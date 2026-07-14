@@ -1,0 +1,6167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/contracts/kiln-control-plane-v1.schema.json",
+  "title": "Kiln Training and Agent Control Plane API",
+  "description": "Complete field-level wire contract for native training, distillation, preflight, embedded agents, recipes, corrections, and the adapter-library surface. Open inputs explicitly preserve accepted-and-ignored unknown fields; emitted objects are closed.",
+  "x-kiln-field-schema-status": "complete",
+  "x-kiln-entrypoints": [
+    "AgentRunAbortResponse",
+    "AgentRunEventsResponse",
+    "AgentRunListResponse",
+    "AgentRunQueuedResponse",
+    "AgentRunRecord",
+    "AgentRunsStatusResponse",
+    "AgentTrace",
+    "AgentTracesListResponse",
+    "CancelTrainingJobResponse",
+    "CapacityRequest",
+    "CapacityResponse",
+    "ClearCorrectionsResponse",
+    "CompatibilityResponse",
+    "CorrectionRow",
+    "CorrectionRowInput",
+    "CreateRunRequest",
+    "DeleteCorrectionResponse",
+    "DeleteTrainingJobResponse",
+    "DiscoverRequest",
+    "DiscoverResponse",
+    "DistillMergeRequest",
+    "DistillPumpRequest",
+    "DistillRefreshRequest",
+    "DistillSelfRequest",
+    "FrontDoorRequest",
+    "FrontDoorResponse",
+    "GrpoRequest",
+    "JudgeDistillRequest",
+    "JudgeDistillResponse",
+    "JudgeDriftCheckRequest",
+    "LibraryListResponse",
+    "ListResponse",
+    "MarkTrainedRequest",
+    "MarkTrainedResponse",
+    "MessageRequest",
+    "OpdRequest",
+    "PublishPayload",
+    "PublishToLibraryResponse",
+    "QueueResponse",
+    "RecipeRunRequest",
+    "RecipeRunResponse",
+    "RecipesListResponse",
+    "SelfImproveRequest",
+    "SelfImproveResponse",
+    "SftRequest",
+    "TerminalStatusResponse",
+    "TierDefaultsListResponse",
+    "TierDefaultsResponse",
+    "TrainingJobDetail",
+    "TrainingResponse",
+    "TrainingStatus",
+    "Vec_TrainingStatus"
+  ],
+  "x-kiln-external-contracts": [
+    "kiln-evals-v1.schema.json",
+    "kiln-inference-v1.schema.json"
+  ],
+  "oneOf": [
+    {
+      "$ref": "#/$defs/AgentRunAbortResponse"
+    },
+    {
+      "$ref": "#/$defs/AgentRunEventsResponse"
+    },
+    {
+      "$ref": "#/$defs/AgentRunListResponse"
+    },
+    {
+      "$ref": "#/$defs/AgentRunQueuedResponse"
+    },
+    {
+      "$ref": "#/$defs/AgentRunRecord"
+    },
+    {
+      "$ref": "#/$defs/AgentRunsStatusResponse"
+    },
+    {
+      "$ref": "#/$defs/AgentTrace"
+    },
+    {
+      "$ref": "#/$defs/AgentTracesListResponse"
+    },
+    {
+      "$ref": "#/$defs/CancelTrainingJobResponse"
+    },
+    {
+      "$ref": "#/$defs/CapacityRequest"
+    },
+    {
+      "$ref": "#/$defs/CapacityResponse"
+    },
+    {
+      "$ref": "#/$defs/ClearCorrectionsResponse"
+    },
+    {
+      "$ref": "#/$defs/CompatibilityResponse"
+    },
+    {
+      "$ref": "#/$defs/CorrectionRow"
+    },
+    {
+      "$ref": "#/$defs/CorrectionRowInput"
+    },
+    {
+      "$ref": "#/$defs/CreateRunRequest"
+    },
+    {
+      "$ref": "#/$defs/DeleteCorrectionResponse"
+    },
+    {
+      "$ref": "#/$defs/DeleteTrainingJobResponse"
+    },
+    {
+      "$ref": "#/$defs/DiscoverRequest"
+    },
+    {
+      "$ref": "#/$defs/DiscoverResponse"
+    },
+    {
+      "$ref": "#/$defs/DistillMergeRequest"
+    },
+    {
+      "$ref": "#/$defs/DistillPumpRequest"
+    },
+    {
+      "$ref": "#/$defs/DistillRefreshRequest"
+    },
+    {
+      "$ref": "#/$defs/DistillSelfRequest"
+    },
+    {
+      "$ref": "#/$defs/FrontDoorRequest"
+    },
+    {
+      "$ref": "#/$defs/FrontDoorResponse"
+    },
+    {
+      "$ref": "#/$defs/GrpoRequest"
+    },
+    {
+      "$ref": "#/$defs/JudgeDistillRequest"
+    },
+    {
+      "$ref": "#/$defs/JudgeDistillResponse"
+    },
+    {
+      "$ref": "#/$defs/JudgeDriftCheckRequest"
+    },
+    {
+      "$ref": "#/$defs/LibraryListResponse"
+    },
+    {
+      "$ref": "#/$defs/ListResponse"
+    },
+    {
+      "$ref": "#/$defs/MarkTrainedRequest"
+    },
+    {
+      "$ref": "#/$defs/MarkTrainedResponse"
+    },
+    {
+      "$ref": "#/$defs/MessageRequest"
+    },
+    {
+      "$ref": "#/$defs/OpdRequest"
+    },
+    {
+      "$ref": "#/$defs/PublishPayload"
+    },
+    {
+      "$ref": "#/$defs/PublishToLibraryResponse"
+    },
+    {
+      "$ref": "#/$defs/QueueResponse"
+    },
+    {
+      "$ref": "#/$defs/RecipeRunRequest"
+    },
+    {
+      "$ref": "#/$defs/RecipeRunResponse"
+    },
+    {
+      "$ref": "#/$defs/RecipesListResponse"
+    },
+    {
+      "$ref": "#/$defs/SelfImproveRequest"
+    },
+    {
+      "$ref": "#/$defs/SelfImproveResponse"
+    },
+    {
+      "$ref": "#/$defs/SftRequest"
+    },
+    {
+      "$ref": "#/$defs/TerminalStatusResponse"
+    },
+    {
+      "$ref": "#/$defs/TierDefaultsListResponse"
+    },
+    {
+      "$ref": "#/$defs/TierDefaultsResponse"
+    },
+    {
+      "$ref": "#/$defs/TrainingJobDetail"
+    },
+    {
+      "$ref": "#/$defs/TrainingResponse"
+    },
+    {
+      "$ref": "#/$defs/TrainingStatus"
+    },
+    {
+      "$ref": "#/$defs/Vec_TrainingStatus"
+    }
+  ],
+  "$defs": {
+    "AdvantageMode": {
+      "type": "string",
+      "enum": [
+        "vanilla",
+        "dr_grpo"
+      ],
+      "description": "Group-relative advantage normalization.",
+      "x-kiln-rust-type": "kiln_train::AdvantageMode",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AgentRunAbortResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "aborting"
+      ],
+      "properties": {
+        "aborting": {
+          "const": true
+        }
+      },
+      "description": "Cooperative abort accepted.",
+      "x-kiln-rust-type": "AgentRunAbortResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AgentRunEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "event"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "event": {
+          "$ref": "#/$defs/AnyJson"
+        }
+      },
+      "description": "One sequenced raw pi event.",
+      "x-kiln-rust-type": "AgentRunEvent",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AgentRunEventsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "events",
+        "next_after",
+        "status",
+        "first_available_seq",
+        "truncated"
+      ],
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentRunEvent"
+          }
+        },
+        "next_after": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "status": {
+          "$ref": "#/$defs/RunStatus"
+        },
+        "first_available_seq": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truncated": {
+          "$ref": "#/$defs/Boolean"
+        }
+      },
+      "description": "Incremental event page with replay-gap detection.",
+      "x-kiln-rust-type": "AgentRunEventsResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AgentRunListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runs"
+      ],
+      "properties": {
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentRunRecord"
+          }
+        }
+      },
+      "description": "Retained embedded-agent runs.",
+      "x-kiln-rust-type": "AgentRunListResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AgentRunQueuedResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "queued"
+      ],
+      "properties": {
+        "queued": {
+          "const": true
+        }
+      },
+      "description": "Control message accepted for delivery.",
+      "x-kiln-rust-type": "AgentRunQueuedResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AgentRunRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "task",
+        "cwd",
+        "status",
+        "created_unix_ms",
+        "queue_seq",
+        "num_turns",
+        "num_tool_calls",
+        "trace_indexed"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "task": {
+          "$ref": "#/$defs/String"
+        },
+        "cwd": {
+          "$ref": "#/$defs/String"
+        },
+        "label": {
+          "$ref": "#/$defs/String"
+        },
+        "status": {
+          "$ref": "#/$defs/RunStatus"
+        },
+        "created_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "queue_seq": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "started_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "finished_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_turns": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_tool_calls": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "session_id": {
+          "$ref": "#/$defs/String"
+        },
+        "session_path": {
+          "$ref": "#/$defs/String"
+        },
+        "trace_indexed": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "last_assistant_text": {
+          "$ref": "#/$defs/String"
+        },
+        "error": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "One persisted embedded-agent run.",
+      "x-kiln-rust-type": "AgentRunRecord",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AgentRunsStatusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "disabled_reason",
+        "pi_available",
+        "pi_path",
+        "max_concurrent_runs",
+        "active_runs",
+        "sessions_dir"
+      ],
+      "properties": {
+        "enabled": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "disabled_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pi_available": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "pi_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_concurrent_runs": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "active_runs": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "sessions_dir": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Embedded-run security gate and local pi availability.",
+      "x-kiln-rust-type": "AgentRunsStatusResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AgentTrace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "working_dir",
+        "num_turns",
+        "num_tool_calls",
+        "outcome",
+        "first_event_at",
+        "last_event_at",
+        "forked",
+        "parent_id",
+        "tool_manifest_sha"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "working_dir": {
+          "$ref": "#/$defs/String"
+        },
+        "num_turns": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_tool_calls": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "outcome": {
+          "$ref": "#/$defs/TraceOutcome"
+        },
+        "first_event_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rfc3339Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_event_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rfc3339Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "forked": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_manifest_sha": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt_messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrainingChatMessageOutput"
+          }
+        },
+        "trajectory": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TurnSegmentOutput"
+          }
+        }
+      },
+      "description": "Indexed pi session and canonical training trajectory.",
+      "x-kiln-rust-type": "AgentTrace",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AgentTracesListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "traces"
+      ],
+      "properties": {
+        "traces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentTrace"
+          }
+        }
+      },
+      "description": "All indexed agent traces.",
+      "x-kiln-rust-type": "AgentTracesListResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AgenticGroup": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "messages"
+      ],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrainingChatMessageInput"
+          }
+        },
+        "completions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScoredRollout"
+          }
+        },
+        "rollouts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScoredRollout"
+          }
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "oneOf": [
+        {
+          "required": [
+            "completions"
+          ],
+          "not": {
+            "required": [
+              "rollouts"
+            ]
+          }
+        },
+        {
+          "required": [
+            "rollouts"
+          ],
+          "not": {
+            "required": [
+              "completions"
+            ]
+          }
+        }
+      ],
+      "description": "One prompt and its scored rollouts; rollouts is an input alias for completions.",
+      "x-kiln-rust-type": "kiln_train::AgenticGroup",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AnyJson": {
+      "description": "Any JSON value.",
+      "x-kiln-rust-type": "serde_json::Value",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "BehaviorPolicy": {
+      "type": "string",
+      "enum": [
+        "no_importance_correction",
+        "recorded"
+      ],
+      "description": "Behavior-probability source.",
+      "x-kiln-rust-type": "kiln_train::BehaviorPolicy",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Boolean": {
+      "type": "boolean",
+      "description": "A serialized Rust boolean.",
+      "x-kiln-rust-type": "bool",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CancelTrainingJobResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "job_id",
+            "message"
+          ],
+          "properties": {
+            "status": {
+              "const": "cancelling"
+            },
+            "job_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "message": {
+              "const": "stop requested \u2014 the trainer aborts at the next step boundary"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "job_id"
+          ],
+          "properties": {
+            "status": {
+              "const": "cancelled"
+            },
+            "job_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          }
+        }
+      ],
+      "description": "Cooperative running cancellation or immediate queued cancellation.",
+      "x-kiln-rust-type": "CancelTrainingJobResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CapacityRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "rollouts",
+        "tokens_per_rollout",
+        "top_k",
+        "rank"
+      ],
+      "properties": {
+        "rollouts": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "tokens_per_rollout": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "top_k": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "rank": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "num_layers": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "hidden_size": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "initial_overlap_probe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnitInterval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Preflight information-capacity estimate inputs.",
+      "x-kiln-rust-type": "CapacityRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CapacityResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bits_needed",
+        "bits_storable_in_lora",
+        "capacity_ratio",
+        "expected_overlap_at_step_50",
+        "warnings"
+      ],
+      "properties": {
+        "bits_needed": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "bits_storable_in_lora": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "capacity_ratio": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "expected_overlap_at_step_50": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        }
+      },
+      "description": "Capacity estimate and admission warnings.",
+      "x-kiln-rust-type": "CapacityResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ClearCorrectionsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "removed"
+      ],
+      "properties": {
+        "status": {
+          "const": "cleared"
+        },
+        "removed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Active-correction clear result; trained history remains.",
+      "x-kiln-rust-type": "ClearCorrectionsResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CompatibilityResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "matches",
+        "note"
+      ],
+      "properties": {
+        "matches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompatibilityRow"
+          }
+        },
+        "note": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Filtered compatibility-table results.",
+      "x-kiln-rust-type": "CompatibilityResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CompatibilityRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "teacher",
+        "student",
+        "domain",
+        "predicted_initial_overlap",
+        "recommended_rank",
+        "cold_start_epochs",
+        "expected_gpu_hours",
+        "expected_cost_usd",
+        "validation_eval",
+        "expected_eval_delta_points"
+      ],
+      "properties": {
+        "teacher": {
+          "$ref": "#/$defs/String"
+        },
+        "student": {
+          "$ref": "#/$defs/String"
+        },
+        "domain": {
+          "$ref": "#/$defs/String"
+        },
+        "predicted_initial_overlap": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "recommended_rank": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "cold_start_epochs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_gpu_hours": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "expected_cost_usd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validation_eval": {
+          "$ref": "#/$defs/String"
+        },
+        "expected_eval_delta_points": {
+          "$ref": "#/$defs/FiniteNumber"
+        }
+      },
+      "description": "One teacher/student/domain compatibility estimate.",
+      "x-kiln-rust-type": "CompatibilityRow",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CorrectionRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "agent",
+        "adapter",
+        "user",
+        "original",
+        "ideal",
+        "truncated",
+        "created_at"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "agent": {
+          "$ref": "#/$defs/String"
+        },
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "user": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "original": {
+          "$ref": "#/$defs/String"
+        },
+        "ideal": {
+          "$ref": "#/$defs/String"
+        },
+        "truncated": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "created_at": {
+          "$ref": "#/$defs/String"
+        },
+        "trained_into": {
+          "$ref": "#/$defs/String"
+        },
+        "trained_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        }
+      },
+      "description": "Closed emitted correction row.",
+      "x-kiln-rust-type": "CorrectionRow",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CorrectionRowInput": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "request_id",
+        "user"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "agent": {
+          "$ref": "#/$defs/String"
+        },
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "user": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "original": {
+          "$ref": "#/$defs/String"
+        },
+        "ideal": {
+          "$ref": "#/$defs/String"
+        },
+        "truncated": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "created_at": {
+          "$ref": "#/$defs/String"
+        },
+        "trained_into": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trained_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rfc3339Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Correction upsert input. Server-owned timestamps and training markers may be omitted.",
+      "x-kiln-rust-type": "CorrectionRow",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CreateRunRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "task"
+      ],
+      "properties": {
+        "task": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tools": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/String"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thinking_level": {
+          "anyOf": [
+            {
+              "enum": [
+                "off",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeout_secs": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 10
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Start one embedded agent run.",
+      "x-kiln-rust-type": "CreateRunRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DecimalU64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "description": "An exact unsigned 64-bit value serialized as a decimal string.",
+      "x-kiln-rust-type": "u64",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DeleteCorrectionResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "request_id"
+      ],
+      "properties": {
+        "status": {
+          "const": "deleted"
+        },
+        "request_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "description": "Single correction deletion result.",
+      "x-kiln-rust-type": "DeleteCorrectionResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DeleteTrainingJobResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "status",
+        "removed_archive_file"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "status": {
+          "const": "deleted"
+        },
+        "removed_archive_file": {
+          "$ref": "#/$defs/Boolean"
+        }
+      },
+      "description": "Terminal training-record deletion result.",
+      "x-kiln-rust-type": "DeleteTrainingJobResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DiscoverRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Optional server-local pi sessions directory.",
+      "x-kiln-rust-type": "DiscoverRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DiscoverResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "indexed",
+        "path"
+      ],
+      "properties": {
+        "indexed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "path": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Trace discovery result.",
+      "x-kiln-rust-type": "DiscoverResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DistillMergeRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name",
+        "sources"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DistillMergeSource"
+          },
+          "minItems": 1
+        },
+        "student": {
+          "$ref": "#/$defs/String"
+        },
+        "rollout_budget": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "config": {
+          "$ref": "#/$defs/OpdConfig"
+        },
+        "post_eval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PostEvalConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Behavior-space adapter merge request.",
+      "x-kiln-rust-type": "DistillMergeRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DistillMergeSource": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "adapter"
+      ],
+      "properties": {
+        "adapter": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "weight": {
+          "$ref": "#/$defs/FiniteNumber"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "One weighted adapter source.",
+      "x-kiln-rust-type": "kiln_train::DistillMergeSource",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DistillPumpMode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "domain"
+          ],
+          "properties": {
+            "domain": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "examples"
+          ],
+          "properties": {
+            "examples": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OpdPrompt"
+              },
+              "minItems": 1
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "wide"
+          ],
+          "properties": {
+            "wide": {
+              "$ref": "#/$defs/Boolean"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Targeted-domain, inline-example, or wide-corpus knowledge-pump mode.",
+      "x-kiln-rust-type": "kiln_train::DistillPumpMode",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DistillPumpRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name",
+        "teacher",
+        "mode"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "teacher": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "mode": {
+          "$ref": "#/$defs/DistillPumpMode"
+        },
+        "rank": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rollout_budget": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "use_cache": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "config": {
+          "$ref": "#/$defs/OpdConfig"
+        },
+        "post_eval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PostEvalConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Knowledge-pump request with an explicit teacher and rollout budget.",
+      "x-kiln-rust-type": "DistillPumpRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DistillRefreshRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name",
+        "new_data",
+        "behavioural_teacher"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "new_data": {
+          "$ref": "#/$defs/NewKnowledgeSource"
+        },
+        "behavioural_teacher": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "background_chat": {
+          "$ref": "#/$defs/String"
+        },
+        "require_if_eval_recovery": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "require_internal_qa_gain": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "config": {
+          "$ref": "#/$defs/OpdConfig"
+        },
+        "post_eval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PostEvalConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "if_eval_suite": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "new_knowledge_eval_suite": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Two-phase new-knowledge training and instruction-following recovery request.",
+      "x-kiln-rust-type": "DistillRefreshRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DistillSelfRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name",
+        "mode"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "mode": {
+          "$ref": "#/$defs/SelfDistillMode"
+        },
+        "prompts": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OpdPrompt"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ground_truth": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/String"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "documents": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/String"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "config": {
+          "$ref": "#/$defs/OpdConfig"
+        },
+        "post_eval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PostEvalConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Privileged-information self-distillation request.",
+      "x-kiln-rust-type": "DistillSelfRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EchoConfig": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "lambda": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "env_mask_mode": {
+          "$ref": "#/$defs/EnvMaskMode"
+        },
+        "warning_filter": {
+          "$ref": "#/$defs/Boolean"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "ECHO observation-token auxiliary loss.",
+      "x-kiln-rust-type": "kiln_train::EchoConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EnvMaskMode": {
+      "type": "string",
+      "enum": [
+        "env_only",
+        "full_obs"
+      ],
+      "description": "Observation-token mask policy.",
+      "x-kiln-rust-type": "kiln_train::EnvMaskMode",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ExamplesSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "dataset"
+          ],
+          "properties": {
+            "dataset": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "examples"
+          ],
+          "properties": {
+            "examples": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SftExample"
+              },
+              "minItems": 1
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Registered dataset or inline SFT examples.",
+      "x-kiln-rust-type": "ExamplesSource",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "FiniteNumber": {
+      "type": "number",
+      "description": "A finite JSON number.",
+      "x-kiln-rust-type": "f32 | f64",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "FrontDoorRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "name",
+            "new_data",
+            "behavioural_teacher"
+          ],
+          "properties": {
+            "kind": {
+              "const": "distill_refresh"
+            },
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "new_data": {
+              "$ref": "#/$defs/NewKnowledgeSource"
+            },
+            "behavioural_teacher": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "background_chat": {
+              "$ref": "#/$defs/String"
+            },
+            "require_if_eval_recovery": {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            "require_internal_qa_gain": {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            "config": {
+              "$ref": "#/$defs/OpdConfig"
+            },
+            "post_eval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PostEvalConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "if_eval_suite": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "new_knowledge_eval_suite": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "name",
+            "sources"
+          ],
+          "properties": {
+            "kind": {
+              "const": "distill_merge"
+            },
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "sources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/DistillMergeSource"
+              },
+              "minItems": 1
+            },
+            "student": {
+              "$ref": "#/$defs/String"
+            },
+            "rollout_budget": {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            "config": {
+              "$ref": "#/$defs/OpdConfig"
+            },
+            "post_eval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PostEvalConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "name",
+            "teacher",
+            "mode"
+          ],
+          "properties": {
+            "kind": {
+              "const": "distill_pump"
+            },
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "teacher": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "mode": {
+              "$ref": "#/$defs/DistillPumpMode"
+            },
+            "rank": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PositiveInteger"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "rollout_budget": {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            "use_cache": {
+              "$ref": "#/$defs/Boolean"
+            },
+            "config": {
+              "$ref": "#/$defs/OpdConfig"
+            },
+            "post_eval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PostEvalConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "teacher"
+          ],
+          "properties": {
+            "kind": {
+              "const": "opd"
+            },
+            "prompts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OpdPrompt"
+              },
+              "minItems": 1
+            },
+            "dataset_path": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "teacher": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "config": {
+              "$ref": "#/$defs/OpdConfig"
+            },
+            "post_eval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PostEvalConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored",
+          "oneOf": [
+            {
+              "required": [
+                "prompts"
+              ],
+              "not": {
+                "required": [
+                  "dataset_path"
+                ],
+                "properties": {
+                  "dataset_path": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "required": [
+                "dataset_path"
+              ],
+              "properties": {
+                "dataset_path": {
+                  "$ref": "#/$defs/NonEmptyString"
+                }
+              },
+              "not": {
+                "required": [
+                  "prompts"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "grpo"
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AgenticGroup"
+              },
+              "minItems": 1
+            },
+            "agentic_groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AgenticGroup"
+              },
+              "minItems": 1
+            },
+            "dataset_path": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "dataset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "config": {
+              "$ref": "#/$defs/GrpoConfig"
+            },
+            "post_eval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PostEvalConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored",
+          "oneOf": [
+            {
+              "required": [
+                "groups"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "agentic_groups"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "dataset_path"
+                    ],
+                    "properties": {
+                      "dataset_path": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "required": [
+                      "dataset"
+                    ],
+                    "properties": {
+                      "dataset": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "required": [
+                "agentic_groups"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "groups"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "dataset_path"
+                    ],
+                    "properties": {
+                      "dataset_path": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "required": [
+                      "dataset"
+                    ],
+                    "properties": {
+                      "dataset": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "required": [
+                "dataset_path"
+              ],
+              "properties": {
+                "dataset_path": {
+                  "$ref": "#/$defs/NonEmptyString"
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "groups"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "agentic_groups"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "dataset"
+                    ],
+                    "properties": {
+                      "dataset": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "required": [
+                "dataset"
+              ],
+              "properties": {
+                "dataset": {
+                  "$ref": "#/$defs/NonEmptyString"
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "groups"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "agentic_groups"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "dataset_path"
+                    ],
+                    "properties": {
+                      "dataset_path": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "sft"
+            },
+            "examples": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SftExample"
+              },
+              "minItems": 1
+            },
+            "dataset_path": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "dataset": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "config": {
+              "$ref": "#/$defs/SftConfig"
+            },
+            "post_eval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PostEvalConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "examples"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "dataset_path"
+                    ],
+                    "properties": {
+                      "dataset_path": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "required": [
+                      "dataset"
+                    ],
+                    "properties": {
+                      "dataset": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "required": [
+                "dataset_path"
+              ],
+              "properties": {
+                "dataset_path": {
+                  "$ref": "#/$defs/NonEmptyString"
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "examples"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "dataset"
+                    ],
+                    "properties": {
+                      "dataset": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "required": [
+                "dataset"
+              ],
+              "properties": {
+                "dataset": {
+                  "$ref": "#/$defs/NonEmptyString"
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "examples"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "dataset_path"
+                    ],
+                    "properties": {
+                      "dataset_path": {
+                        "not": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Single tagged training front door across all native pipelines.",
+      "x-kiln-rust-type": "FrontDoorRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "FrontDoorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "picked",
+        "training"
+      ],
+      "properties": {
+        "picked": {
+          "enum": [
+            "distill_refresh",
+            "distill_merge",
+            "distill_pump",
+            "opd",
+            "grpo",
+            "sft"
+          ]
+        },
+        "training": {
+          "$ref": "#/$defs/TrainingResponse"
+        }
+      },
+      "description": "Selected pipeline plus its admission receipt.",
+      "x-kiln-rust-type": "FrontDoorResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "GrpoConfig": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "learning_rate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kl_coeff": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "clip_epsilon": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "clip_eps_high": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cispo_max_weight": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "advantage_mode": {
+          "$ref": "#/$defs/AdvantageMode"
+        },
+        "loss_aggregation": {
+          "$ref": "#/$defs/LossAggregation"
+        },
+        "kl_estimator": {
+          "$ref": "#/$defs/KlEstimator"
+        },
+        "dynamic_sampling": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "is_level": {
+          "$ref": "#/$defs/IsLevel"
+        },
+        "behavior_policy": {
+          "$ref": "#/$defs/BehaviorPolicy"
+        },
+        "kl_reference_policy": {
+          "$ref": "#/$defs/KlReferencePolicy"
+        },
+        "reference_policy": {
+          "$ref": "#/$defs/KlReferencePolicy"
+        },
+        "entropy_aware_kl_quantile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnitInterval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reward_saturation_threshold": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "reward_low_variance_threshold": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "reward_filter_var_min": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reward_filter_var_max": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reward_filter_min_groups": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "reward_filter_on_empty": {
+          "$ref": "#/$defs/RewardFilterOnEmpty"
+        },
+        "lora_rank": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "lora_alpha": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "base_adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "allow_adapter_shape_conversion": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "allow_high_lora_scale": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "output_name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "auto_load": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "checkpoint_interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resume_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "grad_checkpoint_segments": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "optimizer": {
+          "$ref": "#/$defs/Optimizer"
+        },
+        "adapter_smoke_test": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "loss": {
+          "$ref": "#/$defs/LossConfig"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "x-kiln-input-aliases": {
+        "reference_policy": "kl_reference_policy"
+      },
+      "description": "Complete GRPO optimizer, policy, filtering, checkpoint, and composite-loss configuration.",
+      "x-kiln-rust-type": "kiln_train::GrpoConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "GrpoRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgenticGroup"
+          },
+          "minItems": 1
+        },
+        "agentic_groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgenticGroup"
+          },
+          "minItems": 1
+        },
+        "dataset_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dataset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "config": {
+          "$ref": "#/$defs/GrpoConfig"
+        },
+        "post_eval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PostEvalConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "oneOf": [
+        {
+          "required": [
+            "groups"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "agentic_groups"
+                ]
+              },
+              {
+                "required": [
+                  "dataset_path"
+                ],
+                "properties": {
+                  "dataset_path": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              },
+              {
+                "required": [
+                  "dataset"
+                ],
+                "properties": {
+                  "dataset": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "agentic_groups"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "groups"
+                ]
+              },
+              {
+                "required": [
+                  "dataset_path"
+                ],
+                "properties": {
+                  "dataset_path": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              },
+              {
+                "required": [
+                  "dataset"
+                ],
+                "properties": {
+                  "dataset": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "dataset_path"
+          ],
+          "properties": {
+            "dataset_path": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "groups"
+                ]
+              },
+              {
+                "required": [
+                  "agentic_groups"
+                ]
+              },
+              {
+                "required": [
+                  "dataset"
+                ],
+                "properties": {
+                  "dataset": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "dataset"
+          ],
+          "properties": {
+            "dataset": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "groups"
+                ]
+              },
+              {
+                "required": [
+                  "agentic_groups"
+                ]
+              },
+              {
+                "required": [
+                  "dataset_path"
+                ],
+                "properties": {
+                  "dataset_path": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "x-kiln-input-aliases": {
+        "agentic_groups": "groups"
+      },
+      "x-kiln-semantic-constraints": [
+        "recorded behavior policy requires provenance on every rollout"
+      ],
+      "description": "GRPO submission using exactly one inline, local-path, or registered-dataset source.",
+      "x-kiln-rust-type": "GrpoRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "IsLevel": {
+      "type": "string",
+      "enum": [
+        "token",
+        "sequence",
+        "cispo"
+      ],
+      "description": "Importance-sampling granularity.",
+      "x-kiln-rust-type": "kiln_train::IsLevel",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "JudgeDistillRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "teacher": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "include_pi_share": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "config": {
+          "$ref": "#/$defs/OpdConfig"
+        },
+        "post_eval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PostEvalConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Distill a local judge from indexed agent traces.",
+      "x-kiln-rust-type": "JudgeDistillRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "JudgeDistillResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "state",
+        "effective_seed",
+        "message"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "state": {
+          "const": "queued"
+        },
+        "effective_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "message": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Judge-distillation admission receipt.",
+      "x-kiln-rust-type": "JudgeDistillResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "JudgeDriftCheckRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "judge": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "teacher": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "sample_size": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "agreement_threshold": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "x-kiln-current-runtime-result": "http_501_not_implemented",
+      "description": "Validated drift-check inputs. The endpoint currently returns only HTTP 501 after validation.",
+      "x-kiln-rust-type": "JudgeDriftCheckRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "KlEstimator": {
+      "type": "string",
+      "enum": [
+        "k1",
+        "k3",
+        "none"
+      ],
+      "description": "Per-token KL estimator.",
+      "x-kiln-rust-type": "kiln_train::KlEstimator",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "KlReferencePolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "base_per_step"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "none"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "ema"
+            },
+            "decay": {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            "refresh_every": {
+              "$ref": "#/$defs/PositiveInteger"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Frozen policy used only for the KL penalty.",
+      "x-kiln-rust-type": "kiln_train::KlReferencePolicy",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "LibraryAdapterEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "source_kind",
+        "description",
+        "post_eval",
+        "uploader",
+        "size_bytes"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/String"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "post_eval": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/FiniteNumber"
+          }
+        },
+        "uploader": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "One adapter-library catalog entry.",
+      "x-kiln-rust-type": "LibraryAdapterEntry",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "LibraryListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "adapters",
+        "note"
+      ],
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/String"
+        },
+        "adapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LibraryAdapterEntry"
+          }
+        },
+        "note": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Configured library backend and visible catalog entries.",
+      "x-kiln-rust-type": "LibraryListResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "corrections"
+      ],
+      "properties": {
+        "corrections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CorrectionRow"
+          }
+        }
+      },
+      "description": "Active or historical corrections.",
+      "x-kiln-rust-type": "ListResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "LossAggregation": {
+      "type": "string",
+      "enum": [
+        "per_sample",
+        "token_level"
+      ],
+      "description": "GRPO surrogate aggregation.",
+      "x-kiln-rust-type": "kiln_train::LossAggregation",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "LossConfig": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "echo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EchoConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "opd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpdAuxConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "no_policy_loss": {
+          "$ref": "#/$defs/Boolean"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Composition of policy, ECHO, and reserved OPD objectives.",
+      "x-kiln-rust-type": "kiln_train::LossConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "MarkTrainedRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "request_ids",
+        "adapter"
+      ],
+      "properties": {
+        "request_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          },
+          "minItems": 1
+        },
+        "adapter": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Mark selected correction rows as consumed by an adapter.",
+      "x-kiln-rust-type": "MarkTrainedRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "MarkTrainedResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "marked"
+      ],
+      "properties": {
+        "status": {
+          "const": "marked"
+        },
+        "marked": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Number of correction rows marked.",
+      "x-kiln-rust-type": "MarkTrainedResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "MessageRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "message"
+      ],
+      "properties": {
+        "message": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Steering or follow-up message for an active run.",
+      "x-kiln-rust-type": "MessageRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "NewKnowledgeSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "dataset"
+          ],
+          "properties": {
+            "dataset": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "examples"
+          ],
+          "properties": {
+            "examples": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OpdPrompt"
+              },
+              "minItems": 1
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Registered dataset or inline prompts for a refresh recipe.",
+      "x-kiln-rust-type": "kiln_train::NewKnowledgeSource",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "NonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A non-empty UTF-8 string.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "NonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "A non-negative integer.",
+      "x-kiln-rust-type": "u64 | u32 | usize",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpdAuxConfig": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "lambda": {
+          "$ref": "#/$defs/FiniteNumber"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Reserved OPD auxiliary-loss slot.",
+      "x-kiln-rust-type": "kiln_train::OpdAuxConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpdConfig": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "training_mode": {
+          "$ref": "#/$defs/OpdTrainingMode"
+        },
+        "objective": {
+          "$ref": "#/$defs/OpdObjective"
+        },
+        "loss": {
+          "$ref": "#/$defs/OpdLossGranularity"
+        },
+        "top_k": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "samples_per_prompt": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "temperature": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "top_p": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "max_tokens": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "stable_opd": {
+          "$ref": "#/$defs/StableOpdMode"
+        },
+        "discount": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "clip_epsilon": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "learning_rate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lora_rank": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "lora_alpha": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "allow_high_lora_scale": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "base_adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "auto_load": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "checkpoint_interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resume_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "grad_checkpoint_segments": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "seed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "optimizer": {
+          "$ref": "#/$defs/Optimizer"
+        },
+        "echo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EchoConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "epochs": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "max_cost_usd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "x-kiln-semantic-constraints": [
+        "server loss is teacher_top_k",
+        "stable_opd.mode is off",
+        "discount and clip_epsilon are zero",
+        "max_cost_usd is null"
+      ],
+      "description": "Complete OPD rollout, objective, optimizer, checkpoint, and optional ECHO configuration.",
+      "x-kiln-rust-type": "kiln_train::OpdConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpdLossGranularity": {
+      "type": "string",
+      "enum": [
+        "sampled_token",
+        "teacher_top_k",
+        "full_vocab"
+      ],
+      "description": "OPD teacher-support granularity; only teacher_top_k is server executable.",
+      "x-kiln-rust-type": "kiln_train::OpdLossGranularity",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpdObjective": {
+      "type": "string",
+      "enum": [
+        "reverse_kl",
+        "cross_entropy"
+      ],
+      "description": "OPD objective; cross_entropy is a rejected compatibility value.",
+      "x-kiln-rust-type": "kiln_train::OpdObjective",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpdPrompt": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "messages"
+      ],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrainingChatMessageInput"
+          }
+        },
+        "teacher_extra_messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrainingChatMessageInput"
+          }
+        },
+        "trajectory": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TurnSegmentInput"
+          }
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Student-visible prompt with optional asymmetric teacher context and agentic replay.",
+      "x-kiln-rust-type": "kiln_train::OpdPrompt",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpdRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "teacher"
+      ],
+      "properties": {
+        "prompts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpdPrompt"
+          },
+          "minItems": 1
+        },
+        "dataset_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "teacher": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "config": {
+          "$ref": "#/$defs/OpdConfig"
+        },
+        "post_eval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PostEvalConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "oneOf": [
+        {
+          "required": [
+            "prompts"
+          ],
+          "not": {
+            "required": [
+              "dataset_path"
+            ],
+            "properties": {
+              "dataset_path": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        },
+        {
+          "required": [
+            "dataset_path"
+          ],
+          "properties": {
+            "dataset_path": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "not": {
+            "required": [
+              "prompts"
+            ]
+          }
+        }
+      ],
+      "x-kiln-semantic-constraints": [
+        "teacher alias is registered"
+      ],
+      "description": "Direct OPD submission using inline prompts or a server-local replay dataset.",
+      "x-kiln-rust-type": "OpdRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpdTrainingMode": {
+      "type": "string",
+      "enum": [
+        "on_policy",
+        "off_policy"
+      ],
+      "description": "Fresh-rollout versus teacher-authored replay mode.",
+      "x-kiln-rust-type": "kiln_train::OpdTrainingMode",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Optimizer": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "sgd"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "adam_w"
+            },
+            "beta1": {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            "beta2": {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            "eps": {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            "weight_decay": {
+              "$ref": "#/$defs/FiniteNumber"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "muon"
+            },
+            "momentum": {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            "nesterov": {
+              "$ref": "#/$defs/Boolean"
+            },
+            "ns_iters": {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            "weight_decay": {
+              "$ref": "#/$defs/FiniteNumber"
+            }
+          }
+        }
+      ],
+      "description": "Fail-closed optimizer selection and variant-specific controls.",
+      "x-kiln-rust-type": "kiln_train::Optimizer",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PositiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "A positive integer.",
+      "x-kiln-rust-type": "u64 | u32 | usize",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PostEvalConfig": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "suite"
+      ],
+      "properties": {
+        "suite": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "generation": {
+          "$ref": "kiln-evals-v1.schema.json#/$defs/EvalGenerationParams"
+        },
+        "min_accuracy": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "include_baseline": {
+          "$ref": "#/$defs/Boolean"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Optional post-training eval and promotion gate.",
+      "x-kiln-rust-type": "kiln_eval::PostEvalConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PromptsSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "dataset"
+          ],
+          "properties": {
+            "dataset": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "prompts"
+          ],
+          "properties": {
+            "prompts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OpdPrompt"
+              },
+              "minItems": 1
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Registered dataset or inline OPD prompts.",
+      "x-kiln-rust-type": "PromptsSource",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PublishPayload": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uploader": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Optional publication metadata.",
+      "x-kiln-rust-type": "PublishPayload",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PublishToLibraryResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "backend",
+        "intended_id",
+        "uploader",
+        "description",
+        "receipt_schema_version",
+        "note"
+      ],
+      "properties": {
+        "status": {
+          "const": "ready_to_publish"
+        },
+        "backend": {
+          "$ref": "#/$defs/String"
+        },
+        "intended_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "uploader": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt_schema_version": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "note": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "x-kiln-current-runtime-result": "contract_only_no_remote_upload",
+      "description": "Validated local publication bundle. Remote upload is not yet operational.",
+      "x-kiln-rust-type": "PublishToLibraryResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "QueueResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "running",
+        "queued",
+        "completed"
+      ],
+      "properties": {
+        "running": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrainingStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queued": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QueueStatusEntry"
+          }
+        },
+        "completed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrainingStatus"
+          }
+        }
+      },
+      "description": "Training queue grouped into running, queued, and terminal jobs.",
+      "x-kiln-rust-type": "QueueResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "QueueStatusEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "job_type",
+        "adapter_name",
+        "position"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "job_type": {
+          "$ref": "#/$defs/TrainingJobType"
+        },
+        "adapter_name": {
+          "$ref": "#/$defs/String"
+        },
+        "position": {
+          "$ref": "#/$defs/PositiveInteger"
+        }
+      },
+      "description": "One queued training job and its FIFO position.",
+      "x-kiln-rust-type": "QueueStatusEntry",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Recipe": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name",
+        "steps"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecipeStep"
+          },
+          "minItems": 1
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Inline multi-step training recipe.",
+      "x-kiln-rust-type": "Recipe",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RecipeAdmissionDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "supported",
+        "unavailable_reason"
+      ],
+      "properties": {
+        "supported": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "unavailable_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Current substrate admission for a built-in recipe.",
+      "x-kiln-rust-type": "RecipeAdmissionDescriptor",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RecipeDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "num_steps",
+        "admission"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "num_steps": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "admission": {
+          "$ref": "#/$defs/RecipeAdmissionDescriptor"
+        }
+      },
+      "description": "List projection for a built-in recipe.",
+      "x-kiln-rust-type": "RecipeDescriptor",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RecipeRunRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "recipe"
+          ],
+          "properties": {
+            "recipe": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "inputs": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/AnyJson"
+              }
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "body"
+          ],
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/Recipe"
+            },
+            "inputs": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/AnyJson"
+              }
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Named or inline recipe invocation with optional placeholder inputs.",
+      "x-kiln-rust-type": "RecipeRunRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RecipeRunResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recipe",
+        "job_ids",
+        "effective_seeds",
+        "message"
+      ],
+      "properties": {
+        "recipe": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "job_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          }
+        },
+        "effective_seeds": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalU64"
+          }
+        },
+        "message": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Queued jobs for one recipe execution.",
+      "x-kiln-rust-type": "RecipeRunResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RecipeStep": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "name",
+            "examples_from"
+          ],
+          "properties": {
+            "kind": {
+              "const": "sft"
+            },
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "base_adapter": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "examples_from": {
+              "$ref": "#/$defs/ExamplesSource"
+            },
+            "config": {
+              "$ref": "#/$defs/SftConfig"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "name",
+            "teacher",
+            "prompts_from"
+          ],
+          "properties": {
+            "kind": {
+              "const": "opd"
+            },
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "teacher": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "prompts_from": {
+              "$ref": "#/$defs/PromptsSource"
+            },
+            "config": {
+              "$ref": "#/$defs/OpdConfig"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "name",
+            "sources"
+          ],
+          "properties": {
+            "kind": {
+              "const": "distill_merge"
+            },
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "sources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/DistillMergeSource"
+              },
+              "minItems": 1
+            },
+            "student": {
+              "$ref": "#/$defs/String"
+            },
+            "rollout_budget": {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            "config": {
+              "$ref": "#/$defs/OpdConfig"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "name",
+            "teacher",
+            "mode"
+          ],
+          "properties": {
+            "kind": {
+              "const": "distill_pump"
+            },
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "teacher": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "mode": {
+              "$ref": "#/$defs/DistillPumpMode"
+            },
+            "config": {
+              "$ref": "#/$defs/OpdConfig"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "name",
+            "new_data",
+            "behavioural_teacher"
+          ],
+          "properties": {
+            "kind": {
+              "const": "distill_refresh"
+            },
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "new_data": {
+              "$ref": "#/$defs/NewKnowledgeSource"
+            },
+            "behavioural_teacher": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "background_chat": {
+              "$ref": "#/$defs/String"
+            },
+            "config": {
+              "$ref": "#/$defs/OpdConfig"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "name",
+            "mode"
+          ],
+          "properties": {
+            "kind": {
+              "const": "distill_self"
+            },
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "mode": {
+              "$ref": "#/$defs/SelfDistillMode"
+            },
+            "config": {
+              "$ref": "#/$defs/OpdConfig"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "suite",
+            "adapter",
+            "require_min_score"
+          ],
+          "properties": {
+            "kind": {
+              "const": "post_eval"
+            },
+            "suite": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "adapter": {
+              "$ref": "#/$defs/String"
+            },
+            "require_min_score": {
+              "$ref": "#/$defs/UnitInterval"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "One typed recipe step.",
+      "x-kiln-rust-type": "RecipeStep",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RecipesListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recipes"
+      ],
+      "properties": {
+        "recipes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecipeDescriptor"
+          }
+        }
+      },
+      "description": "All built-in recipes and their current admission state.",
+      "x-kiln-rust-type": "RecipesListResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RewardFilterOnEmpty": {
+      "type": "string",
+      "enum": [
+        "fail",
+        "train-all",
+        "skip"
+      ],
+      "description": "Behavior when variance filtering keeps too few groups.",
+      "x-kiln-rust-type": "kiln_train::RewardFilterOnEmpty",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Rfc3339Timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "An RFC 3339 timestamp.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RunStatus": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "aborted",
+        "timed_out",
+        "interrupted"
+      ],
+      "description": "Embedded agent-run lifecycle state.",
+      "x-kiln-rust-type": "crate::agent_runs::RunStatus",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ScoredRollout": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "text",
+        "reward"
+      ],
+      "properties": {
+        "text": {
+          "$ref": "#/$defs/String"
+        },
+        "reward": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "trajectory": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TurnSegmentInput"
+          }
+        },
+        "provenance": {
+          "$ref": "kiln-inference-v1.schema.json#/$defs/RolloutProvenanceV1"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "One rewarded completion with optional trajectory and exact generation provenance.",
+      "x-kiln-rust-type": "kiln_train::ScoredRollout",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SelfDistillMode": {
+      "type": "string",
+      "enum": [
+        "ground_truth_conditioning",
+        "conciseness",
+        "document_as_pi",
+        "reverse_teacher"
+      ],
+      "description": "Privileged-information self-distillation mode.",
+      "x-kiln-rust-type": "kiln_train::SelfDistillMode",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SelfImproveRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "judge": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "crisp": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "config": {
+          "$ref": "#/$defs/OpdConfig"
+        },
+        "post_eval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PostEvalConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Queue the agentic self-improvement loop.",
+      "x-kiln-rust-type": "SelfImproveRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SelfImproveResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_ids",
+        "effective_seeds",
+        "state",
+        "message"
+      ],
+      "properties": {
+        "job_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          },
+          "minItems": 1
+        },
+        "effective_seeds": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalU64"
+          }
+        },
+        "state": {
+          "const": "queued"
+        },
+        "message": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "All phases admitted for one self-improvement round.",
+      "x-kiln-rust-type": "SelfImproveResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SftConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "training_profile": {
+          "$ref": "#/$defs/SftTrainingProfile"
+        },
+        "invalid_row_policy": {
+          "$ref": "#/$defs/SftInvalidRowPolicy"
+        },
+        "epochs": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "learning_rate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lora_rank": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "lora_alpha": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "train_mtp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "base_adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "allow_adapter_shape_conversion": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "allow_high_lora_scale": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "output_name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "auto_load": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "checkpoint_interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resume_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "grad_checkpoint_segments": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "optimizer": {
+          "$ref": "#/$defs/Optimizer"
+        },
+        "adapter_smoke_test": {
+          "$ref": "#/$defs/Boolean"
+        }
+      },
+      "description": "Complete native SFT configuration. Unknown fields fail admission.",
+      "x-kiln-rust-type": "kiln_train::SftConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SftExample": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrainingChatMessageInput"
+          }
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "One SFT conversation.",
+      "x-kiln-rust-type": "kiln_train::SftExample",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SftInvalidRowPolicy": {
+      "type": "string",
+      "enum": [
+        "fail",
+        "skip"
+      ],
+      "description": "Malformed-row admission policy.",
+      "x-kiln-rust-type": "kiln_train::SftInvalidRowPolicy",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SftRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "examples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SftExample"
+          },
+          "minItems": 1
+        },
+        "dataset_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dataset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "config": {
+          "$ref": "#/$defs/SftConfig"
+        },
+        "post_eval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PostEvalConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "examples"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "dataset_path"
+                ],
+                "properties": {
+                  "dataset_path": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              },
+              {
+                "required": [
+                  "dataset"
+                ],
+                "properties": {
+                  "dataset": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "dataset_path"
+          ],
+          "properties": {
+            "dataset_path": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "examples"
+                ]
+              },
+              {
+                "required": [
+                  "dataset"
+                ],
+                "properties": {
+                  "dataset": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "dataset"
+          ],
+          "properties": {
+            "dataset": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "examples"
+                ]
+              },
+              {
+                "required": [
+                  "dataset_path"
+                ],
+                "properties": {
+                  "dataset_path": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "x-kiln-semantic-constraints": [
+        "server SFT rejects train_mtp=true"
+      ],
+      "description": "SFT submission using exactly one inline, local-path, or registered-dataset source.",
+      "x-kiln-rust-type": "SftRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SftTrainingProfile": {
+      "type": "string",
+      "enum": [
+        "native_online_lora_v1"
+      ],
+      "description": "Versioned native SFT training shape.",
+      "x-kiln-rust-type": "kiln_train::SftTrainingProfile",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "A prefixed SHA-256 digest.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "StableOpdMode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "const": "off"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "const": "auto"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "mode",
+            "kl_beta",
+            "sft_lambda"
+          ],
+          "properties": {
+            "mode": {
+              "const": "manual"
+            },
+            "kl_beta": {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            "sft_lambda": {
+              "$ref": "#/$defs/FiniteNumber"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Stable-OPD mode; only off is currently executable.",
+      "x-kiln-rust-type": "kiln_train::StableOpdMode",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "String": {
+      "type": "string",
+      "description": "A UTF-8 string.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TerminalStatusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "disabled_reason",
+        "pi_available",
+        "pi_path",
+        "cwd",
+        "session_active"
+      ],
+      "properties": {
+        "enabled": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "disabled_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pi_available": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "pi_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cwd": {
+          "$ref": "#/$defs/String"
+        },
+        "session_active": {
+          "$ref": "#/$defs/Boolean"
+        }
+      },
+      "description": "Embedded terminal security gate, binary, cwd, and session status.",
+      "x-kiln-rust-type": "TerminalStatusResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TierDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tier",
+        "default_logit_source",
+        "default_loss",
+        "default_top_k",
+        "lora_rank",
+        "batch_size",
+        "samples_per_prompt_default",
+        "samples_per_prompt_data_multiplier",
+        "max_rollout_tokens",
+        "auto_checkpoint_cadence_steps",
+        "cost_cap_default_usd",
+        "cold_start_overlap_threshold",
+        "mixture_distillation_golden_fraction",
+        "eval_gate_required",
+        "notifications_channels"
+      ],
+      "properties": {
+        "tier": {
+          "enum": [
+            "laptop",
+            "prosumer",
+            "corporate"
+          ]
+        },
+        "default_logit_source": {
+          "$ref": "#/$defs/String"
+        },
+        "default_loss": {
+          "$ref": "#/$defs/String"
+        },
+        "default_top_k": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "lora_rank": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "batch_size": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "samples_per_prompt_default": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "samples_per_prompt_data_multiplier": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "max_rollout_tokens": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "auto_checkpoint_cadence_steps": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "cost_cap_default_usd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cold_start_overlap_threshold": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "mixture_distillation_golden_fraction": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "eval_gate_required": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "notifications_channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        }
+      },
+      "description": "Paper-cited defaults for one hardware/deployment tier.",
+      "x-kiln-rust-type": "TierDefaults",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TierDefaultsListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tiers"
+      ],
+      "properties": {
+        "tiers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TierDefaults"
+          },
+          "minItems": 3
+        }
+      },
+      "description": "All built-in tier defaults.",
+      "x-kiln-rust-type": "TierDefaultsListResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TierDefaultsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tier",
+        "defaults"
+      ],
+      "properties": {
+        "tier": {
+          "enum": [
+            "laptop",
+            "prosumer",
+            "corporate"
+          ]
+        },
+        "defaults": {
+          "$ref": "#/$defs/TierDefaults"
+        }
+      },
+      "description": "One named tier and its defaults.",
+      "x-kiln-rust-type": "TierDefaultsResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TraceOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ended_with_exit_0",
+        "user_edited_agent_files",
+        "has_followup_attempt"
+      ],
+      "properties": {
+        "ended_with_exit_0": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "user_edited_agent_files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "has_followup_attempt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Best-effort outcome signals inferred from a pi session.",
+      "x-kiln-rust-type": "TraceOutcome",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingChatMessageInput": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/String"
+        },
+        "content": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              }
+            }
+          ]
+        },
+        "tool_calls": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Canonical training chat input. Content-part arrays are reduced to text by the compatibility decoder.",
+      "x-kiln-rust-type": "kiln_core::tokenizer::ChatMessage",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingChatMessageOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "content"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/String"
+        },
+        "content": {
+          "$ref": "#/$defs/String"
+        },
+        "tool_calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          }
+        },
+        "name": {
+          "$ref": "#/$defs/String"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Closed emitted training chat message.",
+      "x-kiln-rust-type": "kiln_core::tokenizer::ChatMessage",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingCheckpointSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resume_checkpoint",
+        "checkpoint_id",
+        "training_kind",
+        "data_source_kind",
+        "global_step",
+        "total_steps",
+        "next_epoch_index",
+        "next_cursor_in_epoch",
+        "complete",
+        "created_at",
+        "effective_config",
+        "data_content_sha256",
+        "data_item_count"
+      ],
+      "properties": {
+        "resume_checkpoint": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "checkpoint_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "training_kind": {
+          "$ref": "#/$defs/TrainingKind"
+        },
+        "data_source_kind": {
+          "$ref": "#/$defs/String"
+        },
+        "global_step": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_steps": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "next_epoch_index": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "next_cursor_in_epoch": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "complete": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        },
+        "effective_config": {
+          "$ref": "#/$defs/AnyJson"
+        },
+        "data_content_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "data_item_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "teacher_id": {
+          "$ref": "#/$defs/String"
+        },
+        "teacher_identity_revision": {
+          "$ref": "#/$defs/String"
+        },
+        "teacher_content_revision": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Newest manifest-valid resumable checkpoint summary.",
+      "x-kiln-rust-type": "TrainingCheckpointSummary",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingJobDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "state",
+        "progress",
+        "current_loss",
+        "adapter_name",
+        "started_at",
+        "elapsed_secs",
+        "epoch",
+        "adapter_path",
+        "auto_load",
+        "linked_eval_job_ids",
+        "loss_history",
+        "train_receipt",
+        "replay_request",
+        "latest_checkpoint",
+        "checkpoint_error",
+        "metadata_error"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "state": {
+          "$ref": "#/$defs/TrainingState"
+        },
+        "progress": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "current_loss": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "started_at": {
+          "$ref": "#/$defs/String"
+        },
+        "elapsed_secs": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "submitted_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "finished_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "job_type": {
+          "$ref": "#/$defs/TrainingJobType"
+        },
+        "error": {
+          "$ref": "#/$defs/String"
+        },
+        "post_eval_verdict": {
+          "$ref": "#/$defs/String"
+        },
+        "gate_outcome": {
+          "enum": [
+            "promoted",
+            "kept",
+            "regression",
+            "demoted",
+            "error"
+          ]
+        },
+        "epoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "auto_load": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "linked_eval_job_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "loss_history": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrainingLossSample"
+          }
+        },
+        "train_receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnyJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "replay_request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnyJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrainingCheckpointSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpoint_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "metadata_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Training status plus curves, receipts, replay summary, and newest checkpoint.",
+      "x-kiln-rust-type": "TrainingJobDetail",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingJobType": {
+      "type": "string",
+      "enum": [
+        "sft",
+        "grpo",
+        "opd"
+      ],
+      "description": "Native training pipeline identity.",
+      "x-kiln-rust-type": "crate::state::TrainingJobType",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingKind": {
+      "type": "string",
+      "enum": [
+        "sft",
+        "grpo",
+        "opd",
+        "capability-distillation"
+      ],
+      "description": "Immutable checkpoint training kind.",
+      "x-kiln-rust-type": "kiln_train::checkpoint::TrainingKind",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingLossSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "epoch",
+        "progress",
+        "loss",
+        "elapsed_secs"
+      ],
+      "properties": {
+        "epoch": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "progress": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "loss": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "elapsed_secs": {
+          "$ref": "#/$defs/FiniteNumber"
+        }
+      },
+      "description": "One bounded live loss-curve sample.",
+      "x-kiln-rust-type": "crate::state::TrainingLossSample",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "state",
+        "effective_seed",
+        "message"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "state": {
+          "const": "queued"
+        },
+        "effective_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "message": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Immutable training admission receipt.",
+      "x-kiln-rust-type": "TrainingResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingState": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "failed"
+      ],
+      "description": "Training-job lifecycle state.",
+      "x-kiln-rust-type": "kiln_train::TrainingState",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "state",
+        "progress",
+        "current_loss",
+        "adapter_name",
+        "started_at",
+        "elapsed_secs"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "state": {
+          "$ref": "#/$defs/TrainingState"
+        },
+        "progress": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "current_loss": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "started_at": {
+          "$ref": "#/$defs/String"
+        },
+        "elapsed_secs": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "submitted_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "finished_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "job_type": {
+          "$ref": "#/$defs/TrainingJobType"
+        },
+        "error": {
+          "$ref": "#/$defs/String"
+        },
+        "post_eval_verdict": {
+          "$ref": "#/$defs/String"
+        },
+        "gate_outcome": {
+          "enum": [
+            "promoted",
+            "kept",
+            "regression",
+            "demoted",
+            "error"
+          ]
+        }
+      },
+      "description": "Live or archived training-job status.",
+      "x-kiln-rust-type": "TrainingStatus",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TurnSegmentInput": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "role",
+        "content"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/String"
+        },
+        "content": {
+          "$ref": "#/$defs/String"
+        },
+        "kind": {
+          "enum": [
+            "context",
+            "action",
+            "observation"
+          ]
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/String"
+        },
+        "warning_prefix_len": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "One trajectory segment accepted by training.",
+      "x-kiln-rust-type": "kiln_train::TurnSegment",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TurnSegmentOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "content",
+        "kind"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/String"
+        },
+        "content": {
+          "$ref": "#/$defs/String"
+        },
+        "kind": {
+          "enum": [
+            "context",
+            "action",
+            "observation"
+          ]
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/String"
+        },
+        "warning_prefix_len": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Closed emitted trajectory segment.",
+      "x-kiln-rust-type": "kiln_train::TurnSegment",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "UnitInterval": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "A number in the closed interval [0, 1].",
+      "x-kiln-rust-type": "f32 | f64",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Vec_TrainingStatus": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TrainingStatus"
+      },
+      "description": "All retained training statuses.",
+      "x-kiln-rust-type": "Vec<TrainingStatus>",
+      "x-kiln-field-schema-status": "complete"
+    }
+  },
+  "x-kiln-examples": {
+    "AgentRunAbortResponse": [
+      {
+        "aborting": true
+      }
+    ],
+    "AgentRunEventsResponse": [
+      {
+        "events": [
+          {
+            "seq": 0,
+            "event": {
+              "type": "message_end"
+            }
+          }
+        ],
+        "next_after": 1,
+        "status": "running",
+        "first_available_seq": 0,
+        "truncated": false
+      }
+    ],
+    "AgentRunListResponse": [
+      {
+        "runs": [
+          {
+            "id": "run-1",
+            "task": "Fix the failing test",
+            "cwd": "/srv/project",
+            "status": "completed",
+            "created_unix_ms": 1700000000000,
+            "queue_seq": 1,
+            "started_unix_ms": 1700000000010,
+            "finished_unix_ms": 1700000001000,
+            "num_turns": 2,
+            "num_tool_calls": 1,
+            "session_id": "session-1",
+            "session_path": "/srv/adapters/agent_runs/sessions/session-1.jsonl",
+            "trace_indexed": true,
+            "last_assistant_text": "Fixed."
+          }
+        ]
+      }
+    ],
+    "AgentRunQueuedResponse": [
+      {
+        "queued": true
+      }
+    ],
+    "AgentRunRecord": [
+      {
+        "id": "run-1",
+        "task": "Fix the failing test",
+        "cwd": "/srv/project",
+        "status": "completed",
+        "created_unix_ms": 1700000000000,
+        "queue_seq": 1,
+        "started_unix_ms": 1700000000010,
+        "finished_unix_ms": 1700000001000,
+        "num_turns": 2,
+        "num_tool_calls": 1,
+        "session_id": "session-1",
+        "session_path": "/srv/adapters/agent_runs/sessions/session-1.jsonl",
+        "trace_indexed": true,
+        "last_assistant_text": "Fixed."
+      }
+    ],
+    "AgentRunsStatusResponse": [
+      {
+        "enabled": true,
+        "disabled_reason": null,
+        "pi_available": true,
+        "pi_path": "/usr/bin/pi",
+        "max_concurrent_runs": 2,
+        "active_runs": 0,
+        "sessions_dir": "/srv/adapters/agent_runs/sessions"
+      }
+    ],
+    "AgentTrace": [
+      {
+        "id": "session-1",
+        "working_dir": "/srv/project",
+        "num_turns": 2,
+        "num_tool_calls": 1,
+        "outcome": {
+          "ended_with_exit_0": true,
+          "user_edited_agent_files": [],
+          "has_followup_attempt": null
+        },
+        "first_event_at": "2026-07-14T12:00:00Z",
+        "last_event_at": "2026-07-14T12:01:00Z",
+        "forked": false,
+        "parent_id": null,
+        "tool_manifest_sha": null,
+        "prompt_messages": [
+          {
+            "role": "user",
+            "content": "Explain 2 + 2."
+          }
+        ],
+        "trajectory": [
+          {
+            "role": "assistant",
+            "content": "Fixed.",
+            "kind": "action"
+          }
+        ]
+      }
+    ],
+    "AgentTracesListResponse": [
+      {
+        "traces": [
+          {
+            "id": "session-1",
+            "working_dir": "/srv/project",
+            "num_turns": 2,
+            "num_tool_calls": 1,
+            "outcome": {
+              "ended_with_exit_0": true,
+              "user_edited_agent_files": [],
+              "has_followup_attempt": null
+            },
+            "first_event_at": "2026-07-14T12:00:00Z",
+            "last_event_at": "2026-07-14T12:01:00Z",
+            "forked": false,
+            "parent_id": null,
+            "tool_manifest_sha": null,
+            "prompt_messages": [
+              {
+                "role": "user",
+                "content": "Explain 2 + 2."
+              }
+            ],
+            "trajectory": [
+              {
+                "role": "assistant",
+                "content": "Fixed.",
+                "kind": "action"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "CancelTrainingJobResponse": [
+      {
+        "status": "cancelled",
+        "job_id": "train-1"
+      },
+      {
+        "status": "cancelling",
+        "job_id": "train-2",
+        "message": "stop requested \u2014 the trainer aborts at the next step boundary"
+      }
+    ],
+    "CapacityRequest": [
+      {
+        "rollouts": 100,
+        "tokens_per_rollout": 512,
+        "top_k": 32,
+        "rank": 32
+      }
+    ],
+    "CapacityResponse": [
+      {
+        "bits_needed": 256000.0,
+        "bits_storable_in_lora": 41943040.0,
+        "capacity_ratio": 163.84,
+        "expected_overlap_at_step_50": 0.9,
+        "warnings": []
+      }
+    ],
+    "ClearCorrectionsResponse": [
+      {
+        "status": "cleared",
+        "removed": 1
+      }
+    ],
+    "CompatibilityResponse": [
+      {
+        "matches": [
+          {
+            "teacher": "qwen3.6-27b@vllm",
+            "student": "Qwen3.5-4B@kiln",
+            "domain": "math_reasoning",
+            "predicted_initial_overlap": 0.78,
+            "recommended_rank": 64,
+            "cold_start_epochs": null,
+            "expected_gpu_hours": 4.0,
+            "expected_cost_usd": null,
+            "validation_eval": "math-frontier-eval",
+            "expected_eval_delta_points": 12.0
+          }
+        ],
+        "note": null
+      }
+    ],
+    "CorrectionRow": [
+      {
+        "request_id": "chat-1",
+        "agent": "pi",
+        "adapter": null,
+        "user": "2 + 2?",
+        "original": "5",
+        "ideal": "4",
+        "truncated": false,
+        "created_at": "2026-07-14T12:00:00Z"
+      }
+    ],
+    "CorrectionRowInput": [
+      {
+        "request_id": "chat-1",
+        "agent": "pi",
+        "adapter": null,
+        "user": "2 + 2?",
+        "original": "5",
+        "ideal": "4",
+        "truncated": false,
+        "created_at": ""
+      }
+    ],
+    "CreateRunRequest": [
+      {
+        "task": "Fix the failing test",
+        "cwd": "/srv/project",
+        "thinking_level": "high",
+        "timeout_secs": 900
+      }
+    ],
+    "DeleteCorrectionResponse": [
+      {
+        "status": "deleted",
+        "request_id": "chat-1"
+      }
+    ],
+    "DeleteTrainingJobResponse": [
+      {
+        "job_id": "train-1",
+        "status": "deleted",
+        "removed_archive_file": true
+      }
+    ],
+    "DiscoverRequest": [
+      {
+        "path": "/home/user/.pi/agent/sessions"
+      }
+    ],
+    "DiscoverResponse": [
+      {
+        "indexed": 4,
+        "path": "/home/user/.pi/agent/sessions"
+      }
+    ],
+    "DistillMergeRequest": [
+      {
+        "name": "merged-v1",
+        "sources": [
+          {
+            "adapter": "math-v1",
+            "weight": 1.0
+          }
+        ],
+        "config": {
+          "training_mode": "on_policy",
+          "objective": "reverse_kl",
+          "loss": "teacher_top_k",
+          "top_k": 32,
+          "stable_opd": {
+            "mode": "off"
+          },
+          "optimizer": {
+            "kind": "muon"
+          }
+        }
+      }
+    ],
+    "DistillPumpRequest": [
+      {
+        "name": "rust-v1",
+        "teacher": "qwen-27b",
+        "mode": {
+          "domain": "rust"
+        },
+        "rollout_budget": 1000,
+        "config": {
+          "training_mode": "on_policy",
+          "objective": "reverse_kl",
+          "loss": "teacher_top_k",
+          "top_k": 32,
+          "stable_opd": {
+            "mode": "off"
+          },
+          "optimizer": {
+            "kind": "muon"
+          }
+        }
+      }
+    ],
+    "DistillRefreshRequest": [
+      {
+        "name": "assistant-v1",
+        "new_data": {
+          "dataset": "new-docs"
+        },
+        "behavioural_teacher": "prior-self",
+        "config": {
+          "training_mode": "on_policy",
+          "objective": "reverse_kl",
+          "loss": "teacher_top_k",
+          "top_k": 32,
+          "stable_opd": {
+            "mode": "off"
+          },
+          "optimizer": {
+            "kind": "muon"
+          }
+        }
+      }
+    ],
+    "DistillSelfRequest": [
+      {
+        "name": "concise-v1",
+        "mode": "conciseness",
+        "config": {
+          "training_mode": "on_policy",
+          "objective": "reverse_kl",
+          "loss": "teacher_top_k",
+          "top_k": 32,
+          "stable_opd": {
+            "mode": "off"
+          },
+          "optimizer": {
+            "kind": "muon"
+          }
+        }
+      }
+    ],
+    "FrontDoorRequest": [
+      {
+        "kind": "sft",
+        "examples": [
+          {
+            "messages": [
+              {
+                "role": "user",
+                "content": "Explain 2 + 2."
+              },
+              {
+                "role": "assistant",
+                "content": "4"
+              }
+            ]
+          }
+        ],
+        "config": {
+          "output_name": "math-v1",
+          "optimizer": {
+            "kind": "muon"
+          }
+        }
+      }
+    ],
+    "FrontDoorResponse": [
+      {
+        "picked": "sft",
+        "training": {
+          "job_id": "train-1",
+          "state": "queued",
+          "effective_seed": "42",
+          "message": "Queued training job"
+        }
+      }
+    ],
+    "GrpoRequest": [
+      {
+        "groups": [
+          {
+            "messages": [
+              {
+                "role": "user",
+                "content": "Explain 2 + 2."
+              }
+            ],
+            "completions": [
+              {
+                "text": "4",
+                "reward": 1.0
+              },
+              {
+                "text": "5",
+                "reward": 0.0
+              }
+            ]
+          }
+        ],
+        "config": {
+          "optimizer": {
+            "kind": "muon"
+          }
+        }
+      }
+    ],
+    "JudgeDistillRequest": [
+      {
+        "name": "judge-pi-v1",
+        "teacher": "qwen-27b",
+        "include_pi_share": false,
+        "config": {
+          "training_mode": "on_policy",
+          "objective": "reverse_kl",
+          "loss": "teacher_top_k",
+          "top_k": 32,
+          "stable_opd": {
+            "mode": "off"
+          },
+          "optimizer": {
+            "kind": "muon"
+          }
+        }
+      }
+    ],
+    "JudgeDistillResponse": [
+      {
+        "job_id": "judge-1",
+        "state": "queued",
+        "effective_seed": "42",
+        "message": "Queued training job"
+      }
+    ],
+    "JudgeDriftCheckRequest": [
+      {
+        "judge": "judge-pi-v1",
+        "teacher": "qwen-27b",
+        "sample_size": 50,
+        "agreement_threshold": 0.8
+      }
+    ],
+    "LibraryListResponse": [
+      {
+        "backend": "https://library.kiln.run",
+        "adapters": [],
+        "note": "Library backend not yet operational"
+      }
+    ],
+    "ListResponse": [
+      {
+        "corrections": [
+          {
+            "request_id": "chat-1",
+            "agent": "pi",
+            "adapter": null,
+            "user": "2 + 2?",
+            "original": "5",
+            "ideal": "4",
+            "truncated": false,
+            "created_at": "2026-07-14T12:00:00Z"
+          }
+        ]
+      }
+    ],
+    "MarkTrainedRequest": [
+      {
+        "request_ids": [
+          "chat-1"
+        ],
+        "adapter": "math-v1"
+      }
+    ],
+    "MarkTrainedResponse": [
+      {
+        "status": "marked",
+        "marked": 1
+      }
+    ],
+    "MessageRequest": [
+      {
+        "message": "Also run the focused test."
+      }
+    ],
+    "OpdRequest": [
+      {
+        "prompts": [
+          {
+            "messages": [
+              {
+                "role": "user",
+                "content": "Explain 2 + 2."
+              }
+            ]
+          }
+        ],
+        "teacher": "qwen-27b",
+        "config": {
+          "training_mode": "on_policy",
+          "objective": "reverse_kl",
+          "loss": "teacher_top_k",
+          "top_k": 32,
+          "stable_opd": {
+            "mode": "off"
+          },
+          "optimizer": {
+            "kind": "muon"
+          }
+        }
+      }
+    ],
+    "PublishPayload": [
+      {
+        "description": "Math adapter",
+        "uploader": "local-user"
+      }
+    ],
+    "PublishToLibraryResponse": [
+      {
+        "status": "ready_to_publish",
+        "backend": "https://library.kiln.run",
+        "intended_id": "math-v1@2026-07-14",
+        "uploader": "local-user",
+        "description": "Math adapter",
+        "receipt_schema_version": 1,
+        "note": "Library publish endpoint is contract-only until launch."
+      }
+    ],
+    "QueueResponse": [
+      {
+        "running": null,
+        "queued": [
+          {
+            "job_id": "train-1",
+            "job_type": "sft",
+            "adapter_name": "math-v1",
+            "position": 1
+          }
+        ],
+        "completed": []
+      }
+    ],
+    "RecipeRunRequest": [
+      {
+        "body": {
+          "name": "quick-sft",
+          "description": "Train one adapter",
+          "steps": [
+            {
+              "kind": "sft",
+              "name": "math-v1",
+              "examples_from": {
+                "examples": [
+                  {
+                    "messages": [
+                      {
+                        "role": "user",
+                        "content": "Explain 2 + 2."
+                      },
+                      {
+                        "role": "assistant",
+                        "content": "4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "inputs": {}
+      }
+    ],
+    "RecipeRunResponse": [
+      {
+        "recipe": "quick-sft",
+        "job_ids": [
+          "train-1"
+        ],
+        "effective_seeds": {
+          "train-1": "42"
+        },
+        "message": "Queued recipe"
+      }
+    ],
+    "RecipesListResponse": [
+      {
+        "recipes": [
+          {
+            "name": "quick-sft",
+            "description": "Train one adapter",
+            "num_steps": 1,
+            "admission": {
+              "supported": true,
+              "unavailable_reason": null
+            }
+          }
+        ]
+      }
+    ],
+    "SelfImproveRequest": [
+      {
+        "agent": "pi-coder-current",
+        "judge": "judge-pi-v1",
+        "crisp": true,
+        "config": {
+          "training_mode": "on_policy",
+          "objective": "reverse_kl",
+          "loss": "teacher_top_k",
+          "top_k": 32,
+          "stable_opd": {
+            "mode": "off"
+          },
+          "optimizer": {
+            "kind": "muon"
+          }
+        }
+      }
+    ],
+    "SelfImproveResponse": [
+      {
+        "job_ids": [
+          "opd-1",
+          "crisp-1"
+        ],
+        "effective_seeds": {
+          "opd-1": "42",
+          "crisp-1": "43"
+        },
+        "state": "queued",
+        "message": "Self-improvement queued"
+      }
+    ],
+    "SftRequest": [
+      {
+        "examples": [
+          {
+            "messages": [
+              {
+                "role": "user",
+                "content": "Explain 2 + 2."
+              },
+              {
+                "role": "assistant",
+                "content": "4"
+              }
+            ]
+          }
+        ],
+        "config": {
+          "output_name": "math-v1",
+          "optimizer": {
+            "kind": "muon"
+          }
+        }
+      }
+    ],
+    "TerminalStatusResponse": [
+      {
+        "enabled": true,
+        "disabled_reason": null,
+        "pi_available": true,
+        "pi_path": "/usr/bin/pi",
+        "cwd": "/srv/project",
+        "session_active": false
+      }
+    ],
+    "TierDefaultsListResponse": [
+      {
+        "tiers": [
+          {
+            "tier": "prosumer",
+            "default_logit_source": "LocalTeacher",
+            "default_loss": "teacher_top_k (K=32)",
+            "default_top_k": 32,
+            "lora_rank": 32,
+            "batch_size": 16,
+            "samples_per_prompt_default": 4,
+            "samples_per_prompt_data_multiplier": 32,
+            "max_rollout_tokens": 7168,
+            "auto_checkpoint_cadence_steps": 10,
+            "cost_cap_default_usd": 25.0,
+            "cold_start_overlap_threshold": 0.5,
+            "mixture_distillation_golden_fraction": 0.25,
+            "eval_gate_required": true,
+            "notifications_channels": [
+              "desktop_tray",
+              "email",
+              "webhook"
+            ]
+          },
+          {
+            "tier": "laptop",
+            "default_logit_source": "LocalTeacher",
+            "default_loss": "teacher_top_k (K=32)",
+            "default_top_k": 32,
+            "lora_rank": 32,
+            "batch_size": 16,
+            "samples_per_prompt_default": 4,
+            "samples_per_prompt_data_multiplier": 32,
+            "max_rollout_tokens": 7168,
+            "auto_checkpoint_cadence_steps": 10,
+            "cost_cap_default_usd": 25.0,
+            "cold_start_overlap_threshold": 0.5,
+            "mixture_distillation_golden_fraction": 0.25,
+            "eval_gate_required": true,
+            "notifications_channels": [
+              "desktop_tray",
+              "email",
+              "webhook"
+            ]
+          },
+          {
+            "tier": "corporate",
+            "default_logit_source": "LocalTeacher",
+            "default_loss": "teacher_top_k (K=32)",
+            "default_top_k": 32,
+            "lora_rank": 32,
+            "batch_size": 16,
+            "samples_per_prompt_default": 4,
+            "samples_per_prompt_data_multiplier": 32,
+            "max_rollout_tokens": 7168,
+            "auto_checkpoint_cadence_steps": 10,
+            "cost_cap_default_usd": 25.0,
+            "cold_start_overlap_threshold": 0.5,
+            "mixture_distillation_golden_fraction": 0.25,
+            "eval_gate_required": true,
+            "notifications_channels": [
+              "desktop_tray",
+              "email",
+              "webhook"
+            ]
+          }
+        ]
+      }
+    ],
+    "TierDefaultsResponse": [
+      {
+        "tier": "prosumer",
+        "defaults": {
+          "tier": "prosumer",
+          "default_logit_source": "LocalTeacher",
+          "default_loss": "teacher_top_k (K=32)",
+          "default_top_k": 32,
+          "lora_rank": 32,
+          "batch_size": 16,
+          "samples_per_prompt_default": 4,
+          "samples_per_prompt_data_multiplier": 32,
+          "max_rollout_tokens": 7168,
+          "auto_checkpoint_cadence_steps": 10,
+          "cost_cap_default_usd": 25.0,
+          "cold_start_overlap_threshold": 0.5,
+          "mixture_distillation_golden_fraction": 0.25,
+          "eval_gate_required": true,
+          "notifications_channels": [
+            "desktop_tray",
+            "email",
+            "webhook"
+          ]
+        }
+      }
+    ],
+    "TrainingJobDetail": [
+      {
+        "job_id": "train-1",
+        "state": "completed",
+        "progress": 1.0,
+        "current_loss": 0.2,
+        "adapter_name": "math-v1",
+        "effective_seed": "42",
+        "started_at": "12s ago",
+        "elapsed_secs": 12.0,
+        "submitted_unix_ms": 1700000000000,
+        "finished_unix_ms": 1700000012000,
+        "job_type": "sft",
+        "epoch": 3,
+        "adapter_path": "/srv/adapters/math-v1",
+        "auto_load": true,
+        "linked_eval_job_ids": [],
+        "loss_history": [
+          {
+            "epoch": 1,
+            "progress": 0.5,
+            "loss": 0.4,
+            "elapsed_secs": 5.0
+          }
+        ],
+        "train_receipt": null,
+        "replay_request": null,
+        "latest_checkpoint": null,
+        "checkpoint_error": null,
+        "metadata_error": null
+      }
+    ],
+    "TrainingResponse": [
+      {
+        "job_id": "train-1",
+        "state": "queued",
+        "effective_seed": "42",
+        "message": "Queued training job"
+      }
+    ],
+    "TrainingStatus": [
+      {
+        "job_id": "train-1",
+        "state": "completed",
+        "progress": 1.0,
+        "current_loss": 0.2,
+        "adapter_name": "math-v1",
+        "effective_seed": "42",
+        "started_at": "12s ago",
+        "elapsed_secs": 12.0,
+        "submitted_unix_ms": 1700000000000,
+        "finished_unix_ms": 1700000012000,
+        "job_type": "sft"
+      }
+    ],
+    "Vec_TrainingStatus": [
+      [
+        {
+          "job_id": "train-1",
+          "state": "completed",
+          "progress": 1.0,
+          "current_loss": 0.2,
+          "adapter_name": "math-v1",
+          "effective_seed": "42",
+          "started_at": "12s ago",
+          "elapsed_secs": 12.0,
+          "submitted_unix_ms": 1700000000000,
+          "finished_unix_ms": 1700000012000,
+          "job_type": "sft"
+        }
+      ]
+    ]
+  }
+}

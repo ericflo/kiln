@@ -1,5 +1,12 @@
 # ECHO Guide
 
+The normative HTTP field contract for `GrpoRequest`, `GrpoConfig`,
+`LossConfig`, `EchoConfig`, trajectory segments, and training responses is the
+generated [Training and Agent Control Plane API
+Schema](../contracts/kiln-control-plane-v1.schema.json). This guide explains
+the operating model; the generated schema owns wire requiredness, nullability,
+defaults, constraints, aliases, and unknown-field behavior.
+
 > *Make every multi-turn rollout teach two things: how to act, and how the environment responds.*
 
 ECHO (**E**nvironment **C**ross-entropy **H**ybrid **O**bjective; Shrivastava, Awadallah, Papailiopoulos — MSR AI Frontiers, 2026) adds a length-normalized cross-entropy loss on environment-observation tokens to kiln's standard GRPO policy-gradient loss on action tokens. The math:

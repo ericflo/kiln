@@ -21,6 +21,7 @@ INFERENCE_SCHEMA_PATH = ROOT / "contracts" / "kiln-inference-v1.schema.json"
 OBSERVABILITY_SCHEMA_PATH = ROOT / "contracts" / "kiln-observability-v1.schema.json"
 ARTIFACT_SCHEMA_PATH = ROOT / "contracts" / "kiln-artifacts-v1.schema.json"
 EVAL_SCHEMA_PATH = ROOT / "contracts" / "kiln-evals-v1.schema.json"
+CONTROL_SCHEMA_PATH = ROOT / "contracts" / "kiln-control-plane-v1.schema.json"
 THINKING_SCHEMA_PATH = ROOT / "contracts" / "thinking-budget-v1.schema.json"
 INFERENCE_ENTRYPOINTS = (
     "BatchCompletionRequest",
@@ -116,10 +117,67 @@ EVAL_ENTRYPOINTS = (
     "ValidateJudgmentResponse",
 )
 EVAL_COMPONENT_TYPES = {name: name for name in EVAL_ENTRYPOINTS}
+CONTROL_ENTRYPOINTS = (
+    "AgentRunAbortResponse",
+    "AgentRunEventsResponse",
+    "AgentRunListResponse",
+    "AgentRunQueuedResponse",
+    "AgentRunRecord",
+    "AgentRunsStatusResponse",
+    "AgentTrace",
+    "AgentTracesListResponse",
+    "CancelTrainingJobResponse",
+    "CapacityRequest",
+    "CapacityResponse",
+    "ClearCorrectionsResponse",
+    "CompatibilityResponse",
+    "CorrectionRow",
+    "CorrectionRowInput",
+    "CreateRunRequest",
+    "DeleteCorrectionResponse",
+    "DeleteTrainingJobResponse",
+    "DiscoverRequest",
+    "DiscoverResponse",
+    "DistillMergeRequest",
+    "DistillPumpRequest",
+    "DistillRefreshRequest",
+    "DistillSelfRequest",
+    "FrontDoorRequest",
+    "FrontDoorResponse",
+    "GrpoRequest",
+    "JudgeDistillRequest",
+    "JudgeDistillResponse",
+    "JudgeDriftCheckRequest",
+    "LibraryListResponse",
+    "ListResponse",
+    "MarkTrainedRequest",
+    "MarkTrainedResponse",
+    "MessageRequest",
+    "OpdRequest",
+    "PublishPayload",
+    "PublishToLibraryResponse",
+    "QueueResponse",
+    "RecipeRunRequest",
+    "RecipeRunResponse",
+    "RecipesListResponse",
+    "SelfImproveRequest",
+    "SelfImproveResponse",
+    "SftRequest",
+    "TerminalStatusResponse",
+    "TierDefaultsListResponse",
+    "TierDefaultsResponse",
+    "TrainingJobDetail",
+    "TrainingResponse",
+    "TrainingStatus",
+    "Vec_TrainingStatus",
+)
+CONTROL_COMPONENT_TYPES = {name: name for name in CONTROL_ENTRYPOINTS}
+CONTROL_COMPONENT_TYPES["CorrectionRowInput"] = "CorrectionRow"
+CONTROL_COMPONENT_TYPES["Vec_TrainingStatus"] = "Vec<TrainingStatus>"
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
-    "complete": 79,
-    "migration_pending": 39,
-    "total": 118,
+    "complete": 131,
+    "migration_pending": 0,
+    "total": 131,
 }
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
 EXPECTED_METHOD_COUNTS = {"DELETE": 12, "GET": 53, "POST": 47}
@@ -154,7 +212,12 @@ NO_BODY_POSTS = {
     "/v1/agent/runs/{id}/abort",
     "/v1/library/install/{id}",
 }
-EXPLICIT_ERROR_PATHS = {"/v1/debug/model-state", "/v1/health"}
+EXPLICIT_ERROR_PATHS = {
+    "/v1/agent/judge_drift_check",
+    "/v1/debug/model-state",
+    "/v1/health",
+    "/v1/library/install/{id}",
+}
 
 
 class ContractError(Exception):
@@ -198,6 +261,7 @@ def resolve_contract_ref(document: dict[str, Any], reference: str) -> Any:
             OBSERVABILITY_SCHEMA_PATH.name: OBSERVABILITY_SCHEMA_PATH,
             ARTIFACT_SCHEMA_PATH.name: ARTIFACT_SCHEMA_PATH,
             EVAL_SCHEMA_PATH.name: EVAL_SCHEMA_PATH,
+            CONTROL_SCHEMA_PATH.name: CONTROL_SCHEMA_PATH,
         }
         if document_name not in external_documents:
             raise ContractError(f"unsupported external OpenAPI reference {reference!r}")
@@ -242,7 +306,7 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         "x-kiln-operation-count": 112,
         "x-kiln-method-counts": EXPECTED_METHOD_COUNTS,
         "x-kiln-tag-counts": EXPECTED_TAG_COUNTS,
-        "x-kiln-field-schema-status": "migration_pending",
+        "x-kiln-field-schema-status": "complete",
         "x-kiln-component-schema-counts": EXPECTED_COMPONENT_SCHEMA_COUNTS,
     }
     for key, expected in expected_root.items():
@@ -400,7 +464,26 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
             errors.append(f"{label}: responses must be an object")
             continue
         success = [code for code in responses if code.isdigit() and 100 <= int(code) < 400]
-        if len(success) != 1:
+        unavailable = operation.get("x-kiln-currently-unavailable") is True
+        if unavailable:
+            explicit_errors = [
+                code for code in responses if code.isdigit() and 400 <= int(code) < 600
+            ]
+            if success or len(explicit_errors) != 1:
+                errors.append(
+                    f"{label}: unavailable operations require exactly one explicit error response and no success"
+                )
+            elif responses[explicit_errors[0]].get("x-kiln-rust-type") != "ApiError":
+                errors.append(f"{label}: unavailable operation must return ApiError")
+            error_schema = (
+                responses[explicit_errors[0]]
+                .get("content", {})
+                .get("application/json", {})
+                .get("schema")
+            ) if explicit_errors else None
+            if error_schema != {"$ref": "#/components/schemas/ApiError"}:
+                errors.append(f"{label}: unavailable operation must use the structured ApiError schema")
+        elif len(success) != 1:
             errors.append(f"{label}: exactly one success response is required")
         else:
             response = responses[success[0]]
@@ -535,6 +618,13 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
             errors.append(f"eval component {entrypoint} must use complete ref {expected_ref}")
         if schema.get("x-kiln-rust-type") != rust_type:
             errors.append(f"eval component {entrypoint} must bind Rust type {rust_type}")
+    for entrypoint, rust_type in CONTROL_COMPONENT_TYPES.items():
+        schema = schemas.get(entrypoint, {})
+        expected_ref = f"{CONTROL_SCHEMA_PATH.name}#/$defs/{entrypoint}"
+        if schema.get("$ref") != expected_ref or schema.get("x-kiln-field-schema-status") != "complete":
+            errors.append(f"control-plane component {entrypoint} must use complete ref {expected_ref}")
+        if schema.get("x-kiln-rust-type") != rust_type:
+            errors.append(f"control-plane component {entrypoint} must bind Rust type {rust_type}")
 
     eval_operations = {
         ("post", "/v1/eval/compare"): ("EvalCompareSpec", "EvalRunResponse"),
@@ -660,6 +750,80 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         for parameter in delete_export_parameters
     ):
         errors.append("DELETE /v1/train/hf/exports/{name}: optional If-Match contract is missing")
+
+    control_operations = {
+        ("post", "/v1/adapters/distill_merge"): ("DistillMergeRequest", "200", "TrainingResponse"),
+        ("post", "/v1/agent/judge_distill"): ("JudgeDistillRequest", "200", "JudgeDistillResponse"),
+        ("post", "/v1/agent/judge_drift_check"): ("JudgeDriftCheckRequest", "501", "ApiError"),
+        ("get", "/v1/agent/runs"): (None, "200", "AgentRunListResponse"),
+        ("post", "/v1/agent/runs"): ("CreateRunRequest", "200", "AgentRunRecord"),
+        ("get", "/v1/agent/runs/status"): (None, "200", "AgentRunsStatusResponse"),
+        ("get", "/v1/agent/runs/{id}"): (None, "200", "AgentRunRecord"),
+        ("post", "/v1/agent/runs/{id}/abort"): (None, "200", "AgentRunAbortResponse"),
+        ("get", "/v1/agent/runs/{id}/events"): (None, "200", "AgentRunEventsResponse"),
+        ("post", "/v1/agent/runs/{id}/follow_up"): ("MessageRequest", "200", "AgentRunQueuedResponse"),
+        ("post", "/v1/agent/runs/{id}/steer"): ("MessageRequest", "200", "AgentRunQueuedResponse"),
+        ("post", "/v1/agent/self_improve"): ("SelfImproveRequest", "200", "SelfImproveResponse"),
+        ("get", "/v1/agent/traces"): (None, "200", "AgentTracesListResponse"),
+        ("post", "/v1/agent/traces/discover"): ("DiscoverRequest", "200", "DiscoverResponse"),
+        ("get", "/v1/agent/traces/{id}"): (None, "200", "AgentTrace"),
+        ("delete", "/v1/corrections"): (None, "200", "ClearCorrectionsResponse"),
+        ("get", "/v1/corrections"): (None, "200", "ListResponse"),
+        ("post", "/v1/corrections"): ("CorrectionRowInput", "200", "CorrectionRow"),
+        ("post", "/v1/corrections/mark_trained"): ("MarkTrainedRequest", "200", "MarkTrainedResponse"),
+        ("delete", "/v1/corrections/{request_id}"): (None, "200", "DeleteCorrectionResponse"),
+        ("post", "/v1/distill/pump"): ("DistillPumpRequest", "200", "TrainingResponse"),
+        ("post", "/v1/distill/refresh"): ("DistillRefreshRequest", "200", "TrainingResponse"),
+        ("post", "/v1/distill/self"): ("DistillSelfRequest", "200", "TrainingResponse"),
+        ("get", "/v1/library"): (None, "200", "LibraryListResponse"),
+        ("post", "/v1/library/install/{id}"): (None, "400", "ApiError"),
+        ("post", "/v1/library/publish/{name}"): ("PublishPayload", "200", "PublishToLibraryResponse"),
+        ("post", "/v1/preflight/capacity"): ("CapacityRequest", "200", "CapacityResponse"),
+        ("get", "/v1/preflight/compatibility"): (None, "200", "CompatibilityResponse"),
+        ("get", "/v1/preflight/tier_defaults"): (None, "200", "TierDefaultsResponse"),
+        ("get", "/v1/preflight/tiers"): (None, "200", "TierDefaultsListResponse"),
+        ("get", "/v1/recipes"): (None, "200", "RecipesListResponse"),
+        ("post", "/v1/recipes/run"): ("RecipeRunRequest", "200", "RecipeRunResponse"),
+        ("get", "/v1/terminal/status"): (None, "200", "TerminalStatusResponse"),
+        ("post", "/v1/train"): ("FrontDoorRequest", "200", "FrontDoorResponse"),
+        ("post", "/v1/train/agentic"): ("GrpoRequest", "200", "TrainingResponse"),
+        ("post", "/v1/train/grpo"): ("GrpoRequest", "200", "TrainingResponse"),
+        ("delete", "/v1/train/jobs/{job_id}"): (None, "200", "DeleteTrainingJobResponse"),
+        ("get", "/v1/train/jobs/{job_id}"): (None, "200", "TrainingJobDetail"),
+        ("post", "/v1/train/opd"): ("OpdRequest", "200", "TrainingResponse"),
+        ("get", "/v1/train/queue"): (None, "200", "QueueResponse"),
+        ("delete", "/v1/train/queue/{job_id}"): (None, "200", "CancelTrainingJobResponse"),
+        ("post", "/v1/train/sft"): ("SftRequest", "200", "TrainingResponse"),
+        ("get", "/v1/train/status"): (None, "200", "Vec_TrainingStatus"),
+        ("get", "/v1/train/status/{job_id}"): (None, "200", "TrainingStatus"),
+        ("post", "/v1/training/grpo"): ("GrpoRequest", "200", "TrainingResponse"),
+    }
+    for (method, path), (request_component, status, response_component) in control_operations.items():
+        operation = paths.get(path, {}).get(method, {})
+        request_content = operation.get("requestBody", {}).get("content", {})
+        request_refs = [
+            media.get("schema", {}).get("$ref")
+            for media in request_content.values()
+            if isinstance(media, dict)
+        ]
+        expected_request_ref = (
+            f"#/components/schemas/{request_component}" if request_component else None
+        )
+        if (request_refs[0] if len(request_refs) == 1 else None) != expected_request_ref:
+            errors.append(
+                f"{method.upper()} {path}: control-plane request schema must be {expected_request_ref}"
+            )
+        response = operation.get("responses", {}).get(status, {})
+        response_refs = [
+            media.get("schema", {}).get("$ref")
+            for media in response.get("content", {}).values()
+            if isinstance(media, dict)
+        ]
+        expected_response_ref = f"#/components/schemas/{response_component}"
+        if response_refs != [expected_response_ref]:
+            errors.append(
+                f"{method.upper()} {path} {status}: control-plane response schema must be {expected_response_ref}"
+            )
 
     for reference in collect_references(document):
         try:
@@ -1318,6 +1482,285 @@ def validate_eval_schema(
     return errors
 
 
+def validate_control_schema(
+    schema: dict[str, Any],
+    eval_schema: dict[str, Any],
+    inference_schema: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    expected_identity = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://ericflo.github.io/kiln/contracts/kiln-control-plane-v1.schema.json",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-external-contracts": [EVAL_SCHEMA_PATH.name, INFERENCE_SCHEMA_PATH.name],
+    }
+    for key, expected in expected_identity.items():
+        if schema.get(key) != expected:
+            errors.append(f"control-plane schema {key} must be {expected!r}")
+    if schema.get("x-kiln-entrypoints") != list(CONTROL_ENTRYPOINTS):
+        errors.append("control-plane schema entrypoints drifted")
+    if schema.get("oneOf") != [{"$ref": f"#/$defs/{name}"} for name in CONTROL_ENTRYPOINTS]:
+        errors.append("control-plane schema root union must contain every public payload shape")
+
+    definitions = schema.get("$defs")
+    if not isinstance(definitions, dict):
+        errors.append("control-plane schema $defs must be an object")
+        return errors
+    if len(definitions) != 115:
+        errors.append(f"control-plane schema must contain 115 definitions, got {len(definitions)}")
+    if list(definitions) != sorted(definitions):
+        errors.append("control-plane schema definitions must be sorted")
+
+    open_input_objects = {
+        "AgenticGroup",
+        "CapacityRequest",
+        "CorrectionRowInput",
+        "CreateRunRequest",
+        "DiscoverRequest",
+        "DistillMergeRequest",
+        "DistillMergeSource",
+        "DistillPumpRequest",
+        "DistillRefreshRequest",
+        "DistillSelfRequest",
+        "EchoConfig",
+        "GrpoConfig",
+        "GrpoRequest",
+        "JudgeDistillRequest",
+        "JudgeDriftCheckRequest",
+        "LossConfig",
+        "MarkTrainedRequest",
+        "MessageRequest",
+        "OpdAuxConfig",
+        "OpdConfig",
+        "OpdPrompt",
+        "OpdRequest",
+        "PostEvalConfig",
+        "PublishPayload",
+        "Recipe",
+        "ScoredRollout",
+        "SelfImproveRequest",
+        "SftExample",
+        "TrainingChatMessageInput",
+        "TurnSegmentInput",
+    }
+    for name, definition in definitions.items():
+        if not isinstance(definition, dict):
+            errors.append(f"control-plane definition {name} must be an object")
+            continue
+        if definition.get("x-kiln-field-schema-status") != "complete":
+            errors.append(f"control-plane definition {name} must be field-schema complete")
+        if not isinstance(definition.get("x-kiln-rust-type"), str):
+            errors.append(f"control-plane definition {name} must bind a Rust wire type")
+        if definition.get("type") == "object":
+            expected_open = name in open_input_objects
+            if definition.get("additionalProperties") is not expected_open:
+                state = "open" if expected_open else "closed"
+                errors.append(f"control-plane object definition {name} must be {state}")
+            if expected_open and definition.get("x-kiln-unknown-field-policy") != "accepted_and_ignored":
+                errors.append(f"control-plane open input {name} must name its ignored-unknown-field policy")
+    for entrypoint, rust_type in CONTROL_COMPONENT_TYPES.items():
+        definition = definitions.get(entrypoint, {})
+        if definition.get("x-kiln-rust-type") != rust_type:
+            errors.append(f"control-plane definition {entrypoint} must bind Rust type {rust_type}")
+
+    registry = {
+        EVAL_SCHEMA_PATH.name: eval_schema,
+        eval_schema.get("$id", ""): eval_schema,
+        INFERENCE_SCHEMA_PATH.name: inference_schema,
+        inference_schema.get("$id", ""): inference_schema,
+        schema.get("$id", ""): schema,
+    }
+    for reference in collect_references(schema):
+        try:
+            resolve_ref({"$ref": reference}, schema, registry)
+        except SchemaResolutionError as error:
+            errors.append(str(error))
+
+    reachable: set[str] = set()
+    pending = list(CONTROL_ENTRYPOINTS)
+    while pending:
+        name = pending.pop()
+        if name in reachable or name not in definitions:
+            continue
+        reachable.add(name)
+        for reference in collect_references(definitions[name]):
+            match = re.fullmatch(r"#/\$defs/([^/]+)", reference)
+            if match:
+                pending.append(match.group(1))
+    orphaned = sorted(set(definitions) - reachable)
+    if orphaned:
+        errors.append("control-plane schema has unreachable definitions: " + ", ".join(orphaned))
+
+    examples = schema.get("x-kiln-examples")
+    if not isinstance(examples, dict) or set(examples) != set(CONTROL_ENTRYPOINTS):
+        errors.append("control-plane examples must cover every public payload shape")
+    else:
+        for name, values in examples.items():
+            if not isinstance(values, list) or not values:
+                errors.append(f"control-plane examples for {name} must be a non-empty array")
+                continue
+            for index, value in enumerate(values):
+                errors.extend(
+                    validate_instance(
+                        value,
+                        {"$ref": f"#/$defs/{name}"},
+                        schema,
+                        f"example({name})[{index}]",
+                        registry=registry,
+                    )
+                )
+
+    closed_responses = {
+        "AgentRunAbortResponse", "AgentRunEventsResponse", "AgentRunListResponse",
+        "AgentRunQueuedResponse", "AgentRunRecord", "AgentRunsStatusResponse", "AgentTrace",
+        "AgentTracesListResponse", "CapacityResponse", "ClearCorrectionsResponse",
+        "CompatibilityResponse", "CorrectionRow", "DeleteCorrectionResponse",
+        "DeleteTrainingJobResponse", "DiscoverResponse", "FrontDoorResponse",
+        "JudgeDistillResponse", "LibraryListResponse", "ListResponse", "MarkTrainedResponse",
+        "PublishToLibraryResponse", "QueueResponse", "RecipeRunResponse", "RecipesListResponse",
+        "SelfImproveResponse", "TerminalStatusResponse", "TierDefaultsListResponse",
+        "TierDefaultsResponse", "TrainingJobDetail", "TrainingResponse", "TrainingStatus",
+    }
+    for name in closed_responses:
+        if definitions.get(name, {}).get("additionalProperties") is not False:
+            errors.append(f"{name} must remain a closed emitted response")
+    for name, field in (
+        ("TrainingResponse", "effective_seed"),
+        ("JudgeDistillResponse", "effective_seed"),
+    ):
+        if definitions.get(name, {}).get("properties", {}).get(field) != {"$ref": "#/$defs/DecimalU64"}:
+            errors.append(f"{name}.{field} must use exact decimal u64 encoding")
+    for name, field in (
+        ("SelfImproveResponse", "effective_seeds"),
+        ("RecipeRunResponse", "effective_seeds"),
+    ):
+        if definitions.get(name, {}).get("properties", {}).get(field) != {
+            "type": "object",
+            "additionalProperties": {"$ref": "#/$defs/DecimalU64"},
+        }:
+            errors.append(f"{name}.{field} must map job IDs to exact decimal u64 values")
+    if definitions.get("SftRequest", {}).get("additionalProperties") is not False:
+        errors.append("SftRequest must preserve deny_unknown_fields")
+    aliases = {
+        ("GrpoRequest", "agentic_groups"): "groups",
+        ("GrpoConfig", "reference_policy"): "kl_reference_policy",
+        ("AgenticGroup", "rollouts"): "completions",
+    }
+    for (name, alias), canonical in aliases.items():
+        definition = definitions.get(name, {})
+        if alias not in definition.get("properties", {}):
+            errors.append(f"{name} must retain input alias {alias}")
+        metadata = definition.get("x-kiln-input-aliases", {})
+        if name != "AgenticGroup" and metadata.get(alias) != canonical:
+            errors.append(f"{name} must document {alias} as an alias of {canonical}")
+    if definitions.get("JudgeDriftCheckRequest", {}).get("x-kiln-current-runtime-result") != "http_501_not_implemented":
+        errors.append("JudgeDriftCheckRequest must expose the current HTTP 501 boundary")
+    if definitions.get("PublishToLibraryResponse", {}).get("x-kiln-current-runtime-result") != "contract_only_no_remote_upload":
+        errors.append("PublishToLibraryResponse must expose the contract-only library boundary")
+
+    source_structs: dict[str, tuple[str, str, set[str], set[str]]] = {
+        "TrainingChatMessageInput": ("crates/kiln-core/src/tokenizer.rs", "ChatMessage", set(), set()),
+        "TrainingChatMessageOutput": ("crates/kiln-core/src/tokenizer.rs", "ChatMessage", set(), set()),
+        "SftExample": ("crates/kiln-train/src/lib.rs", "SftExample", set(), set()),
+        "SftConfig": ("crates/kiln-train/src/lib.rs", "SftConfig", set(), set()),
+        "SftRequest": ("crates/kiln-train/src/lib.rs", "SftRequest", set(), {"ingestion"}),
+        "PostEvalConfig": ("crates/kiln-eval/src/suite.rs", "PostEvalConfig", set(), set()),
+        "EchoConfig": ("crates/kiln-train/src/lib.rs", "EchoConfig", set(), set()),
+        "OpdAuxConfig": ("crates/kiln-train/src/lib.rs", "OpdAuxConfig", set(), set()),
+        "LossConfig": ("crates/kiln-train/src/lib.rs", "LossConfig", set(), set()),
+        "TurnSegmentInput": ("crates/kiln-train/src/trajectory.rs", "TurnSegment", set(), set()),
+        "TurnSegmentOutput": ("crates/kiln-train/src/trajectory.rs", "TurnSegment", set(), set()),
+        "ScoredRollout": ("crates/kiln-train/src/trajectory.rs", "ScoredRollout", set(), set()),
+        "AgenticGroup": ("crates/kiln-train/src/trajectory.rs", "AgenticGroup", {"rollouts"}, set()),
+        "GrpoConfig": ("crates/kiln-train/src/lib.rs", "GrpoConfig", {"reference_policy"}, set()),
+        "GrpoRequest": ("crates/kiln-train/src/lib.rs", "GrpoRequest", {"agentic_groups"}, set()),
+        "OpdPrompt": ("crates/kiln-train/src/opd.rs", "OpdPrompt", set(), set()),
+        "OpdConfig": ("crates/kiln-train/src/opd.rs", "OpdConfig", set(), set()),
+        "OpdRequest": ("crates/kiln-train/src/opd.rs", "OpdRequest", set(), set()),
+        "DistillRefreshRequest": ("crates/kiln-train/src/opd.rs", "DistillRefreshRequest", set(), set()),
+        "DistillMergeSource": ("crates/kiln-train/src/opd.rs", "DistillMergeSource", set(), set()),
+        "DistillMergeRequest": ("crates/kiln-train/src/opd.rs", "DistillMergeRequest", set(), set()),
+        "DistillPumpRequest": ("crates/kiln-train/src/opd.rs", "DistillPumpRequest", set(), set()),
+        "DistillSelfRequest": ("crates/kiln-train/src/opd.rs", "DistillSelfRequest", set(), set()),
+        "TrainingStatus": ("crates/kiln-train/src/lib.rs", "TrainingStatus", set(), set()),
+        "TrainingResponse": ("crates/kiln-train/src/lib.rs", "TrainingResponse", set(), set()),
+        "QueueResponse": ("crates/kiln-server/src/api/training.rs", "QueueResponse", set(), set()),
+        "QueueStatusEntry": ("crates/kiln-server/src/api/training.rs", "QueueStatusEntry", set(), set()),
+        "TrainingLossSample": ("crates/kiln-server/src/state.rs", "TrainingLossSample", set(), set()),
+        "TrainingCheckpointSummary": ("crates/kiln-server/src/api/training.rs", "TrainingCheckpointSummary", set(), set()),
+        "FrontDoorResponse": ("crates/kiln-server/src/api/pit_of_success.rs", "FrontDoorResponse", set(), set()),
+        "CompatibilityRow": ("crates/kiln-server/src/api/pit_of_success.rs", "CompatibilityRow", set(), set()),
+        "CompatibilityResponse": ("crates/kiln-server/src/api/pit_of_success.rs", "CompatibilityResponse", set(), set()),
+        "CapacityRequest": ("crates/kiln-server/src/api/pit_of_success.rs", "CapacityRequest", set(), set()),
+        "CapacityResponse": ("crates/kiln-server/src/api/pit_of_success.rs", "CapacityResponse", set(), set()),
+        "TierDefaults": ("crates/kiln-server/src/api/pit_of_success.rs", "TierDefaults", set(), set()),
+        "TierDefaultsResponse": ("crates/kiln-server/src/api/pit_of_success.rs", "TierDefaultsResponse", set(), set()),
+        "TierDefaultsListResponse": ("crates/kiln-server/src/api/pit_of_success.rs", "TierDefaultsListResponse", set(), set()),
+        "AgentRunRecord": ("crates/kiln-server/src/agent_runs.rs", "AgentRunRecord", set(), set()),
+        "CreateRunRequest": ("crates/kiln-server/src/api/agent_runs.rs", "CreateRunRequest", set(), set()),
+        "MessageRequest": ("crates/kiln-server/src/api/agent_runs.rs", "MessageRequest", set(), set()),
+        "AgentRunsStatusResponse": ("crates/kiln-server/src/api/agent_runs.rs", "AgentRunsStatusResponse", set(), set()),
+        "AgentRunListResponse": ("crates/kiln-server/src/api/agent_runs.rs", "AgentRunListResponse", set(), set()),
+        "AgentRunEvent": ("crates/kiln-server/src/api/agent_runs.rs", "AgentRunEvent", set(), set()),
+        "AgentRunEventsResponse": ("crates/kiln-server/src/api/agent_runs.rs", "AgentRunEventsResponse", set(), set()),
+        "AgentRunQueuedResponse": ("crates/kiln-server/src/api/agent_runs.rs", "AgentRunQueuedResponse", set(), set()),
+        "AgentRunAbortResponse": ("crates/kiln-server/src/api/agent_runs.rs", "AgentRunAbortResponse", set(), set()),
+        "TerminalStatusResponse": ("crates/kiln-server/src/api/terminal.rs", "TerminalStatusResponse", set(), set()),
+        "TraceOutcome": ("crates/kiln-server/src/api/agent_traces.rs", "TraceOutcome", set(), set()),
+        "AgentTrace": ("crates/kiln-server/src/api/agent_traces.rs", "AgentTrace", set(), set()),
+        "AgentTracesListResponse": ("crates/kiln-server/src/api/agent_traces.rs", "AgentTracesListResponse", set(), set()),
+        "DiscoverRequest": ("crates/kiln-server/src/api/agent_traces.rs", "DiscoverRequest", set(), set()),
+        "DiscoverResponse": ("crates/kiln-server/src/api/agent_traces.rs", "DiscoverResponse", set(), set()),
+        "JudgeDistillRequest": ("crates/kiln-server/src/api/self_improve.rs", "JudgeDistillRequest", set(), set()),
+        "JudgeDistillResponse": ("crates/kiln-server/src/api/self_improve.rs", "JudgeDistillResponse", set(), set()),
+        "SelfImproveRequest": ("crates/kiln-server/src/api/self_improve.rs", "SelfImproveRequest", set(), set()),
+        "SelfImproveResponse": ("crates/kiln-server/src/api/self_improve.rs", "SelfImproveResponse", set(), set()),
+        "JudgeDriftCheckRequest": ("crates/kiln-server/src/api/self_improve.rs", "JudgeDriftCheckRequest", set(), set()),
+        "Recipe": ("crates/kiln-server/src/api/recipes.rs", "Recipe", set(), set()),
+        "RecipeRunResponse": ("crates/kiln-server/src/api/recipes.rs", "RecipeRunResponse", set(), set()),
+        "RecipesListResponse": ("crates/kiln-server/src/api/recipes.rs", "RecipesListResponse", set(), set()),
+        "RecipeDescriptor": ("crates/kiln-server/src/api/recipes.rs", "RecipeDescriptor", set(), set()),
+        "RecipeAdmissionDescriptor": ("crates/kiln-server/src/api/recipes.rs", "RecipeAdmissionDescriptor", set(), set()),
+        "CorrectionRowInput": ("crates/kiln-server/src/api/corrections.rs", "CorrectionRow", set(), set()),
+        "CorrectionRow": ("crates/kiln-server/src/api/corrections.rs", "CorrectionRow", set(), set()),
+        "ListResponse": ("crates/kiln-server/src/api/corrections.rs", "ListResponse", set(), set()),
+        "MarkTrainedRequest": ("crates/kiln-server/src/api/corrections.rs", "MarkTrainedRequest", set(), set()),
+        "MarkTrainedResponse": ("crates/kiln-server/src/api/corrections.rs", "MarkTrainedResponse", set(), set()),
+        "DeleteCorrectionResponse": ("crates/kiln-server/src/api/corrections.rs", "DeleteCorrectionResponse", set(), set()),
+        "ClearCorrectionsResponse": ("crates/kiln-server/src/api/corrections.rs", "ClearCorrectionsResponse", set(), set()),
+        "LibraryAdapterEntry": ("crates/kiln-server/src/api/library.rs", "LibraryAdapterEntry", set(), set()),
+        "LibraryListResponse": ("crates/kiln-server/src/api/library.rs", "LibraryListResponse", set(), set()),
+        "PublishPayload": ("crates/kiln-server/src/api/library.rs", "PublishPayload", set(), set()),
+        "PublishToLibraryResponse": ("crates/kiln-server/src/api/library.rs", "PublishToLibraryResponse", set(), set()),
+        "DeleteTrainingJobResponse": ("crates/kiln-server/src/api/training.rs", "DeleteTrainingJobResponse", set(), set()),
+    }
+    for name, (path, struct_name, schema_only, source_only) in source_structs.items():
+        schema_fields = set(definitions.get(name, {}).get("properties", {})) - schema_only
+        try:
+            source_fields = rust_struct_fields(path, struct_name) - source_only
+        except ContractError as error:
+            errors.append(str(error))
+            continue
+        if schema_fields != source_fields:
+            errors.append(
+                f"control-plane source audit {name} drifted: schema={sorted(schema_fields)}, source={sorted(source_fields)}"
+            )
+
+    status_properties = set(definitions.get("TrainingStatus", {}).get("properties", {}))
+    detail_properties = set(definitions.get("TrainingJobDetail", {}).get("properties", {}))
+    try:
+        detail_source = rust_struct_fields("crates/kiln-server/src/api/training.rs", "TrainingJobDetail")
+    except ContractError as error:
+        errors.append(str(error))
+    else:
+        direct_schema = detail_properties - status_properties
+        if detail_source - {"status"} != direct_schema:
+            errors.append("TrainingJobDetail flattened source fields drifted from its schema")
+        if {"job_type", "post_eval_verdict"} & (detail_source - {"status"}):
+            errors.append("TrainingJobDetail must not serialize flattened status keys twice")
+    return errors
+
+
 def run_inference_self_tests(
     schema: dict[str, Any], thinking_schema: dict[str, Any]
 ) -> list[str]:
@@ -1591,9 +2034,103 @@ def run_eval_self_tests(
     return errors
 
 
+def run_control_self_tests(
+    schema: dict[str, Any], eval_schema: dict[str, Any], inference_schema: dict[str, Any]
+) -> list[str]:
+    examples = schema["x-kiln-examples"]
+    cases: list[tuple[str, Any, str]] = []
+    cases.append(("SftRequest", {}, "SFT without a data source"))
+    two_sft_sources = copy.deepcopy(examples["SftRequest"][0])
+    two_sft_sources["dataset"] = "math-sft"
+    cases.append(("SftRequest", two_sft_sources, "SFT with two data sources"))
+    unknown_sft_config = copy.deepcopy(examples["SftRequest"][0])
+    unknown_sft_config["config"]["warmup_steps"] = 10
+    cases.append(("SftRequest", unknown_sft_config, "unknown native SFT config field"))
+    two_grpo_sources = copy.deepcopy(examples["GrpoRequest"][0])
+    two_grpo_sources["dataset_path"] = "/srv/grpo.jsonl"
+    cases.append(("GrpoRequest", two_grpo_sources, "GRPO with two data sources"))
+    duplicate_group_alias = copy.deepcopy(examples["GrpoRequest"][0])
+    duplicate_group_alias["agentic_groups"] = duplicate_group_alias["groups"]
+    cases.append(("GrpoRequest", duplicate_group_alias, "GRPO with canonical and alias groups"))
+    ambiguous_group = copy.deepcopy(examples["GrpoRequest"][0])
+    ambiguous_group["groups"][0]["rollouts"] = ambiguous_group["groups"][0]["completions"]
+    cases.append(("GrpoRequest", ambiguous_group, "agentic group with both rollout aliases"))
+    bad_optimizer = copy.deepcopy(examples["SftRequest"][0])
+    bad_optimizer["config"]["optimizer"] = {"kind": "muon", "future": True}
+    cases.append(("SftRequest", bad_optimizer, "optimizer with an unknown field"))
+    short_timeout = copy.deepcopy(examples["CreateRunRequest"][0])
+    short_timeout["timeout_secs"] = 9
+    cases.append(("CreateRunRequest", short_timeout, "agent timeout below runtime minimum"))
+    zero_capacity = copy.deepcopy(examples["CapacityRequest"][0])
+    zero_capacity["rank"] = 0
+    cases.append(("CapacityRequest", zero_capacity, "zero capacity rank"))
+    bad_threshold = copy.deepcopy(examples["JudgeDriftCheckRequest"][0])
+    bad_threshold["agreement_threshold"] = 0
+    cases.append(("JudgeDriftCheckRequest", bad_threshold, "zero drift threshold"))
+    numeric_seed = copy.deepcopy(examples["TrainingResponse"][0])
+    numeric_seed["effective_seed"] = 42
+    cases.append(("TrainingResponse", numeric_seed, "numeric training response seed"))
+    numeric_seed_map = copy.deepcopy(examples["SelfImproveResponse"][0])
+    numeric_seed_map["effective_seeds"]["opd-1"] = 42
+    cases.append(("SelfImproveResponse", numeric_seed_map, "numeric self-improve seed"))
+    open_response = copy.deepcopy(examples["TrainingJobDetail"][0])
+    open_response["future"] = True
+    cases.append(("TrainingJobDetail", open_response, "unknown training detail field"))
+    mixed_cancel = copy.deepcopy(examples["CancelTrainingJobResponse"][0])
+    mixed_cancel["message"] = "stop requested — the trainer aborts at the next step boundary"
+    cases.append(("CancelTrainingJobResponse", mixed_cancel, "mixed cancellation variants"))
+    open_correction = copy.deepcopy(examples["CorrectionRow"][0])
+    open_correction["future"] = True
+    cases.append(("CorrectionRow", open_correction, "unknown correction response field"))
+    ambiguous_recipe = {"recipe": "quick-sft", "body": examples["RecipeRunRequest"][0]["body"]}
+    cases.append(("RecipeRunRequest", ambiguous_recipe, "ambiguous named and inline recipe"))
+    missing_front_door_tag = copy.deepcopy(examples["FrontDoorRequest"][0])
+    missing_front_door_tag.pop("kind")
+    cases.append(("FrontDoorRequest", missing_front_door_tag, "front door without kind"))
+    too_few_tiers = {"tiers": examples["TierDefaultsListResponse"][0]["tiers"][:2]}
+    cases.append(("TierDefaultsListResponse", too_few_tiers, "incomplete built-in tier list"))
+
+    registry = {
+        EVAL_SCHEMA_PATH.name: eval_schema,
+        eval_schema.get("$id", ""): eval_schema,
+        INFERENCE_SCHEMA_PATH.name: inference_schema,
+        inference_schema.get("$id", ""): inference_schema,
+    }
+    errors = []
+    for name, value, label in cases:
+        observed = validate_instance(
+            value,
+            {"$ref": f"#/$defs/{name}"},
+            schema,
+            registry=registry,
+        )
+        if not observed:
+            errors.append(f"control-plane self-test {label!r} unexpectedly passed")
+
+    open_grpo = copy.deepcopy(examples["GrpoRequest"][0])
+    open_grpo["future_compatibility_field"] = True
+    if validate_instance(open_grpo, {"$ref": "#/$defs/GrpoRequest"}, schema, registry=registry):
+        errors.append("control-plane self-test rejected an ignored unknown GRPO request field")
+    nullable_sft_source = copy.deepcopy(examples["SftRequest"][0])
+    nullable_sft_source["dataset"] = None
+    if validate_instance(nullable_sft_source, {"$ref": "#/$defs/SftRequest"}, schema, registry=registry):
+        errors.append("control-plane self-test rejected an explicit null inactive SFT source")
+    nullable_opd_source = copy.deepcopy(examples["OpdRequest"][0])
+    nullable_opd_source["dataset_path"] = None
+    if validate_instance(nullable_opd_source, {"$ref": "#/$defs/OpdRequest"}, schema, registry=registry):
+        errors.append("control-plane self-test rejected an explicit null inactive OPD source")
+
+    open_detail_schema = copy.deepcopy(schema)
+    open_detail_schema["$defs"]["TrainingJobDetail"]["additionalProperties"] = True
+    observed = validate_control_schema(open_detail_schema, eval_schema, inference_schema)
+    if not any("TrainingJobDetail must" in error for error in observed):
+        errors.append("control-plane self-test failed to reject an open training detail response")
+    return errors
+
+
 def run_self_tests(
     document: dict[str, Any], inference_schema: dict[str, Any], observability_schema: dict[str, Any],
-    artifact_schema: dict[str, Any], eval_schema: dict[str, Any],
+    artifact_schema: dict[str, Any], eval_schema: dict[str, Any], control_schema: dict[str, Any],
     thinking_schema: dict[str, Any]
 ) -> list[str]:
     mutations = []
@@ -1619,6 +2156,13 @@ def run_self_tests(
     bad_ref["paths"]["/v1/models"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"] = "#/components/schemas/Missing"
     mutations.append((bad_ref, "unresolved OpenAPI reference"))
 
+    fake_unavailable_success = copy.deepcopy(document)
+    operation = fake_unavailable_success["paths"]["/v1/agent/judge_drift_check"]["post"]
+    operation["responses"]["200"] = copy.deepcopy(
+        document["paths"]["/v1/train/status/{job_id}"]["get"]["responses"]["200"]
+    )
+    mutations.append((fake_unavailable_success, "unavailable operations require"))
+
     errors = []
     for mutated, expected_fragment in mutations:
         observed = validate_contract(mutated)
@@ -1628,6 +2172,7 @@ def run_self_tests(
     errors.extend(run_observability_self_tests(observability_schema))
     errors.extend(run_artifact_self_tests(artifact_schema, inference_schema, observability_schema))
     errors.extend(run_eval_self_tests(eval_schema, observability_schema, thinking_schema))
+    errors.extend(run_control_self_tests(control_schema, eval_schema, inference_schema))
     return errors
 
 
@@ -1637,12 +2182,14 @@ def check(*, self_test: bool) -> None:
     observability_schema = load_json(OBSERVABILITY_SCHEMA_PATH)
     artifact_schema = load_json(ARTIFACT_SCHEMA_PATH)
     eval_schema = load_json(EVAL_SCHEMA_PATH)
+    control_schema = load_json(CONTROL_SCHEMA_PATH)
     thinking_schema = load_json(THINKING_SCHEMA_PATH)
     errors = validate_contract(document)
     errors.extend(validate_inference_schema(inference_schema, thinking_schema))
     errors.extend(validate_observability_schema(observability_schema))
     errors.extend(validate_artifact_schema(artifact_schema, inference_schema, observability_schema))
     errors.extend(validate_eval_schema(eval_schema, observability_schema, thinking_schema))
+    errors.extend(validate_control_schema(control_schema, eval_schema, inference_schema))
     if self_test:
         errors.extend(
             run_self_tests(
@@ -1651,6 +2198,7 @@ def check(*, self_test: bool) -> None:
                 observability_schema,
                 artifact_schema,
                 eval_schema,
+                control_schema,
                 thinking_schema,
             )
         )
@@ -1667,7 +2215,8 @@ def check(*, self_test: bool) -> None:
         f"{len(inference_schema['$defs'])} inference definitions, "
         f"{len(observability_schema['$defs'])} observability definitions, "
         f"{len(artifact_schema['$defs'])} artifact definitions, "
-        f"{len(eval_schema['$defs'])} eval definitions"
+        f"{len(eval_schema['$defs'])} eval definitions, "
+        f"{len(control_schema['$defs'])} control-plane definitions"
     )
 
 

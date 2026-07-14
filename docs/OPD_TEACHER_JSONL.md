@@ -1,5 +1,14 @@
 # Off-Policy OPD Teacher JSONL
 
+The normative HTTP field contract for `OpdRequest`, `OpdConfig`,
+distillation variants, teacher-facing prompts, post-eval gates, and training
+responses is the generated [Training and Agent Control Plane API
+Schema](../contracts/kiln-control-plane-v1.schema.json). The immutable teacher
+identity and registry lifecycle are defined by the generated [Artifact
+Lifecycle API Schema](../contracts/kiln-artifacts-v1.schema.json). This guide
+owns the offline JSONL record workflow rather than duplicating those HTTP
+contracts.
+
 Kiln accepts one JSON object per line for off-policy teacher distillation.
 Each example contains the prompt seen by the student, the teacher response to
 replay, and optional teacher logprobs for reverse-KL training.

@@ -238,14 +238,15 @@ async fn upsert_correction(
 async fn delete_correction(
     State(state): State<AppState>,
     AxumPath(request_id): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<DeleteCorrectionResponse>, ApiError> {
     let removed = CorrectionsStore::for_state(&state)
         .remove(&request_id)
         .map_err(|e| ApiError::internal(format!("corrections store: {e}")))?;
     if removed {
-        Ok(Json(
-            serde_json::json!({ "status": "deleted", "request_id": request_id }),
-        ))
+        Ok(Json(DeleteCorrectionResponse {
+            status: "deleted",
+            request_id,
+        }))
     } else {
         Err(ApiError::training_invalid_request(format!(
             "no correction with request_id {request_id:?}"
@@ -255,13 +256,26 @@ async fn delete_correction(
 
 async fn clear_corrections(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ClearCorrectionsResponse>, ApiError> {
     let removed = CorrectionsStore::for_state(&state)
         .clear_active()
         .map_err(|e| ApiError::internal(format!("corrections store: {e}")))?;
-    Ok(Json(
-        serde_json::json!({ "status": "cleared", "removed": removed }),
-    ))
+    Ok(Json(ClearCorrectionsResponse {
+        status: "cleared",
+        removed,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct DeleteCorrectionResponse {
+    status: &'static str,
+    request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ClearCorrectionsResponse {
+    status: &'static str,
+    removed: usize,
 }
 
 /// Mark a set of rows as trained into `adapter`. Called by the dashboard
@@ -329,14 +343,21 @@ impl CorrectionsStore {
 async fn mark_trained(
     State(state): State<AppState>,
     Json(req): Json<MarkTrainedRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<MarkTrainedResponse>, ApiError> {
     let store = CorrectionsStore::for_state(&state);
     // Locked RMW — this route races the training worker's
     // completion-time marking and dashboard upserts.
     let marked = store.mark_trained_into(&req.request_ids, &req.adapter);
-    Ok(Json(
-        serde_json::json!({ "status": "marked", "marked": marked }),
-    ))
+    Ok(Json(MarkTrainedResponse {
+        status: "marked",
+        marked,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct MarkTrainedResponse {
+    status: &'static str,
+    marked: usize,
 }
 
 pub fn routes() -> Router<AppState> {

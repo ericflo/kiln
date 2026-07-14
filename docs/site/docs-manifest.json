@@ -202,6 +202,14 @@
       "description": "Generated field-level contract for suites and scorers, eval admission and results, uploaded datasets, deterministic synthesis, and pairwise-judgment compilation and validation."
     },
     {
+      "source": "contracts/kiln-control-plane-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "control-plane-api-schema",
+      "title": "Training and Agent Control Plane API Schema",
+      "section": "training",
+      "description": "Generated field-level contract for native SFT, GRPO and OPD, distillation, preflight, embedded agents and traces, recipes, corrections, training jobs, and adapter-library operations."
+    },
+    {
       "source": "docs/HF_TRL_INTEROP.md",
       "slug": "hf-trl-interoperability",
       "title": "HF/TRL Interoperability",

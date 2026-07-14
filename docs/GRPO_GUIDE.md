@@ -1,5 +1,14 @@
 # GRPO Training Guide
 
+The normative HTTP field contract for `GrpoRequest`, `GrpoConfig`, scored
+rollouts, exact provenance, job admission, queue state, and training detail is
+the generated [Training and Agent Control Plane API
+Schema](../contracts/kiln-control-plane-v1.schema.json). The complete route,
+status, transport, and structured-error inventory is the generated [HTTP API
+contract](../contracts/kiln-http-api-v1.openapi.json). This guide owns the
+workflow; those generated contracts own wire requiredness, nullability,
+aliases, bounds, and unknown-field behavior.
+
 This guide walks through GRPO end-to-end on Kiln: what it is, the loop you run,
 and three runnable verifiable-reward examples (math correctness, JSON-validity,
 code-runs). Everything below assumes a Kiln server running on

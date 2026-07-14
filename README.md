@@ -593,7 +593,9 @@ wire semantics live in the generated
 [inference](contracts/kiln-inference-v1.schema.json),
 [observability](contracts/kiln-observability-v1.schema.json),
 [artifact lifecycle](contracts/kiln-artifacts-v1.schema.json), and
-[eval and judgment](contracts/kiln-evals-v1.schema.json) schemas; those
+[eval and judgment](contracts/kiln-evals-v1.schema.json), and
+[training and agent control plane](contracts/kiln-control-plane-v1.schema.json)
+schemas; those
 contracts distinguish required, nullable, omitted, closed, and deliberately
 open inputs and include validated examples for every public entrypoint.
 

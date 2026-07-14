@@ -4,7 +4,7 @@
   "info": {
     "title": "Kiln HTTP API",
     "version": "1.0.0",
-    "description": "Canonical inventory of every production HTTP route, method, transport, handler owner, request type, response type, status, media type, path/header/query input, and structured error envelope. Component field schemas marked as migration-pending remain open objects until their serde contracts are moved into canonical schemas."
+    "description": "Canonical inventory of every production HTTP route, method, transport, handler owner, request type, response type, status, media type, path/header/query input, and structured error envelope. Every named payload component delegates its complete field contract to a canonical generated schema."
   },
   "servers": [
     {
@@ -807,21 +807,19 @@
           "x-kiln-rust-type": "JudgeDriftCheckRequest"
         },
         "responses": {
-          "200": {
-            "description": "Successful response.",
+          "501": {
+            "description": "Validated request; scoring is not implemented.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
-          },
-          "default": {
-            "$ref": "#/components/responses/ApiError"
+            "x-kiln-rust-type": "ApiError"
           }
-        }
+        },
+        "x-kiln-currently-unavailable": true
       }
     },
     "/v1/agent/runs": {
@@ -832,7 +830,7 @@
         "summary": "List runs",
         "operationId": "agent_runs_list_runs_get_v1_agent_runs",
         "x-kiln-handler": "agent_runs::list_runs",
-        "x-kiln-rust-signature": "async fn list_runs( State(state): State<AppState>, Query(q): Query<ListRunsQuery>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn list_runs( State(state): State<AppState>, Query(q): Query<ListRunsQuery>, ) -> Result<Json<AgentRunListResponse>, ApiError>",
         "x-kiln-transport": "http",
         "x-kiln-query-rust-type": "ListRunsQuery",
         "responses": {
@@ -841,11 +839,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/AgentRunListResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "AgentRunListResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -898,7 +896,7 @@
         "summary": "Runs status",
         "operationId": "agent_runs_runs_status_get_v1_agent_runs_status",
         "x-kiln-handler": "agent_runs::runs_status",
-        "x-kiln-rust-signature": "async fn runs_status(State(state): State<AppState>) -> Json<serde_json::Value>",
+        "x-kiln-rust-signature": "async fn runs_status(State(state): State<AppState>) -> Json<AgentRunsStatusResponse>",
         "x-kiln-transport": "http",
         "responses": {
           "200": {
@@ -906,11 +904,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/AgentRunsStatusResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "AgentRunsStatusResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -965,7 +963,7 @@
         "summary": "Abort run",
         "operationId": "agent_runs_abort_run_post_v1_agent_runs_id_abort",
         "x-kiln-handler": "agent_runs::abort_run",
-        "x-kiln-rust-signature": "async fn abort_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn abort_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, ) -> Result<Json<AgentRunAbortResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -984,11 +982,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/AgentRunAbortResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "AgentRunAbortResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -1004,7 +1002,7 @@
         "summary": "Run events",
         "operationId": "agent_runs_run_events_get_v1_agent_runs_id_events",
         "x-kiln-handler": "agent_runs::run_events",
-        "x-kiln-rust-signature": "async fn run_events( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Query(q): Query<EventsQuery>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn run_events( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Query(q): Query<EventsQuery>, ) -> Result<Json<AgentRunEventsResponse>, ApiError>",
         "x-kiln-transport": "http",
         "x-kiln-query-rust-type": "EventsQuery",
         "parameters": [
@@ -1024,11 +1022,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/AgentRunEventsResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "AgentRunEventsResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -1044,7 +1042,7 @@
         "summary": "Follow up run",
         "operationId": "agent_runs_follow_up_run_post_v1_agent_runs_id_follow_up",
         "x-kiln-handler": "agent_runs::follow_up_run",
-        "x-kiln-rust-signature": "async fn follow_up_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Json(req): Json<MessageRequest>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn follow_up_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Json(req): Json<MessageRequest>, ) -> Result<Json<AgentRunQueuedResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -1074,11 +1072,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/AgentRunQueuedResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "AgentRunQueuedResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -1094,7 +1092,7 @@
         "summary": "Steer run",
         "operationId": "agent_runs_steer_run_post_v1_agent_runs_id_steer",
         "x-kiln-handler": "agent_runs::steer_run",
-        "x-kiln-rust-signature": "async fn steer_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Json(req): Json<MessageRequest>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn steer_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Json(req): Json<MessageRequest>, ) -> Result<Json<AgentRunQueuedResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -1124,11 +1122,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/AgentRunQueuedResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "AgentRunQueuedResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -1502,7 +1500,7 @@
         "summary": "Clear corrections",
         "operationId": "corrections_clear_corrections_delete_v1_corrections",
         "x-kiln-handler": "corrections::clear_corrections",
-        "x-kiln-rust-signature": "async fn clear_corrections( State(state): State<AppState>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn clear_corrections( State(state): State<AppState>, ) -> Result<Json<ClearCorrectionsResponse>, ApiError>",
         "x-kiln-transport": "http",
         "responses": {
           "200": {
@@ -1510,11 +1508,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/ClearCorrectionsResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "ClearCorrectionsResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -1562,7 +1560,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CorrectionRow"
+                "$ref": "#/components/schemas/CorrectionRowInput"
               }
             }
           },
@@ -1594,7 +1592,7 @@
         "summary": "Mark trained",
         "operationId": "corrections_mark_trained_post_v1_corrections_mark_trained",
         "x-kiln-handler": "corrections::mark_trained",
-        "x-kiln-rust-signature": "async fn mark_trained( State(state): State<AppState>, Json(req): Json<MarkTrainedRequest>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn mark_trained( State(state): State<AppState>, Json(req): Json<MarkTrainedRequest>, ) -> Result<Json<MarkTrainedResponse>, ApiError>",
         "x-kiln-transport": "http",
         "requestBody": {
           "required": true,
@@ -1613,11 +1611,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/MarkTrainedResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "MarkTrainedResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -1633,7 +1631,7 @@
         "summary": "Delete correction",
         "operationId": "corrections_delete_correction_delete_v1_corrections_request_id",
         "x-kiln-handler": "corrections::delete_correction",
-        "x-kiln-rust-signature": "async fn delete_correction( State(state): State<AppState>, AxumPath(request_id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn delete_correction( State(state): State<AppState>, AxumPath(request_id): AxumPath<String>, ) -> Result<Json<DeleteCorrectionResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -1652,11 +1650,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/DeleteCorrectionResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "DeleteCorrectionResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -2912,21 +2910,19 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Successful response.",
+          "400": {
+            "description": "Adapter-library installation is not operational.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
-          },
-          "default": {
-            "$ref": "#/components/responses/ApiError"
+            "x-kiln-rust-type": "ApiError"
           }
-        }
+        },
+        "x-kiln-currently-unavailable": true
       }
     },
     "/v1/library/publish/{name}": {
@@ -2937,7 +2933,7 @@
         "summary": "Publish to library",
         "operationId": "library_publish_to_library_post_v1_library_publish_name",
         "x-kiln-handler": "library::publish_to_library",
-        "x-kiln-rust-signature": "async fn publish_to_library( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(payload): Json<PublishPayload>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn publish_to_library( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(payload): Json<PublishPayload>, ) -> Result<Json<PublishToLibraryResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -2967,11 +2963,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/PublishToLibraryResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "PublishToLibraryResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -3367,7 +3363,7 @@
         "summary": "Terminal status",
         "operationId": "terminal_terminal_status_get_v1_terminal_status",
         "x-kiln-handler": "terminal::terminal_status",
-        "x-kiln-rust-signature": "async fn terminal_status() -> Json<serde_json::Value>",
+        "x-kiln-rust-signature": "async fn terminal_status() -> Json<TerminalStatusResponse>",
         "x-kiln-transport": "http",
         "responses": {
           "200": {
@@ -3375,11 +3371,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/TerminalStatusResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "TerminalStatusResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -3880,7 +3876,7 @@
         "summary": "Delete archived job",
         "operationId": "training_delete_archived_job_delete_v1_train_jobs_job_id",
         "x-kiln-handler": "training::delete_archived_job",
-        "x-kiln-rust-signature": "async fn delete_archived_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn delete_archived_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<DeleteTrainingJobResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -3899,11 +3895,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/DeleteTrainingJobResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "DeleteTrainingJobResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -4023,7 +4019,7 @@
         "summary": "Cancel queued job",
         "operationId": "training_cancel_queued_job_delete_v1_train_queue_job_id",
         "x-kiln-handler": "training::cancel_queued_job",
-        "x-kiln-rust-signature": "async fn cancel_queued_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn cancel_queued_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<CancelTrainingJobResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -4042,11 +4038,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/CancelTrainingJobResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "CancelTrainingJobResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -4232,26 +4228,45 @@
         "x-kiln-field-schema-status": "complete",
         "x-kiln-rust-type": "AdaptersResponse"
       },
+      "AgentRunAbortResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/AgentRunAbortResponse",
+        "x-kiln-rust-type": "AgentRunAbortResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
+      "AgentRunEventsResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/AgentRunEventsResponse",
+        "x-kiln-rust-type": "AgentRunEventsResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
+      "AgentRunListResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/AgentRunListResponse",
+        "x-kiln-rust-type": "AgentRunListResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
+      "AgentRunQueuedResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/AgentRunQueuedResponse",
+        "x-kiln-rust-type": "AgentRunQueuedResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
       "AgentRunRecord": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type AgentRunRecord. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/AgentRunRecord",
         "x-kiln-rust-type": "AgentRunRecord",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
+      },
+      "AgentRunsStatusResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/AgentRunsStatusResponse",
+        "x-kiln-rust-type": "AgentRunsStatusResponse",
+        "x-kiln-field-schema-status": "complete"
       },
       "AgentTrace": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type AgentTrace. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/AgentTrace",
         "x-kiln-rust-type": "AgentTrace",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "AgentTracesListResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type AgentTracesListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/AgentTracesListResponse",
         "x-kiln-rust-type": "AgentTracesListResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "ApiError": {
         "type": "object",
@@ -4321,19 +4336,20 @@
         "x-kiln-rust-type": "CancelEvalJobResponse",
         "x-kiln-field-schema-status": "complete"
       },
+      "CancelTrainingJobResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/CancelTrainingJobResponse",
+        "x-kiln-rust-type": "CancelTrainingJobResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
       "CapacityRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type CapacityRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/CapacityRequest",
         "x-kiln-rust-type": "CapacityRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "CapacityResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type CapacityResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/CapacityResponse",
         "x-kiln-rust-type": "CapacityResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "ChatCompletionChunkStream": {
         "$ref": "kiln-inference-v1.schema.json#/$defs/ChatCompletionChunkStream",
@@ -4350,12 +4366,15 @@
         "x-kiln-rust-type": "ChatCompletionResponse",
         "x-kiln-field-schema-status": "complete"
       },
+      "ClearCorrectionsResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/ClearCorrectionsResponse",
+        "x-kiln-rust-type": "ClearCorrectionsResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
       "CompatibilityResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type CompatibilityResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/CompatibilityResponse",
         "x-kiln-rust-type": "CompatibilityResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "CompileJudgmentBody": {
         "$ref": "kiln-evals-v1.schema.json#/$defs/CompileJudgmentBody",
@@ -4373,11 +4392,14 @@
         "x-kiln-field-schema-status": "complete"
       },
       "CorrectionRow": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type CorrectionRow. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/CorrectionRow",
         "x-kiln-rust-type": "CorrectionRow",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
+      },
+      "CorrectionRowInput": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/CorrectionRowInput",
+        "x-kiln-rust-type": "CorrectionRow",
+        "x-kiln-field-schema-status": "complete"
       },
       "CreateJudgmentBody": {
         "$ref": "kiln-evals-v1.schema.json#/$defs/CreateJudgmentBody",
@@ -4385,11 +4407,9 @@
         "x-kiln-field-schema-status": "complete"
       },
       "CreateRunRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type CreateRunRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/CreateRunRequest",
         "x-kiln-rust-type": "CreateRunRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "CssStylesheet": {
         "type": "string",
@@ -4433,6 +4453,11 @@
         "x-kiln-field-schema-status": "complete",
         "x-kiln-rust-type": "DeleteAdapterResponse"
       },
+      "DeleteCorrectionResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/DeleteCorrectionResponse",
+        "x-kiln-rust-type": "DeleteCorrectionResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
       "DeleteDatasetResponse": {
         "$ref": "kiln-evals-v1.schema.json#/$defs/DeleteDatasetResponse",
         "x-kiln-rust-type": "DeleteDatasetResponse",
@@ -4460,47 +4485,40 @@
         "x-kiln-field-schema-status": "complete",
         "x-kiln-rust-type": "DeleteTeacherResponse"
       },
+      "DeleteTrainingJobResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/DeleteTrainingJobResponse",
+        "x-kiln-rust-type": "DeleteTrainingJobResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
       "DiscoverRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DiscoverRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/DiscoverRequest",
         "x-kiln-rust-type": "DiscoverRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "DiscoverResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DiscoverResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/DiscoverResponse",
         "x-kiln-rust-type": "DiscoverResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "DistillMergeRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DistillMergeRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/DistillMergeRequest",
         "x-kiln-rust-type": "DistillMergeRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "DistillPumpRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DistillPumpRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/DistillPumpRequest",
         "x-kiln-rust-type": "DistillPumpRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "DistillRefreshRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DistillRefreshRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/DistillRefreshRequest",
         "x-kiln-rust-type": "DistillRefreshRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "DistillSelfRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DistillSelfRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/DistillSelfRequest",
         "x-kiln-rust-type": "DistillSelfRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "EvalCompareSpec": {
         "$ref": "kiln-evals-v1.schema.json#/$defs/EvalCompareSpec",
@@ -4551,18 +4569,14 @@
         "x-kiln-rust-type": "ExportSummary"
       },
       "FrontDoorRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type FrontDoorRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/FrontDoorRequest",
         "x-kiln-rust-type": "FrontDoorRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "FrontDoorResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type FrontDoorResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/FrontDoorResponse",
         "x-kiln-rust-type": "FrontDoorResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "GrpoExportRequest": {
         "$ref": "kiln-artifacts-v1.schema.json#/$defs/GrpoExportRequest",
@@ -4571,11 +4585,9 @@
         "x-kiln-rust-type": "GrpoExportRequest"
       },
       "GrpoRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type GrpoRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/GrpoRequest",
         "x-kiln-rust-type": "GrpoRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "HealthResponse": {
         "$ref": "kiln-observability-v1.schema.json#/$defs/HealthResponse",
@@ -4615,25 +4627,19 @@
         "x-kiln-field-schema-status": "complete"
       },
       "JudgeDistillRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type JudgeDistillRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/JudgeDistillRequest",
         "x-kiln-rust-type": "JudgeDistillRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "JudgeDistillResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type JudgeDistillResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/JudgeDistillResponse",
         "x-kiln-rust-type": "JudgeDistillResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "JudgeDriftCheckRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type JudgeDriftCheckRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/JudgeDriftCheckRequest",
         "x-kiln-rust-type": "JudgeDriftCheckRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "JudgmentListResponse": {
         "$ref": "kiln-evals-v1.schema.json#/$defs/JudgmentListResponse",
@@ -4646,18 +4652,14 @@
         "x-kiln-field-schema-status": "complete"
       },
       "LibraryListResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type LibraryListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/LibraryListResponse",
         "x-kiln-rust-type": "LibraryListResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "ListResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type ListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/ListResponse",
         "x-kiln-rust-type": "ListResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "LoadAdapterRequest": {
         "$ref": "kiln-artifacts-v1.schema.json#/$defs/LoadAdapterRequest",
@@ -4672,11 +4674,14 @@
         "x-kiln-rust-type": "LoadAdapterResponse"
       },
       "MarkTrainedRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type MarkTrainedRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/MarkTrainedRequest",
         "x-kiln-rust-type": "MarkTrainedRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
+      },
+      "MarkTrainedResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/MarkTrainedResponse",
+        "x-kiln-rust-type": "MarkTrainedResponse",
+        "x-kiln-field-schema-status": "complete"
       },
       "MergeAdapterRequest": {
         "$ref": "kiln-artifacts-v1.schema.json#/$defs/MergeAdapterRequest",
@@ -4691,11 +4696,9 @@
         "x-kiln-rust-type": "MergeAdapterResponse"
       },
       "MessageRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type MessageRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/MessageRequest",
         "x-kiln-rust-type": "MessageRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "ModelStateResponse": {
         "$ref": "kiln-observability-v1.schema.json#/$defs/ModelStateResponse",
@@ -4708,11 +4711,9 @@
         "x-kiln-field-schema-status": "complete"
       },
       "OpdRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type OpdRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/OpdRequest",
         "x-kiln-rust-type": "OpdRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "PrometheusText": {
         "type": "string",
@@ -4726,39 +4727,34 @@
         "x-kiln-field-schema-status": "complete"
       },
       "PublishPayload": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type PublishPayload. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/PublishPayload",
         "x-kiln-rust-type": "PublishPayload",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
+      },
+      "PublishToLibraryResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/PublishToLibraryResponse",
+        "x-kiln-rust-type": "PublishToLibraryResponse",
+        "x-kiln-field-schema-status": "complete"
       },
       "QueueResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type QueueResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/QueueResponse",
         "x-kiln-rust-type": "QueueResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "RecipeRunRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type RecipeRunRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/RecipeRunRequest",
         "x-kiln-rust-type": "RecipeRunRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "RecipeRunResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type RecipeRunResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/RecipeRunResponse",
         "x-kiln-rust-type": "RecipeRunResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "RecipesListResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type RecipesListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/RecipesListResponse",
         "x-kiln-rust-type": "RecipesListResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "Redirect": {
         "type": "string",
@@ -4788,18 +4784,14 @@
         "x-kiln-field-schema-status": "complete"
       },
       "SelfImproveRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type SelfImproveRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/SelfImproveRequest",
         "x-kiln-rust-type": "SelfImproveRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "SelfImproveResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type SelfImproveResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/SelfImproveResponse",
         "x-kiln-rust-type": "SelfImproveResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "SftExportRequest": {
         "$ref": "kiln-artifacts-v1.schema.json#/$defs/SftExportRequest",
@@ -4808,11 +4800,9 @@
         "x-kiln-rust-type": "SftExportRequest"
       },
       "SftRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type SftRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/SftRequest",
         "x-kiln-rust-type": "SftRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "SuiteListResponse": {
         "$ref": "kiln-evals-v1.schema.json#/$defs/SuiteListResponse",
@@ -4856,6 +4846,11 @@
         "x-kiln-field-schema-status": "complete",
         "x-kiln-rust-type": "TeachersListResponse"
       },
+      "TerminalStatusResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/TerminalStatusResponse",
+        "x-kiln-rust-type": "TerminalStatusResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
       "TextCompletionRequest": {
         "$ref": "kiln-inference-v1.schema.json#/$defs/TextCompletionRequest",
         "x-kiln-rust-type": "TextCompletionRequest",
@@ -4867,39 +4862,29 @@
         "x-kiln-field-schema-status": "complete"
       },
       "TierDefaultsListResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type TierDefaultsListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/TierDefaultsListResponse",
         "x-kiln-rust-type": "TierDefaultsListResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "TierDefaultsResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type TierDefaultsResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/TierDefaultsResponse",
         "x-kiln-rust-type": "TierDefaultsResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "TrainingJobDetail": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type TrainingJobDetail. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/TrainingJobDetail",
         "x-kiln-rust-type": "TrainingJobDetail",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "TrainingResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type TrainingResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/TrainingResponse",
         "x-kiln-rust-type": "TrainingResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "TrainingStatus": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type TrainingStatus. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/TrainingStatus",
         "x-kiln-rust-type": "TrainingStatus",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "UnloadAdapterResponse": {
         "$ref": "kiln-artifacts-v1.schema.json#/$defs/UnloadAdapterResponse",
@@ -4924,13 +4909,9 @@
         "x-kiln-field-schema-status": "complete"
       },
       "Vec_TrainingStatus": {
-        "type": "array",
-        "items": {
-          "$ref": "#/components/schemas/TrainingStatus"
-        },
-        "description": "Runtime payload represented by Rust type Vec<TrainingStatus>. The referenced item field schema is still migration pending.",
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/Vec_TrainingStatus",
         "x-kiln-rust-type": "Vec<TrainingStatus>",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "WebSocketUpgrade": {
         "type": "string",
@@ -4969,10 +4950,10 @@
     "training": 15,
     "ui": 9
   },
-  "x-kiln-field-schema-status": "migration_pending",
+  "x-kiln-field-schema-status": "complete",
   "x-kiln-component-schema-counts": {
-    "complete": 79,
-    "migration_pending": 39,
-    "total": 118
+    "complete": 131,
+    "migration_pending": 0,
+    "total": 131
   }
 }

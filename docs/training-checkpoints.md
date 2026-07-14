@@ -1,5 +1,12 @@
 # Native Training Checkpoints
 
+The normative HTTP field contract for SFT, GRPO and OPD checkpoint controls,
+training status, queue state, cancellation, deletion, job detail, and the
+newest resumable-checkpoint summary is the generated [Training and Agent
+Control Plane API Schema](../contracts/kiln-control-plane-v1.schema.json).
+This guide owns checkpoint durability and resume semantics; the generated
+schema owns the public wire shape.
+
 Kiln uses two deliberately separate training artifacts:
 
 - A **resumable checkpoint** is an immutable directory ending in

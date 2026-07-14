@@ -976,7 +976,9 @@ every route and transport. Use the generated
 [inference](contracts/kiln-inference-v1.schema.json),
 [observability](contracts/kiln-observability-v1.schema.json),
 [artifact lifecycle](contracts/kiln-artifacts-v1.schema.json), and
-[eval and judgment](contracts/kiln-evals-v1.schema.json) schemas for the
+[eval and judgment](contracts/kiln-evals-v1.schema.json), and
+[training and agent control plane](contracts/kiln-control-plane-v1.schema.json)
+schemas for the
 complete field, nullability, unknown-field, constraint, and example reference.
 
 | Method | Path | Description |

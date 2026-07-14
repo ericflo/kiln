@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::agent_runs::{AgentRunRecord, ControlError, NewRunParams, StartRunError};
 use crate::error::ApiError;
@@ -69,18 +69,29 @@ fn require_runs_enabled() -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn runs_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+#[derive(Debug, Serialize)]
+struct AgentRunsStatusResponse {
+    enabled: bool,
+    disabled_reason: Option<String>,
+    pi_available: bool,
+    pi_path: Option<String>,
+    max_concurrent_runs: usize,
+    active_runs: usize,
+    sessions_dir: String,
+}
+
+async fn runs_status(State(state): State<AppState>) -> Json<AgentRunsStatusResponse> {
     let (enabled, reason) = runs_gate();
     let pi = crate::pi_rpc::find_pi();
-    Json(serde_json::json!({
-        "enabled": enabled,
-        "disabled_reason": reason,
-        "pi_available": pi.is_some(),
-        "pi_path": pi.map(|p| p.display().to_string()),
-        "max_concurrent_runs": state.agent_runs.max_concurrent(),
-        "active_runs": state.agent_runs.active_count(),
-        "sessions_dir": state.agent_runs.sessions_dir().display().to_string(),
-    }))
+    Json(AgentRunsStatusResponse {
+        enabled,
+        disabled_reason: reason,
+        pi_available: pi.is_some(),
+        pi_path: pi.map(|path| path.display().to_string()),
+        max_concurrent_runs: state.agent_runs.max_concurrent(),
+        active_runs: state.agent_runs.active_count(),
+        sessions_dir: state.agent_runs.sessions_dir().display().to_string(),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,13 +193,18 @@ struct ListRunsQuery {
 async fn list_runs(
     State(state): State<AppState>,
     Query(q): Query<ListRunsQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<AgentRunListResponse>, ApiError> {
     require_runs_enabled()?;
     let mut runs = state.agent_runs.list();
     if let Some(label) = &q.label {
         runs.retain(|r| r.label.as_deref() == Some(label.as_str()));
     }
-    Ok(Json(serde_json::json!({ "runs": runs })))
+    Ok(Json(AgentRunListResponse { runs }))
+}
+
+#[derive(Debug, Serialize)]
+struct AgentRunListResponse {
+    runs: Vec<AgentRunRecord>,
 }
 
 async fn get_run(
@@ -214,7 +230,7 @@ async fn run_events(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Query(q): Query<EventsQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<AgentRunEventsResponse>, ApiError> {
     require_runs_enabled()?;
     let Some(page) = state.agent_runs.events_after(&id, q.after) else {
         return Err(ApiError::agent_run_not_found(&id));
@@ -224,20 +240,35 @@ async fn run_events(
         .last()
         .map(|(seq, _)| seq + 1)
         .unwrap_or(q.after);
-    let events: Vec<serde_json::Value> = page
+    let events: Vec<AgentRunEvent> = page
         .events
         .into_iter()
-        .map(|(seq, event)| serde_json::json!({ "seq": seq, "event": event }))
+        .map(|(seq, event)| AgentRunEvent { seq, event })
         .collect();
-    Ok(Json(serde_json::json!({
-        "events": events,
-        "next_after": next_after,
-        "status": page.status,
+    Ok(Json(AgentRunEventsResponse {
+        events,
+        next_after,
+        status: page.status,
         // Replay-gap detection: events before the cursor are gone when
         // truncated (ring prune on a long run, or a server restart).
-        "first_available_seq": page.first_available_seq,
-        "truncated": page.truncated,
-    })))
+        first_available_seq: page.first_available_seq,
+        truncated: page.truncated,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct AgentRunEvent {
+    seq: u64,
+    event: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentRunEventsResponse {
+    events: Vec<AgentRunEvent>,
+    next_after: u64,
+    status: crate::agent_runs::RunStatus,
+    first_available_seq: Option<u64>,
+    truncated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -256,7 +287,7 @@ async fn steer_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(req): Json<MessageRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<AgentRunQueuedResponse>, ApiError> {
     require_runs_enabled()?;
     if req.message.trim().is_empty() {
         return Err(ApiError::agent_run_invalid_request(
@@ -267,14 +298,14 @@ async fn steer_run(
         .agent_runs
         .steer(&id, req.message)
         .map_err(|e| map_control_error(&id, e))?;
-    Ok(Json(serde_json::json!({"queued": true})))
+    Ok(Json(AgentRunQueuedResponse { queued: true }))
 }
 
 async fn follow_up_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(req): Json<MessageRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<AgentRunQueuedResponse>, ApiError> {
     require_runs_enabled()?;
     if req.message.trim().is_empty() {
         return Err(ApiError::agent_run_invalid_request(
@@ -285,19 +316,29 @@ async fn follow_up_run(
         .agent_runs
         .follow_up(&id, req.message)
         .map_err(|e| map_control_error(&id, e))?;
-    Ok(Json(serde_json::json!({"queued": true})))
+    Ok(Json(AgentRunQueuedResponse { queued: true }))
+}
+
+#[derive(Debug, Serialize)]
+struct AgentRunQueuedResponse {
+    queued: bool,
 }
 
 async fn abort_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<AgentRunAbortResponse>, ApiError> {
     require_runs_enabled()?;
     state
         .agent_runs
         .abort(&id)
         .map_err(|e| map_control_error(&id, e))?;
-    Ok(Json(serde_json::json!({"aborting": true})))
+    Ok(Json(AgentRunAbortResponse { aborting: true }))
+}
+
+#[derive(Debug, Serialize)]
+struct AgentRunAbortResponse {
+    aborting: bool,
 }
 
 pub fn routes() -> Router<AppState> {

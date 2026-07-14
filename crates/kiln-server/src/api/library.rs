@@ -98,11 +98,22 @@ struct PublishPayload {
     uploader: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct PublishToLibraryResponse {
+    status: &'static str,
+    backend: String,
+    intended_id: String,
+    uploader: Option<String>,
+    description: Option<String>,
+    receipt_schema_version: u32,
+    note: &'static str,
+}
+
 async fn publish_to_library(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
     Json(payload): Json<PublishPayload>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<PublishToLibraryResponse>, ApiError> {
     // Validate the local adapter has a §8.11 audit receipt — that's the
     // §3.10 provenance gate. Without it, refuse to publish.
     let adapter_dir = state.adapter_dir.join(&name);
@@ -124,16 +135,16 @@ async fn publish_to_library(
     // digest, intended id format. Caller can use this to decide
     // whether to proceed with a manual upload until the operational
     // backend ships.
-    Ok(Json(serde_json::json!({
-        "status": "ready_to_publish",
-        "backend": backend,
-        "intended_id": format!("{}@{}", name, &receipt.produced_at[..10]),
-        "uploader": payload.uploader,
-        "description": payload.description,
-        "receipt_schema_version": receipt.schema_version,
-        "note": "Library publish endpoint is contract-only until §3.10 launch; \
-                 see grand plan §3.10 / §13 Phase 3 success criteria."
-    })))
+    Ok(Json(PublishToLibraryResponse {
+        status: "ready_to_publish",
+        backend,
+        intended_id: format!("{}@{}", name, &receipt.produced_at[..10]),
+        uploader: payload.uploader,
+        description: payload.description,
+        receipt_schema_version: receipt.schema_version,
+        note: "Library publish endpoint is contract-only until §3.10 launch; \
+               see grand plan §3.10 / §13 Phase 3 success criteria.",
+    }))
 }
 
 pub fn routes() -> Router<AppState> {

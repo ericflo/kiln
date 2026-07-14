@@ -34,6 +34,7 @@ use axum::{
     routing::get,
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use serde::Serialize;
 
 use crate::state::AppState;
 
@@ -84,20 +85,30 @@ fn find_pi() -> Option<PathBuf> {
     crate::pi_rpc::find_pi()
 }
 
-async fn terminal_status() -> Json<serde_json::Value> {
+#[derive(Debug, Serialize)]
+struct TerminalStatusResponse {
+    enabled: bool,
+    disabled_reason: Option<String>,
+    pi_available: bool,
+    pi_path: Option<String>,
+    cwd: String,
+    session_active: bool,
+}
+
+async fn terminal_status() -> Json<TerminalStatusResponse> {
     let (enabled, reason) = terminal_gate();
     let pi = find_pi();
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "?".into());
-    Json(serde_json::json!({
-        "enabled": enabled,
-        "disabled_reason": reason,
-        "pi_available": pi.is_some(),
-        "pi_path": pi.map(|p| p.display().to_string()),
-        "cwd": cwd,
-        "session_active": SESSION_ACTIVE.load(Ordering::SeqCst),
-    }))
+    Json(TerminalStatusResponse {
+        enabled,
+        disabled_reason: reason,
+        pi_available: pi.is_some(),
+        pi_path: pi.map(|path| path.display().to_string()),
+        cwd,
+        session_active: SESSION_ACTIVE.load(Ordering::SeqCst),
+    })
 }
 
 /// Best-effort server URL for pi's provider config, derived from the Host

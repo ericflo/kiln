@@ -3967,7 +3967,7 @@ async fn list_queue(State(state): State<AppState>) -> Json<QueueResponse> {
 async fn cancel_queued_job(
     State(state): State<AppState>,
     AxumPath(job_id): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<CancelTrainingJobResponse>, ApiError> {
     // Check job state; flag running jobs for cooperative cancellation.
     {
         let jobs = state.training_jobs.read().unwrap();
@@ -3978,11 +3978,10 @@ async fn cancel_queued_job(
             job.cancel_requested
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::info!(job_id = %job_id, "cancellation requested for running training job");
-            return Ok(Json(serde_json::json!({
-                "job_id": job_id,
-                "status": "cancelling",
-                "message": "stop requested — the trainer aborts at the next step boundary"
-            })));
+            return Ok(Json(CancelTrainingJobResponse::Cancelling {
+                job_id,
+                message: "stop requested — the trainer aborts at the next step boundary",
+            }));
         }
         if job.state != TrainingState::Queued {
             return Err(ApiError::training_job_not_cancellable(
@@ -4021,13 +4020,22 @@ async fn cancel_queued_job(
                 .metrics
                 .inc_training(mt, TrainingMetricStatus::Cancelled);
         }
-        Ok(Json(serde_json::json!({
-            "job_id": job_id,
-            "status": "cancelled"
-        })))
+        Ok(Json(CancelTrainingJobResponse::Cancelled { job_id }))
     } else {
         Err(ApiError::training_job_already_started(&job_id))
     }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum CancelTrainingJobResponse {
+    Cancelling {
+        job_id: String,
+        message: &'static str,
+    },
+    Cancelled {
+        job_id: String,
+    },
 }
 
 /// DELETE /v1/train/jobs/:job_id — permanently delete a terminal training
@@ -4037,7 +4045,7 @@ async fn cancel_queued_job(
 async fn delete_archived_job(
     State(state): State<AppState>,
     AxumPath(job_id): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<DeleteTrainingJobResponse>, ApiError> {
     // Refuse if the job is still active. The in-memory map is the source
     // of truth for live state; an archived entry will only exist for jobs
     // already in a terminal state.
@@ -4079,11 +4087,18 @@ async fn delete_archived_job(
         }
     };
 
-    Ok(Json(serde_json::json!({
-        "job_id": job_id,
-        "status": "deleted",
-        "removed_archive_file": removed_file,
-    })))
+    Ok(Json(DeleteTrainingJobResponse {
+        job_id,
+        status: "deleted",
+        removed_archive_file: removed_file,
+    }))
+}
+
+#[derive(Serialize)]
+struct DeleteTrainingJobResponse {
+    job_id: String,
+    status: &'static str,
+    removed_archive_file: bool,
 }
 
 /// Rich detail payload exposed at `GET /v1/train/jobs/:job_id`. Flattens
@@ -4093,16 +4108,12 @@ async fn delete_archived_job(
 struct TrainingJobDetail {
     #[serde(flatten)]
     status: TrainingStatus,
-    job_type: TrainingJobType,
     epoch: Option<u32>,
     adapter_path: Option<String>,
     auto_load: bool,
     /// Eval job IDs queued by `post_eval`. `None` when no post-eval was
     /// requested; otherwise newest-first.
     linked_eval_job_ids: Vec<String>,
-    /// §8.7 gate verdict (promoted / demoted to `.failed` / not measured)
-    /// once the post-training eval reaches a terminal state.
-    post_eval_verdict: Option<String>,
     /// Time-series of progress samples. Empty until the trainer emits
     /// its first callback.
     loss_history: Vec<crate::state::TrainingLossSample>,
@@ -4427,12 +4438,10 @@ async fn job_detail(
         (
             TrainingJobDetail {
                 status: training_status_from_info(job),
-                job_type: job.job_type,
                 epoch: job.epoch,
                 adapter_path: job.adapter_path.clone(),
                 auto_load: job.auto_load,
                 linked_eval_job_ids: job.linked_eval_job_ids.clone(),
-                post_eval_verdict: job.post_eval_verdict.clone(),
                 loss_history: job.loss_history.clone(),
                 train_receipt: None,
                 replay_request: None,
