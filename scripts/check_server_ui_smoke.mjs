@@ -967,6 +967,16 @@ function smokeRequestLatency() {
       response_delivery: 0,
       handler_queue: 0,
       client_delivery: 0,
+      sampling: 0,
+      readback: 0,
+      gpu_lock_wait: 0,
+      graph_capture: 0,
+      graph_replay: 0,
+      synchronization: 0,
+      resize: 0,
+      trim: 0,
+      adapter: 0,
+      training: 0,
       unexplained: 0,
     },
     phases: {
@@ -980,10 +990,10 @@ function smokeRequestLatency() {
       response_delivery_ms: 2,
       handler_queue_ms: 1,
       client_delivery_ms: 1,
-      gpu_lock_wait_ms: null,
+      gpu_lock_wait_ms: 2,
       graph_capture_ms: null,
       graph_replay_ms: null,
-      synchronization_ms: null,
+      synchronization_ms: 4,
       resize_ms: null,
       trim_ms: null,
       adapter_ms: null,
@@ -2203,7 +2213,10 @@ async function startServer({
         unexplained_stall_count: 0,
         stall_reasons: {
           actor_queue: 0, actor_admission: 0, actor_prefill: 0, actor_decode: 0,
-          response_delivery: 0, handler_queue: 0, client_delivery: 0, unexplained: 0,
+          response_delivery: 0, handler_queue: 0, client_delivery: 0, sampling: 0,
+          readback: 0, gpu_lock_wait: 0, graph_capture: 0, graph_replay: 0,
+          synchronization: 0, resize: 0, trim: 0, adapter: 0, training: 0,
+          unexplained: 0,
         },
       });
       return;
@@ -3645,8 +3658,10 @@ async function runSmoke(baseUrl, {
         '30 ms',
         'Stalls',
         'Actor prefill',
+        'GPU lock wait',
+        'Synchronization',
         '7 of 7 request-local gaps retained',
-        'Not measured on this path: Sampling, Readback, GPU lock wait',
+        'Not measured on this path: Sampling, Readback, Graph capture',
       ]) {
         if (!latencyText.includes(expected)) {
           fail(`Request latency diagnosis is missing ${JSON.stringify(expected)}: ${JSON.stringify(latencyText)}`);
@@ -3669,6 +3684,40 @@ async function runSmoke(baseUrl, {
       // Clearing the errored row flips 1→0: the recovery is announced too.
       setRecentRequests([cleanRow]);
       await expectStatusAnnouncement(page, 'recent-requests-status', /no requests need attention\./, 'Attention-count recovery was not announced');
+
+      // A coherent attributed stall exercises the complete closed reason
+      // vocabulary in the drill, independent of the routine-traffic status
+      // assertions above.
+      const diagnosticLatency = smokeRequestLatency();
+      diagnosticLatency.itl_ms_p99 = 282.6;
+      diagnosticLatency.itl_ms_p999 = 298.3;
+      diagnosticLatency.max_itl_ms = 300;
+      diagnosticLatency.stall_count = 1;
+      diagnosticLatency.stall_reasons.synchronization = 1;
+      diagnosticLatency.phases.decode_ms = 320;
+      diagnosticLatency.phases.synchronization_ms = 280;
+      const diagnosticRow = piRow({
+        id: 'chatcmpl-latency-diagnostic',
+        prompt_preview: 'diagnose backend pause',
+        latency: diagnosticLatency,
+      });
+      setRecentRequests([diagnosticRow]);
+      await waitForPanelText(page, '#recent-requests-panel', /diagnose backend pause/, 'Attributed-stall row did not render');
+      await clickAndWait(
+        page,
+        `#recent-requests-panel .recent-row[data-id="${diagnosticRow.id}"]`,
+        'Could not open the attributed-stall request drill',
+      );
+      const diagnosticText = await page.$eval(
+        '#request-drill-content [data-request-latency]',
+        (el) => el.textContent || '',
+      ).catch(() => fail('Attributed-stall drill did not render latency diagnosis'));
+      for (const expected of ['300 ms', 'synchronization 1', 'Synchronization', '280 ms']) {
+        if (!diagnosticText.includes(expected)) {
+          fail(`Attributed-stall diagnosis is missing ${JSON.stringify(expected)}: ${JSON.stringify(diagnosticText)}`);
+        }
+      }
+      await clickAndWait(page, '#request-drill-close', 'Could not close the attributed-stall drill');
 
       // Re-drain so the later empty-state assertions hold.
       setRecentRequests([]);

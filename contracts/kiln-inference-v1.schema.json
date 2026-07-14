@@ -613,7 +613,9 @@
       "type": "object",
       "required": [
         "actor_queue", "actor_admission", "actor_prefill", "actor_decode",
-        "response_delivery", "handler_queue", "client_delivery", "unexplained"
+        "response_delivery", "handler_queue", "client_delivery", "sampling",
+        "readback", "gpu_lock_wait", "graph_capture", "graph_replay",
+        "synchronization", "resize", "trim", "adapter", "training", "unexplained"
       ],
       "properties": {
         "actor_queue": { "$ref": "#/$defs/NonNegativeInteger" },
@@ -623,6 +625,16 @@
         "response_delivery": { "$ref": "#/$defs/NonNegativeInteger" },
         "handler_queue": { "$ref": "#/$defs/NonNegativeInteger" },
         "client_delivery": { "$ref": "#/$defs/NonNegativeInteger" },
+        "sampling": { "$ref": "#/$defs/NonNegativeInteger" },
+        "readback": { "$ref": "#/$defs/NonNegativeInteger" },
+        "gpu_lock_wait": { "$ref": "#/$defs/NonNegativeInteger" },
+        "graph_capture": { "$ref": "#/$defs/NonNegativeInteger" },
+        "graph_replay": { "$ref": "#/$defs/NonNegativeInteger" },
+        "synchronization": { "$ref": "#/$defs/NonNegativeInteger" },
+        "resize": { "$ref": "#/$defs/NonNegativeInteger" },
+        "trim": { "$ref": "#/$defs/NonNegativeInteger" },
+        "adapter": { "$ref": "#/$defs/NonNegativeInteger" },
+        "training": { "$ref": "#/$defs/NonNegativeInteger" },
         "unexplained": { "$ref": "#/$defs/NonNegativeInteger" }
       },
       "additionalProperties": false,
@@ -1032,7 +1044,10 @@
           "type": ["string", "null"],
           "enum": [
             "actor_queue", "actor_admission", "actor_prefill", "actor_decode",
-            "response_delivery", "handler_queue", "client_delivery", "unexplained", null
+            "response_delivery", "handler_queue", "client_delivery", "sampling",
+            "readback", "gpu_lock_wait", "graph_capture", "graph_replay",
+            "synchronization", "resize", "trim", "adapter", "training",
+            "unexplained", null
           ]
         },
         "blocking_phase_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" }

@@ -29,7 +29,7 @@ use crate::config::{
     DeterministicInference, DirectDecodeRendezvousBackendPolicy, MaxDecodeBatch,
     MaxDecodeBatchDiagnostics, PrefillLayerBudget, PrefillTokenBudget, StreamStallGrace,
 };
-use crate::latency_observability::{EngineTokenTiming, TokenPhaseDurations};
+use crate::latency_observability::{BackendPhaseDurations, EngineTokenTiming, TokenPhaseDurations};
 use crate::response_delivery::{
     DeliveryBarrierError, DeliveryBatch, DeliveryCommand, DeliveryKey, DeliveryResult,
     DeliveryResultNotifyError, DeliveryResultSink, DeliveryResultSinkError, DeliveryTerminal,
@@ -212,6 +212,12 @@ pub struct EngineRequest {
 pub struct EngineSampledToken {
     pub token_id: TokenId,
     pub behavior_logprob: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodeStepOutput {
+    pub tokens: Vec<EngineSampledToken>,
+    pub backend_phases: BackendPhaseDurations,
 }
 
 impl EngineSampledToken {
@@ -556,6 +562,17 @@ pub trait DecodeForward: Send + Sync + 'static {
                 .map(EngineSampledToken::untraced)
                 .collect()
         })
+    }
+    fn forward_decode_with_phases(
+        &self,
+        slots: &mut [&mut DecodeSlot],
+        sampling: &[SamplingParams],
+    ) -> Result<DecodeStepOutput> {
+        self.forward_decode_with_metadata(slots, sampling)
+            .map(|tokens| DecodeStepOutput {
+                tokens,
+                backend_phases: BackendPhaseDurations::default(),
+            })
     }
     fn is_eos_token(&self, _token: TokenId) -> Result<bool> {
         Ok(false)
@@ -1063,8 +1080,13 @@ impl DecodeForward for RealDecodeForward {
         slots: &mut [&mut DecodeSlot],
         sampling: &[SamplingParams],
     ) -> Result<Vec<TokenId>> {
-        self.forward_decode_with_metadata(slots, sampling)
-            .map(|tokens| tokens.into_iter().map(|sampled| sampled.token_id).collect())
+        self.forward_decode_with_phases(slots, sampling)
+            .map(|step| {
+                step.tokens
+                    .into_iter()
+                    .map(|sampled| sampled.token_id)
+                    .collect()
+            })
     }
 
     fn forward_decode_with_metadata(
@@ -1072,13 +1094,25 @@ impl DecodeForward for RealDecodeForward {
         slots: &mut [&mut DecodeSlot],
         sampling: &[SamplingParams],
     ) -> Result<Vec<EngineSampledToken>> {
+        self.forward_decode_with_phases(slots, sampling)
+            .map(|step| step.tokens)
+    }
+
+    fn forward_decode_with_phases(
+        &self,
+        slots: &mut [&mut DecodeSlot],
+        sampling: &[SamplingParams],
+    ) -> Result<DecodeStepOutput> {
         self.grow_ready_decode_slots(slots)?;
         let mut output = vec![EngineSampledToken::untraced(0); slots.len()];
+        let mut backend_phases = BackendPhaseDurations::default();
         let (decode_indices, decode_params) =
             collect_ready_decode_indices(slots, sampling, &mut output)?;
 
         if !decode_indices.is_empty() {
+            let gpu_lock_started = Instant::now();
             let gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
+            backend_phases.observe_gpu_lock_wait(gpu_lock_started.elapsed());
             let mut ordinary_rows = Vec::with_capacity(decode_indices.len());
             let mut ordinary_params = Vec::with_capacity(decode_indices.len());
             let mut ordinary_output_indices = Vec::with_capacity(decode_indices.len());
@@ -1208,7 +1242,9 @@ impl DecodeForward for RealDecodeForward {
                 }
                 Ok(decoded)
             })();
+            let synchronization_started = Instant::now();
             let synchronized = runner_guard.synchronize_external_yield("batched decode step");
+            backend_phases.observe_synchronization(synchronization_started.elapsed());
             drop(runner_guard);
             if let Err(err) = synchronized {
                 std::mem::forget(gpu_guard);
@@ -1219,7 +1255,10 @@ impl DecodeForward for RealDecodeForward {
             }
         }
 
-        Ok(output)
+        Ok(DecodeStepOutput {
+            tokens: output,
+            backend_phases,
+        })
     }
 
     fn is_eos_token(&self, token: TokenId) -> Result<bool> {
@@ -3609,7 +3648,7 @@ impl BatchingEngineActor {
         let started = Instant::now();
         let result = self
             .forward
-            .forward_decode_with_metadata(&mut slots, &sampling);
+            .forward_decode_with_phases(&mut slots, &sampling);
         let elapsed = started.elapsed();
         drop(slots);
         for active in &mut self.active {
@@ -3621,13 +3660,20 @@ impl BatchingEngineActor {
         self.refresh_snapshot();
 
         let output_tokens = match result {
-            Ok(tokens) if tokens.len() == batch_len => tokens,
-            Ok(tokens) => {
+            Ok(step) if step.tokens.len() == batch_len => {
+                for active in &mut self.active {
+                    active
+                        .token_phase_durations
+                        .add_backend(step.backend_phases);
+                }
+                step.tokens
+            }
+            Ok(step) => {
                 self.finish_indices_with_error(
                     &ready_indices,
                     format!(
                         "batched decode returned {} rows for batch size {batch_len}",
-                        tokens.len()
+                        step.tokens.len()
                     ),
                 );
                 self.refresh_snapshot();
@@ -3919,6 +3965,7 @@ mod tests {
         calls: StdMutex<Vec<Vec<TokenId>>>,
         reusable_prefixes: bool,
         prefix_probe_calls: std::sync::atomic::AtomicUsize,
+        reported_backend_phases: BackendPhaseDurations,
     }
 
     #[derive(Default)]
@@ -4253,6 +4300,21 @@ mod tests {
                 .collect();
             self.calls.lock().unwrap().push(input_tokens.clone());
             Ok(input_tokens.iter().map(|token| token + 10).collect())
+        }
+
+        fn forward_decode_with_phases(
+            &self,
+            slots: &mut [&mut DecodeSlot],
+            sampling: &[SamplingParams],
+        ) -> Result<DecodeStepOutput> {
+            self.forward_decode(slots, sampling)
+                .map(|tokens| DecodeStepOutput {
+                    tokens: tokens
+                        .into_iter()
+                        .map(EngineSampledToken::untraced)
+                        .collect(),
+                    backend_phases: self.reported_backend_phases,
+                })
         }
 
         fn is_eos_token(&self, token: TokenId) -> Result<bool> {
@@ -5539,6 +5601,61 @@ mod tests {
                 assert!(timing.producer_delivered_at.is_some());
             }
             other => panic!("expected timed token, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_backend_phases_follow_the_owned_tokens_to_each_request() {
+        let mut backend_phases = BackendPhaseDurations::default();
+        backend_phases.observe_gpu_lock_wait(Duration::from_millis(7));
+        backend_phases.observe_synchronization(Duration::from_millis(11));
+        backend_phases.observe_graph_capture(Duration::from_millis(13));
+        backend_phases.observe_graph_replay(Duration::from_millis(17));
+        let forward = Arc::new(MockForward {
+            reported_backend_phases: backend_phases,
+            ..MockForward::default()
+        });
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let mut actor = test_actor(
+            rx,
+            forward,
+            8,
+            false,
+            1,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let (response_a_tx, mut response_a_rx) = mpsc::channel(2);
+        push_test_active(
+            &mut actor,
+            request(101, 2),
+            response_a_tx,
+            DecodeSlot::Mock {
+                next_token: 101,
+                generated_tokens: Vec::new(),
+            },
+        );
+        let (response_b_tx, mut response_b_rx) = mpsc::channel(2);
+        push_test_active(
+            &mut actor,
+            request(201, 2),
+            response_b_tx,
+            DecodeSlot::Mock {
+                next_token: 201,
+                generated_tokens: Vec::new(),
+            },
+        );
+
+        assert_eq!(actor.run_decode_batch(), 2);
+        for (expected_token, response_rx) in [(111, &mut response_a_rx), (211, &mut response_b_rx)]
+        {
+            match response_rx.blocking_recv() {
+                Some(EngineEvent::Token { token, timing }) => {
+                    assert_eq!(token, expected_token);
+                    assert_eq!(timing.phases_since_previous_token.backend, backend_phases);
+                }
+                other => panic!("expected timed token, got {other:?}"),
+            }
         }
     }
 

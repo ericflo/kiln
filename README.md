@@ -696,8 +696,9 @@ producer-ready/delivered, handler-received, and delivery queue timing. Omission
 follows the server metadata default but never opts a stream into custom
 per-token events.
 The request-local ITL percentiles, bounded stall attribution, exact timing
-boundaries, nullable phase coverage, rolling endpoint, and Prometheus contract
-are documented in [`docs/LATENCY_OBSERVABILITY.md`](docs/LATENCY_OBSERVABILITY.md).
+boundaries, nullable phase coverage, request-owned batching-engine GPU-lock and
+synchronization timings, rolling endpoint, and Prometheus contract are
+documented in [`docs/LATENCY_OBSERVABILITY.md`](docs/LATENCY_OBSERVABILITY.md).
 
 ### Prompt logprobs
 

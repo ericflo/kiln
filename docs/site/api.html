@@ -1529,7 +1529,13 @@ kiln serve --config kiln.toml</code></pre>
           bounded path source plus producer-ready/delivered, handler-received, and response-queue
           times. Direct streams retain the same request summary while leaving actor-only phases
           <code>null</code> and classifying otherwise unpartitioned gaps as
-          <code>unexplained</code>.
+          <code>unexplained</code>. Batching-engine streams also propagate exact, invocation-owned
+          <code>gpu_lock_wait_ms</code> and <code>synchronization_ms</code> candidates. Sampling,
+          readback, graph, resize/trim, adapter, and training phases remain <code>null</code> until
+          their owning runtime returns request-correlated timings; process-global counter deltas
+          are never presented as per-request evidence. The complete phase, overlap, reason-set,
+          nullability, rolling-statistics, and Prometheus contract is documented in
+          <a href="https://github.com/ericflo/kiln/blob/main/docs/LATENCY_OBSERVABILITY.md">Latency Observability</a>.
         </p>
         <h3 id="prompt-logprobs" class="text-xl font-semibold mt-6 mb-3">Score prompt tokens</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">

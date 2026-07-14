@@ -16,12 +16,119 @@ const RELATIVE_STALL_MULTIPLIER: f64 = 5.0;
 const MAX_RETAINED_REQUEST_GAPS: usize = 8_192;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackendPhaseDurations {
+    pub sampling: Option<Duration>,
+    pub readback: Option<Duration>,
+    pub gpu_lock_wait: Option<Duration>,
+    pub graph_capture: Option<Duration>,
+    pub graph_replay: Option<Duration>,
+    pub synchronization: Option<Duration>,
+    pub resize: Option<Duration>,
+    pub trim: Option<Duration>,
+    pub adapter: Option<Duration>,
+    pub training: Option<Duration>,
+}
+
+impl BackendPhaseDurations {
+    fn add_observation(total: &mut Option<Duration>, duration: Duration) {
+        *total = Some(total.unwrap_or(Duration::ZERO).saturating_add(duration));
+    }
+
+    pub fn observe_sampling(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.sampling, duration);
+    }
+
+    pub fn observe_readback(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.readback, duration);
+    }
+
+    pub fn observe_gpu_lock_wait(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.gpu_lock_wait, duration);
+    }
+
+    pub fn observe_graph_capture(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.graph_capture, duration);
+    }
+
+    pub fn observe_graph_replay(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.graph_replay, duration);
+    }
+
+    pub fn observe_synchronization(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.synchronization, duration);
+    }
+
+    pub fn observe_resize(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.resize, duration);
+    }
+
+    pub fn observe_trim(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.trim, duration);
+    }
+
+    pub fn observe_adapter(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.adapter, duration);
+    }
+
+    pub fn observe_training(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.training, duration);
+    }
+
+    fn add_to(self, totals: &mut Self) {
+        for (total, observation) in [
+            (&mut totals.sampling, self.sampling),
+            (&mut totals.readback, self.readback),
+            (&mut totals.gpu_lock_wait, self.gpu_lock_wait),
+            (&mut totals.graph_capture, self.graph_capture),
+            (&mut totals.graph_replay, self.graph_replay),
+            (&mut totals.synchronization, self.synchronization),
+            (&mut totals.resize, self.resize),
+            (&mut totals.trim, self.trim),
+            (&mut totals.adapter, self.adapter),
+            (&mut totals.training, self.training),
+        ] {
+            if let Some(duration) = observation {
+                Self::add_observation(total, duration);
+            }
+        }
+    }
+
+    fn max_covered_duration(self) -> Duration {
+        [
+            self.sampling,
+            self.readback,
+            self.gpu_lock_wait,
+            self.graph_capture,
+            self.graph_replay,
+            self.synchronization,
+            self.resize,
+            self.trim,
+            self.adapter,
+            self.training,
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(Duration::ZERO)
+    }
+
+    fn actor_decode_residual(self, actor_decode: Duration) -> Duration {
+        // Backend phases are narrower candidates contained by the broad actor
+        // decode wall interval. Subtract only the largest observed candidate:
+        // the detailed phases may overlap, so summing them would manufacture
+        // coverage and could erase genuine actor-side decode work.
+        actor_decode.saturating_sub(self.max_covered_duration())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenPhaseDurations {
     pub actor_queue: Duration,
     pub actor_admission: Duration,
     pub actor_prefill: Duration,
     pub actor_decode: Duration,
     pub response_delivery: Duration,
+    pub backend: BackendPhaseDurations,
     pub unexplained: Duration,
 }
 
@@ -46,6 +153,10 @@ impl TokenPhaseDurations {
         self.response_delivery = self.response_delivery.saturating_add(duration);
     }
 
+    pub fn add_backend(&mut self, phases: BackendPhaseDurations) {
+        phases.add_to(&mut self.backend);
+    }
+
     pub fn account_unexplained_wall_time(&mut self, wall_time: Duration) {
         let actor_serial = self
             .actor_queue
@@ -56,7 +167,9 @@ impl TokenPhaseDurations {
         // trace, max() is the conservative lower bound on the covered union;
         // summing would double-count overlap and hide genuinely unexplained
         // wall time.
-        let accounted = actor_serial.max(self.response_delivery);
+        let accounted = actor_serial
+            .max(self.response_delivery)
+            .max(self.backend.max_covered_duration());
         self.unexplained = wall_time.saturating_sub(accounted);
     }
 
@@ -65,8 +178,51 @@ impl TokenPhaseDurations {
             (LatencyStallReason::ActorQueue, self.actor_queue),
             (LatencyStallReason::ActorAdmission, self.actor_admission),
             (LatencyStallReason::ActorPrefill, self.actor_prefill),
-            (LatencyStallReason::ActorDecode, self.actor_decode),
+            (
+                LatencyStallReason::ActorDecode,
+                self.backend.actor_decode_residual(self.actor_decode),
+            ),
             (LatencyStallReason::ResponseDelivery, self.response_delivery),
+            (
+                LatencyStallReason::Sampling,
+                self.backend.sampling.unwrap_or(Duration::ZERO),
+            ),
+            (
+                LatencyStallReason::Readback,
+                self.backend.readback.unwrap_or(Duration::ZERO),
+            ),
+            (
+                LatencyStallReason::GpuLockWait,
+                self.backend.gpu_lock_wait.unwrap_or(Duration::ZERO),
+            ),
+            (
+                LatencyStallReason::GraphCapture,
+                self.backend.graph_capture.unwrap_or(Duration::ZERO),
+            ),
+            (
+                LatencyStallReason::GraphReplay,
+                self.backend.graph_replay.unwrap_or(Duration::ZERO),
+            ),
+            (
+                LatencyStallReason::Synchronization,
+                self.backend.synchronization.unwrap_or(Duration::ZERO),
+            ),
+            (
+                LatencyStallReason::Resize,
+                self.backend.resize.unwrap_or(Duration::ZERO),
+            ),
+            (
+                LatencyStallReason::Trim,
+                self.backend.trim.unwrap_or(Duration::ZERO),
+            ),
+            (
+                LatencyStallReason::Adapter,
+                self.backend.adapter.unwrap_or(Duration::ZERO),
+            ),
+            (
+                LatencyStallReason::Training,
+                self.backend.training.unwrap_or(Duration::ZERO),
+            ),
             (LatencyStallReason::Unexplained, self.unexplained),
         ]
         .into_iter()
@@ -79,6 +235,7 @@ impl TokenPhaseDurations {
         totals.actor_admission = totals.actor_admission.saturating_add(self.actor_admission);
         totals.actor_prefill = totals.actor_prefill.saturating_add(self.actor_prefill);
         totals.actor_decode = totals.actor_decode.saturating_add(self.actor_decode);
+        self.backend.add_to(&mut totals.backend);
         totals.unexplained = totals.unexplained.saturating_add(self.unexplained);
     }
 }
@@ -114,11 +271,21 @@ pub enum LatencyStallReason {
     ResponseDelivery,
     HandlerQueue,
     ClientDelivery,
+    Sampling,
+    Readback,
+    GpuLockWait,
+    GraphCapture,
+    GraphReplay,
+    Synchronization,
+    Resize,
+    Trim,
+    Adapter,
+    Training,
     Unexplained,
 }
 
 impl LatencyStallReason {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 18] = [
         Self::ActorQueue,
         Self::ActorAdmission,
         Self::ActorPrefill,
@@ -126,6 +293,16 @@ impl LatencyStallReason {
         Self::ResponseDelivery,
         Self::HandlerQueue,
         Self::ClientDelivery,
+        Self::Sampling,
+        Self::Readback,
+        Self::GpuLockWait,
+        Self::GraphCapture,
+        Self::GraphReplay,
+        Self::Synchronization,
+        Self::Resize,
+        Self::Trim,
+        Self::Adapter,
+        Self::Training,
         Self::Unexplained,
     ];
 
@@ -138,6 +315,16 @@ impl LatencyStallReason {
             Self::ResponseDelivery => "response_delivery",
             Self::HandlerQueue => "handler_queue",
             Self::ClientDelivery => "client_delivery",
+            Self::Sampling => "sampling",
+            Self::Readback => "readback",
+            Self::GpuLockWait => "gpu_lock_wait",
+            Self::GraphCapture => "graph_capture",
+            Self::GraphReplay => "graph_replay",
+            Self::Synchronization => "synchronization",
+            Self::Resize => "resize",
+            Self::Trim => "trim",
+            Self::Adapter => "adapter",
+            Self::Training => "training",
             Self::Unexplained => "unexplained",
         }
     }
@@ -151,7 +338,17 @@ impl LatencyStallReason {
             Self::ResponseDelivery => 4,
             Self::HandlerQueue => 5,
             Self::ClientDelivery => 6,
-            Self::Unexplained => 7,
+            Self::Sampling => 7,
+            Self::Readback => 8,
+            Self::GpuLockWait => 9,
+            Self::GraphCapture => 10,
+            Self::GraphReplay => 11,
+            Self::Synchronization => 12,
+            Self::Resize => 13,
+            Self::Trim => 14,
+            Self::Adapter => 15,
+            Self::Training => 16,
+            Self::Unexplained => 17,
         }
     }
 }
@@ -195,6 +392,16 @@ pub struct LatencyStallReasonCounts {
     pub response_delivery: u64,
     pub handler_queue: u64,
     pub client_delivery: u64,
+    pub sampling: u64,
+    pub readback: u64,
+    pub gpu_lock_wait: u64,
+    pub graph_capture: u64,
+    pub graph_replay: u64,
+    pub synchronization: u64,
+    pub resize: u64,
+    pub trim: u64,
+    pub adapter: u64,
+    pub training: u64,
     pub unexplained: u64,
 }
 
@@ -208,6 +415,16 @@ impl LatencyStallReasonCounts {
             LatencyStallReason::ResponseDelivery => &mut self.response_delivery,
             LatencyStallReason::HandlerQueue => &mut self.handler_queue,
             LatencyStallReason::ClientDelivery => &mut self.client_delivery,
+            LatencyStallReason::Sampling => &mut self.sampling,
+            LatencyStallReason::Readback => &mut self.readback,
+            LatencyStallReason::GpuLockWait => &mut self.gpu_lock_wait,
+            LatencyStallReason::GraphCapture => &mut self.graph_capture,
+            LatencyStallReason::GraphReplay => &mut self.graph_replay,
+            LatencyStallReason::Synchronization => &mut self.synchronization,
+            LatencyStallReason::Resize => &mut self.resize,
+            LatencyStallReason::Trim => &mut self.trim,
+            LatencyStallReason::Adapter => &mut self.adapter,
+            LatencyStallReason::Training => &mut self.training,
             LatencyStallReason::Unexplained => &mut self.unexplained,
         };
         *value = value.saturating_add(1);
@@ -221,6 +438,16 @@ impl LatencyStallReasonCounts {
             .saturating_add(self.response_delivery)
             .saturating_add(self.handler_queue)
             .saturating_add(self.client_delivery)
+            .saturating_add(self.sampling)
+            .saturating_add(self.readback)
+            .saturating_add(self.gpu_lock_wait)
+            .saturating_add(self.graph_capture)
+            .saturating_add(self.graph_replay)
+            .saturating_add(self.synchronization)
+            .saturating_add(self.resize)
+            .saturating_add(self.trim)
+            .saturating_add(self.adapter)
+            .saturating_add(self.training)
             .saturating_add(self.unexplained)
     }
 }
@@ -404,8 +631,8 @@ impl RequestLatencyTracker {
                     .then(|| duration_ms(self.phase_totals.actor_prefill)),
                 decode_ms: (token_phase_observed && self.actor_phases_observed)
                     .then(|| duration_ms(self.phase_totals.actor_decode)),
-                sampling_ms: None,
-                readback_ms: None,
+                sampling_ms: self.phase_totals.backend.sampling.map(duration_ms),
+                readback_ms: self.phase_totals.backend.readback.map(duration_ms),
                 response_delivery_ms: token_phase_observed
                     .then(|| duration_ms(self.phase_totals.response_delivery)),
                 handler_queue_ms: token_phase_observed
@@ -413,14 +640,14 @@ impl RequestLatencyTracker {
                 client_delivery_ms: self
                     .client_delivery_observed
                     .then(|| duration_ms(self.client_delivery_total)),
-                gpu_lock_wait_ms: None,
-                graph_capture_ms: None,
-                graph_replay_ms: None,
-                synchronization_ms: None,
-                resize_ms: None,
-                trim_ms: None,
-                adapter_ms: None,
-                training_ms: None,
+                gpu_lock_wait_ms: self.phase_totals.backend.gpu_lock_wait.map(duration_ms),
+                graph_capture_ms: self.phase_totals.backend.graph_capture.map(duration_ms),
+                graph_replay_ms: self.phase_totals.backend.graph_replay.map(duration_ms),
+                synchronization_ms: self.phase_totals.backend.synchronization.map(duration_ms),
+                resize_ms: self.phase_totals.backend.resize.map(duration_ms),
+                trim_ms: self.phase_totals.backend.trim.map(duration_ms),
+                adapter_ms: self.phase_totals.backend.adapter.map(duration_ms),
+                training_ms: self.phase_totals.backend.training.map(duration_ms),
                 unexplained_ms: token_phase_observed
                     .then(|| duration_ms(self.phase_totals.unexplained)),
             },
@@ -552,6 +779,44 @@ mod tests {
         };
         phases.account_unexplained_wall_time(Duration::from_millis(100));
         assert_eq!(phases.unexplained, Duration::from_millis(20));
+    }
+
+    #[test]
+    fn backend_subphase_can_explain_a_stall_inside_broad_actor_decode_wall_time() {
+        let start = Instant::now();
+        let mut tracker = RequestLatencyTracker::new(start, None);
+        for offset_ms in [0, 10, 20] {
+            let ready_at = start + Duration::from_millis(offset_ms);
+            tracker.record_token(
+                EngineTokenTiming::ready(ready_at, TokenPhaseDurations::default()),
+                ready_at,
+            );
+        }
+
+        let mut backend = BackendPhaseDurations::default();
+        backend.observe_synchronization(Duration::from_millis(260));
+        let ready_at = start + Duration::from_millis(320);
+        let observation = tracker
+            .record_token(
+                EngineTokenTiming::ready(
+                    ready_at,
+                    TokenPhaseDurations {
+                        actor_decode: Duration::from_millis(290),
+                        backend,
+                        ..TokenPhaseDurations::default()
+                    },
+                ),
+                ready_at,
+            )
+            .unwrap();
+
+        assert_eq!(observation.reason, LatencyStallReason::Synchronization);
+        assert_eq!(observation.attributed_duration, Duration::from_millis(260));
+        let diagnostics = tracker.diagnostics();
+        assert_eq!(diagnostics.stall_reasons.synchronization, 1);
+        assert_eq!(diagnostics.phases.decode_ms, Some(290.0));
+        assert_eq!(diagnostics.phases.synchronization_ms, Some(260.0));
+        assert_eq!(diagnostics.phases.sampling_ms, None);
     }
 
     #[test]

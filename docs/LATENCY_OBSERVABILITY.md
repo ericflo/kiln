@@ -87,6 +87,16 @@ use the same `RequestLatencyDiagnostics` object:
     "response_delivery": 0,
     "handler_queue": 0,
     "client_delivery": 0,
+    "sampling": 0,
+    "readback": 0,
+    "gpu_lock_wait": 0,
+    "graph_capture": 0,
+    "graph_replay": 0,
+    "synchronization": 0,
+    "resize": 0,
+    "trim": 0,
+    "adapter": 0,
+    "training": 0,
     "unexplained": 0
   },
   "phases": {
@@ -100,10 +110,10 @@ use the same `RequestLatencyDiagnostics` object:
     "response_delivery_ms": 1.0,
     "handler_queue_ms": 1.0,
     "client_delivery_ms": 1.0,
-    "gpu_lock_wait_ms": null,
+    "gpu_lock_wait_ms": 0.2,
     "graph_capture_ms": null,
     "graph_replay_ms": null,
-    "synchronization_ms": null,
+    "synchronization_ms": 0.5,
     "resize_ms": null,
     "trim_ms": null,
     "adapter_ms": null,
@@ -135,35 +145,50 @@ The currently measured batching path exposes:
 | `tokenization_ms` | Prompt token encoding in the request handler |
 | `prefill_ms` | Actor prefill wall time accumulated while the request is active |
 | `decode_ms` | Actor decode wall time accumulated while the request is active |
+| `gpu_lock_wait_ms` | Time waiting to acquire the shared inference GPU-coordination guard for a decode step |
+| `synchronization_ms` | Time spent settling the decode step at the backend's external-yield boundary |
 | `response_delivery_ms` | Producer-ready to bounded-channel enqueue or bridge receipt |
 | `handler_queue_ms` | Producer delivery to handler receipt |
 | `client_delivery_ms` | Handler receipt to response-body enqueue for streams |
 | `unexplained_ms` | Wall time between tokens not covered by a measured phase candidate |
 
-Direct streaming measures `tokenization_ms`, model-ready-to-bridge
+The batching engine measures `gpu_lock_wait_ms` and `synchronization_ms` on the
+owned decode invocation and propagates those observations only to requests
+active for that step. Direct streaming measures `tokenization_ms`, model-ready-to-bridge
 `response_delivery_ms`, bridge-to-handler `handler_queue_ms`, response-body
 enqueue `client_delivery_ms`, and request-local `unexplained_ms`. Its
 `actor_queue_ms`, `actor_admission_ms`, `prefill_ms`, and `decode_ms` fields are
-`null`, because that path does not expose actor phase boundaries.
+`null`, because that path does not expose actor phase boundaries; its backend
+subphase fields also remain `null` until the direct model path returns the same
+invocation-owned timing envelope.
 
-Sampling, device readback, GPU-lock wait, graph capture/replay,
-synchronization, resize, trim, adapter, and training remain explicit nullable
-fields. Their aggregate subsystems have separate operational telemetry, but
-they are not yet joined to each request-token timeline. A diagnostic consumer
-must preserve this distinction.
+Sampling, device readback, graph capture/replay, resize, trim, adapter, and
+training remain explicit nullable fields. Their aggregate subsystems have
+separate operational telemetry, but they are not yet joined to each
+request-token timeline. In particular, Kiln does not infer a request's graph
+time from process-global before/after counters because concurrent inference
+could make that attribution false. A diagnostic consumer must preserve the
+difference between `null` (not measured on this path) and `0` (measured with no
+material elapsed time).
 
 Phase values are blocking candidates, not an additive critical-path
 decomposition. Work can overlap, especially response delivery with the next
-actor forward. Do not sum every phase and compare it with total request time.
+actor forward, and the broad `decode_ms` interval contains any measured backend
+subphases. Do not sum every phase and compare it with total request time.
 When computing `unexplained_ms`, Kiln conservatively subtracts the larger of
-serial actor work and response delivery rather than their sum, so overlap
-cannot falsely erase missing wall time.
+serial actor work, response delivery, and the largest backend candidate rather
+than their sum, so overlap cannot falsely erase missing wall time.
 
 For each inter-token gap, Kiln selects the largest measured candidate since
-the preceding token. A candidate must explain at least the smaller of 250 ms
-or half the gap; otherwise the reason is `unexplained`. The bounded reason set
-is `actor_queue`, `actor_admission`, `actor_prefill`, `actor_decode`,
-`response_delivery`, `handler_queue`, `client_delivery`, and `unexplained`.
+the preceding token. For classification, the broad actor-decode candidate is
+reduced by only the largest measured backend subphase; detailed phases may
+overlap, so subtracting their sum would manufacture coverage. A candidate must
+explain at least the smaller of 250 ms or half the gap; otherwise the reason is
+`unexplained`. The bounded reason set is `actor_queue`, `actor_admission`,
+`actor_prefill`, `actor_decode`, `response_delivery`, `handler_queue`,
+`client_delivery`, `sampling`, `readback`, `gpu_lock_wait`, `graph_capture`,
+`graph_replay`, `synchronization`, `resize`, `trim`, `adapter`, `training`, and
+`unexplained`. Reasons whose phase is unsupported remain zero.
 
 ## Per-Token SSE Object
 

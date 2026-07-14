@@ -546,7 +546,17 @@
           "response_delivery": 0,
           "handler_queue": 0,
           "client_delivery": 0,
-          "unexplained": 0
+          "unexplained": 0,
+          "sampling": 0,
+          "readback": 0,
+          "gpu_lock_wait": 0,
+          "graph_capture": 0,
+          "graph_replay": 0,
+          "synchronization": 0,
+          "resize": 0,
+          "trim": 0,
+          "adapter": 0,
+          "training": 0
         },
         "sample_count": 84,
         "window_secs": 60.0
@@ -1786,7 +1796,17 @@
             "response_delivery": 0,
             "handler_queue": 0,
             "client_delivery": 0,
-            "unexplained": 0
+            "unexplained": 0,
+            "sampling": 0,
+            "readback": 0,
+            "gpu_lock_wait": 0,
+            "graph_capture": 0,
+            "graph_replay": 0,
+            "synchronization": 0,
+            "resize": 0,
+            "trim": 0,
+            "adapter": 0,
+            "training": 0
           },
           "phases": {
             "actor_queue_ms": 8.0,
@@ -1799,10 +1819,10 @@
             "response_delivery_ms": 3.0,
             "handler_queue_ms": 1.0,
             "client_delivery_ms": 2.0,
-            "gpu_lock_wait_ms": null,
+            "gpu_lock_wait_ms": 0.7,
             "graph_capture_ms": null,
             "graph_replay_ms": null,
-            "synchronization_ms": null,
+            "synchronization_ms": 1.4,
             "resize_ms": null,
             "trim_ms": null,
             "adapter_ms": null,
@@ -1864,7 +1884,17 @@
               "response_delivery": 0,
               "handler_queue": 0,
               "client_delivery": 0,
-              "unexplained": 0
+              "unexplained": 0,
+              "sampling": 0,
+              "readback": 0,
+              "gpu_lock_wait": 0,
+              "graph_capture": 0,
+              "graph_replay": 0,
+              "synchronization": 0,
+              "resize": 0,
+              "trim": 0,
+              "adapter": 0,
+              "training": 0
             },
             "phases": {
               "actor_queue_ms": 8.0,
@@ -1877,10 +1907,10 @@
               "response_delivery_ms": 3.0,
               "handler_queue_ms": 1.0,
               "client_delivery_ms": 2.0,
-              "gpu_lock_wait_ms": null,
+              "gpu_lock_wait_ms": 0.7,
               "graph_capture_ms": null,
               "graph_replay_ms": null,
-              "synchronization_ms": null,
+              "synchronization_ms": 1.4,
               "resize_ms": null,
               "trim_ms": null,
               "adapter_ms": null,
@@ -4555,6 +4585,16 @@
         "response_delivery",
         "handler_queue",
         "client_delivery",
+        "sampling",
+        "readback",
+        "gpu_lock_wait",
+        "graph_capture",
+        "graph_replay",
+        "synchronization",
+        "resize",
+        "trim",
+        "adapter",
+        "training",
         "unexplained"
       ],
       "properties": {
@@ -4577,6 +4617,36 @@
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "client_delivery": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "sampling": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "readback": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "gpu_lock_wait": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "graph_capture": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "graph_replay": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "synchronization": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "resize": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "trim": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "adapter": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "training": {
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "unexplained": {

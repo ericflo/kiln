@@ -2909,7 +2909,10 @@ function requestLatencySection(r) {
   const reasonLabels = {
     actor_queue: 'actor queue', actor_admission: 'admission', actor_prefill: 'prefill',
     actor_decode: 'decode', response_delivery: 'response delivery', handler_queue: 'handler queue',
-    client_delivery: 'body enqueue', unexplained: 'unexplained',
+    client_delivery: 'body enqueue', sampling: 'sampling', readback: 'readback',
+    gpu_lock_wait: 'GPU lock wait', graph_capture: 'graph capture', graph_replay: 'graph replay',
+    synchronization: 'synchronization', resize: 'resize', trim: 'trim', adapter: 'adapter',
+    training: 'training', unexplained: 'unexplained',
   };
   const reasons = Object.entries(reasonLabels)
     .filter(([key]) => Number(latency.stall_reasons?.[key] || 0) > 0)

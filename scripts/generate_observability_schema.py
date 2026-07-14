@@ -1282,7 +1282,12 @@ def build_definitions() -> None:
         "actor_queue": ref("NonNegativeInteger"), "actor_admission": ref("NonNegativeInteger"),
         "actor_prefill": ref("NonNegativeInteger"), "actor_decode": ref("NonNegativeInteger"),
         "response_delivery": ref("NonNegativeInteger"), "handler_queue": ref("NonNegativeInteger"),
-        "client_delivery": ref("NonNegativeInteger"), "unexplained": ref("NonNegativeInteger"),
+        "client_delivery": ref("NonNegativeInteger"), "sampling": ref("NonNegativeInteger"),
+        "readback": ref("NonNegativeInteger"), "gpu_lock_wait": ref("NonNegativeInteger"),
+        "graph_capture": ref("NonNegativeInteger"), "graph_replay": ref("NonNegativeInteger"),
+        "synchronization": ref("NonNegativeInteger"), "resize": ref("NonNegativeInteger"),
+        "trim": ref("NonNegativeInteger"), "adapter": ref("NonNegativeInteger"),
+        "training": ref("NonNegativeInteger"), "unexplained": ref("NonNegativeInteger"),
     }, "Fixed-cardinality token-stall counts by dominant blocking reason.")
     nullable_duration = nullable(ref("NonNegativeNumber"))
     add_object("LatencyPhaseTimings", "LatencyPhaseTimings", {
@@ -1415,6 +1420,9 @@ def build_schema() -> dict[str, Any]:
         "stall_reasons": {
             "actor_queue": 0, "actor_admission": 0, "actor_prefill": 0, "actor_decode": 0,
             "response_delivery": 0, "handler_queue": 0, "client_delivery": 0, "unexplained": 0,
+            "sampling": 0, "readback": 0, "gpu_lock_wait": 0, "graph_capture": 0,
+            "graph_replay": 0, "synchronization": 0, "resize": 0, "trim": 0,
+            "adapter": 0, "training": 0,
         },
         "sample_count": 84, "window_secs": 60.0,
     }]
@@ -1438,13 +1446,16 @@ def build_schema() -> dict[str, Any]:
             "stall_reasons": {
                 "actor_queue": 0, "actor_admission": 0, "actor_prefill": 0, "actor_decode": 0,
                 "response_delivery": 0, "handler_queue": 0, "client_delivery": 0, "unexplained": 0,
+                "sampling": 0, "readback": 0, "gpu_lock_wait": 0, "graph_capture": 0,
+                "graph_replay": 0, "synchronization": 0, "resize": 0, "trim": 0,
+                "adapter": 0, "training": 0,
             },
             "phases": {
                 "actor_queue_ms": 8.0, "actor_admission_ms": 1.0, "tokenization_ms": 2.0,
                 "prefill_ms": 39.0, "decode_ms": 580.0, "sampling_ms": None,
                 "readback_ms": None, "response_delivery_ms": 3.0, "handler_queue_ms": 1.0,
-                "client_delivery_ms": 2.0, "gpu_lock_wait_ms": None, "graph_capture_ms": None,
-                "graph_replay_ms": None, "synchronization_ms": None, "resize_ms": None,
+                "client_delivery_ms": 2.0, "gpu_lock_wait_ms": 0.7, "graph_capture_ms": None,
+                "graph_replay_ms": None, "synchronization_ms": 1.4, "resize_ms": None,
                 "trim_ms": None, "adapter_ms": None, "training_ms": None, "unexplained_ms": 1.0,
             },
         },

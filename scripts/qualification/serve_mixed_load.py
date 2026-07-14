@@ -677,6 +677,8 @@ def parse_token_timing(
     valid_phases = {
         "actor_queue", "actor_admission", "actor_prefill", "actor_decode",
         "response_delivery", "handler_queue", "client_delivery", "unexplained",
+        "sampling", "readback", "gpu_lock_wait", "graph_capture", "graph_replay",
+        "synchronization", "resize", "trim", "adapter", "training",
     }
     if blocking_phase is None:
         if blocking_phase_ms is not None:
@@ -730,6 +732,8 @@ LATENCY_PHASE_FIELDS = {
 LATENCY_REASON_FIELDS = {
     "actor_queue", "actor_admission", "actor_prefill", "actor_decode", "response_delivery",
     "handler_queue", "client_delivery", "unexplained",
+    "sampling", "readback", "gpu_lock_wait", "graph_capture", "graph_replay",
+    "synchronization", "resize", "trim", "adapter", "training",
 }
 
 
