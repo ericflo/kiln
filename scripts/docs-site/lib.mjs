@@ -39,7 +39,7 @@ const IMAGE_EXTENSIONS = new Set([
   '.webp',
 ]);
 const OUTPUT_MARKER = '.kiln-docs-site-output';
-const DOCUMENT_KINDS = new Set(['markdown', 'json_schema']);
+const DOCUMENT_KINDS = new Set(['markdown', 'json_schema', 'openapi']);
 
 export class DocsBuildError extends Error {
   constructor(messages) {
@@ -363,6 +363,121 @@ function renderJsonSchemaMarkdown(schema, document) {
   return `${lines.join('\n').trim()}\n`;
 }
 
+function openApiOperations(spec) {
+  const methods = ['get', 'post', 'put', 'patch', 'delete'];
+  const operations = [];
+  for (const [path, item] of Object.entries(spec?.paths ?? {})) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    for (const method of methods) {
+      const operation = item[method];
+      if (operation && typeof operation === 'object' && !Array.isArray(operation)) {
+        operations.push({ path, method: method.toUpperCase(), operation });
+      }
+    }
+  }
+  return operations;
+}
+
+function openApiRequestSummary(operation) {
+  const parts = [];
+  const pathParameters = (operation.parameters ?? [])
+    .filter((parameter) => parameter?.in === 'path')
+    .map((parameter) => parameter.name);
+  const headerParameters = (operation.parameters ?? [])
+    .filter((parameter) => parameter?.in === 'header')
+    .map((parameter) => parameter.name);
+  if (pathParameters.length > 0) parts.push(`path: ${pathParameters.join(', ')}`);
+  if (headerParameters.length > 0) parts.push(`headers: ${headerParameters.join(', ')}`);
+  if (nonEmptyString(operation['x-kiln-query-rust-type'])) {
+    parts.push(`query: ${operation['x-kiln-query-rust-type']}`);
+  }
+  const body = operation.requestBody;
+  if (body?.content && typeof body.content === 'object') {
+    const media = Object.keys(body.content).join(', ');
+    const type = body['x-kiln-rust-type'] ?? 'declared body';
+    parts.push(`body: ${type} (${media})`);
+  }
+  return parts.join('; ') || 'none';
+}
+
+function openApiResponseSummary(operation) {
+  const successes = Object.entries(operation.responses ?? {})
+    .filter(([status]) => /^\d+$/.test(status) && Number(status) >= 100 && Number(status) < 400);
+  if (successes.length === 0) return 'unspecified';
+  return successes.map(([status, response]) => {
+    const media = Object.keys(response?.content ?? {}).join(', ') || 'no body';
+    const type = response?.['x-kiln-rust-type'] ?? 'declared response';
+    return `${status}: ${type} (${media})`;
+  }).join('; ');
+}
+
+function renderOpenApiMarkdown(spec, document) {
+  const operations = openApiOperations(spec);
+  const lines = [`# ${document.title}`, ''];
+  if (nonEmptyString(spec?.info?.description)) lines.push(spec.info.description.trim(), '');
+  lines.push('## Contract status', '');
+  lines.push(
+    `This contract contains **${Object.keys(spec?.paths ?? {}).length} paths** and **${operations.length} operations**. `
+      + `Field-level payload schemas are \`${spec?.['x-kiln-field-schema-status'] ?? 'unspecified'}\`; every operation and transport remains canonical even while explicitly open payload components are migrated.`,
+    '',
+  );
+  lines.push('## OpenAPI identity', '');
+  lines.push('| Property | Value |', '| --- | --- |');
+  lines.push(`| Title | ${markdownTableCell(spec?.info?.title ?? document.title)} |`);
+  lines.push(`| Version | \`${markdownTableCell(spec?.info?.version ?? 'unknown')}\` |`);
+  lines.push(`| OpenAPI | \`${markdownTableCell(spec?.openapi ?? 'unknown')}\` |`);
+  if (nonEmptyString(spec?.jsonSchemaDialect)) {
+    lines.push(`| JSON Schema dialect | \`${markdownTableCell(spec.jsonSchemaDialect)}\` |`);
+  }
+  const servers = (spec?.servers ?? []).map((server) => server?.url).filter(nonEmptyString);
+  lines.push(`| Servers | ${markdownTableCell(servers.join(', ') || 'none')} |`, '');
+  if (spec?.['x-kiln-method-counts'] && typeof spec['x-kiln-method-counts'] === 'object') {
+    const counts = Object.entries(spec['x-kiln-method-counts'])
+      .map(([method, count]) => `${method} ${count}`)
+      .join(', ');
+    lines.splice(lines.length - 1, 0, `| Method counts | ${markdownTableCell(counts)} |`);
+  }
+
+  const tags = Array.isArray(spec?.tags) ? spec.tags : [];
+  for (const tag of tags) {
+    const tagged = operations.filter(({ operation }) => operation.tags?.includes(tag.name));
+    lines.push(`## ${tag.name}`, '');
+    if (nonEmptyString(tag.description)) lines.push(tag.description.trim(), '');
+    lines.push(
+      '| Method | Path | Summary | Request inputs | Successful response | Owner |',
+      '| --- | --- | --- | --- | --- | --- |',
+    );
+    for (const { path, method, operation } of tagged) {
+      const transport = operation['x-kiln-transport'] === 'websocket' ? ' (WebSocket)' : '';
+      lines.push(
+        `| \`${method}\` | \`${markdownTableCell(path)}\` | ${markdownTableCell(operation.summary)}${transport} | ${markdownTableCell(openApiRequestSummary(operation))} | ${markdownTableCell(openApiResponseSummary(operation))} | \`${markdownTableCell(operation['x-kiln-handler'] ?? 'unknown')}\` |`,
+      );
+    }
+    lines.push('');
+  }
+
+  const schemas = spec?.components?.schemas ?? {};
+  lines.push('## Payload components', '');
+  lines.push(
+    'Open components are explicit migration markers, not an assertion that arbitrary fields are accepted by the runtime.',
+    '',
+    '| Component | Rust type | Shape | Field status |',
+    '| --- | --- | --- | --- |',
+  );
+  for (const [name, schema] of Object.entries(schemas)) {
+    let shape = schemaType(schema);
+    if (schema?.type === 'object') {
+      shape += schema.additionalProperties === false ? '; closed' : '; open';
+    }
+    const status = schema?.type === 'object' && schema.additionalProperties === true
+      ? 'migration pending'
+      : 'declared';
+    lines.push(`| \`${markdownTableCell(name)}\` | \`${markdownTableCell(schema?.['x-kiln-rust-type'] ?? 'unknown')}\` | ${markdownTableCell(shape)} | ${status} |`);
+  }
+  lines.push('');
+  return `${lines.join('\n').trim()}\n`;
+}
+
 async function pathIsFile(path) {
   try {
     return (await lstat(path)).isFile();
@@ -461,6 +576,9 @@ export async function loadAndValidateManifest({ repoRoot, manifestPath }) {
     if (kind === 'json_schema' && extension !== '.json') {
       errors.push(`${label}.source must be a JSON file for kind json_schema`);
     }
+    if (kind === 'openapi' && extension !== '.json') {
+      errors.push(`${label}.source must be a JSON file for kind openapi`);
+    }
     if (sources.has(document.source)) {
       errors.push(`duplicate document source ${document.source}`);
     } else {
@@ -484,13 +602,17 @@ export async function loadAndValidateManifest({ repoRoot, manifestPath }) {
       errors.push(`${label}.source escapes the repository: ${document.source}`);
     } else if (!(await pathIsFile(absoluteSource))) {
       errors.push(`${label}.source does not exist or is not a file: ${document.source}`);
-    } else if (kind === 'json_schema') {
+    } else if (kind === 'json_schema' || kind === 'openapi') {
       try {
-        const schema = JSON.parse(await readFile(absoluteSource, 'utf8'));
-        if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
-          errors.push(`${label}.source must contain a JSON Schema object`);
-        } else if (!nonEmptyString(schema.$schema)) {
+        const parsed = JSON.parse(await readFile(absoluteSource, 'utf8'));
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          errors.push(`${label}.source must contain a JSON object`);
+        } else if (kind === 'json_schema' && !nonEmptyString(parsed.$schema)) {
           errors.push(`${label}.source must declare a non-empty $schema dialect`);
+        } else if (kind === 'openapi' && (!nonEmptyString(parsed.openapi) || !parsed.openapi.startsWith('3.1.'))) {
+          errors.push(`${label}.source must declare an OpenAPI 3.1 version`);
+        } else if (kind === 'openapi' && (!parsed.paths || typeof parsed.paths !== 'object' || Array.isArray(parsed.paths))) {
+          errors.push(`${label}.source must declare an OpenAPI paths object`);
         }
       } catch (error) {
         errors.push(`${label}.source is not valid JSON: ${error.message}`);
@@ -881,7 +1003,8 @@ export async function buildDocsSite({
     const sourceRaw = await readFile(sourcePath, 'utf8');
     const document = documentBySource.get(source);
     let raw = sourceRaw;
-    if (documentKind(document ?? {}) === 'json_schema') {
+    const kind = documentKind(document ?? {});
+    if (kind === 'json_schema') {
       let schema;
       try {
         schema = JSON.parse(sourceRaw);
@@ -889,6 +1012,14 @@ export async function buildDocsSite({
         throw new DocsBuildError(`${source}: cannot render JSON Schema: ${error.message}`);
       }
       raw = renderJsonSchemaMarkdown(schema, document);
+    } else if (kind === 'openapi') {
+      let spec;
+      try {
+        spec = JSON.parse(sourceRaw);
+      } catch (error) {
+        throw new DocsBuildError(`${source}: cannot render OpenAPI: ${error.message}`);
+      }
+      raw = renderOpenApiMarkdown(spec, document);
     }
     const tokens = markdown.parse(raw, {});
     const headingData = decorateHeadings(tokens, raw);

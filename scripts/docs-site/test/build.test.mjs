@@ -341,6 +341,123 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
   );
 });
 
+test('OpenAPI documents render every operation, transport, owner, and payload status', async () => {
+  const fixture = await createFixture();
+  const manifest = fixtureManifest();
+  manifest.documents.push({
+    source: 'contracts/http.openapi.json',
+    kind: 'openapi',
+    slug: 'http-api',
+    title: 'HTTP API',
+    section: 'start',
+    description: 'Generated HTTP contract.',
+  });
+  await write(fixture.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  await write(
+    resolve(fixture.root, 'contracts/http.openapi.json'),
+    `${JSON.stringify({
+      openapi: '3.1.1',
+      jsonSchemaDialect: 'https://json-schema.org/draft/2020-12/schema',
+      info: {
+        title: 'Fixture HTTP API',
+        version: '1.0.0',
+        description: 'Canonical fixture operation inventory.',
+      },
+      servers: [{ url: 'http://127.0.0.1:8420' }],
+      tags: [
+        { name: 'status', description: 'Operational status.' },
+        { name: 'terminal', description: 'Terminal transport.' },
+      ],
+      paths: {
+        '/health': {
+          get: {
+            tags: ['status'],
+            summary: 'Get health',
+            operationId: 'get_health',
+            'x-kiln-handler': 'health::health',
+            'x-kiln-transport': 'http',
+            'x-kiln-query-rust-type': 'HealthQuery',
+            responses: {
+              200: {
+                description: 'Success.',
+                'x-kiln-rust-type': 'HealthResponse',
+                content: {
+                  'application/json': { schema: { $ref: '#/components/schemas/HealthResponse' } },
+                },
+              },
+            },
+          },
+        },
+        '/v1/terminal/ws': {
+          get: {
+            tags: ['terminal'],
+            summary: 'Open terminal',
+            operationId: 'open_terminal',
+            'x-kiln-handler': 'terminal::terminal_ws',
+            'x-kiln-transport': 'websocket',
+            parameters: [{ name: 'Origin', in: 'header', schema: { type: 'string' } }],
+            responses: {
+              101: {
+                description: 'Upgrade.',
+                'x-kiln-rust-type': 'WebSocketUpgrade',
+                content: {
+                  'application/octet-stream': { schema: { $ref: '#/components/schemas/WebSocketUpgrade' } },
+                },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          HealthResponse: {
+            type: 'object',
+            additionalProperties: true,
+            'x-kiln-rust-type': 'HealthResponse',
+          },
+          WebSocketUpgrade: {
+            type: 'string',
+            format: 'binary',
+            'x-kiln-rust-type': 'WebSocketUpgrade',
+          },
+        },
+      },
+      'x-kiln-field-schema-status': 'migration_pending',
+    }, null, 2)}\n`,
+  );
+
+  const output = resolve(fixture.root, '.openapi-output');
+  await buildDocsSite({
+    repoRoot: fixture.root,
+    siteSourceDir: fixture.site,
+    manifestPath: fixture.manifestPath,
+    outDir: output,
+  });
+  const html = await readFile(resolve(output, 'docs/http-api/index.html'), 'utf8');
+  assert.match(html, /Fixture HTTP API/);
+  assert.match(html, /2 paths/);
+  assert.match(html, /2 operations/);
+  assert.match(html, /<code>GET<\/code>/);
+  assert.match(html, /<code>\/v1\/terminal\/ws<\/code>/);
+  assert.match(html, /WebSocket/);
+  assert.match(html, /query: HealthQuery/);
+  assert.match(html, /headers: Origin/);
+  assert.match(html, /terminal::terminal_ws/);
+  assert.match(html, /Payload components/);
+  assert.match(html, /migration pending/);
+
+  const index = JSON.parse(await readFile(resolve(output, 'docs/search-index.json'), 'utf8'));
+  const entry = index.find((item) => item.slug === 'http-api');
+  assert.match(entry.content, /\/v1\/terminal\/ws/);
+  assert.match(entry.content, /WebSocket/);
+
+  await write(resolve(fixture.root, 'contracts/http.openapi.json'), '{invalid');
+  await assert.rejects(
+    loadAndValidateManifest({ repoRoot: fixture.root, manifestPath: fixture.manifestPath }),
+    (error) => error instanceof DocsBuildError && /not valid JSON/.test(error.message),
+  );
+});
+
 test('broken Markdown anchors fail before publication', async () => {
   const fixture = await createFixture();
   await write(

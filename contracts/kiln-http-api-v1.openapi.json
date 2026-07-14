@@ -1,0 +1,4857 @@
+{
+  "openapi": "3.1.1",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Kiln HTTP API",
+    "version": "1.0.0",
+    "description": "Canonical inventory of every production HTTP route, method, transport, handler owner, request type, response type, status, media type, path/header/query input, and structured error envelope. Component field schemas marked as migration-pending remain open objects until their serde contracts are moved into canonical schemas."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8420"
+    }
+  ],
+  "tags": [
+    {
+      "name": "ui",
+      "description": "Embedded offline dashboard, redirects, and static assets."
+    },
+    {
+      "name": "observability",
+      "description": "Health, metrics, configuration, model identity, and runtime statistics."
+    },
+    {
+      "name": "inference",
+      "description": "OpenAI-compatible chat, prompt scoring, and batch text generation."
+    },
+    {
+      "name": "adapters",
+      "description": "Adapter discovery, loading, transfer, merge, deletion, and receipts."
+    },
+    {
+      "name": "corrections",
+      "description": "Captured correction rows and training lifecycle marking."
+    },
+    {
+      "name": "teachers",
+      "description": "Identity-bound remote teacher registration and cache artifacts."
+    },
+    {
+      "name": "agents",
+      "description": "Embedded agent runs, imported traces, and self-improvement workflows."
+    },
+    {
+      "name": "training",
+      "description": "Native SFT, GRPO, OPD, distillation, queue, and job lifecycle."
+    },
+    {
+      "name": "hf-trl",
+      "description": "Immutable Hugging Face/TRL exports and verified PEFT imports."
+    },
+    {
+      "name": "evals",
+      "description": "Eval suites, datasets, jobs, synthesis, and judgment datasets."
+    },
+    {
+      "name": "preflight",
+      "description": "Compatibility, capacity, tier defaults, and intent routing."
+    },
+    {
+      "name": "recipes",
+      "description": "Built-in multi-step training recipes."
+    },
+    {
+      "name": "library",
+      "description": "Adapter library discovery, installation, and publication."
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Redirect root to ui",
+        "operationId": "ui_redirect_root_to_ui_get",
+        "x-kiln-handler": "ui::redirect_root_to_ui",
+        "x-kiln-rust-signature": "async fn redirect_root_to_ui() -> Redirect",
+        "x-kiln-transport": "http",
+        "responses": {
+          "303": {
+            "description": "Successful response.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "$ref": "#/components/schemas/Redirect"
+                }
+              }
+            },
+            "x-kiln-rust-type": "Redirect",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "observability"
+        ],
+        "summary": "Get server readiness and runtime diagnostics",
+        "operationId": "health_health_get_health",
+        "x-kiln-handler": "health::health",
+        "x-kiln-rust-signature": "async fn health(State(state): State<AppState>) -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "HealthResponse"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "observability"
+        ],
+        "summary": "Export Prometheus metrics",
+        "operationId": "metrics_metrics_handler_get_metrics",
+        "x-kiln-handler": "metrics::metrics_handler",
+        "x-kiln-rust-signature": "async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrometheusText"
+                }
+              }
+            },
+            "x-kiln-rust-type": "PrometheusText"
+          }
+        }
+      }
+    },
+    "/ui": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Redirect ui to slash",
+        "operationId": "ui_redirect_ui_to_slash_get_ui",
+        "x-kiln-handler": "ui::redirect_ui_to_slash",
+        "x-kiln-rust-signature": "async fn redirect_ui_to_slash(uri: Uri) -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "307": {
+            "description": "Successful response.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "$ref": "#/components/schemas/Redirect"
+                }
+              }
+            },
+            "x-kiln-rust-type": "Redirect",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Serve ui",
+        "operationId": "ui_serve_ui_get_ui",
+        "x-kiln-handler": "ui::serve_ui",
+        "x-kiln-rust-signature": "async fn serve_ui() -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "$ref": "#/components/schemas/HtmlDocument"
+                }
+              }
+            },
+            "x-kiln-rust-type": "HtmlDocument"
+          }
+        }
+      }
+    },
+    "/ui/app.js": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Serve app js",
+        "operationId": "ui_serve_app_js_get_ui_app_js",
+        "x-kiln-handler": "ui::serve_app_js",
+        "x-kiln-rust-signature": "async fn serve_app_js() -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/javascript": {
+                "schema": {
+                  "$ref": "#/components/schemas/JavaScriptSource"
+                }
+              }
+            },
+            "x-kiln-rust-type": "JavaScriptSource"
+          }
+        }
+      }
+    },
+    "/ui/demo.js": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Serve demo js",
+        "operationId": "ui_serve_demo_js_get_ui_demo_js",
+        "x-kiln-handler": "ui::serve_demo_js",
+        "x-kiln-rust-signature": "async fn serve_demo_js() -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/javascript": {
+                "schema": {
+                  "$ref": "#/components/schemas/JavaScriptSource"
+                }
+              }
+            },
+            "x-kiln-rust-type": "JavaScriptSource"
+          }
+        }
+      }
+    },
+    "/ui/styles.css": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Serve styles css",
+        "operationId": "ui_serve_styles_css_get_ui_styles_css",
+        "x-kiln-handler": "ui::serve_styles_css",
+        "x-kiln-rust-signature": "async fn serve_styles_css() -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "text/css": {
+                "schema": {
+                  "$ref": "#/components/schemas/CssStylesheet"
+                }
+              }
+            },
+            "x-kiln-rust-type": "CssStylesheet"
+          }
+        }
+      }
+    },
+    "/ui/vendor/xterm-addon-fit.js": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Serve xterm fit js",
+        "operationId": "ui_serve_xterm_fit_js_get_ui_vendor_xterm_addon_fit_js",
+        "x-kiln-handler": "ui::serve_xterm_fit_js",
+        "x-kiln-rust-signature": "async fn serve_xterm_fit_js() -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/javascript": {
+                "schema": {
+                  "$ref": "#/components/schemas/JavaScriptSource"
+                }
+              }
+            },
+            "x-kiln-rust-type": "JavaScriptSource"
+          }
+        }
+      }
+    },
+    "/ui/vendor/xterm.css": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Serve xterm css",
+        "operationId": "ui_serve_xterm_css_get_ui_vendor_xterm_css",
+        "x-kiln-handler": "ui::serve_xterm_css",
+        "x-kiln-rust-signature": "async fn serve_xterm_css() -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "text/css": {
+                "schema": {
+                  "$ref": "#/components/schemas/CssStylesheet"
+                }
+              }
+            },
+            "x-kiln-rust-type": "CssStylesheet"
+          }
+        }
+      }
+    },
+    "/ui/vendor/xterm.js": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Serve xterm js",
+        "operationId": "ui_serve_xterm_js_get_ui_vendor_xterm_js",
+        "x-kiln-handler": "ui::serve_xterm_js",
+        "x-kiln-rust-signature": "async fn serve_xterm_js() -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/javascript": {
+                "schema": {
+                  "$ref": "#/components/schemas/JavaScriptSource"
+                }
+              }
+            },
+            "x-kiln-rust-type": "JavaScriptSource"
+          }
+        }
+      }
+    },
+    "/v1/adapters": {
+      "get": {
+        "tags": [
+          "adapters"
+        ],
+        "summary": "List adapters",
+        "operationId": "adapters_list_adapters_get_v1_adapters",
+        "x-kiln-handler": "adapters::list_adapters",
+        "x-kiln-rust-signature": "async fn list_adapters(State(state): State<AppState>) -> Json<AdaptersResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdaptersResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "AdaptersResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/adapters/distill_merge": {
+      "post": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Submit distill merge",
+        "operationId": "training_submit_distill_merge_post_v1_adapters_distill_merge",
+        "x-kiln-handler": "training::submit_distill_merge",
+        "x-kiln-rust-signature": "async fn submit_distill_merge( State(state): State<AppState>, payload: Result<Json<DistillMergeRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DistillMergeRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "DistillMergeRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TrainingResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/adapters/load": {
+      "post": {
+        "tags": [
+          "adapters"
+        ],
+        "summary": "Load adapter",
+        "operationId": "adapters_load_adapter_post_v1_adapters_load",
+        "x-kiln-handler": "adapters::load_adapter",
+        "x-kiln-rust-signature": "async fn load_adapter( State(state): State<AppState>, Json(req): Json<LoadAdapterRequest>, ) -> Result<Json<LoadAdapterResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoadAdapterRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "LoadAdapterRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoadAdapterResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "LoadAdapterResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/adapters/merge": {
+      "post": {
+        "tags": [
+          "adapters"
+        ],
+        "summary": "Merge adapters",
+        "operationId": "adapters_merge_adapters_post_v1_adapters_merge",
+        "x-kiln-handler": "adapters::merge_adapters",
+        "x-kiln-rust-signature": "async fn merge_adapters( State(state): State<AppState>, Json(req): Json<MergeAdapterRequest>, ) -> Result<Json<MergeAdapterResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeAdapterRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "MergeAdapterRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeAdapterResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "MergeAdapterResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/adapters/unload": {
+      "post": {
+        "tags": [
+          "adapters"
+        ],
+        "summary": "Unload adapter",
+        "operationId": "adapters_unload_adapter_post_v1_adapters_unload",
+        "x-kiln-handler": "adapters::unload_adapter",
+        "x-kiln-rust-signature": "async fn unload_adapter( State(state): State<AppState>, ) -> Result<Json<UnloadAdapterResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnloadAdapterResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "UnloadAdapterResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/adapters/upload": {
+      "post": {
+        "tags": [
+          "adapters"
+        ],
+        "summary": "Upload adapter",
+        "operationId": "adapters_upload_adapter_post_v1_adapters_upload",
+        "x-kiln-handler": "adapters::upload_adapter",
+        "x-kiln-rust-signature": "async fn upload_adapter( State(state): State<AppState>, mut multipart: Multipart, ) -> Result<Json<UploadAdapterResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/AdapterUploadMultipart"
+              }
+            }
+          },
+          "x-kiln-rust-type": "AdapterUploadMultipart"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadAdapterResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "UploadAdapterResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/adapters/{name}": {
+      "delete": {
+        "tags": [
+          "adapters"
+        ],
+        "summary": "Delete adapter",
+        "operationId": "adapters_delete_adapter_delete_v1_adapters_name",
+        "x-kiln-handler": "adapters::delete_adapter",
+        "x-kiln-rust-signature": "async fn delete_adapter( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DeleteAdapterResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteAdapterResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "DeleteAdapterResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/adapters/{name}/detail": {
+      "get": {
+        "tags": [
+          "adapters"
+        ],
+        "summary": "Adapter detail",
+        "operationId": "adapters_adapter_detail_get_v1_adapters_name_detail",
+        "x-kiln-handler": "adapters::adapter_detail",
+        "x-kiln-rust-signature": "async fn adapter_detail( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<AdapterDetail>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdapterDetail"
+                }
+              }
+            },
+            "x-kiln-rust-type": "AdapterDetail"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/adapters/{name}/download": {
+      "get": {
+        "tags": [
+          "adapters"
+        ],
+        "summary": "Download adapter",
+        "operationId": "adapters_download_adapter_get_v1_adapters_name_download",
+        "x-kiln-handler": "adapters::download_adapter",
+        "x-kiln-rust-signature": "async fn download_adapter( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Response, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/gzip": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryArchive"
+                }
+              }
+            },
+            "x-kiln-rust-type": "BinaryArchive",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/adapters/{name}/receipt": {
+      "get": {
+        "tags": [
+          "adapters"
+        ],
+        "summary": "Adapter receipt",
+        "operationId": "adapters_adapter_receipt_get_v1_adapters_name_receipt",
+        "x-kiln-handler": "adapters::adapter_receipt",
+        "x-kiln-rust-signature": "async fn adapter_receipt( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<kiln_train::AdapterReceipt>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/kiln_train_AdapterReceipt"
+                }
+              }
+            },
+            "x-kiln-rust-type": "kiln_train::AdapterReceipt"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/judge_distill": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Judge distill",
+        "operationId": "self_improve_judge_distill_post_v1_agent_judge_distill",
+        "x-kiln-handler": "self_improve::judge_distill",
+        "x-kiln-rust-signature": "async fn judge_distill( State(state): State<AppState>, Json(req): Json<JudgeDistillRequest>, ) -> Result<Json<JudgeDistillResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeDistillRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "JudgeDistillRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgeDistillResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "JudgeDistillResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/judge_drift_check": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Judge drift check",
+        "operationId": "self_improve_judge_drift_check_post_v1_agent_judge_drift_check",
+        "x-kiln-handler": "self_improve::judge_drift_check",
+        "x-kiln-rust-signature": "async fn judge_drift_check( State(state): State<AppState>, Json(req): Json<JudgeDriftCheckRequest>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JudgeDriftCheckRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "JudgeDriftCheckRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/runs": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List runs",
+        "operationId": "agent_runs_list_runs_get_v1_agent_runs",
+        "x-kiln-handler": "agent_runs::list_runs",
+        "x-kiln-rust-signature": "async fn list_runs( State(state): State<AppState>, Query(q): Query<ListRunsQuery>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "x-kiln-query-rust-type": "ListRunsQuery",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Create run",
+        "operationId": "agent_runs_create_run_post_v1_agent_runs",
+        "x-kiln-handler": "agent_runs::create_run",
+        "x-kiln-rust-signature": "async fn create_run( State(state): State<AppState>, Json(req): Json<CreateRunRequest>, ) -> Result<Json<AgentRunRecord>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRunRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "CreateRunRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunRecord"
+                }
+              }
+            },
+            "x-kiln-rust-type": "AgentRunRecord"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/runs/status": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Runs status",
+        "operationId": "agent_runs_runs_status_get_v1_agent_runs_status",
+        "x-kiln-handler": "agent_runs::runs_status",
+        "x-kiln-rust-signature": "async fn runs_status(State(state): State<AppState>) -> Json<serde_json::Value>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/runs/{id}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Get run",
+        "operationId": "agent_runs_get_run_get_v1_agent_runs_id",
+        "x-kiln-handler": "agent_runs::get_run",
+        "x-kiln-rust-signature": "async fn get_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, ) -> Result<Json<AgentRunRecord>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunRecord"
+                }
+              }
+            },
+            "x-kiln-rust-type": "AgentRunRecord"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/runs/{id}/abort": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Abort run",
+        "operationId": "agent_runs_abort_run_post_v1_agent_runs_id_abort",
+        "x-kiln-handler": "agent_runs::abort_run",
+        "x-kiln-rust-signature": "async fn abort_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/runs/{id}/events": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Run events",
+        "operationId": "agent_runs_run_events_get_v1_agent_runs_id_events",
+        "x-kiln-handler": "agent_runs::run_events",
+        "x-kiln-rust-signature": "async fn run_events( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Query(q): Query<EventsQuery>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "x-kiln-query-rust-type": "EventsQuery",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/runs/{id}/follow_up": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Follow up run",
+        "operationId": "agent_runs_follow_up_run_post_v1_agent_runs_id_follow_up",
+        "x-kiln-handler": "agent_runs::follow_up_run",
+        "x-kiln-rust-signature": "async fn follow_up_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Json(req): Json<MessageRequest>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessageRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "MessageRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/runs/{id}/steer": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Steer run",
+        "operationId": "agent_runs_steer_run_post_v1_agent_runs_id_steer",
+        "x-kiln-handler": "agent_runs::steer_run",
+        "x-kiln-rust-signature": "async fn steer_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Json(req): Json<MessageRequest>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessageRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "MessageRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/self_improve": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Self improve",
+        "operationId": "self_improve_self_improve_post_v1_agent_self_improve",
+        "x-kiln-handler": "self_improve::self_improve",
+        "x-kiln-rust-signature": "async fn self_improve( State(state): State<AppState>, Json(req): Json<SelfImproveRequest>, ) -> Result<Json<SelfImproveResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelfImproveRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "SelfImproveRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SelfImproveResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "SelfImproveResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/traces": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List traces",
+        "operationId": "agent_traces_list_traces_get_v1_agent_traces",
+        "x-kiln-handler": "agent_traces::list_traces",
+        "x-kiln-rust-signature": "async fn list_traces(State(state): State<AppState>) -> Json<AgentTracesListResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTracesListResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "AgentTracesListResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/traces/discover": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Discover traces",
+        "operationId": "agent_traces_discover_traces_post_v1_agent_traces_discover",
+        "x-kiln-handler": "agent_traces::discover_traces",
+        "x-kiln-rust-signature": "async fn discover_traces( State(state): State<AppState>, Json(req): Json<DiscoverRequest>, ) -> Result<Json<DiscoverResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiscoverRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "DiscoverRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoverResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "DiscoverResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/agent/traces/{id}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Get trace",
+        "operationId": "agent_traces_get_trace_get_v1_agent_traces_id",
+        "x-kiln-handler": "agent_traces::get_trace",
+        "x-kiln-rust-signature": "async fn get_trace( State(state): State<AppState>, AxumPath(id): AxumPath<String>, ) -> Result<Json<AgentTrace>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTrace"
+                }
+              }
+            },
+            "x-kiln-rust-type": "AgentTrace"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/cache/export": {
+      "get": {
+        "tags": [
+          "teachers"
+        ],
+        "summary": "Cache export",
+        "operationId": "cache_cache_export_get_v1_cache_export",
+        "x-kiln-handler": "cache::cache_export",
+        "x-kiln-rust-signature": "async fn cache_export(State(state): State<AppState>) -> Result<Response, ApiError>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/gzip": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryArchive"
+                }
+              }
+            },
+            "x-kiln-rust-type": "BinaryArchive",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/cache/stats": {
+      "get": {
+        "tags": [
+          "teachers"
+        ],
+        "summary": "Cache stats",
+        "operationId": "cache_cache_stats_get_v1_cache_stats",
+        "x-kiln-handler": "cache::cache_stats",
+        "x-kiln-rust-signature": "async fn cache_stats(State(state): State<AppState>) -> Result<Json<CacheStatsResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheStatsResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "CacheStatsResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "tags": [
+          "inference"
+        ],
+        "summary": "Create an OpenAI-compatible chat completion",
+        "operationId": "completions_chat_completions_post_v1_chat_completions",
+        "x-kiln-handler": "completions::chat_completions",
+        "x-kiln-rust-signature": "async fn chat_completions( State(state): State<AppState>, headers: HeaderMap, Json(mut req): Json<ChatCompletionRequest>, ) -> Result<Response, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatCompletionRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "ChatCompletionRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCompletionResponse"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCompletionChunkStream"
+                }
+              }
+            },
+            "x-kiln-rust-type": "ChatCompletionResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/completions": {
+      "post": {
+        "tags": [
+          "inference"
+        ],
+        "summary": "Score prompt log probabilities",
+        "operationId": "completions_completions_post_v1_completions",
+        "x-kiln-handler": "completions::completions",
+        "x-kiln-rust-signature": "async fn completions( State(state): State<AppState>, Json(req): Json<TextCompletionRequest>, ) -> Result<Response, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TextCompletionRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "TextCompletionRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TextCompletionResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TextCompletionResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/completions/batch": {
+      "post": {
+        "tags": [
+          "inference"
+        ],
+        "summary": "Generate text for a batch of prompts",
+        "operationId": "completions_batch_completions_post_v1_completions_batch",
+        "x-kiln-handler": "completions::batch_completions",
+        "x-kiln-rust-signature": "async fn batch_completions( State(state): State<AppState>, Json(req): Json<BatchCompletionRequest>, ) -> Result<Response, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchCompletionRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "BatchCompletionRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchCompletionResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "BatchCompletionResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/config": {
+      "get": {
+        "tags": [
+          "observability"
+        ],
+        "summary": "Get config",
+        "operationId": "config_get_config_get_v1_config",
+        "x-kiln-handler": "config::get_config",
+        "x-kiln-rust-signature": "async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "ConfigResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/corrections": {
+      "delete": {
+        "tags": [
+          "corrections"
+        ],
+        "summary": "Clear corrections",
+        "operationId": "corrections_clear_corrections_delete_v1_corrections",
+        "x-kiln-handler": "corrections::clear_corrections",
+        "x-kiln-rust-signature": "async fn clear_corrections( State(state): State<AppState>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "corrections"
+        ],
+        "summary": "List corrections",
+        "operationId": "corrections_list_corrections_get_v1_corrections",
+        "x-kiln-handler": "corrections::list_corrections",
+        "x-kiln-rust-signature": "async fn list_corrections( State(state): State<AppState>, Query(q): Query<ListQuery>, ) -> Json<ListResponse>",
+        "x-kiln-transport": "http",
+        "x-kiln-query-rust-type": "ListQuery",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "ListResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "corrections"
+        ],
+        "summary": "Upsert correction",
+        "operationId": "corrections_upsert_correction_post_v1_corrections",
+        "x-kiln-handler": "corrections::upsert_correction",
+        "x-kiln-rust-signature": "async fn upsert_correction( State(state): State<AppState>, Json(row): Json<CorrectionRow>, ) -> Result<Json<CorrectionRow>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CorrectionRow"
+              }
+            }
+          },
+          "x-kiln-rust-type": "CorrectionRow"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CorrectionRow"
+                }
+              }
+            },
+            "x-kiln-rust-type": "CorrectionRow"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/corrections/mark_trained": {
+      "post": {
+        "tags": [
+          "corrections"
+        ],
+        "summary": "Mark trained",
+        "operationId": "corrections_mark_trained_post_v1_corrections_mark_trained",
+        "x-kiln-handler": "corrections::mark_trained",
+        "x-kiln-rust-signature": "async fn mark_trained( State(state): State<AppState>, Json(req): Json<MarkTrainedRequest>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkTrainedRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "MarkTrainedRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/corrections/{request_id}": {
+      "delete": {
+        "tags": [
+          "corrections"
+        ],
+        "summary": "Delete correction",
+        "operationId": "corrections_delete_correction_delete_v1_corrections_request_id",
+        "x-kiln-handler": "corrections::delete_correction",
+        "x-kiln-rust-signature": "async fn delete_correction( State(state): State<AppState>, AxumPath(request_id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/debug/model-state": {
+      "get": {
+        "tags": [
+          "observability"
+        ],
+        "summary": "Model state",
+        "operationId": "debug_model_state_model_state_get_v1_debug_model_state",
+        "x-kiln-handler": "debug_model_state::model_state",
+        "x-kiln-rust-signature": "async fn model_state(State(state): State<AppState>) -> Response",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelStateResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "ModelStateResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/distill/pump": {
+      "post": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Submit distill pump",
+        "operationId": "training_submit_distill_pump_post_v1_distill_pump",
+        "x-kiln-handler": "training::submit_distill_pump",
+        "x-kiln-rust-signature": "async fn submit_distill_pump( State(state): State<AppState>, payload: Result<Json<DistillPumpRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DistillPumpRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "DistillPumpRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TrainingResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/distill/refresh": {
+      "post": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Submit distill refresh",
+        "operationId": "training_submit_distill_refresh_post_v1_distill_refresh",
+        "x-kiln-handler": "training::submit_distill_refresh",
+        "x-kiln-rust-signature": "async fn submit_distill_refresh( State(state): State<AppState>, payload: Result<Json<DistillRefreshRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DistillRefreshRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "DistillRefreshRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TrainingResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/distill/self": {
+      "post": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Submit distill self",
+        "operationId": "training_submit_distill_self_post_v1_distill_self",
+        "x-kiln-handler": "training::submit_distill_self",
+        "x-kiln-rust-signature": "async fn submit_distill_self( State(state): State<AppState>, payload: Result<Json<DistillSelfRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DistillSelfRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "DistillSelfRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TrainingResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/compare": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Submit compare",
+        "operationId": "eval_submit_compare_post_v1_eval_compare",
+        "x-kiln-handler": "eval::submit_compare",
+        "x-kiln-rust-signature": "async fn submit_compare( State(state): State<AppState>, Json(spec): Json<EvalCompareSpec>, ) -> Result<Json<EvalRunResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvalCompareSpec"
+              }
+            }
+          },
+          "x-kiln-rust-type": "EvalCompareSpec"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "EvalRunResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/datasets": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "List datasets",
+        "operationId": "eval_list_datasets_get_v1_eval_datasets",
+        "x-kiln-handler": "eval::list_datasets",
+        "x-kiln-rust-signature": "async fn list_datasets(State(state): State<AppState>) -> Json<DatasetListResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetListResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "DatasetListResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/datasets/upload": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Upload dataset",
+        "operationId": "eval_upload_dataset_post_v1_eval_datasets_upload",
+        "x-kiln-handler": "eval::upload_dataset",
+        "x-kiln-rust-signature": "async fn upload_dataset( State(state): State<AppState>, mut multipart: Multipart, ) -> Result<Json<DatasetManifest>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetUploadMultipart"
+              }
+            }
+          },
+          "x-kiln-rust-type": "DatasetUploadMultipart"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetManifest"
+                }
+              }
+            },
+            "x-kiln-rust-type": "DatasetManifest"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/datasets/{name}": {
+      "delete": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Delete dataset",
+        "operationId": "eval_delete_dataset_delete_v1_eval_datasets_name",
+        "x-kiln-handler": "eval::delete_dataset",
+        "x-kiln-rust-signature": "async fn delete_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Get dataset",
+        "operationId": "eval_get_dataset_get_v1_eval_datasets_name",
+        "x-kiln-handler": "eval::get_dataset",
+        "x-kiln-rust-signature": "async fn get_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DatasetManifest>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetManifest"
+                }
+              }
+            },
+            "x-kiln-rust-type": "DatasetManifest"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/datasets/{name}/preview": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Synthesize dataset preview",
+        "operationId": "eval_synthesize_dataset_preview_post_v1_eval_datasets_name_preview",
+        "x-kiln-handler": "eval::synthesize_dataset_preview",
+        "x-kiln-rust-signature": "async fn synthesize_dataset_preview( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<SynthesisPreviewBody>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SynthesisPreviewBody"
+              }
+            }
+          },
+          "x-kiln-rust-type": "SynthesisPreviewBody"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/datasets/{name}/rows": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Dataset rows",
+        "operationId": "eval_dataset_rows_get_v1_eval_datasets_name_rows",
+        "x-kiln-handler": "eval::dataset_rows",
+        "x-kiln-rust-signature": "async fn dataset_rows( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Query(q): Query<DatasetRowsQuery>, ) -> Result<Json<Vec<serde_json::Value>>, ApiError>",
+        "x-kiln-transport": "http",
+        "x-kiln-query-rust-type": "DatasetRowsQuery",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValueArray"
+                }
+              }
+            },
+            "x-kiln-rust-type": "Vec<serde_json::Value>"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/datasets/{name}/synthesize": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Synthesize dataset",
+        "operationId": "eval_synthesize_dataset_post_v1_eval_datasets_name_synthesize",
+        "x-kiln-handler": "eval::synthesize_dataset",
+        "x-kiln-rust-signature": "async fn synthesize_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<SynthesizeBody>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SynthesizeBody"
+              }
+            }
+          },
+          "x-kiln-rust-type": "SynthesizeBody"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/jobs": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "List jobs",
+        "operationId": "eval_list_jobs_get_v1_eval_jobs",
+        "x-kiln-handler": "eval::list_jobs",
+        "x-kiln-rust-signature": "async fn list_jobs(State(state): State<AppState>) -> Json<EvalJobListResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalJobListResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "EvalJobListResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/jobs/{job_id}": {
+      "delete": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Cancel job",
+        "operationId": "eval_cancel_job_delete_v1_eval_jobs_job_id",
+        "x-kiln-handler": "eval::cancel_job",
+        "x-kiln-rust-signature": "async fn cancel_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Get job",
+        "operationId": "eval_get_job_get_v1_eval_jobs_job_id",
+        "x-kiln-handler": "eval::get_job",
+        "x-kiln-rust-signature": "async fn get_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<EvalResult>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalResult"
+                }
+              }
+            },
+            "x-kiln-rust-type": "EvalResult"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/jobs/{job_id}/rerun": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Rerun job",
+        "operationId": "eval_rerun_job_post_v1_eval_jobs_job_id_rerun",
+        "x-kiln-handler": "eval::rerun_job",
+        "x-kiln-rust-signature": "async fn rerun_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, Json(body): Json<RerunBody>, ) -> Result<Json<EvalRunResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerunBody"
+              }
+            }
+          },
+          "x-kiln-rust-type": "RerunBody"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "EvalRunResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/run": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Submit eval",
+        "operationId": "eval_submit_eval_post_v1_eval_run",
+        "x-kiln-handler": "eval::submit_eval",
+        "x-kiln-rust-signature": "async fn submit_eval( State(state): State<AppState>, Json(req): Json<EvalRunRequest>, ) -> Result<Json<EvalRunResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvalRunRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "EvalRunRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "EvalRunResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/suites": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "List suites",
+        "operationId": "eval_list_suites_get_v1_eval_suites",
+        "x-kiln-handler": "eval::list_suites",
+        "x-kiln-rust-signature": "async fn list_suites(State(state): State<AppState>) -> Result<Json<SuiteListResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuiteListResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "SuiteListResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Save suite",
+        "operationId": "eval_save_suite_post_v1_eval_suites",
+        "x-kiln-handler": "eval::save_suite",
+        "x-kiln-rust-signature": "async fn save_suite( State(state): State<AppState>, Query(query): Query<SuiteUpsertQuery>, Json(suite): Json<EvalSuite>, ) -> Result<Json<SuiteSaveResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "x-kiln-query-rust-type": "SuiteUpsertQuery",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvalSuite"
+              }
+            }
+          },
+          "x-kiln-rust-type": "EvalSuite"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuiteSaveResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "SuiteSaveResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/eval/suites/{name}": {
+      "delete": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Delete suite",
+        "operationId": "eval_delete_suite_delete_v1_eval_suites_name",
+        "x-kiln-handler": "eval::delete_suite",
+        "x-kiln-rust-signature": "async fn delete_suite( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Get suite",
+        "operationId": "eval_get_suite_get_v1_eval_suites_name",
+        "x-kiln-handler": "eval::get_suite",
+        "x-kiln-rust-signature": "async fn get_suite( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<EvalSuite>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalSuite"
+                }
+              }
+            },
+            "x-kiln-rust-type": "EvalSuite"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "observability"
+        ],
+        "summary": "Get server readiness and runtime diagnostics (v1 alias)",
+        "operationId": "health_health_get_v1_health",
+        "x-kiln-handler": "health::health",
+        "x-kiln-rust-signature": "async fn health(State(state): State<AppState>) -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "HealthResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/judgments": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "List judgments",
+        "operationId": "eval_list_judgments_get_v1_judgments",
+        "x-kiln-handler": "eval::list_judgments",
+        "x-kiln-rust-signature": "async fn list_judgments(State(state): State<AppState>) -> Json<JudgmentListResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgmentListResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "JudgmentListResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Create judgment dataset",
+        "operationId": "eval_create_judgment_dataset_post_v1_judgments",
+        "x-kiln-handler": "eval::create_judgment_dataset",
+        "x-kiln-rust-signature": "async fn create_judgment_dataset( State(state): State<AppState>, Json(body): Json<CreateJudgmentBody>, ) -> Result<Json<JudgmentManifest>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateJudgmentBody"
+              }
+            }
+          },
+          "x-kiln-rust-type": "CreateJudgmentBody"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgmentManifest"
+                }
+              }
+            },
+            "x-kiln-rust-type": "JudgmentManifest"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/judgments/render_prompt": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Render judgment prompt",
+        "operationId": "eval_render_judgment_prompt_post_v1_judgments_render_prompt",
+        "x-kiln-handler": "eval::render_judgment_prompt",
+        "x-kiln-rust-signature": "async fn render_judgment_prompt(Json(body): Json<AppendJudgmentBody>) -> Json<serde_json::Value>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppendJudgmentBody"
+              }
+            }
+          },
+          "x-kiln-rust-type": "AppendJudgmentBody"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/judgments/{name}": {
+      "delete": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Delete judgment dataset",
+        "operationId": "eval_delete_judgment_dataset_delete_v1_judgments_name",
+        "x-kiln-handler": "eval::delete_judgment_dataset",
+        "x-kiln-rust-signature": "async fn delete_judgment_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/judgments/{name}/compile": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Compile judgment",
+        "operationId": "eval_compile_judgment_post_v1_judgments_name_compile",
+        "x-kiln-handler": "eval::compile_judgment",
+        "x-kiln-rust-signature": "async fn compile_judgment( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<CompileJudgmentBody>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompileJudgmentBody"
+              }
+            }
+          },
+          "x-kiln-rust-type": "CompileJudgmentBody"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/judgments/{name}/rows": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Append judgment",
+        "operationId": "eval_append_judgment_post_v1_judgments_name_rows",
+        "x-kiln-handler": "eval::append_judgment",
+        "x-kiln-rust-signature": "async fn append_judgment( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<AppendJudgmentBody>, ) -> Result<Json<AppendJudgmentResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppendJudgmentBody"
+              }
+            }
+          },
+          "x-kiln-rust-type": "AppendJudgmentBody"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppendJudgmentResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "AppendJudgmentResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/judgments/{name}/rows/{judgment_id}": {
+      "delete": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Remove judgment row",
+        "operationId": "eval_remove_judgment_row_delete_v1_judgments_name_rows_judgment_id",
+        "x-kiln-handler": "eval::remove_judgment_row",
+        "x-kiln-rust-signature": "async fn remove_judgment_row( State(state): State<AppState>, AxumPath((name, judgment_id)): AxumPath<(String, String)>, ) -> Result<Json<JudgmentManifest>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "judgment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JudgmentManifest"
+                }
+              }
+            },
+            "x-kiln-rust-type": "JudgmentManifest"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/judgments/{name}/validate": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Validate judgment adapter",
+        "operationId": "eval_validate_judgment_adapter_post_v1_judgments_name_validate",
+        "x-kiln-handler": "eval::validate_judgment_adapter",
+        "x-kiln-rust-signature": "async fn validate_judgment_adapter( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<PromoteJudgmentBody>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromoteJudgmentBody"
+              }
+            }
+          },
+          "x-kiln-rust-type": "PromoteJudgmentBody"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/library": {
+      "get": {
+        "tags": [
+          "library"
+        ],
+        "summary": "List library",
+        "operationId": "library_list_library_get_v1_library",
+        "x-kiln-handler": "library::list_library",
+        "x-kiln-rust-signature": "async fn list_library(State(_state): State<AppState>) -> Json<LibraryListResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryListResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "LibraryListResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/library/install/{id}": {
+      "post": {
+        "tags": [
+          "library"
+        ],
+        "summary": "Install from library",
+        "operationId": "library_install_from_library_post_v1_library_install_id",
+        "x-kiln-handler": "library::install_from_library",
+        "x-kiln-rust-signature": "async fn install_from_library( State(state): State<AppState>, AxumPath(id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/library/publish/{name}": {
+      "post": {
+        "tags": [
+          "library"
+        ],
+        "summary": "Publish to library",
+        "operationId": "library_publish_to_library_post_v1_library_publish_name",
+        "x-kiln-handler": "library::publish_to_library",
+        "x-kiln-rust-signature": "async fn publish_to_library( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(payload): Json<PublishPayload>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishPayload"
+              }
+            }
+          },
+          "x-kiln-rust-type": "PublishPayload"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "observability"
+        ],
+        "summary": "List models",
+        "operationId": "models_list_models_get_v1_models",
+        "x-kiln-handler": "models::list_models",
+        "x-kiln-rust-signature": "async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "ModelsResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/preflight/capacity": {
+      "post": {
+        "tags": [
+          "preflight"
+        ],
+        "summary": "Capacity",
+        "operationId": "pit_of_success_capacity_post_v1_preflight_capacity",
+        "x-kiln-handler": "pit_of_success::capacity",
+        "x-kiln-rust-signature": "async fn capacity( State(_state): State<AppState>, Json(req): Json<CapacityRequest>, ) -> Result<Json<CapacityResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CapacityRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "CapacityRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapacityResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "CapacityResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/preflight/compatibility": {
+      "get": {
+        "tags": [
+          "preflight"
+        ],
+        "summary": "Compatibility",
+        "operationId": "pit_of_success_compatibility_get_v1_preflight_compatibility",
+        "x-kiln-handler": "pit_of_success::compatibility",
+        "x-kiln-rust-signature": "async fn compatibility( State(_state): State<AppState>, Query(q): Query<CompatibilityQuery>, ) -> Json<CompatibilityResponse>",
+        "x-kiln-transport": "http",
+        "x-kiln-query-rust-type": "CompatibilityQuery",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatibilityResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "CompatibilityResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/preflight/tier_defaults": {
+      "get": {
+        "tags": [
+          "preflight"
+        ],
+        "summary": "Tier defaults endpoint",
+        "operationId": "pit_of_success_tier_defaults_endpoint_get_v1_preflight_tier_defaults",
+        "x-kiln-handler": "pit_of_success::tier_defaults_endpoint",
+        "x-kiln-rust-signature": "async fn tier_defaults_endpoint( State(_state): State<AppState>, Query(q): Query<TierQuery>, ) -> Result<Json<TierDefaultsResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "x-kiln-query-rust-type": "TierQuery",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TierDefaultsResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TierDefaultsResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/preflight/tiers": {
+      "get": {
+        "tags": [
+          "preflight"
+        ],
+        "summary": "Tier defaults list",
+        "operationId": "pit_of_success_tier_defaults_list_get_v1_preflight_tiers",
+        "x-kiln-handler": "pit_of_success::tier_defaults_list",
+        "x-kiln-rust-signature": "async fn tier_defaults_list(State(_state): State<AppState>) -> Json<TierDefaultsListResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TierDefaultsListResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TierDefaultsListResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/recipes": {
+      "get": {
+        "tags": [
+          "recipes"
+        ],
+        "summary": "List recipes",
+        "operationId": "recipes_list_recipes_get_v1_recipes",
+        "x-kiln-handler": "recipes::list_recipes",
+        "x-kiln-rust-signature": "async fn list_recipes(State(state): State<AppState>) -> Json<RecipesListResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipesListResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "RecipesListResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/recipes/run": {
+      "post": {
+        "tags": [
+          "recipes"
+        ],
+        "summary": "Run recipe",
+        "operationId": "recipes_run_recipe_post_v1_recipes_run",
+        "x-kiln-handler": "recipes::run_recipe",
+        "x-kiln-rust-signature": "async fn run_recipe( State(state): State<AppState>, payload: Result<Json<RecipeRunRequest>, JsonRejection>, ) -> Result<Json<RecipeRunResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecipeRunRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "RecipeRunRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeRunResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "RecipeRunResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/stats/decode": {
+      "get": {
+        "tags": [
+          "observability"
+        ],
+        "summary": "Get decode stats",
+        "operationId": "stats_get_decode_stats_get_v1_stats_decode",
+        "x-kiln-handler": "stats::get_decode_stats",
+        "x-kiln-rust-signature": "async fn get_decode_stats(State(state): State<AppState>) -> Json<DecodeStatsSnapshot>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecodeStatsSnapshot"
+                }
+              }
+            },
+            "x-kiln-rust-type": "DecodeStatsSnapshot"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/stats/recent-requests": {
+      "get": {
+        "tags": [
+          "observability"
+        ],
+        "summary": "Get recent requests",
+        "operationId": "stats_get_recent_requests_get_v1_stats_recent_requests",
+        "x-kiln-handler": "stats::get_recent_requests",
+        "x-kiln-rust-signature": "async fn get_recent_requests(State(state): State<AppState>) -> Json<Vec<RequestRecord>>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec_RequestRecord"
+                }
+              }
+            },
+            "x-kiln-rust-type": "Vec<RequestRecord>"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/teachers": {
+      "get": {
+        "tags": [
+          "teachers"
+        ],
+        "summary": "List teachers",
+        "operationId": "teachers_list_teachers_get_v1_teachers",
+        "x-kiln-handler": "teachers::list_teachers",
+        "x-kiln-rust-signature": "async fn list_teachers(State(state): State<AppState>) -> Json<TeachersListResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeachersListResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TeachersListResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "teachers"
+        ],
+        "summary": "Register teacher",
+        "operationId": "teachers_register_teacher_post_v1_teachers",
+        "x-kiln-handler": "teachers::register_teacher",
+        "x-kiln-rust-signature": "async fn register_teacher( State(state): State<AppState>, Json(body): Json<serde_json::Value>, ) -> Result<Json<TeacherEntry>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonValue"
+              }
+            }
+          },
+          "x-kiln-rust-type": "serde_json::Value"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeacherEntry"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TeacherEntry"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/teachers/{alias}": {
+      "delete": {
+        "tags": [
+          "teachers"
+        ],
+        "summary": "Delete teacher",
+        "operationId": "teachers_delete_teacher_delete_v1_teachers_alias",
+        "x-kiln-handler": "teachers::delete_teacher",
+        "x-kiln-rust-signature": "async fn delete_teacher( State(state): State<AppState>, AxumPath(alias): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "alias",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/terminal/status": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Terminal status",
+        "operationId": "terminal_terminal_status_get_v1_terminal_status",
+        "x-kiln-handler": "terminal::terminal_status",
+        "x-kiln-rust-signature": "async fn terminal_status() -> Json<serde_json::Value>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/terminal/ws": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Upgrade to the trusted embedded terminal WebSocket",
+        "operationId": "terminal_terminal_ws_get_v1_terminal_ws",
+        "x-kiln-handler": "terminal::terminal_ws",
+        "x-kiln-rust-signature": "async fn terminal_ws( ws: WebSocketUpgrade, axum::extract::State(state): axum::extract::State<AppState>, headers: HeaderMap, ) -> impl IntoResponse",
+        "x-kiln-transport": "websocket",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "description": "Browser origin checked by the trusted terminal gate.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Successful response.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebSocketUpgrade"
+                }
+              }
+            },
+            "x-kiln-rust-type": "WebSocketUpgrade"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train": {
+      "post": {
+        "tags": [
+          "preflight"
+        ],
+        "summary": "Submit front door",
+        "operationId": "pit_of_success_submit_front_door_post_v1_train",
+        "x-kiln-handler": "pit_of_success::submit_front_door",
+        "x-kiln-rust-signature": "async fn submit_front_door( State(state): State<AppState>, payload: Result<Json<FrontDoorRequest>, JsonRejection>, ) -> Result<Json<FrontDoorResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FrontDoorRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "FrontDoorRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FrontDoorResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "FrontDoorResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/agentic": {
+      "post": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Submit an agentic GRPO training job",
+        "operationId": "training_submit_grpo_post_v1_train_agentic",
+        "x-kiln-handler": "training::submit_grpo",
+        "x-kiln-rust-signature": "async fn submit_grpo( State(state): State<AppState>, payload: Result<Json<GrpoRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrpoRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "GrpoRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TrainingResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/grpo": {
+      "post": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Submit grpo",
+        "operationId": "training_submit_grpo_post_v1_train_grpo",
+        "x-kiln-handler": "training::submit_grpo",
+        "x-kiln-rust-signature": "async fn submit_grpo( State(state): State<AppState>, payload: Result<Json<GrpoRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrpoRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "GrpoRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TrainingResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/hf/exports": {
+      "get": {
+        "tags": [
+          "hf-trl"
+        ],
+        "summary": "List exports",
+        "operationId": "hf_trl_list_exports_get_v1_train_hf_exports",
+        "x-kiln-handler": "hf_trl::list_exports",
+        "x-kiln-rust-signature": "async fn list_exports(State(state): State<AppState>) -> Result<Json<ExportList>, ApiError>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportList"
+                }
+              }
+            },
+            "x-kiln-rust-type": "ExportList"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/hf/exports/{name}": {
+      "delete": {
+        "tags": [
+          "hf-trl"
+        ],
+        "summary": "Delete export",
+        "operationId": "hf_trl_delete_export_delete_v1_train_hf_exports_name",
+        "x-kiln-handler": "hf_trl::delete_export",
+        "x-kiln-rust-signature": "async fn delete_export( State(state): State<AppState>, AxumPath(name): AxumPath<String>, headers: HeaderMap, ) -> Result<Json<DeleteExportResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "description": "Quoted export ETag used for conditional deletion.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteExportResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "DeleteExportResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "hf-trl"
+        ],
+        "summary": "Get export",
+        "operationId": "hf_trl_get_export_get_v1_train_hf_exports_name",
+        "x-kiln-handler": "hf_trl::get_export",
+        "x-kiln-rust-signature": "async fn get_export( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Response, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportDetail"
+                }
+              }
+            },
+            "x-kiln-rust-type": "ExportDetail",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/hf/exports/{name}/download": {
+      "get": {
+        "tags": [
+          "hf-trl"
+        ],
+        "summary": "Download export",
+        "operationId": "hf_trl_download_export_get_v1_train_hf_exports_name_download",
+        "x-kiln-handler": "hf_trl::download_export",
+        "x-kiln-rust-signature": "async fn download_export( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Response, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/gzip": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryArchive"
+                }
+              }
+            },
+            "x-kiln-rust-type": "BinaryArchive",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/hf/grpo/exports": {
+      "post": {
+        "tags": [
+          "hf-trl"
+        ],
+        "summary": "Create grpo export",
+        "operationId": "hf_trl_create_grpo_export_post_v1_train_hf_grpo_exports",
+        "x-kiln-handler": "hf_trl::create_grpo_export",
+        "x-kiln-rust-signature": "async fn create_grpo_export( State(state): State<AppState>, payload: Result<Json<GrpoExportRequest>, JsonRejection>, ) -> Result<Response, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrpoExportRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "GrpoExportRequest"
+        },
+        "responses": {
+          "201": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportSummary"
+                }
+              }
+            },
+            "x-kiln-rust-type": "ExportSummary",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/hf/peft/imports/{name}": {
+      "post": {
+        "tags": [
+          "hf-trl"
+        ],
+        "summary": "Import a verified HF/TRL PEFT result",
+        "operationId": "hf_trl_import_import_peft_post_v1_train_hf_peft_imports_name",
+        "x-kiln-handler": "hf_trl_import::import_peft",
+        "x-kiln-rust-signature": "async fn import_peft( State(state): State<AppState>, AxumPath(name): AxumPath<String>, headers: HeaderMap, body: Body, ) -> Result<Response, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "Content-Type",
+            "in": "header",
+            "required": true,
+            "description": "Must be application/gzip.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/gzip": {
+              "schema": {
+                "$ref": "#/components/schemas/BinaryArchive"
+              }
+            }
+          },
+          "x-kiln-rust-type": "BinaryArchive"
+        },
+        "responses": {
+          "201": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportPeftResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "ImportPeftResponse",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/hf/sft/exports": {
+      "post": {
+        "tags": [
+          "hf-trl"
+        ],
+        "summary": "Create sft export",
+        "operationId": "hf_trl_create_sft_export_post_v1_train_hf_sft_exports",
+        "x-kiln-handler": "hf_trl::create_sft_export",
+        "x-kiln-rust-signature": "async fn create_sft_export( State(state): State<AppState>, payload: Result<Json<SftExportRequest>, JsonRejection>, ) -> Result<Response, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SftExportRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "SftExportRequest"
+        },
+        "responses": {
+          "201": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportSummary"
+                }
+              }
+            },
+            "x-kiln-rust-type": "ExportSummary",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/jobs/{job_id}": {
+      "delete": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Delete archived job",
+        "operationId": "training_delete_archived_job_delete_v1_train_jobs_job_id",
+        "x-kiln-handler": "training::delete_archived_job",
+        "x-kiln-rust-signature": "async fn delete_archived_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Job detail",
+        "operationId": "training_job_detail_get_v1_train_jobs_job_id",
+        "x-kiln-handler": "training::job_detail",
+        "x-kiln-rust-signature": "async fn job_detail( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<TrainingJobDetail>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingJobDetail"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TrainingJobDetail"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/opd": {
+      "post": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Submit opd",
+        "operationId": "training_submit_opd_post_v1_train_opd",
+        "x-kiln-handler": "training::submit_opd",
+        "x-kiln-rust-signature": "async fn submit_opd( State(state): State<AppState>, payload: Result<Json<OpdRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpdRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "OpdRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TrainingResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/queue": {
+      "get": {
+        "tags": [
+          "training"
+        ],
+        "summary": "List queue",
+        "operationId": "training_list_queue_get_v1_train_queue",
+        "x-kiln-handler": "training::list_queue",
+        "x-kiln-rust-signature": "async fn list_queue(State(state): State<AppState>) -> Json<QueueResponse>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "QueueResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/queue/{job_id}": {
+      "delete": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Cancel queued job",
+        "operationId": "training_cancel_queued_job_delete_v1_train_queue_job_id",
+        "x-kiln-handler": "training::cancel_queued_job",
+        "x-kiln-rust-signature": "async fn cancel_queued_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/sft": {
+      "post": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Submit sft",
+        "operationId": "training_submit_sft_post_v1_train_sft",
+        "x-kiln-handler": "training::submit_sft",
+        "x-kiln-rust-signature": "async fn submit_sft( State(state): State<AppState>, payload: Result<Json<SftRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SftRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "SftRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TrainingResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/status": {
+      "get": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Training status",
+        "operationId": "training_training_status_get_v1_train_status",
+        "x-kiln-handler": "training::training_status",
+        "x-kiln-rust-signature": "async fn training_status(State(state): State<AppState>) -> Json<Vec<TrainingStatus>>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec_TrainingStatus"
+                }
+              }
+            },
+            "x-kiln-rust-type": "Vec<TrainingStatus>"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/train/status/{job_id}": {
+      "get": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Job status",
+        "operationId": "training_job_status_get_v1_train_status_job_id",
+        "x-kiln-handler": "training::job_status",
+        "x-kiln-rust-signature": "async fn job_status( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<TrainingStatus>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingStatus"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TrainingStatus"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/training/grpo": {
+      "post": {
+        "tags": [
+          "training"
+        ],
+        "summary": "Submit a GRPO training job (compatibility alias)",
+        "operationId": "training_submit_grpo_post_v1_training_grpo",
+        "x-kiln-handler": "training::submit_grpo",
+        "x-kiln-rust-signature": "async fn submit_grpo( State(state): State<AppState>, payload: Result<Json<GrpoRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrpoRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "GrpoRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "TrainingResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "ApiError": {
+        "description": "Structured API failure.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "AdapterDetail": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type AdapterDetail. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "AdapterDetail"
+      },
+      "AdapterUploadMultipart": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type AdapterUploadMultipart. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "AdapterUploadMultipart"
+      },
+      "AdaptersResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type AdaptersResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "AdaptersResponse"
+      },
+      "AgentRunRecord": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type AgentRunRecord. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "AgentRunRecord"
+      },
+      "AgentTrace": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type AgentTrace. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "AgentTrace"
+      },
+      "AgentTracesListResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type AgentTracesListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "AgentTracesListResponse"
+      },
+      "ApiError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message",
+              "hint"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "hint": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "x-kiln-rust-type": "ApiError"
+      },
+      "AppendJudgmentBody": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type AppendJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "AppendJudgmentBody"
+      },
+      "AppendJudgmentResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type AppendJudgmentResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "AppendJudgmentResponse"
+      },
+      "BatchCompletionRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type BatchCompletionRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "BatchCompletionRequest"
+      },
+      "BatchCompletionResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type BatchCompletionResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "BatchCompletionResponse"
+      },
+      "BinaryArchive": {
+        "type": "string",
+        "format": "binary",
+        "description": "Runtime payload represented by Rust type BinaryArchive. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "BinaryArchive"
+      },
+      "CacheStatsResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type CacheStatsResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "CacheStatsResponse"
+      },
+      "CapacityRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type CapacityRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "CapacityRequest"
+      },
+      "CapacityResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type CapacityResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "CapacityResponse"
+      },
+      "ChatCompletionChunkStream": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type ChatCompletionChunkStream. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "ChatCompletionChunkStream"
+      },
+      "ChatCompletionRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type ChatCompletionRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "ChatCompletionRequest"
+      },
+      "ChatCompletionResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type ChatCompletionResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "ChatCompletionResponse"
+      },
+      "CompatibilityResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type CompatibilityResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "CompatibilityResponse"
+      },
+      "CompileJudgmentBody": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type CompileJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "CompileJudgmentBody"
+      },
+      "ConfigResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type ConfigResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "ConfigResponse"
+      },
+      "CorrectionRow": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type CorrectionRow. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "CorrectionRow"
+      },
+      "CreateJudgmentBody": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type CreateJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "CreateJudgmentBody"
+      },
+      "CreateRunRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type CreateRunRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "CreateRunRequest"
+      },
+      "CssStylesheet": {
+        "type": "string",
+        "description": "Runtime payload represented by Rust type CssStylesheet. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "CssStylesheet"
+      },
+      "DatasetListResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DatasetListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DatasetListResponse"
+      },
+      "DatasetManifest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DatasetManifest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DatasetManifest"
+      },
+      "DatasetUploadMultipart": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DatasetUploadMultipart. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DatasetUploadMultipart"
+      },
+      "DecodeStatsSnapshot": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DecodeStatsSnapshot. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DecodeStatsSnapshot"
+      },
+      "DeleteAdapterResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DeleteAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DeleteAdapterResponse"
+      },
+      "DeleteExportResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DeleteExportResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DeleteExportResponse"
+      },
+      "DiscoverRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DiscoverRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DiscoverRequest"
+      },
+      "DiscoverResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DiscoverResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DiscoverResponse"
+      },
+      "DistillMergeRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DistillMergeRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DistillMergeRequest"
+      },
+      "DistillPumpRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DistillPumpRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DistillPumpRequest"
+      },
+      "DistillRefreshRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DistillRefreshRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DistillRefreshRequest"
+      },
+      "DistillSelfRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type DistillSelfRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "DistillSelfRequest"
+      },
+      "EvalCompareSpec": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type EvalCompareSpec. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "EvalCompareSpec"
+      },
+      "EvalJobListResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type EvalJobListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "EvalJobListResponse"
+      },
+      "EvalResult": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type EvalResult. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "EvalResult"
+      },
+      "EvalRunRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type EvalRunRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "EvalRunRequest"
+      },
+      "EvalRunResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type EvalRunResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "EvalRunResponse"
+      },
+      "EvalSuite": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type EvalSuite. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "EvalSuite"
+      },
+      "ExportDetail": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type ExportDetail. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "ExportDetail"
+      },
+      "ExportList": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type ExportList. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "ExportList"
+      },
+      "ExportSummary": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type ExportSummary. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "ExportSummary"
+      },
+      "FrontDoorRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type FrontDoorRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "FrontDoorRequest"
+      },
+      "FrontDoorResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type FrontDoorResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "FrontDoorResponse"
+      },
+      "GrpoExportRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type GrpoExportRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "GrpoExportRequest"
+      },
+      "GrpoRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type GrpoRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "GrpoRequest"
+      },
+      "HealthResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type HealthResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "HealthResponse"
+      },
+      "HtmlDocument": {
+        "type": "string",
+        "description": "Runtime payload represented by Rust type HtmlDocument. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "HtmlDocument"
+      },
+      "ImportPeftResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type ImportPeftResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "ImportPeftResponse"
+      },
+      "JavaScriptSource": {
+        "type": "string",
+        "description": "Runtime payload represented by Rust type JavaScriptSource. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "JavaScriptSource"
+      },
+      "JsonValue": {
+        "description": "Runtime payload represented by Rust type serde_json::Value. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "serde_json::Value"
+      },
+      "JsonValueArray": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/JsonValue"
+        },
+        "description": "Runtime payload represented by Rust type Vec<serde_json::Value>. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "Vec<serde_json::Value>"
+      },
+      "JudgeDistillRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type JudgeDistillRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "JudgeDistillRequest"
+      },
+      "JudgeDistillResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type JudgeDistillResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "JudgeDistillResponse"
+      },
+      "JudgeDriftCheckRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type JudgeDriftCheckRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "JudgeDriftCheckRequest"
+      },
+      "JudgmentListResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type JudgmentListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "JudgmentListResponse"
+      },
+      "JudgmentManifest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type JudgmentManifest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "JudgmentManifest"
+      },
+      "LibraryListResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type LibraryListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "LibraryListResponse"
+      },
+      "ListResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type ListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "ListResponse"
+      },
+      "LoadAdapterRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type LoadAdapterRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "LoadAdapterRequest"
+      },
+      "LoadAdapterResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type LoadAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "LoadAdapterResponse"
+      },
+      "MarkTrainedRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type MarkTrainedRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "MarkTrainedRequest"
+      },
+      "MergeAdapterRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type MergeAdapterRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "MergeAdapterRequest"
+      },
+      "MergeAdapterResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type MergeAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "MergeAdapterResponse"
+      },
+      "MessageRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type MessageRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "MessageRequest"
+      },
+      "ModelStateResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type ModelStateResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "ModelStateResponse"
+      },
+      "ModelsResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type ModelsResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "ModelsResponse"
+      },
+      "OpdRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type OpdRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "OpdRequest"
+      },
+      "PrometheusText": {
+        "type": "string",
+        "description": "Runtime payload represented by Rust type PrometheusText. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "PrometheusText"
+      },
+      "PromoteJudgmentBody": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type PromoteJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "PromoteJudgmentBody"
+      },
+      "PublishPayload": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type PublishPayload. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "PublishPayload"
+      },
+      "QueueResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type QueueResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "QueueResponse"
+      },
+      "RecipeRunRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type RecipeRunRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "RecipeRunRequest"
+      },
+      "RecipeRunResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type RecipeRunResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "RecipeRunResponse"
+      },
+      "RecipesListResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type RecipesListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "RecipesListResponse"
+      },
+      "Redirect": {
+        "type": "string",
+        "description": "Runtime payload represented by Rust type Redirect. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "Redirect"
+      },
+      "RequestRecord": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type RequestRecord. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "RequestRecord"
+      },
+      "RerunBody": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type RerunBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "RerunBody"
+      },
+      "SelfImproveRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type SelfImproveRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "SelfImproveRequest"
+      },
+      "SelfImproveResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type SelfImproveResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "SelfImproveResponse"
+      },
+      "SftExportRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type SftExportRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "SftExportRequest"
+      },
+      "SftRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type SftRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "SftRequest"
+      },
+      "SuiteListResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type SuiteListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "SuiteListResponse"
+      },
+      "SuiteSaveResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type SuiteSaveResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "SuiteSaveResponse"
+      },
+      "SynthesisPreviewBody": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type SynthesisPreviewBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "SynthesisPreviewBody"
+      },
+      "SynthesizeBody": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type SynthesizeBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "SynthesizeBody"
+      },
+      "TeacherEntry": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type TeacherEntry. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "TeacherEntry"
+      },
+      "TeachersListResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type TeachersListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "TeachersListResponse"
+      },
+      "TextCompletionRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type TextCompletionRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "TextCompletionRequest"
+      },
+      "TextCompletionResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type TextCompletionResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "TextCompletionResponse"
+      },
+      "TierDefaultsListResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type TierDefaultsListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "TierDefaultsListResponse"
+      },
+      "TierDefaultsResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type TierDefaultsResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "TierDefaultsResponse"
+      },
+      "TrainingJobDetail": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type TrainingJobDetail. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "TrainingJobDetail"
+      },
+      "TrainingResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type TrainingResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "TrainingResponse"
+      },
+      "TrainingStatus": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type TrainingStatus. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "TrainingStatus"
+      },
+      "UnloadAdapterResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type UnloadAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "UnloadAdapterResponse"
+      },
+      "UploadAdapterResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type UploadAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "UploadAdapterResponse"
+      },
+      "Vec_RequestRecord": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/RequestRecord"
+        },
+        "description": "Runtime payload represented by Rust type Vec<RequestRecord>. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "Vec<RequestRecord>"
+      },
+      "Vec_TrainingStatus": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/TrainingStatus"
+        },
+        "description": "Runtime payload represented by Rust type Vec<TrainingStatus>. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "Vec<TrainingStatus>"
+      },
+      "WebSocketUpgrade": {
+        "type": "string",
+        "format": "binary",
+        "description": "Runtime payload represented by Rust type WebSocketUpgrade. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "WebSocketUpgrade"
+      },
+      "kiln_train_AdapterReceipt": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Runtime payload represented by Rust type kiln_train::AdapterReceipt. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "x-kiln-rust-type": "kiln_train::AdapterReceipt"
+      }
+    }
+  },
+  "x-kiln-path-count": 101,
+  "x-kiln-operation-count": 112,
+  "x-kiln-method-counts": {
+    "DELETE": 12,
+    "GET": 53,
+    "POST": 47
+  },
+  "x-kiln-tag-counts": {
+    "adapters": 9,
+    "agents": 16,
+    "corrections": 5,
+    "evals": 25,
+    "hf-trl": 7,
+    "inference": 3,
+    "library": 3,
+    "observability": 8,
+    "preflight": 5,
+    "recipes": 2,
+    "teachers": 5,
+    "training": 15,
+    "ui": 9
+  },
+  "x-kiln-field-schema-status": "migration_pending"
+}

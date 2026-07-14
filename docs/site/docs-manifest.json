@@ -71,6 +71,14 @@
       "description": "Generated machine-readable reference for all typed TOML sections, fields, defaults, validation bounds, environment names, compatibility inputs, and cross-field safety conditions."
     },
     {
+      "source": "contracts/kiln-http-api-v1.openapi.json",
+      "kind": "openapi",
+      "slug": "http-api",
+      "title": "HTTP API Contract",
+      "section": "start",
+      "description": "Generated canonical inventory of every production route, method, transport, handler owner, request type, response type, status, media type, and structured error envelope."
+    },
+    {
       "source": "CHANGELOG.md",
       "slug": "changelog",
       "title": "Changelog",
