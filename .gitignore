@@ -23,6 +23,19 @@ profiling-artifacts/
 # qualification/receipts; raw logs, traces, and profiles stay here.
 .qualification/
 
+# Raw benchmark, serving, metrics, and profiler output. Retain compact receipts,
+# summaries, manifests, and hashes instead.
+*.log
+*.sse
+*.prom
+*.trace
+*.prof
+*.profile
+*.nsys-rep
+*.qdrep
+*.nvvp
+*.perf.data
+
 # Vulkan SPIR-V build artifacts
 *.spv
 

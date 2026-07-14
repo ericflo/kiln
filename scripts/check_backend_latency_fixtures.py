@@ -151,8 +151,8 @@ def validate_result_provenance(
     context: str,
     manifest_schema_version: Any,
     manifest_path: Path | None,
-    require_raw_log_file: bool,
-    require_tracked_files: bool,
+    require_covered_provenance: bool,
+    enforce_git_retention: bool,
 ) -> None:
     if result.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION:
         errors.append(
@@ -169,7 +169,7 @@ def validate_result_provenance(
         errors.append(
             f"{context}.result_artifact.git_commit must be a lowercase 40-character git commit"
         )
-    elif require_raw_log_file and not git_commit_exists(git_commit):
+    elif require_covered_provenance and not git_commit_exists(git_commit):
         errors.append(
             f"{context}.result_artifact.git_commit must exist in the local repository when --require-covered is set"
         )
@@ -177,7 +177,7 @@ def validate_result_provenance(
     git_tracked_dirty = result.get("git_tracked_dirty")
     if not isinstance(git_tracked_dirty, bool):
         errors.append(f"{context}.result_artifact.git_tracked_dirty must be a boolean")
-    elif require_raw_log_file and git_tracked_dirty:
+    elif require_covered_provenance and git_tracked_dirty:
         errors.append(
             f"{context}.result_artifact.git_tracked_dirty must be false when --require-covered is set"
         )
@@ -189,7 +189,7 @@ def validate_result_provenance(
         errors.append(
             f"{context}.result_artifact.manifest must be {repo_relative_path(manifest_path)!r}, got {manifest!r}"
         )
-    elif require_raw_log_file and not is_repo_relative_path(manifest):
+    elif require_covered_provenance and not is_repo_relative_path(manifest):
         errors.append(
             f"{context}.result_artifact.manifest must be repo-relative when --require-covered is set"
         )
@@ -234,7 +234,7 @@ def validate_result_provenance(
                     f"{context}.result_artifact.source_sha256 does not match source"
                 )
             elif (
-                require_raw_log_file
+                require_covered_provenance
                 and isinstance(git_commit, str)
                 and GIT_COMMIT_RE.match(git_commit)
             ):
@@ -247,7 +247,7 @@ def validate_result_provenance(
                     errors.append(
                         f"{context}.result_artifact.source_sha256 must match source at git_commit"
                     )
-        elif require_raw_log_file:
+        elif require_covered_provenance:
             errors.append(
                 f"{context}.source must exist when --require-covered is set: {source}"
             )
@@ -255,11 +255,11 @@ def validate_result_provenance(
     raw_log = result.get("raw_log")
     if not isinstance(raw_log, str) or not raw_log:
         errors.append(f"{context}.result_artifact.raw_log must be a non-empty string")
-    elif require_raw_log_file and not is_repo_relative_path(raw_log):
+    elif require_covered_provenance and not is_repo_relative_path(raw_log):
         errors.append(
             f"{context}.result_artifact.raw_log must be repo-relative when --require-covered is set"
         )
-    elif require_raw_log_file and not is_canonical_raw_log_path(raw_log):
+    elif require_covered_provenance and not is_canonical_raw_log_path(raw_log):
         errors.append(
             f"{context}.result_artifact.raw_log must live under {LATENCY_RAW_LOG_DIR} "
             "with a .log extension when --require-covered is set"
@@ -279,14 +279,10 @@ def validate_result_provenance(
                 errors.append(
                     f"{context}.result_artifact.raw_log_sha256 does not match raw_log"
                 )
-            if require_tracked_files and not git_path_is_tracked(raw_log):
+            if enforce_git_retention and git_path_is_tracked(raw_log):
                 errors.append(
-                    f"{context}.result_artifact.raw_log must be tracked by git when --require-covered is set"
+                    f"{context}.result_artifact.raw_log must not be tracked by git when --require-covered is set"
                 )
-        elif require_raw_log_file:
-            errors.append(
-                f"{context}.result_artifact.raw_log must exist when --require-covered is set: {raw_log}"
-            )
 
 
 def validate_result_keys(errors: list[str], result: dict[str, Any], context: str) -> None:
@@ -327,7 +323,7 @@ def validate_raw_log_metrics(
     result: dict[str, Any],
     observed_metrics: dict[str, Any],
     context: str,
-    require_raw_log_file: bool,
+    require_covered_provenance: bool,
 ) -> None:
     raw_log = result.get("raw_log")
     if not isinstance(raw_log, str) or not raw_log:
@@ -351,7 +347,7 @@ def validate_raw_log_metrics(
             continue
         raw_observed = raw_observations.get(metric_name)
         if raw_observed is None:
-            if require_raw_log_file:
+            if require_covered_provenance:
                 errors.append(
                     f"{context}.result_artifact.raw_log missing metric {metric_name}"
                 )
@@ -375,8 +371,8 @@ def validate_result_artifact(
     context: str,
     manifest_schema_version: Any,
     manifest_path: Path | None,
-    require_raw_log_file: bool = False,
-    require_tracked_files: bool = False,
+    require_covered_provenance: bool = False,
+    enforce_git_retention: bool = False,
     require_threshold_pass: bool = True,
 ) -> None:
     try:
@@ -412,8 +408,8 @@ def validate_result_artifact(
         context,
         manifest_schema_version,
         manifest_path,
-        require_raw_log_file,
-        require_tracked_files,
+        require_covered_provenance,
+        enforce_git_retention,
     )
 
     observed_metrics = result.get("metrics")
@@ -429,7 +425,7 @@ def validate_result_artifact(
         result,
         observed_metrics,
         context,
-        require_raw_log_file,
+        require_covered_provenance,
     )
 
     for metric_idx, metric in enumerate(fixture.get("metrics", [])):
@@ -629,8 +625,8 @@ def validate_manifest(
                 context,
                 manifest.get("schema_version"),
                 manifest_path,
-                require_raw_log_file=require_covered,
-                require_tracked_files=require_covered,
+                require_covered_provenance=require_covered,
+                enforce_git_retention=require_covered,
             )
 
     missing_fixture_slots = manifest.get("missing_fixture_slots", [])
@@ -744,7 +740,7 @@ def self_test() -> int:
             "fixtures[0]",
             1,
             None,
-            require_raw_log_file=True,
+            require_covered_provenance=True,
         )
         if errors:
             print(
@@ -767,7 +763,7 @@ def self_test() -> int:
             "fixtures[0]",
             1,
             None,
-            require_raw_log_file=True,
+            require_covered_provenance=True,
             require_threshold_pass=False,
         )
         if errors:
@@ -794,7 +790,7 @@ def self_test() -> int:
             "fixtures[0]",
             1,
             None,
-            require_raw_log_file=True,
+            require_covered_provenance=True,
         )
         if not any("contains unknown keys" in error for error in errors):
             print(
@@ -816,7 +812,7 @@ def self_test() -> int:
             "fixtures[0]",
             1,
             None,
-            require_raw_log_file=True,
+            require_covered_provenance=True,
         )
         if not any("contains undeclared metrics" in error for error in errors):
             print(
@@ -858,12 +854,16 @@ def self_test() -> int:
             "fixtures[0]",
             1,
             None,
-            require_raw_log_file=True,
+            require_covered_provenance=True,
         )
-        if not any("raw_log must exist" in error for error in errors):
+        if any("raw_log" in error for error in errors):
             print(
                 json.dumps(
-                    {"ok": False, "case": "missing raw log", "errors": errors},
+                    {
+                        "ok": False,
+                        "case": "retained hash accepts absent raw log",
+                        "errors": errors,
+                    },
                     indent=2,
                 )
             )
@@ -1095,7 +1095,7 @@ def self_test() -> int:
             "fixtures[0]",
             1,
             None,
-            require_raw_log_file=True,
+            require_covered_provenance=True,
         )
         if not any("git_tracked_dirty must be false" in error for error in errors):
             print(
@@ -1118,7 +1118,7 @@ def self_test() -> int:
             "fixtures[0]",
             1,
             None,
-            require_raw_log_file=True,
+            require_covered_provenance=True,
         )
         if not any("git_commit must exist in the local repository" in error for error in errors):
             print(
@@ -1167,7 +1167,7 @@ def self_test() -> int:
             "fixtures[0]",
             1,
             None,
-            require_raw_log_file=True,
+            require_covered_provenance=True,
         )
         if not any("source must exist at git_commit" in error for error in errors):
             print(
@@ -1213,7 +1213,7 @@ def self_test() -> int:
             "fixtures[0]",
             1,
             None,
-            require_raw_log_file=True,
+            require_covered_provenance=True,
         )
         if not any("source_sha256 does not match source" in error for error in errors):
             print(
@@ -1345,12 +1345,12 @@ def self_test() -> int:
                 )
             )
             return 1
-        if not any("raw_log must be tracked by git" in error for error in errors):
+        if any("raw_log must not be tracked by git" in error for error in errors):
             print(
                 json.dumps(
                     {
                         "ok": False,
-                        "case": "untracked raw log",
+                        "case": "untracked raw log accepted",
                         "errors": errors,
                     },
                     indent=2,
@@ -1444,7 +1444,7 @@ def self_test() -> int:
             "fixtures[0]",
             1,
             None,
-            require_raw_log_file=True,
+            require_covered_provenance=True,
         )
         if not any("raw_log must live under" in error for error in errors):
             print(
@@ -1486,7 +1486,7 @@ def self_test() -> int:
             "fixtures[0]",
             1,
             None,
-            require_raw_log_file=True,
+            require_covered_provenance=True,
         )
         if not any("raw_log must be repo-relative" in error for error in errors):
             print(

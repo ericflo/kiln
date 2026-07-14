@@ -114,8 +114,9 @@ Covered result artifacts must not contain additional top-level keys, and
 should bump `artifact_schema_version` and update the validator.
 
 The validator's trust boundary is repository evidence, not a hardware oracle:
-it checks that reviewed artifact JSON, raw logs, fixture source, commit
-provenance, metric values, and locked thresholds are mutually consistent and
+it checks that reviewed artifact JSON, raw-log hashes, fixture source, commit
+provenance, metric values, and locked thresholds are mutually consistent. The
+raw log is verified and re-parsed during import and threshold locking but is not
 tracked. A clean-checkout artifact must not be materialized while new
 untracked repo evidence is present; this keeps local scratch files from
 claiming the same provenance as checked-in hardware evidence.
@@ -125,18 +126,18 @@ When `--require-covered` is set, the validator requires the fixture
 paths to be repo-relative. It also requires fixture `result_artifact` paths to
 live under `bench-results/backend-latency` with a `.json` extension, result
 `raw_log` paths to live under `bench-results/backend-latency/raw` with a `.log`
-extension, the result artifact and raw log to be tracked by git, and the
-referenced source and `raw_log` files to exist in the checkout and checks that
-their SHA-256 digests match
-`source_sha256` and `raw_log_sha256`. It requires `git_commit` to be a
+extension, the compact result artifact to be tracked by Git, and any locally
+present raw log to remain untracked. The raw log may be absent after its digest
+and metrics have been retained. When it is locally present, the validator
+checks that its SHA-256 matches `raw_log_sha256` and re-parses every declared
+metric. It always checks the current and committed fixture source against
+`source_sha256`. It requires `git_commit` to be a
 lowercase 40-character commit that exists in the local repository, requires the
 fixture source to exist at `git_commit`, requires `source_sha256` to match the
 source bytes at that commit, and requires `git_tracked_dirty` to be `false` for
 covered validation. The writer sets that field from
 `git status --porcelain --untracked-files=all`. It then re-parses the
-raw log `KILN_LATENCY_METRIC` lines and requires every declared artifact metric
-value and unit to match the raw log. It rejects unknown artifact keys and
-undeclared artifact metrics.
+It rejects unknown artifact keys and undeclared artifact metrics.
 
 The fixture digest deliberately excludes metric `max`, `threshold_state`, and
 `result_artifact` so a reviewed artifact remains valid while thresholds are
@@ -239,7 +240,8 @@ python3 scripts/plan_backend_latency_fixture_dispatch.py \
 ```
 
 After downloading the workflow artifact zip or directory, import the result JSON
-and raw log into their canonical repository paths before locking thresholds:
+and raw log into their canonical paths before locking thresholds. The result is
+reviewable repository evidence; the raw log is ignored local input:
 
 ```sh
 python3 scripts/import_backend_latency_artifact.py \
@@ -252,7 +254,8 @@ directory. It validates the result schema, fixture provenance, source digest,
 raw-log digest, metric values, Git commit, and clean-checkout marker, but it does
 not require locked `max` thresholds. If canonical files already exist with
 different content, pass `--force` only after deciding the newer hardware run
-should replace them.
+should replace them. Commit the compact JSON result, manifest thresholds, and
+raw-log SHA-256 only. Do not force-add the ignored raw log.
 
 ## Locking Thresholds
 
@@ -277,9 +280,11 @@ version, stable fixture digest,
 hardware/source/command provenance, source file digest, and contain every
 declared metric with no unknown artifact keys or undeclared metrics. It also
 requires the fixture `source`, result `manifest`, and result `raw_log` paths to
-be repo-relative, result `raw_log` to live under
-`bench-results/backend-latency/raw` with a `.log` extension, and the referenced
-source and raw log files to exist and match `source_sha256`/`raw_log_sha256`.
+be repo-relative and result `raw_log` to live under
+`bench-results/backend-latency/raw` with a `.log` extension. Threshold locking
+is the ingestion boundary where the ignored local raw log must still exist: it
+must match `raw_log_sha256`, and every parsed metric value and unit must match
+the compact result. The source must exist and match `source_sha256`.
 It requires `git_commit` to be a lowercase 40-character commit that exists in
 the local repository, requires the fixture source to exist at `git_commit`,
 requires `source_sha256` to match the source bytes at that commit, and requires
@@ -293,7 +298,9 @@ unselected fixtures stay `pending_fixture_result`, and manifest `status` remains
 sets the manifest `status` to `covered` once all fixture thresholds are locked.
 The locker applies the headroom by comparison: `<=` thresholds are raised above
 observed latency, while `>=` thresholds are lowered below observed throughput.
-Use `--check` to validate without writing.
+Use `--check` to validate without writing. After locking, retain the raw log in
+the external workflow artifact or delete the ignored local copy; the covered
+gate validates the tracked compact result without requiring that payload.
 
 Then run the covered gate:
 

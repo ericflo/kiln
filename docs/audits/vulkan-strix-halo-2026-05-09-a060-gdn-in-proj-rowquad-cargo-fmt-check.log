@@ -1,3 +1,0 @@
-$ cargo fmt --check
-
-exit_status=0

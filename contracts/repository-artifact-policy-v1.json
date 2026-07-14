@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "forbidden_artifact_suffixes": [
+    ".log",
+    ".nsys-rep",
+    ".nvvp",
+    ".perf.data",
+    ".prof",
+    ".profile",
+    ".prom",
+    ".qdrep",
+    ".sse",
+    ".trace"
+  ],
+  "max_csv_bytes": 1048576,
+  "max_tracked_file_bytes": 10485760,
+  "large_file_exceptions": []
+}

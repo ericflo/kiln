@@ -300,8 +300,8 @@ def import_backend_latency_artifact(
                 f"fixture {observed_fixture_id}",
                 manifest.get("schema_version"),
                 manifest_path,
-                require_raw_log_file=True,
-                require_tracked_files=False,
+                require_covered_provenance=True,
+                enforce_git_retention=True,
                 require_threshold_pass=False,
             )
             if errors:

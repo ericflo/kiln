@@ -224,6 +224,13 @@
       "description": "Generated ownership and migration inventory for every direct environment read and mutation, including literal KILN names, dynamic call sites, and test/build boundaries."
     },
     {
+      "source": "docs/ARTIFACT_RETENTION.md",
+      "slug": "artifact-retention",
+      "title": "Repository Artifact Retention",
+      "section": "operations",
+      "description": "Checked-in evidence boundaries, raw artifact retention, size limits, hash-bound exceptions, historical recovery, and the lightweight all-push guard."
+    },
+    {
       "source": "CONTRIBUTING.md",
       "slug": "contributing",
       "title": "Contributing",

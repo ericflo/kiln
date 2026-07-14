@@ -1,0 +1,22 @@
+name: Repository hygiene
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-hygiene-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  artifacts:
+    name: Tracked artifact policy
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 scripts/check_repository_artifacts.py
