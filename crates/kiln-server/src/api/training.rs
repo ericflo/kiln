@@ -4461,7 +4461,7 @@ async fn job_detail(
     detail.train_receipt = train_receipt;
     detail.replay_request = replay_request;
     detail.metadata_error = metadata_error;
-    let checkpoint_kind = match detail.job_type {
+    let checkpoint_kind = match detail.status.job_type {
         TrainingJobType::Sft => Some(kiln_train::checkpoint::TrainingKind::Sft),
         TrainingJobType::Grpo => Some(kiln_train::checkpoint::TrainingKind::Grpo),
         TrainingJobType::Opd => Some(kiln_train::checkpoint::TrainingKind::Opd),
