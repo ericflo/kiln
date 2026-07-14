@@ -645,14 +645,18 @@ fn rocm_graph_state_uses_bounded_reusable_slots() {
         "fn bind_decode_row_to_slot",
         "refresh_batched_state_from_rows_in_place",
         "fn prepare_owner_decode",
-        "RocmGraphCacheKey::new(owner, requested_key.clone())",
-        "RocmGraphCacheKey::new(owner, key)",
+        "let cache_key = RocmGraphCacheKey::new(owner, key.clone());",
+        "self.admit_captured_graph(cache_key, candidate",
     ] {
         assert!(
             rocm_graph.contains(required),
             "ROCm HIP graph decode state must use bounded reusable slots: {required}"
         );
     }
+    assert!(
+        rocm_graph.matches("RocmGraphCacheKey::new(owner,").count() >= 4,
+        "every decode/capture path must bind its graph geometry to a reusable owner"
+    );
 
     for forbidden in [
         "captured: HashMap<RocmGraphKey, CapturedDecodeGraphRocm>",
