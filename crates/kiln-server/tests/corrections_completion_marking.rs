@@ -122,6 +122,7 @@ fn enqueue_corrections_job(state: &AppState, job_id: &str, correction_ids: Vec<S
         submitted_unix_ms: 1,
         auto_load: false,
         consumed_correction_ids: correction_ids,
+        training_data: None,
         finished_at: None,
         finished_unix_ms: None,
         error: None,

@@ -1510,8 +1510,8 @@ def validate_control_schema(
     if not isinstance(definitions, dict):
         errors.append("control-plane schema $defs must be an object")
         return errors
-    if len(definitions) != 115:
-        errors.append(f"control-plane schema must contain 115 definitions, got {len(definitions)}")
+    if len(definitions) != 117:
+        errors.append(f"control-plane schema must contain 117 definitions, got {len(definitions)}")
     if list(definitions) != sorted(definitions):
         errors.append("control-plane schema definitions must be sorted")
 

@@ -538,10 +538,27 @@ pub struct EvalCompareSpec {
 /// Auto-eval hook attached to an `SftRequest` or `GrpoRequest`. When set,
 /// the training queue worker enqueues an eval against the produced adapter
 /// once training finishes.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PostEvalDataScope {
+    /// The suite must be disjoint from the admitted training corpus. Exact,
+    /// normalized, and persisted source-provenance overlap reject admission.
+    #[default]
+    HeldOut,
+    /// Explicit diagnostic over training data. Results are descriptive only
+    /// and cannot drive an accuracy promotion gate.
+    TrainSetEval,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostEvalConfig {
     /// Name of the registered suite to run.
     pub suite: String,
+    /// Whether the suite is required to be held out or is an explicitly
+    /// labeled train-set diagnostic. Defaults to the fail-closed held-out
+    /// policy.
+    #[serde(default)]
+    pub data_scope: PostEvalDataScope,
     /// Optional generation override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<EvalGenerationParams>,
@@ -582,6 +599,22 @@ mod tests {
             schema_version: 1,
             tools: None,
         }
+    }
+
+    #[test]
+    fn post_eval_data_scope_defaults_held_out_and_uses_explicit_wire_label() {
+        let default: PostEvalConfig = serde_json::from_value(serde_json::json!({
+            "suite": "fixture"
+        }))
+        .unwrap();
+        assert_eq!(default.data_scope, PostEvalDataScope::HeldOut);
+
+        let diagnostic: PostEvalConfig = serde_json::from_value(serde_json::json!({
+            "suite": "fixture",
+            "data_scope": "train-set-eval"
+        }))
+        .unwrap();
+        assert_eq!(diagnostic.data_scope, PostEvalDataScope::TrainSetEval);
     }
 
     #[test]

@@ -858,6 +858,11 @@ pub struct SftRequest {
     /// the consumed rows flip to `trained_into` when the job COMPLETES.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset: Option<String>,
+    /// Persisted partition selected from `dataset`. Omitted named-dataset
+    /// requests default to `train`. Invalid with inline rows, raw paths, or
+    /// the virtual `corrections:active` dataset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_split: Option<kiln_eval::DatasetSplit>,
     #[serde(default)]
     pub config: SftConfig,
     /// Server-owned ingestion evidence. It is not part of the public request
@@ -1303,6 +1308,10 @@ pub struct GrpoRequest {
     /// exclusive with both `groups` and `dataset_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset: Option<String>,
+    /// Persisted partition selected from `dataset`. Omitted named-dataset
+    /// requests default to `train`; invalid with inline groups or raw paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_split: Option<kiln_eval::DatasetSplit>,
     #[serde(default)]
     pub config: GrpoConfig,
     /// Optional auto-eval hook (see `SftRequest::post_eval`).
@@ -2054,6 +2063,27 @@ impl Default for GrpoConfig {
     }
 }
 
+/// Immutable identity of the exact corpus admitted for one training job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrainingDataProvenance {
+    /// `inline`, `dataset_path`, `named_dataset`, or a virtual source such as
+    /// `corrections`.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<kiln_eval::DatasetSplit>,
+    /// Identity of the entire registered dataset at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_corpus_sha256: Option<String>,
+    /// Identity of its exact persisted split manifest at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_manifest_sha256: Option<String>,
+    /// Identity of the exact selected rows/groups admitted for training.
+    pub admitted_corpus_sha256: String,
+    pub rows: u64,
+}
+
 /// Status of an ongoing training job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingStatus {
@@ -2080,6 +2110,9 @@ pub struct TrainingStatus {
     /// payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_type: Option<String>,
+    /// Exact admitted corpus and partition identity. Absent on legacy jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_data: Option<TrainingDataProvenance>,
     /// Failure detail when `state == failed`; absent otherwise and on
     /// payloads that predate the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]

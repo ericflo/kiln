@@ -95,6 +95,7 @@ fn enqueue_sft_job(state: &AppState, job_id: &str) {
         submitted_unix_ms: 1,
         auto_load: false,
         consumed_correction_ids: Vec::new(),
+        training_data: None,
         finished_at: None,
         finished_unix_ms: None,
         error: None,

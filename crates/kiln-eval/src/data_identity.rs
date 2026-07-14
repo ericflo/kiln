@@ -6,7 +6,7 @@
 //! normalized row identity, `group_id`, or `session_id`, so duplicates and
 //! related turns cannot leak across partitions.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -151,7 +151,7 @@ pub struct DatasetSplitManifest {
     pub rows: Vec<DatasetSplitRow>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetExampleIdentity {
     pub content_sha256: String,
@@ -166,6 +166,122 @@ pub struct DatasetExampleProvenance {
     pub dataset: String,
     pub source_split: DatasetSplit,
     pub row: DatasetRowIdentity,
+}
+
+/// The first conservative overlap found between admitted training data and an
+/// eval suite. Exact prompt/target overlap is checked before normalized
+/// overlap; persisted row and grouping provenance provide a stronger signal
+/// for suites synthesized from registered datasets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContaminationMatch {
+    ExactExample,
+    NormalizedExample,
+    SourceRow,
+    NormalizedSourceRow,
+    Group,
+    Session,
+}
+
+impl ContaminationMatch {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactExample => "exact prompt/target",
+            Self::NormalizedExample => "normalized prompt/target",
+            Self::SourceRow => "source row",
+            Self::NormalizedSourceRow => "normalized source row",
+            Self::Group => "source group",
+            Self::Session => "source session",
+        }
+    }
+}
+
+/// Bounded index of identities present in one eval suite. Training admission
+/// streams candidate rows/groups through this index, so even very large
+/// training corpora do not require a second in-memory identity set.
+#[derive(Debug, Clone, Default)]
+pub struct EvalContaminationIndex {
+    example_content_sha256: BTreeSet<String>,
+    example_normalized_sha256: BTreeSet<String>,
+    source_content_sha256: BTreeSet<String>,
+    source_normalized_sha256: BTreeSet<String>,
+    group_ids: BTreeSet<String>,
+    session_ids: BTreeSet<String>,
+}
+
+impl EvalContaminationIndex {
+    pub fn from_suite(suite: &crate::EvalSuite) -> Self {
+        let mut index = Self::default();
+        for example in &suite.examples {
+            let identity = example_identity(&example.messages, example.target.as_deref());
+            index.example_content_sha256.insert(identity.content_sha256);
+            index
+                .example_normalized_sha256
+                .insert(identity.normalized_sha256);
+            let provenance = example
+                .metadata
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|metadata| metadata.get(DATASET_PROVENANCE_METADATA_KEY))
+                .and_then(|value| {
+                    serde_json::from_value::<DatasetExampleProvenance>(value.clone()).ok()
+                });
+            if let Some(provenance) = provenance {
+                index
+                    .source_content_sha256
+                    .insert(provenance.row.content_sha256);
+                index
+                    .source_normalized_sha256
+                    .insert(provenance.row.normalized_sha256);
+                if let Some(group_id) = provenance.row.group_id {
+                    index.group_ids.insert(group_id);
+                }
+                if let Some(session_id) = provenance.row.session_id {
+                    index.session_ids.insert(session_id);
+                }
+            }
+        }
+        index
+    }
+
+    pub fn check_example(
+        &self,
+        messages: &[crate::EvalChatMessage],
+        target: Option<&str>,
+    ) -> Option<ContaminationMatch> {
+        let identity = example_identity(messages, target);
+        if self
+            .example_content_sha256
+            .contains(&identity.content_sha256)
+        {
+            return Some(ContaminationMatch::ExactExample);
+        }
+        self.example_normalized_sha256
+            .contains(&identity.normalized_sha256)
+            .then_some(ContaminationMatch::NormalizedExample)
+    }
+
+    pub fn check_source_row(&self, row: &DatasetSplitRow) -> Option<ContaminationMatch> {
+        if self.source_content_sha256.contains(&row.content_sha256) {
+            return Some(ContaminationMatch::SourceRow);
+        }
+        if self
+            .source_normalized_sha256
+            .contains(&row.normalized_sha256)
+        {
+            return Some(ContaminationMatch::NormalizedSourceRow);
+        }
+        if row
+            .group_id
+            .as_ref()
+            .is_some_and(|group_id| self.group_ids.contains(group_id))
+        {
+            return Some(ContaminationMatch::Group);
+        }
+        row.session_id
+            .as_ref()
+            .is_some_and(|session_id| self.session_ids.contains(session_id))
+            .then_some(ContaminationMatch::Session)
+    }
 }
 
 pub fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
@@ -581,5 +697,88 @@ mod tests {
                 .collect::<BTreeMap<_, _>>()
         };
         assert_eq!(assignments(&original), assignments(&reversed));
+    }
+
+    fn contamination_suite(
+        prompt: &str,
+        target: &str,
+        provenance: Option<DatasetExampleProvenance>,
+    ) -> crate::EvalSuite {
+        crate::EvalSuite {
+            name: "contamination-fixture".to_string(),
+            description: None,
+            default_scorer: crate::Scorer::ExactMatch {
+                case_sensitive: true,
+                strip_whitespace: true,
+            },
+            generation: Default::default(),
+            aggregation: Default::default(),
+            system_prompt: None,
+            examples: vec![crate::EvalExample {
+                messages: vec![crate::EvalChatMessage::new("user", prompt)],
+                target: Some(target.to_string()),
+                metadata: provenance.map(
+                    |provenance| serde_json::json!({DATASET_PROVENANCE_METADATA_KEY: provenance}),
+                ),
+                ..Default::default()
+            }],
+            schema_version: crate::SUITE_SCHEMA_VERSION,
+            tools: None,
+        }
+    }
+
+    #[test]
+    fn contamination_index_detects_exact_and_normalized_examples() {
+        let index = EvalContaminationIndex::from_suite(&contamination_suite(
+            "Answer This",
+            "Forty Two",
+            None,
+        ));
+        assert_eq!(
+            index.check_example(
+                &[crate::EvalChatMessage::new("user", "Answer This")],
+                Some("Forty Two")
+            ),
+            Some(ContaminationMatch::ExactExample)
+        );
+        assert_eq!(
+            index.check_example(
+                &[crate::EvalChatMessage::new("user", " answer\nTHIS ")],
+                Some("forty   two")
+            ),
+            Some(ContaminationMatch::NormalizedExample)
+        );
+    }
+
+    #[test]
+    fn contamination_index_detects_grouped_source_provenance() {
+        let source = DatasetRowIdentity {
+            row_number: 1,
+            content_sha256: "sha256:source".to_string(),
+            normalized_sha256: "sha256:normalized-source".to_string(),
+            group_id: Some("group-7".to_string()),
+            session_id: Some("session-9".to_string()),
+        };
+        let index = EvalContaminationIndex::from_suite(&contamination_suite(
+            "prompt",
+            "target",
+            Some(DatasetExampleProvenance {
+                dataset: "fixture".to_string(),
+                source_split: DatasetSplit::Holdout,
+                row: source,
+            }),
+        ));
+        let related = DatasetSplitRow {
+            row_number: 2,
+            content_sha256: "sha256:different".to_string(),
+            normalized_sha256: "sha256:also-different".to_string(),
+            split: DatasetSplit::Train,
+            group_id: Some("group-7".to_string()),
+            session_id: None,
+        };
+        assert_eq!(
+            index.check_source_row(&related),
+            Some(ContaminationMatch::Group)
+        );
     }
 }

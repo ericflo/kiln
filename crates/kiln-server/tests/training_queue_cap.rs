@@ -81,6 +81,7 @@ fn fill_queue(state: &AppState, n: usize) {
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
+                dataset_split: None,
                 examples: Vec::new(),
                 config: Default::default(),
                 ingestion: None,

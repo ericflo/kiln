@@ -527,6 +527,7 @@ fn prepare_agent_job(
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load: true,
         consumed_correction_ids: Vec::new(),
+        training_data: None,
         finished_at: None,
         finished_unix_ms: None,
         error: None,

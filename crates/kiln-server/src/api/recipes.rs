@@ -440,6 +440,7 @@ async fn run_recipe(
                 ..
             }) => Some(kiln_eval::PostEvalConfig {
                 suite: suite.clone(),
+                data_scope: Default::default(),
                 generation: None,
                 min_accuracy: Some(*require_min_score as f32),
                 include_baseline: false,
@@ -538,6 +539,7 @@ fn step_to_queued_job(
                 QueuedJob::Sft(SftRequest {
                     dataset_path: None,
                     dataset,
+                    dataset_split: None,
                     examples,
                     config: sft_config,
                     ingestion: None,
@@ -717,6 +719,7 @@ fn prepare_step_job(
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load: true,
         consumed_correction_ids: Vec::new(),
+        training_data: None,
         finished_at: None,
         finished_unix_ms: None,
         error: None,
@@ -855,6 +858,7 @@ mod tests {
         // The lookahead conversion used by the prepare loop.
         let gate = kiln_eval::PostEvalConfig {
             suite: suite.clone(),
+            data_scope: Default::default(),
             generation: None,
             min_accuracy: Some(*require_min_score as f32),
             include_baseline: false,

@@ -407,6 +407,10 @@ pub struct TrainingJobInfo {
     /// a failed job leaves the basket intact and re-trainable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consumed_correction_ids: Vec<String>,
+    /// Immutable corpus and partition identity recorded by authoritative
+    /// admission. Missing only on legacy archived jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_data: Option<kiln_train::TrainingDataProvenance>,
     /// Wall-clock instant at which the job entered a terminal state
     /// (`Completed` or `Failed`). `None` while the job is still
     /// `Queued` or `Running`. Used by the training-queue worker's GC

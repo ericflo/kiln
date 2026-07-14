@@ -255,18 +255,32 @@ def build_shared_training_types() -> None:
         "adapter_smoke_test": ref("Boolean"),
     }
     add_object("SftConfig", "kiln_train::SftConfig", sft_config_fields, "Complete native SFT configuration. Unknown fields fail admission.", optional=tuple(sft_config_fields), open_input=False)
+    add_enum(
+        "PostEvalDataScope",
+        "kiln_eval::PostEvalDataScope",
+        ["held-out", "train-set-eval"],
+        "Whether post-training evaluation is held out or an explicit train-set diagnostic.",
+    )
     add_object(
         "PostEvalConfig",
         "kiln_eval::PostEvalConfig",
         {
             "suite": ref("NonEmptyString"),
+            "data_scope": ref("PostEvalDataScope"),
             "generation": external_ref(EVAL_SCHEMA, "EvalGenerationParams"),
             "min_accuracy": ref("UnitInterval"),
             "include_baseline": ref("Boolean"),
         },
         "Optional post-training eval and promotion gate.",
-        optional=("generation", "min_accuracy", "include_baseline"),
+        optional=("data_scope", "generation", "min_accuracy", "include_baseline"),
         open_input=True,
+        extra={
+            "allOf": [{
+                "if": {"required": ["data_scope"], "properties": {"data_scope": {"const": "train-set-eval"}}},
+                "then": {"not": {"required": ["min_accuracy"]}},
+            }],
+            "x-kiln-semantic-constraints": ["train-set-eval is diagnostic only and cannot set min_accuracy"],
+        },
     )
     add_object(
         "SftRequest",
@@ -275,18 +289,23 @@ def build_shared_training_types() -> None:
             "examples": array(ref("SftExample"), min_items=1),
             "dataset_path": nullable(ref("String")),
             "dataset": nullable(ref("String")),
+            "dataset_split": external_ref(EVAL_SCHEMA, "DatasetSplit"),
             "config": ref("SftConfig"),
             "post_eval": nullable(ref("PostEvalConfig")),
         },
         "SFT submission using exactly one inline, local-path, or registered-dataset source.",
-        optional=("examples", "dataset_path", "dataset", "config", "post_eval"),
+        optional=("examples", "dataset_path", "dataset", "dataset_split", "config", "post_eval"),
         extra={
             "oneOf": [
                 {"required": ["examples"], "not": {"anyOf": [active_optional("dataset_path"), active_optional("dataset")]}},
                 {"required": ["dataset_path"], "properties": {"dataset_path": ref("NonEmptyString")}, "not": {"anyOf": [{"required": ["examples"]}, active_optional("dataset")]}},
                 {"required": ["dataset"], "properties": {"dataset": ref("NonEmptyString")}, "not": {"anyOf": [{"required": ["examples"]}, active_optional("dataset_path")]}},
             ],
-            "x-kiln-semantic-constraints": ["server SFT rejects train_mtp=true"],
+            "allOf": [{
+                "if": {"required": ["dataset_split"]},
+                "then": {"required": ["dataset"], "properties": {"dataset": ref("NonEmptyString")}},
+            }],
+            "x-kiln-semantic-constraints": ["server SFT rejects train_mtp=true", "dataset_split requires a registered named dataset and defaults to train"],
         },
     )
 
@@ -370,9 +389,9 @@ def build_grpo_types() -> None:
     add_object(
         "GrpoRequest",
         "GrpoRequest",
-        {"groups": array(ref("AgenticGroup"), min_items=1), "agentic_groups": array(ref("AgenticGroup"), min_items=1), "dataset_path": nullable(ref("String")), "dataset": nullable(ref("String")), "config": ref("GrpoConfig"), "post_eval": nullable(ref("PostEvalConfig"))},
+        {"groups": array(ref("AgenticGroup"), min_items=1), "agentic_groups": array(ref("AgenticGroup"), min_items=1), "dataset_path": nullable(ref("String")), "dataset": nullable(ref("String")), "dataset_split": external_ref(EVAL_SCHEMA, "DatasetSplit"), "config": ref("GrpoConfig"), "post_eval": nullable(ref("PostEvalConfig"))},
         "GRPO submission using exactly one inline, local-path, or registered-dataset source.",
-        optional=("groups", "agentic_groups", "dataset_path", "dataset", "config", "post_eval"),
+        optional=("groups", "agentic_groups", "dataset_path", "dataset", "dataset_split", "config", "post_eval"),
         open_input=True,
         extra={
             "oneOf": [
@@ -382,7 +401,11 @@ def build_grpo_types() -> None:
                 {"required": ["dataset"], "properties": {"dataset": ref("NonEmptyString")}, "not": {"anyOf": [{"required": ["groups"]}, {"required": ["agentic_groups"]}, active_optional("dataset_path")]}},
             ],
             "x-kiln-input-aliases": {"agentic_groups": "groups"},
-            "x-kiln-semantic-constraints": ["recorded behavior policy requires provenance on every rollout"],
+            "allOf": [{
+                "if": {"required": ["dataset_split"]},
+                "then": {"required": ["dataset"], "properties": {"dataset": ref("NonEmptyString")}},
+            }],
+            "x-kiln-semantic-constraints": ["recorded behavior policy requires provenance on every rollout", "dataset_split requires a registered named dataset and defaults to train"],
         },
     )
 
@@ -512,14 +535,29 @@ def build_opd_types() -> None:
 def build_training_responses() -> None:
     add_enum("TrainingState", "kiln_train::TrainingState", ["queued", "running", "completed", "failed"], "Training-job lifecycle state.")
     add_enum("TrainingJobType", "crate::state::TrainingJobType", ["sft", "grpo", "opd"], "Native training pipeline identity.")
+    add_object(
+        "TrainingDataProvenance",
+        "kiln_train::TrainingDataProvenance",
+        {
+            "source": ref("NonEmptyString"),
+            "dataset": ref("NonEmptyString"),
+            "split": external_ref(EVAL_SCHEMA, "DatasetSplit"),
+            "dataset_corpus_sha256": external_ref(EVAL_SCHEMA, "Sha256Digest"),
+            "split_manifest_sha256": external_ref(EVAL_SCHEMA, "Sha256Digest"),
+            "admitted_corpus_sha256": external_ref(EVAL_SCHEMA, "Sha256Digest"),
+            "rows": ref("NonNegativeInteger"),
+        },
+        "Immutable corpus, dataset, and partition identity captured by authoritative training admission.",
+        optional=("dataset", "split", "dataset_corpus_sha256", "split_manifest_sha256"),
+    )
     status_fields = {
         "job_id": ref("NonEmptyString"), "state": ref("TrainingState"), "progress": ref("FiniteNumber"),
         "current_loss": nullable(ref("FiniteNumber")), "adapter_name": nullable(ref("String")), "effective_seed": ref("DecimalU64"),
         "started_at": ref("String"), "elapsed_secs": ref("FiniteNumber"), "submitted_unix_ms": ref("NonNegativeInteger"),
-        "finished_unix_ms": ref("NonNegativeInteger"), "job_type": ref("TrainingJobType"), "error": ref("String"),
+        "finished_unix_ms": ref("NonNegativeInteger"), "job_type": ref("TrainingJobType"), "training_data": ref("TrainingDataProvenance"), "error": ref("String"),
         "post_eval_verdict": ref("String"), "gate_outcome": {"enum": ["promoted", "kept", "regression", "demoted", "error"]},
     }
-    status_optional = ("effective_seed", "submitted_unix_ms", "finished_unix_ms", "job_type", "error", "post_eval_verdict", "gate_outcome")
+    status_optional = ("effective_seed", "submitted_unix_ms", "finished_unix_ms", "job_type", "training_data", "error", "post_eval_verdict", "gate_outcome")
     add_object("TrainingStatus", "TrainingStatus", status_fields, "Live or archived training-job status.", optional=status_optional)
     add_definition("Vec_TrainingStatus", "Vec<TrainingStatus>", array(ref("TrainingStatus")), "All retained training statuses.")
     add_object("TrainingResponse", "TrainingResponse", {"job_id": ref("NonEmptyString"), "state": {"const": "queued"}, "effective_seed": ref("DecimalU64"), "message": ref("String")}, "Immutable training admission receipt.")

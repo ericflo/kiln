@@ -933,6 +933,13 @@ fn assistant_target(m: &SftMessage) -> Option<(String, AssistantTargetKind)> {
     Some((m.content.clone(), AssistantTargetKind::Prose))
 }
 
+/// Canonical training target for an assistant message. This deliberately
+/// shares synthesis's tool-call/code normalization so contamination checks
+/// compare the exact target representation written into generated suites.
+pub fn assistant_target_text(message: &SftMessage) -> Option<String> {
+    assistant_target(message).map(|(target, _)| target)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AssistantTargetKind {
     Prose,

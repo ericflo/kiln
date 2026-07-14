@@ -4952,6 +4952,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                                          label: &str| {
                     let cfg = kiln_eval::PostEvalConfig {
                         suite: suite.clone(),
+                        data_scope: Default::default(),
                         generation: None,
                         min_accuracy: Some(0.0),
                         include_baseline: false,
@@ -6303,6 +6304,7 @@ mod tests {
             examples: Vec::new(),
             dataset_path: None,
             dataset: None,
+            dataset_split: None,
             config: Default::default(),
             ingestion: None,
             post_eval: None,
@@ -6689,6 +6691,7 @@ mod tests {
             submitted_unix_ms: 1,
             auto_load: false,
             consumed_correction_ids: correction_ids,
+            training_data: None,
             finished_at: None,
             finished_unix_ms: None,
             error: None,
@@ -6853,6 +6856,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
+                dataset_split: None,
                 examples: vec![],
                 config: Default::default(),
                 ingestion: None,
@@ -6869,6 +6873,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
+                dataset_split: None,
                 examples: vec![],
                 config: Default::default(),
                 ingestion: None,
@@ -6885,6 +6890,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
+                dataset_split: None,
                 examples: vec![],
                 config: Default::default(),
                 ingestion: None,
@@ -6912,6 +6918,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
+                dataset_split: None,
                 examples: vec![],
                 config: Default::default(),
                 ingestion: None,
@@ -6928,6 +6935,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
+                dataset_split: None,
                 examples: vec![],
                 config: Default::default(),
                 ingestion: None,
@@ -6944,6 +6952,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 dataset_path: None,
                 dataset: None,
+                dataset_split: None,
                 examples: vec![],
                 config: Default::default(),
                 ingestion: None,
@@ -6991,6 +7000,7 @@ mod tests {
         set_test_readonly(&canonical, true);
         let job = QueuedJob::Grpo(GrpoRequest {
             dataset: None,
+            dataset_split: None,
             groups: Vec::new(),
             dataset_path: Some(canonical.to_string_lossy().into_owned()),
             config: Default::default(),
@@ -7042,6 +7052,7 @@ mod tests {
     fn grpo_path_job(path: &Path) -> QueuedJob {
         QueuedJob::Grpo(GrpoRequest {
             dataset: None,
+            dataset_split: None,
             groups: Vec::new(),
             dataset_path: Some(path.display().to_string()),
             config: Default::default(),
@@ -7277,6 +7288,7 @@ mod tests {
         let state = mk_post_eval_state();
         let cfg = kiln_eval::PostEvalConfig {
             suite: "smoke".into(),
+            data_scope: Default::default(),
             generation: None,
             min_accuracy: None,
             include_baseline: false,
@@ -7291,6 +7303,7 @@ mod tests {
         let state = mk_post_eval_state();
         let cfg = kiln_eval::PostEvalConfig {
             suite: "smoke".into(),
+            data_scope: Default::default(),
             generation: None,
             min_accuracy: None,
             include_baseline: true,
@@ -7315,6 +7328,7 @@ mod tests {
         let state = mk_post_eval_state();
         let cfg = kiln_eval::PostEvalConfig {
             suite: "smoke".into(),
+            data_scope: Default::default(),
             generation: None,
             min_accuracy: Some(0.8),
             include_baseline: true,
@@ -7363,6 +7377,7 @@ mod tests {
         state.suite_registry = None;
         let cfg = kiln_eval::PostEvalConfig {
             suite: "smoke".into(),
+            data_scope: Default::default(),
             generation: None,
             min_accuracy: None,
             include_baseline: false,

@@ -200,11 +200,13 @@ async fn post_eval_config_serializes_through_train_request_round_trip() {
     let req = kiln_train::SftRequest {
         dataset_path: None,
         dataset: None,
+        dataset_split: None,
         examples: vec![],
         config: Default::default(),
         ingestion: None,
         post_eval: Some(PostEvalConfig {
             suite: "smoke".into(),
+            data_scope: Default::default(),
             generation: Some(EvalGenerationParams {
                 temperature: 0.0,
                 max_tokens: 64,

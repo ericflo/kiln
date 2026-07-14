@@ -32,6 +32,7 @@ use crate::training_preflight::{
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
 use kiln_memory::vram::VramSource;
+use kiln_train::TrainingDataProvenance;
 
 #[derive(Debug)]
 struct GrpoSubmissionStats {
@@ -458,6 +459,10 @@ fn validate_grpo_jsonl_submission(
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     config: &kiln_train::GrpoConfig,
     model_num_layers: usize,
+    contamination: Option<(
+        &kiln_eval::EvalContaminationIndex,
+        &kiln_eval::PostEvalConfig,
+    )>,
 ) -> Result<GrpoSubmissionStats, ApiError> {
     use std::fs::OpenOptions;
     use std::io::{BufRead, BufReader, Read, Seek, Write};
@@ -653,6 +658,11 @@ fn validate_grpo_jsonl_submission(
                 line_no
             ))
         })?;
+        if let Some((index, post_eval)) = contamination
+            && let Some(overlap) = check_grpo_group_contamination(index, &group)
+        {
+            return Err(contamination_error(post_eval, overlap));
+        }
         if group.completions.is_empty() {
             return Err(ApiError::training_invalid_request(format!(
                 "GRPO JSONL group at line {line_no} in '{dataset_path}' has no completions"
@@ -983,14 +993,17 @@ fn validate_grpo_submission_source(
     req: &GrpoRequest,
     tokenizer: Option<&kiln_core::tokenizer::KilnTokenizer>,
 ) -> Result<(), ApiError> {
-    if req.dataset_path.is_some() && !req.groups.is_empty() {
+    let source_count = usize::from(!req.groups.is_empty())
+        + usize::from(req.dataset_path.is_some())
+        + usize::from(req.dataset.is_some());
+    if source_count != 1 {
         return Err(ApiError::training_invalid_request(
-            "GRPO request must use either groups or dataset_path, not both",
+            "GRPO request must use exactly one of groups, dataset_path, or dataset",
         ));
     }
-    if req.dataset_path.is_none() && req.groups.is_empty() {
+    if req.dataset_split.is_some() && req.dataset.is_none() {
         return Err(ApiError::training_invalid_request(
-            "GRPO request needs either non-empty groups or dataset_path",
+            "GRPO dataset_split is valid only with a named dataset",
         ));
     }
     // Fail fast on loss compositions the kt-tape trainer cannot train
@@ -1616,6 +1629,16 @@ pub(crate) async fn admit_sft_request(
             "SFT request must use exactly one of examples, dataset_path, or dataset",
         ));
     }
+    if req.dataset_split.is_some()
+        && req
+            .dataset
+            .as_deref()
+            .is_none_or(|dataset| dataset == "corrections:active")
+    {
+        return Err(ApiError::training_invalid_request(
+            "SFT dataset_split is valid only with a registered named dataset",
+        ));
+    }
     if let Some(name) = req.config.output_name.as_deref() {
         super::adapters::validate_adapter_name(name)?;
     }
@@ -1647,6 +1670,7 @@ pub(crate) async fn admit_sft_request(
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         consumed_correction_ids: Vec::new(),
+        training_data: None,
         finished_at: None,
         finished_unix_ms: None,
         error: None,
@@ -1718,30 +1742,6 @@ async fn submit_grpo(
 
     validate_post_eval_suite(&state, req.post_eval.as_ref())?;
 
-    // Train-by-dataset-name: resolve an uploaded dataset (the eval dataset
-    // store) to its on-disk JSONL and ride the existing dataset_path
-    // streaming path. Callers send just the name — no rows round-trip.
-    if let Some(dataset_name) = req.dataset.take() {
-        if !req.groups.is_empty() || req.dataset_path.is_some() {
-            return Err(ApiError::training_invalid_request(
-                "GRPO request must use exactly one of groups, dataset_path, or dataset",
-            ));
-        }
-        let registry = state
-            .dataset_registry
-            .as_ref()
-            .ok_or_else(ApiError::dataset_registry_unavailable)?;
-        let dir = registry.dataset_dir(&dataset_name).map_err(|e| match e {
-            crate::eval::DatasetError::InvalidName(_) => ApiError::dataset_invalid(&dataset_name),
-            other => ApiError::dataset_invalid(format!("{other}")),
-        })?;
-        let path = dir.join("data.jsonl");
-        if !path.is_file() {
-            return Err(ApiError::dataset_not_found(&dataset_name));
-        }
-        req.dataset_path = Some(path.to_string_lossy().into_owned());
-    }
-
     // Reject when the queue is at its configured cap. See submit_sft above
     // for the audit reference.
     let max_queued = state.max_queued_training_jobs;
@@ -1766,7 +1766,7 @@ async fn submit_grpo(
     }
     validate_grpo_submission_source(&req, Some(state.tokenizer.as_ref()))?;
 
-    let stats = if req.dataset_path.is_some() {
+    let stats = if req.dataset_path.is_some() || req.dataset.is_some() {
         // The authoritative queue admission performs the bounded full-corpus
         // scan while holding the process admission permit. Do not duplicate
         // that expensive work on the async handler before capacity is owned.
@@ -1813,6 +1813,8 @@ async fn submit_grpo(
     if stats.streaming_dataset {
         tracing::info!(
             dataset_path = req.dataset_path.as_deref().unwrap_or_default(),
+            dataset = req.dataset.as_deref().unwrap_or_default(),
+            dataset_split = req.dataset_split.unwrap_or_default().as_str(),
             job_id = %job_id,
             adapter = %adapter_name,
             "streamed GRPO training request entering bounded full-corpus admission"
@@ -1842,6 +1844,7 @@ async fn submit_grpo(
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         consumed_correction_ids: Vec::new(),
+        training_data: None,
         finished_at: None,
         finished_unix_ms: None,
         error: None,
@@ -2049,6 +2052,7 @@ async fn submit_opd(
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         consumed_correction_ids: Vec::new(),
+        training_data: None,
         finished_at: None,
         finished_unix_ms: None,
         error: None,
@@ -2184,6 +2188,7 @@ async fn submit_distill_refresh(
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         consumed_correction_ids: Vec::new(),
+        training_data: None,
         finished_at: None,
         finished_unix_ms: None,
         error: None,
@@ -2415,6 +2420,11 @@ pub(crate) fn validate_post_eval_suite(
     let Some(cfg) = post_eval else {
         return Ok(());
     };
+    if cfg.data_scope == kiln_eval::PostEvalDataScope::TrainSetEval && cfg.min_accuracy.is_some() {
+        return Err(ApiError::training_invalid_request(
+            "post_eval.data_scope \"train-set-eval\" is diagnostic only and cannot set min_accuracy",
+        ));
+    }
     let Some(registry) = state.suite_registry.as_ref() else {
         // No registry on this state (mock/test shapes) — the eval worker
         // will surface the failure; don't block submission.
@@ -2429,6 +2439,169 @@ pub(crate) fn validate_post_eval_suite(
         )));
     }
     Ok(())
+}
+
+fn post_eval_contamination_index(
+    state: &AppState,
+    post_eval: Option<&kiln_eval::PostEvalConfig>,
+) -> Result<Option<kiln_eval::EvalContaminationIndex>, ApiError> {
+    let Some(cfg) = post_eval else {
+        return Ok(None);
+    };
+    if cfg.data_scope == kiln_eval::PostEvalDataScope::TrainSetEval {
+        return Ok(None);
+    }
+    let Some(registry) = state.suite_registry.as_ref() else {
+        // Minimal unit-test states may omit the registry. Production startup
+        // always installs it, and validate_post_eval_suite owns that contract.
+        return Ok(None);
+    };
+    let suite = registry.load(&cfg.suite).map_err(|error| {
+        ApiError::training_invalid_request(format!(
+            "load held-out post_eval suite {:?} during admission: {error}",
+            cfg.suite
+        ))
+    })?;
+    Ok(Some(kiln_eval::EvalContaminationIndex::from_suite(&suite)))
+}
+
+fn contamination_error(
+    post_eval: &kiln_eval::PostEvalConfig,
+    overlap: kiln_eval::ContaminationMatch,
+) -> ApiError {
+    ApiError::training_invalid_request(format!(
+        "post_eval suite {:?} is declared held-out but overlaps admitted training data via {}; use a disjoint suite or explicitly set post_eval.data_scope to \"train-set-eval\" for a non-gating diagnostic",
+        post_eval.suite,
+        overlap.as_str()
+    ))
+}
+
+fn check_prompt_variants(
+    index: &kiln_eval::EvalContaminationIndex,
+    messages: &[kiln_eval::EvalChatMessage],
+    target: &str,
+) -> Option<kiln_eval::ContaminationMatch> {
+    let mut variants = Vec::with_capacity(4);
+    variants.push(messages.to_vec());
+    let without_system = messages
+        .iter()
+        .filter(|message| message.role != "system")
+        .cloned()
+        .collect::<Vec<_>>();
+    variants.push(without_system);
+    for prompt in variants.clone() {
+        let mut trimmed = prompt;
+        while trimmed.last().is_some_and(|message| message.role == "tool") {
+            trimmed.pop();
+        }
+        variants.push(trimmed);
+    }
+    variants
+        .iter()
+        .find_map(|prompt| index.check_example(prompt, Some(target)))
+}
+
+fn check_sft_contamination(
+    index: &kiln_eval::EvalContaminationIndex,
+    examples: &[kiln_train::SftExample],
+) -> Option<kiln_eval::ContaminationMatch> {
+    for example in examples {
+        for (assistant_index, assistant) in example.messages.iter().enumerate() {
+            if assistant.role != "assistant" {
+                continue;
+            }
+            let Some(target) = kiln_eval::assistant_target_text(assistant) else {
+                continue;
+            };
+            if let Some(overlap) =
+                check_prompt_variants(index, &example.messages[..assistant_index], &target)
+            {
+                return Some(overlap);
+            }
+        }
+    }
+    None
+}
+
+fn check_grpo_group_contamination(
+    index: &kiln_eval::EvalContaminationIndex,
+    group: &kiln_train::GrpoGroup,
+) -> Option<kiln_eval::ContaminationMatch> {
+    group
+        .completions
+        .iter()
+        .find_map(|completion| check_prompt_variants(index, &group.messages, &completion.text))
+}
+
+fn check_split_contamination(
+    index: &kiln_eval::EvalContaminationIndex,
+    split: &kiln_eval::DatasetSplitManifest,
+    selected: kiln_eval::DatasetSplit,
+) -> Option<kiln_eval::ContaminationMatch> {
+    split
+        .rows
+        .iter()
+        .filter(|row| row.split == selected)
+        .find_map(|row| index.check_source_row(row))
+}
+
+struct NamedDatasetAdmission {
+    path: PathBuf,
+    split: kiln_eval::DatasetSplit,
+    manifest: crate::eval::DatasetManifest,
+    split_manifest: kiln_eval::DatasetSplitManifest,
+}
+
+fn resolve_named_training_dataset(
+    state: &AppState,
+    name: &str,
+    requested_split: Option<kiln_eval::DatasetSplit>,
+    expected_format: crate::eval::DatasetFormat,
+) -> Result<NamedDatasetAdmission, ApiError> {
+    let registry = state
+        .dataset_registry
+        .as_ref()
+        .ok_or_else(ApiError::dataset_registry_unavailable)?;
+    let manifest = registry.load_manifest(name).map_err(|error| match error {
+        crate::eval::DatasetError::NotFound(_) => ApiError::dataset_not_found(name),
+        crate::eval::DatasetError::InvalidName(_) => ApiError::dataset_invalid(name),
+        other => ApiError::dataset_invalid(format!("{other}")),
+    })?;
+    if manifest.format != expected_format {
+        return Err(ApiError::training_invalid_request(format!(
+            "dataset {name:?} has format {:?}; this training route requires {:?}",
+            manifest.format, expected_format
+        )));
+    }
+    let split = requested_split.unwrap_or_default();
+    let split_manifest = registry
+        .load_split(name)
+        .map_err(|error| ApiError::dataset_invalid(format!("{error}")))?;
+    let path = registry
+        .split_path(name, split)
+        .map_err(|error| ApiError::dataset_invalid(format!("{error}")))?;
+    Ok(NamedDatasetAdmission {
+        path,
+        split,
+        manifest,
+        split_manifest,
+    })
+}
+
+fn named_training_provenance(
+    source: &NamedDatasetAdmission,
+    admitted_corpus_sha256: String,
+    rows: u64,
+) -> TrainingDataProvenance {
+    TrainingDataProvenance {
+        source: "named_dataset".to_string(),
+        dataset: Some(source.manifest.name.clone()),
+        split: Some(source.split),
+        dataset_corpus_sha256: Some(source.manifest.corpus_sha256.clone()),
+        split_manifest_sha256: Some(source.manifest.split_manifest_sha256.clone()),
+        admitted_corpus_sha256,
+        rows,
+    }
 }
 
 pub(crate) fn enforce_queue_caps(state: &AppState) -> Result<(), ApiError> {
@@ -3231,6 +3404,7 @@ fn prepare_training_entry_admission(
                     "SFT request must use exactly one of examples, dataset_path, or dataset",
                 ));
             }
+            let mut named_source = None;
             let prepared = if let Some(dataset_name) = req.dataset.as_deref() {
                 if dataset_name == "corrections:active" {
                     let store = super::corrections::CorrectionsStore::for_state(state);
@@ -3256,35 +3430,27 @@ fn prepare_training_entry_admission(
                         retained_correction_ids(ids, &prepared.ingestion)?;
                     prepared
                 } else {
-                    let registry = state
-                        .dataset_registry
-                        .as_ref()
-                        .ok_or_else(ApiError::dataset_registry_unavailable)?;
-                    let dataset_dir =
-                        registry
-                            .dataset_dir(dataset_name)
-                            .map_err(|error| match error {
-                                crate::eval::DatasetError::NotFound(_) => {
-                                    ApiError::dataset_not_found(dataset_name)
-                                }
-                                crate::eval::DatasetError::InvalidName(_) => {
-                                    ApiError::dataset_invalid(dataset_name)
-                                }
-                                other => ApiError::dataset_invalid(format!("{other}")),
-                            })?;
-                    let data_path = dataset_dir.join("data.jsonl");
-                    crate::sft_dataset::prepare_sft_jsonl(
-                        &data_path,
+                    let source = resolve_named_training_dataset(
+                        state,
+                        dataset_name,
+                        req.dataset_split,
+                        crate::eval::DatasetFormat::SftChat,
+                    )?;
+                    let prepared = crate::sft_dataset::prepare_sft_jsonl(
+                        &source.path,
                         state.tokenizer.as_ref(),
                         req.config.invalid_row_policy,
                         "named_dataset",
-                        Some(dataset_name.to_string()),
+                        Some(format!("{dataset_name}:{}", source.split.as_str())),
                     )
                     .map_err(|error| {
                         ApiError::training_invalid_request(format!(
-                            "invalid SFT dataset {dataset_name:?}: {error:#}"
+                            "invalid SFT dataset {dataset_name:?} {} split: {error:#}",
+                            source.split.as_str()
                         ))
-                    })?
+                    })?;
+                    named_source = Some(source);
+                    prepared
                 }
             } else if let Some(path) = req.dataset_path.as_deref() {
                 let canonical = std::fs::canonicalize(path).map_err(|error| {
@@ -3318,6 +3484,40 @@ fn prepare_training_entry_admission(
                     ApiError::training_invalid_request(format!("invalid SFT rows: {error:#}"))
                 })?
             };
+            let contamination = post_eval_contamination_index(state, req.post_eval.as_ref())?;
+            if let Some(index) = contamination.as_ref() {
+                let overlap = named_source
+                    .as_ref()
+                    .and_then(|source| {
+                        check_split_contamination(index, &source.split_manifest, source.split)
+                    })
+                    .or_else(|| check_sft_contamination(index, &prepared.examples));
+                if let Some(overlap) = overlap {
+                    return Err(contamination_error(
+                        req.post_eval
+                            .as_ref()
+                            .expect("contamination index requires post_eval"),
+                        overlap,
+                    ));
+                }
+            }
+            info.training_data = Some(if let Some(source) = named_source.as_ref() {
+                named_training_provenance(
+                    source,
+                    prepared.ingestion.kept_corpus_sha256.clone(),
+                    prepared.ingestion.rows_kept as u64,
+                )
+            } else {
+                TrainingDataProvenance {
+                    source: prepared.ingestion.source.clone(),
+                    dataset: req.dataset.clone(),
+                    split: None,
+                    dataset_corpus_sha256: None,
+                    split_manifest_sha256: None,
+                    admitted_corpus_sha256: prepared.ingestion.kept_corpus_sha256.clone(),
+                    rows: prepared.ingestion.rows_kept as u64,
+                }
+            });
             let admission_weight_bytes =
                 sft_materialized_weight_bytes(&prepared.examples, &prepared.ingestion)?;
             let loss_route = sft_loss_route_for_state(state)?;
@@ -3346,6 +3546,7 @@ fn prepare_training_entry_admission(
             // valid single-source inline SFT payload.
             req.dataset_path = None;
             req.dataset = None;
+            req.dataset_split = None;
             entry.reserved_bytes = admission.reserved_bytes;
             entry.prepared_data = PreparedTrainingData::Sft(PreparedSftAdmission {
                 ingestion: prepared.ingestion,
@@ -3356,20 +3557,61 @@ fn prepare_training_entry_admission(
             });
         }
         QueuedJob::Grpo(req) => {
-            if req.dataset_path.is_some() == !req.groups.is_empty() {
+            let source_count = usize::from(!req.groups.is_empty())
+                + usize::from(req.dataset_path.is_some())
+                + usize::from(req.dataset.is_some());
+            if source_count != 1 {
                 return Err(ApiError::training_invalid_request(
-                    "GRPO request must use exactly one of groups or dataset_path",
+                    "GRPO request must use exactly one of groups, dataset_path, or dataset",
                 ));
             }
-            let (max_seq_len, prepared) = if let Some(path) = req.dataset_path.as_deref() {
+            let named_source = req
+                .dataset
+                .as_deref()
+                .map(|dataset| {
+                    resolve_named_training_dataset(
+                        state,
+                        dataset,
+                        req.dataset_split,
+                        crate::eval::DatasetFormat::GrpoGroups,
+                    )
+                })
+                .transpose()?;
+            let contamination = post_eval_contamination_index(state, req.post_eval.as_ref())?;
+            if let (Some(index), Some(source)) = (contamination.as_ref(), named_source.as_ref())
+                && let Some(overlap) =
+                    check_split_contamination(index, &source.split_manifest, source.split)
+            {
+                return Err(contamination_error(
+                    req.post_eval
+                        .as_ref()
+                        .expect("contamination index requires post_eval"),
+                    overlap,
+                ));
+            }
+            let source_path = named_source
+                .as_ref()
+                .map(|source| source.path.as_path())
+                .or_else(|| req.dataset_path.as_deref().map(std::path::Path::new));
+            let (max_seq_len, prepared, admitted_corpus_sha256, admitted_rows) = if let Some(path) =
+                source_path
+            {
                 let receipt = match std::mem::take(&mut entry.prepared_data) {
                     PreparedTrainingData::None => validate_grpo_jsonl_submission(
-                        path,
+                        &path.to_string_lossy(),
                         &state.adapter_dir.join(".training-inputs"),
                         &mut entry.prepared_data_permit,
                         state.tokenizer.as_ref(),
                         &req.config,
                         state.model_config.num_layers,
+                        contamination.as_ref().map(|index| {
+                            (
+                                index,
+                                req.post_eval
+                                    .as_ref()
+                                    .expect("contamination index requires post_eval"),
+                            )
+                        }),
                     )?
                     .source_receipt
                     .ok_or_else(|| ApiError::internal("GRPO scan omitted source receipt"))?,
@@ -3380,10 +3622,14 @@ fn prepare_training_entry_admission(
                         ));
                     }
                 };
+                let admitted_corpus_sha256 = receipt.source_sha256.clone();
+                let admitted_rows = receipt.groups as u64;
                 req.dataset_path = Some(receipt.path.to_string_lossy().into_owned());
                 (
                     receipt.max_seq_len,
                     PreparedTrainingData::GrpoJsonl(receipt),
+                    admitted_corpus_sha256,
+                    admitted_rows,
                 )
             } else {
                 if !matches!(entry.prepared_data, PreparedTrainingData::None) {
@@ -3393,6 +3639,16 @@ fn prepare_training_entry_admission(
                 }
                 let mut maximum = 0usize;
                 for (index, group) in req.groups.iter().enumerate() {
+                    if let Some(contamination) = contamination.as_ref()
+                        && let Some(overlap) = check_grpo_group_contamination(contamination, group)
+                    {
+                        return Err(contamination_error(
+                            req.post_eval
+                                .as_ref()
+                                .expect("contamination index requires post_eval"),
+                            overlap,
+                        ));
+                    }
                     let row_max =
                         kiln_train::trainer::validate_grpo_group_policy_data_and_max_seq_len(
                             group,
@@ -3407,8 +3663,35 @@ fn prepare_training_entry_admission(
                         })?;
                     maximum = maximum.max(row_max);
                 }
-                (maximum, PreparedTrainingData::None)
+                let corpus = serde_json::to_value(&req.groups).map_err(|error| {
+                    ApiError::internal(format!("serialize admitted inline GRPO groups: {error}"))
+                })?;
+                (
+                    maximum,
+                    PreparedTrainingData::None,
+                    kiln_eval::sha256_json(&corpus),
+                    req.groups.len() as u64,
+                )
             };
+            info.training_data = Some(if let Some(source) = named_source.as_ref() {
+                named_training_provenance(source, admitted_corpus_sha256, admitted_rows)
+            } else {
+                TrainingDataProvenance {
+                    source: if req.dataset_path.is_some() {
+                        "dataset_path".to_string()
+                    } else {
+                        "inline".to_string()
+                    },
+                    dataset: None,
+                    split: None,
+                    dataset_corpus_sha256: None,
+                    split_manifest_sha256: None,
+                    admitted_corpus_sha256,
+                    rows: admitted_rows,
+                }
+            });
+            req.dataset = None;
+            req.dataset_split = None;
             let admission = enforce_training_preflight(
                 state,
                 max_seq_len,
@@ -3828,6 +4111,7 @@ fn register_and_enqueue_distill(
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         consumed_correction_ids: Vec::new(),
+        training_data: None,
         finished_at: None,
         finished_unix_ms: None,
         error: None,
@@ -3875,6 +4159,7 @@ fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatu
             }
             .into(),
         ),
+        training_data: j.training_data.clone(),
         error: j.error.clone(),
         post_eval_verdict: j.post_eval_verdict.clone(),
         gate_outcome: j.gate_outcome.clone(),
@@ -5051,6 +5336,7 @@ mod tests {
             submitted_unix_ms: crate::recent_requests::now_unix_ms(),
             auto_load: false,
             consumed_correction_ids: Vec::new(),
+            training_data: None,
             finished_at: None,
             finished_unix_ms: None,
             error: None,
@@ -5064,6 +5350,7 @@ mod tests {
             examples: Vec::new(),
             dataset_path: None,
             dataset: None,
+            dataset_split: None,
             config: SftConfig::default(),
             ingestion: None,
             post_eval: None,
@@ -5193,6 +5480,106 @@ mod tests {
         )
     }
 
+    #[test]
+    fn train_set_eval_cannot_be_a_promotion_gate() {
+        let state = teacher_binding_test_state();
+        let config = kiln_eval::PostEvalConfig {
+            suite: "diagnostic".to_string(),
+            data_scope: kiln_eval::PostEvalDataScope::TrainSetEval,
+            generation: None,
+            min_accuracy: Some(0.8),
+            include_baseline: false,
+        };
+        let error = validate_post_eval_suite(&state, Some(&config)).unwrap_err();
+        assert_eq!(error.code, "training_invalid_request");
+        assert!(error.message.contains("diagnostic only"));
+    }
+
+    #[test]
+    fn named_training_defaults_to_persisted_train_partition() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = crate::eval::DatasetRegistry::new(temp.path().join("datasets"));
+        let rows = (0..9)
+            .map(|index| {
+                serde_json::json!({
+                    "group_id": format!("group-{index}"),
+                    "messages": [
+                        {"role": "user", "content": format!("prompt {index}")},
+                        {"role": "assistant", "content": format!("answer {index}")}
+                    ]
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        registry
+            .create(
+                "partitioned",
+                crate::eval::DatasetFormat::SftChat,
+                None,
+                rows.as_bytes(),
+            )
+            .unwrap();
+        let mut state = teacher_binding_test_state();
+        state.dataset_registry = Some(Arc::new(registry));
+
+        let source = resolve_named_training_dataset(
+            &state,
+            "partitioned",
+            None,
+            crate::eval::DatasetFormat::SftChat,
+        )
+        .unwrap();
+        assert_eq!(source.split, kiln_eval::DatasetSplit::Train);
+        assert_eq!(
+            source.path.file_name().and_then(|name| name.to_str()),
+            Some("train.jsonl")
+        );
+        assert_eq!(
+            source
+                .split_manifest
+                .rows
+                .iter()
+                .filter(|row| row.split == kiln_eval::DatasetSplit::Train)
+                .count() as u64,
+            source.manifest.split_counts.train
+        );
+    }
+
+    #[test]
+    fn sft_contamination_check_covers_normalized_and_stripped_prompt_variants() {
+        let suite = kiln_eval::EvalSuite {
+            name: "held-out".to_string(),
+            description: None,
+            default_scorer: kiln_eval::Scorer::ExactMatch {
+                case_sensitive: true,
+                strip_whitespace: true,
+            },
+            generation: Default::default(),
+            aggregation: Default::default(),
+            system_prompt: None,
+            examples: vec![kiln_eval::EvalExample {
+                messages: vec![ChatMessage::new("user", "answer this")],
+                target: Some("forty two".to_string()),
+                ..Default::default()
+            }],
+            schema_version: kiln_eval::SUITE_SCHEMA_VERSION,
+            tools: None,
+        };
+        let index = kiln_eval::EvalContaminationIndex::from_suite(&suite);
+        let examples = vec![SftExample {
+            messages: vec![
+                ChatMessage::new("system", "private training frame"),
+                ChatMessage::new("user", " Answer\nTHIS "),
+                ChatMessage::new("assistant", "FORTY   TWO"),
+            ],
+        }];
+        assert_eq!(
+            check_sft_contamination(&index, &examples),
+            Some(kiln_eval::ContaminationMatch::NormalizedExample)
+        );
+    }
+
     fn fixture_teacher_spec(alias: &str) -> super::super::teachers::TeacherSpec {
         super::super::teachers::TeacherSpec {
             alias: alias.into(),
@@ -5274,6 +5661,7 @@ mod tests {
             groups: Vec::new(),
             dataset_path: None,
             dataset: None,
+            dataset_split: None,
             config: GrpoConfig::default(),
             post_eval: None,
         };
@@ -5281,6 +5669,7 @@ mod tests {
             examples: Vec::new(),
             dataset_path: None,
             dataset: None,
+            dataset_split: None,
             config: SftConfig::default(),
             ingestion: None,
             post_eval: None,
@@ -5723,6 +6112,7 @@ mod tests {
     fn grpo_req(dataset_path: Option<&str>, groups: Vec<GrpoGroup>) -> GrpoRequest {
         GrpoRequest {
             dataset: None,
+            dataset_split: None,
             groups,
             dataset_path: dataset_path.map(str::to_string),
             config: GrpoConfig::default(),
@@ -6020,6 +6410,7 @@ mod tests {
             &tokenizer,
             &GrpoConfig::default(),
             2,
+            None,
         )
         .unwrap_err();
         assert!(error.message.contains("line 2"), "{}", error.message);
@@ -6063,6 +6454,7 @@ mod tests {
             &tokenizer,
             &GrpoConfig::default(),
             2,
+            None,
         )
         .unwrap();
         assert!(stats.streaming_dataset);

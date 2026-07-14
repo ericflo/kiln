@@ -1832,6 +1832,9 @@
                 }
               ]
             },
+            "dataset_split": {
+              "$ref": "kiln-evals-v1.schema.json#/$defs/DatasetSplit"
+            },
             "config": {
               "$ref": "#/$defs/GrpoConfig"
             },
@@ -2034,6 +2037,9 @@
                   "type": "null"
                 }
               ]
+            },
+            "dataset_split": {
+              "$ref": "kiln-evals-v1.schema.json#/$defs/DatasetSplit"
             },
             "config": {
               "$ref": "#/$defs/SftConfig"
@@ -2410,6 +2416,9 @@
             }
           ]
         },
+        "dataset_split": {
+          "$ref": "kiln-evals-v1.schema.json#/$defs/DatasetSplit"
+        },
         "config": {
           "$ref": "#/$defs/GrpoConfig"
         },
@@ -2578,8 +2587,28 @@
       "x-kiln-input-aliases": {
         "agentic_groups": "groups"
       },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "dataset_split"
+            ]
+          },
+          "then": {
+            "required": [
+              "dataset"
+            ],
+            "properties": {
+              "dataset": {
+                "$ref": "#/$defs/NonEmptyString"
+              }
+            }
+          }
+        }
+      ],
       "x-kiln-semantic-constraints": [
-        "recorded behavior policy requires provenance on every rollout"
+        "recorded behavior policy requires provenance on every rollout",
+        "dataset_split requires a registered named dataset and defaults to train"
       ],
       "description": "GRPO submission using exactly one inline, local-path, or registered-dataset source.",
       "x-kiln-rust-type": "GrpoRequest",
@@ -3407,6 +3436,9 @@
         "suite": {
           "$ref": "#/$defs/NonEmptyString"
         },
+        "data_scope": {
+          "$ref": "#/$defs/PostEvalDataScope"
+        },
         "generation": {
           "$ref": "kiln-evals-v1.schema.json#/$defs/EvalGenerationParams"
         },
@@ -3418,8 +3450,42 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "data_scope"
+            ],
+            "properties": {
+              "data_scope": {
+                "const": "train-set-eval"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "min_accuracy"
+              ]
+            }
+          }
+        }
+      ],
+      "x-kiln-semantic-constraints": [
+        "train-set-eval is diagnostic only and cannot set min_accuracy"
+      ],
       "description": "Optional post-training eval and promotion gate.",
       "x-kiln-rust-type": "kiln_eval::PostEvalConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PostEvalDataScope": {
+      "type": "string",
+      "enum": [
+        "held-out",
+        "train-set-eval"
+      ],
+      "description": "Whether post-training evaluation is held out or an explicit train-set diagnostic.",
+      "x-kiln-rust-type": "kiln_eval::PostEvalDataScope",
       "x-kiln-field-schema-status": "complete"
     },
     "PromptsSource": {
@@ -4328,6 +4394,9 @@
             }
           ]
         },
+        "dataset_split": {
+          "$ref": "kiln-evals-v1.schema.json#/$defs/DatasetSplit"
+        },
         "config": {
           "$ref": "#/$defs/SftConfig"
         },
@@ -4439,8 +4508,28 @@
           }
         }
       ],
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "dataset_split"
+            ]
+          },
+          "then": {
+            "required": [
+              "dataset"
+            ],
+            "properties": {
+              "dataset": {
+                "$ref": "#/$defs/NonEmptyString"
+              }
+            }
+          }
+        }
+      ],
       "x-kiln-semantic-constraints": [
-        "server SFT rejects train_mtp=true"
+        "server SFT rejects train_mtp=true",
+        "dataset_split requires a registered named dataset and defaults to train"
       ],
       "description": "SFT submission using exactly one inline, local-path, or registered-dataset source.",
       "x-kiln-rust-type": "SftRequest",
@@ -4906,6 +4995,41 @@
       "x-kiln-rust-type": "TrainingCheckpointSummary",
       "x-kiln-field-schema-status": "complete"
     },
+    "TrainingDataProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "admitted_corpus_sha256",
+        "rows"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "dataset": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "split": {
+          "$ref": "kiln-evals-v1.schema.json#/$defs/DatasetSplit"
+        },
+        "dataset_corpus_sha256": {
+          "$ref": "kiln-evals-v1.schema.json#/$defs/Sha256Digest"
+        },
+        "split_manifest_sha256": {
+          "$ref": "kiln-evals-v1.schema.json#/$defs/Sha256Digest"
+        },
+        "admitted_corpus_sha256": {
+          "$ref": "kiln-evals-v1.schema.json#/$defs/Sha256Digest"
+        },
+        "rows": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Immutable corpus, dataset, and partition identity captured by authoritative training admission.",
+      "x-kiln-rust-type": "kiln_train::TrainingDataProvenance",
+      "x-kiln-field-schema-status": "complete"
+    },
     "TrainingJobDetail": {
       "type": "object",
       "additionalProperties": false,
@@ -4975,6 +5099,9 @@
         },
         "job_type": {
           "$ref": "#/$defs/TrainingJobType"
+        },
+        "training_data": {
+          "$ref": "#/$defs/TrainingDataProvenance"
         },
         "error": {
           "$ref": "#/$defs/String"
@@ -5229,6 +5356,9 @@
         },
         "job_type": {
           "$ref": "#/$defs/TrainingJobType"
+        },
+        "training_data": {
+          "$ref": "#/$defs/TrainingDataProvenance"
         },
         "error": {
           "$ref": "#/$defs/String"
