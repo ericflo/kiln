@@ -908,9 +908,10 @@ class ServeMixedLoadTests(unittest.TestCase):
     def test_token_timing_parser_is_strict_and_ordered(self) -> None:
         timing = {
             "object": "kiln.token_timing",
+            "source": "batching_engine",
             "token_index": 1,
             "ready_ms": 12.0,
-            "actor_delivered_ms": 14.0,
+            "producer_delivered_ms": 14.0,
             "handler_received_ms": 17.0,
             "body_enqueued_ms": 20.0,
             "response_delivery_ms": 2.0,
@@ -940,7 +941,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         timing.update({
             "token_index": 2,
             "ready_ms": 20.0,
-            "actor_delivered_ms": 22.0,
+            "producer_delivered_ms": 22.0,
             "handler_received_ms": 25.0,
             "body_enqueued_ms": 28.0,
             "blocking_phase": "actor_decode",
@@ -952,6 +953,9 @@ class ServeMixedLoadTests(unittest.TestCase):
         )
         with self.assertRaises(serve.QualificationError):
             serve.parse_token_timing(timing, 2, previous_ready_ms=21.0)
+        timing["source"] = "unbounded"
+        with self.assertRaises(serve.QualificationError):
+            serve.parse_token_timing(timing, 2, previous_ready_ms=12.0)
 
     def test_token_timing_usage_contract_allows_only_consumed_eos_delta(self) -> None:
         self.assertTrue(serve.token_timing_matches_usage("length", 3, 3))

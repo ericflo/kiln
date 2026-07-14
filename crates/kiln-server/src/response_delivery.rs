@@ -428,7 +428,7 @@ impl DeliveryState {
                         pending.terminate(error.clone());
                         while let Some(mut event) = pending.events.pop_front() {
                             if let EngineEvent::Token { timing, .. } = &mut event {
-                                timing.mark_actor_delivered(Instant::now());
+                                timing.mark_producer_delivered(Instant::now());
                             }
                             if lane.response_tx.try_send(event).is_err() {
                                 break;
@@ -590,7 +590,7 @@ fn poll_lane(
             .expect("a pending delivery batch contains an event");
 
         if let EngineEvent::Token { timing, .. } = &mut event {
-            timing.mark_actor_delivered(now);
+            timing.mark_producer_delivered(now);
         }
 
         match lane.response_tx.try_send(event) {
@@ -997,7 +997,7 @@ mod tests {
                 assert_eq!(timing.ready_at, expected_ready_at);
                 assert!(
                     timing
-                        .actor_delivered_at
+                        .producer_delivered_at
                         .is_some_and(|at| at >= expected_ready_at)
                 );
             }

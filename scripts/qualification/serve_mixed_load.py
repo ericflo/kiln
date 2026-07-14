@@ -605,9 +605,10 @@ def parse_token_timing(
         return None
     if set(value) != {
         "object",
+        "source",
         "token_index",
         "ready_ms",
-        "actor_delivered_ms",
+        "producer_delivered_ms",
         "handler_received_ms",
         "body_enqueued_ms",
         "response_delivery_ms",
@@ -627,10 +628,13 @@ def parse_token_timing(
         raise QualificationError(
             f"token timing index {token_index!r} does not match expected {expected_index}"
         )
+    source = value["source"]
+    if source not in {"batching_engine", "direct"}:
+        raise QualificationError("token timing source is not bounded")
     numbers: dict[str, float] = {}
     for field in (
         "ready_ms",
-        "actor_delivered_ms",
+        "producer_delivered_ms",
         "handler_received_ms",
         "body_enqueued_ms",
         "response_delivery_ms",
@@ -645,10 +649,10 @@ def parse_token_timing(
         if not math.isfinite(number) or number < 0:
             raise QualificationError(f"token timing {field} is not finite and nonnegative")
         numbers[field] = number
-    if numbers["actor_delivered_ms"] + 1e-6 < numbers["ready_ms"]:
-        raise QualificationError("token timing actor-delivered timestamp precedes ready timestamp")
-    if numbers["handler_received_ms"] + 1e-6 < numbers["actor_delivered_ms"]:
-        raise QualificationError("token timing handler timestamp precedes actor delivery")
+    if numbers["producer_delivered_ms"] + 1e-6 < numbers["ready_ms"]:
+        raise QualificationError("token timing producer-delivered timestamp precedes ready timestamp")
+    if numbers["handler_received_ms"] + 1e-6 < numbers["producer_delivered_ms"]:
+        raise QualificationError("token timing handler timestamp precedes producer delivery")
     if numbers["body_enqueued_ms"] + 1e-6 < numbers["handler_received_ms"]:
         raise QualificationError("token timing body enqueue precedes handler receipt")
     if previous_ready_ms is not None and numbers["ready_ms"] < previous_ready_ms:
@@ -659,10 +663,10 @@ def parse_token_timing(
     expected_delay = numbers["handler_received_ms"] - numbers["ready_ms"]
     if abs(numbers["queue_delay_ms"] - expected_delay) > 0.05:
         raise QualificationError("token timing queue delay is internally inconsistent")
-    expected_response_delivery = numbers["actor_delivered_ms"] - numbers["ready_ms"]
+    expected_response_delivery = numbers["producer_delivered_ms"] - numbers["ready_ms"]
     if abs(numbers["response_delivery_ms"] - expected_response_delivery) > 0.05:
         raise QualificationError("token timing response delivery is internally inconsistent")
-    expected_handler_queue = numbers["handler_received_ms"] - numbers["actor_delivered_ms"]
+    expected_handler_queue = numbers["handler_received_ms"] - numbers["producer_delivered_ms"]
     if abs(numbers["handler_queue_ms"] - expected_handler_queue) > 0.05:
         raise QualificationError("token timing handler queue is internally inconsistent")
     expected_client_delivery = numbers["body_enqueued_ms"] - numbers["handler_received_ms"]

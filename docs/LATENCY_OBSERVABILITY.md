@@ -24,18 +24,17 @@ Set `include_performance` on a chat request:
 ```
 
 For a non-streaming batching-engine request, the response carries
-`metadata.performance.latency`. For a batching-engine stream, the terminal
-chat chunk carries the same request summary and each emitted model token is
-followed by a `kiln.token_timing` SSE object. Custom timing objects are emitted
+`metadata.performance.latency`. For either real-model streaming path, the
+terminal chat chunk carries the request summary and each emitted model token
+is followed by a `kiln.token_timing` SSE object. Custom timing objects are emitted
 only after an explicit request opt-in; enabling the server-wide performance
 metadata default does not silently add non-OpenAI SSE objects.
 
-Completed batching-engine requests also retain the summary in the bounded
+Completed instrumented requests also retain the summary in the bounded
 `GET /v1/stats/recent-requests` ring. The dashboard renders it under **Latency
-diagnosis**. Direct streaming currently contributes request-local gaps to the
-rolling endpoint and Prometheus as `unexplained`, but its recent-request
-`latency` field is absent and it emits no per-token timing object. This avoids
-inventing actor boundaries on a path that does not use the actor.
+diagnosis**. Direct streaming records model-producer and bridge boundaries,
+but leaves actor-only phases `null` and attributes the otherwise unpartitioned
+interval between model-ready tokens to `unexplained`.
 
 ## Timing Boundaries
 
@@ -46,9 +45,9 @@ the named boundaries.
 | Boundary | Meaning |
 | --- | --- |
 | request receipt | Entry to chat request handling, before prompt rendering and tokenization |
-| ready | The batching actor selected the token and made it ready for delivery |
-| actor delivered | The delivery worker successfully enqueued the token into the request's bounded actor-to-handler channel |
-| handler received | The async chat producer received the actor event |
+| ready | The batching actor or direct model producer made the accepted token ready for delivery |
+| producer delivered | The batching delivery worker enqueued the token into the actor-to-handler channel, or the direct bridge received it from the model channel |
+| handler received | The async chat producer received the bridged token event |
 | body enqueued | The producer successfully enqueued the rendered content into the HTTP response body channel |
 
 `body_enqueued` does not mean the remote client acknowledged network bytes.
@@ -122,7 +121,7 @@ count, and sets `gap_samples_truncated=true`; percentiles and stall counts then
 describe the retained suffix.
 
 Percentiles use R-7 linear interpolation over request-local gaps. TTFT is
-request receipt to first actor-ready token. A request with no token has `null`
+request receipt to first producer-ready token. A request with no token has `null`
 TTFT and ITL values; a one-token request has TTFT but no ITL sample.
 
 ## Phase Attribution
@@ -136,10 +135,16 @@ The currently measured batching path exposes:
 | `tokenization_ms` | Prompt token encoding in the request handler |
 | `prefill_ms` | Actor prefill wall time accumulated while the request is active |
 | `decode_ms` | Actor decode wall time accumulated while the request is active |
-| `response_delivery_ms` | Actor-ready to successful bounded-channel enqueue |
-| `handler_queue_ms` | Actor delivery to handler receipt |
+| `response_delivery_ms` | Producer-ready to bounded-channel enqueue or bridge receipt |
+| `handler_queue_ms` | Producer delivery to handler receipt |
 | `client_delivery_ms` | Handler receipt to response-body enqueue for streams |
-| `unexplained_ms` | Actor wall time between tokens not covered by a measured actor candidate |
+| `unexplained_ms` | Wall time between tokens not covered by a measured phase candidate |
+
+Direct streaming measures `tokenization_ms`, model-ready-to-bridge
+`response_delivery_ms`, bridge-to-handler `handler_queue_ms`, response-body
+enqueue `client_delivery_ms`, and request-local `unexplained_ms`. Its
+`actor_queue_ms`, `actor_admission_ms`, `prefill_ms`, and `decode_ms` fields are
+`null`, because that path does not expose actor phase boundaries.
 
 Sampling, device readback, GPU-lock wait, graph capture/replay,
 synchronization, resize, trim, adapter, and training remain explicit nullable
@@ -162,15 +167,16 @@ is `actor_queue`, `actor_admission`, `actor_prefill`, `actor_decode`,
 
 ## Per-Token SSE Object
 
-An opted-in batching stream emits this non-chat object after the corresponding
+An opted-in real-model stream emits this non-chat object after the corresponding
 content has entered the response-body channel:
 
 ```json
 {
   "object": "kiln.token_timing",
+  "source": "batching_engine",
   "token_index": 7,
   "ready_ms": 12.0,
-  "actor_delivered_ms": 14.0,
+  "producer_delivered_ms": 14.0,
   "handler_received_ms": 17.0,
   "body_enqueued_ms": 20.0,
   "response_delivery_ms": 2.0,
@@ -181,6 +187,10 @@ content has entered the response-body channel:
   "blocking_phase_ms": 280.0
 }
 ```
+
+`source` is the closed value `batching_engine` or `direct`. The
+`producer_delivered_ms` boundary is therefore meaningful without pretending a
+direct stream uses the batching actor.
 
 `blocking_phase` and `blocking_phase_ms` are `null` for the first token because
 there is no preceding token gap. They can also be `null` when no gap
@@ -209,7 +219,7 @@ cross-paired. When the window is empty, counts and numeric summaries are zero.
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
-| `kiln_request_ttft_seconds` | histogram | Request receipt to first actor-ready token |
+| `kiln_request_ttft_seconds` | histogram | Request receipt to first producer-ready token |
 | `kiln_token_itl_seconds` | histogram | Every request-local inter-token gap |
 | `kiln_request_latency_phase_seconds{phase}` | histogram | Measured request phase; unsupported `null` phases emit no observation |
 | `kiln_token_stalls_total{reason}` | counter | Gaps at or above the fixed 250 ms absolute floor by dominant reason |

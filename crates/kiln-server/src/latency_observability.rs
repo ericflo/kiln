@@ -86,7 +86,7 @@ impl TokenPhaseDurations {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineTokenTiming {
     pub ready_at: Instant,
-    pub actor_delivered_at: Option<Instant>,
+    pub producer_delivered_at: Option<Instant>,
     pub phases_since_previous_token: TokenPhaseDurations,
 }
 
@@ -94,13 +94,13 @@ impl EngineTokenTiming {
     pub fn ready(ready_at: Instant, phases_since_previous_token: TokenPhaseDurations) -> Self {
         Self {
             ready_at,
-            actor_delivered_at: None,
+            producer_delivered_at: None,
             phases_since_previous_token,
         }
     }
 
-    pub fn mark_actor_delivered(&mut self, delivered_at: Instant) {
-        self.actor_delivered_at = Some(delivered_at);
+    pub fn mark_producer_delivered(&mut self, delivered_at: Instant) {
+        self.producer_delivered_at = Some(delivered_at);
     }
 }
 
@@ -252,6 +252,7 @@ struct RetainedGap {
 pub struct RequestLatencyTracker {
     request_started_at: Instant,
     tokenization: Option<Duration>,
+    actor_phases_observed: bool,
     first_token_ready_at: Option<Instant>,
     previous_token_ready_at: Option<Instant>,
     emitted_tokens: u64,
@@ -266,9 +267,22 @@ pub struct RequestLatencyTracker {
 
 impl RequestLatencyTracker {
     pub fn new(request_started_at: Instant, tokenization: Option<Duration>) -> Self {
+        Self::with_actor_phase_coverage(request_started_at, tokenization, true)
+    }
+
+    pub fn direct(request_started_at: Instant, tokenization: Option<Duration>) -> Self {
+        Self::with_actor_phase_coverage(request_started_at, tokenization, false)
+    }
+
+    fn with_actor_phase_coverage(
+        request_started_at: Instant,
+        tokenization: Option<Duration>,
+        actor_phases_observed: bool,
+    ) -> Self {
         Self {
             request_started_at,
             tokenization,
+            actor_phases_observed,
             first_token_ready_at: None,
             previous_token_ready_at: None,
             emitted_tokens: 0,
@@ -293,14 +307,14 @@ impl RequestLatencyTracker {
             .phases_since_previous_token
             .add_to(&mut self.phase_totals);
 
-        let actor_delivered_at = timing.actor_delivered_at.unwrap_or(timing.ready_at);
+        let producer_delivered_at = timing.producer_delivered_at.unwrap_or(timing.ready_at);
         self.phase_totals.response_delivery = self
             .phase_totals
             .response_delivery
-            .saturating_add(actor_delivered_at.saturating_duration_since(timing.ready_at));
+            .saturating_add(producer_delivered_at.saturating_duration_since(timing.ready_at));
         self.handler_queue_total = self
             .handler_queue_total
-            .saturating_add(handler_received_at.saturating_duration_since(actor_delivered_at));
+            .saturating_add(handler_received_at.saturating_duration_since(producer_delivered_at));
 
         let observation = self.previous_token_ready_at.map(|previous| {
             let gap = timing.ready_at.saturating_duration_since(previous);
@@ -381,14 +395,14 @@ impl RequestLatencyTracker {
             unexplained_stall_count: stall_reasons.unexplained,
             stall_reasons,
             phases: LatencyPhaseTimings {
-                actor_queue_ms: token_phase_observed
+                actor_queue_ms: (token_phase_observed && self.actor_phases_observed)
                     .then(|| duration_ms(self.phase_totals.actor_queue)),
-                actor_admission_ms: token_phase_observed
+                actor_admission_ms: (token_phase_observed && self.actor_phases_observed)
                     .then(|| duration_ms(self.phase_totals.actor_admission)),
                 tokenization_ms: self.tokenization.map(duration_ms),
-                prefill_ms: token_phase_observed
+                prefill_ms: (token_phase_observed && self.actor_phases_observed)
                     .then(|| duration_ms(self.phase_totals.actor_prefill)),
-                decode_ms: token_phase_observed
+                decode_ms: (token_phase_observed && self.actor_phases_observed)
                     .then(|| duration_ms(self.phase_totals.actor_decode)),
                 sampling_ms: None,
                 readback_ms: None,
@@ -472,7 +486,7 @@ mod tests {
                 ..TokenPhaseDurations::default()
             },
         );
-        stalled.mark_actor_delivered(stalled_ready + Duration::from_millis(2));
+        stalled.mark_producer_delivered(stalled_ready + Duration::from_millis(2));
         let gap = tracker
             .record_token(stalled, stalled_ready + Duration::from_millis(4))
             .unwrap();
@@ -555,6 +569,47 @@ mod tests {
         assert_eq!(phases.client_delivery_ms, Some(0.0));
         assert_eq!(phases.unexplained_ms, Some(0.0));
         assert_eq!(phases.sampling_ms, None);
+    }
+
+    #[test]
+    fn direct_tracker_keeps_actor_phases_null_and_transport_phases_measured() {
+        let start = Instant::now();
+        let mut tracker = RequestLatencyTracker::direct(start, Some(Duration::from_millis(3)));
+        let first_ready = start + Duration::from_millis(20);
+        let mut first = EngineTokenTiming::ready(first_ready, TokenPhaseDurations::default());
+        first.mark_producer_delivered(first_ready + Duration::from_millis(2));
+        tracker.record_token(first, first_ready + Duration::from_millis(4));
+        tracker.record_client_delivery(
+            first_ready + Duration::from_millis(4),
+            first_ready + Duration::from_millis(7),
+        );
+
+        let second_ready = start + Duration::from_millis(30);
+        let mut phases = TokenPhaseDurations::default();
+        phases.account_unexplained_wall_time(Duration::from_millis(10));
+        let mut second = EngineTokenTiming::ready(second_ready, phases);
+        second.mark_producer_delivered(second_ready + Duration::from_millis(1));
+        let gap = tracker
+            .record_token(second, second_ready + Duration::from_millis(2))
+            .unwrap();
+        tracker.record_client_delivery(
+            second_ready + Duration::from_millis(2),
+            second_ready + Duration::from_millis(3),
+        );
+
+        assert_eq!(gap.reason, LatencyStallReason::Unexplained);
+        assert_eq!(gap.attributed_duration, Duration::from_millis(10));
+        let diagnostics = tracker.diagnostics();
+        assert_eq!(diagnostics.ttft_ms, Some(20.0));
+        assert_eq!(diagnostics.phases.tokenization_ms, Some(3.0));
+        assert_eq!(diagnostics.phases.response_delivery_ms, Some(3.0));
+        assert_eq!(diagnostics.phases.handler_queue_ms, Some(3.0));
+        assert_eq!(diagnostics.phases.client_delivery_ms, Some(4.0));
+        assert_eq!(diagnostics.phases.unexplained_ms, Some(10.0));
+        assert!(diagnostics.phases.actor_queue_ms.is_none());
+        assert!(diagnostics.phases.actor_admission_ms.is_none());
+        assert!(diagnostics.phases.prefill_ms.is_none());
+        assert!(diagnostics.phases.decode_ms.is_none());
     }
 
     #[test]

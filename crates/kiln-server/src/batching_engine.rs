@@ -4435,7 +4435,7 @@ mod tests {
             Some(EngineEvent::Token { token, timing }) => {
                 assert_eq!(token, expected);
                 assert!(timing.ready_at <= Instant::now());
-                assert!(timing.actor_delivered_at.is_some());
+                assert!(timing.producer_delivered_at.is_some());
             }
             other => panic!("expected token {expected}, got {other:?}"),
         }
@@ -5536,7 +5536,7 @@ mod tests {
                 assert_eq!(token, 111);
                 assert!(timing.ready_at >= before);
                 assert!(timing.ready_at <= after);
-                assert!(timing.actor_delivered_at.is_some());
+                assert!(timing.producer_delivered_at.is_some());
             }
             other => panic!("expected timed token, got {other:?}"),
         }

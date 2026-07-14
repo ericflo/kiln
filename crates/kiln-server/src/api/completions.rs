@@ -31,10 +31,8 @@ use std::path::{Path, PathBuf};
 
 use crate::batching_engine::{EngineActionTokenSource, EngineEvent, EngineRequest};
 use crate::error::ApiError;
-#[cfg(test)]
-use crate::latency_observability::TokenPhaseDurations;
 use crate::latency_observability::{
-    EngineTokenTiming, RequestLatencyDiagnostics, RequestLatencyTracker,
+    EngineTokenTiming, RequestLatencyDiagnostics, RequestLatencyTracker, TokenPhaseDurations,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::metrics::RequestStatus;
@@ -1216,9 +1214,10 @@ fn streaming_finish_chunk_json(
 #[derive(Debug, Serialize)]
 struct StreamingTokenTiming {
     object: &'static str,
+    source: &'static str,
     token_index: u32,
     ready_ms: f64,
-    actor_delivered_ms: f64,
+    producer_delivered_ms: f64,
     handler_received_ms: f64,
     body_enqueued_ms: f64,
     response_delivery_ms: f64,
@@ -1239,6 +1238,7 @@ fn streaming_token_timing_enabled(req: &ChatCompletionRequest) -> bool {
 
 fn streaming_token_timing_json(
     enabled: bool,
+    source: &'static str,
     token_index: u32,
     request_start: std::time::Instant,
     timing: EngineTokenTiming,
@@ -1247,16 +1247,17 @@ fn streaming_token_timing_json(
     gap: Option<crate::latency_observability::TokenGapObservation>,
 ) -> Option<String> {
     enabled.then(|| {
-        let actor_delivered_at = timing.actor_delivered_at.unwrap_or(timing.ready_at);
+        let producer_delivered_at = timing.producer_delivered_at.unwrap_or(timing.ready_at);
         serde_json::to_string(&StreamingTokenTiming {
             object: "kiln.token_timing",
+            source,
             token_index,
             ready_ms: instant_delta_ms(request_start, timing.ready_at),
-            actor_delivered_ms: instant_delta_ms(request_start, actor_delivered_at),
+            producer_delivered_ms: instant_delta_ms(request_start, producer_delivered_at),
             handler_received_ms: instant_delta_ms(request_start, handler_received_at),
             body_enqueued_ms: instant_delta_ms(request_start, body_enqueued_at),
-            response_delivery_ms: instant_delta_ms(timing.ready_at, actor_delivered_at),
-            handler_queue_ms: instant_delta_ms(actor_delivered_at, handler_received_at),
+            response_delivery_ms: instant_delta_ms(timing.ready_at, producer_delivered_at),
+            handler_queue_ms: instant_delta_ms(producer_delivered_at, handler_received_at),
             queue_delay_ms: instant_delta_ms(timing.ready_at, handler_received_at),
             client_delivery_ms: instant_delta_ms(handler_received_at, body_enqueued_at),
             blocking_phase: gap.map(|observation| observation.reason.as_str()),
@@ -4141,8 +4142,8 @@ pub struct ChatCompletionRequest {
     pub fold_reasoning_into_content: Option<bool>,
     /// Kiln extension: include request-scoped performance counters in the
     /// stable `metadata.performance` response field. An explicit `true` on a
-    /// batching-engine stream also emits a distinct `kiln.token_timing` SSE
-    /// object before each model token. When omitted, the server config default
+    /// real-model stream also emits a distinct `kiln.token_timing` SSE object
+    /// for each model token. When omitted, the server config default
     /// decides final-response metadata but does not opt the client into custom
     /// per-token SSE objects.
     #[serde(default)]
@@ -6160,6 +6161,7 @@ async fn chat_completions_inner(
                         &sampling,
                         &req,
                         request_start,
+                        Some(tokenization_duration),
                         completion_cache_key.clone(),
                         chat_request_cache_key.clone(),
                         chat_request_cache_owner.take(),
@@ -7501,6 +7503,7 @@ async fn generate_real_batched_streaming(
                                             );
                                         if let Some(timing_payload) = streaming_token_timing_json(
                                             include_token_timing,
+                                            "batching_engine",
                                             completion_token_count,
                                             request_start,
                                             timing,
@@ -8294,6 +8297,13 @@ struct DirectModelStream {
     settled: Option<std::sync::mpsc::Receiver<()>>,
 }
 
+#[derive(Debug)]
+struct BridgedDirectModelEvent {
+    event: StreamEvent,
+    /// Time the blocking bridge received the event from the model producer.
+    producer_delivered_at: std::time::Instant,
+}
+
 struct DirectPrefixLookupOwnership<G, P, B> {
     gpu_guard: Option<G>,
     pending_lookup: Option<P>,
@@ -8386,7 +8396,7 @@ impl DirectModelStream {
 fn bridge_direct_model_stream(
     stream: DirectModelStream,
 ) -> (
-    tokio::sync::mpsc::Receiver<StreamEvent>,
+    tokio::sync::mpsc::Receiver<BridgedDirectModelEvent>,
     tokio::task::JoinHandle<Result<(), String>>,
 ) {
     const MODEL_EVENT_BRIDGE_CAPACITY: usize = 16;
@@ -8401,9 +8411,16 @@ fn bridge_direct_model_stream(
         let terminal = loop {
             match events.recv() {
                 Ok(event @ (StreamEvent::Done(_) | StreamEvent::Error(_))) => {
-                    break event;
+                    break BridgedDirectModelEvent {
+                        event,
+                        producer_delivered_at: std::time::Instant::now(),
+                    };
                 }
                 Ok(event) => {
+                    let event = BridgedDirectModelEvent {
+                        event,
+                        producer_delivered_at: std::time::Instant::now(),
+                    };
                     if consumer_open && tx.blocking_send(event).is_err() {
                         consumer_open = false;
                     }
@@ -8439,7 +8456,7 @@ fn bridge_direct_model_stream(
 
 async fn cancel_and_settle_direct_model_stream(
     cancel: &CancelHandle,
-    events: &mut tokio::sync::mpsc::Receiver<StreamEvent>,
+    events: &mut tokio::sync::mpsc::Receiver<BridgedDirectModelEvent>,
     bridge: tokio::task::JoinHandle<Result<(), String>>,
 ) {
     cancel.cancel();
@@ -8558,6 +8575,7 @@ async fn generate_real_streaming(
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
     request_start: std::time::Instant,
+    tokenization_duration: Option<std::time::Duration>,
     completion_cache_key: Option<DeterministicCompletionCacheKey>,
     chat_request_cache_key: Option<DeterministicCacheKey>,
     chat_request_cache_owner: Option<ChatRequestCacheOwnerGuard>,
@@ -8600,6 +8618,9 @@ async fn generate_real_streaming(
     let buffer_tool_content = request_allows_tool_call_parsing(req);
     let mut tool_gate = ToolCallGate::new(buffer_tool_content);
     let include_usage = req.stream_options.as_ref().is_some_and(|o| o.include_usage);
+    let include_token_timing = streaming_token_timing_enabled(req);
+    let include_performance = chat_performance_metadata_enabled(state, req);
+    let performance_adapter_used = adapter_used_for_performance_metadata(state);
     let thinking_mode = thinking_mode_for_prompt(&prompt).to_string();
     let stream_thinking_budget_metadata =
         thinking_budget_metadata_for_request(state, req, prompt_starts_in_reasoning(&prompt));
@@ -8629,11 +8650,17 @@ async fn generate_real_streaming(
             let mut reasoning_buf = String::new();
             let mut content_buf = String::new();
             let mut completion_token_count: u32 = 0;
-            let mut previous_direct_token_at: Option<std::time::Instant> = None;
+            let mut first_token_ready_at: Option<std::time::Instant> = None;
+            let mut previous_direct_token_ready_at: Option<std::time::Instant> = None;
+            let latency_tracker = std::sync::Mutex::new(RequestLatencyTracker::direct(
+                request_start,
+                tokenization_duration,
+            ));
 
             let record_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
             let record_error_for_record = record_error.clone();
             let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
+                let latency = latency_tracker.lock().unwrap().diagnostics();
                 let error =
                     record_error_for_record
                         .lock()
@@ -8665,7 +8692,9 @@ async fn generate_real_streaming(
                     temperature: req_temperature,
                     top_p: req_top_p,
                     max_tokens: req_max_tokens,
-                    ttft_ms: None,
+                    ttft_ms: latency
+                        .ttft_ms
+                        .map(|milliseconds| milliseconds.min(u64::MAX as f64) as u64),
                     model_prefill_ms: None,
                     model_decode_ms: None,
                     error,
@@ -8676,7 +8705,7 @@ async fn generate_real_streaming(
                             completion_tokens as usize,
                         ),
                     )),
-                    latency: None,
+                    latency: Some(latency),
                 };
                 record_recent_request(&state_for_record, record);
             };
@@ -8944,19 +8973,30 @@ async fn generate_real_streaming(
                     DirectStreamSelection::Ready(event) => event,
                 };
                 match event {
-                    Some(StreamEvent::Token(token)) => {
-                        let token_at = std::time::Instant::now();
-                        if let Some(previous) = previous_direct_token_at.replace(token_at) {
-                            let gap = token_at.saturating_duration_since(previous);
-                            let observation = crate::latency_observability::TokenGapObservation {
-                                gap,
-                                reason:
-                                    crate::latency_observability::LatencyStallReason::Unexplained,
-                                attributed_duration: std::time::Duration::ZERO,
-                            };
-                            metrics.observe_token_gap(observation);
+                    Some(BridgedDirectModelEvent {
+                        event: StreamEvent::Token(token),
+                        producer_delivered_at,
+                    }) => {
+                        let handler_received_at = std::time::Instant::now();
+                        first_token_ready_at.get_or_insert(token.ready_at);
+                        let mut phases = TokenPhaseDurations::default();
+                        if let Some(previous) =
+                            previous_direct_token_ready_at.replace(token.ready_at)
+                        {
+                            phases.account_unexplained_wall_time(
+                                token.ready_at.saturating_duration_since(previous),
+                            );
+                        }
+                        let mut timing = EngineTokenTiming::ready(token.ready_at, phases);
+                        timing.mark_producer_delivered(producer_delivered_at);
+                        let gap = latency_tracker
+                            .lock()
+                            .unwrap()
+                            .record_token(timing, handler_received_at);
+                        if let Some(gap) = gap {
+                            metrics.observe_token_gap(gap);
                             if let Ok(mut stats) = decode_stats.lock() {
-                                stats.record_gap(token_at, observation);
+                                stats.record_gap(handler_received_at, gap);
                             }
                         }
                         metrics.add_tokens(1);
@@ -8990,10 +9030,40 @@ async fn generate_real_streaming(
                             Ok(true) if direct_stream_deadline_expired(deadline) => {
                                 break DirectStreamExit::Timeout;
                             }
-                            Ok(true) => {}
+                            Ok(true) => {
+                                let body_enqueued_at = std::time::Instant::now();
+                                latency_tracker
+                                    .lock()
+                                    .unwrap()
+                                    .record_client_delivery(handler_received_at, body_enqueued_at);
+                                if let Some(timing_payload) = streaming_token_timing_json(
+                                    include_token_timing,
+                                    "direct",
+                                    completion_token_count,
+                                    request_start,
+                                    timing,
+                                    handler_received_at,
+                                    body_enqueued_at,
+                                    gap,
+                                ) {
+                                    match tokio::time::timeout_at(
+                                        deadline,
+                                        tx.send(Event::default().data(timing_payload)),
+                                    )
+                                    .await
+                                    {
+                                        Err(_) => break DirectStreamExit::Timeout,
+                                        Ok(Err(_)) => break DirectStreamExit::ClientDisconnect,
+                                        Ok(Ok(())) => {}
+                                    }
+                                }
+                            }
                         }
                     }
-                    Some(StreamEvent::Done(done)) => {
+                    Some(BridgedDirectModelEvent {
+                        event: StreamEvent::Done(done),
+                        ..
+                    }) => {
                         let bridge_result = tokio::select! {
                             biased;
                             _ = tokio::time::sleep_until(deadline) => None,
@@ -9154,6 +9224,33 @@ async fn generate_real_streaming(
                                 status,
                             );
                         }
+                        let total_latency = request_start.elapsed();
+                        let ttft = first_token_ready_at
+                            .map(|ready_at| ready_at.saturating_duration_since(request_start));
+                        let latency_diagnostics = latency_tracker.lock().unwrap().diagnostics();
+                        let performance =
+                            include_performance.then(|| ChatCompletionPerformanceMetadata {
+                                prompt_tokens: prompt_token_count,
+                                completion_tokens: completion_token_count as usize,
+                                ttft_ms: ttft.map(duration_ms_f64),
+                                prefill_ms: None,
+                                actor_queue_ms: None,
+                                actor_admission_ms: None,
+                                actor_prefill_wall_ms: None,
+                                decode_ms: None,
+                                total_latency_ms: duration_ms_f64(total_latency),
+                                decode_tokens_per_sec:
+                                    decode_tokens_per_sec_for_performance_metadata(
+                                        completion_token_count as usize,
+                                        total_latency,
+                                        ttft,
+                                        None,
+                                    ),
+                                adapter_used: performance_adapter_used.clone(),
+                                thinking_mode: thinking_mode.clone(),
+                                finish_reason: finish.clone(),
+                                latency: Some(latency_diagnostics),
+                            });
                         let chunk = ChatCompletionChunk {
                             id: id.clone(),
                             object: "chat.completion.chunk",
@@ -9173,7 +9270,11 @@ async fn generate_real_streaming(
                         drop(terminal_tx);
                         let mut terminal_events = drain_terminal_event_buffer(terminal_rx);
                         terminal_events.push_back(Event::default().data(
-                            streaming_finish_chunk_json(&chunk, &thinking_budget_metadata, None),
+                            streaming_finish_chunk_json(
+                                &chunk,
+                                &thinking_budget_metadata,
+                                performance.as_ref(),
+                            ),
                         ));
                         if include_usage {
                             terminal_events.push_back(Event::default().data(usage_chunk_json(
@@ -9221,7 +9322,10 @@ async fn generate_real_streaming(
                         }
                         return;
                     }
-                    Some(StreamEvent::Error(mut error)) => {
+                    Some(BridgedDirectModelEvent {
+                        event: StreamEvent::Error(mut error),
+                        ..
+                    }) => {
                         match bridge_handle
                             .take()
                             .expect("direct model bridge consumed once")
@@ -13872,10 +13976,12 @@ mod tests {
             settled: Some(settled_rx),
         });
 
+        let ready_at = std::time::Instant::now();
         model_tx
             .send(StreamEvent::Token(kiln_model::StreamToken {
                 token_id: 7,
                 text: "token".to_string(),
+                ready_at,
             }))
             .unwrap();
         model_tx
@@ -13888,7 +13994,12 @@ mod tests {
 
         assert!(matches!(
             tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await,
-            Ok(Some(StreamEvent::Token(token))) if token.token_id == 7
+            Ok(Some(BridgedDirectModelEvent {
+                event: StreamEvent::Token(token),
+                producer_delivered_at,
+            })) if token.token_id == 7
+                && token.ready_at == ready_at
+                && producer_delivered_at >= ready_at
         ));
         tokio::task::yield_now().await;
         assert!(matches!(
@@ -13900,7 +14011,10 @@ mod tests {
         settled_tx.send(()).unwrap();
         assert!(matches!(
             tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await,
-            Ok(Some(StreamEvent::Done(done))) if done.completion_tokens == 1
+            Ok(Some(BridgedDirectModelEvent {
+                event: StreamEvent::Done(done),
+                ..
+            })) if done.completion_tokens == 1
         ));
         assert!(bridge.await.unwrap().is_ok());
     }
@@ -14133,12 +14247,13 @@ mod tests {
         let request_start = std::time::Instant::now();
         let ready_at = request_start + std::time::Duration::from_millis(12);
         let mut engine_timing = EngineTokenTiming::ready(ready_at, TokenPhaseDurations::default());
-        engine_timing.mark_actor_delivered(ready_at + std::time::Duration::from_millis(2));
+        engine_timing.mark_producer_delivered(ready_at + std::time::Duration::from_millis(2));
         let handler_received_at = ready_at + std::time::Duration::from_millis(5);
         let body_enqueued_at = handler_received_at + std::time::Duration::from_millis(3);
         assert!(
             streaming_token_timing_json(
                 false,
+                "batching_engine",
                 1,
                 request_start,
                 engine_timing,
@@ -14150,6 +14265,7 @@ mod tests {
         );
         let timing = streaming_token_timing_json(
             true,
+            "batching_engine",
             7,
             request_start,
             engine_timing,
@@ -14166,11 +14282,12 @@ mod tests {
         assert_eq!(payloads.len(), 1);
         let payload = payloads.into_iter().next().unwrap();
         let object = payload.as_object().unwrap();
-        assert_eq!(object.len(), 12, "timing payload shape changed: {payload}");
+        assert_eq!(object.len(), 13, "timing payload shape changed: {payload}");
         assert_eq!(payload["object"], "kiln.token_timing");
+        assert_eq!(payload["source"], "batching_engine");
         assert_eq!(payload["token_index"], 7);
         assert_eq!(payload["ready_ms"], 12.0);
-        assert_eq!(payload["actor_delivered_ms"], 14.0);
+        assert_eq!(payload["producer_delivered_ms"], 14.0);
         assert_eq!(payload["handler_received_ms"], 17.0);
         assert_eq!(payload["body_enqueued_ms"], 20.0);
         assert_eq!(payload["response_delivery_ms"], 2.0);

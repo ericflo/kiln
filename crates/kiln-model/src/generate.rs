@@ -12,6 +12,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc,
 };
+use std::time::Instant;
 
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
@@ -1262,6 +1263,9 @@ pub struct StreamToken {
     pub token_id: TokenId,
     /// The decoded text for this token.
     pub text: String,
+    /// Monotonic time immediately before the model producer publishes this
+    /// accepted token to its stream channel.
+    pub ready_at: Instant,
 }
 
 /// Final event sent when streaming generation completes.
@@ -2449,10 +2453,12 @@ fn emit_stream_token(
         }
     };
     let scan = gate.stop.push(&delta);
+    let ready_at = Instant::now();
     if tx
         .send(StreamEvent::Token(StreamToken {
             token_id: token,
             text: scan.emit,
+            ready_at,
         }))
         .is_err()
     {

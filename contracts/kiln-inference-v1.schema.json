@@ -995,9 +995,10 @@
       "type": "object",
       "required": [
         "object",
+        "source",
         "token_index",
         "ready_ms",
-        "actor_delivered_ms",
+        "producer_delivered_ms",
         "handler_received_ms",
         "body_enqueued_ms",
         "response_delivery_ms",
@@ -1009,9 +1010,14 @@
       ],
       "properties": {
         "object": { "const": "kiln.token_timing" },
+        "source": {
+          "type": "string",
+          "enum": ["batching_engine", "direct"],
+          "description": "Producer path that owns ready and delivery timestamps."
+        },
         "token_index": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "ready_ms": { "type": "number", "minimum": 0 },
-        "actor_delivered_ms": { "type": "number", "minimum": 0 },
+        "producer_delivered_ms": { "type": "number", "minimum": 0 },
         "handler_received_ms": { "type": "number", "minimum": 0 },
         "body_enqueued_ms": { "type": "number", "minimum": 0 },
         "response_delivery_ms": { "type": "number", "minimum": 0 },
@@ -1326,9 +1332,10 @@
     "StreamingTokenTiming": [
       {
         "object": "kiln.token_timing",
+        "source": "batching_engine",
         "token_index": 0,
         "ready_ms": 12.5,
-        "actor_delivered_ms": 12.6,
+        "producer_delivered_ms": 12.6,
         "handler_received_ms": 12.8,
         "body_enqueued_ms": 13.0,
         "response_delivery_ms": 0.1,

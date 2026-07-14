@@ -1523,10 +1523,13 @@ kiln serve --config kiln.toml</code></pre>
           <code>actor_admission_ms</code> (slot preparation), and
           <code>actor_prefill_wall_ms</code> (admission completion to first sampled-token readiness),
           alongside accumulated model <code>prefill_ms</code>, <code>decode_ms</code>, TTFT, and total
-          latency. Non-batching paths return the actor fields as <code>null</code>. Batching-engine
-          streams publish the same performance object on the terminal chat chunk; explicit opt-in
-          also emits a separate <code>kiln.token_timing</code> SSE object before each model token
-          with actor-ready, handler-received, and response-queue times.
+          latency. Non-batching paths return the actor fields as <code>null</code>. Both real-model
+          streaming paths publish a performance object on the terminal chat chunk; explicit opt-in
+          also emits a separate <code>kiln.token_timing</code> SSE object for each model token with a
+          bounded path source plus producer-ready/delivered, handler-received, and response-queue
+          times. Direct streams retain the same request summary while leaving actor-only phases
+          <code>null</code> and classifying otherwise unpartitioned gaps as
+          <code>unexplained</code>.
         </p>
         <h3 id="prompt-logprobs" class="text-xl font-semibold mt-6 mb-3">Score prompt tokens</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">

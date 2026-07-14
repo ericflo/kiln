@@ -689,11 +689,12 @@ Set `include_performance: true` on `POST /v1/chat/completions` to receive
 and `actor_prefill_wall_ms` (admission completion to first sampled-token
 readiness) from accumulated model `prefill_ms`, `decode_ms`, TTFT, and total
 latency. The three actor fields are `null` on paths that do not use the batching
-actor. Batching-engine streams publish the same object once on the terminal
-chat chunk; an explicit request opt-in also emits the existing
-`kiln.token_timing` object before each model token, with actor-ready,
-handler-received, and delivery queue timing. Omission follows the server
-metadata default but never opts a stream into custom per-token events.
+actor. Both real-model streaming paths publish a performance object on the
+terminal chat chunk; an explicit request opt-in also emits the existing
+`kiln.token_timing` object for each model token, with a bounded path source,
+producer-ready/delivered, handler-received, and delivery queue timing. Omission
+follows the server metadata default but never opts a stream into custom
+per-token events.
 The request-local ITL percentiles, bounded stall attribution, exact timing
 boundaries, nullable phase coverage, rolling endpoint, and Prometheus contract
 are documented in [`docs/LATENCY_OBSERVABILITY.md`](docs/LATENCY_OBSERVABILITY.md).
