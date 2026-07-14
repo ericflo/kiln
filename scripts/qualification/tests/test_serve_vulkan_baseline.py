@@ -129,6 +129,7 @@ class ServeVulkanBaselineTests(unittest.TestCase):
         workload = baseline.EFFECTIVE_CONFIG["workload"]
         self.assertEqual(workload["simultaneous_dispatch"], "per_wave_thread_barrier")
         self.assertEqual(workload["pause_gate_ms"], 2_000)
+        self.assertEqual(workload["request_timeout_seconds"], 600)
 
     def test_source_build_is_vulkan_only_bounded_and_timeout_separated(self) -> None:
         build = baseline.EFFECTIVE_CONFIG["build"]

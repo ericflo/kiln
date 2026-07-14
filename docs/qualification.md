@@ -311,6 +311,12 @@ After one fixed warmup, four thread-barrier waves dispatch concurrency 1, 4, 8,
 and 12 with mixed prompt lengths from 16 through 1,024 deterministic words.
 All 25 measured requests disable thinking and sampling, ignore EOS, stream
 usage and performance metadata, and must finish by the exact 32-token limit.
+The 600-second per-request limit is a correctness-containment deadline for the
+longest synchronized prefill, not a latency SLO or a passing performance
+threshold. Actual TTFT, end-to-end duration, output throughput, active width,
+and decode batch width remain unchanged receipt evidence; the cross-engine
+serving matrix owns the competitive performance verdict. Raising containment
+therefore cannot turn a slow run into a fast one or suppress a timeout.
 The final two waves cover the configured eight decode slots and the four
 derived short-prefill staging slots. Batching counters must prove at least one
 multi-row decode, more decode rows than forwards, and a prefill forward for
@@ -328,7 +334,11 @@ generated TOML, the effective server/environment configuration identities, the
 kernel contract, the execution-provenance envelope, and one ordered canonical
 hash of all 25 streamed semantic outputs. Dynamic response IDs and timestamps
 are excluded from the semantic hash; request names, usage counts, and semantic
-deltas are included.
+deltas are included. The public response headers use the paired value `base`
+for both loaded-adapter fields when no adapter is resident. Qualification
+normalizes only that exact pair to no identity; a missing header, a mixed
+base/named pair, a malformed revision, or any named identity in this baseline
+fails closed.
 
 A failed result preserves every boundary it actually crossed instead of
 replacing the run with a generic zero record. Its compact `details.milestones`
@@ -341,6 +351,14 @@ hash evidence. Typed device, graph, resize, and reclaim events are collected
 from server start through shutdown, while memory samples span measured load.
 The final pass/fail gate therefore sees post-measurement teardown faults as
 well as events observed during load.
+
+Compact details remain valid JSON even when a failure list exceeds the receipt
+limit. Long strings are bounded inside the JSON value, while `_truncation`
+records the SHA-256 and original character count plus the number of omitted
+top-level fields. Runner-level failures such as a nonzero process exit are
+added under `runner_failures`; the runner never appends text after a JSON
+object. The ignored full stdout/stderr artifacts remain hash-bound to the
+receipt for causal inspection.
 
 Metrics for a boundary absent from `milestones` mean "not observed," not a
 successful zero-count measurement. For example, zero requests with no
@@ -357,8 +375,9 @@ the case result. It must never be reclassified as a successful empty stream or
 reduced to a secondary missing-finish-reason error.
 
 The gate fails on any request error, non-length or short output, missing actor
-timing, adapter identity, device fault, resize/reclaim/graph event, batching
-error, failed or at-least-100-ms external-yield synchronization, changed KV
+timing, unexpected named adapter identity, device fault, resize/reclaim/graph
+event, batching error, failed or at-least-100-ms external-yield synchronization,
+changed KV
 capacity, missing memory sample, unexplained adaptive ITL outlier, or ITL gap
 above two seconds. Gaps above 250 ms are always counted as stall evidence even
 when they remain below the hard pause gate. The server must drain, exit zero

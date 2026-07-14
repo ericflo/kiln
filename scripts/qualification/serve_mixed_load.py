@@ -26,6 +26,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Iterable
 
+from result_details import compact_details
+
 
 ROOT = Path(__file__).resolve().parents[2]
 CASE_ID = "mixed-load"
@@ -158,6 +160,7 @@ def _variant_config(
     memory_reclaim_mode: str,
     rocm_graphs_requested: bool,
     rocm_graphs_enabled: bool,
+    request_timeout_seconds: int = 180,
 ) -> dict[str, Any]:
     return {
         "build": ROCM_BUILD_SPEC.effective_config(),
@@ -176,7 +179,7 @@ def _variant_config(
             "default_thinking_enabled": False,
             "http_send_buffer_bytes": HTTP_SEND_BUFFER_BYTES,
             "log_format": "json",
-            "request_timeout_seconds": 180,
+            "request_timeout_seconds": request_timeout_seconds,
             "stream_stall_grace_ms": STREAM_STALL_GRACE_MS,
             "max_decode_batch": MAX_DECODE_BATCH,
             "max_prefill_staging_slots": MAX_PREFILL_STAGING_SLOTS,
@@ -918,6 +921,25 @@ def stream_generation_error(value: Any) -> str | None:
     return message
 
 
+def response_loaded_adapter_identity(
+    adapter: str | None, revision: str | None
+) -> tuple[str | None, str | None]:
+    """Normalize the public paired `base` response-header sentinel."""
+    if adapter is None and revision is None:
+        raise QualificationError("response omitted loaded-adapter identity headers")
+    if adapter is None or revision is None:
+        raise QualificationError("response emitted an incomplete loaded-adapter identity")
+    if adapter == "base" and revision == "base":
+        return None, None
+    if adapter == "base" or revision == "base":
+        raise QualificationError("response mixed base and named loaded-adapter identity")
+    if not adapter or any(character.isspace() for character in adapter):
+        raise QualificationError("response emitted an invalid loaded-adapter name")
+    if re.fullmatch(r"[0-9a-f]{64}", revision) is None:
+        raise QualificationError("response emitted an invalid loaded-adapter revision")
+    return adapter, revision
+
+
 @dataclasses.dataclass
 class StreamResult:
     name: str
@@ -1199,9 +1221,9 @@ def run_stream(
         )
         response = connection.getresponse()
         content_type = response.getheader("Content-Type", "")
-        loaded_adapter = response.getheader("X-Kiln-Loaded-Adapter")
-        loaded_adapter_revision = response.getheader(
-            "X-Kiln-Loaded-Adapter-Revision"
+        loaded_adapter, loaded_adapter_revision = response_loaded_adapter_identity(
+            response.getheader("X-Kiln-Loaded-Adapter"),
+            response.getheader("X-Kiln-Loaded-Adapter-Revision"),
         )
         if response.status != 200:
             raise QualificationError(f"{name} returned HTTP {response.status}: {response.read(512)!r}")
@@ -3620,9 +3642,7 @@ def write_result(path: Path, value: dict[str, Any]) -> None:
 
 
 def bounded_details(value: str | None) -> str | None:
-    if value is None or len(value) <= 2000:
-        return value
-    return value[:1976] + "...[details truncated]"
+    return compact_details(value, 2000)
 
 
 def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, Any]], str | None]:

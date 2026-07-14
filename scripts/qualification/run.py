@@ -31,6 +31,7 @@ from typing import Any, Callable
 import environment as environment_module
 from model_fingerprint import ModelFingerprintError, fingerprint_model
 from receipt import MAX_RESULT_DETAIL_CHARACTERS, validate_receipt
+from result_details import compact_details, join_details
 from source_tree_hash import HASH_FORMAT, SourceTreeHashError, source_tree_hash
 from strict_json import JSON_INTEGER_MAX_DIGITS, loads as strict_json_loads
 from workload import (
@@ -1105,24 +1106,13 @@ def _runner_metrics(
 
 
 def _compact_details(value: str) -> str:
-    if len(value) <= MAX_RESULT_DETAIL_CHARACTERS:
-        return value
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    marker = f"... [truncated sha256:{digest} chars={len(value)}] ..."
-    available = MAX_RESULT_DETAIL_CHARACTERS - len(marker)
-    head = available // 2
-    tail = available - head
-    return value[:head] + marker + value[-tail:]
+    result = compact_details(value, MAX_RESULT_DETAIL_CHARACTERS)
+    assert result is not None
+    return result
 
 
 def _join_details(*values: str | None) -> str | None:
-    parts: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if value and value not in seen:
-            parts.append(value)
-            seen.add(value)
-    return _compact_details("; ".join(parts)) if parts else None
+    return join_details(*values, max_characters=MAX_RESULT_DETAIL_CHARACTERS)
 
 
 def _artifact(root: Path, path: Path, kind: str) -> dict[str, Any]:

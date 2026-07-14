@@ -12,6 +12,7 @@ from pathlib import Path
 
 QUALIFICATION_DIR = Path(__file__).resolve().parents[1]
 ROOT = QUALIFICATION_DIR.parents[1]
+sys.path.insert(0, str(QUALIFICATION_DIR))
 SPEC = importlib.util.spec_from_file_location(
     "qualification_serve_mixed_load", QUALIFICATION_DIR / "serve_mixed_load.py"
 )
@@ -686,6 +687,8 @@ class ServeMixedLoadTests(unittest.TestCase):
         response = mock.Mock(status=200)
         response.getheader.side_effect = lambda name, default=None: {
             "Content-Type": "text/event-stream",
+            "X-Kiln-Loaded-Adapter": "base",
+            "X-Kiln-Loaded-Adapter-Revision": "base",
         }.get(name, default)
         response.fp.peek.return_value = b"data"
         response.read1.return_value = (
@@ -713,6 +716,30 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.semantic_deltas, [])
         connection.close.assert_called_once_with()
+
+    def test_loaded_adapter_headers_normalize_the_paired_base_sentinel(self) -> None:
+        self.assertEqual(
+            serve.response_loaded_adapter_identity("base", "base"),
+            (None, None),
+        )
+        self.assertEqual(
+            serve.response_loaded_adapter_identity("fixture-adapter", "a" * 64),
+            ("fixture-adapter", "a" * 64),
+        )
+    def test_loaded_adapter_headers_reject_incomplete_or_mixed_identity(self) -> None:
+        invalid = (
+            (None, None),
+            ("fixture-adapter", None),
+            (None, "a" * 64),
+            ("base", "a" * 64),
+            ("fixture-adapter", "base"),
+            ("fixture adapter", "a" * 64),
+            ("fixture-adapter", "not-a-revision"),
+        )
+        for adapter, revision in invalid:
+            with self.subTest(adapter=adapter, revision=revision):
+                with self.assertRaises(serve.QualificationError):
+                    serve.response_loaded_adapter_identity(adapter, revision)
 
     def test_checked_in_workload_exactly_matches_driver_contract(self) -> None:
         manifest = json.loads(
@@ -2472,7 +2499,16 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         bounded = serve.bounded_details("x" * 3000)
         assert bounded is not None
         self.assertLessEqual(len(bounded), 2000)
-        self.assertTrue(bounded.endswith("...[details truncated]"))
+        self.assertIn("...[truncated sha256:", bounded)
+
+        structured = serve.bounded_details(
+            json.dumps({"error": "x" * 3000, "milestones": ["build", "startup"]})
+        )
+        assert structured is not None
+        parsed = json.loads(structured)
+        self.assertEqual(parsed["milestones"], ["build", "startup"])
+        self.assertIn("[truncated sha256:", parsed["error"])
+        self.assertEqual(parsed["_truncation"]["omitted_fields"], 0)
 
     def test_request_body_pins_deterministic_non_thinking_stream(self) -> None:
         body = serve.request_body("prompt", 12, 7)

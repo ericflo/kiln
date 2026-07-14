@@ -482,6 +482,43 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(outcome.receipt_path.is_file())
         self.assert_valid(outcome, repository.root)
 
+    def test_runner_preserves_json_details_when_adding_contract_failures(self) -> None:
+        details = run_module._join_details(
+            json.dumps(
+                {
+                    "error": "capacity failure: " + "x" * 4000,
+                    "milestones": ["build", "startup", "measurement", "teardown"],
+                },
+                separators=(",", ":"),
+            ),
+            "exit code 1 not in [0]",
+        )
+        assert details is not None
+        self.assertLessEqual(
+            len(details), receipt_module.MAX_RESULT_DETAIL_CHARACTERS
+        )
+        parsed = json.loads(details)
+        self.assertEqual(
+            parsed["milestones"],
+            ["build", "startup", "measurement", "teardown"],
+        )
+        self.assertEqual(parsed["runner_failures"], ["exit code 1 not in [0]"])
+        self.assertIn("[truncated sha256:", parsed["error"])
+        self.assertRegex(parsed["_truncation"]["sha256"], r"^sha256:[0-9a-f]{64}$")
+
+    def test_runner_keeps_distinct_structured_repetition_details(self) -> None:
+        details = run_module._join_details(
+            '{"attempt":1,"milestones":["build"]}',
+            '{"attempt":2,"milestones":["build","measurement"]}',
+        )
+        assert details is not None
+        parsed = json.loads(details)
+        self.assertEqual(parsed["attempt"], 1)
+        self.assertEqual(
+            parsed["additional_case_details"],
+            [{"attempt": 2, "milestones": ["build", "measurement"]}],
+        )
+
     def test_timeout_terminates_descendant_process_group(self) -> None:
         code = (
             "import pathlib,subprocess,sys,time; "

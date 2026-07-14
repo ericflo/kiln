@@ -27,7 +27,9 @@ RESULT_ENV = mixed.RESULT_ENV
 VARIANT_ENV = mixed.VARIANT_ENV
 BUILD_TIMEOUT_SECONDS = 900.0
 OVERALL_TIMEOUT_SECONDS = 1800.0
-REQUEST_TIMEOUT_SECONDS = 180.0
+# Correctness containment, not a latency SLO. Every observed duration remains a
+# first-class metric and cross-engine performance is gated by the benchmark matrix.
+REQUEST_TIMEOUT_SECONDS = 600.0
 WARMUP_MAX_TOKENS = 16
 MAX_TOKENS = 32
 PAUSE_GATE_MS = 2_000.0
@@ -54,6 +56,7 @@ def _effective_config() -> dict[str, Any]:
         memory_reclaim_mode="off",
         rocm_graphs_requested=False,
         rocm_graphs_enabled=False,
+        request_timeout_seconds=int(REQUEST_TIMEOUT_SECONDS),
     )
     value["build"] = {
         **mixed.VULKAN_BUILD_SPEC.effective_config(),
