@@ -31,7 +31,8 @@ WARMUP_MAX_TOKENS = 16
 GRAPH_CACHE_ENTRIES = 64
 HEADROOM_BUDGET_BYTES = 1 << 30
 TIGHT_BUDGET_BYTES = 64 << 20
-REQUEST_TIMEOUT_SECONDS = 120.0
+REQUEST_TIMEOUT_SECONDS = 300.0
+SERVER_REQUEST_TIMEOUT_SECONDS = 360
 OVERALL_TIMEOUT_SECONDS = 2100.0
 ARM_ORDER = ("headroom", "tight")
 ARM_BUDGETS = {
@@ -61,6 +62,7 @@ def _base_config() -> dict[str, Any]:
             "rocm_graph_mode": "lazy_capture_replay",
         }
     )
+    value["server"]["request_timeout_seconds"] = SERVER_REQUEST_TIMEOUT_SECONDS
     value["workload"] = {
         "arm_order": {
             f"arm_{index}": arm for index, arm in enumerate(ARM_ORDER)
@@ -94,15 +96,24 @@ mixed.VARIANT_CONFIGS[VARIANT_ID] = EFFECTIVE_CONFIG
 
 METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "attributed_itl_outlier_count": ("count", "sum", True),
+    "case_failure_count": ("count", "sum", True),
     "graph_budget_event_count": ("count", "sum", False),
+    "headroom_arm_completed": ("count", "sum", False),
+    "headroom_arm_started": ("count", "sum", False),
+    "headroom_attempted_request_count": ("count", "sum", False),
     "headroom_graph_capture_count": ("count", "sum", False),
     "headroom_graph_failure_count": ("count", "sum", True),
     "headroom_graph_peak_retained_bytes": ("bytes", "max", True),
     "headroom_graph_replay_count": ("count", "sum", False),
+    "headroom_completed_request_count": ("count", "sum", False),
     "headroom_peak_gpu_memory_used_bytes": ("bytes", "max", True),
     "max_completed_concurrency": ("requests", "max", False),
     "output_mismatch_count": ("count", "sum", True),
     "request_failure_count": ("count", "sum", True),
+    "tight_arm_completed": ("count", "sum", False),
+    "tight_arm_started": ("count", "sum", False),
+    "tight_attempted_request_count": ("count", "sum", False),
+    "tight_completed_request_count": ("count", "sum", False),
     "tight_graph_budget_eviction_count": ("count", "sum", False),
     "tight_graph_byte_budget_rejection_count": ("count", "sum", False),
     "tight_graph_capture_count": ("count", "sum", False),
@@ -114,6 +125,11 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "unexplained_itl_outlier_count": ("count", "sum", True),
 }
 for _level in CONCURRENCY_LEVELS:
+    METRIC_DEFINITIONS[f"concurrency_{_level}_attempted_request_count"] = (
+        "count",
+        "sum",
+        False,
+    )
     METRIC_DEFINITIONS[f"concurrency_{_level}_e2e_ms_p99"] = (
         "ms",
         "p99",
@@ -122,6 +138,11 @@ for _level in CONCURRENCY_LEVELS:
     METRIC_DEFINITIONS[f"concurrency_{_level}_itl_ms_p99"] = (
         "ms",
         "p99",
+        True,
+    )
+    METRIC_DEFINITIONS[f"concurrency_{_level}_failure_count"] = (
+        "count",
+        "sum",
         True,
     )
     METRIC_DEFINITIONS[f"concurrency_{_level}_request_count"] = (
@@ -147,6 +168,71 @@ class ArmRun:
     peak_gpu_memory_used_bytes: int
     attributed_itl_outliers: int
     unexplained_itl_outliers: int
+
+
+@dataclasses.dataclass
+class RunEvidence:
+    arm_started: set[str] = dataclasses.field(default_factory=set)
+    arm_completed: set[str] = dataclasses.field(default_factory=set)
+    results: dict[str, list[mixed.StreamResult]] = dataclasses.field(
+        default_factory=lambda: {arm: [] for arm in ARM_ORDER}
+    )
+    outputs_by_arm: dict[str, dict[str, str]] = dataclasses.field(
+        default_factory=lambda: {arm: {} for arm in ARM_ORDER}
+    )
+    attempted_by_level: dict[int, int] = dataclasses.field(default_factory=dict)
+    tight_attempted_by_level: dict[int, int] = dataclasses.field(default_factory=dict)
+    failures_by_level: dict[int, int] = dataclasses.field(default_factory=dict)
+    graph_by_arm: dict[str, dict[str, int]] = dataclasses.field(default_factory=dict)
+    peak_gpu_memory_used_bytes: dict[str, int] = dataclasses.field(default_factory=dict)
+    attributed_itl_outliers: dict[str, int] = dataclasses.field(default_factory=dict)
+    unexplained_itl_outliers: dict[str, int] = dataclasses.field(default_factory=dict)
+    max_completed_concurrency: int = 0
+    request_failure_count: int = 0
+    case_failure_count: int = 0
+
+    def begin_wave(self, arm: str, level: int, request_count: int) -> None:
+        if arm == "headroom":
+            self.attempted_by_level[level] = request_count
+        elif arm == "tight":
+            self.tight_attempted_by_level[level] = request_count
+
+    def record_wave(
+        self,
+        arm: str,
+        level: int,
+        wave: list[mixed.StreamResult],
+    ) -> list[mixed.StreamResult]:
+        successful = [result for result in wave if result.success]
+        failures = len(wave) - len(successful)
+        self.results[arm].extend(successful)
+        self.outputs_by_arm[arm].update(
+            {
+                result.name: canonical_semantic_hash(result)
+                for result in successful
+            }
+        )
+        self.request_failure_count += failures
+        if arm == "headroom":
+            self.begin_wave(arm, level, len(wave))
+            self.failures_by_level[level] = failures
+            if failures == 0 and len(wave) == level:
+                self.max_completed_concurrency = max(
+                    self.max_completed_concurrency,
+                    level,
+                )
+        else:
+            self.begin_wave(arm, level, len(wave))
+        return successful
+
+    def record_graph(self, arm: str, value: dict[str, int]) -> None:
+        self.graph_by_arm[arm] = dict(value)
+
+    def record_peak_memory(self, arm: str, value: int) -> None:
+        self.peak_gpu_memory_used_bytes[arm] = max(
+            self.peak_gpu_memory_used_bytes.get(arm, 0),
+            value,
+        )
 
 
 def canonical_semantic_hash(result: mixed.StreamResult) -> str:
@@ -212,6 +298,7 @@ def run_wave(
                     seed=seed + level * 1000 + index,
                     absolute_deadline=deadline,
                     abort_event=abort,
+                    request_timeout_seconds=REQUEST_TIMEOUT_SECONDS,
                 )
             )
         results = [
@@ -241,6 +328,7 @@ def run_arm(
     seed: int,
     arm: str,
     deadline: float,
+    evidence: RunEvidence,
 ) -> ArmRun:
     budget_bytes = ARM_BUDGETS[arm]
     port = mixed.free_loopback_port()
@@ -264,6 +352,9 @@ def run_arm(
     sampler = mixed.MemorySampler(port)
     shutdown: mixed.ShutdownOutcome | None = None
     residue: list[str] = []
+    measured_started: float | None = None
+    warmup: mixed.StreamResult | None = None
+    results: list[mixed.StreamResult] = []
     try:
         mixed.wait_ready(port, process, server_log, deadline)
         startup = wait_drained(port, deadline, f"{arm} startup")
@@ -278,7 +369,6 @@ def run_arm(
         if failures:
             raise ResilienceError("; ".join(failures))
 
-        warmup: mixed.StreamResult | None = None
         for index in range(8):
             warmup = mixed.run_stream(
                 port,
@@ -288,6 +378,7 @@ def run_arm(
                 max_tokens=WARMUP_MAX_TOKENS,
                 seed=seed + index,
                 absolute_deadline=deadline,
+                request_timeout_seconds=REQUEST_TIMEOUT_SECONDS,
             )
             if not warmup.success:
                 raise ResilienceError(f"{arm} warmup failed: {warmup.error}")
@@ -311,12 +402,14 @@ def run_arm(
 
         health_start = wait_drained(port, deadline, f"{arm} measurement start")
         graph_start = mixed.graph_snapshot(health_start)
+        evidence.record_graph(arm, graph_start)
         measured_started = time.monotonic()
         sampler.start()
-        results: list[mixed.StreamResult] = []
         for level in CONCURRENCY_LEVELS:
+            evidence.begin_wave(arm, level, level)
             wave = run_wave(port, arm, level, seed, deadline)
             failures = [result for result in wave if not result.success]
+            results.extend(evidence.record_wave(arm, level, wave))
             if failures:
                 raise ResilienceError(
                     f"{arm} concurrency {level} had {len(failures)} failed requests: "
@@ -327,8 +420,8 @@ def run_arm(
                     raise ResilienceError(
                         f"{arm} {result.name} did not preserve the fixed output denominator"
                     )
-            results.extend(wave)
-            wait_drained(port, deadline, f"{arm} concurrency {level}")
+            drained = wait_drained(port, deadline, f"{arm} concurrency {level}")
+            evidence.record_graph(arm, mixed.graph_snapshot(drained))
         sampler.close()
 
         health_end = wait_drained(port, deadline, f"{arm} final")
@@ -343,6 +436,8 @@ def run_arm(
         if failures:
             raise ResilienceError("; ".join(failures))
         graph_end = mixed.graph_snapshot(health_end)
+        evidence.record_graph(arm, graph_end)
+        evidence.record_peak_memory(arm, max(sampler.samples, default=0))
         if process.poll() is not None:
             raise ResilienceError(f"{arm} server exited during measurement")
         if graph_end["failures"] != 0:
@@ -364,6 +459,8 @@ def run_arm(
         attributed, unexplained = mixed.classify_itl_outliers(
             warmup.itl_ms, results, events
         )
+        evidence.attributed_itl_outliers[arm] = attributed
+        evidence.unexplained_itl_outliers[arm] = unexplained
         if attributed or unexplained:
             raise ResilienceError(
                 f"{arm} observed {attributed} attributed and {unexplained} unexplained ITL outliers"
@@ -385,8 +482,29 @@ def run_arm(
         )
     finally:
         sampler.close()
+        evidence.record_peak_memory(arm, max(sampler.samples, default=0))
+        if process.poll() is None:
+            try:
+                evidence.record_graph(
+                    arm,
+                    mixed.graph_snapshot(mixed.json_request(port, "GET", "/health")),
+                )
+            except Exception:
+                pass
         shutdown = mixed.terminate_process(process)
         server_log.join()
+        if measured_started is not None and warmup is not None:
+            events = server_log.events_since(measured_started)
+            try:
+                attributed, unexplained = mixed.classify_itl_outliers(
+                    warmup.itl_ms,
+                    results,
+                    events,
+                )
+                evidence.attributed_itl_outliers[arm] = attributed
+                evidence.unexplained_itl_outliers[arm] = unexplained
+            except Exception:
+                pass
         residue = mixed.snapshot_payload_residue(snapshot_dir)
         shutil.rmtree(run_dir, ignore_errors=True)
         if shutdown.forced or shutdown.returncode != 0 or residue:
@@ -398,7 +516,7 @@ def run_arm(
 
 def graph_budget_events(graph: dict[str, int]) -> int:
     return sum(
-        graph[field]
+        graph.get(field, 0)
         for field in (
             "budget_evictions",
             "byte_budget_rejections",
@@ -412,49 +530,97 @@ def percentile(values: list[float], probability: float) -> float:
     return mixed.percentile_r7(values, probability) if values else 0.0
 
 
-def metrics_from_arms(arms: dict[str, ArmRun]) -> tuple[list[dict[str, Any]], str | None]:
-    headroom = arms["headroom"]
-    tight = arms["tight"]
-    common_outputs = set(headroom.outputs) & set(tight.outputs)
-    output_mismatches = sum(
-        headroom.outputs[name] != tight.outputs[name] for name in common_outputs
-    ) + len(set(headroom.outputs) ^ set(tight.outputs))
+def metrics_from_evidence(
+    evidence: RunEvidence,
+) -> tuple[list[dict[str, Any]], str | None]:
+    headroom_results = evidence.results["headroom"]
+    headroom_outputs = evidence.outputs_by_arm["headroom"]
+    tight_outputs = evidence.outputs_by_arm["tight"]
+    output_mismatches = 0
+    if set(ARM_ORDER).issubset(evidence.arm_completed):
+        common_outputs = set(headroom_outputs) & set(tight_outputs)
+        output_mismatches = sum(
+            headroom_outputs[name] != tight_outputs[name] for name in common_outputs
+        ) + len(set(headroom_outputs) ^ set(tight_outputs))
+
+    headroom_graph = evidence.graph_by_arm.get("headroom", {})
+    tight_graph = evidence.graph_by_arm.get("tight", {})
+    headroom_failures = {
+        level: max(
+            evidence.failures_by_level.get(level, 0),
+            evidence.attempted_by_level.get(level, 0)
+            - sum(
+                result.name.startswith(f"resilience-c{level}-")
+                for result in headroom_results
+            ),
+        )
+        for level in CONCURRENCY_LEVELS
+    }
+    tight_failure_count = max(
+        0,
+        sum(evidence.tight_attempted_by_level.values())
+        - len(evidence.results["tight"]),
+    )
     values: dict[str, float | int] = {
-        "attributed_itl_outlier_count": sum(
-            arm.attributed_itl_outliers for arm in arms.values()
+        "attributed_itl_outlier_count": sum(evidence.attributed_itl_outliers.values()),
+        "case_failure_count": evidence.case_failure_count,
+        "graph_budget_event_count": graph_budget_events(tight_graph),
+        "headroom_arm_completed": int("headroom" in evidence.arm_completed),
+        "headroom_arm_started": int("headroom" in evidence.arm_started),
+        "headroom_attempted_request_count": sum(evidence.attempted_by_level.values()),
+        "headroom_completed_request_count": len(headroom_results),
+        "headroom_graph_capture_count": headroom_graph.get("capture_successes", 0),
+        "headroom_graph_failure_count": headroom_graph.get("failures", 0),
+        "headroom_graph_peak_retained_bytes": headroom_graph.get(
+            "peak_retained_bytes", 0
         ),
-        "graph_budget_event_count": graph_budget_events(tight.graph_end),
-        "headroom_graph_capture_count": headroom.graph_end["capture_successes"],
-        "headroom_graph_failure_count": headroom.graph_end["failures"],
-        "headroom_graph_peak_retained_bytes": headroom.graph_end["peak_retained_bytes"],
-        "headroom_graph_replay_count": headroom.graph_end["replay_successes"],
-        "headroom_peak_gpu_memory_used_bytes": headroom.peak_gpu_memory_used_bytes,
-        "max_completed_concurrency": max(CONCURRENCY_LEVELS),
+        "headroom_graph_replay_count": headroom_graph.get("replay_successes", 0),
+        "headroom_peak_gpu_memory_used_bytes": evidence.peak_gpu_memory_used_bytes.get(
+            "headroom", 0
+        ),
+        "max_completed_concurrency": evidence.max_completed_concurrency,
         "output_mismatch_count": output_mismatches,
-        "request_failure_count": 0,
-        "tight_graph_budget_eviction_count": tight.graph_end["budget_evictions"],
-        "tight_graph_byte_budget_rejection_count": tight.graph_end["byte_budget_rejections"],
-        "tight_graph_capture_count": tight.graph_end["capture_successes"],
-        "tight_graph_failure_count": tight.graph_end["failures"],
-        "tight_graph_peak_retained_bytes": tight.graph_end["peak_retained_bytes"],
-        "tight_graph_pre_capture_byte_budget_skip_count": tight.graph_end[
-            "pre_capture_byte_budget_skips"
-        ],
-        "tight_graph_replay_count": tight.graph_end["replay_successes"],
-        "tight_peak_gpu_memory_used_bytes": tight.peak_gpu_memory_used_bytes,
+        "request_failure_count": max(
+            evidence.request_failure_count,
+            sum(headroom_failures.values()) + tight_failure_count,
+        ),
+        "tight_arm_completed": int("tight" in evidence.arm_completed),
+        "tight_arm_started": int("tight" in evidence.arm_started),
+        "tight_attempted_request_count": sum(
+            evidence.tight_attempted_by_level.values()
+        ),
+        "tight_completed_request_count": len(evidence.results["tight"]),
+        "tight_graph_budget_eviction_count": tight_graph.get("budget_evictions", 0),
+        "tight_graph_byte_budget_rejection_count": tight_graph.get(
+            "byte_budget_rejections", 0
+        ),
+        "tight_graph_capture_count": tight_graph.get("capture_successes", 0),
+        "tight_graph_failure_count": tight_graph.get("failures", 0),
+        "tight_graph_peak_retained_bytes": tight_graph.get("peak_retained_bytes", 0),
+        "tight_graph_pre_capture_byte_budget_skip_count": tight_graph.get(
+            "pre_capture_byte_budget_skips", 0
+        ),
+        "tight_graph_replay_count": tight_graph.get("replay_successes", 0),
+        "tight_peak_gpu_memory_used_bytes": evidence.peak_gpu_memory_used_bytes.get(
+            "tight", 0
+        ),
         "unexplained_itl_outlier_count": sum(
-            arm.unexplained_itl_outliers for arm in arms.values()
+            evidence.unexplained_itl_outliers.values()
         ),
     }
     for level in CONCURRENCY_LEVELS:
         selected = [
             result
-            for result in headroom.results
+            for result in headroom_results
             if result.name.startswith(f"resilience-c{level}-")
         ]
+        values[f"concurrency_{level}_attempted_request_count"] = (
+            evidence.attempted_by_level.get(level, 0)
+        )
         values[f"concurrency_{level}_e2e_ms_p99"] = percentile(
             [result.e2e_ms for result in selected], 0.99
         )
+        values[f"concurrency_{level}_failure_count"] = headroom_failures[level]
         values[f"concurrency_{level}_itl_ms_p99"] = percentile(
             [gap for result in selected for gap in result.itl_ms], 0.99
         )
@@ -481,27 +647,45 @@ def metrics_from_arms(arms: dict[str, ArmRun]) -> tuple[list[dict[str, Any]], st
     return metrics, details
 
 
-def zero_metrics() -> list[dict[str, Any]]:
-    values = []
-    for name in sorted(METRIC_DEFINITIONS):
-        unit, aggregation, lower_is_better = METRIC_DEFINITIONS[name]
-        values.append(
-            {
-                "name": name,
-                "value": 1 if name == "request_failure_count" else 0,
-                "unit": unit,
-                "aggregation": aggregation,
-                "lower_is_better": lower_is_better,
-            }
+def metrics_from_arms(arms: dict[str, ArmRun]) -> tuple[list[dict[str, Any]], str | None]:
+    evidence = RunEvidence()
+    for arm_name, arm in arms.items():
+        evidence.arm_started.add(arm_name)
+        evidence.arm_completed.add(arm_name)
+        evidence.results[arm_name].extend(arm.results)
+        evidence.outputs_by_arm[arm_name].update(arm.outputs)
+        evidence.record_graph(arm_name, arm.graph_end)
+        evidence.record_peak_memory(arm_name, arm.peak_gpu_memory_used_bytes)
+        evidence.attributed_itl_outliers[arm_name] = arm.attributed_itl_outliers
+        evidence.unexplained_itl_outliers[arm_name] = arm.unexplained_itl_outliers
+    for level in CONCURRENCY_LEVELS:
+        selected = [
+            result
+            for result in evidence.results["headroom"]
+            if result.name.startswith(f"resilience-c{level}-")
+        ]
+        evidence.attempted_by_level[level] = len(selected)
+        evidence.failures_by_level[level] = 0
+        evidence.tight_attempted_by_level[level] = len(
+            [
+                result
+                for result in evidence.results["tight"]
+                if result.name.startswith(f"resilience-c{level}-")
+            ]
         )
-    return values
+    evidence.max_completed_concurrency = max(CONCURRENCY_LEVELS)
+    return metrics_from_evidence(evidence)
+
+
+def zero_metrics() -> list[dict[str, Any]]:
+    return metrics_from_evidence(RunEvidence())[0]
 
 
 def write_result(path: Path, value: dict[str, Any]) -> None:
     mixed.write_result(path, value)
 
 
-def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str | None]:
+def execute(model_path: Path, seed: int, evidence: RunEvidence) -> None:
     deadline = time.monotonic() + OVERALL_TIMEOUT_SECONDS
     binary, binary_hash, build_seconds = mixed.build_binary(deadline)
     mixed.trace(
@@ -510,10 +694,10 @@ def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str | No
         path=str(binary.relative_to(ROOT)),
         sha256=binary_hash,
     )
-    arms = {
-        arm: run_arm(binary, model_path, seed, arm, deadline) for arm in ARM_ORDER
-    }
-    return metrics_from_arms(arms)
+    for arm in ARM_ORDER:
+        evidence.arm_started.add(arm)
+        run_arm(binary, model_path, seed, arm, deadline, evidence)
+        evidence.arm_completed.add(arm)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -533,6 +717,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     status = "failed"
     details: str | None = None
+    evidence = RunEvidence()
     metrics = zero_metrics()
     try:
         if variant != VARIANT_ID:
@@ -540,10 +725,16 @@ def main(argv: list[str] | None = None) -> int:
         model_path = args.model_path.resolve(strict=True)
         if not model_path.is_dir():
             raise ResilienceError("--model-path must be a directory")
-        metrics, details = execute(model_path, args.seed)
+        execute(model_path, args.seed, evidence)
+        metrics, details = metrics_from_evidence(evidence)
         status = "passed" if details is None else "failed"
+        if status == "failed":
+            evidence.case_failure_count = 1
+            metrics, _ = metrics_from_evidence(evidence)
     except Exception as exc:
         details = f"{type(exc).__name__}: {exc}"
+        evidence.case_failure_count = 1
+        metrics, _ = metrics_from_evidence(evidence)
         mixed.trace("graph_resilience_error", details=details)
     result = {
         "schema_version": 1,

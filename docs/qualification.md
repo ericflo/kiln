@@ -443,6 +443,16 @@ closed `graph_cache_byte_budget` eager fallback. The receipt publishes p99 TTFT,
 ITL, and E2E latency at every concurrency plus graph and peak-memory counters.
 A passing receipt therefore has zero attributed or unexplained ITL outliers.
 
+The 300-second client deadline and 360-second server deadline are containment
+ceilings for this correctness matrix, not performance targets. The fixed
+cross-engine serving campaign owns comparative throughput and latency verdicts;
+increasing these ceilings cannot erase the measured TTFT or E2E values. A failed
+matrix receipt retains attempted, completed, and failed request counts for every
+headroom wave, the highest fully completed concurrency, per-arm
+start/attempt/completion coverage, the latest graph counters, peak memory, and
+observed pause counts. Unstarted arms therefore remain explicitly distinguishable
+from started-but-incomplete arms and measured zero events.
+
 Run the destructive-identity and fallback-containment corpus separately. It
 uses the bounded Cargo wrapper, one compile job, the unchanged 15 GiB host-memory
 floor, offline dependencies, one test thread, and a required real ROCm device:

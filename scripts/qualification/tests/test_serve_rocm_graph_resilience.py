@@ -3,8 +3,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 QUALIFICATION_DIR = Path(__file__).resolve().parents[1]
@@ -21,14 +24,15 @@ SPEC.loader.exec_module(resilience)
 
 
 def stream_result(name: str, content: str = "token") -> resilience.mixed.StreamResult:
+    token_times = [1.1 + index * 0.1 for index in range(resilience.MAX_TOKENS)]
     return resilience.mixed.StreamResult(
         name=name,
         marker="marker",
         started=1.0,
         finished=2.0,
         semantic_times=[1.25],
-        token_ready_times=[1.25, 1.5],
-        token_queue_delays_ms=[0.0, 0.0],
+        token_ready_times=token_times,
+        token_queue_delays_ms=[0.0] * len(token_times),
         prompt_tokens=4,
         completion_tokens=resilience.MAX_TOKENS,
         usage_records=1,
@@ -111,6 +115,31 @@ class ServeRocmGraphResilienceTests(unittest.TestCase):
             workload["pause_policy"],
             "zero_attributed_or_unexplained_itl_outliers",
         )
+        self.assertEqual(workload["request_timeout_seconds"], 300)
+        self.assertEqual(
+            resilience.EFFECTIVE_CONFIG["server"]["request_timeout_seconds"],
+            360,
+        )
+
+    def test_wave_delivers_the_declared_correctness_timeout(self) -> None:
+        expected = stream_result("resilience-c1-r00")
+        with mock.patch.object(
+            resilience.mixed,
+            "run_stream",
+            return_value=expected,
+        ) as run_stream:
+            wave = resilience.run_wave(
+                12345,
+                "headroom",
+                1,
+                7,
+                time.monotonic() + 1.0,
+            )
+        self.assertEqual(wave, [expected])
+        self.assertEqual(
+            run_stream.call_args.kwargs["request_timeout_seconds"],
+            resilience.REQUEST_TIMEOUT_SECONDS,
+        )
 
     def test_semantic_hash_excludes_dynamic_envelope_but_binds_output(self) -> None:
         first = stream_result("request", "same")
@@ -175,6 +204,17 @@ class ServeRocmGraphResilienceTests(unittest.TestCase):
         self.assertEqual(by_name["graph_budget_event_count"], 1)
         for level in resilience.CONCURRENCY_LEVELS:
             self.assertEqual(by_name[f"concurrency_{level}_request_count"], 1)
+            self.assertEqual(
+                by_name[f"concurrency_{level}_attempted_request_count"], 1
+            )
+            self.assertEqual(by_name[f"concurrency_{level}_failure_count"], 0)
+        self.assertEqual(by_name["headroom_arm_completed"], 1)
+        self.assertEqual(by_name["headroom_arm_started"], 1)
+        self.assertEqual(by_name["tight_arm_completed"], 1)
+        self.assertEqual(by_name["tight_arm_started"], 1)
+        self.assertEqual(by_name["tight_attempted_request_count"], 5)
+        self.assertEqual(by_name["tight_completed_request_count"], 5)
+        self.assertEqual(by_name["case_failure_count"], 0)
 
         drifted = dict(outputs)
         drifted[next(iter(drifted))] = "sha256:different"
@@ -185,6 +225,100 @@ class ServeRocmGraphResilienceTests(unittest.TestCase):
         by_name = {metric["name"]: metric["value"] for metric in metrics}
         self.assertEqual(by_name["output_mismatch_count"], 1)
         self.assertIsNotNone(details)
+
+    def test_partial_failure_metrics_retain_completed_wave_evidence(self) -> None:
+        evidence = resilience.RunEvidence()
+        evidence.arm_started.add("headroom")
+        evidence.record_graph("headroom", graph(capture_successes=9, replay_successes=31))
+        evidence.record_peak_memory("headroom", 1234)
+        evidence.record_wave("headroom", 1, [stream_result("resilience-c1-r00")])
+
+        failed = resilience.dataclasses.replace(
+            stream_result("resilience-c64-r01"),
+            semantic_times=[],
+            token_ready_times=[],
+            token_queue_delays_ms=[],
+            prompt_tokens=0,
+            completion_tokens=0,
+            usage_records=0,
+            finish_reason=None,
+            done=False,
+            error="TimeoutError: timed out",
+        )
+        evidence.record_wave(
+            "headroom",
+            64,
+            [stream_result("resilience-c64-r00"), failed],
+        )
+        evidence.case_failure_count = 1
+
+        metrics, details = resilience.metrics_from_evidence(evidence)
+        by_name = {metric["name"]: metric["value"] for metric in metrics}
+        self.assertIsNone(details)
+        self.assertEqual(by_name["case_failure_count"], 1)
+        self.assertEqual(by_name["request_failure_count"], 1)
+        self.assertEqual(by_name["headroom_arm_completed"], 0)
+        self.assertEqual(by_name["headroom_arm_started"], 1)
+        self.assertEqual(by_name["tight_arm_completed"], 0)
+        self.assertEqual(by_name["tight_arm_started"], 0)
+        self.assertEqual(by_name["tight_attempted_request_count"], 0)
+        self.assertEqual(by_name["tight_completed_request_count"], 0)
+        self.assertEqual(by_name["headroom_attempted_request_count"], 3)
+        self.assertEqual(by_name["headroom_completed_request_count"], 2)
+        self.assertEqual(by_name["concurrency_1_attempted_request_count"], 1)
+        self.assertEqual(by_name["concurrency_1_request_count"], 1)
+        self.assertEqual(by_name["concurrency_1_failure_count"], 0)
+        self.assertEqual(by_name["concurrency_64_attempted_request_count"], 2)
+        self.assertEqual(by_name["concurrency_64_request_count"], 1)
+        self.assertEqual(by_name["concurrency_64_failure_count"], 1)
+        self.assertEqual(by_name["max_completed_concurrency"], 1)
+        self.assertEqual(by_name["headroom_graph_capture_count"], 9)
+        self.assertEqual(by_name["headroom_graph_replay_count"], 31)
+        self.assertEqual(by_name["headroom_peak_gpu_memory_used_bytes"], 1234)
+
+    def test_main_writes_partial_evidence_when_execution_raises(self) -> None:
+        def fail_after_wave(
+            _model_path: Path,
+            _seed: int,
+            evidence: resilience.RunEvidence,
+        ) -> None:
+            evidence.arm_started.add("headroom")
+            evidence.record_graph("headroom", graph(capture_successes=9))
+            evidence.record_wave(
+                "headroom",
+                1,
+                [stream_result("resilience-c1-r00")],
+            )
+            raise resilience.ResilienceError("synthetic failure")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model = root / "model"
+            model.mkdir()
+            result_path = root / "result.json"
+            environment = {
+                resilience.RESULT_ENV: str(result_path),
+                resilience.VARIANT_ENV: resilience.VARIANT_ID,
+            }
+            with (
+                mock.patch.dict(resilience.os.environ, environment, clear=False),
+                mock.patch.object(resilience, "execute", side_effect=fail_after_wave),
+            ):
+                returncode = resilience.main(
+                    ["--model-path", str(model), "--seed", "7"]
+                )
+
+            self.assertEqual(returncode, 1)
+            result = json.loads(result_path.read_text())
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("synthetic failure", result["details"])
+            by_name = {
+                metric["name"]: metric["value"] for metric in result["metrics"]
+            }
+            self.assertEqual(by_name["case_failure_count"], 1)
+            self.assertEqual(by_name["headroom_attempted_request_count"], 1)
+            self.assertEqual(by_name["headroom_completed_request_count"], 1)
+            self.assertEqual(by_name["headroom_graph_capture_count"], 9)
 
 def dataclasses_replace(value: resilience.ArmRun, **changes: object) -> resilience.ArmRun:
     fields = {
