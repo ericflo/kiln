@@ -4430,11 +4430,16 @@ async fn job_detail(
     // callback contends for the WRITE lock on every step. Building
     // outside a `let _ = jobs;` would extend the borrow until end of
     // function.
-    let (mut detail, metadata_dir) = {
+    let (mut detail, metadata_dir, checkpoint_kind) = {
         let jobs = state.training_jobs.read().unwrap();
         let job = jobs
             .get(&job_id)
             .ok_or_else(|| ApiError::training_job_not_found(&job_id))?;
+        let checkpoint_kind = match job.job_type {
+            TrainingJobType::Sft => Some(kiln_train::checkpoint::TrainingKind::Sft),
+            TrainingJobType::Grpo => Some(kiln_train::checkpoint::TrainingKind::Grpo),
+            TrainingJobType::Opd => Some(kiln_train::checkpoint::TrainingKind::Opd),
+        };
         (
             TrainingJobDetail {
                 status: training_status_from_info(job),
@@ -4454,6 +4459,7 @@ async fn job_detail(
                 &job.adapter_name,
                 job.adapter_path.as_deref(),
             ),
+            checkpoint_kind,
         )
     };
     let (train_receipt, replay_request, metadata_error) =
@@ -4461,11 +4467,6 @@ async fn job_detail(
     detail.train_receipt = train_receipt;
     detail.replay_request = replay_request;
     detail.metadata_error = metadata_error;
-    let checkpoint_kind = match detail.status.job_type {
-        TrainingJobType::Sft => Some(kiln_train::checkpoint::TrainingKind::Sft),
-        TrainingJobType::Grpo => Some(kiln_train::checkpoint::TrainingKind::Grpo),
-        TrainingJobType::Opd => Some(kiln_train::checkpoint::TrainingKind::Opd),
-    };
     if let (Some(expected_kind), Some(adapter_name)) =
         (checkpoint_kind, detail.status.adapter_name.as_deref())
     {
