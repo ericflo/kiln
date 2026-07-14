@@ -402,26 +402,27 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
   resize, trim, adapter, and training phases separately.
   - Batching paths now distinguish actor queue, admission, tokenization, prefill,
     decode, response delivery, handler queue, response-body enqueue, and
-    conservative unexplained time. Unsupported backend subphases remain
-    explicit `null`; this gate stays open for sampling, readback, GPU-lock,
-    graph, synchronization, resize, trim, adapter, and training correlation and
-    for direct-path coverage.
-- [ ] Associate each emitted token with ready time, delivered time, and any
+    conservative unexplained time. Direct streams now distinguish tokenization,
+    model-producer delivery, bridge/handler queueing, response-body enqueue, and
+    otherwise unpartitioned time. Unsupported backend subphases remain explicit
+    `null`; this gate stays open for sampling, readback, GPU-lock, graph,
+    synchronization, resize, trim, adapter, and training correlation.
+- [x] Associate each emitted token with ready time, delivered time, and any
   blocking phase since the preceding token.
-  - Every batching-engine token carries actor-ready and delivery timestamps plus
-    one bounded dominant blocking candidate, and opted-in SSE exposes their
-    exact queue identities. Direct streams use request-local unexplained gaps
-    but do not yet retain the producer-ready/delivery boundary.
+  - Every batching-engine and direct-model token carries producer-ready and
+    delivery timestamps plus one bounded dominant blocking candidate. Opted-in
+    SSE names the closed source path and exposes the exact ready, producer
+    delivery, handler receipt, body enqueue, queue, and blocking values.
 - [x] Export bounded-cardinality counters/histograms for TTFT, ITL p50/p99/p99.9,
   unexplained gaps, and each stall reason.
   - Prometheus uses fixed bucket and reason vocabularies, while the bounded
     rolling endpoint reports request-local p50/p99/p99.9/max ITL and the
     adaptive `max(250 ms, 5 * p50)` threshold without request/model labels.
-- [ ] Show the same attribution in recent-request diagnostics without requiring
+- [x] Show the same attribution in recent-request diagnostics without requiring
   a profiler.
-  - Batching requests retain the same closed latency object rendered by the
-    recent-request drill, with unsupported phases visibly absent. Direct-stream
-    recent records still lack that object, so this gate remains open.
+  - Batching and direct-stream requests retain the same closed latency object
+    rendered by the recent-request drill, with unsupported phases visibly
+    absent rather than replaced with invented zeroes.
 - [x] Ensure measurement overhead is benchmarked and bounded.
   - A 20,000-token debug-build regression covers request tracking, Prometheus,
     the rolling ring, and final snapshots with a 100 microsecond/token ceiling;
@@ -1962,6 +1963,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-14 | Enforced train/eval separation | `sha256:1e1c3590b361da12ef7de9905e04293b906573f4a5eeaff8ab5e81b04c6b421e` | `f1fbb7fac` through `5e3fcdf51` | portable data/API/UI/documentation contract and hosted default CPU lane; accelerator execution unaffected | hosted CI `29332702186`; Pages `29332377706`; UI smoke `29331460222`; qualification tooling 421/421; focused ROCm harness/manifest/receipt tests 95/95; current 82-definition/32-entrypoint eval schema and 117-definition/52-entrypoint control-plane schema; 102-path/114-operation/133-payload HTTP self-test; 10/10 docs-builder tests; 47-document/5-asset build; Chromium docs and full server-UI matrices; release/link, thinking-budget, formatting, and diff-hygiene gates | passed | Registered rows retain exact and normalized identities plus declared group/session links. Deterministic connected-component manifests materialize train/validation/holdout partitions, exhaustively guarantee every feasible small-corpus partition, and drive named SFT/GRPO, synthesis, public provenance, UI, and generated docs. Held-out post-eval rejects exact, normalized, source-row, group, or session overlap; explicit `train-set-eval` is diagnostic-only and cannot set an accuracy gate. Hosted compilation and the full default suite cleared all migration regressions; derived router counts now come from canonical OpenAPI metadata. Individual files are atomically replaced and hash-bound, but a whole dataset mutation is not yet one crash-transactional directory generation; the final partial-commit gate remains open and this row makes no such claim. This closes Phase 4.2. |
 | 2026-07-13 | Fail-closed cross-engine serving benchmark v3 | `sha256:4095b84d5d1fe70d1442633a30f10ddf412ee257e55a5aee59a818fe02fe550f` | `32cbb54f6` | portable benchmark, receipt, campaign, and permanent website contract; accelerator execution pending | 428 qualification-tooling tests; 20 focused benchmark/campaign tests; all four historical v2 serving receipts; 10/10 docs-builder tests; 47-document/5-asset build; desktop/mobile Chromium site smoke; Python compilation and diff hygiene | passed static checkpoint | Every new run fingerprints and rechecks exact weight shards, config, tokenizer, template, runtime artifact, repository, and memory counter. Kiln's runtime artifact must match the executable hash reported by the live process; vLLM requires a canonical immutable-launcher manifest whose embedded model, implementation, runtime-content hash, and `kiln-teacher-v1` identity verify. Five fixed profiles own prompt shape, sampling, comparison mode, and prompt-token uniformity; ordered observed prompt-token counts close tokenizer drift, while exact output parity is required only where cross-engine determinism is meaningful. Absolute memory limits are predeclared verdict gates. The campaign runner executes all five profiles at concurrency 1/8/16/32/64/128, preserves failed counterexamples, pairs matching Kiln/vLLM receipts, and writes a self-hashing summary. Driver v2 remains validation-only for checked-in history. This closes the Phase 5.1 measurement-contract items, not the still-open ROCm/vLLM hardware matrix, optimization, or performance-positioning gates. |
 | 2026-07-14 | Request-aware latency diagnostics and bounded telemetry | `sha256:a47ac0e5d838ad9b80d103ceb4818b8d3b0cb80adecc534f2d12ef66c26dd855` | `b15d8c2a6` + `6b9fdc26f` + `a9cfb6520` + `9ea546bed` | portable runtime/API/product contract; accelerator execution unaffected | 1,052 hosted server library tests plus substrate, anomaly, CUDA-dependency, qualification, formatting, license, and repository gates in CI `29339093096`; 428 local qualification tests; exact 102-path/114-operation HTTP contract; 10/10 docs-builder tests and 48-document/5-asset build; desktop/mobile rendered docs smoke; empty/desktop/mobile/cold-start/failure-recovery server UI smoke; schema, syntax, JSON, and diff hygiene | passed static checkpoint | Batching requests now carry actor-ready/delivery timestamps and bounded queue/admission/prefill/decode/delivery candidates through unary, streaming, terminal performance metadata, recent requests, the diagnosis UI, rolling request-local statistics, fixed-cardinality Prometheus metrics, generated schemas, strict qualification parsing, and a comprehensive website reference. Conservative overlap accounting cannot erase unexplained wall time; unsupported backend subphases are nullable rather than invented. A 20,000-token regression bounds the complete measurement path at 100 microseconds/token in debug builds and retained request samples at 8,192/256 KiB. Hosted CI caught a non-`Send` streaming tracker, three stale timing fixtures, two invalid one-sample adaptive-threshold tests, and a real shutdown-path missing delivery timestamp; each was repaired and the replacement run is green with every accelerator job skipped. Direct streaming and request-correlated sampling/readback/GPU-lock/graph/sync/mutation phases remain open. Local bounded Cargo refused at 10 GiB available under the unchanged 15 GiB floor. |
+| 2026-07-14 | Direct-stream latency observability and product parity | `sha256:bb609491b79e52929e825eed95063e171a9e9190abe2c87bf02e6a1b7050f19c` | `598229695` | portable runtime/API/product contract; accelerator execution unaffected | hosted CI `29340648131` with 1,053 server library tests plus substrate, anomaly, CUDA-dependency, qualification, formatting, and license gates; Pages `29340646543`; qualification `29340648026`; repository hygiene and release drift; 428 local qualification tests; exact 102-path/114-operation HTTP contract; 10/10 docs-builder tests and 48-document/5-asset build; desktop/mobile rendered docs smoke; full server-UI smoke | passed static checkpoint | Direct-model tokens now preserve producer-ready time through the blocking bridge and record producer delivery, handler receipt, response-body enqueue, request-local ITL, bounded stall attribution, rolling metrics, fixed-cardinality Prometheus observations, terminal performance metadata, recent-request diagnostics, and explicit per-token SSE timing. The public object uses a closed `batching_engine`/`direct` source and generic producer-delivery boundary; direct actor-only phases remain `null` and otherwise unpartitioned intervals remain visibly `unexplained`. Strict schema, qualification parsing, README, operator reference, generated documentation, and the permanent API website agree. This closes the emitted-token and recent-diagnostics gates in Phase 1.6; backend phase correlation remains open. Local bounded Cargo refused at 9 GiB available under the unchanged 15 GiB floor. |
 
 ## Known Starting Defects
 
