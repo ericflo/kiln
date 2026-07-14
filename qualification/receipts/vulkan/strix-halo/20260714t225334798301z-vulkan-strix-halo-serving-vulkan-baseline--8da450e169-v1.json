@@ -1,0 +1,735 @@
+{
+  "artifacts": [
+    {
+      "bytes": 6318,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260714t225334798301z-vulkan-strix-halo-serving-vulkan-baseline--8da450e169-v1/environment.json",
+      "sha256": "sha256:34efb3289dc3b1cecccebcacd135b96fde6b7d88fe9fcd35fac82eeddc0f38de"
+    },
+    {
+      "bytes": 1957,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260714t225334798301z-vulkan-strix-halo-serving-vulkan-baseline--8da450e169-v1/cases/001-vulkan-serving-baseline-r001/stdout.log",
+      "sha256": "sha256:55ce7552e8e17c650e4767f4302a49bf783baca4bb43a98d01ddc3b620aeca21"
+    },
+    {
+      "bytes": 33044,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260714t225334798301z-vulkan-strix-halo-serving-vulkan-baseline--8da450e169-v1/cases/001-vulkan-serving-baseline-r001/stderr.log",
+      "sha256": "sha256:5a3f69e7b734f1c62b7c01f301e281b2a52d1e631be1881334c163b20febc5ac"
+    },
+    {
+      "bytes": 14808,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260714t225334798301z-vulkan-strix-halo-serving-vulkan-baseline--8da450e169-v1/cases/001-vulkan-serving-baseline-r001/case-result.json",
+      "sha256": "sha256:62f553f1740265a29e6e1d9402511c8271ff44eaff499508f984a6b9b38c7a55"
+    },
+    {
+      "bytes": 10376,
+      "kind": "command_case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260714t225334798301z-vulkan-strix-halo-serving-vulkan-baseline--8da450e169-v1/cases/001-vulkan-serving-baseline-r001/command-result.json",
+      "sha256": "sha256:4717db78faf63d817dc20cc15b7966f026563e538aef2878e9ea892f1c5e12ec"
+    },
+    {
+      "bytes": 16195,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260714t225334798301z-vulkan-strix-halo-serving-vulkan-baseline--8da450e169-v1/run-config.json",
+      "sha256": "sha256:e97e55b076e0c9ffbe1df57076763c21ff7e7bef2ec2cd62f37b5101adcbd817"
+    }
+  ],
+  "created_at_utc": "2026-07-14T22:54:13.119Z",
+  "effective_config": {
+    "build": {
+      "binary": "kiln",
+      "cargo_environment_policy": "closed-source-build-v1",
+      "cargo_execution_mode": "transient-service",
+      "cargo_jobs": 1,
+      "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
+      "cargo_min_available_gib": 15,
+      "cargo_private_network": true,
+      "cargo_service_runtime_max_seconds": 840,
+      "cargo_wrapper": "scripts/cargo-bounded.sh",
+      "features": "vulkan",
+      "locked": true,
+      "no_default_features": true,
+      "offline": true,
+      "package": "kiln-server",
+      "profile": "release",
+      "timeout_seconds": 900
+    },
+    "runtime": {
+      "kv_autoscale_enabled": false,
+      "kv_autoscale_requested": false,
+      "memory_reclaim_mode": "off",
+      "memory_reclaim_requested_mode": "off",
+      "rocm_graphs_enabled": false,
+      "rocm_graphs_requested": false,
+      "serving_profile": "experimental"
+    },
+    "server": {
+      "chat_performance_metadata_enabled": true,
+      "debug_endpoints_enabled": true,
+      "default_thinking_enabled": false,
+      "http_send_buffer_bytes": 4096,
+      "log_format": "json",
+      "max_active_requests": 12,
+      "max_decode_batch": 8,
+      "max_prefill_layers_per_cycle": 4,
+      "max_prefill_staging_priority_burst": 4,
+      "max_prefill_staging_slots": 4,
+      "max_prefill_tokens_per_cycle": 64,
+      "request_timeout_seconds": 180,
+      "stream_stall_grace_ms": 2000
+    },
+    "workload": {
+      "expected_completion_tokens": 800,
+      "expected_finish_reason": "length",
+      "expected_request_count": 25,
+      "ignore_eos": true,
+      "max_tokens": 32,
+      "overall_timeout_seconds": 1800,
+      "pause_gate_ms": 2000,
+      "request_timeout_seconds": 180,
+      "semantic_output_evidence": "ordered_canonical_sha256",
+      "simultaneous_dispatch": "per_wave_thread_barrier",
+      "stall_evidence_ms": 250,
+      "warmup_max_tokens": 16,
+      "waves": {
+        "batch-4": {
+          "slot_0": 16,
+          "slot_1": 64,
+          "slot_2": 192,
+          "slot_3": 384
+        },
+        "batch-8": {
+          "slot_0": 16,
+          "slot_1": 32,
+          "slot_2": 64,
+          "slot_3": 96,
+          "slot_4": 192,
+          "slot_5": 384,
+          "slot_6": 512,
+          "slot_7": 768
+        },
+        "saturation-12": {
+          "slot_0": 16,
+          "slot_1": 24,
+          "slot_10": 512,
+          "slot_11": 1024,
+          "slot_2": 32,
+          "slot_3": 48,
+          "slot_4": 64,
+          "slot_5": 96,
+          "slot_6": 128,
+          "slot_7": 192,
+          "slot_8": 256,
+          "slot_9": 384
+        },
+        "single": {
+          "slot_0": 16
+        }
+      }
+    }
+  },
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+      "shader": "2026.2"
+    },
+    "device": {
+      "architecture": "strix_halo",
+      "driver": "radv Mesa 26.1.3-arch1.2",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "driver": "Mesa 26.1.3-arch1.2",
+      "execution_environment_sha256": "sha256:748bde6c3565530b3b917be42b2642467210c9a4f01f00a6ff7167e35dd3543a",
+      "vulkan_device": "1.4.348",
+      "vulkan_instance": "1.4.350"
+    }
+  },
+  "metrics": [],
+  "model": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "id": "Qwen3.5-4B",
+    "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "notes": [],
+  "qualification": {
+    "backend": "vulkan",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/serving-vulkan-baseline-v1.json",
+      "--variant",
+      "vulkan-serving-baseline",
+      "--host-id",
+      "strix-halo",
+      "--model",
+      "Qwen3.5-4B",
+      "--model-id",
+      "Qwen3.5-4B"
+    ],
+    "duration_seconds": 38.321696687999065,
+    "finished_at_utc": "2026-07-14T22:54:13.119Z",
+    "kind": "performance",
+    "profile": "serving-vulkan-baseline-v1",
+    "started_at_utc": "2026-07-14T22:53:34.798Z",
+    "verdict": "failed"
+  },
+  "receipt_id": "20260714t225334798301z-vulkan-strix-halo-serving-vulkan-baseline--8da450e169-v1",
+  "results": [
+    {
+      "details": "{\"build_seconds\":0.3915142490004655,\"effective_environment_sha256\":\"sha256:4cb86cc8e0ebc9850e38852b54c62003c0cdd1737a8c259bd82f4a8362d8b06d\",\"effective_server_config_sha256\":\"sha256:20669febda5cae37510a1db42353e82be1cd319fb77781acccdc39b9ece79dbe\",\"error\":\"VulkanBaselineError: Vulkan warmup failed: QualificationError: warmup emitted 0 finish reasons\",\"execution_provenance_sha256\":\"sha256:38fad22b15d2559fb0ed7d53545dfc09ae166c5fcf8de99366b58a79123e6b0d\",\"generated_config_sha256\":\"sha256:d28546cb1996585007ced86e41d106b5d0971c1e719d3db0afc4adc5d0a9f73a\",\"kernel_contract_sha256\":\"sha256:80f3ac77877e8d91d19d87557971d94a0d63d8c730ffc87d1f6eb33eb104aa09\",\"kiln_binary_sha256\":\"sha256:1312f7a0fc52bb856b74d9c3c3e9ede8c15a4fc1449babf70d938fa2cb63e6c6\",\"milestones\":[\"build\",\"config\",\"startup\",\"teardown\"]}; exit code 1 not in [0]",
+      "duration_seconds": 29.335578415000782,
+      "id": "vulkan-serving-baseline",
+      "metrics": [
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "attributed_itl_outlier_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "batch_4_completion_token_count",
+          "unit": "tokens",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "batch_4_duration_seconds",
+          "unit": "s",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "batch_4_e2e_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "batch_4_itl_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "rate",
+          "lower_is_better": false,
+          "name": "batch_4_output_tokens_per_second",
+          "unit": "tokens/s",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "batch_4_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batch_4_request_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "batch_4_ttft_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "batch_8_completion_token_count",
+          "unit": "tokens",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "batch_8_duration_seconds",
+          "unit": "s",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "batch_8_e2e_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "batch_8_itl_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "rate",
+          "lower_is_better": false,
+          "name": "batch_8_output_tokens_per_second",
+          "unit": "tokens/s",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "batch_8_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batch_8_request_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "batch_8_ttft_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "batching_batched_decode_forward_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "batching_decode_forward_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "batching_decode_row_count",
+          "unit": "rows",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": false,
+          "name": "batching_max_observed_active_requests",
+          "unit": "requests",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": false,
+          "name": "batching_max_observed_batch_size",
+          "unit": "rows",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "batching_prefill_forward_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "batching_prefill_layer_count",
+          "unit": "layers",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "batching_prefill_layer_yield_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batching_total_error_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "binary_build_count",
+          "unit": "count",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "completion_token_count",
+          "unit": "tokens",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "device_fault_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "external_yield_sync_call_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "external_yield_sync_max_ms",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_slow_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_total_ms",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_activity_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "itl_pause_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "itl_stall_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "kv_blocks_end",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "kv_blocks_start",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "kv_resize_event_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "length_terminated_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "memory_reclaim_event_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "memory_sample_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "memory_sampler_error_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "rate",
+          "lower_is_better": false,
+          "name": "output_token_throughput_per_second",
+          "unit": "tokens/s",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "peak_gpu_memory_used_bytes",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "policy_attestation_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prompt_token_count",
+          "unit": "tokens",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "request_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "saturation_12_completion_token_count",
+          "unit": "tokens",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "saturation_12_duration_seconds",
+          "unit": "s",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "saturation_12_e2e_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "saturation_12_itl_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "rate",
+          "lower_is_better": false,
+          "name": "saturation_12_output_tokens_per_second",
+          "unit": "tokens/s",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "saturation_12_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "saturation_12_request_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "saturation_12_ttft_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "semantic_output_record_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_forced_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_nonzero_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "single_completion_token_count",
+          "unit": "tokens",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "single_duration_seconds",
+          "unit": "s",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "single_e2e_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "single_itl_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "rate",
+          "lower_is_better": false,
+          "name": "single_output_tokens_per_second",
+          "unit": "tokens/s",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "single_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "single_request_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "single_ttft_ms_p99",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "snapshot_residue_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "unexplained_itl_outlier_count",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "failed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "ef652f371da4bfffd1c9108f57db5369a92e9298",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:c8200815d40e7b1520c59cb80ae46042fac99082ee47fffc7eab3f95b0d8a3b0",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "serving-vulkan-baseline-v1",
+    "parameters": {
+      "variant_id": "vulkan-serving-baseline"
+    },
+    "seed": 20260713,
+    "sha256": "sha256:f934c2b229f05211c59b28906a674181f7a90a4d5f2335beb22c4eaf240cdecb"
+  }
+}
