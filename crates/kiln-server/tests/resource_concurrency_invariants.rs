@@ -1430,6 +1430,11 @@ fn rocm_capture_arena_suppresses_active_stream_synchronizes() {
         "pub fn rocm_synchronize_tensor_stream(",
         "/// Refresh `dst`'s contents in place",
     );
+    let same_stream_sync = source_between(
+        &rocm_storage,
+        "pub(crate) fn rocm_synchronize_context_same_stream_dependency_with_inputs(",
+        "/// Preserve a historical device-wide barrier",
+    );
     let contiguous = source_between(
         &rocm_storage,
         "pub fn rocm_contiguous(",
@@ -1447,22 +1452,27 @@ fn rocm_capture_arena_suppresses_active_stream_synchronizes() {
         "ROCm tensor-stream sync must no-op under HIP graph capture"
     );
     assert!(
+        same_stream_sync.contains("if crate::rocm_capture_arena_active()")
+            && same_stream_sync.contains("return Ok(())"),
+        "the shared ROCm post-launch boundary must suppress synchronization inside capture"
+    );
+    assert!(
         contiguous
-            .matches("if !crate::rocm_capture_arena_active()")
+            .matches("rocm_synchronize_context_same_stream_dependency_with_inputs")
             .count()
             >= 3,
-        "ROCm contiguous must not call hipStreamSynchronize inside capture"
+        "every ROCm contiguous launch path must use the capture-safe post-launch boundary"
     );
     assert!(
         concat
-            .matches("if !crate::rocm_capture_arena_active()")
+            .matches("rocm_synchronize_context_same_stream_dependency_with_inputs")
             .count()
             >= 3,
-        "ROCm concat must not call hipStreamSynchronize inside capture"
+        "every direct ROCm concat launch path must use the capture-safe post-launch boundary"
     );
     assert!(
-        bf16_matmul.contains("if !crate::rocm_capture_arena_active()"),
-        "ROCm BF16 matmul fallback must not call hipStreamSynchronize inside capture"
+        bf16_matmul.contains("rocm_synchronize_context_same_stream_dependency_with_inputs"),
+        "ROCm BF16 matmul fallback must use the capture-safe post-launch boundary"
     );
 }
 
