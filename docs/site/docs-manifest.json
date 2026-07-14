@@ -187,6 +187,13 @@
       "description": "Environment-feedback training requests, diagnostics, and operating modes."
     },
     {
+      "source": "docs/DATASET_SPLITS.md",
+      "slug": "dataset-splits",
+      "title": "Dataset Splits and Train/Eval Separation",
+      "section": "training",
+      "description": "Content-addressed rows, deterministic group-aware partitions, held-out synthesis, contamination admission, and training-data provenance."
+    },
+    {
       "source": "docs/EVAL_GUIDE.md",
       "slug": "evals",
       "title": "Eval Guide",

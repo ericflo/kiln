@@ -28,9 +28,9 @@ Three things are unusual about kiln's eval stack:
    targets to `json_validity`, tool calls to `tool_call`, code blocks to
    `code`, and free-form text to a contains-with-key-phrases scorer.
 2. **You don't have to start from scratch.** Upload an SFT JSONL and Kiln
-   *synthesizes* an eval suite from it — picking the right decomposition
-   strategy for your data (single-turn Q&A, every-step in an agent run,
-   tool-call prediction, etc.) and writing the suite to disk for you.
+   content-addresses it, persists group-aware train/validation/holdout
+   partitions, and *synthesizes* an eval suite from the holdout partition by
+   default. It never relabels the training partition as held out.
 3. **You don't need a frontier LLM as the judge.** The flywheel turns
    user A/B picks into a local SFT dataset; that dataset trains a *local*
    judge LoRA; the judge LoRA scores future evals via `LlmJudge`. Nothing
@@ -98,19 +98,20 @@ documented here.
 
 Most users never hand-author a suite. The canonical flow is:
 
-1. **Upload an SFT JSONL.** Drag your training data (the same `messages: [...]`
-   JSONL you'd POST to `/v1/train/sft`) into the **Evals → Datasets → Upload**
-   panel, or POST it via:
+1. **Upload an SFT JSONL.** Drag a `messages: [...]` corpus into the
+   **Evals → Datasets → Upload** panel, or POST it via:
 
    ```bash
    curl -F name=my-sft -F format=sft_chat -F file=@my-sft.jsonl \
         http://localhost:8420/v1/eval/datasets/upload
    ```
 
-   Kiln scans the file and reports row counts, role patterns, tool-call
-   density — useful signals for picking a synthesis strategy.
+   Kiln content-addresses every row and persists deterministic,
+   group/session-aware train, validation, and holdout views. Inspect the
+   actual counts before use; connected rows always stay together.
 
-2. **Synthesize a suite.** Pick a *strategy* (`final_assistant`,
+2. **Synthesize a held-out suite.** Synthesis reads the persisted `holdout`
+   partition by default. Pick a *strategy* (`final_assistant`,
    `first_assistant_turn`, `every_assistant_turn`, `tool_call_predict`) and
    click **Preview 5 examples** to sanity-check before committing. Then
    **Save & Run vs active** synthesizes the full suite and queues an eval
@@ -130,6 +131,10 @@ Most users never hand-author a suite. The canonical flow is:
 
 3. **Stash + re-run.** Suites live in `<adapter_dir>/.eval/suites/<name>/`
    on disk. Re-run the same suite against any adapter in 1 click.
+
+The complete row-identity, split API, named-training, contamination, migration,
+and provenance contract is in
+[Dataset Splits and Train/Eval Separation](DATASET_SPLITS.md).
 
 ## Multi-completion evaluation
 
@@ -800,7 +805,9 @@ Cancel a queued or running job.
 ## Post-training auto-eval
 
 Attach `post_eval` to any SFT or GRPO request and the trained adapter is
-automatically evaluated when training completes:
+automatically evaluated when training completes. `data_scope` defaults to
+`held-out`; admission rejects exact, normalized, source-row, group, or session
+overlap with the exact admitted training corpus:
 
 ```bash
 curl -X POST http://localhost:8420/v1/train/sft \
@@ -810,15 +817,22 @@ curl -X POST http://localhost:8420/v1/train/sft \
         "config": {"training_profile": "native_online_lora_v1", "epochs": 3, "output_name": "math-v1"},
         "post_eval": {
           "suite": "math-smoke",
+          "data_scope": "held-out",
           "include_baseline": true
         }
       }'
 ```
 
-When the training job finishes the worker enqueues two eval jobs (one
-against the trained adapter, one against the base model) and back-links
-their IDs onto the training status via `linked_eval_job_id`. Use
-`include_baseline: false` to skip the base-model run.
+When the training job finishes the worker enqueues the adapter evaluation and,
+when requested, its base-model comparison, then back-links eval IDs on the
+training status through `linked_eval_job_ids`. Use `include_baseline: false`
+to skip the base-model run.
+
+An intentional training-data diagnostic must set
+`"data_scope":"train-set-eval"`. That label permits overlap but is rejected
+when combined with `min_accuracy`, so it cannot masquerade as a promotion
+gate. See [Dataset Splits and Train/Eval Separation](DATASET_SPLITS.md) for
+the exact policy and limitations.
 
 ## CLI
 

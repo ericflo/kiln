@@ -116,6 +116,12 @@ Successful and trainer-reached failed SFT runs place the following object at
 `inline`, `dataset_path`, `named_dataset`, `corrections`, `recipe`, or
 `rust_api`; it describes provenance and never contributes to row identity.
 
+Registered named datasets additionally select a persisted `dataset_split`
+(default `train`) and expose the full dataset, split-manifest, and admitted
+corpus identities through the public training job. See
+[Dataset Splits and Train/Eval Separation](DATASET_SPLITS.md) for group-aware
+assignment, held-out synthesis, and post-training contamination admission.
+
 The adjacent data counters use the same admission result:
 
 - `examples_read == rows_read`

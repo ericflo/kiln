@@ -100,6 +100,7 @@ const generatedDocsPages = [
       'SFT Ingestion and Row Identity',
       'SFT Tokenization and Loss',
       'Native Training Checkpoints',
+      'Dataset Splits and Train/Eval Separation',
       'Thinking Budget Contract',
       'CI and Local Qualification Policy',
       'Verification Policy',
@@ -734,6 +735,30 @@ const generatedDocsPages = [
     ],
   },
   {
+    label: 'Dataset Splits and Train/Eval Separation',
+    path: publishedPath('docs/dataset-splits/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/dataset-splits/',
+    h1: 'Dataset Splits and Train/Eval Separation',
+    anchors: [
+      'recommended-workflow',
+      'split-configuration',
+      'row-and-group-identity',
+      'post-training-evaluation-policy',
+      'training-data-provenance',
+      'what-this-does-and-does-not-prove',
+    ],
+    terms: [
+      'dataset_split',
+      'source_split',
+      'split_manifest_sha256',
+      'train-set-eval',
+      'arbitrary paraphrases',
+      'group_id',
+      'session_id',
+      'before queue publication',
+    ],
+  },
+  {
     label: 'Local Hardware Qualification',
     path: publishedPath('docs/hardware-qualification/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/hardware-qualification/',
@@ -1127,6 +1152,7 @@ function validateSftLossRouteDocumentationSourceContract() {
     'training-checkpoints',
     'grpo',
     'echo',
+    'dataset-splits',
     'evals',
   ];
   const trainingSlugs = manifest.documents
@@ -2538,6 +2564,7 @@ function validateGeneratedDocsArtifacts() {
     'training-checkpoints',
     'grpo',
     'echo',
+    'dataset-splits',
     'evals',
   ];
   const trainingSearchOrder = searchIndex

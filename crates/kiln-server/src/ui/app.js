@@ -4040,6 +4040,10 @@ function renderTrainingCard(j, state) {
     ? `<div class="training-card-error">${icon('warning', 'icn-sm')} ${escapeHtml(String(j.error).slice(0, 220))}</div>`
     : '';
   const cancelBtn = actionBtn;
+  const admitted = j.training_data || null;
+  const admittedDataLine = admitted
+    ? `<div class="training-card-data" title="Exact admitted training corpus ${escapeHtml(admitted.admitted_corpus_sha256 || '')}">${icon('stack', 'icn-sm')} ${escapeHtml(admitted.dataset || admitted.source || 'training data')}${admitted.split ? ` · ${escapeHtml(admitted.split)}` : ''} · ${Number(admitted.rows || 0).toLocaleString()} row${Number(admitted.rows || 0) === 1 ? '' : 's'}</div>`
+    : '';
   // Prefer the wall-clock timestamps (`submitted_unix_ms` /
   // `finished_unix_ms`) introduced with the on-disk archive — those
   // survive restarts. Fall back to `elapsed_secs` only when the server
@@ -4062,6 +4066,7 @@ function renderTrainingCard(j, state) {
       ${timeBadge}
       ${cancelBtn}
     </div>
+    ${admittedDataLine}
     <div class="training-card-progress">
       <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%;"></div></div>
       <div class="training-stat"><span class="training-stat-num">${pct}%</span><span class="training-stat-label">progress</span></div>
@@ -4656,9 +4661,23 @@ wireAdvanced('grpo', () => {
 });
 
 // "Prove it after training" — wires the server's post_eval auto-hook: when
-// checked, the train request carries post_eval:{suite, include_baseline:true}
+// checked, the train request carries an explicit suite and data scope
 // and Kiln grades the fresh adapter AND base the moment training completes.
 // The row only appears when eval suites actually exist (no dead control).
+function updateProveControls(kind) {
+  const check = document.getElementById(kind + '-prove');
+  const suite = document.getElementById(kind + '-prove-suite');
+  const scope = document.getElementById(kind + '-prove-scope');
+  const hint = document.getElementById(kind + '-prove-hint');
+  const enabled = Boolean(check?.checked);
+  if (suite) suite.disabled = !enabled;
+  if (scope) scope.disabled = !enabled;
+  if (hint) {
+    hint.textContent = scope?.value === 'train-set-eval'
+      ? 'Diagnostic only: this mode may reuse training rows and cannot satisfy a minimum-accuracy promotion gate.'
+      : 'Kiln rejects the submission if this suite overlaps the admitted training partition, then grades the adapter and base when training finishes.';
+  }
+}
 async function refreshProveRows() {
   let suites = [];
   try { const d = await api('/v1/eval/suites'); suites = d.suites || []; } catch (_) { /* leave hidden */ }
@@ -4672,16 +4691,19 @@ async function refreshProveRows() {
     const cur = sel.value;
     sel.innerHTML = suites.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}${s.num_examples ? ' · ' + s.num_examples + ' examples' : ''}</option>`).join('');
     if (cur && suites.some(s => s.name === cur)) sel.value = cur;
-    sel.disabled = !check.checked;
+    updateProveControls(kind);
   }
 }
-document.getElementById('sft-prove')?.addEventListener('change', e => { const s = document.getElementById('sft-prove-suite'); if (s) s.disabled = !e.target.checked; });
-document.getElementById('grpo-prove')?.addEventListener('change', e => { const s = document.getElementById('grpo-prove-suite'); if (s) s.disabled = !e.target.checked; });
+for (const kind of ['sft', 'grpo']) {
+  document.getElementById(kind + '-prove')?.addEventListener('change', () => updateProveControls(kind));
+  document.getElementById(kind + '-prove-scope')?.addEventListener('change', () => updateProveControls(kind));
+}
 function provePostEval(kind) {
   const check = document.getElementById(kind + '-prove');
   const sel = document.getElementById(kind + '-prove-suite');
+  const scope = document.getElementById(kind + '-prove-scope');
   if (!check || !check.checked || !sel || !sel.value) return null;
-  return { suite: sel.value, include_baseline: true };
+  return { suite: sel.value, data_scope: scope?.value || 'held-out', include_baseline: true };
 }
 
 // Dataset picker, per-form and format-correct (fixes the old SFT-only picker
@@ -4696,7 +4718,13 @@ async function refreshDatasetPicker(kind) {
     const datasets = (d.datasets || []).filter(m => m.format === K.datasetFormat);
     const cur = sel.value;
     sel.innerHTML = '<option value="">Select an uploaded dataset…</option>'
-      + datasets.map(m => `<option value="${escapeHtml(m.name)}">${escapeHtml(m.name)} · ${m.num_rows} rows</option>`).join('');
+      + datasets.map(m => {
+        const counts = m.split_counts || {};
+        const train = Number.isFinite(Number(counts.train)) ? Number(counts.train) : Number(m.num_rows || 0);
+        const validation = Number(counts.validation || 0);
+        const holdout = Number(counts.holdout || 0);
+        return `<option value="${escapeHtml(m.name)}">${escapeHtml(m.name)} · ${train.toLocaleString()} train · ${validation.toLocaleString()} validation · ${holdout.toLocaleString()} holdout</option>`;
+      }).join('');
     if (cur) sel.value = cur;
     // An empty picker is a dead-end without directions — say where data comes from.
     const empty = document.getElementById(kind + '-pick-empty');
@@ -4709,21 +4737,33 @@ async function loadNamedDatasetIntoTraining(kind, name) {
   // Reference the dataset BY NAME — the server trains on its own copy
   // (/v1/train/* accepts `dataset`), so rows never round-trip through the
   // browser and nothing is truncated. We only fetch the manifest for the count.
-  let count = null;
+  let manifest = null;
   try {
     const d = await api('/v1/eval/datasets');
-    const m = (d.datasets || []).find(x => x.name === name);
-    if (m) count = m.num_rows;
+    manifest = (d.datasets || []).find(x => x.name === name) || null;
   } catch (_) {}
-  trainingData[kind] = { datasetName: name, count, label: name };
+  const counts = manifest?.split_counts || {};
+  const count = manifest
+    ? (Number.isFinite(Number(counts.train)) ? Number(counts.train) : Number(manifest.num_rows || 0))
+    : null;
+  const validation = Number(counts.validation || 0);
+  const holdout = Number(counts.holdout || 0);
+  trainingData[kind] = {
+    datasetName: name,
+    split: 'train',
+    count,
+    label: name,
+    splitManifestSha256: manifest?.split_manifest_sha256 || null,
+    datasetCorpusSha256: manifest?.corpus_sha256 || null,
+  };
   const ta = document.getElementById(K.textareaId);
   if (ta) ta.value = '';
   const el = document.getElementById(kind + '-data-status');
   if (el) {
     el.hidden = false; el.className = 'train-data-status is-good';
     el.innerHTML = `${icon('check', 'icn-sm')} <strong>${escapeHtml(name)}</strong>`
-      + (count != null ? ` · ${Number(count).toLocaleString()} ${K.noun}${count === 1 ? '' : 's'}` : '')
-      + ` <span class="train-data-src">trains on the server's copy — nothing to re-upload, no row limit</span>`;
+      + (count != null ? ` · ${Number(count).toLocaleString()} train ${K.noun}${count === 1 ? '' : 's'}` : '')
+      + (manifest ? ` <span class="train-data-src">(${validation.toLocaleString()} validation · ${holdout.toLocaleString()} holdout) · persisted train partition</span>` : '');
   }
   K.update();
   maybeSuggestAdapterName(kind, name);
@@ -5073,7 +5113,7 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
     if (held && held.datasetName) {
       // Server-side dataset reference: the server reads its own copy — no rows
       // travel in the request and nothing is truncated.
-      body = { dataset: held.datasetName, config };
+      body = { dataset: held.datasetName, dataset_split: held.split || 'train', config };
     } else {
       let examples;
       if (held && held.items && held.items.length) {
@@ -5127,7 +5167,7 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
     const held = trainingData.grpo;
     let body;
     if (held && held.datasetName) {
-      body = { dataset: held.datasetName, config };
+      body = { dataset: held.datasetName, dataset_split: held.split || 'train', config };
     } else {
       let groups;
       if (held && held.items && held.items.length) {
@@ -7123,14 +7163,24 @@ function openSynthPanel(name, manifest = null) {
   document.getElementById('synth-suite-name').value = name + '-eval';
   document.getElementById('synth-preview-output').innerHTML = '';
   const source = document.getElementById('synth-source-split');
-  const counts = manifest?.split_counts || {};
+  const counts = manifest?.split_counts || null;
   if (source) {
     for (const option of source.options) {
-      const count = Number(counts[option.value] || 0);
-      option.disabled = count === 0;
-      option.textContent = `${option.value === 'train' ? 'Train-set diagnostic' : option.value[0].toUpperCase() + option.value.slice(1)} (${count.toLocaleString()})`;
+      const label = option.value === 'train'
+        ? 'Train-set diagnostic'
+        : option.value[0].toUpperCase() + option.value.slice(1);
+      if (counts) {
+        const count = Number(counts[option.value] || 0);
+        option.disabled = count === 0;
+        option.textContent = `${label} (${count.toLocaleString()})`;
+      } else {
+        option.disabled = false;
+        option.textContent = label;
+      }
     }
-    source.value = counts.holdout > 0 ? 'holdout' : counts.validation > 0 ? 'validation' : 'train';
+    source.value = !counts || counts.holdout > 0
+      ? 'holdout'
+      : counts.validation > 0 ? 'validation' : 'train';
   }
   document.getElementById('synthesize-panel').hidden = false;
   document.getElementById('synthesize-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -7352,9 +7402,9 @@ document.getElementById('dataset-upload-form')?.addEventListener('submit', async
     // TRAINING (one click), not get hijacked into the eval-synthesis flow.
     if (format === 'sft_chat' || format === 'grpo_groups') {
       const kind = format === 'sft_chat' ? 'sft' : 'grpo';
-      showDatasetUploadedNext(m.name, kind, m.num_rows);
+      showDatasetUploadedNext(m.name, kind, m.num_rows, m);
     } else {
-      openSynthPanel(m.name);
+      openSynthPanel(m.name, m);
     }
   } catch (e) { toast('Upload failed: ' + e.message, 'err'); }
 });
@@ -7433,7 +7483,7 @@ async function uploadSampleDataset(btn) {
       'Built-in sample: coding-agent conversations with tool calls', blob);
     refreshDatasets();
     toast(`Sample dataset added (${m.num_rows} rows) — next: synthesize an eval suite from it`, 'ok');
-    openSynthPanel(m.name);
+    openSynthPanel(m.name, m);
   } catch (e) {
     if (e.code === 'dataset_exists' || /already exists/i.test(e.message || '')) {
       toast('The sample dataset is already here — synthesize an eval suite from it', 'info');
@@ -7470,7 +7520,7 @@ async function buildDatasetFromCorrections(btn) {
       'Your corrections: each row pairs a prompt with the answer you said pi should have given', new Blob([jsonl], { type: 'application/jsonl' }));
     refreshDatasets();
     toast(`Dataset "${m.name}" built from ${finished.length} correction${finished.length === 1 ? '' : 's'} — next: synthesize an eval suite from it`, 'ok');
-    openSynthPanel(m.name);
+    openSynthPanel(m.name, m);
   } catch (e) {
     toast('Could not build the dataset: ' + e.message, 'err');
     if (btn) btn.disabled = false;
@@ -7480,7 +7530,7 @@ async function buildDatasetFromCorrections(btn) {
 // Inline "uploaded — what next?" strip on the Datasets tab. Primary action is
 // training (that's why most people upload SFT/GRPO data); synthesizing an eval
 // from the same rows is offered alongside.
-function showDatasetUploadedNext(name, kind, numRows) {
+function showDatasetUploadedNext(name, kind, numRows, manifest = null) {
   const old = document.getElementById('dataset-uploaded-next');
   if (old) old.remove();
   const form = document.getElementById('dataset-upload-form');
@@ -7497,7 +7547,7 @@ function showDatasetUploadedNext(name, kind, numRows) {
     <button type="button" class="btn btn-sm btn-ghost corr-receipt-dismiss" id="dataset-next-dismiss" aria-label="Dismiss">${icon('close', 'icn-sm')}</button>`;
   form.insertAdjacentElement('afterend', strip);
   document.getElementById('dataset-next-train')?.addEventListener('click', () => { strip.remove(); trainFromDataset(name, kind); });
-  document.getElementById('dataset-next-synth')?.addEventListener('click', () => { strip.remove(); openSynthPanel(name); });
+  document.getElementById('dataset-next-synth')?.addEventListener('click', () => { strip.remove(); openSynthPanel(name, manifest); });
   document.getElementById('dataset-next-dismiss')?.addEventListener('click', () => strip.remove());
 }
 
@@ -10371,6 +10421,7 @@ function renderTrainMetadata(j) {
   const hp = receipt?.hyperparameters || {};
   const data = receipt?.data || {};
   const source = receipt?.training_data || {};
+  const admitted = j.training_data || {};
   const config = replay?.request_body?.config || null;
   const rows = [
     renderDrillKv('Mode', hp.mode || replay?.kind || j.job_type),
@@ -10384,7 +10435,13 @@ function renderTrainMetadata(j) {
     renderDrillKv('Examples trained', data.examples_trained),
     renderDrillKv('Groups trained', data.groups_trained),
     renderDrillKv('Completions trained', data.completions_trained),
-    renderDrillKv('Data source', source.source || replay?.request_body?.dataset || replay?.request_body?.dataset_path),
+    renderDrillKv('Data source', admitted.source || source.source || replay?.request_body?.dataset || replay?.request_body?.dataset_path),
+    renderDrillKv('Dataset', admitted.dataset),
+    renderDrillKv('Partition', admitted.split),
+    renderDrillKv('Rows admitted', admitted.rows),
+    renderDrillKv('Admitted corpus SHA-256', admitted.admitted_corpus_sha256),
+    renderDrillKv('Split manifest SHA-256', admitted.split_manifest_sha256),
+    renderDrillKv('Full dataset SHA-256', admitted.dataset_corpus_sha256),
   ].join('');
   const receiptRaw = receipt
     ? `<details style="margin-top:12px;"><summary>Raw train receipt</summary><pre class="req-pre">${escapeHtml(JSON.stringify(receipt, null, 2))}</pre></details>`
@@ -10395,12 +10452,12 @@ function renderTrainMetadata(j) {
   const error = j.metadata_error
     ? `<div class="training-card-error" style="margin-top:10px;">${icon('warning', 'icn-sm')} ${escapeHtml(j.metadata_error)}</div>`
     : '';
-  const empty = !receipt && !replay && !j.metadata_error
+  const empty = !receipt && !replay && !j.training_data && !j.metadata_error
     ? '<div class="hint">No receipt or replay metadata was found for this job.</div>'
     : '';
   return `<div class="detail-section">
     <h4>Run metadata</h4>
-    ${receipt || replay ? `<div class="req-stats" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">${rows}</div>` : empty}
+    ${receipt || replay || j.training_data ? `<div class="req-stats" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">${rows}</div>` : empty}
     ${error}
     ${receiptRaw}
     ${replayRaw}
@@ -10517,8 +10574,9 @@ async function prepareTrainingResume(j, checkpoint) {
   const requestBody = j?.replay_request?.request_body || {};
   const config = requestBody.config || {};
   let restoredDataset = null;
-  if (typeof requestBody.dataset === 'string' && requestBody.dataset.trim()) {
-    restoredDataset = requestBody.dataset.trim();
+  const recordedDataset = requestBody.dataset || j?.training_data?.dataset;
+  if (typeof recordedDataset === 'string' && recordedDataset.trim()) {
+    restoredDataset = recordedDataset.trim();
     await loadNamedDatasetIntoTraining(kind, restoredDataset);
   }
 

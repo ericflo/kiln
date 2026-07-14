@@ -853,7 +853,7 @@ struct SynthesizeBody {
     run_against: Option<Vec<String>>,
     /// Persisted partition to synthesize. Defaults to holdout. Selecting
     /// `train` is allowed for diagnostics, but post-training admission will
-    /// require an explicit `train_set_eval` label before it can be linked.
+    /// require the explicit `train-set-eval` wire label before it can be linked.
     #[serde(default = "default_synthesis_source_split")]
     source_split: DatasetSplit,
 }

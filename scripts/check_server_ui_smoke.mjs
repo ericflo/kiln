@@ -615,12 +615,24 @@ function isFiniteNumber(value) {
 }
 
 function validateSftPayload(body) {
-  if (!Array.isArray(body?.examples) || body.examples.length !== 1) return 'SFT examples should be a one-item array from the sample payload';
-  const messages = body.examples[0]?.messages;
-  if (!Array.isArray(messages) || messages.length !== 2) return 'SFT sample example should include user and assistant messages';
-  if (messages[0]?.role !== 'user' || messages[1]?.role !== 'assistant') return 'SFT sample messages should preserve chat roles';
+  const namedDataset = typeof body?.dataset === 'string';
+  if (namedDataset) {
+    if (body.dataset !== 'sample-coding-agent') return 'Named SFT should preserve the selected dataset';
+    if (body.dataset_split !== 'train') return 'Named SFT should explicitly select the persisted train partition';
+    if ('examples' in body || 'dataset_path' in body) return 'Named SFT should submit exactly one data source';
+    if (body?.post_eval?.suite !== 'smoke-heldout' || body.post_eval.data_scope !== 'train-set-eval') {
+      return 'Named SFT should preserve the deliberate train-set diagnostic label';
+    }
+    if (body.post_eval.include_baseline !== true) return 'Named SFT diagnostic should compare with the base model';
+  } else {
+    if (!Array.isArray(body?.examples) || body.examples.length !== 1) return 'SFT examples should be a one-item array from the sample payload';
+    const messages = body.examples[0]?.messages;
+    if (!Array.isArray(messages) || messages.length !== 2) return 'SFT sample example should include user and assistant messages';
+    if (messages[0]?.role !== 'user' || messages[1]?.role !== 'assistant') return 'SFT sample messages should preserve chat roles';
+  }
   if (body?.config?.training_profile !== 'native_online_lora_v1') return 'SFT should submit the explicit native_online_lora_v1 profile';
-  if (body?.config?.output_name !== 'sft-adapter') return 'SFT output_name should be nested under config';
+  const expectedOutput = namedDataset ? 'sample-coding-agent-sft' : 'sft-adapter';
+  if (body?.config?.output_name !== expectedOutput) return 'SFT output_name should be nested under config and follow the selected source';
   if (body?.config?.auto_load !== true) return 'SFT auto_load should be true by default';
   if ('learning_rate' in (body?.config || {})) return 'SFT learning_rate should be omitted when the field is blank (server resolves the per-optimizer default)';
   if (body?.config?.epochs !== 3) return 'SFT epochs should be numeric and nested under config';
@@ -877,6 +889,17 @@ function validateEvalDatasetUploadRequest(req, body) {
       size_bytes: file.content.length,
       created_at: now,
       updated_at: now,
+      corpus_sha256: `sha256:${'1'.repeat(64)}`,
+      normalized_corpus_sha256: `sha256:${'2'.repeat(64)}`,
+      split_manifest_sha256: `sha256:${'3'.repeat(64)}`,
+      split_config: { seed: '0', train_percent: 80, validation_percent: 10 },
+      split_counts: {
+        train: Math.max(1, lines.length - 2),
+        validation: lines.length > 2 ? 1 : 0,
+        holdout: lines.length > 1 ? 1 : 0,
+      },
+      num_groups: 0,
+      num_sessions: 0,
       stats,
     },
   };
@@ -1131,6 +1154,7 @@ async function startServer({
     modelsCold,
     recentRequests: [],
     modelsRequests: 0,
+    evalSuites: [],
     trainingOptimizerAvailable: false,
     trainingSubmitRequests: { sft: 0, grpo: 0, opd: 0, refresh: 0, pump: 0, merge: 0, self: 0, recipe: 0 },
   };
@@ -1962,8 +1986,10 @@ async function startServer({
       // samples mirror state.rs TrainingLossSample (epoch/progress/loss/
       // elapsed_secs — no step, no wall-clock) and feed the drill modal's
       // "Copy loss CSV" assertion.
+      const namedDataset = typeof body.dataset === 'string';
+      const jobId = namedDataset ? 'smoke-sft-named' : 'smoke-sft';
       runningTrainingJob = {
-        job_id: 'smoke-sft',
+        job_id: jobId,
         job_type: 'sft',
         effective_seed: '18446744073709551615',
         state: 'Running',
@@ -1979,8 +2005,21 @@ async function startServer({
         ],
         linked_eval_job_ids: [],
         auto_load: false,
+        training_data: namedDataset ? {
+          source: 'named_dataset',
+          dataset: body.dataset,
+          split: body.dataset_split,
+          dataset_corpus_sha256: `sha256:${'1'.repeat(64)}`,
+          split_manifest_sha256: `sha256:${'3'.repeat(64)}`,
+          admitted_corpus_sha256: `sha256:${'4'.repeat(64)}`,
+          rows: 8,
+        } : {
+          source: 'inline',
+          admitted_corpus_sha256: `sha256:${'5'.repeat(64)}`,
+          rows: 1,
+        },
       };
-      setTimeout(() => json(res, { message: 'SFT job submitted', job_id: 'smoke-sft', effective_seed: '18446744073709551615' }), 75);
+      setTimeout(() => json(res, { message: 'SFT job submitted', job_id: jobId, effective_seed: '18446744073709551615' }), 75);
       return;
     }
     if (url.pathname === '/v1/train/grpo') {
@@ -2157,7 +2196,7 @@ async function startServer({
     // are exercised in smoke, but keep them registered so future UI
     // background polls don't surprise the mock.
     if (url.pathname === '/v1/eval/suites') {
-      json(res, { suites: [] });
+      json(res, { suites: apiState.evalSuites });
       return;
     }
     // The drill modal lazily fetches the suite content so it can show the
@@ -2429,6 +2468,7 @@ async function startServer({
     setRecentRequests: (rows) => { apiState.recentRequests = rows; },
     setModelsCold: (value) => { apiState.modelsCold = value; },
     setTrainingOptimizerAvailable: (value) => { apiState.trainingOptimizerAvailable = value; },
+    setEvalSuites: (suites) => { apiState.evalSuites = suites.map((suite) => ({ ...suite })); },
     getTrainingSubmitRequests: () => ({ ...apiState.trainingSubmitRequests }),
     getModelsRequests: () => apiState.modelsRequests,
   };
@@ -3266,6 +3306,7 @@ async function runSmoke(baseUrl, {
   setFailRuntimeConfig = null,
   setRecentRequests = null,
   setTrainingOptimizerAvailable = null,
+  setEvalSuites = null,
   getTrainingSubmitRequests = null,
 } = {}) {
   const puppeteer = await loadPuppeteer();
@@ -5148,6 +5189,64 @@ async function runSmoke(baseUrl, {
     ).catch(() => fail('Sample upload should open the synthesize panel (create a suite is the next step)'));
     const synthSuiteName = await page.$eval('#synth-suite-name', (el) => el.value);
     if (synthSuiteName !== 'sample-coding-agent-eval') fail(`Synthesize panel should pre-fill the suite name from the sample dataset, got ${JSON.stringify(synthSuiteName)}`);
+    const synthSourceSplit = await page.$eval('#synth-source-split', (el) => el.value);
+    if (synthSourceSplit !== 'holdout') fail(`Dataset synthesis should default to the persisted holdout partition, got ${JSON.stringify(synthSourceSplit)}`);
+
+    // Named training consumes the persisted train partition and makes a
+    // held-out-vs-diagnostic choice explicit. Exercise the complete browser
+    // request and rendered provenance rather than checking source strings.
+    if (!setEvalSuites) fail('Train/eval separation smoke controls are unavailable');
+    setEvalSuites([{ name: 'smoke-heldout', num_examples: 2 }]);
+    await goToPrimaryTab(page, 'training');
+    await clickAndWait(page, '#training-tab-sft', 'Could not open SFT for named-dataset training');
+    await page.waitForFunction(
+      () => document.getElementById('sft-prove-row')?.hidden === false,
+      { timeout: 5000 },
+    ).catch(() => fail('A registered eval suite should reveal post-training evaluation controls'));
+    const initialProveState = await page.evaluate(() => ({
+      scope: document.getElementById('sft-prove-scope')?.value,
+      scopeDisabled: document.getElementById('sft-prove-scope')?.disabled,
+      suiteDisabled: document.getElementById('sft-prove-suite')?.disabled,
+      hint: document.getElementById('sft-prove-hint')?.textContent,
+    }));
+    if (initialProveState.scope !== 'held-out'
+      || !initialProveState.scopeDisabled
+      || !initialProveState.suiteDisabled
+      || !/rejects the submission.*overlaps/i.test(initialProveState.hint || '')) {
+      fail(`Post-training eval should default visibly and disabled to held-out: ${JSON.stringify(initialProveState)}`);
+    }
+    await clickAndWait(page, '#sft-pick-toggle', 'Could not open the named SFT dataset picker');
+    await page.waitForFunction(
+      () => Array.from(document.getElementById('sft-dataset-pick')?.options || [])
+        .some((option) => /sample-coding-agent.*8 train.*1 validation.*1 holdout/.test(option.textContent || '')),
+      { timeout: 5000 },
+    ).catch(() => fail('Named SFT picker should show exact train, validation, and holdout counts'));
+    await page.select('#sft-dataset-pick', 'sample-coding-agent');
+    await waitForPanelText(page, '#sft-data-status', /8 train examples.*1 validation.*1 holdout.*persisted train partition/, 'Named SFT status should identify the exact train partition');
+    await clickAndWait(page, '#sft-prove', 'Could not enable post-training evaluation');
+    await page.select('#sft-prove-scope', 'train-set-eval');
+    await waitForPanelText(page, '#sft-prove-hint', /Diagnostic only:.*cannot satisfy a minimum-accuracy promotion gate/, 'Train-set evaluation should be visibly diagnostic-only');
+    const namedSftRequestPromise = page.waitForRequest(
+      (request) => request.method() === 'POST' && request.url().endsWith('/v1/train/sft'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#sft-form button[type="submit"]', 'Could not submit named SFT train partition');
+    const namedSftRequest = await namedSftRequestPromise.catch(() => fail('Named SFT did not POST /v1/train/sft'));
+    const namedSftBody = JSON.parse(namedSftRequest.postData() || '{}');
+    if (namedSftBody.dataset !== 'sample-coding-agent'
+      || namedSftBody.dataset_split !== 'train'
+      || namedSftBody.post_eval?.suite !== 'smoke-heldout'
+      || namedSftBody.post_eval?.data_scope !== 'train-set-eval'
+      || namedSftBody.post_eval?.include_baseline !== true) {
+      fail(`Named SFT request lost partition or eval-scope intent: ${JSON.stringify(namedSftBody)}`);
+    }
+    await expectTrainingToast(page, 'SFT job submitted · seed 18446744073709551615');
+    await waitForPanelText(page, '#tab-queue', /sample-coding-agent.*train.*8 rows/, 'Training card should show admitted named-dataset provenance');
+    await clickAndWait(page, '[data-train-job-id="smoke-sft-named"]', 'Could not open named SFT job provenance');
+    await waitForPanelText(page, '#train-drill-content', /Data source[\s\S]*named_dataset[\s\S]*Dataset[\s\S]*sample-coding-agent[\s\S]*Partition[\s\S]*train[\s\S]*Rows admitted[\s\S]*8/, 'Training drill should show source, dataset, partition, and admitted count');
+    await waitForPanelText(page, '#train-drill-content', new RegExp(`Admitted corpus SHA-256[\\s\\S]*sha256:${'4'.repeat(64)}[\\s\\S]*Split manifest SHA-256[\\s\\S]*sha256:${'3'.repeat(64)}`), 'Training drill should show exact admitted and split-manifest identities');
+    await clickAndWait(page, '#train-drill-close', 'Could not close named SFT provenance drill');
+    await goToPrimaryTab(page, 'evals');
 
     // ---- Judgment Undo: record an A/B pick, then the toast's Undo must
     // DELETE exactly the row the POST response identified (judgment_id)
@@ -5524,6 +5623,7 @@ const {
   setFailRuntimeConfig,
   setRecentRequests,
   setTrainingOptimizerAvailable,
+  setEvalSuites,
   getTrainingSubmitRequests,
 } = await startServer();
 try {
@@ -5532,6 +5632,7 @@ try {
     setFailRuntimeConfig,
     setRecentRequests,
     setTrainingOptimizerAvailable,
+    setEvalSuites,
     getTrainingSubmitRequests,
   });
   console.log('[smoke] default scenario desktop passed; mobile start');

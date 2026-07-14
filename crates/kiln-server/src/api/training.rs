@@ -6310,11 +6310,17 @@ mod tests {
     fn grpo_submission_rejects_ambiguous_or_empty_sources() {
         let both = grpo_req(Some("/tmp/grpo.jsonl"), vec![grpo_group()]);
         let err = validate_grpo_submission_source(&both, None).unwrap_err();
-        assert!(err.message.contains("either groups or dataset_path"));
+        assert_eq!(
+            err.message,
+            "GRPO request must use exactly one of groups, dataset_path, or dataset"
+        );
 
         let empty = grpo_req(None, Vec::new());
         let err = validate_grpo_submission_source(&empty, None).unwrap_err();
-        assert!(err.message.contains("non-empty groups or dataset_path"));
+        assert_eq!(
+            err.message,
+            "GRPO request must use exactly one of groups, dataset_path, or dataset"
+        );
 
         let inline = grpo_req(None, vec![grpo_group()]);
         validate_grpo_submission_source(&inline, None).unwrap();

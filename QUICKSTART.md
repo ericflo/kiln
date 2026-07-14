@@ -851,6 +851,7 @@ curl -X POST http://localhost:8420/v1/eval/datasets/customer-support/synthesize 
   -H 'content-type: application/json' \
   -d '{
     "suite_name": "support-eval",
+    "source_split": "holdout",
     "strategy": "final_assistant",
     "scorer": {"kind": "auto_detect"},
     "sampling": {"max_examples": 100, "max_prompt_chars": 32768, "max_target_chars": 4096, "dedupe": true},
@@ -860,7 +861,13 @@ curl -X POST http://localhost:8420/v1/eval/datasets/customer-support/synthesize 
 # → returns the synthesized suite + the queued eval job IDs
 ```
 
-The `strategy` knob picks how each conversation is decomposed: `final_assistant` (default — prompt = everything up to the last user turn, target = final assistant reply), `first_assistant_turn`, `every_assistant_turn`, or `tool_call_predict` (only keeps assistant turns that emit tool calls; canonicalizes them and pairs with the `tool_call` scorer).
+The `source_split` knob selects a persisted dataset partition and defaults to
+`holdout`; it never silently treats training rows as held out. The `strategy`
+knob picks how each selected conversation is decomposed: `final_assistant`
+(default — prompt = everything up to the last user turn, target = final
+assistant reply), `first_assistant_turn`, `every_assistant_turn`, or
+`tool_call_predict` (only keeps assistant turns that emit tool calls;
+canonicalizes them and pairs with the `tool_call` scorer).
 
 **Run an existing suite against any adapter:**
 
@@ -891,6 +898,7 @@ curl -X POST http://localhost:8420/v1/train/sft \
     "config": {"output_name": "support-bot-v3"},
     "post_eval": {
       "suite": "support-eval",
+      "data_scope": "held-out",
       "include_baseline": true
     }
   }'
@@ -898,6 +906,13 @@ curl -X POST http://localhost:8420/v1/train/sft \
 # a baseline run against the base model. Both jobs are back-linked from
 # the training job's status under `linked_eval_job_ids`.
 ```
+
+Held-out is the default and rejects exact, normalized, source-row, group, or
+session overlap with the admitted training corpus before queue publication.
+Use `data_scope: "train-set-eval"` only for a labeled training-data diagnostic;
+it cannot set `min_accuracy`. See
+[`docs/DATASET_SPLITS.md`](docs/DATASET_SPLITS.md) for registered dataset
+partitions, split controls, migration, provenance, and limitations.
 
 **The judgment flywheel** turns your A/B picks into a *local* judge LoRA — no frontier-LLM dependency. Open `/ui/` → Evals → Judgments, generate side-by-side replies for a prompt, click `A`/`B`/`Tie` (or `S` to skip). After ~20 judgments, click "Compile to SFT" to produce a training dataset, run `kiln train sft` on it to get a judge adapter, then point any future eval at it via `Scorer::LlmJudge { judge_adapter: "support-judge-v1" }`.
 

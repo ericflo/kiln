@@ -580,7 +580,11 @@
               <input type="checkbox" id="sft-prove"> Prove it after training
             </label>
             <select id="sft-prove-suite" aria-label="Eval suite to grade against" disabled></select>
-            <span class="prove-hint">Kiln grades the new adapter <em>and</em> base on this suite the moment training finishes — the verdict lands on the job.</span>
+            <select id="sft-prove-scope" aria-label="Evaluation data scope" disabled>
+              <option value="held-out" selected>Held-out evaluation</option>
+              <option value="train-set-eval">Train-set diagnostic</option>
+            </select>
+            <span class="prove-hint" id="sft-prove-hint">Kiln rejects the submission if this suite overlaps the admitted training partition, then grades the adapter and base when training finishes.</span>
           </div>
           <div class="adv-row">
             <button type="button" class="btn btn-sm btn-ghost" id="sft-adv-toggle" aria-expanded="false" aria-controls="sft-advanced"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg> Advanced</button>
@@ -683,7 +687,11 @@
               <input type="checkbox" id="grpo-prove"> Prove it after training
             </label>
             <select id="grpo-prove-suite" aria-label="Eval suite to grade against" disabled></select>
-            <span class="prove-hint">Kiln grades the new adapter <em>and</em> base on this suite the moment training finishes — the verdict lands on the job.</span>
+            <select id="grpo-prove-scope" aria-label="Evaluation data scope" disabled>
+              <option value="held-out" selected>Held-out evaluation</option>
+              <option value="train-set-eval">Train-set diagnostic</option>
+            </select>
+            <span class="prove-hint" id="grpo-prove-hint">Kiln rejects the submission if this suite overlaps the admitted training partition, then grades the adapter and base when training finishes.</span>
           </div>
           <div class="adv-row">
             <button type="button" class="btn btn-sm btn-ghost" id="grpo-adv-toggle" aria-expanded="false" aria-controls="grpo-advanced"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg> Advanced</button>

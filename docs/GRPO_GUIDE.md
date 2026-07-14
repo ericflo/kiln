@@ -101,6 +101,14 @@ generation that produced it.
 
 ## Recommended recorded-policy workflow
 
+When the source is an uploaded named `grpo_groups` dataset, native training
+selects its persisted `train` partition by default and accepts an explicit
+`dataset_split`. Dataset-to-suite synthesis selects `holdout` by default, and
+a held-out `post_eval` rejects content or declared source-group overlap before
+the training job is published. See
+[Dataset Splits and Train/Eval Separation](DATASET_SPLITS.md) for the complete
+API and provenance contract.
+
 Create one task per line and a normal chat request template. The CLI owns
 `seed`, `adapter`, `n`, `stream`, and `rollout_provenance`, so template values
 for those fields are overwritten deliberately.
