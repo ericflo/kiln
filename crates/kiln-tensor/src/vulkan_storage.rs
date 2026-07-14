@@ -890,6 +890,100 @@ pub fn vulkan_contiguous(t: &crate::Tensor) -> Result<crate::Tensor> {
     kt_tensor_from_vk(&vk_out, device_index)
 }
 
+/// Materialize an independent Vulkan-backed copy of `t`.
+///
+/// Dense row-major views use one raw device-to-device buffer copy, including
+/// a non-zero logical start offset. Strided F32/BF16 views use the resident
+/// gather kernel. Other strided dtypes retain the general host-staging path so
+/// [`crate::Tensor::copy`] remains value-correct across the full dtype surface.
+/// Every successful path owns a fresh backing allocation and a fresh tensor ID.
+pub fn vulkan_deep_copy(t: &crate::Tensor) -> Result<crate::Tensor> {
+    let vk = t
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| Error::Msg("vulkan_deep_copy: tensor must be Vulkan-backed".to_string()))?;
+    let device_index = match vk.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    let dense_layout = crate::Layout::contiguous(t.shape().to_vec());
+    if t.strides() != dense_layout.strides() {
+        if matches!(t.dtype(), DType::F32 | DType::BF16)
+            && t.rank() <= kiln_vulkan_kernel::vk_ops::contiguous_gather::MAX_RANK
+        {
+            return vulkan_contiguous(t);
+        }
+        let host = vulkan_to_host_copy(t)?;
+        return host_to_vulkan_copy(&host, device_index);
+    }
+
+    let dtype = t.dtype();
+    let byte_len = dtype.packed_buffer_bytes(t.element_count());
+    let start_offset = t.layout().start_offset();
+    let src_byte_offset = if dtype.is_packed() {
+        if start_offset != 0 {
+            return Err(Error::Msg(
+                "vulkan_deep_copy: offset packed views are not representable".to_string(),
+            ));
+        }
+        0
+    } else {
+        start_offset
+            .checked_mul(dtype.size_in_bytes())
+            .ok_or_else(|| {
+                Error::Msg("vulkan_deep_copy: source byte offset overflow".to_string())
+            })?
+    };
+    let src_byte_end = src_byte_offset
+        .checked_add(byte_len)
+        .ok_or_else(|| Error::Msg("vulkan_deep_copy: source byte range overflow".to_string()))?;
+    if src_byte_end > vk.byte_len() {
+        return Err(Error::Msg(format!(
+            "vulkan_deep_copy: source byte range {src_byte_offset}..{src_byte_end} exceeds logical storage length {}",
+            vk.byte_len()
+        )));
+    }
+
+    if byte_len != 0 && (!src_byte_offset.is_multiple_of(4) || !byte_len.is_multiple_of(4)) {
+        if matches!(dtype, DType::F32 | DType::BF16)
+            && t.rank() <= kiln_vulkan_kernel::vk_ops::contiguous_gather::MAX_RANK
+        {
+            return vulkan_contiguous(t);
+        }
+        let host = vulkan_to_host_copy(t)?;
+        return host_to_vulkan_copy(&host, device_index);
+    }
+
+    let vulkan_device = vk.vulkan_device();
+    let buffer = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(
+        vulkan_device,
+        byte_len.max(4) as u64,
+    )
+    .map_err(|e| Error::Msg(format!("vulkan_deep_copy: allocation failed: {e}")))?;
+    VulkanBuffer::copy_buffer_region(
+        vulkan_device.device(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        vk.buffer(),
+        src_byte_offset as u64,
+        &buffer,
+        0,
+        byte_len as u64,
+    )
+    .map_err(|e| Error::Msg(format!("vulkan_deep_copy: device copy failed: {e}")))?;
+
+    let storage = VulkanStorage::from_arc_buffer(
+        Arc::clone(vulkan_device),
+        device_index,
+        dtype,
+        buffer,
+        byte_len as u64,
+    )?;
+    crate::Tensor::from_parts(Arc::new(storage), dense_layout, crate::TensorId::next())
+}
+
 // ----------------------------------------------------------------------
 // vulkan_matmul_bf16w — #1443 step1: F32-act × BF16-weight mixed-precision GEMM
 // ----------------------------------------------------------------------
@@ -3622,6 +3716,87 @@ mod tests {
         // the gather — they can't be exercised through this path and aren't
         // tested here. The gather covers genuinely-strided layouts (transpose,
         // narrow), validated above.
+    }
+
+    #[test]
+    fn vulkan_deep_copy_is_value_faithful_and_independent() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+        let dev = Device::Vulkan(0);
+        let source =
+            crate::Tensor::from_vec_on(dev, vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])
+                .unwrap();
+        let copied = source.copy().expect("dense Vulkan deep copy");
+        let source_storage = source
+            .storage()
+            .as_any()
+            .downcast_ref::<VulkanStorage>()
+            .unwrap();
+        let copied_storage = copied
+            .storage()
+            .as_any()
+            .downcast_ref::<VulkanStorage>()
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(&source_storage.buffer_arc(), &copied_storage.buffer_arc()),
+            "deep copy must own an independent Vulkan allocation"
+        );
+        assert_ne!(
+            source.id(),
+            copied.id(),
+            "deep copy must have a fresh tensor ID"
+        );
+        assert_eq!(read_vk_f32(&copied), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        let replacement =
+            crate::Tensor::from_vec_on(dev, vec![9.0f32, 8.0, 7.0], vec![1, 3]).unwrap();
+        source
+            .slice_set(&replacement, 0usize, 0)
+            .expect("mutate source after snapshot");
+        assert_eq!(read_vk_f32(&source), vec![9.0, 8.0, 7.0, 4.0, 5.0, 6.0]);
+        assert_eq!(
+            read_vk_f32(&copied),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "source mutation must not alias the snapshot"
+        );
+
+        let view = source.transpose(0, 1).unwrap();
+        let view_copy = view.copy().expect("strided Vulkan deep copy");
+        assert_eq!(view_copy.device(), dev);
+        assert!(view_copy.is_contiguous());
+        assert_eq!(view_copy.shape(), &[3, 2]);
+        assert_eq!(read_vk_f32(&view_copy), vec![9.0, 4.0, 8.0, 5.0, 7.0, 6.0]);
+
+        let odd_bf16 = crate::Tensor::from_vec_on(dev, vec![1.0f32, 2.0, 3.0], vec![3])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let odd_bf16_copy = odd_bf16.copy().expect("unaligned BF16 deep copy");
+        assert_eq!(
+            odd_bf16_copy
+                .to_dtype(DType::F32)
+                .unwrap()
+                .to_device(Device::Cpu)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap(),
+            vec![1.0, 2.0, 3.0]
+        );
+
+        let bytes =
+            crate::Tensor::from_raw_bytes_on(dev, DType::U8, vec![3, 1, 4], vec![3]).unwrap();
+        let byte_copy = bytes.copy().expect("unaligned byte deep copy");
+        let host = byte_copy.to_device(Device::Cpu).unwrap();
+        assert_eq!(
+            host.storage()
+                .as_any()
+                .downcast_ref::<crate::CpuStorage>()
+                .unwrap()
+                .as_bytes(),
+            &[3, 1, 4]
+        );
     }
 
     /// BF16 on-device `contiguous()` (the `vk_gather_contiguous_bf16` packed

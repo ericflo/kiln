@@ -762,7 +762,9 @@ impl Tensor {
     ///   logical host-image fallback.
     /// - CPU: rebuilds a fresh [`crate::CpuStorage`] from the
     ///   materialized row-major bytes.
-    /// - Vulkan: not yet implemented (errors).
+    /// - Vulkan: copies dense logical bytes device-to-device, uses the
+    ///   resident gather for strided F32/BF16 views, and retains a staged
+    ///   correctness fallback for other view/dtype combinations.
     pub fn copy(&self) -> Result<Self> {
         match self.device() {
             #[cfg(feature = "cuda")]
@@ -771,6 +773,8 @@ impl Tensor {
             Device::Rocm(_) => crate::rocm_contiguous(self),
             #[cfg(feature = "metal")]
             Device::Metal(_) => crate::metal_deep_copy(self),
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(_) => crate::vulkan_deep_copy(self),
             Device::Cpu => {
                 // Materialize a contiguous CPU view, then rebuild fresh
                 // storage from its addressable bytes so the result never

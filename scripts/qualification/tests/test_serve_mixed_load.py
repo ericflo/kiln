@@ -680,6 +680,40 @@ class ServeMixedLoadTests(unittest.TestCase):
         response.read1.assert_called_once_with(4096)
         connection.close.assert_called_once_with()
 
+    def test_run_stream_preserves_structured_generation_error(self) -> None:
+        sock = mock.Mock()
+        connection = mock.Mock(sock=sock)
+        response = mock.Mock(status=200)
+        response.getheader.side_effect = lambda name, default=None: {
+            "Content-Type": "text/event-stream",
+        }.get(name, default)
+        response.fp.peek.return_value = b"data"
+        response.read1.return_value = (
+            b'data: {"error":{"message":"device copy failed","type":"server_error",'
+            b'"code":"generation_error"}}\n\ndata: [DONE]\n\n'
+        )
+        connection.getresponse.return_value = response
+
+        with mock.patch.object(
+            serve.http.client, "HTTPConnection", return_value=connection
+        ):
+            result = serve.run_stream(
+                12345,
+                name="error-test",
+                marker="marker",
+                prompt_words=1,
+                max_tokens=2,
+                seed=7,
+            )
+
+        self.assertEqual(
+            result.error,
+            "QualificationError: error-test stream generation_error: device copy failed",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.semantic_deltas, [])
+        connection.close.assert_called_once_with()
+
     def test_checked_in_workload_exactly_matches_driver_contract(self) -> None:
         manifest = json.loads(
             (ROOT / "qualification/workloads/serving-mixed-rocm-v1.json").read_text()

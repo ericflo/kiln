@@ -349,6 +349,13 @@ wave; zero shutdown failures with no `teardown` milestone does not attest clean
 shutdown. Keep and validate these failed receipts as causal counterexamples,
 but do not compare their partial performance metrics with passing baselines.
 
+An HTTP-200 SSE response can still terminate with the closed structured error
+envelope `{message, type: "server_error", code: "generation_error"}` followed
+by `[DONE]`. Every serving driver treats that envelope as the primary request
+failure, validates its exact shape, and retains the bounded server message in
+the case result. It must never be reclassified as a successful empty stream or
+reduced to a secondary missing-finish-reason error.
+
 The gate fails on any request error, non-length or short output, missing actor
 timing, adapter identity, device fault, resize/reclaim/graph event, batching
 error, failed or at-least-100-ms external-yield synchronization, changed KV

@@ -899,6 +899,25 @@ def token_timing_matches_usage(
     return False
 
 
+def stream_generation_error(value: Any) -> str | None:
+    if not isinstance(value, dict) or "error" not in value:
+        return None
+    error = value["error"]
+    expected = {"message", "type", "code"}
+    if not isinstance(error, dict) or set(error) != expected:
+        raise QualificationError("stream emitted a malformed structured error")
+    message = error["message"]
+    error_type = error["type"]
+    code = error["code"]
+    if not isinstance(message, str) or not message:
+        raise QualificationError("stream error message must be non-empty text")
+    if error_type != "server_error" or code != "generation_error":
+        raise QualificationError(
+            f"stream emitted unexpected structured error type={error_type!r} code={code!r}"
+        )
+    return message
+
+
 @dataclasses.dataclass
 class StreamResult:
     name: str
@@ -1207,6 +1226,11 @@ def run_stream(
                     done = True
                     break
                 value = json.loads(data)
+                generation_error = stream_generation_error(value)
+                if generation_error is not None:
+                    raise QualificationError(
+                        f"{name} stream generation_error: {generation_error}"
+                    )
                 actor_performance = parse_actor_performance(value)
                 if actor_performance is not None:
                     if actor_queue_ms is not None:
