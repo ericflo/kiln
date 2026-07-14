@@ -306,6 +306,55 @@ class RunnerTests(unittest.TestCase):
             self.assertRegex(captured[name]["value"], r"^sha256:[0-9a-f]{64}$")
             self.assertNotIn("must-not-appear", captured[name]["value"])
 
+    def test_case_environment_excludes_undeclared_ambient_controls(self) -> None:
+        workload = environment_workload(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os; "
+                    "assert os.environ['DECLARED_CASE_VALUE'] == 'manifest'; "
+                    "assert 'PATH' in os.environ; "
+                    "assert 'ROCM_PATH' not in os.environ; "
+                    "assert 'KILN_UNDECLARED_RUNNER_TEST' not in os.environ; "
+                    "assert 'CODEX_AUTH_JSON' not in os.environ"
+                ),
+            ]
+        )
+        workload["variants"][0]["cases"][0]["environment"] = {
+            "DECLARED_CASE_VALUE": "manifest"
+        }
+        repository = Repository(workload)
+        self.addCleanup(repository.close)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ROCM_PATH": "/ambient/rocm",
+                "KILN_UNDECLARED_RUNNER_TEST": "ambient-product-control",
+                "CODEX_AUTH_JSON": "ambient-credential",
+            },
+            clear=False,
+        ):
+            outcome = self.execute(repository)
+
+        self.assertEqual(outcome.exit_code, 0)
+        config_artifact = next(
+            artifact
+            for artifact in outcome.receipt["artifacts"]
+            if artifact["kind"] == "effective_run_config"
+        )
+        run_config = json.loads((repository.root / config_artifact["path"]).read_text())
+        self.assertEqual(
+            run_config["case_environment_policy"],
+            run_module.CASE_ENVIRONMENT_POLICY,
+        )
+        self.assertNotIn("ROCM_PATH", run_config["case_base_environment"])
+        self.assertNotIn(
+            "KILN_UNDECLARED_RUNNER_TEST", run_config["case_base_environment"]
+        )
+        self.assertNotIn("CODEX_AUTH_JSON", run_config["case_base_environment"])
+        self.assert_valid(outcome, repository.root)
+
     def fake_environment(
         self, backend: str, host_id: str, root: Path
     ) -> run_module.EnvironmentCapture:
@@ -768,7 +817,7 @@ class RunnerTests(unittest.TestCase):
                     changed_report["errors"],
                 )
 
-    def test_inherited_environment_drift_rejects_ab_comparison(self) -> None:
+    def test_undeclared_environment_drift_does_not_enter_ab_comparison(self) -> None:
         repository = Repository(performance_ab_workload())
         self.addCleanup(repository.close)
         outcomes = []
@@ -804,7 +853,7 @@ class RunnerTests(unittest.TestCase):
             ]
             for outcome in outcomes
         ]
-        self.assertNotEqual(hashes[0], hashes[1])
+        self.assertEqual(hashes[0], hashes[1])
         manifest = compare_module.load_committed_workload(
             repository.workload_path, root=repository.root
         )
@@ -813,11 +862,7 @@ class RunnerTests(unittest.TestCase):
             compare_module.load_validated_receipt(outcomes[1].receipt_path),
             manifest=manifest,
         )
-        self.assertFalse(report["compatible"])
-        self.assertTrue(
-            any("backend_environment" in error for error in report["errors"]),
-            report["errors"],
-        )
+        self.assertTrue(report["ok"], report["errors"])
 
     def test_model_placeholder_requires_model_before_hooks_or_artifacts(self) -> None:
         repository = Repository(performance_ab_workload())
@@ -1103,7 +1148,12 @@ class RunnerTests(unittest.TestCase):
         )
         self.assertEqual(run_config["max_run_structured_bytes"], structured_budget)
         self.assert_valid(outcome, repository.root)
-        self.assertIn("inherited_environment", run_config)
+        self.assertEqual(
+            run_config["case_environment_policy"],
+            run_module.CASE_ENVIRONMENT_POLICY,
+        )
+        self.assertIn("case_base_environment", run_config)
+        self.assertNotIn("inherited_environment", run_config)
         self.assertTrue(
             all("process_environment" not in case for case in run_config["cases"])
         )

@@ -39,6 +39,15 @@ python3 scripts/qualification/workload.py \
 The runner rejects a dirty worktree, an uncommitted workload, missing required
 variables, a missing required device, silent skips, and an existing receipt or
 raw-run directory. Do not bypass those checks.
+Each case runs under `closed-qualification-case-v1`: a fixed base containing
+only path, toolchain-home, locale, temporary-directory, user, and user-session
+plumbing, followed by the committed case's exact `environment` object and the
+runner-owned result-path and variant identifiers. Ambient backend controls,
+device selectors, compiler/linker flags, product `KILN_*` values, credentials,
+and library paths do not enter a case. Declare a required value in the workload
+instead. The ignored effective-run artifact records the policy, redacted base,
+base hash, exact overrides, and final per-case environment hash; the compact
+receipt carries the same base hash as its execution-environment identity.
 The ROCm mixed-load driver also rejects ambient `KILN_*` server controls before
 building. Configuration changes must be declared in a committed workload
 variant; inherited shell overrides are never silently ignored or accepted as

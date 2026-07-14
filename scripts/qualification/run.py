@@ -51,6 +51,25 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKLOAD_DIRECTORY = Path("qualification/workloads")
 RESULT_PATH_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_CASE_RESULT"
 VARIANT_ID_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_VARIANT_ID"
+CASE_ENVIRONMENT_POLICY = "closed-qualification-case-v1"
+# Host plumbing needed to locate tools and enter the bounded user service. Any
+# backend, compiler, device-selection, or product control belongs in the
+# committed case environment instead.
+CASE_BASE_ENVIRONMENT_NAMES = (
+    "CARGO_HOME",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "PATH",
+    "RUSTUP_HOME",
+    "SHELL",
+    "TMPDIR",
+    "USER",
+    "XDG_RUNTIME_DIR",
+)
 MODEL_REQUIRED_KINDS = {"serving", "performance", "training", "eval", "soak"}
 HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 RECEIPT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,127}$")
@@ -496,6 +515,14 @@ def _redacted_environment(environment: dict[str, str]) -> dict[str, dict[str, An
             "value": sha256_bytes(value.encode("utf-8")) if sensitive else value,
         }
     return result
+
+
+def _closed_case_base_environment(environment: dict[str, str]) -> dict[str, str]:
+    return {
+        name: environment[name]
+        for name in CASE_BASE_ENVIRONMENT_NAMES
+        if name in environment
+    }
 
 
 def _unavailable_environment(
@@ -1464,8 +1491,13 @@ def run_qualification(
     started_at = utc_now()
     started_monotonic = time.monotonic()
     clean_at_start = True
-    inherited_environment = dict(os.environ)
-    execution_environment_hash = _canonical_hash(inherited_environment)
+    case_base_environment = _closed_case_base_environment(dict(os.environ))
+    execution_environment_hash = _canonical_hash(
+        {
+            "policy": CASE_ENVIRONMENT_POLICY,
+            "environment": case_base_environment,
+        }
+    )
 
     resolved_receipt_id = receipt_id or _receipt_id(
         started_at,
@@ -1569,7 +1601,7 @@ def run_qualification(
                 key: _resolve_text(value, variables, seed, resolved_model_path)
                 for key, value in case["environment"].items()
             }
-            process_environment = dict(inherited_environment)
+            process_environment = dict(case_base_environment)
             process_environment.update(overrides)
             process_environment[RESULT_PATH_ENVIRONMENT_VARIABLE] = str(command_result_path)
             process_environment[VARIANT_ID_ENVIRONMENT_VARIABLE] = variant_id
@@ -1847,8 +1879,9 @@ def run_qualification(
             "max_run_capture_bytes": MAX_RUN_CAPTURE_BYTES,
             "per_case_result_limit_bytes": per_case_result_limit,
             "max_run_structured_bytes": MAX_RUN_STRUCTURED_BYTES,
-            "inherited_environment_sha256": execution_environment_hash,
-            "inherited_environment": _redacted_environment(inherited_environment),
+            "case_environment_policy": CASE_ENVIRONMENT_POLICY,
+            "case_base_environment_sha256": execution_environment_hash,
+            "case_base_environment": _redacted_environment(case_base_environment),
             "infrastructure_failures": infrastructure_failures,
             "cases": run_config_cases,
         },
