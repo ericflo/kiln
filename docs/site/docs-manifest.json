@@ -63,6 +63,14 @@
       "description": "Every supported typed TOML field and mechanically derived environment override, plus deliberately backend-owned policy such as SFT loss routing."
     },
     {
+      "source": "contracts/kiln-config-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "configuration-schema",
+      "title": "Configuration Schema",
+      "section": "start",
+      "description": "Generated machine-readable reference for all typed TOML sections, fields, defaults, validation bounds, environment names, compatibility inputs, and cross-field safety conditions."
+    },
+    {
       "source": "CHANGELOG.md",
       "slug": "changelog",
       "title": "Changelog",

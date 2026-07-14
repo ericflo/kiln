@@ -260,6 +260,7 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
     `${JSON.stringify({
       $schema: 'https://json-schema.org/draft/2020-12/schema',
       $id: 'https://example.test/receipt.schema.json',
+      title: 'Receipt contract v1',
       description: 'Canonical receipt envelope.',
       type: 'object',
       additionalProperties: false,
@@ -285,6 +286,22 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
             duration_ms: { type: 'number', minimum: 0, default: 0 },
           },
         },
+        config: {
+          description: 'Typed configuration fixture.',
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            configured: {
+              type: 'boolean',
+              default: false,
+              'x-kiln-path': 'server.configured',
+              'x-kiln-type-and-default': 'boolean; false',
+              'x-kiln-canonical-env': 'KILN_SERVER_CONFIGURED (implemented)',
+              'x-kiln-environment': 'KILN_CONFIGURED (deprecated compatibility)',
+              'x-kiln-validation': 'Controls the fixture behavior.',
+            },
+          },
+        },
       },
     }, null, 2)}\n`,
   );
@@ -298,12 +315,17 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
   });
   const html = await readFile(resolve(output, 'docs/receipt-schema/index.html'), 'utf8');
   assert.match(html, /Schema identity/);
+  assert.match(html, /Receipt contract v1/);
   assert.match(html, /Root fields/);
   assert.match(html, /<code>schema_version<\/code>/);
   assert.match(html, /const 1/);
   assert.match(html, /Definitions/);
   assert.match(html, /id="result"/);
   assert.match(html, /enum &quot;passed&quot;, &quot;failed&quot;/);
+  assert.match(html, /Canonical environment target/);
+  assert.match(html, /server\.configured/);
+  assert.match(html, /KILN_SERVER_CONFIGURED/);
+  assert.match(html, /KILN_CONFIGURED \(deprecated compatibility\)/);
   assert.match(html, /Composition and conditional rules/);
   assert.match(html, /&quot;then&quot;: \{/);
 

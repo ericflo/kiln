@@ -1,0 +1,1481 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/contracts/kiln-config-v1.schema.json",
+  "title": "Kiln server configuration v1",
+  "description": "Canonical schema for kiln.toml. Sections and fields are optional because the typed loader supplies defaults; unknown sections and fields are rejected. Environment precedence and compatibility aliases are annotations, not TOML keys.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "server": {
+      "$ref": "#/$defs/server"
+    },
+    "accelerator": {
+      "$ref": "#/$defs/accelerator"
+    },
+    "batching": {
+      "$ref": "#/$defs/batching"
+    },
+    "model": {
+      "$ref": "#/$defs/model"
+    },
+    "memory": {
+      "$ref": "#/$defs/memory"
+    },
+    "training": {
+      "$ref": "#/$defs/training"
+    },
+    "logging": {
+      "$ref": "#/$defs/logging"
+    },
+    "prefix_cache": {
+      "$ref": "#/$defs/prefix_cache"
+    },
+    "speculative": {
+      "$ref": "#/$defs/speculative"
+    },
+    "streaming_prefill": {
+      "$ref": "#/$defs/streaming_prefill"
+    },
+    "adapters": {
+      "$ref": "#/$defs/adapters"
+    },
+    "teachers": {
+      "$ref": "#/$defs/teachers"
+    },
+    "eval": {
+      "$ref": "#/$defs/eval"
+    },
+    "request_log": {
+      "$ref": "#/$defs/request_log"
+    },
+    "agent": {
+      "$ref": "#/$defs/agent"
+    }
+  },
+  "$defs": {
+    "server": {
+      "type": "object",
+      "description": "HTTP serving, scheduling limits, response metadata, and default thinking policy.",
+      "additionalProperties": false,
+      "properties": {
+        "serving_profile": {
+          "type": "string",
+          "enum": [
+            "stable",
+            "experimental",
+            "maintenance"
+          ],
+          "default": "stable",
+          "description": "stable, experimental, or maintenance, case-insensitive. Process-lifetime policy; restart required.",
+          "x-kiln-path": "server.serving_profile",
+          "x-kiln-type-and-default": "string enum; \"stable\"",
+          "x-kiln-canonical-env": "KILN_SERVER_SERVING_PROFILE (implemented)",
+          "x-kiln-environment": "KILN_SERVING_PROFILE (deprecated compatibility)",
+          "x-kiln-validation": "stable, experimental, or maintenance, case-insensitive. Process-lifetime policy; restart required."
+        },
+        "deterministic": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enables deterministic tensor behavior and forces the effective concurrent decode width to one.",
+          "x-kiln-path": "server.deterministic",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_SERVER_DETERMINISTIC (implemented)",
+          "x-kiln-environment": "KILN_DETERMINISTIC (deprecated compatibility)",
+          "x-kiln-validation": "Enables deterministic tensor behavior and forces the effective concurrent decode width to one."
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "default": "127.0.0.1",
+          "description": "Must be non-empty. Binding beyond loopback exposes an unauthenticated inference and training API; use a trusted network or authenticated reverse proxy.",
+          "x-kiln-path": "server.host",
+          "x-kiln-type-and-default": "string; \"127.0.0.1\"",
+          "x-kiln-canonical-env": "KILN_SERVER_HOST (implemented)",
+          "x-kiln-environment": "KILN_HOST (deprecated compatibility)",
+          "x-kiln-validation": "Must be non-empty. Binding beyond loopback exposes an unauthenticated inference and training API; use a trusted network or authenticated reverse proxy."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8420,
+          "description": "1..=65535.",
+          "x-kiln-path": "server.port",
+          "x-kiln-type-and-default": "unsigned 16-bit integer; 8420",
+          "x-kiln-canonical-env": "KILN_SERVER_PORT (implemented)",
+          "x-kiln-environment": "KILN_PORT (deprecated compatibility)",
+          "x-kiln-validation": "1..=65535."
+        },
+        "request_timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 600,
+          "description": "Must be greater than zero. Bounds a request, including model work and cleanup settlement.",
+          "x-kiln-path": "server.request_timeout_secs",
+          "x-kiln-type-and-default": "unsigned integer; 600",
+          "x-kiln-canonical-env": "KILN_SERVER_REQUEST_TIMEOUT_SECS (implemented)",
+          "x-kiln-environment": "KILN_REQUEST_TIMEOUT_SECS (deprecated compatibility)",
+          "x-kiln-validation": "Must be greater than zero. Bounds a request, including model work and cleanup settlement."
+        },
+        "http_send_buffer_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 16777216,
+          "description": "When set, 1024..=16777216. Applied to accepted sockets. Startup preflights the listener and rejects an OS read-back smaller than requested.",
+          "x-kiln-path": "server.http_send_buffer_bytes",
+          "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
+          "x-kiln-canonical-env": "KILN_SERVER_HTTP_SEND_BUFFER_BYTES (implemented)",
+          "x-kiln-environment": "KILN_HTTP_SEND_BUFFER_BYTES (deprecated compatibility)",
+          "x-kiln-validation": "When set, 1024..=16777216. Applied to accepted sockets. Startup preflights the listener and rejects an OS read-back smaller than requested."
+        },
+        "stream_stall_grace_ms": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 2000,
+          "default": 2000,
+          "description": "10..=2000. A request retaining KV state with no streaming delivery progress is selected for cancellation after this grace.",
+          "x-kiln-path": "server.stream_stall_grace_ms",
+          "x-kiln-type-and-default": "unsigned integer; 2000",
+          "x-kiln-canonical-env": "KILN_SERVER_STREAM_STALL_GRACE_MS (implemented)",
+          "x-kiln-environment": "KILN_STREAM_STALL_GRACE_MS (deprecated compatibility)",
+          "x-kiln-validation": "10..=2000. A request retaining KV state with no streaming delivery progress is selected for cancellation after this grace."
+        },
+        "max_batch_tokens": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 65536,
+          "default": 512,
+          "description": "2..=65536. Combined decode-plus-prefill token budget for one batching-actor cycle.",
+          "x-kiln-path": "server.max_batch_tokens",
+          "x-kiln-type-and-default": "unsigned integer; 512",
+          "x-kiln-canonical-env": "KILN_SERVER_MAX_BATCH_TOKENS (implemented)",
+          "x-kiln-environment": "KILN_MAX_BATCH_TOKENS (deprecated compatibility)",
+          "x-kiln-validation": "2..=65536. Combined decode-plus-prefill token budget for one batching-actor cycle."
+        },
+        "max_prefill_tokens_per_cycle": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536,
+          "default": 64,
+          "description": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget.",
+          "x-kiln-path": "server.max_prefill_tokens_per_cycle",
+          "x-kiln-type-and-default": "unsigned integer; 64",
+          "x-kiln-canonical-env": "KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE (implemented)",
+          "x-kiln-environment": "KILN_MAX_PREFILL_TOKENS_PER_CYCLE (deprecated compatibility)",
+          "x-kiln-validation": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget."
+        },
+        "max_prefill_layers_per_cycle": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024,
+          "default": 4,
+          "description": "1..=1024. Number of transformer layers an in-flight prefill chunk may execute before yielding to decode.",
+          "x-kiln-path": "server.max_prefill_layers_per_cycle",
+          "x-kiln-type-and-default": "unsigned integer; 4",
+          "x-kiln-canonical-env": "KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE (implemented)",
+          "x-kiln-environment": "KILN_MAX_PREFILL_LAYERS_PER_CYCLE (deprecated compatibility)",
+          "x-kiln-validation": "1..=1024. Number of transformer layers an in-flight prefill chunk may execute before yielding to decode."
+        },
+        "max_decode_batch": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            }
+          ],
+          "default": "auto",
+          "description": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width.",
+          "x-kiln-path": "server.max_decode_batch",
+          "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
+          "x-kiln-canonical-env": "KILN_SERVER_MAX_DECODE_BATCH (implemented)",
+          "x-kiln-environment": "KILN_MAX_DECODE_BATCH (deprecated compatibility)",
+          "x-kiln-validation": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width."
+        },
+        "eval_mode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enables deterministic eval-serving defaults, headers, adapter warnings, and transient-cache cleanup behavior. serve --eval-mode applies a typed override after environment resolution and wins without mutating process environment.",
+          "x-kiln-path": "server.eval_mode",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_SERVER_EVAL_MODE (implemented)",
+          "x-kiln-environment": "KILN_EVAL_MODE (deprecated compatibility)",
+          "x-kiln-validation": "Enables deterministic eval-serving defaults, headers, adapter warnings, and transient-cache cleanup behavior. serve --eval-mode applies a typed override after environment resolution and wins without mutating process environment."
+        },
+        "default_thinking_enabled": {
+          "type": "boolean",
+          "description": "None preserves the model template default. Requests may override with chat_template_kwargs.enable_thinking. Without the canonical spelling, any presence of KILN_DEFAULT_NO_THINK, even a value such as 0, first selects false; the explicit KILN_DEFAULT_THINKING_ENABLED value is applied afterward and wins. When the canonical spelling is present, every present compatibility alias must resolve to the same boolean. There is no environment spelling that restores None.",
+          "x-kiln-path": "server.default_thinking_enabled",
+          "x-kiln-type-and-default": "optional boolean; omitted (None)",
+          "x-kiln-canonical-env": "KILN_SERVER_DEFAULT_THINKING_ENABLED (implemented)",
+          "x-kiln-environment": "KILN_DEFAULT_THINKING_ENABLED (deprecated compatibility); KILN_DEFAULT_NO_THINK is a deprecated presence-only alias",
+          "x-kiln-validation": "None preserves the model template default. Requests may override with chat_template_kwargs.enable_thinking. Without the canonical spelling, any presence of KILN_DEFAULT_NO_THINK, even a value such as 0, first selects false; the explicit KILN_DEFAULT_THINKING_ENABLED value is applied afterward and wins. When the canonical spelling is present, every present compatibility alias must resolve to the same boolean. There is no environment spelling that restores None."
+        },
+        "default_thinking_budget_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Integer values include 0, which closes thinking immediately. Case-insensitive unlimited clears a TOML limit back to None. Requests may inherit, replace, or explicitly disable the limit.",
+          "x-kiln-path": "server.default_thinking_budget_tokens",
+          "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
+          "x-kiln-canonical-env": "KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS (implemented)",
+          "x-kiln-environment": "KILN_DEFAULT_THINKING_BUDGET_TOKENS (deprecated compatibility)",
+          "x-kiln-validation": "Integer values include 0, which closes thinking immediately. Case-insensitive unlimited clears a TOML limit back to None. Requests may inherit, replace, or explicitly disable the limit."
+        },
+        "default_thinking_budget_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Integer values include 0. unlimited clears a TOML limit. The clock starts at the first decode candidate, after queueing and prefill. The first token or time limit reached forces the model's closing </think> sequence.",
+          "x-kiln-path": "server.default_thinking_budget_ms",
+          "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
+          "x-kiln-canonical-env": "KILN_SERVER_DEFAULT_THINKING_BUDGET_MS (implemented)",
+          "x-kiln-environment": "KILN_DEFAULT_THINKING_BUDGET_MS (deprecated compatibility)",
+          "x-kiln-validation": "Integer values include 0. unlimited clears a TOML limit. The clock starts at the first decode candidate, after queueing and prefill. The first token or time limit reached forces the model's closing </think> sequence."
+        },
+        "fold_reasoning_into_content": {
+          "type": "boolean",
+          "default": false,
+          "description": "Copies separated reasoning into content for compatibility clients. A request can override it.",
+          "x-kiln-path": "server.fold_reasoning_into_content",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_SERVER_FOLD_REASONING_INTO_CONTENT (implemented)",
+          "x-kiln-environment": "KILN_FOLD_REASONING_INTO_CONTENT (deprecated compatibility)",
+          "x-kiln-validation": "Copies separated reasoning into content for compatibility clients. A request can override it."
+        },
+        "chat_performance_metadata": {
+          "type": "boolean",
+          "default": false,
+          "description": "Default for chat response performance metadata; requests can override with include_performance.",
+          "x-kiln-path": "server.chat_performance_metadata",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_SERVER_CHAT_PERFORMANCE_METADATA (implemented)",
+          "x-kiln-environment": "KILN_CHAT_PERFORMANCE_METADATA (deprecated compatibility)",
+          "x-kiln-validation": "Default for chat response performance metadata; requests can override with include_performance."
+        },
+        "chat_config_hash_metadata": {
+          "type": "boolean",
+          "default": false,
+          "description": "Default for chat response config hashes; requests can override with include_config_hashes.",
+          "x-kiln-path": "server.chat_config_hash_metadata",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_SERVER_CHAT_CONFIG_HASH_METADATA (implemented)",
+          "x-kiln-environment": "KILN_CHAT_CONFIG_HASH_METADATA (deprecated compatibility)",
+          "x-kiln-validation": "Default for chat response config hashes; requests can override with include_config_hashes."
+        },
+        "slow_request_warn_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 30,
+          "description": "0 disables slow-request warnings; otherwise a request at least this old emits a structured warning.",
+          "x-kiln-path": "server.slow_request_warn_secs",
+          "x-kiln-type-and-default": "unsigned integer; 30",
+          "x-kiln-canonical-env": "KILN_SERVER_SLOW_REQUEST_WARN_SECS (implemented)",
+          "x-kiln-environment": "KILN_SLOW_REQUEST_WARN_SECS (deprecated compatibility)",
+          "x-kiln-validation": "0 disables slow-request warnings; otherwise a request at least this old emits a structured warning."
+        },
+        "shutdown_timeout_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5,
+          "description": "Must be greater than zero. Hard ceiling for graceful drain before forced exit.",
+          "x-kiln-path": "server.shutdown_timeout_secs",
+          "x-kiln-type-and-default": "unsigned integer; 5",
+          "x-kiln-canonical-env": "KILN_SERVER_SHUTDOWN_TIMEOUT_SECS (implemented)",
+          "x-kiln-environment": "KILN_SHUTDOWN_TIMEOUT_SECS (deprecated compatibility)",
+          "x-kiln-validation": "Must be greater than zero. Hard ceiling for graceful drain before forced exit."
+        }
+      },
+      "default": {}
+    },
+    "accelerator": {
+      "type": "object",
+      "description": "Process-lifetime accelerator execution, ROCm synchronization, and graph-cache policy.",
+      "additionalProperties": false,
+      "properties": {
+        "rocm_synchronization_mode": {
+          "type": "string",
+          "enum": [
+            "legacy_host_barriers",
+            "stream_ordered"
+          ],
+          "default": "legacy_host_barriers",
+          "description": "legacy_host_barriers or stream_ordered, case-insensitive. stream_ordered requires server.serving_profile = \"experimental\"; other profiles fail startup rather than silently weakening the request. Restart required.",
+          "x-kiln-path": "accelerator.rocm_synchronization_mode",
+          "x-kiln-type-and-default": "string enum; \"legacy_host_barriers\"",
+          "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "legacy_host_barriers or stream_ordered, case-insensitive. stream_ordered requires server.serving_profile = \"experimental\"; other profiles fail startup rather than silently weakening the request. Restart required."
+        },
+        "rocm_graph_mode": {
+          "type": "string",
+          "enum": [
+            "profile",
+            "disabled",
+            "warmup_then_eager",
+            "lazy_capture_replay"
+          ],
+          "default": "profile",
+          "description": "profile, disabled, warmup_then_eager, or lazy_capture_replay, case-insensitive. profile resolves to disabled under stable/maintenance and lazy_capture_replay under experimental. The two explicit non-disabled modes require the experimental profile. Restart required.",
+          "x-kiln-path": "accelerator.rocm_graph_mode",
+          "x-kiln-type-and-default": "string enum; \"profile\"",
+          "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_GRAPH_MODE (implemented)",
+          "x-kiln-environment": "KILN_ROCM_GRAPHS and KILN_ROCM_GRAPH_CAPTURE (deprecated compatibility)",
+          "x-kiln-validation": "profile, disabled, warmup_then_eager, or lazy_capture_replay, case-insensitive. profile resolves to disabled under stable/maintenance and lazy_capture_replay under experimental. The two explicit non-disabled modes require the experimental profile. Restart required."
+        },
+        "rocm_graph_cache_entries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "default": 8,
+          "description": "1..=64. Bounds retained native graph entries in every product and embedding constructor; zero or unbounded capacities are rejected. Restart required.",
+          "x-kiln-path": "accelerator.rocm_graph_cache_entries",
+          "x-kiln-type-and-default": "unsigned integer; 8",
+          "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES (implemented)",
+          "x-kiln-environment": "KILN_ROCM_GRAPH_CACHE_MAX (deprecated compatibility)",
+          "x-kiln-validation": "1..=64. Bounds retained native graph entries in every product and embedding constructor; zero or unbounded capacities are rejected. Restart required."
+        },
+        "rocm_graph_cache_max_bytes": {
+          "type": "integer",
+          "minimum": 67108864,
+          "maximum": 17179869184,
+          "default": 1073741824,
+          "description": "67108864..=17179869184 (64 MiB through 16 GiB). Independently bounds requested physical bytes retained by graph-owned stable tensors, capture arenas, private-stream hipBLASLt workspaces, and owner slot state. Opaque HIP graph/exec/stream/event overhead is counted as objects and remains subject to live driver-pressure policy. Restart required.",
+          "x-kiln-path": "accelerator.rocm_graph_cache_max_bytes",
+          "x-kiln-type-and-default": "unsigned integer bytes; 1073741824 (1 GiB)",
+          "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "67108864..=17179869184 (64 MiB through 16 GiB). Independently bounds requested physical bytes retained by graph-owned stable tensors, capture arenas, private-stream hipBLASLt workspaces, and owner slot state. Opaque HIP graph/exec/stream/event overhead is counted as objects and remains subject to live driver-pressure policy. Restart required."
+        }
+      },
+      "default": {}
+    },
+    "batching": {
+      "type": "object",
+      "description": "Production batching actor and direct-decode rendezvous policy.",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "enabled",
+            "disabled"
+          ],
+          "default": "auto",
+          "description": "TOML accepts auto, enabled, or disabled, case-insensitively. Environment input also accepts the strict boolean spellings, mapping true to enabled and false to disabled. auto delegates actor selection to the immutable backend policy; an explicit value wins. Restart required.",
+          "x-kiln-path": "batching.mode",
+          "x-kiln-type-and-default": "string enum; \"auto\"",
+          "x-kiln-canonical-env": "KILN_BATCHING_MODE (implemented)",
+          "x-kiln-environment": "KILN_BATCHING_ENGINE (deprecated compatibility)",
+          "x-kiln-validation": "TOML accepts auto, enabled, or disabled, case-insensitively. Environment input also accepts the strict boolean spellings, mapping true to enabled and false to disabled. auto delegates actor selection to the immutable backend policy; an explicit value wins. Restart required."
+        },
+        "rowwise_decode": {
+          "type": "boolean",
+          "default": false,
+          "description": "false sends each ready cohort through one true batched forward. true issues one forward per row while retaining actor ownership; it is an emergency correctness comparison, normally reduces throughput, and does not increase the effective decode width. Restart required.",
+          "x-kiln-path": "batching.rowwise_decode",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_BATCHING_ROWWISE_DECODE (implemented)",
+          "x-kiln-environment": "KILN_BATCH_DECODE_ROWWISE (deprecated compatibility)",
+          "x-kiln-validation": "false sends each ready cohort through one true batched forward. true issues one forward per row while retaining actor ownership; it is an emergency correctness comparison, normally reduces throughput, and does not increase the effective decode width. Restart required."
+        },
+        "prefix_aware_admission": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, a queued same-adapter strict descendant waits while its active shorter prefix can become reusable; independent rows may still be admitted. Disable only for a controlled admission A/B. Restart required.",
+          "x-kiln-path": "batching.prefix_aware_admission",
+          "x-kiln-type-and-default": "boolean; true",
+          "x-kiln-canonical-env": "KILN_BATCHING_PREFIX_AWARE_ADMISSION (implemented)",
+          "x-kiln-environment": "KILN_BATCH_PREFIX_AWARE_ADMISSION (deprecated compatibility)",
+          "x-kiln-validation": "When true, a queued same-adapter strict descendant waits while its active shorter prefix can become reusable; independent rows may still be admitted. Disable only for a controlled admission A/B. Restart required."
+        },
+        "prefill_admission_quantum": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            }
+          ],
+          "default": "auto",
+          "description": "An integer must be 1..=65536 and caps how many queued prompts the actor admits in one cycle before returning to decode. auto is case-insensitive and uses the backend policy below. The selected value is then clamped to 1..=effective max_decode_batch; the diagnostics name effective_decode_width as final authority when it performs that clamp. Restart required.",
+          "x-kiln-path": "batching.prefill_admission_quantum",
+          "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
+          "x-kiln-canonical-env": "KILN_BATCHING_PREFILL_ADMISSION_QUANTUM (implemented)",
+          "x-kiln-environment": "KILN_BATCH_PREFILL_ADMISSION_QUANTUM (deprecated compatibility)",
+          "x-kiln-validation": "An integer must be 1..=65536 and caps how many queued prompts the actor admits in one cycle before returning to decode. auto is case-insensitive and uses the backend policy below. The selected value is then clamped to 1..=effective max_decode_batch; the diagnostics name effective_decode_width as final authority when it performs that clamp. Restart required."
+        },
+        "direct_decode_rendezvous_mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "enabled",
+            "disabled"
+          ],
+          "default": "auto",
+          "description": "Selects only the fallback worker used by actor-absent direct streaming effectively-greedy requests. TOML accepts auto, enabled, or disabled, case-insensitively; environment input also accepts the strict boolean spellings. auto enables the worker on every real backend. Sampled requests, non-streaming requests, and every route using the batching actor bypass this worker. Restart required.",
+          "x-kiln-path": "batching.direct_decode_rendezvous_mode",
+          "x-kiln-type-and-default": "string enum; \"auto\"",
+          "x-kiln-canonical-env": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE (implemented)",
+          "x-kiln-environment": "KILN_DECODE_BATCHER (deprecated compatibility)",
+          "x-kiln-validation": "Selects only the fallback worker used by actor-absent direct streaming effectively-greedy requests. TOML accepts auto, enabled, or disabled, case-insensitively; environment input also accepts the strict boolean spellings. auto enables the worker on every real backend. Sampled requests, non-streaming requests, and every route using the batching actor bypass this worker. Restart required."
+        },
+        "direct_decode_rendezvous_max_batch": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            }
+          ],
+          "default": "auto",
+          "description": "An explicit integer must be 1..=65536. auto uses the backend policy below. Either selection is clamped to the already-resolved effective decode width; diagnostics use effective_decode_width when that ceiling wins. Restart required.",
+          "x-kiln-path": "batching.direct_decode_rendezvous_max_batch",
+          "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
+          "x-kiln-canonical-env": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH (implemented)",
+          "x-kiln-environment": "KILN_DECODE_BATCH_MAX (deprecated compatibility)",
+          "x-kiln-validation": "An explicit integer must be 1..=65536. auto uses the backend policy below. Either selection is clamped to the already-resolved effective decode width; diagnostics use effective_decode_width when that ceiling wins. Restart required."
+        },
+        "direct_decode_rendezvous_wait_us": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 0
+            }
+          ],
+          "default": "auto",
+          "description": "An explicit value is any non-negative u64 number of microseconds, including 0; auto uses backend policy. A negative, overflowing, malformed, or non-UTF-8 environment value stops startup. In particular, malformed legacy KILN_DECODE_BATCH_WAIT_US now fails startup instead of silently becoming zero. Restart required.",
+          "x-kiln-path": "batching.direct_decode_rendezvous_wait_us",
+          "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
+          "x-kiln-canonical-env": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US (implemented)",
+          "x-kiln-environment": "KILN_DECODE_BATCH_WAIT_US (deprecated compatibility)",
+          "x-kiln-validation": "An explicit value is any non-negative u64 number of microseconds, including 0; auto uses backend policy. A negative, overflowing, malformed, or non-UTF-8 environment value stops startup. In particular, malformed legacy KILN_DECODE_BATCH_WAIT_US now fails startup instead of silently becoming zero. Restart required."
+        },
+        "direct_decode_rendezvous_mixed_seq_lens": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "default": "auto",
+          "description": "TOML accepts only the string auto or a native boolean; quoted boolean strings are rejected. Environment input accepts auto or the strict boolean spellings. The value controls whether one compatible fallback cohort may contain different decode positions. Restart required.",
+          "x-kiln-path": "batching.direct_decode_rendezvous_mixed_seq_lens",
+          "x-kiln-type-and-default": "\"auto\" or boolean; \"auto\"",
+          "x-kiln-canonical-env": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS (implemented)",
+          "x-kiln-environment": "KILN_DECODE_BATCH_MIXED_SEQ (deprecated compatibility)",
+          "x-kiln-validation": "TOML accepts only the string auto or a native boolean; quoted boolean strings are rejected. Environment input accepts auto or the strict boolean spellings. The value controls whether one compatible fallback cohort may contain different decode positions. Restart required."
+        }
+      },
+      "default": {}
+    },
+    "model": {
+      "type": "object",
+      "description": "Model, tokenizer, snapshot, adapter, and served identity paths.",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must be non-empty when set. Omitted starts the server in mock mode; a real model path enables real inference.",
+          "x-kiln-path": "model.path",
+          "x-kiln-type-and-default": "optional string; omitted (None)",
+          "x-kiln-canonical-env": "KILN_MODEL_PATH (implemented)",
+          "x-kiln-environment": "KILN_MODEL_PATH",
+          "x-kiln-validation": "Must be non-empty when set. Omitted starts the server in mock mode; a real model path enables real inference."
+        },
+        "model_id": {
+          "type": "string",
+          "minLength": 1,
+          "default": "Qwen/Qwen3.5-4B",
+          "description": "Must be non-empty. Used for model/tokenizer identity and as the source of the default served id. Kiln still applies its built-in Qwen3.5-4B runtime profile.",
+          "x-kiln-path": "model.model_id",
+          "x-kiln-type-and-default": "string; \"Qwen/Qwen3.5-4B\"",
+          "x-kiln-canonical-env": "KILN_MODEL_MODEL_ID (implemented)",
+          "x-kiln-environment": "KILN_MODEL_ID (deprecated compatibility)",
+          "x-kiln-validation": "Must be non-empty. Used for model/tokenizer identity and as the source of the default served id. Kiln still applies its built-in Qwen3.5-4B runtime profile."
+        },
+        "tokenizer_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must be non-empty when set.",
+          "x-kiln-path": "model.tokenizer_path",
+          "x-kiln-type-and-default": "optional string; omitted (None)",
+          "x-kiln-canonical-env": "KILN_MODEL_TOKENIZER_PATH (implemented)",
+          "x-kiln-environment": "KILN_TOKENIZER_PATH (deprecated compatibility)",
+          "x-kiln-validation": "Must be non-empty when set."
+        },
+        "adapter_dir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must be non-empty when set. For the Qwen3.5-4B profile, omission resolves to <model.path>/adapters.",
+          "x-kiln-path": "model.adapter_dir",
+          "x-kiln-type-and-default": "optional string; omitted (None)",
+          "x-kiln-canonical-env": "KILN_MODEL_ADAPTER_DIR (implemented)",
+          "x-kiln-environment": "KILN_ADAPTER_DIR (deprecated compatibility)",
+          "x-kiln-validation": "Must be non-empty when set. For the Qwen3.5-4B profile, omission resolves to <model.path>/adapters."
+        },
+        "snapshot_dir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must be non-empty when set. The environment alias uniquely treats an empty or whitespace-only value as a request to clear the TOML value. Without a value, Kiln tries a location beside the model and then the system temporary directory.",
+          "x-kiln-path": "model.snapshot_dir",
+          "x-kiln-type-and-default": "optional string; omitted (None)",
+          "x-kiln-canonical-env": "KILN_MODEL_SNAPSHOT_DIR (implemented)",
+          "x-kiln-environment": "KILN_MODEL_SNAPSHOT_DIR",
+          "x-kiln-validation": "Must be non-empty when set. The environment alias uniquely treats an empty or whitespace-only value as a request to clear the TOML value. Without a value, Kiln tries a location beside the model and then the system temporary directory."
+        },
+        "served_model_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must be non-empty when set. Otherwise the effective id is the final slash-separated component of model.model_id (Qwen3.5-4B by default). serve --served-model-id applies a typed, validated override after environment resolution.",
+          "x-kiln-path": "model.served_model_id",
+          "x-kiln-type-and-default": "optional string; omitted (None)",
+          "x-kiln-canonical-env": "KILN_MODEL_SERVED_MODEL_ID (implemented)",
+          "x-kiln-environment": "KILN_SERVED_MODEL_ID (deprecated compatibility)",
+          "x-kiln-validation": "Must be non-empty when set. Otherwise the effective id is the final slash-separated component of model.model_id (Qwen3.5-4B by default). serve --served-model-id applies a typed, validated override after environment resolution."
+        }
+      },
+      "default": {}
+    },
+    "memory": {
+      "type": "object",
+      "description": "Accelerator capacity, live-governor, KV-cache, and graph allocation policy.",
+      "additionalProperties": false,
+      "properties": {
+        "num_blocks": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Must be greater than zero when set. Omission invokes backend-aware automatic KV-block sizing.",
+          "x-kiln-path": "memory.num_blocks",
+          "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
+          "x-kiln-canonical-env": "KILN_MEMORY_NUM_BLOCKS (implemented)",
+          "x-kiln-environment": "KILN_NUM_BLOCKS (deprecated compatibility)",
+          "x-kiln-validation": "Must be greater than zero when set. Omission invokes backend-aware automatic KV-block sizing."
+        },
+        "gpu_memory_gb": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Must be finite, greater than zero, and representable as bytes. Units are GiB. This is a capacity cap, not a hardware override: it may reduce the detected safe capacity but never expands physical VRAM, host-backed unified memory, or a cgroup-bounded capacity. A request above the safe detected capacity is clamped down.",
+          "x-kiln-path": "memory.gpu_memory_gb",
+          "x-kiln-type-and-default": "optional finite number; omitted (None)",
+          "x-kiln-canonical-env": "KILN_MEMORY_GPU_MEMORY_GB (implemented)",
+          "x-kiln-environment": "KILN_GPU_MEMORY_GB (deprecated compatibility)",
+          "x-kiln-validation": "Must be finite, greater than zero, and representable as bytes. Units are GiB. This is a capacity cap, not a hardware override: it may reduce the detected safe capacity but never expands physical VRAM, host-backed unified memory, or a cgroup-bounded capacity. A request above the safe detected capacity is clamped down."
+        },
+        "inference_memory_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.7,
+          "description": "Loader validation accepts 0.0..=1.0; real-state construction clamps the configured value to 0.1..=1.0 before KV sizing. The remainder is available to the training budget.",
+          "x-kiln-path": "memory.inference_memory_fraction",
+          "x-kiln-type-and-default": "finite number; 0.7",
+          "x-kiln-canonical-env": "KILN_MEMORY_INFERENCE_MEMORY_FRACTION (implemented)",
+          "x-kiln-environment": "KILN_INFERENCE_MEMORY_FRACTION (deprecated compatibility)",
+          "x-kiln-validation": "Loader validation accepts 0.0..=1.0; real-state construction clamps the configured value to 0.1..=1.0 before KV sizing. The remainder is available to the training budget."
+        },
+        "training_memory_gb": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Must be finite, greater than zero, and representable as bytes when set. Optional training-budget cap in GiB; it can reduce but never expand the capacity remaining after resident model and KV allocations.",
+          "x-kiln-path": "memory.training_memory_gb",
+          "x-kiln-type-and-default": "optional finite number; omitted (None)",
+          "x-kiln-canonical-env": "KILN_MEMORY_TRAINING_MEMORY_GB (implemented)",
+          "x-kiln-environment": "KILN_TRAINING_MEMORY_GB (deprecated compatibility)",
+          "x-kiln-validation": "Must be finite, greater than zero, and representable as bytes when set. Optional training-budget cap in GiB; it can reduce but never expand the capacity remaining after resident model and KV allocations."
+        },
+        "floor_gb": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1.0,
+          "description": "Must be finite, non-negative, representable as bytes, and strictly smaller than the selected accelerator's effective capacity after memory.gpu_memory_gb is applied. Units are GiB. Accelerator startup rejects an equal or larger floor before model upload and reports both configured and effective byte values. The process-wide governor subtracts this additional floor, then outstanding soft reservations, from live free memory when computing allocation headroom. On unified-memory devices it is separate from the physical-memory reserve applied during safe-capacity detection.",
+          "x-kiln-path": "memory.floor_gb",
+          "x-kiln-type-and-default": "finite number; 1.0",
+          "x-kiln-canonical-env": "KILN_MEMORY_FLOOR_GB (implemented)",
+          "x-kiln-environment": "KILN_MEMORY_FLOOR_GB",
+          "x-kiln-validation": "Must be finite, non-negative, representable as bytes, and strictly smaller than the selected accelerator's effective capacity after memory.gpu_memory_gb is applied. Units are GiB. Accelerator startup rejects an equal or larger floor before model upload and reports both configured and effective byte values. The process-wide governor subtracts this additional floor, then outstanding soft reservations, from live free memory when computing allocation headroom. On unified-memory devices it is separate from the physical-memory reserve applied during safe-capacity detection."
+        },
+        "probe_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 500,
+          "description": "Must be greater than zero. Sets the background memory-sampler cadence. Request, inference, health, and metrics paths read only the published sample and never run a driver/OS probe synchronously. Cached admission fails closed when the sample is older than max(5000 ms, 4 * probe_ms), the latest probe failed, or a required sampler is not running. An explicit refresh after a material allocation or release bypasses the cadence.",
+          "x-kiln-path": "memory.probe_ms",
+          "x-kiln-type-and-default": "unsigned integer; 500",
+          "x-kiln-canonical-env": "KILN_MEMORY_PROBE_MS (implemented)",
+          "x-kiln-environment": "KILN_MEMORY_PROBE_MS",
+          "x-kiln-validation": "Must be greater than zero. Sets the background memory-sampler cadence. Request, inference, health, and metrics paths read only the published sample and never run a driver/OS probe synchronously. Cached admission fails closed when the sample is older than max(5000 ms, 4 * probe_ms), the latest probe failed, or a required sampler is not running. An explicit refresh after a material allocation or release bypasses the cadence."
+        },
+        "reclaim_mode": {
+          "type": "string",
+          "enum": [
+            "off",
+            "on-demand",
+            "automatic"
+          ],
+          "default": "off",
+          "description": "Exactly off, on-demand, or automatic, case-insensitive with surrounding whitespace ignored. off prevents execution of registered allocator reclaim hooks; on-demand permits explicit pressure and allocation-retry reclaim calls; automatic also permits the background pressure monitor. The immutable serving profile remains authoritative: a profile with allocator reclaim disabled keeps the effective mode off and does not start the monitor.",
+          "x-kiln-path": "memory.reclaim_mode",
+          "x-kiln-type-and-default": "string enum; \"off\"",
+          "x-kiln-canonical-env": "KILN_MEMORY_RECLAIM_MODE (implemented)",
+          "x-kiln-environment": "KILN_MEMORY_RECLAIM_MODE",
+          "x-kiln-validation": "Exactly off, on-demand, or automatic, case-insensitive with surrounding whitespace ignored. off prevents execution of registered allocator reclaim hooks; on-demand permits explicit pressure and allocation-retry reclaim calls; automatic also permits the background pressure monitor. The immutable serving profile remains authoritative: a profile with allocator reclaim disabled keeps the effective mode off and does not start the monitor."
+        },
+        "kv_autoscale": {
+          "type": "boolean",
+          "default": true,
+          "description": "Requests the pressure-driven physical KV-cache control loop. The serving profile and backend remain authoritative: stable mode and backends without device-resident KV pressure report the request as unavailable rather than silently enabling mutation. /health, /v1/config, and the trusted debug state expose the request, effective state, bounded reason, and source.",
+          "x-kiln-path": "memory.kv_autoscale",
+          "x-kiln-type-and-default": "boolean; true",
+          "x-kiln-canonical-env": "KILN_MEMORY_KV_AUTOSCALE (implemented)",
+          "x-kiln-environment": "KILN_KV_AUTOSCALE (deprecated compatibility)",
+          "x-kiln-validation": "Requests the pressure-driven physical KV-cache control loop. The serving profile and backend remain authoritative: stable mode and backends without device-resident KV pressure report the request as unavailable rather than silently enabling mutation. /health, /v1/config, and the trusted debug state expose the request, effective state, bounded reason, and source."
+        },
+        "kv_force_blocks": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "A positive value requests one exact startup resize before the normal autoscaler loop. It requires memory.kv_autoscale=true and server.serving_profile=\"maintenance\"; every other combination fails configuration validation. Zero disables the one-shot operation. The resize still uses full replacement-pool reservation, exclusive GPU ownership, graph invalidation, transactional publication, and typed forced_configuration attribution. This is an offline maintenance/qualification control, not a per-request tuning knob.",
+          "x-kiln-path": "memory.kv_force_blocks",
+          "x-kiln-type-and-default": "unsigned integer; 0 (disabled)",
+          "x-kiln-canonical-env": "KILN_MEMORY_KV_FORCE_BLOCKS (implemented)",
+          "x-kiln-environment": "KILN_KV_FORCE_BLOCKS (deprecated compatibility)",
+          "x-kiln-validation": "A positive value requests one exact startup resize before the normal autoscaler loop. It requires memory.kv_autoscale=true and server.serving_profile=\"maintenance\"; every other combination fails configuration validation. Zero disables the one-shot operation. The resize still uses full replacement-pool reservation, exclusive GPU ownership, graph invalidation, transactional publication, and typed forced_configuration attribution. This is an offline maintenance/qualification control, not a per-request tuning knob."
+        },
+        "kv_cache_fp8": {
+          "type": "boolean",
+          "default": false,
+          "description": "Requests E4M3FN KV storage. Backend storage policy may reject or disable the request when unsupported.",
+          "x-kiln-path": "memory.kv_cache_fp8",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_MEMORY_KV_CACHE_FP8 (implemented)",
+          "x-kiln-environment": "KILN_KV_CACHE_FP8 (deprecated compatibility)",
+          "x-kiln-validation": "Requests E4M3FN KV storage. Backend storage policy may reject or disable the request when unsupported."
+        },
+        "cuda_graphs": {
+          "type": "boolean",
+          "default": true,
+          "description": "CUDA-only request. Non-CUDA backends ignore it, and a serving profile with live graph capture disabled selects eager-only execution regardless of this value.",
+          "x-kiln-path": "memory.cuda_graphs",
+          "x-kiln-type-and-default": "boolean; true",
+          "x-kiln-canonical-env": "KILN_MEMORY_CUDA_GRAPHS (implemented)",
+          "x-kiln-environment": "KILN_CUDA_GRAPHS (deprecated compatibility)",
+          "x-kiln-validation": "CUDA-only request. Non-CUDA backends ignore it, and a serving profile with live graph capture disabled selects eager-only execution regardless of this value."
+        }
+      },
+      "default": {}
+    },
+    "training": {
+      "type": "object",
+      "description": "Native training checkpoint, queue, retention, and webhook policy.",
+      "additionalProperties": false,
+      "properties": {
+        "grad_checkpoint_segments": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Must be greater than zero when set. When present, selects an explicit process-lifetime gradient-checkpoint segment count for native training; omission leaves workload- and capacity-aware automatic planning enabled.",
+          "x-kiln-path": "training.grad_checkpoint_segments",
+          "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
+          "x-kiln-canonical-env": "KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS (implemented)",
+          "x-kiln-environment": "KILN_GRAD_CHECKPOINT_SEGMENTS (deprecated compatibility)",
+          "x-kiln-validation": "Must be greater than zero when set. When present, selects an explicit process-lifetime gradient-checkpoint segment count for native training; omission leaves workload- and capacity-aware automatic planning enabled."
+        },
+        "no_grad_checkpoint": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disables gradient checkpoint execution for native training. The disabled state and any explicit segment count are retained together in the immutable training policy and exact-resume identity. Disabling checkpointing can materially increase training memory.",
+          "x-kiln-path": "training.no_grad_checkpoint",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_TRAINING_NO_GRAD_CHECKPOINT (implemented)",
+          "x-kiln-environment": "KILN_NO_GRAD_CHECKPOINT (deprecated compatibility)",
+          "x-kiln-validation": "Disables gradient checkpoint execution for native training. The disabled state and any explicit segment count are retained together in the immutable training policy and exact-resume identity. Disabling checkpointing can materially increase training memory."
+        },
+        "recompute_checkpoint_boundaries": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "enabled",
+            "disabled"
+          ],
+          "default": "auto",
+          "description": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto replays sparse SFT boundaries when sequence length is at least recompute_boundary_threshold_tokens; enabled always replays them and disabled always retains them. The canonical environment name accepts only those three words. The deprecated alias additionally accepts historical 1/true/yes and 0/false/no; on and off are not accepted for this alias.",
+          "x-kiln-path": "training.recompute_checkpoint_boundaries",
+          "x-kiln-type-and-default": "string enum; \"auto\"",
+          "x-kiln-canonical-env": "KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES (implemented)",
+          "x-kiln-environment": "KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES (deprecated compatibility)",
+          "x-kiln-validation": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto replays sparse SFT boundaries when sequence length is at least recompute_boundary_threshold_tokens; enabled always replays them and disabled always retains them. The canonical environment name accepts only those three words. The deprecated alias additionally accepts historical 1/true/yes and 0/false/no; on and off are not accepted for this alias."
+        },
+        "recompute_boundary_threshold_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 8192,
+          "description": "Inclusive sequence-length threshold used only by automatic SFT boundary replay. Zero, negative, overflowing, malformed, and non-UTF-8 environment values stop startup.",
+          "x-kiln-path": "training.recompute_boundary_threshold_tokens",
+          "x-kiln-type-and-default": "positive unsigned integer; 8192",
+          "x-kiln-canonical-env": "KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS (implemented)",
+          "x-kiln-environment": "KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS (deprecated compatibility)",
+          "x-kiln-validation": "Inclusive sequence-length threshold used only by automatic SFT boundary replay. Zero, negative, overflowing, malformed, and non-UTF-8 environment values stop startup."
+        },
+        "checkpoint_boundary_anchor_stride": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ],
+          "default": "auto",
+          "description": "When sparse SFT replay is active, a concrete value retains every Nth segment boundary as an anchor. auto derives a shape-specific positive stride from sequence length, segment count, hidden width, boundary dtype, and the cache target. Zero and strings other than auto fail startup.",
+          "x-kiln-path": "training.checkpoint_boundary_anchor_stride",
+          "x-kiln-type-and-default": "\"auto\" or positive unsigned integer; \"auto\"",
+          "x-kiln-canonical-env": "KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE (implemented)",
+          "x-kiln-environment": "KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE (deprecated compatibility)",
+          "x-kiln-validation": "When sparse SFT replay is active, a concrete value retains every Nth segment boundary as an anchor. auto derives a shape-specific positive stride from sequence length, segment count, hidden width, boundary dtype, and the cache target. Zero and strings other than auto fail startup."
+        },
+        "checkpoint_boundary_cache_gb": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 6.0,
+          "description": "Automatic anchor-stride memory target. Despite the historical _gb spelling, the unit is GiB (2^30 bytes). The value must be finite, positive, convert to at least one byte, and remain below the u64 byte limit. Startup converts it once to integral bytes using the historical truncating conversion.",
+          "x-kiln-path": "training.checkpoint_boundary_cache_gb",
+          "x-kiln-type-and-default": "positive floating-point GiB value; 6.0",
+          "x-kiln-canonical-env": "KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB (implemented)",
+          "x-kiln-environment": "KILN_CHECKPOINT_BOUNDARY_CACHE_GB (deprecated compatibility)",
+          "x-kiln-validation": "Automatic anchor-stride memory target. Despite the historical _gb spelling, the unit is GiB (2^30 bytes). The value must be finite, positive, convert to at least one byte, and remain below the u64 byte limit. Startup converts it once to integral bytes using the historical truncating conversion."
+        },
+        "checkpoint_interval": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Must be greater than zero when set. Number of committed optimizer steps between checkpoints; per-job configuration overrides it. Omission disables periodic checkpoints.",
+          "x-kiln-path": "training.checkpoint_interval",
+          "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
+          "x-kiln-canonical-env": "KILN_TRAINING_CHECKPOINT_INTERVAL (implemented)",
+          "x-kiln-environment": "KILN_CHECKPOINT_INTERVAL (deprecated compatibility)",
+          "x-kiln-validation": "Must be greater than zero when set. Number of committed optimizer steps between checkpoints; per-job configuration overrides it. Omission disables periodic checkpoints."
+        },
+        "webhook_url": {
+          "type": "string",
+          "minLength": 1,
+          "format": "uri",
+          "pattern": "^https?://",
+          "description": "Must be a non-empty valid HTTP(S) URL. An exactly empty environment value clears a TOML URL; whitespace is not a clearing value and fails validation. Delivery is fire-and-forget with a five-second timeout after terminal state is recorded.",
+          "x-kiln-path": "training.webhook_url",
+          "x-kiln-type-and-default": "optional string; omitted (None)",
+          "x-kiln-canonical-env": "KILN_TRAINING_WEBHOOK_URL (implemented)",
+          "x-kiln-environment": "KILN_TRAINING_WEBHOOK_URL",
+          "x-kiln-validation": "Must be a non-empty valid HTTP(S) URL. An exactly empty environment value clears a TOML URL; whitespace is not a clearing value and fails validation. Delivery is fire-and-forget with a five-second timeout after terminal state is recorded."
+        },
+        "max_queued_jobs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 32,
+          "description": "Must be greater than zero. At capacity, submissions return HTTP 503 with Retry-After: 30.",
+          "x-kiln-path": "training.max_queued_jobs",
+          "x-kiln-type-and-default": "unsigned integer; 32",
+          "x-kiln-canonical-env": "KILN_TRAINING_MAX_QUEUED_JOBS (implemented)",
+          "x-kiln-environment": "KILN_TRAINING_MAX_QUEUED_JOBS",
+          "x-kiln-validation": "Must be greater than zero. At capacity, submissions return HTTP 503 with Retry-After: 30."
+        },
+        "max_tracked_jobs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1024,
+          "description": "Must be greater than zero and at least max_queued_jobs. Counts queued, running, completed, and failed entries.",
+          "x-kiln-path": "training.max_tracked_jobs",
+          "x-kiln-type-and-default": "unsigned integer; 1024",
+          "x-kiln-canonical-env": "KILN_TRAINING_MAX_TRACKED_JOBS (implemented)",
+          "x-kiln-environment": "KILN_TRAINING_MAX_TRACKED_JOBS",
+          "x-kiln-validation": "Must be greater than zero and at least max_queued_jobs. Counts queued, running, completed, and failed entries."
+        },
+        "tracked_job_ttl_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 604800,
+          "description": "Must be greater than zero. Terminal entries older than the TTL are removed; active jobs are never age-evicted.",
+          "x-kiln-path": "training.tracked_job_ttl_secs",
+          "x-kiln-type-and-default": "unsigned integer; 604800",
+          "x-kiln-canonical-env": "KILN_TRAINING_TRACKED_JOB_TTL_SECS (implemented)",
+          "x-kiln-environment": "KILN_TRAINING_TRACKED_JOB_TTL_SECS",
+          "x-kiln-validation": "Must be greater than zero. Terminal entries older than the TTL are removed; active jobs are never age-evicted."
+        }
+      },
+      "default": {},
+      "x-kiln-dependent-order": [
+        {
+          "less-or-equal": "max_queued_jobs",
+          "greater-or-equal": "max_tracked_jobs"
+        }
+      ]
+    },
+    "logging": {
+      "type": "object",
+      "description": "Tracing filter and output format.",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": "string",
+          "default": "info",
+          "description": "One of trace, debug, info, warn, error, or a valid tracing_subscriber::EnvFilter directive such as kiln=debug,tower_http=warn. RUST_LOG overrides the effective filter but does not make an invalid typed value valid.",
+          "x-kiln-path": "logging.level",
+          "x-kiln-type-and-default": "string; \"info\"",
+          "x-kiln-canonical-env": "KILN_LOGGING_LEVEL (implemented)",
+          "x-kiln-environment": "KILN_LOG_LEVEL (deprecated compatibility)",
+          "x-kiln-validation": "One of trace, debug, info, warn, error, or a valid tracing_subscriber::EnvFilter directive such as kiln=debug,tower_http=warn. RUST_LOG overrides the effective filter but does not make an invalid typed value valid."
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "json",
+            "pretty",
+            "text",
+            "human"
+          ],
+          "default": "auto",
+          "description": "Exactly auto, json, pretty, text, or human. auto is pretty on a stderr TTY and JSON otherwise; text and human select pretty output.",
+          "x-kiln-path": "logging.format",
+          "x-kiln-type-and-default": "string; \"auto\"",
+          "x-kiln-canonical-env": "KILN_LOGGING_FORMAT (implemented)",
+          "x-kiln-environment": "KILN_LOG_FORMAT (deprecated compatibility)",
+          "x-kiln-validation": "Exactly auto, json, pretty, text, or human. auto is pretty on a stderr TTY and JSON otherwise; text and human select pretty output."
+        }
+      },
+      "default": {}
+    },
+    "prefix_cache": {
+      "type": "object",
+      "description": "Shared-prefix KV and recurrent-state retention policy.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enables reuse of KV blocks and recurrent-state snapshots for shared prompt prefixes.",
+          "x-kiln-path": "prefix_cache.enabled",
+          "x-kiln-type-and-default": "boolean; true",
+          "x-kiln-canonical-env": "KILN_PREFIX_CACHE_ENABLED (implemented)",
+          "x-kiln-environment": "KILN_PREFIX_CACHE_ENABLED",
+          "x-kiln-validation": "Enables reuse of KV blocks and recurrent-state snapshots for shared prompt prefixes."
+        },
+        "max_blocks": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Must be greater than zero when set. None resolves to half of the allocated KV block pool.",
+          "x-kiln-path": "prefix_cache.max_blocks",
+          "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
+          "x-kiln-canonical-env": "KILN_PREFIX_CACHE_MAX_BLOCKS (implemented)",
+          "x-kiln-environment": "KILN_PREFIX_CACHE_MAX_BLOCKS",
+          "x-kiln-validation": "Must be greater than zero when set. None resolves to half of the allocated KV block pool."
+        },
+        "max_entries": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Must be greater than zero when set. None resolves from the relevant safe allocation tier and per-entry recurrent-state bytes, with at least one entry. Vulkan reserves this state from the separately bounded host-backed tier before sizing its host-resident KV pool; an explicit count that cannot fit stops startup.",
+          "x-kiln-path": "prefix_cache.max_entries",
+          "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
+          "x-kiln-canonical-env": "KILN_PREFIX_CACHE_MAX_ENTRIES (implemented)",
+          "x-kiln-environment": "KILN_PREFIX_CACHE_MAX_ENTRIES",
+          "x-kiln-validation": "Must be greater than zero when set. None resolves from the relevant safe allocation tier and per-entry recurrent-state bytes, with at least one entry. Vulkan reserves this state from the separately bounded host-backed tier before sizing its host-resident KV pool; an explicit count that cannot fit stops startup."
+        }
+      },
+      "default": {}
+    },
+    "speculative": {
+      "type": "object",
+      "description": "Fail-closed speculative-decoding intent and geometry.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "false forces the effective method to off. For compatibility, true with method = \"off\" selects skip_layer; that effective method is then subject to the fail-closed startup gate below.",
+          "x-kiln-path": "speculative.enabled",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_SPECULATIVE_ENABLED (implemented)",
+          "x-kiln-environment": "KILN_SPEC_ENABLED (deprecated compatibility)",
+          "x-kiln-validation": "false forces the effective method to off. For compatibility, true with method = \"off\" selects skip_layer; that effective method is then subject to the fail-closed startup gate below."
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "off",
+            "skip_layer",
+            "mtp"
+          ],
+          "default": "off",
+          "description": "TOML accepts off, skip_layer, or mtp. The environment parser also accepts none, 0, false; skiplayer, skip-layer, self; and native_mtp, native-mtp. The deprecated method alias also controls enabled when neither enabled spelling is present: non-off enables and off disables. The canonical method name has literal field semantics and does not implicitly enable.",
+          "x-kiln-path": "speculative.method",
+          "x-kiln-type-and-default": "string enum; \"off\"",
+          "x-kiln-canonical-env": "KILN_SPECULATIVE_METHOD (implemented)",
+          "x-kiln-environment": "KILN_SPEC_METHOD (deprecated compatibility)",
+          "x-kiln-validation": "TOML accepts off, skip_layer, or mtp. The environment parser also accepts none, 0, false; skiplayer, skip-layer, self; and native_mtp, native-mtp. The deprecated method alias also controls enabled when neither enabled spelling is present: non-off enables and off disables. The canonical method name has literal field semantics and does not implicitly enable."
+        },
+        "num_speculative_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4,
+          "default": 4,
+          "description": "Draft proposal bound K. Must be in 1..=4; out-of-range values stop startup before accelerator allocation. This conservative ceiling matches the planned local K=1/2/4 qualification matrix and cannot be raised without new accelerator evidence.",
+          "x-kiln-path": "speculative.num_speculative_tokens",
+          "x-kiln-type-and-default": "unsigned integer; 4",
+          "x-kiln-canonical-env": "KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS (implemented)",
+          "x-kiln-environment": "KILN_SPEC_NUM_TOKENS (deprecated compatibility)",
+          "x-kiln-validation": "Draft proposal bound K. Must be in 1..=4; out-of-range values stop startup before accelerator allocation. This conservative ceiling matches the planned local K=1/2/4 qualification matrix and cannot be raised without new accelerator evidence."
+        },
+        "draft_layers": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 8,
+          "description": "Must be greater than zero. When speculative decoding is enabled, model-dependent startup validation also requires this value to be less than the selected model's transformer-layer count. Invalid geometry stops startup; it does not fall back at request time.",
+          "x-kiln-path": "speculative.draft_layers",
+          "x-kiln-type-and-default": "unsigned integer; 8",
+          "x-kiln-canonical-env": "KILN_SPECULATIVE_DRAFT_LAYERS (implemented)",
+          "x-kiln-environment": "KILN_SPEC_DRAFT_LAYERS (deprecated compatibility)",
+          "x-kiln-validation": "Must be greater than zero. When speculative decoding is enabled, model-dependent startup validation also requires this value to be less than the selected model's transformer-layer count. Invalid geometry stops startup; it does not fall back at request time."
+        }
+      },
+      "default": {}
+    },
+    "streaming_prefill": {
+      "type": "object",
+      "description": "Backend-aware streaming-prefill dispatch and tile policy.",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "enabled",
+            "disabled"
+          ],
+          "default": "auto",
+          "description": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto delegates dispatch to backend policy, enabled selects every non-empty prompt, and disabled selects none. The canonical environment name accepts only those three words. Deprecated aliases also accept the strict boolean forms listed above, mapping true to enabled and false to disabled. Legacy TOML enabled = true or enabled = false remains accepted; if mode is also present, both must express the same non-auto intent or startup fails.",
+          "x-kiln-path": "streaming_prefill.mode",
+          "x-kiln-type-and-default": "string enum; \"auto\"",
+          "x-kiln-canonical-env": "KILN_STREAMING_PREFILL_MODE (implemented)",
+          "x-kiln-environment": "KILN_STREAMING_PREFILL and KILN_STREAMING_PREFILL_ENABLED (deprecated compatibility)",
+          "x-kiln-validation": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto delegates dispatch to backend policy, enabled selects every non-empty prompt, and disabled selects none. The canonical environment name accepts only those three words. Deprecated aliases also accept the strict boolean forms listed above, mapping true to enabled and false to disabled. Legacy TOML enabled = true or enabled = false remains accepted; if mode is also present, both must express the same non-auto intent or startup fails."
+        },
+        "threshold_tokens": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ],
+          "default": "auto",
+          "description": "In auto mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. 0, negative values, and strings other than auto fail startup. enabled and disabled modes ignore this crossover for dispatch while retaining it in diagnostics.",
+          "x-kiln-path": "streaming_prefill.threshold_tokens",
+          "x-kiln-type-and-default": "\"auto\" or positive unsigned integer; \"auto\"",
+          "x-kiln-canonical-env": "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS (implemented)",
+          "x-kiln-environment": "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS",
+          "x-kiln-validation": "In auto mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. 0, negative values, and strings other than auto fail startup. enabled and disabled modes ignore this crossover for dispatch while retaining it in diagnostics."
+        },
+        "tile_tokens": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "multipleOf": 64
+            }
+          ],
+          "default": "auto",
+          "description": "Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. When this field is concrete and either specialized tile below is auto, that specialized route inherits this base value rather than its backend default.",
+          "x-kiln-path": "streaming_prefill.tile_tokens",
+          "x-kiln-type-and-default": "\"auto\" or positive unsigned integer; \"auto\"",
+          "x-kiln-canonical-env": "KILN_STREAMING_PREFILL_TILE_TOKENS (implemented)",
+          "x-kiln-environment": "KILN_STREAMING_TILE_TOKENS (deprecated compatibility)",
+          "x-kiln-validation": "Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. When this field is concrete and either specialized tile below is auto, that specialized route inherits this base value rather than its backend default."
+        },
+        "tape_tile_tokens": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "multipleOf": 64
+            }
+          ],
+          "default": "auto",
+          "description": "Tile used by tape-authoritative training forward paths. Concrete values must be positive multiples of 64. auto inherits an explicit tile_tokens; when both are auto, backend policy owns the value.",
+          "x-kiln-path": "streaming_prefill.tape_tile_tokens",
+          "x-kiln-type-and-default": "\"auto\" or positive unsigned integer; \"auto\"",
+          "x-kiln-canonical-env": "KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS (implemented)",
+          "x-kiln-environment": "KILN_TAPE_STREAMING_TILE_TOKENS (deprecated compatibility)",
+          "x-kiln-validation": "Tile used by tape-authoritative training forward paths. Concrete values must be positive multiples of 64. auto inherits an explicit tile_tokens; when both are auto, backend policy owns the value."
+        },
+        "detached_full_attn_tile_tokens": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "multipleOf": 64
+            }
+          ],
+          "default": "auto",
+          "description": "Tile for detached materialized full-attention training work. A concrete value also controls its derived boundary-forward and tape-replay variants. auto inherits an explicit tile_tokens; when both are auto, each variant keeps its backend default. Every concrete value must be a positive multiple of 64.",
+          "x-kiln-path": "streaming_prefill.detached_full_attn_tile_tokens",
+          "x-kiln-type-and-default": "\"auto\" or positive unsigned integer; \"auto\"",
+          "x-kiln-canonical-env": "KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS (implemented)",
+          "x-kiln-environment": "KILN_DETACHED_FULL_ATTN_TILE_TOKENS (deprecated compatibility)",
+          "x-kiln-validation": "Tile for detached materialized full-attention training work. A concrete value also controls its derived boundary-forward and tape-replay variants. auto inherits an explicit tile_tokens; when both are auto, each variant keeps its backend default. Every concrete value must be a positive multiple of 64."
+        },
+        "last_token_lm_head": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, the final inference streaming tile computes the LM head only for its last row. All centralized strict boolean spellings, including on and off, work identically.",
+          "x-kiln-path": "streaming_prefill.last_token_lm_head",
+          "x-kiln-type-and-default": "boolean; true",
+          "x-kiln-canonical-env": "KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD (implemented)",
+          "x-kiln-environment": "KILN_STREAMING_LAST_TOKEN_LM_HEAD (deprecated compatibility)",
+          "x-kiln-validation": "When true, the final inference streaming tile computes the LM head only for its last row. All centralized strict boolean spellings, including on and off, work identically."
+        },
+        "enabled": {
+          "type": "boolean",
+          "deprecated": true,
+          "description": "Deprecated TOML compatibility input. Use streaming_prefill.mode; when both are present they must express the same non-auto intent.",
+          "x-kiln-path": "streaming_prefill.enabled",
+          "x-kiln-type-and-default": "deprecated compatibility boolean; omitted",
+          "x-kiln-canonical-env": "none; use KILN_STREAMING_PREFILL_MODE",
+          "x-kiln-environment": "TOML compatibility only",
+          "x-kiln-validation": "Deprecated TOML compatibility input. Maps true to enabled and false to disabled. Conflicts with an explicit mode stop startup."
+        }
+      },
+      "default": {},
+      "x-kiln-compatible-mode-toggle": {
+        "mode": "mode",
+        "toggle": "enabled",
+        "true-value": "enabled",
+        "false-value": "disabled"
+      }
+    },
+    "adapters": {
+      "type": "object",
+      "description": "Finalized adapter and composed-cache disk limits.",
+      "additionalProperties": false,
+      "properties": {
+        "max_disk_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 107374182400,
+          "description": "Caps finalized adapter bytes under adapter_dir, excluding upload staging and the composed cache. For the environment alias only, empty or 0 means None and disables the cap. TOML 0 is accepted as a literal zero cap, not as None.",
+          "x-kiln-path": "adapters.max_disk_bytes",
+          "x-kiln-type-and-default": "optional unsigned integer; 107374182400 (100 GiB)",
+          "x-kiln-canonical-env": "KILN_ADAPTERS_MAX_DISK_BYTES (implemented)",
+          "x-kiln-environment": "KILN_ADAPTERS_MAX_DISK_BYTES",
+          "x-kiln-validation": "Caps finalized adapter bytes under adapter_dir, excluding upload staging and the composed cache. For the environment alias only, empty or 0 means None and disables the cap. TOML 0 is accepted as a literal zero cap, not as None."
+        },
+        "composed_cache_max_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 10737418240,
+          "description": "LRU byte cap for .composed. Environment empty or 0 disables this dimension; TOML 0 remains a zero cap.",
+          "x-kiln-path": "adapters.composed_cache_max_bytes",
+          "x-kiln-type-and-default": "optional unsigned integer; 10737418240 (10 GiB)",
+          "x-kiln-canonical-env": "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES (implemented)",
+          "x-kiln-environment": "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES",
+          "x-kiln-validation": "LRU byte cap for .composed. Environment empty or 0 disables this dimension; TOML 0 remains a zero cap."
+        },
+        "composed_cache_max_entries": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 64,
+          "description": "LRU entry-count cap for .composed. Environment empty or 0 disables this dimension; TOML 0 remains a zero cap.",
+          "x-kiln-path": "adapters.composed_cache_max_entries",
+          "x-kiln-type-and-default": "optional unsigned integer; 64",
+          "x-kiln-canonical-env": "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES (implemented)",
+          "x-kiln-environment": "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES",
+          "x-kiln-validation": "LRU entry-count cap for .composed. Environment empty or 0 disables this dimension; TOML 0 remains a zero cap."
+        }
+      },
+      "default": {}
+    },
+    "eval": {
+      "type": "object",
+      "description": "Evaluation registry, queue, retention, and webhook policy.",
+      "additionalProperties": false,
+      "properties": {
+        "eval_dir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must be non-empty when set. Despite the historical field name, runtime treats it as the shared eval root and creates the three registry subdirectories below it.",
+          "x-kiln-path": "eval.eval_dir",
+          "x-kiln-type-and-default": "optional path string; omitted (None)",
+          "x-kiln-canonical-env": "KILN_EVAL_EVAL_DIR (target only; not implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Must be non-empty when set. Despite the historical field name, runtime treats it as the shared eval root and creates the three registry subdirectories below it."
+        },
+        "max_queued_jobs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 32,
+          "description": "Must be greater than zero.",
+          "x-kiln-path": "eval.max_queued_jobs",
+          "x-kiln-type-and-default": "unsigned integer; 32",
+          "x-kiln-canonical-env": "KILN_EVAL_MAX_QUEUED_JOBS (target only; not implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Must be greater than zero."
+        },
+        "max_tracked_jobs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1024,
+          "description": "Must be greater than zero and at least max_queued_jobs.",
+          "x-kiln-path": "eval.max_tracked_jobs",
+          "x-kiln-type-and-default": "unsigned integer; 1024",
+          "x-kiln-canonical-env": "KILN_EVAL_MAX_TRACKED_JOBS (target only; not implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Must be greater than zero and at least max_queued_jobs."
+        },
+        "webhook_url": {
+          "type": "string",
+          "minLength": 1,
+          "format": "uri",
+          "pattern": "^https?://",
+          "description": "Must be a non-empty valid HTTP(S) URL. Terminal eval notifications are fire-and-forget.",
+          "x-kiln-path": "eval.webhook_url",
+          "x-kiln-type-and-default": "optional string; omitted (None)",
+          "x-kiln-canonical-env": "KILN_EVAL_WEBHOOK_URL (target only; not implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Must be a non-empty valid HTTP(S) URL. Terminal eval notifications are fire-and-forget."
+        }
+      },
+      "default": {},
+      "x-kiln-dependent-order": [
+        {
+          "less-or-equal": "max_queued_jobs",
+          "greater-or-equal": "max_tracked_jobs"
+        }
+      ]
+    },
+    "request_log": {
+      "type": "object",
+      "description": "Durable bounded inference request/response logging.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch. Initialization failure logs a warning and disables logging rather than aborting an otherwise valid server startup.",
+          "x-kiln-path": "request_log.enabled",
+          "x-kiln-type-and-default": "boolean; true",
+          "x-kiln-canonical-env": "KILN_REQUEST_LOG_ENABLED (implemented)",
+          "x-kiln-environment": "KILN_REQUEST_LOG_ENABLED",
+          "x-kiln-validation": "Master switch. Initialization failure logs a warning and disables logging rather than aborting an otherwise valid server startup."
+        },
+        "dir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must be non-empty when set. None resolves to <adapter_dir>/.requests. The environment alias cannot clear a TOML directory; an empty value is fatal.",
+          "x-kiln-path": "request_log.dir",
+          "x-kiln-type-and-default": "optional path string; omitted (None)",
+          "x-kiln-canonical-env": "KILN_REQUEST_LOG_DIR (implemented)",
+          "x-kiln-environment": "KILN_REQUEST_LOG_DIR",
+          "x-kiln-validation": "Must be non-empty when set. None resolves to <adapter_dir>/.requests. The environment alias cannot clear a TOML directory; an empty value is fatal."
+        },
+        "max_file_bytes": {
+          "type": "integer",
+          "minimum": 4096,
+          "default": 67108864,
+          "description": "Must be at least 4096. The active JSONL file rotates after reaching the threshold.",
+          "x-kiln-path": "request_log.max_file_bytes",
+          "x-kiln-type-and-default": "unsigned integer; 67108864 (64 MiB)",
+          "x-kiln-canonical-env": "KILN_REQUEST_LOG_MAX_FILE_BYTES (implemented)",
+          "x-kiln-environment": "KILN_REQUEST_LOG_MAX_FILE_BYTES",
+          "x-kiln-validation": "Must be at least 4096. The active JSONL file rotates after reaching the threshold."
+        },
+        "max_total_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2147483648,
+          "description": "Must be greater than zero. Oldest rotated files are removed until retained bytes fit. There is no validation requiring this value to exceed max_file_bytes.",
+          "x-kiln-path": "request_log.max_total_bytes",
+          "x-kiln-type-and-default": "unsigned integer; 2147483648 (2 GiB)",
+          "x-kiln-canonical-env": "KILN_REQUEST_LOG_MAX_TOTAL_BYTES (implemented)",
+          "x-kiln-environment": "KILN_REQUEST_LOG_MAX_TOTAL_BYTES",
+          "x-kiln-validation": "Must be greater than zero. Oldest rotated files are removed until retained bytes fit. There is no validation requiring this value to exceed max_file_bytes."
+        },
+        "compress": {
+          "type": "boolean",
+          "default": true,
+          "description": "Gzip rotated files when true.",
+          "x-kiln-path": "request_log.compress",
+          "x-kiln-type-and-default": "boolean; true",
+          "x-kiln-canonical-env": "KILN_REQUEST_LOG_COMPRESS (implemented)",
+          "x-kiln-environment": "KILN_REQUEST_LOG_COMPRESS",
+          "x-kiln-validation": "Gzip rotated files when true."
+        },
+        "max_capture_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4194304,
+          "description": "Must be greater than zero. Per-request and per-response storage cap; truncation affects the log only, never the wire response.",
+          "x-kiln-path": "request_log.max_capture_bytes",
+          "x-kiln-type-and-default": "unsigned integer; 4194304 (4 MiB)",
+          "x-kiln-canonical-env": "KILN_REQUEST_LOG_MAX_CAPTURE_BYTES (implemented)",
+          "x-kiln-environment": "KILN_REQUEST_LOG_MAX_CAPTURE_BYTES",
+          "x-kiln-validation": "Must be greater than zero. Per-request and per-response storage cap; truncation affects the log only, never the wire response."
+        }
+      },
+      "default": {}
+    },
+    "agent": {
+      "type": "object",
+      "description": "Self-improvement schedule and embedded agent-run limits.",
+      "additionalProperties": false,
+      "properties": {
+        "self_improve_interval_hours": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Omission disables scheduling. 0 is accepted and also results in no scheduler. The first run occurs one full interval after startup; cadence is persisted under the adapter directory.",
+          "x-kiln-path": "agent.self_improve_interval_hours",
+          "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
+          "x-kiln-canonical-env": "KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS (target only; not implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Omission disables scheduling. 0 is accepted and also results in no scheduler. The first run occurs one full interval after startup; cadence is persisted under the adapter directory."
+        },
+        "self_improve": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Request template submitted to the same self-improvement path as the API. This value is intentionally open structured data; its inner request contract is validated by that subsystem rather than by KilnConfig.",
+          "x-kiln-path": "agent.self_improve",
+          "x-kiln-type-and-default": "optional structured value; omitted (None)",
+          "x-kiln-canonical-env": "KILN_AGENT_SELF_IMPROVE (target only; not implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Request template submitted to the same self-improvement path as the API. This value is intentionally open structured data; its inner request contract is validated by that subsystem rather than by KilnConfig."
+        },
+        "max_concurrent_runs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2,
+          "description": "Must be greater than zero. Embedded pi runs above the limit queue FIFO.",
+          "x-kiln-path": "agent.max_concurrent_runs",
+          "x-kiln-type-and-default": "unsigned integer; 2",
+          "x-kiln-canonical-env": "KILN_AGENT_MAX_CONCURRENT_RUNS (target only; not implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Must be greater than zero. Embedded pi runs above the limit queue FIFO."
+        },
+        "run_timeout_secs": {
+          "type": "integer",
+          "minimum": 10,
+          "default": 900,
+          "description": "Must be at least 10. A per-run timeout can override the server default.",
+          "x-kiln-path": "agent.run_timeout_secs",
+          "x-kiln-type-and-default": "unsigned integer; 900",
+          "x-kiln-canonical-env": "KILN_AGENT_RUN_TIMEOUT_SECS (target only; not implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Must be at least 10. A per-run timeout can override the server default."
+        }
+      },
+      "default": {}
+    },
+    "teacher_credential": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin",
+        "api_key_env"
+      ],
+      "properties": {
+        "origin": {
+          "type": "string",
+          "description": "Must be the exact canonical scheme://host[:port] origin, with no path, query, fragment, or embedded credentials. HTTPS is required unless the host is loopback.",
+          "x-kiln-path": "teachers.credentials.<id>.origin",
+          "x-kiln-type-and-default": "required string for each entry; no entries by default",
+          "x-kiln-canonical-env": "none; structured trust policy is TOML-only",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Must be the exact canonical scheme://host[:port] origin, with no path, query, fragment, or embedded credentials. HTTPS is required unless the host is loopback.",
+          "format": "uri",
+          "minLength": 1
+        },
+        "api_key_env": {
+          "type": "string",
+          "description": "Must match [A-Za-z_][A-Za-z0-9_]*, length 1..=128. The named variable must exist and contain a non-whitespace value at startup.",
+          "x-kiln-path": "teachers.credentials.<id>.api_key_env",
+          "x-kiln-type-and-default": "required string for each entry",
+          "x-kiln-canonical-env": "none; this value names the secret variable",
+          "x-kiln-environment": "the named secret variable itself",
+          "x-kiln-validation": "Must match [A-Za-z_][A-Za-z0-9_]*, length 1..=128. The named variable must exist and contain a non-whitespace value at startup.",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+        }
+      }
+    },
+    "teachers": {
+      "type": "object",
+      "description": "Server-owned remote-teacher credential handles and authorized origins.",
+      "additionalProperties": false,
+      "properties": {
+        "credentials": {
+          "type": "object",
+          "default": {},
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_-]{1,64}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/teacher_credential"
+          },
+          "description": "Opaque credential handles mapped to one exact authorized origin and one secret environment-variable name."
+        }
+      },
+      "default": {}
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "accelerator": {
+            "properties": {
+              "rocm_synchronization_mode": {
+                "const": "stream_ordered"
+              }
+            },
+            "required": [
+              "rocm_synchronization_mode"
+            ]
+          }
+        },
+        "required": [
+          "accelerator"
+        ]
+      },
+      "then": {
+        "properties": {
+          "server": {
+            "properties": {
+              "serving_profile": {
+                "const": "experimental"
+              }
+            },
+            "required": [
+              "serving_profile"
+            ]
+          }
+        },
+        "required": [
+          "server"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "accelerator": {
+            "properties": {
+              "rocm_graph_mode": {
+                "enum": [
+                  "warmup_then_eager",
+                  "lazy_capture_replay"
+                ]
+              }
+            },
+            "required": [
+              "rocm_graph_mode"
+            ]
+          }
+        },
+        "required": [
+          "accelerator"
+        ]
+      },
+      "then": {
+        "properties": {
+          "server": {
+            "properties": {
+              "serving_profile": {
+                "const": "experimental"
+              }
+            },
+            "required": [
+              "serving_profile"
+            ]
+          }
+        },
+        "required": [
+          "server"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "memory": {
+            "properties": {
+              "kv_force_blocks": {
+                "minimum": 1
+              }
+            },
+            "required": [
+              "kv_force_blocks"
+            ]
+          }
+        },
+        "required": [
+          "memory"
+        ]
+      },
+      "then": {
+        "properties": {
+          "server": {
+            "properties": {
+              "serving_profile": {
+                "const": "maintenance"
+              }
+            },
+            "required": [
+              "serving_profile"
+            ]
+          },
+          "memory": {
+            "properties": {
+              "kv_autoscale": {
+                "const": true
+              }
+            },
+            "required": [
+              "kv_autoscale"
+            ]
+          }
+        },
+        "required": [
+          "server",
+          "memory"
+        ]
+      }
+    }
+  ],
+  "x-kiln-field-count": 92,
+  "x-kiln-dynamic-field-template-count": 2,
+  "x-kiln-canonical-environment-count": 84,
+  "x-kiln-config-file-only-count": 8,
+  "x-kiln-compatibility-field-count": 60,
+  "x-kiln-compatibility-alias-count": 63,
+  "x-kiln-toml-compatibility-field-count": 1
+}

@@ -5,6 +5,12 @@ configuration. It describes the configuration accepted by the current
 `KilnConfig` and `RequestLogConfig` implementations, including current defaults,
 validation, working environment-variable aliases, and runtime provenance.
 
+The machine-readable contract is
+[`contracts/kiln-config-v1.schema.json`](../contracts/kiln-config-v1.schema.json).
+The documentation website renders its complete field reference directly from
+that schema. `python3 scripts/check_config_schema.py --self-test` verifies that
+the schema, these tables, and `kiln.example.toml` agree.
+
 Kiln's intended public environment-variable naming rule is mechanical:
 
 ```text
@@ -113,18 +119,20 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 90 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 92 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 90 fixed fields:
+credential. Of the 92 fixed fields:
 
-- 82 implement the canonical mechanical environment name;
-- 58 also retain one or more deprecated compatibility spellings (61 aliases
+- 84 implement the canonical mechanical environment name;
+- 60 also retain one or more deprecated compatibility spellings (63 aliases
   total);
 - 8 are config-file-only and have no environment override;
-- the 61 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+- the 63 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 90 fixed fields and both dynamic credential fields.
+The tables below cover all 92 fixed fields and both dynamic credential fields.
+The schema additionally records the accepted deprecated TOML-only
+`streaming_prefill.enabled` compatibility field so validators match the loader.
 
 ## `[server]`
 

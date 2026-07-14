@@ -270,7 +270,26 @@ function schemaFieldTable(schema) {
     return '_This schema node has no named object fields._\n';
   }
   const required = new Set(Array.isArray(schema.required) ? schema.required : []);
-  const rows = Object.entries(properties).map(([name, field]) => {
+  const entries = Object.entries(properties);
+  const hasKilnConfigMetadata = entries.length > 0
+    && entries.every(([, field]) => nonEmptyString(field?.['x-kiln-path']));
+  if (hasKilnConfigMetadata) {
+    const rows = entries.map(([name, field]) => {
+      const path = field?.['x-kiln-path'] ?? name;
+      const typeAndDefault = field?.['x-kiln-type-and-default'] ?? schemaType(field);
+      const canonicalEnvironment = field?.['x-kiln-canonical-env'] ?? '';
+      const environment = field?.['x-kiln-environment'] ?? '';
+      const validation = field?.['x-kiln-validation'] ?? field?.description ?? '';
+      return `| \`${markdownTableCell(path)}\` | ${required.has(name) ? 'yes' : 'no'} | ${markdownTableCell(typeAndDefault)} | \`${markdownTableCell(canonicalEnvironment)}\` | ${markdownTableCell(environment)} | ${markdownTableCell(validation)} |`;
+    });
+    return [
+      '| Field | Required | Type and default | Canonical environment target | Compatibility input | Validation and semantics |',
+      '| --- | --- | --- | --- | --- | --- |',
+      ...rows,
+      '',
+    ].join('\n');
+  }
+  const rows = entries.map(([name, field]) => {
     const description = field?.description ?? field?.title ?? '';
     return `| \`${markdownTableCell(name)}\` | ${required.has(name) ? 'yes' : 'no'} | \`${markdownTableCell(schemaType(field))}\` | ${markdownTableCell(schemaConstraints(field).join('; '))} | ${markdownTableCell(description)} |`;
   });
@@ -318,6 +337,7 @@ function renderJsonSchemaMarkdown(schema, document) {
   if (nonEmptyString(schema.description)) lines.push(schema.description.trim(), '');
   lines.push('## Schema identity', '');
   lines.push('| Property | Value |', '| --- | --- |');
+  if (nonEmptyString(schema.title)) lines.push(`| Title | ${markdownTableCell(schema.title)} |`);
   if (nonEmptyString(schema.$id)) lines.push(`| \`$id\` | \`${markdownTableCell(schema.$id)}\` |`);
   if (nonEmptyString(schema.$schema)) lines.push(`| Dialect | \`${markdownTableCell(schema.$schema)}\` |`);
   lines.push(`| Root type | \`${markdownTableCell(schemaType(schema))}\` |`);
