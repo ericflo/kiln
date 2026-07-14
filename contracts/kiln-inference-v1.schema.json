@@ -287,7 +287,8 @@
         "decode_tokens_per_sec",
         "adapter_used",
         "thinking_mode",
-        "finish_reason"
+        "finish_reason",
+        "latency"
       ],
       "properties": {
         "prompt_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
@@ -302,7 +303,13 @@
         "decode_tokens_per_sec": { "$ref": "#/$defs/NullableNonNegativeNumber" },
         "adapter_used": { "type": "string" },
         "thinking_mode": { "type": "string" },
-        "finish_reason": { "$ref": "#/$defs/FinishReason" }
+        "finish_reason": { "$ref": "#/$defs/FinishReason" },
+        "latency": {
+          "anyOf": [
+            { "$ref": "#/$defs/RequestLatencyDiagnostics" },
+            { "type": "null" }
+          ]
+        }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "ChatCompletionPerformanceMetadata"
@@ -568,6 +575,59 @@
       "enum": ["error", "length", "stop", "tool_calls"],
       "description": "Why generation ended. error is used for per-item batch failures; ordinary model termination emits stop, length, or tool_calls."
     },
+    "LatencyPhaseTimings": {
+      "type": "object",
+      "required": [
+        "actor_queue_ms", "actor_admission_ms", "tokenization_ms", "prefill_ms",
+        "decode_ms", "sampling_ms", "readback_ms", "response_delivery_ms",
+        "handler_queue_ms", "client_delivery_ms", "gpu_lock_wait_ms",
+        "graph_capture_ms", "graph_replay_ms", "synchronization_ms", "resize_ms",
+        "trim_ms", "adapter_ms", "training_ms", "unexplained_ms"
+      ],
+      "properties": {
+        "actor_queue_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "actor_admission_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "tokenization_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "prefill_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "decode_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "sampling_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "readback_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "response_delivery_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "handler_queue_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "client_delivery_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "gpu_lock_wait_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "graph_capture_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "graph_replay_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "synchronization_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "resize_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "trim_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "adapter_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "training_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "unexplained_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" }
+      },
+      "additionalProperties": false,
+      "description": "Bounded request phase timings; null means the serving path did not measure that subphase.",
+      "x-kiln-rust-type": "LatencyPhaseTimings"
+    },
+    "LatencyStallReasonCounts": {
+      "type": "object",
+      "required": [
+        "actor_queue", "actor_admission", "actor_prefill", "actor_decode",
+        "response_delivery", "handler_queue", "client_delivery", "unexplained"
+      ],
+      "properties": {
+        "actor_queue": { "$ref": "#/$defs/NonNegativeInteger" },
+        "actor_admission": { "$ref": "#/$defs/NonNegativeInteger" },
+        "actor_prefill": { "$ref": "#/$defs/NonNegativeInteger" },
+        "actor_decode": { "$ref": "#/$defs/NonNegativeInteger" },
+        "response_delivery": { "$ref": "#/$defs/NonNegativeInteger" },
+        "handler_queue": { "$ref": "#/$defs/NonNegativeInteger" },
+        "client_delivery": { "$ref": "#/$defs/NonNegativeInteger" },
+        "unexplained": { "$ref": "#/$defs/NonNegativeInteger" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "LatencyStallReasonCounts"
+    },
     "NonNegativeInteger": {
       "type": "integer",
       "minimum": 0
@@ -657,6 +717,33 @@
       "additionalProperties": { "$ref": "#/$defs/PromptLogprobEntry" },
       "description": "Map from decimal token ID strings to the observed/top-K log-probability entry.",
       "x-kiln-rust-type": "BTreeMap<String, PromptLogprobEntry>"
+    },
+    "RequestLatencyDiagnostics": {
+      "type": "object",
+      "required": [
+        "emitted_tokens", "gap_samples", "retained_gap_samples", "gap_samples_truncated",
+        "ttft_ms", "itl_ms_p50", "itl_ms_p99", "itl_ms_p999", "max_itl_ms",
+        "stall_threshold_ms", "stall_count", "unexplained_stall_count", "stall_reasons", "phases"
+      ],
+      "properties": {
+        "emitted_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
+        "gap_samples": { "$ref": "#/$defs/NonNegativeInteger" },
+        "retained_gap_samples": { "type": "integer", "minimum": 0, "maximum": 8192 },
+        "gap_samples_truncated": { "type": "boolean" },
+        "ttft_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "itl_ms_p50": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "itl_ms_p99": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "itl_ms_p999": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "max_itl_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "stall_threshold_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "stall_count": { "$ref": "#/$defs/NonNegativeInteger" },
+        "unexplained_stall_count": { "$ref": "#/$defs/NonNegativeInteger" },
+        "stall_reasons": { "$ref": "#/$defs/LatencyStallReasonCounts" },
+        "phases": { "$ref": "#/$defs/LatencyPhaseTimings" }
+      },
+      "additionalProperties": false,
+      "description": "Request-local TTFT, ITL tail, bounded stall reasons, and honest phase-coverage diagnostics.",
+      "x-kiln-rust-type": "RequestLatencyDiagnostics"
     },
     "RolloutActionTokenV1": {
       "oneOf": [
@@ -910,15 +997,39 @@
         "object",
         "token_index",
         "ready_ms",
+        "actor_delivered_ms",
         "handler_received_ms",
-        "queue_delay_ms"
+        "body_enqueued_ms",
+        "response_delivery_ms",
+        "handler_queue_ms",
+        "queue_delay_ms",
+        "client_delivery_ms",
+        "blocking_phase",
+        "blocking_phase_ms"
       ],
       "properties": {
         "object": { "const": "kiln.token_timing" },
         "token_index": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "ready_ms": { "type": "number", "minimum": 0 },
+        "actor_delivered_ms": { "type": "number", "minimum": 0 },
         "handler_received_ms": { "type": "number", "minimum": 0 },
-        "queue_delay_ms": { "type": "number", "minimum": 0 }
+        "body_enqueued_ms": { "type": "number", "minimum": 0 },
+        "response_delivery_ms": { "type": "number", "minimum": 0 },
+        "handler_queue_ms": { "type": "number", "minimum": 0 },
+        "queue_delay_ms": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Compatibility aggregate equal to response_delivery_ms + handler_queue_ms."
+        },
+        "client_delivery_ms": { "type": "number", "minimum": 0 },
+        "blocking_phase": {
+          "type": ["string", "null"],
+          "enum": [
+            "actor_queue", "actor_admission", "actor_prefill", "actor_decode",
+            "response_delivery", "handler_queue", "client_delivery", "unexplained", null
+          ]
+        },
+        "blocking_phase_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "StreamingTokenTiming"
@@ -1217,8 +1328,15 @@
         "object": "kiln.token_timing",
         "token_index": 0,
         "ready_ms": 12.5,
+        "actor_delivered_ms": 12.6,
         "handler_received_ms": 12.8,
-        "queue_delay_ms": 0.3
+        "body_enqueued_ms": 13.0,
+        "response_delivery_ms": 0.1,
+        "handler_queue_ms": 0.2,
+        "queue_delay_ms": 0.3,
+        "client_delivery_ms": 0.2,
+        "blocking_phase": null,
+        "blocking_phase_ms": null
       }
     ],
     "TextCompletionRequest": [

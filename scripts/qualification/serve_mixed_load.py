@@ -607,8 +607,15 @@ def parse_token_timing(
         "object",
         "token_index",
         "ready_ms",
+        "actor_delivered_ms",
         "handler_received_ms",
+        "body_enqueued_ms",
+        "response_delivery_ms",
+        "handler_queue_ms",
         "queue_delay_ms",
+        "client_delivery_ms",
+        "blocking_phase",
+        "blocking_phase_ms",
     }:
         raise QualificationError("token timing object has an unexpected shape")
     token_index = value["token_index"]
@@ -621,7 +628,16 @@ def parse_token_timing(
             f"token timing index {token_index!r} does not match expected {expected_index}"
         )
     numbers: dict[str, float] = {}
-    for field in ("ready_ms", "handler_received_ms", "queue_delay_ms"):
+    for field in (
+        "ready_ms",
+        "actor_delivered_ms",
+        "handler_received_ms",
+        "body_enqueued_ms",
+        "response_delivery_ms",
+        "handler_queue_ms",
+        "queue_delay_ms",
+        "client_delivery_ms",
+    ):
         raw = value[field]
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             raise QualificationError(f"token timing {field} is not numeric")
@@ -629,8 +645,12 @@ def parse_token_timing(
         if not math.isfinite(number) or number < 0:
             raise QualificationError(f"token timing {field} is not finite and nonnegative")
         numbers[field] = number
-    if numbers["handler_received_ms"] + 1e-6 < numbers["ready_ms"]:
-        raise QualificationError("token timing handler timestamp precedes ready timestamp")
+    if numbers["actor_delivered_ms"] + 1e-6 < numbers["ready_ms"]:
+        raise QualificationError("token timing actor-delivered timestamp precedes ready timestamp")
+    if numbers["handler_received_ms"] + 1e-6 < numbers["actor_delivered_ms"]:
+        raise QualificationError("token timing handler timestamp precedes actor delivery")
+    if numbers["body_enqueued_ms"] + 1e-6 < numbers["handler_received_ms"]:
+        raise QualificationError("token timing body enqueue precedes handler receipt")
     if previous_ready_ms is not None and numbers["ready_ms"] < previous_ready_ms:
         raise QualificationError(
             f"token timing ready_ms regressed from {previous_ready_ms} "
@@ -639,6 +659,39 @@ def parse_token_timing(
     expected_delay = numbers["handler_received_ms"] - numbers["ready_ms"]
     if abs(numbers["queue_delay_ms"] - expected_delay) > 0.05:
         raise QualificationError("token timing queue delay is internally inconsistent")
+    expected_response_delivery = numbers["actor_delivered_ms"] - numbers["ready_ms"]
+    if abs(numbers["response_delivery_ms"] - expected_response_delivery) > 0.05:
+        raise QualificationError("token timing response delivery is internally inconsistent")
+    expected_handler_queue = numbers["handler_received_ms"] - numbers["actor_delivered_ms"]
+    if abs(numbers["handler_queue_ms"] - expected_handler_queue) > 0.05:
+        raise QualificationError("token timing handler queue is internally inconsistent")
+    expected_client_delivery = numbers["body_enqueued_ms"] - numbers["handler_received_ms"]
+    if abs(numbers["client_delivery_ms"] - expected_client_delivery) > 0.05:
+        raise QualificationError("token timing client delivery is internally inconsistent")
+    blocking_phase = value["blocking_phase"]
+    blocking_phase_ms = value["blocking_phase_ms"]
+    valid_phases = {
+        "actor_queue", "actor_admission", "actor_prefill", "actor_decode",
+        "response_delivery", "handler_queue", "client_delivery", "unexplained",
+    }
+    if blocking_phase is None:
+        if blocking_phase_ms is not None:
+            raise QualificationError("token timing null blocking phase has a duration")
+        if previous_ready_ms is not None:
+            raise QualificationError("token timing after the first token lacks a blocking phase")
+    elif blocking_phase not in valid_phases:
+        raise QualificationError("token timing blocking phase is not bounded")
+    elif (
+        isinstance(blocking_phase_ms, bool)
+        or not isinstance(blocking_phase_ms, (int, float))
+        or not math.isfinite(float(blocking_phase_ms))
+        or float(blocking_phase_ms) < 0
+    ):
+        raise QualificationError("token timing blocking phase duration is invalid")
+    elif previous_ready_ms is None:
+        raise QualificationError("first token timing unexpectedly has a blocking phase")
+    elif float(blocking_phase_ms) > numbers["ready_ms"] - previous_ready_ms + 0.05:
+        raise QualificationError("token timing blocking phase exceeds its request-local gap")
     return numbers["ready_ms"], numbers["queue_delay_ms"]
 
 
@@ -656,7 +709,104 @@ PERFORMANCE_METADATA_FIELDS = {
     "adapter_used",
     "thinking_mode",
     "finish_reason",
+    "latency",
 }
+
+LATENCY_DIAGNOSTIC_FIELDS = {
+    "emitted_tokens", "gap_samples", "retained_gap_samples", "gap_samples_truncated",
+    "ttft_ms", "itl_ms_p50", "itl_ms_p99", "itl_ms_p999", "max_itl_ms",
+    "stall_threshold_ms", "stall_count", "unexplained_stall_count", "stall_reasons", "phases",
+}
+LATENCY_PHASE_FIELDS = {
+    "actor_queue_ms", "actor_admission_ms", "tokenization_ms", "prefill_ms", "decode_ms",
+    "sampling_ms", "readback_ms", "response_delivery_ms", "handler_queue_ms",
+    "client_delivery_ms", "gpu_lock_wait_ms", "graph_capture_ms", "graph_replay_ms",
+    "synchronization_ms", "resize_ms", "trim_ms", "adapter_ms", "training_ms", "unexplained_ms",
+}
+LATENCY_REASON_FIELDS = {
+    "actor_queue", "actor_admission", "actor_prefill", "actor_decode", "response_delivery",
+    "handler_queue", "client_delivery", "unexplained",
+}
+
+
+def validate_request_latency(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != LATENCY_DIAGNOSTIC_FIELDS:
+        raise QualificationError("request latency diagnostics have an unexpected shape")
+    for field in (
+        "emitted_tokens", "gap_samples", "retained_gap_samples", "stall_count",
+        "unexplained_stall_count",
+    ):
+        raw = value[field]
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise QualificationError(f"request latency {field} is not a nonnegative integer")
+    if not isinstance(value["gap_samples_truncated"], bool):
+        raise QualificationError("request latency gap_samples_truncated is not boolean")
+    if value["retained_gap_samples"] > value["gap_samples"]:
+        raise QualificationError("request latency retained gaps exceed total gaps")
+    expected_gaps = max(0, value["emitted_tokens"] - 1)
+    if value["gap_samples"] != expected_gaps:
+        raise QualificationError("request latency gap count does not match emitted tokens")
+    expected_retained = min(value["gap_samples"], 8192)
+    if value["retained_gap_samples"] != expected_retained:
+        raise QualificationError("request latency retained gap count violates its bound")
+    if value["gap_samples_truncated"] != (value["gap_samples"] > 8192):
+        raise QualificationError("request latency truncation flag is inconsistent")
+    for field in (
+        "ttft_ms", "itl_ms_p50", "itl_ms_p99", "itl_ms_p999", "max_itl_ms",
+        "stall_threshold_ms",
+    ):
+        raw = value[field]
+        if raw is None:
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise QualificationError(f"request latency {field} is not nullable numeric")
+        if not math.isfinite(float(raw)) or float(raw) < 0:
+            raise QualificationError(f"request latency {field} is not finite and nonnegative")
+    reasons = value["stall_reasons"]
+    if not isinstance(reasons, dict) or set(reasons) != LATENCY_REASON_FIELDS:
+        raise QualificationError("request latency stall reasons have an unexpected shape")
+    for field, raw in reasons.items():
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise QualificationError(f"request latency stall reason {field} is invalid")
+    if sum(reasons.values()) != value["stall_count"]:
+        raise QualificationError("request latency stall reason counts do not sum to stall_count")
+    if reasons["unexplained"] != value["unexplained_stall_count"]:
+        raise QualificationError("request latency unexplained stall count is inconsistent")
+    if value["stall_count"] > value["retained_gap_samples"]:
+        raise QualificationError("request latency stalls exceed retained gaps")
+    if value["emitted_tokens"] == 0 and value["ttft_ms"] is not None:
+        raise QualificationError("request latency without tokens has TTFT")
+    if value["emitted_tokens"] > 0 and value["ttft_ms"] is None:
+        raise QualificationError("request latency with tokens lacks TTFT")
+    percentile_fields = ("itl_ms_p50", "itl_ms_p99", "itl_ms_p999", "max_itl_ms")
+    percentile_values = [value[field] for field in percentile_fields]
+    if value["retained_gap_samples"] == 0:
+        if any(number is not None for number in percentile_values):
+            raise QualificationError("request latency without gaps has ITL percentiles")
+        if value["stall_threshold_ms"] is not None or value["stall_count"] != 0:
+            raise QualificationError("request latency without gaps has stall diagnostics")
+    else:
+        if any(number is None for number in percentile_values):
+            raise QualificationError("request latency with gaps lacks ITL percentiles")
+        p50, p99, p999, maximum = (float(number) for number in percentile_values)
+        if not p50 <= p99 <= p999 <= maximum:
+            raise QualificationError("request latency ITL percentiles are not ordered")
+        expected_threshold = max(250.0, p50 * 5.0)
+        if value["stall_threshold_ms"] is None or abs(float(value["stall_threshold_ms"]) - expected_threshold) > 0.05:
+            raise QualificationError("request latency stall threshold is inconsistent")
+    phases = value["phases"]
+    if not isinstance(phases, dict) or set(phases) != LATENCY_PHASE_FIELDS:
+        raise QualificationError("request latency phases have an unexpected shape")
+    for field, raw in phases.items():
+        if raw is None:
+            continue
+        if (
+            isinstance(raw, bool)
+            or not isinstance(raw, (int, float))
+            or not math.isfinite(float(raw))
+            or float(raw) < 0
+        ):
+            raise QualificationError(f"request latency phase {field} is invalid")
 
 
 def parse_actor_performance(value: Any) -> tuple[float, float, float] | None:
@@ -668,6 +818,7 @@ def parse_actor_performance(value: Any) -> tuple[float, float, float] | None:
     performance = metadata["performance"]
     if not isinstance(performance, dict) or set(performance) != PERFORMANCE_METADATA_FIELDS:
         raise QualificationError("performance metadata has an unexpected shape")
+    validate_request_latency(performance["latency"])
     numbers: dict[str, float] = {}
     for field in (
         "ttft_ms",

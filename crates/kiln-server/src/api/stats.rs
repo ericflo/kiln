@@ -41,6 +41,7 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::latency_observability::{LatencyStallReason, TokenGapObservation};
     use crate::state::AppState;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
@@ -180,14 +181,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_reflects_recorded_tokens() {
+    async fn snapshot_reflects_request_local_gaps() {
         let state = make_test_state();
         {
             let mut ring = state.decode_stats.lock().unwrap();
             let t0 = Instant::now();
-            ring.record_token(t0);
-            ring.record_token(t0 + std::time::Duration::from_millis(20));
-            ring.record_token(t0 + std::time::Duration::from_millis(40));
+            for offset in [20, 40] {
+                ring.record_gap(
+                    t0 + std::time::Duration::from_millis(offset),
+                    TokenGapObservation {
+                        gap: std::time::Duration::from_millis(20),
+                        reason: LatencyStallReason::ActorDecode,
+                        attributed_duration: std::time::Duration::from_millis(20),
+                    },
+                );
+            }
         }
         let app = routes().with_state(state);
         let resp = app

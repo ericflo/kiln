@@ -944,6 +944,54 @@ function smokeRecentRow(overrides = {}) {
     ...overrides,
   };
 }
+
+function smokeRequestLatency() {
+  return {
+    emitted_tokens: 8,
+    gap_samples: 7,
+    retained_gap_samples: 7,
+    gap_samples_truncated: false,
+    ttft_ms: 38,
+    itl_ms_p50: 9,
+    itl_ms_p99: 28,
+    itl_ms_p999: 29.8,
+    max_itl_ms: 30,
+    stall_threshold_ms: 250,
+    stall_count: 0,
+    unexplained_stall_count: 0,
+    stall_reasons: {
+      actor_queue: 0,
+      actor_admission: 0,
+      actor_prefill: 0,
+      actor_decode: 0,
+      response_delivery: 0,
+      handler_queue: 0,
+      client_delivery: 0,
+      unexplained: 0,
+    },
+    phases: {
+      actor_queue_ms: 4,
+      actor_admission_ms: 2,
+      tokenization_ms: 1,
+      prefill_ms: 290,
+      decode_ms: 63,
+      sampling_ms: null,
+      readback_ms: null,
+      response_delivery_ms: 2,
+      handler_queue_ms: 1,
+      client_delivery_ms: 1,
+      gpu_lock_wait_ms: null,
+      graph_capture_ms: null,
+      graph_replay_ms: null,
+      synchronization_ms: null,
+      resize_ms: null,
+      trim_ms: null,
+      adapter_ms: null,
+      training_ms: null,
+      unexplained_ms: 0,
+    },
+  };
+}
 const dashboardRow = () => smokeRecentRow({
   user_agent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36',
   client: 'dashboard',
@@ -954,9 +1002,10 @@ const curlRow = () => smokeRecentRow({
   user_agent: 'curl/8.7.1',
   prompt_preview: 'hello from the curl tab',
 });
-const piRow = () => smokeRecentRow({
+const piRow = (overrides = {}) => smokeRecentRow({
   user_agent: 'pi/1.2.0',
   prompt_preview: 'hello from pi',
+  ...overrides,
 });
 
 function sse(res, chunks) {
@@ -2140,7 +2189,23 @@ async function startServer({
       return;
     }
     if (url.pathname === '/v1/stats/decode') {
-      json(res, { window_secs: 60, sample_count: 0, tok_per_sec: 0, p50_itl_ms: 0, p99_itl_ms: 0, mean_itl_ms: 0 });
+      json(res, {
+        window_secs: 60,
+        sample_count: 0,
+        tok_per_sec: 0,
+        p50_itl_ms: 0,
+        p99_itl_ms: 0,
+        p999_itl_ms: 0,
+        mean_itl_ms: 0,
+        max_itl_ms: 0,
+        stall_threshold_ms: 250,
+        stall_count: 0,
+        unexplained_stall_count: 0,
+        stall_reasons: {
+          actor_queue: 0, actor_admission: 0, actor_prefill: 0, actor_decode: 0,
+          response_delivery: 0, handler_queue: 0, client_delivery: 0, unexplained: 0,
+        },
+      });
       return;
     }
     if (url.pathname === '/v1/terminal/status') {
@@ -3404,7 +3469,7 @@ async function runSmoke(baseUrl, {
         await waitForPanelText(page, '#runtime-config-body', /linux-drm-sysfs-unified/, 'Runtime config did not recover after Retry');
         await expectDirectDecodeRendezvousRuntimeConfig(page, 'Recovered failure');
         await expectCheckpointBoundaryRuntimeConfig(page, 'Recovered failure');
-        await recoverPanel('#decode-perf-panel', /No streaming completions/i, 'Decode panel did not recover after the APIs healed');
+        await recoverPanel('#decode-perf-panel', /No recent token gaps/i, 'Decode panel did not recover after the APIs healed');
         await recoverPanel('#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not recover after the APIs healed');
         await goToPrimaryTab(page, 'training');
         await recoverPanel('#tab-queue', /No training jobs yet\./, 'Training queue did not recover after the APIs healed');
@@ -3432,7 +3497,7 @@ async function runSmoke(baseUrl, {
         await recoverPanel('#tab-queue', /No training jobs yet\./, 'Training queue stuck on failure HTML after second recovery (dedupe key not invalidated)');
         await goToPrimaryTab(page, 'overview');
         await recoverPanel('#server-status', /GPU VRAM/, 'Server status stuck on failure HTML after second recovery');
-        await recoverPanel('#decode-perf-panel', /No streaming completions/i, 'Decode panel stuck on failure HTML after second recovery');
+        await recoverPanel('#decode-perf-panel', /No recent token gaps/i, 'Decode panel stuck on failure HTML after second recovery');
         await recoverPanel('#recent-requests-panel', /No recent requests yet\./, 'Recent requests stuck on failure HTML after second recovery (dedupe key not invalidated)');
       }
 
@@ -3542,7 +3607,7 @@ async function runSmoke(baseUrl, {
       // ── Recent-requests status line: announce only on attention CHANGES ──
       // Routine traffic first: a clean row arrives, the needs-attention count
       // stays 0 → the status node must stay silent across the next poll tick.
-      const cleanRow = piRow();
+      const cleanRow = piRow({ latency: smokeRequestLatency() });
       setRecentRequests([cleanRow]);
       await waitForPanelText(page, '#recent-requests-panel', /hello from pi/, 'Clean pi row did not render before the attention-announcement checks');
       await clickAndWait(
@@ -3569,6 +3634,22 @@ async function runSmoke(baseUrl, {
       ]) {
         if (!budgetText.includes(expected)) {
           fail(`Request drill thinking-budget telemetry is missing ${JSON.stringify(expected)}: ${JSON.stringify(budgetText)}`);
+        }
+      }
+      const latencyText = await page.$eval(
+        '#request-drill-content [data-request-latency]',
+        (el) => el.textContent || '',
+      ).catch(() => fail('Request drill did not render latency diagnosis'));
+      for (const expected of [
+        'p99.9 ITL',
+        '30 ms',
+        'Stalls',
+        'Actor prefill',
+        '7 of 7 request-local gaps retained',
+        'Not measured on this path: Sampling, Readback, GPU lock wait',
+      ]) {
+        if (!latencyText.includes(expected)) {
+          fail(`Request latency diagnosis is missing ${JSON.stringify(expected)}: ${JSON.stringify(latencyText)}`);
         }
       }
       await clickAndWait(page, '#request-drill-close', 'Could not close the recent-request drill');
@@ -4074,7 +4155,7 @@ async function runSmoke(baseUrl, {
     await waitForPanelText(page, '#recent-requests-panel', /No recent requests yet\./, 'Empty recent requests state missing');
     await expectPanelLink(page, '#recent-requests-panel .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
 
-    await waitForPanelText(page, '#decode-perf-panel', /No streaming completions/i, 'Empty decode performance state missing');
+    await waitForPanelText(page, '#decode-perf-panel', /No recent token gaps/i, 'Empty decode performance state missing');
     await expectPanelLink(page, '#decode-perf-panel', '/health', '/health');
 
     // ---- Hidden diagnostics: Prometheus /metrics line in the Connect panel

@@ -495,7 +495,16 @@
         tok_per_sec: Math.round(tps * 10) / 10,
         p50_itl_ms: Math.round(p50 * 10) / 10,
         p99_itl_ms: Math.round((p50 + 4.2) * 10) / 10,
+        p999_itl_ms: Math.round((p50 + 8.4) * 10) / 10,
         mean_itl_ms: Math.round((p50 + 0.6) * 10) / 10,
+        max_itl_ms: Math.round((p50 + 10.1) * 10) / 10,
+        stall_threshold_ms: 250,
+        stall_count: 0,
+        unexplained_stall_count: 0,
+        stall_reasons: {
+          actor_queue: 0, actor_admission: 0, actor_prefill: 0, actor_decode: 0,
+          response_delivery: 0, handler_queue: 0, client_delivery: 0, unexplained: 0,
+        },
       };
     },
     '/v1/stats/recent-requests': () => {

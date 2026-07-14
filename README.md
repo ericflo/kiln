@@ -694,6 +694,9 @@ chat chunk; an explicit request opt-in also emits the existing
 `kiln.token_timing` object before each model token, with actor-ready,
 handler-received, and delivery queue timing. Omission follows the server
 metadata default but never opts a stream into custom per-token events.
+The request-local ITL percentiles, bounded stall attribution, exact timing
+boundaries, nullable phase coverage, rolling endpoint, and Prometheus contract
+are documented in [`docs/LATENCY_OBSERVABILITY.md`](docs/LATENCY_OBSERVABILITY.md).
 
 ### Prompt logprobs
 

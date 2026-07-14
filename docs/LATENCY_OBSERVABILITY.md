@@ -1,0 +1,266 @@
+# Latency Observability
+
+Kiln records request-local token timing so concurrent streams are never joined
+into a false inter-token interval. The same bounded observations feed chat
+performance metadata, per-token SSE diagnostics, recent-request drill-down,
+the rolling decode endpoint, and Prometheus.
+
+This contract is diagnostic evidence, not a claim that every backend exposes
+every internal phase. Unsupported or unavailable phases are `null`. A zero
+means a supported phase was measured and took zero at the reporting
+resolution; it must not be used as a substitute for missing instrumentation.
+
+## Enable Request Timing
+
+Set `include_performance` on a chat request:
+
+```json
+{
+  "model": "Qwen3.5-4B",
+  "messages": [{"role": "user", "content": "Explain the pause."}],
+  "stream": true,
+  "include_performance": true
+}
+```
+
+For a non-streaming batching-engine request, the response carries
+`metadata.performance.latency`. For a batching-engine stream, the terminal
+chat chunk carries the same request summary and each emitted model token is
+followed by a `kiln.token_timing` SSE object. Custom timing objects are emitted
+only after an explicit request opt-in; enabling the server-wide performance
+metadata default does not silently add non-OpenAI SSE objects.
+
+Completed batching-engine requests also retain the summary in the bounded
+`GET /v1/stats/recent-requests` ring. The dashboard renders it under **Latency
+diagnosis**. Direct streaming currently contributes request-local gaps to the
+rolling endpoint and Prometheus as `unexplained`, but its recent-request
+`latency` field is absent and it emits no per-token timing object. This avoids
+inventing actor boundaries on a path that does not use the actor.
+
+## Timing Boundaries
+
+All boundaries use one process-local monotonic clock. Values ending in `_ms`
+are floating-point milliseconds relative to request receipt or elapsed between
+the named boundaries.
+
+| Boundary | Meaning |
+| --- | --- |
+| request receipt | Entry to chat request handling, before prompt rendering and tokenization |
+| ready | The batching actor selected the token and made it ready for delivery |
+| actor delivered | The delivery worker successfully enqueued the token into the request's bounded actor-to-handler channel |
+| handler received | The async chat producer received the actor event |
+| body enqueued | The producer successfully enqueued the rendered content into the HTTP response body channel |
+
+`body_enqueued` does not mean the remote client acknowledged network bytes.
+TCP buffering, proxies, and client rendering are outside the server's clock.
+The public field remains `client_delivery_ms` for compatibility, but its exact
+boundary is handler receipt to response-body enqueue.
+
+The compatibility `queue_delay_ms` field is
+`handler_received_ms - ready_ms`. It equals
+`response_delivery_ms + handler_queue_ms`. New consumers should use those two
+components directly.
+
+## Request Summary
+
+`metadata.performance.latency` and a recent request's optional `latency` field
+use the same `RequestLatencyDiagnostics` object:
+
+```json
+{
+  "emitted_tokens": 3,
+  "gap_samples": 2,
+  "retained_gap_samples": 2,
+  "gap_samples_truncated": false,
+  "ttft_ms": 40.0,
+  "itl_ms_p50": 8.0,
+  "itl_ms_p99": 8.0,
+  "itl_ms_p999": 8.0,
+  "max_itl_ms": 8.0,
+  "stall_threshold_ms": 250.0,
+  "stall_count": 0,
+  "unexplained_stall_count": 0,
+  "stall_reasons": {
+    "actor_queue": 0,
+    "actor_admission": 0,
+    "actor_prefill": 0,
+    "actor_decode": 0,
+    "response_delivery": 0,
+    "handler_queue": 0,
+    "client_delivery": 0,
+    "unexplained": 0
+  },
+  "phases": {
+    "actor_queue_ms": 12.0,
+    "actor_admission_ms": 3.0,
+    "tokenization_ms": 1.0,
+    "prefill_ms": 20.0,
+    "decode_ms": 8.0,
+    "sampling_ms": null,
+    "readback_ms": null,
+    "response_delivery_ms": 1.0,
+    "handler_queue_ms": 1.0,
+    "client_delivery_ms": 1.0,
+    "gpu_lock_wait_ms": null,
+    "graph_capture_ms": null,
+    "graph_replay_ms": null,
+    "synchronization_ms": null,
+    "resize_ms": null,
+    "trim_ms": null,
+    "adapter_ms": null,
+    "training_ms": null,
+    "unexplained_ms": 0.0
+  }
+}
+```
+
+`emitted_tokens` includes the first token. `gap_samples` counts only intervals
+between successive tokens from the same request, so it is normally
+`emitted_tokens - 1`. A request retains at most 8,192 gaps. Once that cap is
+exceeded, Kiln evicts the oldest samples, keeps the lifetime `gap_samples`
+count, and sets `gap_samples_truncated=true`; percentiles and stall counts then
+describe the retained suffix.
+
+Percentiles use R-7 linear interpolation over request-local gaps. TTFT is
+request receipt to first actor-ready token. A request with no token has `null`
+TTFT and ITL values; a one-token request has TTFT but no ITL sample.
+
+## Phase Attribution
+
+The currently measured batching path exposes:
+
+| Phase | Current boundary |
+| --- | --- |
+| `actor_queue_ms` | API enqueue until the actor begins admission |
+| `actor_admission_ms` | Actor slot and request preparation that blocks active actor work |
+| `tokenization_ms` | Prompt token encoding in the request handler |
+| `prefill_ms` | Actor prefill wall time accumulated while the request is active |
+| `decode_ms` | Actor decode wall time accumulated while the request is active |
+| `response_delivery_ms` | Actor-ready to successful bounded-channel enqueue |
+| `handler_queue_ms` | Actor delivery to handler receipt |
+| `client_delivery_ms` | Handler receipt to response-body enqueue for streams |
+| `unexplained_ms` | Actor wall time between tokens not covered by a measured actor candidate |
+
+Sampling, device readback, GPU-lock wait, graph capture/replay,
+synchronization, resize, trim, adapter, and training remain explicit nullable
+fields. Their aggregate subsystems have separate operational telemetry, but
+they are not yet joined to each request-token timeline. A diagnostic consumer
+must preserve this distinction.
+
+Phase values are blocking candidates, not an additive critical-path
+decomposition. Work can overlap, especially response delivery with the next
+actor forward. Do not sum every phase and compare it with total request time.
+When computing `unexplained_ms`, Kiln conservatively subtracts the larger of
+serial actor work and response delivery rather than their sum, so overlap
+cannot falsely erase missing wall time.
+
+For each inter-token gap, Kiln selects the largest measured candidate since
+the preceding token. A candidate must explain at least the smaller of 250 ms
+or half the gap; otherwise the reason is `unexplained`. The bounded reason set
+is `actor_queue`, `actor_admission`, `actor_prefill`, `actor_decode`,
+`response_delivery`, `handler_queue`, `client_delivery`, and `unexplained`.
+
+## Per-Token SSE Object
+
+An opted-in batching stream emits this non-chat object after the corresponding
+content has entered the response-body channel:
+
+```json
+{
+  "object": "kiln.token_timing",
+  "token_index": 7,
+  "ready_ms": 12.0,
+  "actor_delivered_ms": 14.0,
+  "handler_received_ms": 17.0,
+  "body_enqueued_ms": 20.0,
+  "response_delivery_ms": 2.0,
+  "handler_queue_ms": 3.0,
+  "queue_delay_ms": 5.0,
+  "client_delivery_ms": 3.0,
+  "blocking_phase": "actor_prefill",
+  "blocking_phase_ms": 280.0
+}
+```
+
+`blocking_phase` and `blocking_phase_ms` are `null` for the first token because
+there is no preceding token gap. They can also be `null` when no gap
+observation exists. Clients that require a strict OpenAI-only SSE stream
+should leave `include_performance` false and use the terminal response,
+recent-request endpoint, or Prometheus instead.
+
+## Rolling Decode Endpoint
+
+`GET /v1/stats/decode` describes request-local gaps observed during the last
+60 seconds:
+
+- `sample_count`: retained gaps in the active rolling window
+- `tok_per_sec`: gap count divided by the sum of those gaps
+- `p50_itl_ms`, `p99_itl_ms`, `p999_itl_ms`, `mean_itl_ms`, `max_itl_ms`
+- `stall_threshold_ms`: `max(250 ms, 5 * p50_itl_ms)`
+- `stall_count`, `unexplained_stall_count`, and fixed `stall_reasons`
+
+This throughput is a decode cadence diagnostic, not end-to-end request
+throughput. The rolling ring is bounded, and concurrent requests are never
+cross-paired. When the window is empty, counts and numeric summaries are zero.
+
+## Prometheus
+
+`GET /metrics` exports only fixed-cardinality labels:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `kiln_request_ttft_seconds` | histogram | Request receipt to first actor-ready token |
+| `kiln_token_itl_seconds` | histogram | Every request-local inter-token gap |
+| `kiln_request_latency_phase_seconds{phase}` | histogram | Measured request phase; unsupported `null` phases emit no observation |
+| `kiln_token_stalls_total{reason}` | counter | Gaps at or above the fixed 250 ms absolute floor by dominant reason |
+
+Histogram buckets are 5 ms, 10 ms, 25 ms, 50 ms, 100 ms, 250 ms, 500 ms,
+1 s, 2.5 s, 5 s, 10 s, 30 s, 60 s, and `+Inf`. The `phase` and `reason`
+labels use only the closed sets in the schemas; request IDs, model names,
+adapter names, prompts, and clients are never labels.
+
+Prometheus stall counters deliberately use the fixed 250 ms floor so a
+counter's definition never changes with workload mix. The rolling endpoint and
+per-request summary use the adaptive `max(250 ms, 5 * p50)` threshold. Account
+for that difference when comparing the two surfaces.
+
+Example queries:
+
+```promql
+histogram_quantile(0.999, sum by (le) (rate(kiln_token_itl_seconds_bucket[5m])))
+sum by (reason) (rate(kiln_token_stalls_total[5m]))
+histogram_quantile(0.99, sum by (phase, le) (rate(kiln_request_latency_phase_seconds_bucket[5m])))
+```
+
+## Measurement Cost
+
+The per-token path uses monotonic timestamps, bounded `VecDeque` insertion,
+fixed-index relaxed atomics, and one short rolling-ring mutex hold. It performs
+no serialization, percentile sort, logging, or unbounded label lookup while a
+token is being recorded. Percentiles are sorted once when a request summary or
+rolling snapshot is requested.
+
+`latency_measurement_hot_path_is_bounded` measures 20,000 token observations,
+including request tracking, Prometheus histograms, rolling-ring insertion, and
+both final percentile snapshots. The portable debug-build gate allows at most
+100 microseconds per token and reports the measured nanoseconds per token on
+failure or with test output enabled. The per-request retained sample storage is
+also statically limited to 256 KiB; the current 8,192-sample representation
+must fit below that limit. These are regression ceilings, not performance
+claims for a particular accelerator.
+
+## Diagnose A Pause
+
+1. Confirm the gap is request-local in the recent-request drill or
+   `kiln.token_timing`; do not infer it from adjacent global token timestamps.
+2. Check the dominant blocking reason and its duration. Treat `unexplained` as
+   missing evidence, not as proof of a device or allocator fault.
+3. Correlate the same monotonic interval with typed actor, synchronization,
+   graph, allocator, KV-resize, trim, adapter, and training telemetry.
+4. Change one source-bound configuration field per benchmark arm and preserve
+   failed receipts. A temporal gap without a matching typed operation is not
+   evidence of VRAM rebalancing.
+
+The authoritative machine-readable field contracts are
+`contracts/kiln-inference-v1.schema.json` and
+`contracts/kiln-observability-v1.schema.json`.

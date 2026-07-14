@@ -29,6 +29,7 @@ use crate::config::{
     DeterministicInference, DirectDecodeRendezvousBackendPolicy, MaxDecodeBatch,
     MaxDecodeBatchDiagnostics, PrefillLayerBudget, PrefillTokenBudget, StreamStallGrace,
 };
+use crate::latency_observability::{EngineTokenTiming, TokenPhaseDurations};
 use crate::response_delivery::{
     DeliveryBarrierError, DeliveryBatch, DeliveryCommand, DeliveryKey, DeliveryResult,
     DeliveryResultNotifyError, DeliveryResultSink, DeliveryResultSinkError, DeliveryTerminal,
@@ -248,8 +249,13 @@ pub struct EngineActionToken {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
-    Token { token: TokenId, ready_at: Instant },
-    Done { output: BatchedGenerationOutput },
+    Token {
+        token: TokenId,
+        timing: EngineTokenTiming,
+    },
+    Done {
+        output: BatchedGenerationOutput,
+    },
     Error(String),
 }
 
@@ -1993,6 +1999,9 @@ struct ActiveRequest {
     actor_admission_duration: Duration,
     admitted_at: Instant,
     first_token_ready_after_admission: Option<Duration>,
+    phase_window_started_at: Instant,
+    token_phase_durations: TokenPhaseDurations,
+    inflight_token_ready_at: Option<Instant>,
     action_tokens: Option<Vec<EngineActionToken>>,
     slot: DecodeSlot,
 }
@@ -2523,6 +2532,11 @@ impl BatchingEngineActor {
                     })
                 {
                     active.delivery_state = ActiveDeliveryState::Ready;
+                    if let Some(ready_at) = active.inflight_token_ready_at.take() {
+                        active.token_phase_durations.add_response_delivery(
+                            Instant::now().saturating_duration_since(ready_at),
+                        );
+                    }
                 }
             }
             DeliveryResult::Closed {
@@ -2854,6 +2868,11 @@ impl BatchingEngineActor {
                 .forward
                 .prepare_request_chunked(&queued.req, token_budget);
             let actor_admission_duration = admission_started_at.elapsed();
+            for active in &mut self.active {
+                active
+                    .token_phase_durations
+                    .add_actor_admission(actor_admission_duration);
+            }
             self.record_admission_duration(
                 actor_admission_duration,
                 queued.req.request_id,
@@ -2904,6 +2923,10 @@ impl BatchingEngineActor {
                     let admitted_at = Instant::now();
                     let actor_queue_duration =
                         admission_started_at.saturating_duration_since(queued.enqueued_at);
+                    let phase_window_started_at = queued.enqueued_at;
+                    let mut token_phase_durations = TokenPhaseDurations::default();
+                    token_phase_durations.add_actor_queue(actor_queue_duration);
+                    token_phase_durations.add_actor_admission(actor_admission_duration);
                     let initial_prefill_work_tokens = if ready {
                         None
                     } else {
@@ -2921,6 +2944,9 @@ impl BatchingEngineActor {
                         actor_admission_duration,
                         admitted_at,
                         first_token_ready_after_admission: None,
+                        phase_window_started_at,
+                        token_phase_durations,
+                        inflight_token_ready_at: None,
                         action_tokens,
                         slot,
                     });
@@ -3113,6 +3139,9 @@ impl BatchingEngineActor {
                 actor_admission_duration,
                 admitted_at,
                 first_token_ready_after_admission,
+                phase_window_started_at,
+                mut token_phase_durations,
+                inflight_token_ready_at,
                 action_tokens,
                 slot,
             } = self.active.remove(idx);
@@ -3125,6 +3154,10 @@ impl BatchingEngineActor {
                 &req.cancel,
             );
             let elapsed = started.elapsed();
+            token_phase_durations.add_actor_prefill(elapsed);
+            for active in &mut self.active {
+                active.token_phase_durations.add_actor_prefill(elapsed);
+            }
             self.record_prefill_forward_duration(
                 elapsed,
                 req.request_id,
@@ -3243,6 +3276,9 @@ impl BatchingEngineActor {
                         actor_admission_duration,
                         admitted_at,
                         first_token_ready_after_admission,
+                        phase_window_started_at,
+                        token_phase_durations,
+                        inflight_token_ready_at,
                         action_tokens,
                         slot,
                     },
@@ -3271,6 +3307,9 @@ impl BatchingEngineActor {
                     actor_admission_duration,
                     admitted_at,
                     first_token_ready_after_admission,
+                    phase_window_started_at,
+                    token_phase_durations,
+                    inflight_token_ready_at,
                     action_tokens,
                     slot,
                 },
@@ -3411,21 +3450,30 @@ impl BatchingEngineActor {
             let sampling = &self.active[idx].req.sampling;
             forward.stop_reason_after_emit(generated_tokens, sampling)
         };
+        let timing = {
+            let active = &mut self.active[idx];
+            let mut phases = std::mem::take(&mut active.token_phase_durations);
+            phases.account_unexplained_wall_time(
+                ready_at.saturating_duration_since(active.phase_window_started_at),
+            );
+            active.phase_window_started_at = ready_at;
+            EngineTokenTiming::ready(ready_at, phases)
+        };
         match stop {
             Ok(Some(reason)) => {
-                self.finish_active(idx, reason, Some((token, ready_at)));
+                self.finish_active(idx, reason, Some((token, timing)));
             }
             Ok(None) if generated_count >= self.active[idx].req.sampling.max_tokens => {
-                self.finish_active(idx, FinishReason::MaxTokens, Some((token, ready_at)));
+                self.finish_active(idx, FinishReason::MaxTokens, Some((token, timing)));
             }
-            Ok(None) => self.submit_token_delivery(idx, token, ready_at),
+            Ok(None) => self.submit_token_delivery(idx, token, timing),
             Err(err) => {
-                self.finish_one_with_error(idx, format!("{err:#}"), Some((token, ready_at)));
+                self.finish_one_with_error(idx, format!("{err:#}"), Some((token, timing)));
             }
         }
     }
 
-    fn submit_token_delivery(&mut self, idx: usize, token: TokenId, ready_at: Instant) {
+    fn submit_token_delivery(&mut self, idx: usize, token: TokenId, timing: EngineTokenTiming) {
         let (key, sequence) = {
             let active = &mut self.active[idx];
             debug_assert_eq!(active.delivery_state, ActiveDeliveryState::Ready);
@@ -3434,19 +3482,20 @@ impl BatchingEngineActor {
                 self.finish_one_with_error(
                     idx,
                     "response delivery sequence exhausted".to_string(),
-                    Some((token, ready_at)),
+                    Some((token, timing)),
                 );
                 return;
             };
             active.next_delivery_sequence = next_sequence;
             active.delivery_state = ActiveDeliveryState::InFlight { sequence };
+            active.inflight_token_ready_at = Some(timing.ready_at);
             (active.delivery_key, sequence)
         };
         self.queue_delivery(
             key,
             DeliveryBatch::Token {
                 token,
-                ready_at,
+                timing,
                 sequence,
             },
         );
@@ -3563,6 +3612,9 @@ impl BatchingEngineActor {
             .forward_decode_with_metadata(&mut slots, &sampling);
         let elapsed = started.elapsed();
         drop(slots);
+        for active in &mut self.active {
+            active.token_phase_durations.add_actor_decode(elapsed);
+        }
         self.record_decode_forward_duration(elapsed, batch_len);
         self.snapshot.last_batch_size = batch_len;
         self.snapshot.current_batch_size = 0;
@@ -3682,7 +3734,7 @@ impl BatchingEngineActor {
         &mut self,
         idx: usize,
         finish_reason: FinishReason,
-        preceding_token: Option<(TokenId, Instant)>,
+        preceding_token: Option<(TokenId, EngineTokenTiming)>,
     ) {
         let active = self.active.remove(idx);
         let key = active.delivery_key;
@@ -3720,7 +3772,7 @@ impl BatchingEngineActor {
         &mut self,
         idx: usize,
         error: String,
-        preceding_token: Option<(TokenId, Instant)>,
+        preceding_token: Option<(TokenId, EngineTokenTiming)>,
     ) {
         self.snapshot.total_errors += 1;
         let active = self.active.remove(idx);
@@ -3748,7 +3800,7 @@ impl BatchingEngineActor {
         &mut self,
         key: DeliveryKey,
         sequence: u64,
-        preceding_token: Option<(TokenId, Instant)>,
+        preceding_token: Option<(TokenId, EngineTokenTiming)>,
         terminal: DeliveryTerminal,
     ) {
         self.delivery_pending_terminal.insert(key);
@@ -4380,9 +4432,10 @@ mod tests {
 
     fn assert_token_event(event: Option<EngineEvent>, expected: TokenId) {
         match event {
-            Some(EngineEvent::Token { token, ready_at }) => {
+            Some(EngineEvent::Token { token, timing }) => {
                 assert_eq!(token, expected);
-                assert!(ready_at <= Instant::now());
+                assert!(timing.ready_at <= Instant::now());
+                assert!(timing.actor_delivered_at.is_some());
             }
             other => panic!("expected token {expected}, got {other:?}"),
         }
@@ -4451,6 +4504,7 @@ mod tests {
             .expect("test delivery lane registers");
         let initial_prefill_work_tokens = actor.forward.remaining_prefill_tokens(&slot);
         let action_tokens = req.capture_behavior_logprobs.then(Vec::new);
+        let now = Instant::now();
         actor.active.push(ActiveRequest {
             req,
             delivery_key,
@@ -4460,8 +4514,11 @@ mod tests {
             initial_prefill_work_tokens,
             actor_queue_duration: Duration::ZERO,
             actor_admission_duration: Duration::ZERO,
-            admitted_at: Instant::now(),
+            admitted_at: now,
             first_token_ready_after_admission: None,
+            phase_window_started_at: now,
+            token_phase_durations: TokenPhaseDurations::default(),
+            inflight_token_ready_at: None,
             action_tokens,
             slot,
         });
@@ -5288,7 +5345,7 @@ mod tests {
             key: barrier_key,
             batch: DeliveryBatch::Token {
                 token: 999,
-                ready_at: Instant::now(),
+                timing: EngineTokenTiming::ready(Instant::now(), TokenPhaseDurations::default(),),
                 sequence: 0,
             },
         }));
@@ -5456,13 +5513,18 @@ mod tests {
 
         let before = Instant::now();
         let ready_at = Instant::now();
-        actor.submit_token_delivery(0, 111, ready_at);
+        actor.submit_token_delivery(
+            0,
+            111,
+            EngineTokenTiming::ready(ready_at, TokenPhaseDurations::default()),
+        );
         let after = Instant::now();
         match response_rx.blocking_recv() {
-            Some(EngineEvent::Token { token, ready_at }) => {
+            Some(EngineEvent::Token { token, timing }) => {
                 assert_eq!(token, 111);
-                assert!(ready_at >= before);
-                assert!(ready_at <= after);
+                assert!(timing.ready_at >= before);
+                assert!(timing.ready_at <= after);
+                assert!(timing.actor_delivered_at.is_some());
             }
             other => panic!("expected timed token, got {other:?}"),
         }

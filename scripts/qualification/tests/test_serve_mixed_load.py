@@ -910,8 +910,15 @@ class ServeMixedLoadTests(unittest.TestCase):
             "object": "kiln.token_timing",
             "token_index": 1,
             "ready_ms": 12.0,
+            "actor_delivered_ms": 14.0,
             "handler_received_ms": 17.0,
+            "body_enqueued_ms": 20.0,
+            "response_delivery_ms": 2.0,
+            "handler_queue_ms": 3.0,
             "queue_delay_ms": 5.0,
+            "client_delivery_ms": 3.0,
+            "blocking_phase": None,
+            "blocking_phase_ms": None,
         }
         self.assertEqual(serve.parse_token_timing(timing, 1), (12.0, 5.0))
         self.assertIsNone(serve.parse_token_timing({"choices": []}, 1))
@@ -930,13 +937,21 @@ class ServeMixedLoadTests(unittest.TestCase):
             with self.subTest(token_index=invalid_index):
                 with self.assertRaises(serve.QualificationError):
                     serve.parse_token_timing(timing, 1)
-        timing["token_index"] = 1
+        timing.update({
+            "token_index": 2,
+            "ready_ms": 20.0,
+            "actor_delivered_ms": 22.0,
+            "handler_received_ms": 25.0,
+            "body_enqueued_ms": 28.0,
+            "blocking_phase": "actor_decode",
+            "blocking_phase_ms": 8.0,
+        })
         self.assertEqual(
-            serve.parse_token_timing(timing, 1, previous_ready_ms=12.0),
-            (12.0, 5.0),
+            serve.parse_token_timing(timing, 2, previous_ready_ms=12.0),
+            (20.0, 5.0),
         )
         with self.assertRaises(serve.QualificationError):
-            serve.parse_token_timing(timing, 1, previous_ready_ms=13.0)
+            serve.parse_token_timing(timing, 2, previous_ready_ms=21.0)
 
     def test_token_timing_usage_contract_allows_only_consumed_eos_delta(self) -> None:
         self.assertTrue(serve.token_timing_matches_usage("length", 3, 3))
@@ -963,6 +978,51 @@ class ServeMixedLoadTests(unittest.TestCase):
             "adapter_used": "base",
             "thinking_mode": "non_reasoning",
             "finish_reason": "length",
+            "latency": {
+                "emitted_tokens": 3,
+                "gap_samples": 2,
+                "retained_gap_samples": 2,
+                "gap_samples_truncated": False,
+                "ttft_ms": 40.0,
+                "itl_ms_p50": 8.0,
+                "itl_ms_p99": 8.0,
+                "itl_ms_p999": 8.0,
+                "max_itl_ms": 8.0,
+                "stall_threshold_ms": 250.0,
+                "stall_count": 0,
+                "unexplained_stall_count": 0,
+                "stall_reasons": {
+                    "actor_queue": 0,
+                    "actor_admission": 0,
+                    "actor_prefill": 0,
+                    "actor_decode": 0,
+                    "response_delivery": 0,
+                    "handler_queue": 0,
+                    "client_delivery": 0,
+                    "unexplained": 0,
+                },
+                "phases": {
+                    "actor_queue_ms": 12.0,
+                    "actor_admission_ms": 3.0,
+                    "tokenization_ms": 1.0,
+                    "prefill_ms": 20.0,
+                    "decode_ms": 8.0,
+                    "sampling_ms": None,
+                    "readback_ms": None,
+                    "response_delivery_ms": 1.0,
+                    "handler_queue_ms": 1.0,
+                    "client_delivery_ms": 1.0,
+                    "gpu_lock_wait_ms": None,
+                    "graph_capture_ms": None,
+                    "graph_replay_ms": None,
+                    "synchronization_ms": None,
+                    "resize_ms": None,
+                    "trim_ms": None,
+                    "adapter_ms": None,
+                    "training_ms": None,
+                    "unexplained_ms": 0.0,
+                },
+            },
         }
         value = {"metadata": {"performance": performance}}
         self.assertEqual(

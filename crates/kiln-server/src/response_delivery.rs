@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::batching_engine::{BatchedGenerationOutput, EngineEvent};
+use crate::latency_observability::EngineTokenTiming;
 
 /// Identifies one incarnation of a request's response lane.
 ///
@@ -43,11 +44,11 @@ impl DeliveryKey {
 pub(crate) enum DeliveryBatch {
     Token {
         token: TokenId,
-        ready_at: Instant,
+        timing: EngineTokenTiming,
         sequence: u64,
     },
     Terminal {
-        preceding_token: Option<(TokenId, Instant)>,
+        preceding_token: Option<(TokenId, EngineTokenTiming)>,
         terminal: DeliveryTerminal,
         sequence: u64,
     },
@@ -67,16 +68,16 @@ impl DeliveryBatch {
     fn into_events(self) -> VecDeque<EngineEvent> {
         let mut events = VecDeque::with_capacity(2);
         match self {
-            Self::Token {
-                token, ready_at, ..
-            } => events.push_back(EngineEvent::Token { token, ready_at }),
+            Self::Token { token, timing, .. } => {
+                events.push_back(EngineEvent::Token { token, timing })
+            }
             Self::Terminal {
                 preceding_token,
                 terminal,
                 ..
             } => {
-                if let Some((token, ready_at)) = preceding_token {
-                    events.push_back(EngineEvent::Token { token, ready_at });
+                if let Some((token, timing)) = preceding_token {
+                    events.push_back(EngineEvent::Token { token, timing });
                 }
                 events.push_back(terminal.into_event());
             }
@@ -580,10 +581,14 @@ fn poll_lane(
         return LaneDisposition::Keep;
     };
     loop {
-        let event = pending
+        let mut event = pending
             .events
             .pop_front()
             .expect("a pending delivery batch contains an event");
+
+        if let EngineEvent::Token { timing, .. } = &mut event {
+            timing.mark_actor_delivered(now);
+        }
 
         match lane.response_tx.try_send(event) {
             Ok(()) => {
@@ -973,8 +978,27 @@ mod tests {
     fn token(token: TokenId, ready_at: Instant, sequence: u64) -> DeliveryBatch {
         DeliveryBatch::Token {
             token,
-            ready_at,
+            timing: EngineTokenTiming::ready(ready_at, Default::default()),
             sequence,
+        }
+    }
+
+    fn timing(ready_at: Instant) -> EngineTokenTiming {
+        EngineTokenTiming::ready(ready_at, Default::default())
+    }
+
+    fn assert_token_event(event: EngineEvent, expected_token: TokenId, expected_ready_at: Instant) {
+        match event {
+            EngineEvent::Token { token, timing } => {
+                assert_eq!(token, expected_token);
+                assert_eq!(timing.ready_at, expected_ready_at);
+                assert!(
+                    timing
+                        .actor_delivered_at
+                        .is_some_and(|at| at >= expected_ready_at)
+                );
+            }
+            other => panic!("expected token event, got {other:?}"),
         }
     }
 
@@ -1102,12 +1126,10 @@ mod tests {
                 waited: Duration::ZERO,
             }
         );
-        assert_eq!(
+        assert_token_event(
             recv_engine_event(&mut response_rx, Duration::from_secs(1)),
-            EngineEvent::Token {
-                token: 31,
-                ready_at,
-            }
+            31,
+            ready_at,
         );
 
         worker.shutdown("test complete".into()).unwrap();
@@ -1181,19 +1203,15 @@ mod tests {
             thread::yield_now();
         }
         assert_eq!(notifications.load(Ordering::SeqCst), 1);
-        assert_eq!(
+        assert_token_event(
             recv_engine_event(&mut response_rx_a, Duration::from_secs(1)),
-            EngineEvent::Token {
-                token: 10,
-                ready_at,
-            }
+            10,
+            ready_at,
         );
-        assert_eq!(
+        assert_token_event(
             recv_engine_event(&mut response_rx_b, Duration::from_secs(1)),
-            EngineEvent::Token {
-                token: 20,
-                ready_at,
-            }
+            20,
+            ready_at,
         );
         worker.shutdown("test complete".into()).unwrap();
     }
@@ -1220,12 +1238,10 @@ mod tests {
                 batch: token(77, ready_at, 0),
             })
             .unwrap();
-        assert_eq!(
+        assert_token_event(
             recv_engine_event(&mut response_rx, Duration::from_secs(1)),
-            EngineEvent::Token {
-                token: 77,
-                ready_at,
-            }
+            77,
+            ready_at,
         );
 
         thread::scope(|scope| {
@@ -1345,12 +1361,10 @@ mod tests {
             terminal: false,
             waited: Duration::ZERO,
         }));
-        assert_eq!(
+        assert_token_event(
             recv_engine_event(&mut response_rx_b, Duration::from_secs(1)),
-            EngineEvent::Token {
-                token: 20,
-                ready_at,
-            }
+            20,
+            ready_at,
         );
         assert_eq!(
             response_rx_a.try_recv().unwrap(),
@@ -1384,12 +1398,10 @@ mod tests {
 
         // The event proves the worker completed the lane attempt while its
         // corresponding result could not enter the full sink.
-        assert_eq!(
+        assert_token_event(
             recv_engine_event(&mut response_rx, Duration::from_secs(1)),
-            EngineEvent::Token {
-                token: 77,
-                ready_at,
-            }
+            77,
+            ready_at,
         );
         assert_eq!(
             result_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -1490,12 +1502,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
+        assert_token_event(
             recv_engine_event(&mut response_rx, Duration::from_secs(1)),
-            EngineEvent::Token {
-                token: 88,
-                ready_at,
-            }
+            88,
+            ready_at,
         );
         assert_eq!(
             recv_engine_event(&mut response_rx, Duration::from_secs(1)),
@@ -1563,13 +1573,7 @@ mod tests {
             rx_a.try_recv().unwrap(),
             EngineEvent::Error("occupied".into())
         );
-        assert_eq!(
-            rx_b.try_recv().unwrap(),
-            EngineEvent::Token {
-                token: 20,
-                ready_at: now,
-            }
-        );
+        assert_token_event(rx_b.try_recv().unwrap(), 20, now);
     }
 
     #[test]
@@ -1611,13 +1615,7 @@ mod tests {
             }],
             "immediate work must not advance the cadence-blocked queue"
         );
-        assert_eq!(
-            ready_rx.try_recv().unwrap(),
-            EngineEvent::Token {
-                token: 20,
-                ready_at: started,
-            }
-        );
+        assert_token_event(ready_rx.try_recv().unwrap(), 20, started);
 
         assert_eq!(
             state.poll(started + GRACE),
@@ -1715,7 +1713,7 @@ mod tests {
             .handle(DeliveryCommand::Deliver {
                 key,
                 batch: DeliveryBatch::Terminal {
-                    preceding_token: Some((42, ready_at)),
+                    preceding_token: Some((42, timing(ready_at))),
                     terminal: DeliveryTerminal::Done(expected_output.clone()),
                     sequence: 0,
                 },
@@ -1730,13 +1728,7 @@ mod tests {
                 capacity: 1,
             }]
         );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            EngineEvent::Token {
-                token: 42,
-                ready_at,
-            }
-        );
+        assert_token_event(rx.try_recv().unwrap(), 42, ready_at);
 
         assert_eq!(
             state.poll(ready_at + Duration::from_millis(1)),
@@ -1767,7 +1759,7 @@ mod tests {
             .handle(DeliveryCommand::Deliver {
                 key,
                 batch: DeliveryBatch::Terminal {
-                    preceding_token: Some((42, ready_at)),
+                    preceding_token: Some((42, timing(ready_at))),
                     terminal: DeliveryTerminal::Done(expected_output.clone()),
                     sequence: 0,
                 },
@@ -1783,13 +1775,7 @@ mod tests {
                 waited: Duration::ZERO,
             }]
         );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            EngineEvent::Token {
-                token: 42,
-                ready_at,
-            }
-        );
+        assert_token_event(rx.try_recv().unwrap(), 42, ready_at);
         assert_eq!(
             rx.try_recv().unwrap(),
             EngineEvent::Done {
@@ -1813,7 +1799,7 @@ mod tests {
             .handle(DeliveryCommand::Deliver {
                 key,
                 batch: DeliveryBatch::Terminal {
-                    preceding_token: Some((42, started)),
+                    preceding_token: Some((42, timing(started))),
                     terminal: DeliveryTerminal::Done(expected_output.clone()),
                     sequence: 0,
                 },
@@ -1850,13 +1836,7 @@ mod tests {
                 .is_empty(),
             "20ms of continuous terminal backpressure must not exhaust a 50ms grace"
         );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            EngineEvent::Token {
-                token: 42,
-                ready_at: started,
-            }
-        );
+        assert_token_event(rx.try_recv().unwrap(), 42, started);
 
         assert_eq!(
             state.poll(token_progress_at + Duration::from_millis(25)),
@@ -1972,20 +1952,8 @@ mod tests {
 
         let results = state.poll(now);
         assert_eq!(results.len(), 2);
-        assert_eq!(
-            old_rx.try_recv().unwrap(),
-            EngineEvent::Token {
-                token: 11,
-                ready_at: now,
-            }
-        );
-        assert_eq!(
-            new_rx.try_recv().unwrap(),
-            EngineEvent::Token {
-                token: 22,
-                ready_at: now,
-            }
-        );
+        assert_token_event(old_rx.try_recv().unwrap(), 11, now);
+        assert_token_event(new_rx.try_recv().unwrap(), 22, now);
     }
 
     #[test]
@@ -2018,13 +1986,7 @@ mod tests {
                 waited: Duration::from_millis(12),
             }]
         );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            EngineEvent::Token {
-                token: 99,
-                ready_at,
-            }
-        );
+        assert_token_event(rx.try_recv().unwrap(), 99, ready_at);
     }
 
     #[test]
@@ -2054,13 +2016,7 @@ mod tests {
                 capacity: 1,
             }]
         );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            EngineEvent::Token {
-                token: 5,
-                ready_at: now,
-            }
-        );
+        assert_token_event(rx.try_recv().unwrap(), 5, now);
         assert_eq!(
             state.poll(now),
             vec![DeliveryResult::Delivered {
@@ -2143,13 +2099,7 @@ mod tests {
 
         // Shutdown gets exactly one slot: the accepted token wins it, and the
         // best-effort error is dropped instead of overtaking or waiting.
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            EngineEvent::Token {
-                token: 17,
-                ready_at,
-            }
-        );
+        assert_token_event(rx.try_recv().unwrap(), 17, ready_at);
         assert!(matches!(
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Disconnected)

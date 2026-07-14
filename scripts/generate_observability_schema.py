@@ -1278,11 +1278,45 @@ def build_definitions() -> None:
         "object": {"const": "list"},
         "data": array(ref("ModelInfo"), min_items=1, max_items=1),
     }, "OpenAI-compatible list of served models.")
+    add_object("LatencyStallReasonCounts", "LatencyStallReasonCounts", {
+        "actor_queue": ref("NonNegativeInteger"), "actor_admission": ref("NonNegativeInteger"),
+        "actor_prefill": ref("NonNegativeInteger"), "actor_decode": ref("NonNegativeInteger"),
+        "response_delivery": ref("NonNegativeInteger"), "handler_queue": ref("NonNegativeInteger"),
+        "client_delivery": ref("NonNegativeInteger"), "unexplained": ref("NonNegativeInteger"),
+    }, "Fixed-cardinality token-stall counts by dominant blocking reason.")
+    nullable_duration = nullable(ref("NonNegativeNumber"))
+    add_object("LatencyPhaseTimings", "LatencyPhaseTimings", {
+        "actor_queue_ms": nullable_duration, "actor_admission_ms": nullable_duration,
+        "tokenization_ms": nullable_duration, "prefill_ms": nullable_duration,
+        "decode_ms": nullable_duration, "sampling_ms": nullable_duration,
+        "readback_ms": nullable_duration, "response_delivery_ms": nullable_duration,
+        "handler_queue_ms": nullable_duration, "client_delivery_ms": nullable_duration,
+        "gpu_lock_wait_ms": nullable_duration, "graph_capture_ms": nullable_duration,
+        "graph_replay_ms": nullable_duration, "synchronization_ms": nullable_duration,
+        "resize_ms": nullable_duration, "trim_ms": nullable_duration,
+        "adapter_ms": nullable_duration, "training_ms": nullable_duration,
+        "unexplained_ms": nullable_duration,
+    }, "Bounded request phase timings; null means the serving path did not measure that subphase.")
+    nullable_number = nullable(ref("NonNegativeNumber"))
+    add_object("RequestLatencyDiagnostics", "RequestLatencyDiagnostics", {
+        "emitted_tokens": ref("NonNegativeInteger"), "gap_samples": ref("NonNegativeInteger"),
+        "retained_gap_samples": {"type": "integer", "minimum": 0, "maximum": 8192},
+        "gap_samples_truncated": ref("Boolean"),
+        "ttft_ms": nullable_number, "itl_ms_p50": nullable_number,
+        "itl_ms_p99": nullable_number, "itl_ms_p999": nullable_number,
+        "max_itl_ms": nullable_number, "stall_threshold_ms": nullable_number,
+        "stall_count": ref("NonNegativeInteger"), "unexplained_stall_count": ref("NonNegativeInteger"),
+        "stall_reasons": ref("LatencyStallReasonCounts"), "phases": ref("LatencyPhaseTimings"),
+    }, "Request-local TTFT, ITL tail, bounded stall reasons, and honest phase-coverage diagnostics.")
     add_object("DecodeStatsSnapshot", "DecodeStatsSnapshot", {
         "tok_per_sec": ref("NonNegativeNumber"), "p50_itl_ms": ref("NonNegativeNumber"),
-        "p99_itl_ms": ref("NonNegativeNumber"), "mean_itl_ms": ref("NonNegativeNumber"),
+        "p99_itl_ms": ref("NonNegativeNumber"), "p999_itl_ms": ref("NonNegativeNumber"),
+        "mean_itl_ms": ref("NonNegativeNumber"), "max_itl_ms": ref("NonNegativeNumber"),
+        "stall_threshold_ms": ref("NonNegativeNumber"), "stall_count": ref("NonNegativeInteger"),
+        "unexplained_stall_count": ref("NonNegativeInteger"),
+        "stall_reasons": ref("LatencyStallReasonCounts"),
         "sample_count": ref("NonNegativeInteger"), "window_secs": {"const": 60.0},
-    }, "Rolling decode throughput and inter-token latency snapshot.")
+    }, "Rolling request-local decode throughput, ITL tail, and bounded stall diagnosis.")
     add_object("RequestThinkingBudget", "RequestThinkingBudget", {
         "configured": ref("Boolean"), "max_tokens": ref("NonNegativeInteger"),
         "max_time_ms": ref("NonNegativeInteger"), "tokens_source": ref("ThinkingBudgetSource"),
@@ -1304,10 +1338,11 @@ def build_definitions() -> None:
         "error": ref("String"), "thinking_mode": ref("String"), "prefix_cache": ref("String"),
         "prompt_full": ref("String"), "completion_full": ref("String"), "user_agent": ref("String"),
         "client": ref("String"), "thinking_budget": ref("RequestThinkingBudget"),
+        "latency": ref("RequestLatencyDiagnostics"),
     }, "One newest-first bounded recent-request record.", optional=(
         "adapter", "temperature", "top_p", "max_tokens", "ttft_ms", "model_prefill_ms",
         "model_decode_ms", "error", "thinking_mode", "prefix_cache", "prompt_full",
-        "completion_full", "user_agent", "client", "thinking_budget",
+        "completion_full", "user_agent", "client", "thinking_budget", "latency",
     ))
     add_definition("Vec_RequestRecord", "Vec<RequestRecord>", {
         "type": "array", "items": ref("RequestRecord"),
@@ -1375,7 +1410,13 @@ def build_schema() -> dict[str, Any]:
     }]
     examples["DecodeStatsSnapshot"] = [{
         "tok_per_sec": 42.5, "p50_itl_ms": 23.1, "p99_itl_ms": 31.8,
-        "mean_itl_ms": 24.0, "sample_count": 84, "window_secs": 60.0,
+        "p999_itl_ms": 48.2, "mean_itl_ms": 24.0, "max_itl_ms": 51.0,
+        "stall_threshold_ms": 250.0, "stall_count": 0, "unexplained_stall_count": 0,
+        "stall_reasons": {
+            "actor_queue": 0, "actor_admission": 0, "actor_prefill": 0, "actor_decode": 0,
+            "response_delivery": 0, "handler_queue": 0, "client_delivery": 0, "unexplained": 0,
+        },
+        "sample_count": 84, "window_secs": 60.0,
     }]
     examples["RequestRecord"] = [{
         "id": "chatcmpl-example", "timestamp_unix_ms": 1_800_000_000_000,
@@ -1388,6 +1429,24 @@ def build_schema() -> dict[str, Any]:
             "configured": True, "max_tokens": 32, "tokens_source": "request",
             "time_source": "unlimited", "applied": True, "triggered": True,
             "trigger": "tokens", "closed": True, "thinking_tokens": 32, "thinking_time_ms": 410,
+        },
+        "latency": {
+            "emitted_tokens": 48, "gap_samples": 47, "retained_gap_samples": 47,
+            "gap_samples_truncated": False, "ttft_ms": 88.0, "itl_ms_p50": 12.0,
+            "itl_ms_p99": 31.8, "itl_ms_p999": 35.0, "max_itl_ms": 36.0,
+            "stall_threshold_ms": 250.0, "stall_count": 0, "unexplained_stall_count": 0,
+            "stall_reasons": {
+                "actor_queue": 0, "actor_admission": 0, "actor_prefill": 0, "actor_decode": 0,
+                "response_delivery": 0, "handler_queue": 0, "client_delivery": 0, "unexplained": 0,
+            },
+            "phases": {
+                "actor_queue_ms": 8.0, "actor_admission_ms": 1.0, "tokenization_ms": 2.0,
+                "prefill_ms": 39.0, "decode_ms": 580.0, "sampling_ms": None,
+                "readback_ms": None, "response_delivery_ms": 3.0, "handler_queue_ms": 1.0,
+                "client_delivery_ms": 2.0, "gpu_lock_wait_ms": None, "graph_capture_ms": None,
+                "graph_replay_ms": None, "synchronization_ms": None, "resize_ms": None,
+                "trim_ms": None, "adapter_ms": None, "training_ms": None, "unexplained_ms": 1.0,
+            },
         },
     }]
     examples["Vec_RequestRecord"] = [examples["RequestRecord"]]

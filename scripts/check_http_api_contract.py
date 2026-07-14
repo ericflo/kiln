@@ -896,8 +896,8 @@ def validate_inference_schema(
     if not isinstance(definitions, dict):
         errors.append("inference schema $defs must be an object")
         return errors
-    if len(definitions) != 52:
-        errors.append(f"inference schema must contain 52 definitions, got {len(definitions)}")
+    if len(definitions) != 55:
+        errors.append(f"inference schema must contain 55 definitions, got {len(definitions)}")
     if list(definitions) != sorted(definitions):
         errors.append("inference schema definitions must be sorted")
 
@@ -1018,8 +1018,8 @@ def validate_observability_schema(schema: dict[str, Any]) -> list[str]:
     if not isinstance(definitions, dict):
         errors.append("observability schema $defs must be an object")
         return errors
-    if len(definitions) != 137:
-        errors.append(f"observability schema must contain 137 definitions, got {len(definitions)}")
+    if len(definitions) != 140:
+        errors.append(f"observability schema must contain 140 definitions, got {len(definitions)}")
     if list(definitions) != sorted(definitions):
         errors.append("observability schema definitions must be sorted")
     for name, definition in definitions.items():
@@ -1089,7 +1089,7 @@ def validate_observability_schema(schema: dict[str, Any]) -> list[str]:
     optional_request_fields = {
         "adapter", "temperature", "top_p", "max_tokens", "ttft_ms", "model_prefill_ms",
         "model_decode_ms", "error", "thinking_mode", "prefix_cache", "prompt_full",
-        "completion_full", "user_agent", "client", "thinking_budget",
+        "completion_full", "user_agent", "client", "thinking_budget", "latency",
     }
     if optional_request_fields & set(request_record.get("required", [])):
         errors.append("RequestRecord must preserve serde skipped-option wire semantics")

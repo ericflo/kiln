@@ -532,7 +532,22 @@
         "tok_per_sec": 42.5,
         "p50_itl_ms": 23.1,
         "p99_itl_ms": 31.8,
+        "p999_itl_ms": 48.2,
         "mean_itl_ms": 24.0,
+        "max_itl_ms": 51.0,
+        "stall_threshold_ms": 250.0,
+        "stall_count": 0,
+        "unexplained_stall_count": 0,
+        "stall_reasons": {
+          "actor_queue": 0,
+          "actor_admission": 0,
+          "actor_prefill": 0,
+          "actor_decode": 0,
+          "response_delivery": 0,
+          "handler_queue": 0,
+          "client_delivery": 0,
+          "unexplained": 0
+        },
         "sample_count": 84,
         "window_secs": 60.0
       }
@@ -1749,6 +1764,51 @@
           "closed": true,
           "thinking_tokens": 32,
           "thinking_time_ms": 410
+        },
+        "latency": {
+          "emitted_tokens": 48,
+          "gap_samples": 47,
+          "retained_gap_samples": 47,
+          "gap_samples_truncated": false,
+          "ttft_ms": 88.0,
+          "itl_ms_p50": 12.0,
+          "itl_ms_p99": 31.8,
+          "itl_ms_p999": 35.0,
+          "max_itl_ms": 36.0,
+          "stall_threshold_ms": 250.0,
+          "stall_count": 0,
+          "unexplained_stall_count": 0,
+          "stall_reasons": {
+            "actor_queue": 0,
+            "actor_admission": 0,
+            "actor_prefill": 0,
+            "actor_decode": 0,
+            "response_delivery": 0,
+            "handler_queue": 0,
+            "client_delivery": 0,
+            "unexplained": 0
+          },
+          "phases": {
+            "actor_queue_ms": 8.0,
+            "actor_admission_ms": 1.0,
+            "tokenization_ms": 2.0,
+            "prefill_ms": 39.0,
+            "decode_ms": 580.0,
+            "sampling_ms": null,
+            "readback_ms": null,
+            "response_delivery_ms": 3.0,
+            "handler_queue_ms": 1.0,
+            "client_delivery_ms": 2.0,
+            "gpu_lock_wait_ms": null,
+            "graph_capture_ms": null,
+            "graph_replay_ms": null,
+            "synchronization_ms": null,
+            "resize_ms": null,
+            "trim_ms": null,
+            "adapter_ms": null,
+            "training_ms": null,
+            "unexplained_ms": 1.0
+          }
         }
       }
     ],
@@ -1782,6 +1842,51 @@
             "closed": true,
             "thinking_tokens": 32,
             "thinking_time_ms": 410
+          },
+          "latency": {
+            "emitted_tokens": 48,
+            "gap_samples": 47,
+            "retained_gap_samples": 47,
+            "gap_samples_truncated": false,
+            "ttft_ms": 88.0,
+            "itl_ms_p50": 12.0,
+            "itl_ms_p99": 31.8,
+            "itl_ms_p999": 35.0,
+            "max_itl_ms": 36.0,
+            "stall_threshold_ms": 250.0,
+            "stall_count": 0,
+            "unexplained_stall_count": 0,
+            "stall_reasons": {
+              "actor_queue": 0,
+              "actor_admission": 0,
+              "actor_prefill": 0,
+              "actor_decode": 0,
+              "response_delivery": 0,
+              "handler_queue": 0,
+              "client_delivery": 0,
+              "unexplained": 0
+            },
+            "phases": {
+              "actor_queue_ms": 8.0,
+              "actor_admission_ms": 1.0,
+              "tokenization_ms": 2.0,
+              "prefill_ms": 39.0,
+              "decode_ms": 580.0,
+              "sampling_ms": null,
+              "readback_ms": null,
+              "response_delivery_ms": 3.0,
+              "handler_queue_ms": 1.0,
+              "client_delivery_ms": 2.0,
+              "gpu_lock_wait_ms": null,
+              "graph_capture_ms": null,
+              "graph_replay_ms": null,
+              "synchronization_ms": null,
+              "resize_ms": null,
+              "trim_ms": null,
+              "adapter_ms": null,
+              "training_ms": null,
+              "unexplained_ms": 1.0
+            }
           }
         }
       ]
@@ -2973,7 +3078,13 @@
         "tok_per_sec",
         "p50_itl_ms",
         "p99_itl_ms",
+        "p999_itl_ms",
         "mean_itl_ms",
+        "max_itl_ms",
+        "stall_threshold_ms",
+        "stall_count",
+        "unexplained_stall_count",
+        "stall_reasons",
         "sample_count",
         "window_secs"
       ],
@@ -2987,8 +3098,26 @@
         "p99_itl_ms": {
           "$ref": "#/$defs/NonNegativeNumber"
         },
+        "p999_itl_ms": {
+          "$ref": "#/$defs/NonNegativeNumber"
+        },
         "mean_itl_ms": {
           "$ref": "#/$defs/NonNegativeNumber"
+        },
+        "max_itl_ms": {
+          "$ref": "#/$defs/NonNegativeNumber"
+        },
+        "stall_threshold_ms": {
+          "$ref": "#/$defs/NonNegativeNumber"
+        },
+        "stall_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "unexplained_stall_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "stall_reasons": {
+          "$ref": "#/$defs/LatencyStallReasonCounts"
         },
         "sample_count": {
           "$ref": "#/$defs/NonNegativeInteger"
@@ -2997,7 +3126,7 @@
           "const": 60.0
         }
       },
-      "description": "Rolling decode throughput and inter-token latency snapshot.",
+      "description": "Rolling request-local decode throughput, ITL tail, and bounded stall diagnosis.",
       "x-kiln-rust-type": "DecodeStatsSnapshot",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4193,6 +4322,269 @@
       },
       "description": "Latency percentiles in milliseconds.",
       "x-kiln-rust-type": "LatencyPercentiles",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "LatencyPhaseTimings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actor_queue_ms",
+        "actor_admission_ms",
+        "tokenization_ms",
+        "prefill_ms",
+        "decode_ms",
+        "sampling_ms",
+        "readback_ms",
+        "response_delivery_ms",
+        "handler_queue_ms",
+        "client_delivery_ms",
+        "gpu_lock_wait_ms",
+        "graph_capture_ms",
+        "graph_replay_ms",
+        "synchronization_ms",
+        "resize_ms",
+        "trim_ms",
+        "adapter_ms",
+        "training_ms",
+        "unexplained_ms"
+      ],
+      "properties": {
+        "actor_queue_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actor_admission_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tokenization_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prefill_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decode_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sampling_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "readback_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response_delivery_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "handler_queue_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "client_delivery_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu_lock_wait_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "graph_capture_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "graph_replay_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "synchronization_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resize_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trim_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "training_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unexplained_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Bounded request phase timings; null means the serving path did not measure that subphase.",
+      "x-kiln-rust-type": "LatencyPhaseTimings",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "LatencyStallReasonCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actor_queue",
+        "actor_admission",
+        "actor_prefill",
+        "actor_decode",
+        "response_delivery",
+        "handler_queue",
+        "client_delivery",
+        "unexplained"
+      ],
+      "properties": {
+        "actor_queue": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "actor_admission": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "actor_prefill": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "actor_decode": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "response_delivery": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "handler_queue": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "client_delivery": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "unexplained": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Fixed-cardinality token-stall counts by dominant blocking reason.",
+      "x-kiln-rust-type": "LatencyStallReasonCounts",
       "x-kiln-field-schema-status": "complete"
     },
     "LiveMemory": {
@@ -5530,6 +5922,117 @@
       "x-kiln-rust-type": "RecentRequestMetrics",
       "x-kiln-field-schema-status": "complete"
     },
+    "RequestLatencyDiagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "emitted_tokens",
+        "gap_samples",
+        "retained_gap_samples",
+        "gap_samples_truncated",
+        "ttft_ms",
+        "itl_ms_p50",
+        "itl_ms_p99",
+        "itl_ms_p999",
+        "max_itl_ms",
+        "stall_threshold_ms",
+        "stall_count",
+        "unexplained_stall_count",
+        "stall_reasons",
+        "phases"
+      ],
+      "properties": {
+        "emitted_tokens": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "gap_samples": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "retained_gap_samples": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8192
+        },
+        "gap_samples_truncated": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "ttft_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "itl_ms_p50": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "itl_ms_p99": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "itl_ms_p999": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_itl_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stall_threshold_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stall_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "unexplained_stall_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "stall_reasons": {
+          "$ref": "#/$defs/LatencyStallReasonCounts"
+        },
+        "phases": {
+          "$ref": "#/$defs/LatencyPhaseTimings"
+        }
+      },
+      "description": "Request-local TTFT, ITL tail, bounded stall reasons, and honest phase-coverage diagnostics.",
+      "x-kiln-rust-type": "RequestLatencyDiagnostics",
+      "x-kiln-field-schema-status": "complete"
+    },
     "RequestMetrics": {
       "type": "object",
       "additionalProperties": false,
@@ -5659,6 +6162,9 @@
         },
         "thinking_budget": {
           "$ref": "#/$defs/RequestThinkingBudget"
+        },
+        "latency": {
+          "$ref": "#/$defs/RequestLatencyDiagnostics"
         }
       },
       "description": "One newest-first bounded recent-request record.",

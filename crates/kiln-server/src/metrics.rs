@@ -10,6 +10,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::batching_engine::BatchingEngineSnapshot;
+use crate::latency_observability::{
+    ABSOLUTE_STALL_THRESHOLD, LatencyPhaseTimings, LatencyStallReason, RequestLatencyDiagnostics,
+    TokenGapObservation,
+};
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::recent_requests::RequestThinkingBudget;
 
@@ -72,6 +76,54 @@ const THINKING_BUDGET_OUTCOMES: [&str; 9] = [
     "unresolved",
 ];
 
+const LATENCY_PHASES: [&str; 19] = [
+    "actor_queue",
+    "actor_admission",
+    "tokenization",
+    "prefill",
+    "decode",
+    "sampling",
+    "readback",
+    "response_delivery",
+    "handler_queue",
+    "client_delivery",
+    "gpu_lock_wait",
+    "graph_capture",
+    "graph_replay",
+    "synchronization",
+    "resize",
+    "trim",
+    "adapter",
+    "training",
+    "unexplained",
+];
+
+struct AtomicLatencyHistogram {
+    count: AtomicU64,
+    sum_us: AtomicU64,
+    buckets: [AtomicU64; LATENCY_BUCKETS_US.len() + 1],
+}
+
+impl AtomicLatencyHistogram {
+    fn new() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            sum_us: AtomicU64::new(0),
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    fn observe_milliseconds(&self, milliseconds: f64) {
+        if !milliseconds.is_finite() || milliseconds < 0.0 {
+            return;
+        }
+        let microseconds = (milliseconds * 1_000.0).min(u64::MAX as f64) as u64;
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_us.fetch_add(microseconds, Ordering::Relaxed);
+        observe_bucket(&self.buckets, &LATENCY_BUCKETS_US, microseconds);
+    }
+}
+
 /// Atomically tracked metrics for the kiln server.
 pub struct Metrics {
     // Inference counters
@@ -106,6 +158,11 @@ pub struct Metrics {
     pub decode_duration_count: AtomicU64,
     pub decode_duration_sum_us: AtomicU64,
     pub decode_duration_buckets: [AtomicU64; LATENCY_BUCKETS_US.len() + 1],
+
+    request_ttft: AtomicLatencyHistogram,
+    token_itl: AtomicLatencyHistogram,
+    latency_phases: [AtomicLatencyHistogram; LATENCY_PHASES.len()],
+    token_stall_reasons: [AtomicU64; LatencyStallReason::ALL.len()],
 
     /// Fixed-cardinality thinking-budget telemetry. Effective numeric limits
     /// are histograms, never labels; source and outcome labels come only from
@@ -152,6 +209,10 @@ impl Metrics {
             decode_duration_count: AtomicU64::new(0),
             decode_duration_sum_us: AtomicU64::new(0),
             decode_duration_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            request_ttft: AtomicLatencyHistogram::new(),
+            token_itl: AtomicLatencyHistogram::new(),
+            latency_phases: std::array::from_fn(|_| AtomicLatencyHistogram::new()),
+            token_stall_reasons: std::array::from_fn(|_| AtomicU64::new(0)),
             thinking_budget_token_sources: std::array::from_fn(|_| AtomicU64::new(0)),
             thinking_budget_time_sources: std::array::from_fn(|_| AtomicU64::new(0)),
             thinking_budget_outcomes: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -211,6 +272,34 @@ impl Metrics {
         let us = (secs * 1_000_000.0) as u64;
         self.decode_duration_sum_us.fetch_add(us, Ordering::Relaxed);
         observe_bucket(&self.decode_duration_buckets, &LATENCY_BUCKETS_US, us);
+    }
+
+    /// Record one request-local token gap. The histogram includes every gap;
+    /// the reason counter uses the fixed 250ms absolute floor so its meaning is
+    /// stable across scrapes. The rolling stats endpoint additionally applies
+    /// the request-sensitive `max(250ms, 5*p50)` stall gate.
+    pub fn observe_token_gap(&self, observation: TokenGapObservation) {
+        self.token_itl
+            .observe_milliseconds(observation.gap.as_secs_f64() * 1_000.0);
+        if observation.gap >= ABSOLUTE_STALL_THRESHOLD {
+            self.token_stall_reasons[observation.reason.index()].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record the bounded phase summary attached to one completed request.
+    /// Missing backend subphases are not converted to zero observations.
+    pub fn observe_request_latency(&self, diagnostics: &RequestLatencyDiagnostics) {
+        if let Some(ttft_ms) = diagnostics.ttft_ms {
+            self.request_ttft.observe_milliseconds(ttft_ms);
+        }
+        for (index, value) in latency_phase_values(&diagnostics.phases)
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(milliseconds) = value {
+                self.latency_phases[index].observe_milliseconds(milliseconds);
+            }
+        }
     }
 
     /// Record the effective thinking-budget configuration and one bounded
@@ -1015,6 +1104,42 @@ impl Metrics {
                 decode_sum_us as f64 / 1_000_000.0
             ),
         );
+
+        out.push_str("# HELP kiln_request_ttft_seconds Time from request receipt until the first model token became ready.\n");
+        out.push_str("# TYPE kiln_request_ttft_seconds histogram\n");
+        render_atomic_latency_histogram(
+            &mut out,
+            "kiln_request_ttft_seconds",
+            None,
+            &self.request_ttft,
+        );
+
+        out.push_str("# HELP kiln_token_itl_seconds Request-local inter-token latency; concurrent requests are never cross-paired.\n");
+        out.push_str("# TYPE kiln_token_itl_seconds histogram\n");
+        render_atomic_latency_histogram(&mut out, "kiln_token_itl_seconds", None, &self.token_itl);
+
+        out.push_str("# HELP kiln_request_latency_phase_seconds Observed request phase duration. Missing unsupported subphases emit no sample.\n");
+        out.push_str("# TYPE kiln_request_latency_phase_seconds histogram\n");
+        for (phase, histogram) in LATENCY_PHASES.iter().zip(&self.latency_phases) {
+            render_atomic_latency_histogram(
+                &mut out,
+                "kiln_request_latency_phase_seconds",
+                Some(("phase", phase)),
+                histogram,
+            );
+        }
+
+        out.push_str("# HELP kiln_token_stalls_total Request-local token gaps at or above the fixed 250ms absolute stall floor, by bounded dominant reason.\n");
+        out.push_str("# TYPE kiln_token_stalls_total counter\n");
+        for reason in LatencyStallReason::ALL {
+            prom_counter(
+                &mut out,
+                "kiln_token_stalls_total",
+                "reason",
+                reason.as_str(),
+                self.token_stall_reasons[reason.index()].load(Ordering::Relaxed),
+            );
+        }
 
         out.push_str("# HELP kiln_thinking_budget_source_total Recorded chat completion thinking-budget provenance by dimension.\n");
         out.push_str("# TYPE kiln_thinking_budget_source_total counter\n");
@@ -2551,6 +2676,71 @@ fn update_peak(peak: &AtomicU64, value: u64) {
     }
 }
 
+fn latency_phase_values(phases: &LatencyPhaseTimings) -> [Option<f64>; LATENCY_PHASES.len()] {
+    [
+        phases.actor_queue_ms,
+        phases.actor_admission_ms,
+        phases.tokenization_ms,
+        phases.prefill_ms,
+        phases.decode_ms,
+        phases.sampling_ms,
+        phases.readback_ms,
+        phases.response_delivery_ms,
+        phases.handler_queue_ms,
+        phases.client_delivery_ms,
+        phases.gpu_lock_wait_ms,
+        phases.graph_capture_ms,
+        phases.graph_replay_ms,
+        phases.synchronization_ms,
+        phases.resize_ms,
+        phases.trim_ms,
+        phases.adapter_ms,
+        phases.training_ms,
+        phases.unexplained_ms,
+    ]
+}
+
+fn render_atomic_latency_histogram(
+    out: &mut String,
+    name: &str,
+    label: Option<(&str, &str)>,
+    histogram: &AtomicLatencyHistogram,
+) {
+    let mut cumulative = 0_u64;
+    for (index, bound) in LATENCY_BUCKETS_SECONDS.iter().enumerate() {
+        cumulative = cumulative.saturating_add(histogram.buckets[index].load(Ordering::Relaxed));
+        match label {
+            Some((key, value)) => push_line(
+                out,
+                &format!("{name}_bucket{{{key}=\"{value}\",le=\"{bound}\"}} {cumulative}"),
+            ),
+            None => push_line(
+                out,
+                &format!("{name}_bucket{{le=\"{bound}\"}} {cumulative}"),
+            ),
+        }
+    }
+    cumulative = cumulative
+        .saturating_add(histogram.buckets[LATENCY_BUCKETS_SECONDS.len()].load(Ordering::Relaxed));
+    let count = histogram.count.load(Ordering::Relaxed);
+    let sum = histogram.sum_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+    match label {
+        Some((key, value)) => {
+            push_line(
+                out,
+                &format!("{name}_bucket{{{key}=\"{value}\",le=\"+Inf\"}} {cumulative}"),
+            );
+            push_line(out, &format!("{name}_count{{{key}=\"{value}\"}} {count}"));
+            push_line(out, &format!("{name}_sum{{{key}=\"{value}\"}} {sum:.6}"));
+        }
+        None => {
+            push_line(out, &format!("{name}_bucket{{le=\"+Inf\"}} {cumulative}"));
+            push_line(out, &format!("{name}_count {count}"));
+            push_line(out, &format!("{name}_sum {sum:.6}"));
+        }
+    }
+}
+
 fn render_histogram_buckets(
     out: &mut String,
     name: &str,
@@ -2680,6 +2870,34 @@ mod tests {
         m.observe_duration(0.5);
         m.observe_prefill_duration(0.25);
         m.observe_decode_duration(0.75);
+        m.observe_token_gap(TokenGapObservation {
+            gap: std::time::Duration::from_millis(300),
+            reason: LatencyStallReason::ActorPrefill,
+            attributed_duration: std::time::Duration::from_millis(280),
+        });
+        m.observe_request_latency(&RequestLatencyDiagnostics {
+            emitted_tokens: 2,
+            gap_samples: 1,
+            retained_gap_samples: 1,
+            gap_samples_truncated: false,
+            ttft_ms: Some(40.0),
+            itl_ms_p50: Some(300.0),
+            itl_ms_p99: Some(300.0),
+            itl_ms_p999: Some(300.0),
+            max_itl_ms: Some(300.0),
+            stall_threshold_ms: Some(250.0),
+            stall_count: 1,
+            unexplained_stall_count: 0,
+            stall_reasons: crate::latency_observability::LatencyStallReasonCounts {
+                actor_prefill: 1,
+                ..Default::default()
+            },
+            phases: LatencyPhaseTimings {
+                tokenization_ms: Some(4.0),
+                prefill_ms: Some(280.0),
+                ..Default::default()
+            },
+        });
         m.add_tokens(100);
         m.inc_active();
         m.inc_active();
@@ -3230,6 +3448,13 @@ mod tests {
         assert!(output.contains(r#"kiln_request_decode_duration_seconds_bucket{le="1"} 1"#));
         assert!(output.contains("kiln_request_decode_duration_seconds_count 1"));
         assert!(output.contains("kiln_request_decode_duration_seconds_sum 0.75"));
+        assert!(output.contains(r#"kiln_request_ttft_seconds_bucket{le="0.05"} 1"#));
+        assert!(output.contains("kiln_request_ttft_seconds_count 1"));
+        assert!(output.contains(r#"kiln_token_itl_seconds_bucket{le="0.5"} 1"#));
+        assert!(output.contains(
+            r#"kiln_request_latency_phase_seconds_bucket{phase="tokenization",le="0.005"} 1"#
+        ));
+        assert!(output.contains(r#"kiln_token_stalls_total{reason="actor_prefill"} 1"#));
         assert!(output.contains(
             "kiln_thinking_budget_source_total{dimension=\"tokens\",source=\"request\"} 2"
         ));

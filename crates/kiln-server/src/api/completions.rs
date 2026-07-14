@@ -31,6 +31,9 @@ use std::path::{Path, PathBuf};
 
 use crate::batching_engine::{EngineActionTokenSource, EngineEvent, EngineRequest};
 use crate::error::ApiError;
+use crate::latency_observability::{
+    EngineTokenTiming, RequestLatencyDiagnostics, RequestLatencyTracker, TokenPhaseDurations,
+};
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::metrics::RequestStatus;
 use crate::recent_requests::{
@@ -591,6 +594,7 @@ fn attach_chat_performance_metadata(
         adapter_used: adapter_used_for_performance_metadata(state),
         thinking_mode: resp.metadata.thinking_mode.clone(),
         finish_reason,
+        latency: None,
     });
 }
 
@@ -1212,8 +1216,15 @@ struct StreamingTokenTiming {
     object: &'static str,
     token_index: u32,
     ready_ms: f64,
+    actor_delivered_ms: f64,
     handler_received_ms: f64,
+    body_enqueued_ms: f64,
+    response_delivery_ms: f64,
+    handler_queue_ms: f64,
     queue_delay_ms: f64,
+    client_delivery_ms: f64,
+    blocking_phase: Option<&'static str>,
+    blocking_phase_ms: Option<f64>,
 }
 
 fn instant_delta_ms(start: std::time::Instant, end: std::time::Instant) -> f64 {
@@ -1228,16 +1239,27 @@ fn streaming_token_timing_json(
     enabled: bool,
     token_index: u32,
     request_start: std::time::Instant,
-    ready_at: std::time::Instant,
+    timing: EngineTokenTiming,
     handler_received_at: std::time::Instant,
+    body_enqueued_at: std::time::Instant,
+    gap: Option<crate::latency_observability::TokenGapObservation>,
 ) -> Option<String> {
     enabled.then(|| {
+        let actor_delivered_at = timing.actor_delivered_at.unwrap_or(timing.ready_at);
         serde_json::to_string(&StreamingTokenTiming {
             object: "kiln.token_timing",
             token_index,
-            ready_ms: instant_delta_ms(request_start, ready_at),
+            ready_ms: instant_delta_ms(request_start, timing.ready_at),
+            actor_delivered_ms: instant_delta_ms(request_start, actor_delivered_at),
             handler_received_ms: instant_delta_ms(request_start, handler_received_at),
-            queue_delay_ms: instant_delta_ms(ready_at, handler_received_at),
+            body_enqueued_ms: instant_delta_ms(request_start, body_enqueued_at),
+            response_delivery_ms: instant_delta_ms(timing.ready_at, actor_delivered_at),
+            handler_queue_ms: instant_delta_ms(actor_delivered_at, handler_received_at),
+            queue_delay_ms: instant_delta_ms(timing.ready_at, handler_received_at),
+            client_delivery_ms: instant_delta_ms(handler_received_at, body_enqueued_at),
+            blocking_phase: gap.map(|observation| observation.reason.as_str()),
+            blocking_phase_ms: gap
+                .map(|observation| duration_ms_f64(observation.attributed_duration)),
         })
         .expect("token timing payload must serialize")
     })
@@ -1779,6 +1801,9 @@ fn tool_call_deltas_from_openai_calls(calls: &[serde_json::Value]) -> Vec<serde_
 /// recording must not fail the user's request.
 fn record_recent_request(state: &AppState, record: RequestRecord) {
     maybe_log_slow_chat_completion(state, &record);
+    if let Some(latency) = record.latency.as_ref() {
+        state.metrics.observe_request_latency(latency);
+    }
     if let Some(budget) = record.thinking_budget.as_ref() {
         state
             .metrics
@@ -4307,6 +4332,7 @@ pub struct ChatCompletionPerformanceMetadata {
     pub adapter_used: String,
     pub thinking_mode: String,
     pub finish_reason: String,
+    pub latency: Option<RequestLatencyDiagnostics>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5900,7 +5926,9 @@ async fn chat_completions_inner(
         req.tool_choice.as_ref(),
         req.chat_template_kwargs.as_ref(),
     )?;
+    let tokenization_started_at = std::time::Instant::now();
     let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
+    let tokenization_duration = tokenization_started_at.elapsed();
     enforce_context_window(state, &mut sampling, prompt_tokens.len())?;
     configure_thinking_budget_for_prompt(state, &req, &prompt_text, &mut sampling)?;
     validate_rollout_provenance_generation_capacity(&req, &sampling)?;
@@ -6113,6 +6141,7 @@ async fn chat_completions_inner(
                         &sampling,
                         &req,
                         request_start,
+                        Some(tokenization_duration),
                     )
                     .await
                 } else {
@@ -6158,6 +6187,7 @@ async fn chat_completions_inner(
                         &sampling,
                         &req,
                         request_start,
+                        Some(tokenization_duration),
                     )
                     .await
                 } else {
@@ -6971,6 +7001,7 @@ async fn generate_real_batched(
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
     request_start: std::time::Instant,
+    tokenization_duration: Option<std::time::Duration>,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let prompt_token_count = prompt_tokens.len();
     let request_id = Uuid::new_v4();
@@ -6991,11 +7022,19 @@ async fn generate_real_batched(
 
     let timeout = state.request_timeout;
     let mut first_token_at: Option<std::time::Instant> = None;
+    let mut latency_tracker = RequestLatencyTracker::new(request_start, tokenization_duration);
     let collect = async {
         loop {
             match events.recv().await {
-                Some(EngineEvent::Token { ready_at, .. }) => {
-                    first_token_at.get_or_insert(ready_at);
+                Some(EngineEvent::Token { timing, .. }) => {
+                    first_token_at.get_or_insert(timing.ready_at);
+                    let observed_at = std::time::Instant::now();
+                    if let Some(gap) = latency_tracker.record_token(timing, observed_at) {
+                        state.metrics.observe_token_gap(gap);
+                        if let Ok(mut stats) = state.decode_stats.lock() {
+                            stats.record_gap(observed_at, gap);
+                        }
+                    }
                 }
                 Some(EngineEvent::Done { output }) => break Ok(output),
                 Some(EngineEvent::Error(err)) => break Err(anyhow::anyhow!(err)),
@@ -7030,6 +7069,7 @@ async fn generate_real_batched(
     let actor_queue_duration = output.actor_queue_duration;
     let actor_admission_duration = output.actor_admission_duration;
     let actor_prefill_wall_duration = output.actor_prefill_wall_duration;
+    let latency_diagnostics = latency_tracker.diagnostics();
     let finish_reason = match &output.finish_reason {
         kiln_model::FinishReason::Eos => "stop",
         kiln_model::FinishReason::MaxTokens => "length",
@@ -7092,6 +7132,7 @@ async fn generate_real_batched(
                 &metadata.thinking_budget,
                 thinking_budget_status,
             )),
+            latency: Some(latency_diagnostics.clone()),
             ..request_record_from_req(state, req, &id, &model, false)
         },
     );
@@ -7140,6 +7181,9 @@ async fn generate_real_batched(
         actor_admission_duration,
         actor_prefill_wall_duration,
     );
+    if let Some(performance) = response.metadata.performance.as_mut() {
+        performance.latency = Some(latency_diagnostics);
+    }
     Ok(response)
 }
 
@@ -7152,6 +7196,7 @@ async fn generate_real_batched_streaming(
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
     request_start: std::time::Instant,
+    tokenization_duration: Option<std::time::Duration>,
 ) -> Result<Response, ApiError> {
     let prompt_token_count = prompt_tokens.len();
     let request_id = Uuid::new_v4();
@@ -7185,6 +7230,7 @@ async fn generate_real_batched_streaming(
     let timeout = state.request_timeout;
     let tokenizer = state.tokenizer.clone();
     let metrics = state.metrics.clone();
+    let decode_stats = state.decode_stats.clone();
     let state_for_record = state.clone();
     let prompt_text_full = last_user_message_text(req);
     let prompt_preview = truncate_chars(&prompt_text_full, PROMPT_PREVIEW_MAX_CHARS);
@@ -7224,6 +7270,10 @@ async fn generate_real_batched_streaming(
             let mut completion_token_count: u32 = 0;
             let mut generated_tokens: Vec<TokenId> = Vec::new();
             let mut first_token_ready_at: Option<std::time::Instant> = None;
+            let latency_tracker = std::cell::RefCell::new(RequestLatencyTracker::new(
+                request_start,
+                tokenization_duration,
+            ));
             // Server-side emit gates for the engine path (the engine emits
             // raw token ids; the server decodes): incremental detokenizer
             // (no U+FFFD on multi-byte chars, bounded decode window instead
@@ -7234,6 +7284,7 @@ async fn generate_real_batched_streaming(
             let record_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
             let record_error_for_record = record_error.clone();
             let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
+                let latency = latency_tracker.borrow().diagnostics();
                 let error =
                     record_error_for_record
                         .lock()
@@ -7265,7 +7316,9 @@ async fn generate_real_batched_streaming(
                     temperature: req_temperature,
                     top_p: req_top_p,
                     max_tokens: req_max_tokens,
-                    ttft_ms: None,
+                    ttft_ms: latency
+                        .ttft_ms
+                        .map(|milliseconds| milliseconds.min(u64::MAX as f64) as u64),
                     model_prefill_ms: None,
                     model_decode_ms: None,
                     error,
@@ -7276,6 +7329,7 @@ async fn generate_real_batched_streaming(
                             completion_tokens as usize,
                         ),
                     )),
+                    latency: Some(latency),
                 };
                 record_recent_request(&state_for_record, record);
             };
@@ -7346,41 +7400,19 @@ async fn generate_real_batched_streaming(
                     }
                     event = events.recv() => {
                         match event {
-                            Some(EngineEvent::Token { token, ready_at }) => {
+                            Some(EngineEvent::Token { token, timing }) => {
                                 let handler_received_at = std::time::Instant::now();
-                                first_token_ready_at.get_or_insert(ready_at);
+                                first_token_ready_at.get_or_insert(timing.ready_at);
                                 generated_tokens.push(token);
                                 completion_token_count = completion_token_count.saturating_add(1);
                                 metrics.add_tokens(1);
-
-                                if let Some(timing) = streaming_token_timing_json(
-                                    include_token_timing,
-                                    completion_token_count,
-                                    request_start,
-                                    ready_at,
-                                    handler_received_at,
-                                ) {
-                                    match tokio::time::timeout_at(
-                                        deadline,
-                                        tx.send(Event::default().data(timing)),
-                                    )
-                                    .await
-                                    {
-                                        Err(_) => {
-                                            timed_out = true;
-                                            break;
-                                        }
-                                        Ok(Err(_)) => {
-                                            cancel.cancel();
-                                            let _ = batching_engine.cancel(request_id).await;
-                                            record(
-                                                "client_disconnect".to_string(),
-                                                &completion_buf,
-                                                completion_token_count,
-                                            );
-                                            return;
-                                        }
-                                        Ok(Ok(())) => {}
+                                let gap = latency_tracker
+                                    .borrow_mut()
+                                    .record_token(timing, handler_received_at);
+                                if let Some(gap) = gap {
+                                    metrics.observe_token_gap(gap);
+                                    if let Ok(mut stats) = decode_stats.lock() {
+                                        stats.record_gap(handler_received_at, gap);
                                     }
                                 }
 
@@ -7455,7 +7487,45 @@ async fn generate_real_batched_streaming(
                                         );
                                         return;
                                     }
-                                    Ok(true) => {}
+                                    Ok(true) => {
+                                        let body_enqueued_at = std::time::Instant::now();
+                                        latency_tracker.borrow_mut().record_client_delivery(
+                                            handler_received_at,
+                                            body_enqueued_at,
+                                        );
+                                        if let Some(timing_payload) = streaming_token_timing_json(
+                                            include_token_timing,
+                                            completion_token_count,
+                                            request_start,
+                                            timing,
+                                            handler_received_at,
+                                            body_enqueued_at,
+                                            gap,
+                                        ) {
+                                            match tokio::time::timeout_at(
+                                                deadline,
+                                                tx.send(Event::default().data(timing_payload)),
+                                            )
+                                            .await
+                                            {
+                                                Err(_) => {
+                                                    timed_out = true;
+                                                    break;
+                                                }
+                                                Ok(Err(_)) => {
+                                                    cancel.cancel();
+                                                    let _ = batching_engine.cancel(request_id).await;
+                                                    record(
+                                                        "client_disconnect".to_string(),
+                                                        &completion_buf,
+                                                        completion_token_count,
+                                                    );
+                                                    return;
+                                                }
+                                                Ok(Ok(())) => {}
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             Some(EngineEvent::Done { output }) => {
@@ -7621,6 +7691,7 @@ async fn generate_real_batched_streaming(
                                 let total_latency = request_start.elapsed();
                                 let ttft = first_token_ready_at
                                     .map(|ready_at| ready_at.saturating_duration_since(request_start));
+                                let latency_diagnostics = latency_tracker.borrow().diagnostics();
                                 let performance = include_performance.then(|| {
                                     ChatCompletionPerformanceMetadata {
                                         prompt_tokens: prompt_token_count,
@@ -7648,6 +7719,7 @@ async fn generate_real_batched_streaming(
                                         adapter_used: performance_adapter_used.clone(),
                                         thinking_mode: thinking_mode.clone(),
                                         finish_reason: finish.clone(),
+                                        latency: Some(latency_diagnostics.clone()),
                                     }
                                 });
                                 let mut thinking_budget_metadata =
@@ -8550,6 +8622,7 @@ async fn generate_real_streaming(
             let mut reasoning_buf = String::new();
             let mut content_buf = String::new();
             let mut completion_token_count: u32 = 0;
+            let mut previous_direct_token_at: Option<std::time::Instant> = None;
 
             let record_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
             let record_error_for_record = record_error.clone();
@@ -8596,6 +8669,7 @@ async fn generate_real_streaming(
                             completion_tokens as usize,
                         ),
                     )),
+                    latency: None,
                 };
                 record_recent_request(&state_for_record, record);
             };
@@ -8864,8 +8938,19 @@ async fn generate_real_streaming(
                 };
                 match event {
                     Some(StreamEvent::Token(token)) => {
-                        if let Ok(mut stats) = decode_stats.lock() {
-                            stats.record_token(std::time::Instant::now());
+                        let token_at = std::time::Instant::now();
+                        if let Some(previous) = previous_direct_token_at.replace(token_at) {
+                            let gap = token_at.saturating_duration_since(previous);
+                            let observation = crate::latency_observability::TokenGapObservation {
+                                gap,
+                                reason:
+                                    crate::latency_observability::LatencyStallReason::Unexplained,
+                                attributed_duration: std::time::Duration::ZERO,
+                            };
+                            metrics.observe_token_gap(observation);
+                            if let Ok(mut stats) = decode_stats.lock() {
+                                stats.record_gap(token_at, observation);
+                            }
                         }
                         metrics.add_tokens(1);
                         completion_token_count = completion_token_count.saturating_add(1);
@@ -11520,6 +11605,7 @@ async fn generate_one_prepared_response(
                     sampling,
                     req,
                     request_start,
+                    None,
                 )
                 .await
             } else {
@@ -12161,6 +12247,7 @@ mod tests {
             adapter_used: "base".to_string(),
             thinking_mode: "non_reasoning".to_string(),
             finish_reason: "length".to_string(),
+            latency: None,
         };
         let timed: serde_json::Value = serde_json::from_str(&streaming_finish_chunk_json(
             &chunk,
@@ -14038,14 +14125,32 @@ mod tests {
 
         let request_start = std::time::Instant::now();
         let ready_at = request_start + std::time::Duration::from_millis(12);
+        let mut engine_timing = EngineTokenTiming::ready(ready_at, TokenPhaseDurations::default());
+        engine_timing.mark_actor_delivered(ready_at + std::time::Duration::from_millis(2));
         let handler_received_at = ready_at + std::time::Duration::from_millis(5);
+        let body_enqueued_at = handler_received_at + std::time::Duration::from_millis(3);
         assert!(
-            streaming_token_timing_json(false, 1, request_start, ready_at, handler_received_at,)
-                .is_none()
+            streaming_token_timing_json(
+                false,
+                1,
+                request_start,
+                engine_timing,
+                handler_received_at,
+                body_enqueued_at,
+                None,
+            )
+            .is_none()
         );
-        let timing =
-            streaming_token_timing_json(true, 7, request_start, ready_at, handler_received_at)
-                .unwrap();
+        let timing = streaming_token_timing_json(
+            true,
+            7,
+            request_start,
+            engine_timing,
+            handler_received_at,
+            body_enqueued_at,
+            None,
+        )
+        .unwrap();
 
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         tx.send(Event::default().data(timing)).await.unwrap();
@@ -14054,12 +14159,18 @@ mod tests {
         assert_eq!(payloads.len(), 1);
         let payload = payloads.into_iter().next().unwrap();
         let object = payload.as_object().unwrap();
-        assert_eq!(object.len(), 5, "timing payload shape changed: {payload}");
+        assert_eq!(object.len(), 12, "timing payload shape changed: {payload}");
         assert_eq!(payload["object"], "kiln.token_timing");
         assert_eq!(payload["token_index"], 7);
         assert_eq!(payload["ready_ms"], 12.0);
+        assert_eq!(payload["actor_delivered_ms"], 14.0);
         assert_eq!(payload["handler_received_ms"], 17.0);
+        assert_eq!(payload["body_enqueued_ms"], 20.0);
+        assert_eq!(payload["response_delivery_ms"], 2.0);
+        assert_eq!(payload["handler_queue_ms"], 3.0);
         assert_eq!(payload["queue_delay_ms"], 5.0);
+        assert_eq!(payload["client_delivery_ms"], 3.0);
+        assert!(payload["blocking_phase"].is_null());
         assert!(payload.get("choices").is_none());
     }
 

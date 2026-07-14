@@ -2449,25 +2449,30 @@ async function pollDecodePerf() {
     if (idle) {
       key = 'idle|' + window;
       html = `<div class="sched-stats">
-        <div class="sched-stat" title="Decoded tokens per second across recent streaming completions."><div class="num">&mdash;</div><div class="lbl">tok/s</div></div>
+        <div class="sched-stat" title="Decode cadence across recent request-local token gaps."><div class="num">&mdash;</div><div class="lbl">tok/s</div></div>
         <div class="sched-stat" title="Median inter-token latency."><div class="num">&mdash;</div><div class="lbl">p50 ITL</div></div>
         <div class="sched-stat" title="99th-percentile inter-token latency."><div class="num">&mdash;</div><div class="lbl">p99 ITL</div></div>
-        <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">0</div><div class="lbl">samples</div></div>
+        <div class="sched-stat" title="99.9th-percentile inter-token latency."><div class="num">&mdash;</div><div class="lbl">p99.9 ITL</div></div>
+        <div class="sched-stat" title="Request-local inter-token gaps counted in this rolling window."><div class="num">0</div><div class="lbl">token gaps</div></div>
       </div>
-      <div class="empty" style="margin-top: var(--space-4);">No streaming completions in the last ${window}s. Send a message in <strong>Playground</strong> to populate metrics, or check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> if the server is still warming up.</div>`;
+      <div class="empty" style="margin-top: var(--space-4);">No recent token gaps in the last ${window}s. Send a message in <strong>Playground</strong> to populate metrics, or check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> if the server is still warming up.</div>`;
     } else {
       const tps = data.tok_per_sec.toFixed(1);
       const p50 = data.p50_itl_ms.toFixed(1);
       const p99 = data.p99_itl_ms.toFixed(1);
+      const p999 = data.p999_itl_ms.toFixed(1);
       const mean = data.mean_itl_ms.toFixed(1);
-      key = ['live', tps, p50, p99, mean, data.sample_count, window].join('|');
+      const stalls = Number(data.stall_count || 0);
+      const unexplained = Number(data.unexplained_stall_count || 0);
+      key = ['live', tps, p50, p99, p999, mean, stalls, unexplained, data.sample_count, window].join('|');
       html = `<div class="sched-stats">
-        <div class="sched-stat" title="Decoded tokens per second across recent streaming completions."><div class="num">${tps}</div><div class="lbl">tok/s</div></div>
+        <div class="sched-stat" title="Decode cadence across recent request-local token gaps."><div class="num">${tps}</div><div class="lbl">tok/s</div></div>
         <div class="sched-stat" title="Median inter-token latency."><div class="num">${p50}<span style="font-size:0.55em;color:var(--text-muted);font-weight:500;"> ms</span></div><div class="lbl">p50 ITL</div></div>
         <div class="sched-stat" title="99th-percentile inter-token latency."><div class="num">${p99}<span style="font-size:0.55em;color:var(--text-muted);font-weight:500;"> ms</span></div><div class="lbl">p99 ITL</div></div>
-        <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">${data.sample_count}</div><div class="lbl">samples · ${window}s</div></div>
+        <div class="sched-stat" title="99.9th-percentile inter-token latency."><div class="num">${p999}<span style="font-size:0.55em;color:var(--text-muted);font-weight:500;"> ms</span></div><div class="lbl">p99.9 ITL</div></div>
+        <div class="sched-stat" title="Request-local inter-token gaps counted in this rolling window."><div class="num">${data.sample_count}</div><div class="lbl">token gaps · ${window}s</div></div>
       </div>
-      <div style="margin-top: var(--space-3); font-size: var(--text-xs); color: var(--text-muted);">Mean inter-token latency: <span class="tabular-nums" style="color: var(--text-2);">${mean} ms</span></div>`;
+      <div style="margin-top: var(--space-3); font-size: var(--text-xs); color: var(--text-muted);">Mean <span class="tabular-nums" style="color: var(--text-2);">${mean} ms</span> · max <span class="tabular-nums" style="color: var(--text-2);">${data.max_itl_ms.toFixed(1)} ms</span> · stalls <strong class="tabular-nums">${stalls}</strong> · unexplained <strong class="tabular-nums">${unexplained}</strong></div>`;
     }
     if (key !== lastDecodeStatsKey || !host.firstChild) {
       lastDecodeStatsKey = key;
@@ -2604,8 +2609,8 @@ let recentAgentFilter = 'all';
 let recentStatusFilter = 'all';
 
 // A request "needs attention" if pi got a degraded result from it: an error, a
-// truncated (max_tokens-clipped) completion, or a silent fallback to the base
-// model while the server claims a non-base adapter is active. These are the
+// truncated (max_tokens-clipped) completion, a request-local token stall, or a
+// silent fallback to the base model while the server claims a non-base adapter is active. These are the
 // rows worth turning into corrections — the same predicate drives the
 // "Needs attention" filter chip and the per-row warning tint. Deliberate
 // non-problems stay neutral: 'client_disconnect' is the user pressing Ctrl-C
@@ -2616,6 +2621,7 @@ function requestNeedsAttention(r) {
   const f = (r.finish_reason || '').toLowerCase();
   if (r.error || f === 'error') return true;
   if (f === 'length') return true;
+  if (Number(r.latency?.stall_count || 0) > 0) return true;
   if (servedBaseSilently(r.adapter)) return true;
   return false;
 }
@@ -2730,6 +2736,10 @@ function renderRecentRequests(rows) {
     const tokens = `${r.prompt_tokens || 0} → ${r.completion_tokens || 0} tok`;
     const dur = (r.duration_ms != null) ? `${r.duration_ms} ms` : '';
     const ttft = (r.ttft_ms != null) ? `<span class="recent-ttft tabular-nums" title="Time to first token — the latency pi feels before output starts">${fmtMsShort(r.ttft_ms)} ttft</span>` : '';
+    const stalls = Number(r.latency?.stall_count || 0);
+    const stallPill = stalls > 0
+      ? `<span class="recent-pill length" title="${Number(r.latency?.unexplained_stall_count || 0)} unexplained">${stalls} stall${stalls === 1 ? '' : 's'}</span>`
+      : '';
     const promptText = r.prompt_preview || '—';
     const completionText = r.completion_preview || '—';
     const attn = requestNeedsAttention(r);
@@ -2742,7 +2752,7 @@ function renderRecentRequests(rows) {
         </div>
         <div class="recent-meta">
           <span class="recent-tokens">${tokens}${ttft}</span>
-          <span>${finishPill}${dur ? `<span class="tabular-nums">${escapeHtml(dur)}</span>` : ''}</span>
+          <span>${finishPill}${stallPill}${dur ? `<span class="tabular-nums">${escapeHtml(dur)}</span>` : ''}</span>
           <button type="button" class="recent-correct${attn ? '' : ' quiet'}" data-correct-id="${escapeHtml(r.id || '')}" title="Add this to your Corrections basket — write the fix on the Overview, then train">${icon('flask', 'icn-sm')} Correct</button>
         </div>
       </li>
@@ -2868,6 +2878,56 @@ function requestThinkingBudgetSection(r) {
     </div>`;
 }
 
+function requestLatencySection(r) {
+  const latency = r?.latency;
+  if (!latency || typeof latency !== 'object') return '';
+  const value = milliseconds => milliseconds == null ? '—' : fmtMsShort(milliseconds);
+  const summary = [
+    ['TTFT', value(latency.ttft_ms)],
+    ['p50 ITL', value(latency.itl_ms_p50)],
+    ['p99 ITL', value(latency.itl_ms_p99)],
+    ['p99.9 ITL', value(latency.itl_ms_p999)],
+    ['Max ITL', value(latency.max_itl_ms)],
+    ['Stalls', String(latency.stall_count || 0)],
+    ['Unexplained', String(latency.unexplained_stall_count || 0)],
+  ];
+  const phaseLabels = {
+    actor_queue_ms: 'Actor queue', actor_admission_ms: 'Admission', tokenization_ms: 'Tokenization',
+    prefill_ms: 'Actor prefill', decode_ms: 'Actor decode', sampling_ms: 'Sampling',
+    readback_ms: 'Readback', response_delivery_ms: 'Response delivery',
+    handler_queue_ms: 'Handler queue', client_delivery_ms: 'Body enqueue',
+    gpu_lock_wait_ms: 'GPU lock wait', graph_capture_ms: 'Graph capture',
+    graph_replay_ms: 'Graph replay', synchronization_ms: 'Synchronization', resize_ms: 'Resize',
+    trim_ms: 'Trim', adapter_ms: 'Adapter', training_ms: 'Training', unexplained_ms: 'Unexplained',
+  };
+  const phases = latency.phases && typeof latency.phases === 'object' ? latency.phases : {};
+  const measured = Object.entries(phaseLabels)
+    .filter(([key]) => typeof phases[key] === 'number')
+    .map(([key, label]) => `<div class="req-stat"><span class="req-stat-k">${escapeHtml(label)}</span><span class="req-stat-v tabular-nums">${escapeHtml(value(phases[key]))}</span></div>`)
+    .join('');
+  const missing = Object.entries(phaseLabels).filter(([key]) => phases[key] == null).map(([, label]) => label);
+  const reasonLabels = {
+    actor_queue: 'actor queue', actor_admission: 'admission', actor_prefill: 'prefill',
+    actor_decode: 'decode', response_delivery: 'response delivery', handler_queue: 'handler queue',
+    client_delivery: 'body enqueue', unexplained: 'unexplained',
+  };
+  const reasons = Object.entries(reasonLabels)
+    .filter(([key]) => Number(latency.stall_reasons?.[key] || 0) > 0)
+    .map(([key, label]) => `${label} ${latency.stall_reasons[key]}`)
+    .join(' · ');
+  const coverage = `${latency.retained_gap_samples || 0} of ${latency.gap_samples || 0} request-local gaps retained${latency.gap_samples_truncated ? ' (bounded)' : ''}`;
+  return `
+    <div class="req-section" data-request-latency>
+      <div class="req-section-head">Latency diagnosis</div>
+      <div class="req-stats">
+        ${summary.map(([key, display]) => `<div class="req-stat"><span class="req-stat-k">${escapeHtml(key)}</span><span class="req-stat-v tabular-nums">${escapeHtml(display)}</span></div>`).join('')}
+      </div>
+      ${measured ? `<div class="req-stats" style="margin-top:var(--space-3);">${measured}</div>` : ''}
+      <div class="hint" style="margin-top:var(--space-2);">${escapeHtml(coverage)}${reasons ? ` · ${escapeHtml(reasons)}` : ''}</div>
+      ${missing.length ? `<div class="hint" style="margin-top:var(--space-1);">Not measured on this path: ${escapeHtml(missing.join(', '))}</div>` : ''}
+    </div>`;
+}
+
 function openRequestDrillModal(id) {
   const modal = document.getElementById('request-drill-modal');
   if (!modal) return;
@@ -2928,11 +2988,12 @@ function openRequestDrillModal(id) {
     ? `<div class="req-section req-error"><div class="req-section-head">Error</div><pre class="req-pre">${escapeHtml(r.error)}</pre></div>`
     : '';
   const thinkingBudgetHtml = requestThinkingBudgetSection(r);
+  const latencyDiagnosisHtml = requestLatencySection(r);
   // Latency breakdown — the experience pi actually felt: the wait for the first
   // token (TTFT), then how fast the rest streamed. Only meaningful when we have
   // both a TTFT and a total duration (i.e. a streamed completion).
   let latencyHtml = '';
-  if (r.ttft_ms != null && r.duration_ms != null && r.duration_ms >= r.ttft_ms) {
+  if (!r.latency && r.ttft_ms != null && r.duration_ms != null && r.duration_ms >= r.ttft_ms) {
     const total = r.duration_ms, ttft = r.ttft_ms, decode = Math.max(0, total - ttft);
     const ttftPct = total > 0 ? (ttft / total * 100) : 0;
     const tps = (r.completion_tokens && decode > 0) ? (r.completion_tokens / (decode / 1000)).toFixed(0) : null;
@@ -2953,6 +3014,7 @@ function openRequestDrillModal(id) {
   content.innerHTML = `
     <div class="req-detail">
       <div class="req-stats">${statRow}</div>
+      ${latencyDiagnosisHtml}
       ${latencyHtml}
       ${thinkingBudgetHtml}
       ${errBlock}

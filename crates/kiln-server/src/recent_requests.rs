@@ -10,6 +10,8 @@ use std::collections::VecDeque;
 use kiln_core::thinking_budget::ThinkingBudgetSource;
 use serde::Serialize;
 
+use crate::latency_observability::RequestLatencyDiagnostics;
+
 /// Default upper bound on retained requests. Old entries are evicted FIFO.
 pub const DEFAULT_CAPACITY: usize = 100;
 
@@ -74,6 +76,11 @@ pub struct RequestRecord {
     /// outcome when generation progressed far enough to know it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<RequestThinkingBudget>,
+    /// Request-local phase and stall diagnosis. Present when the serving path
+    /// supplies token-ready phase attribution; unsupported subphases remain
+    /// explicit nulls inside the fixed diagnostics contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency: Option<RequestLatencyDiagnostics>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

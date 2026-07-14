@@ -130,6 +130,13 @@
       "description": "Stable, experimental, and maintenance GPU ownership contracts."
     },
     {
+      "source": "docs/LATENCY_OBSERVABILITY.md",
+      "slug": "latency-observability",
+      "title": "Latency Observability",
+      "section": "serving",
+      "description": "Request-local token timing, phase and stall attribution, API and SSE fields, dashboard diagnostics, Prometheus metrics, and pause investigation."
+    },
+    {
       "source": "docs/THINKING_BUDGET_CONTRACT.md",
       "slug": "thinking-budgets",
       "title": "Thinking Budget Contract",
