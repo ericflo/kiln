@@ -160,6 +160,116 @@ class WaveRun:
     finished: float
 
 
+@dataclasses.dataclass
+class RunEvidence:
+    values: dict[str, float | int] = dataclasses.field(
+        default_factory=lambda: {name: 0 for name in METRIC_DEFINITIONS}
+    )
+    details: dict[str, Any] = dataclasses.field(default_factory=dict)
+    milestones: list[str] = dataclasses.field(default_factory=list)
+    waves: list[WaveRun] = dataclasses.field(default_factory=list)
+    warmup: mixed.StreamResult | None = None
+    runtime_started: float | None = None
+    measurement_started: float | None = None
+
+    def record_wave(self, wave: WaveRun) -> None:
+        self.waves.append(wave)
+        prefix = wave.name.replace("-", "_")
+        successes = [result for result in wave.results if result.success]
+        duration = max(wave.finished - wave.started, 1e-9)
+        completion_tokens = sum(result.completion_tokens for result in successes)
+        self.values.update(
+            {
+                f"{prefix}_completion_token_count": completion_tokens,
+                f"{prefix}_duration_seconds": duration,
+                f"{prefix}_e2e_ms_p99": mixed.percentile_r7(
+                    [result.e2e_ms for result in successes], 0.99
+                ),
+                f"{prefix}_itl_ms_p99": mixed.percentile_r7(
+                    [gap for result in successes for gap in result.itl_ms], 0.99
+                ),
+                f"{prefix}_output_tokens_per_second": completion_tokens / duration,
+                f"{prefix}_request_count": len(wave.results),
+                f"{prefix}_request_failure_count": len(wave.results) - len(successes),
+                f"{prefix}_ttft_ms_p99": mixed.percentile_r7(
+                    [result.ttft_ms for result in successes], 0.99
+                ),
+            }
+        )
+        results = [result for completed in self.waves for result in completed.results]
+        successful_results = [result for result in results if result.success]
+        started = min((result.started for result in results), default=wave.started)
+        finished = max((result.finished for result in results), default=started)
+        total_duration = max(finished - started, 1e-9)
+        total_completion_tokens = sum(
+            result.completion_tokens for result in successful_results
+        )
+        itls = [gap for result in successful_results for gap in result.itl_ms]
+        self.values.update(
+            {
+                "completion_token_count": total_completion_tokens,
+                "itl_pause_count": sum(gap > PAUSE_GATE_MS for gap in itls),
+                "itl_stall_count": sum(gap > STALL_EVIDENCE_MS for gap in itls),
+                "length_terminated_request_count": sum(
+                    result.finish_reason == "length" for result in successful_results
+                ),
+                "output_token_throughput_per_second": (
+                    total_completion_tokens / total_duration
+                ),
+                "prompt_token_count": sum(
+                    result.prompt_tokens for result in successful_results
+                ),
+                "request_count": len(results),
+                "request_failure_count": len(results) - len(successful_results),
+                "semantic_output_record_count": len(results),
+            }
+        )
+        self.details["semantic_output_sha256"] = canonical_semantic_sha256(
+            tuple(self.waves)
+        )
+        self.milestones.append(f"wave:{wave.name}")
+
+    def record_runtime_observations(
+        self,
+        events: list[mixed.ObservedEvent],
+        measurement_events: list[mixed.ObservedEvent],
+        memory_samples: list[int],
+        memory_errors: list[str],
+    ) -> None:
+        categories = [event.category for event in events]
+        self.values.update(
+            {
+                "device_fault_count": categories.count("device_fault"),
+                "graph_activity_count": sum(
+                    category in {"graph_capture", "graph_fallback", "graph_sync"}
+                    for category in categories
+                ),
+                "kv_resize_event_count": categories.count("kv_resize"),
+                "memory_reclaim_event_count": categories.count("memory_reclaim"),
+                "memory_sample_count": len(memory_samples),
+                "memory_sampler_error_count": len(memory_errors),
+                "peak_gpu_memory_used_bytes": max(memory_samples, default=0),
+            }
+        )
+        if self.warmup is not None and self.waves:
+            results = [result for wave in self.waves for result in wave.results]
+            successes = [result for result in results if result.success]
+            attributed, unexplained = mixed.classify_itl_outliers(
+                self.warmup.itl_ms, successes, measurement_events
+            )
+            self.values["attributed_itl_outlier_count"] = attributed
+            self.values["unexplained_itl_outlier_count"] = unexplained
+
+    def serialized_details(self, error: str | None = None) -> str:
+        value = {
+            **self.details,
+            "milestones": list(self.milestones),
+        }
+        if error is not None:
+            value["error"] = error
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 def require_sha256(value: Any, label: str) -> str:
     if (
         not isinstance(value, str)
@@ -281,6 +391,26 @@ def execution_identity_failures(
             f"execution provenance source_dirty={source_dirty!r}, expected false"
         )
     return failures
+
+
+def record_execution_identity(
+    evidence: RunEvidence, health: dict[str, Any]
+) -> None:
+    identity = health.get("execution_identity")
+    if not isinstance(identity, dict):
+        return
+    evidence.details.update(
+        {
+            "effective_environment_sha256": identity.get(
+                "effective_environment_sha256"
+            ),
+            "effective_server_config_sha256": identity.get(
+                "effective_server_config_sha256"
+            ),
+            "execution_provenance_sha256": identity.get("provenance_sha256"),
+            "kernel_contract_sha256": identity.get("kernel_contract_sha256"),
+        }
+    )
 
 
 def run_wave(
@@ -548,7 +678,7 @@ def qualification_failures(
     return failures
 
 
-def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str]:
+def execute(model_path: Path, seed: int, evidence: RunEvidence) -> None:
     deadline = time.monotonic() + OVERALL_TIMEOUT_SECONDS
     binary, binary_sha256, build_seconds = mixed.build_binary(
         deadline,
@@ -561,32 +691,45 @@ def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str]:
         path=str(binary.relative_to(ROOT)),
         sha256=binary_sha256,
     )
+    evidence.values["binary_build_count"] = 1
+    evidence.details.update(
+        {
+            "build_seconds": build_seconds,
+            "kiln_binary_sha256": binary_sha256,
+        }
+    )
+    evidence.milestones.append("build")
     port = mixed.free_loopback_port()
     run_dir = mixed.create_serving_run_dir(VARIANT_ID)
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
     config_path = run_dir / "kiln.toml"
-    adapter_dir.mkdir(parents=True, exist_ok=False)
-    mixed.write_server_config(
-        config_path,
-        VARIANT_ID,
-        model_path,
-        port,
-        adapter_dir,
-        snapshot_dir,
-        rocm_graph_mode="disabled",
-    )
-    config_sha256 = mixed.sha256_file(config_path)
-    process, server_log = mixed.start_server(
-        binary, config_path, VARIANT_ID, mixed.VULKAN_BUILD_SPEC
-    )
-    sampler = mixed.MemorySampler(port)
+    process: Any = None
+    server_log: mixed.ServerLog | None = None
+    sampler: mixed.MemorySampler | None = None
     values: dict[str, float | int] | None = None
-    evidence: dict[str, Any] | None = None
     failures: list[str] = []
     shutdown: mixed.ShutdownOutcome | None = None
     residue: list[str] = []
     try:
+        adapter_dir.mkdir(parents=True, exist_ok=False)
+        mixed.write_server_config(
+            config_path,
+            VARIANT_ID,
+            model_path,
+            port,
+            adapter_dir,
+            snapshot_dir,
+            rocm_graph_mode="disabled",
+        )
+        config_sha256 = mixed.sha256_file(config_path)
+        evidence.details["generated_config_sha256"] = config_sha256
+        evidence.milestones.append("config")
+        evidence.runtime_started = time.monotonic()
+        process, server_log = mixed.start_server(
+            binary, config_path, VARIANT_ID, mixed.VULKAN_BUILD_SPEC
+        )
+        sampler = mixed.MemorySampler(port)
         startup_health = mixed.wait_ready(port, process, server_log, deadline)
         startup_debug = mixed.json_request(port, "GET", "/v1/debug/model-state")
         policy_failures = [
@@ -597,11 +740,14 @@ def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str]:
                 startup_health, startup_debug, binary_sha256
             ),
         ]
+        record_execution_identity(evidence, startup_health)
         failures.extend(policy_failures)
+        evidence.values["policy_attestation_failure_count"] = len(policy_failures)
         if policy_failures:
             raise VulkanBaselineError(
                 "startup runtime attestation failed: " + " | ".join(policy_failures)
             )
+        evidence.milestones.append("startup")
         warmup = mixed.run_stream(
             port,
             name="warmup",
@@ -616,13 +762,21 @@ def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str]:
             raise VulkanBaselineError(
                 f"Vulkan warmup failed: {warmup.error or warmup.finish_reason}"
             )
+        evidence.warmup = warmup
+        evidence.milestones.append("warmup")
         before = mixed.json_request(port, "GET", "/health")
         measurement_started = time.monotonic()
-        sampler.start()
-        waves = tuple(
-            run_wave(port, index, name, words, seed + 1_000, deadline)
-            for index, (name, words) in enumerate(WAVES)
+        evidence.measurement_started = measurement_started
+        evidence.values["kv_blocks_start"] = int(
+            mixed.batching_snapshot(before)["blocks_total"]
         )
+        sampler.start()
+        completed_waves: list[WaveRun] = []
+        for index, (name, words) in enumerate(WAVES):
+            wave = run_wave(port, index, name, words, seed + 1_000, deadline)
+            completed_waves.append(wave)
+            evidence.record_wave(wave)
+        waves = tuple(completed_waves)
         sampler.close()
         after = mixed.json_request(port, "GET", "/health")
         final_debug = mixed.json_request(port, "GET", "/v1/debug/model-state")
@@ -648,40 +802,45 @@ def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str]:
             memory_errors=list(sampler.errors),
             policy_failures=policy_failures,
         )
-        failures.extend(qualification_failures(values, waves))
+        evidence.values.update(values)
         if process.poll() is not None:
             failures.append(
                 f"Vulkan server exited during measured load ({process.returncode})"
             )
-        evidence = {
-            "effective_environment_sha256": after["execution_identity"][
-                "effective_environment_sha256"
-            ],
-            "effective_server_config_sha256": after["execution_identity"][
-                "effective_server_config_sha256"
-            ],
-            "execution_provenance_sha256": after["execution_identity"][
-                "provenance_sha256"
-            ],
-            "generated_config_sha256": config_sha256,
-            "kernel_contract_sha256": after["execution_identity"][
-                "kernel_contract_sha256"
-            ],
-            "kiln_binary_sha256": binary_sha256,
-            "semantic_output_sha256": canonical_semantic_sha256(waves),
-        }
+        record_execution_identity(evidence, after)
+        evidence.milestones.append("measurement")
     finally:
-        sampler.close()
-        shutdown = mixed.terminate_process(process)
-        server_log.join()
+        if sampler is not None:
+            sampler.close()
+        events: list[mixed.ObservedEvent] = []
+        measurement_events: list[mixed.ObservedEvent] = []
+        if process is not None:
+            shutdown = mixed.terminate_process(process)
+        if server_log is not None:
+            server_log.join()
+            if evidence.runtime_started is not None:
+                events = server_log.events_since(evidence.runtime_started)
+            if evidence.measurement_started is not None:
+                measurement_events = server_log.events_since(
+                    evidence.measurement_started
+                )
+        evidence.record_runtime_observations(
+            events,
+            measurement_events,
+            [] if sampler is None else list(sampler.samples),
+            [] if sampler is None else list(sampler.errors),
+        )
         residue = mixed.snapshot_payload_residue(snapshot_dir)
+        if shutdown is not None:
+            evidence.values["shutdown_forced_count"] = int(shutdown.forced)
+            evidence.values["shutdown_nonzero_count"] = int(shutdown.returncode != 0)
+            evidence.milestones.append("teardown")
+        evidence.values["snapshot_residue_count"] = len(residue)
         shutil.rmtree(run_dir, ignore_errors=True)
 
-    if values is None or evidence is None or shutdown is None:
+    if values is None or shutdown is None:
         raise VulkanBaselineError("Vulkan baseline ended without complete evidence")
-    values["shutdown_forced_count"] = int(shutdown.forced)
-    values["shutdown_nonzero_count"] = int(shutdown.returncode != 0)
-    values["snapshot_residue_count"] = len(residue)
+    failures.extend(qualification_failures(evidence.values, waves))
     if shutdown.forced:
         failures.append("server exceeded the graceful shutdown deadline")
     if shutdown.returncode != 0:
@@ -692,13 +851,10 @@ def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str]:
         failures.append("server left private model snapshot payload after shutdown")
     if failures:
         raise VulkanBaselineError(" | ".join(dict.fromkeys(failures)))
-    return metric_records(values), json.dumps(
-        evidence, sort_keys=True, separators=(",", ":")
-    )
 
 
 def zero_metrics() -> list[dict[str, Any]]:
-    return metric_records({name: 0 for name in METRIC_DEFINITIONS})
+    return metric_records(RunEvidence().values)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -718,6 +874,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     status = "failed"
     details: str | None = None
+    evidence = RunEvidence()
     metrics = zero_metrics()
     try:
         if variant != VARIANT_ID:
@@ -727,11 +884,15 @@ def main(argv: list[str] | None = None) -> int:
         model_path = args.model_path.resolve(strict=True)
         if not model_path.is_dir():
             raise VulkanBaselineError("--model-path must be a directory")
-        metrics, details = execute(model_path, args.seed)
+        execute(model_path, args.seed, evidence)
+        metrics = metric_records(evidence.values)
+        details = evidence.serialized_details()
         status = "passed"
     except Exception as exc:
-        details = f"{type(exc).__name__}: {exc}"
-        mixed.trace("vulkan_baseline_error", details=details)
+        error = f"{type(exc).__name__}: {exc}"
+        metrics = metric_records(evidence.values)
+        details = evidence.serialized_details(error)
+        mixed.trace("vulkan_baseline_error", details=error)
     result = {
         "schema_version": 1,
         "case_id": CASE_ID,

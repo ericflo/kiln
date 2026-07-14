@@ -143,10 +143,11 @@ class ServeVulkanBaselineTests(unittest.TestCase):
             "build_binary",
             side_effect=baseline.VulkanBaselineError("build boundary reached"),
         ) as build_binary:
+            evidence = baseline.RunEvidence()
             with self.assertRaisesRegex(
                 baseline.VulkanBaselineError, "build boundary reached"
             ):
-                baseline.execute(Path("/model"), 7)
+                baseline.execute(Path("/model"), 7, evidence)
         self.assertIs(build_binary.call_args.args[1], baseline.mixed.VULKAN_BUILD_SPEC)
         self.assertEqual(
             build_binary.call_args.kwargs["build_timeout_seconds"],
@@ -228,6 +229,52 @@ class ServeVulkanBaselineTests(unittest.TestCase):
         self.assertEqual(len(wave.results), 3)
         self.assertEqual(run_stream.call_count, 3)
 
+    def test_run_evidence_retains_each_completed_wave(self) -> None:
+        evidence = baseline.RunEvidence()
+        result = stream_result("partial")
+        evidence.record_wave(
+            baseline.WaveRun("single", (result,), result.started, result.finished)
+        )
+        self.assertEqual(evidence.values["single_request_count"], 1)
+        self.assertEqual(evidence.values["single_completion_token_count"], 2)
+        self.assertEqual(evidence.values["request_count"], 1)
+        self.assertEqual(evidence.values["request_failure_count"], 0)
+        self.assertEqual(evidence.values["semantic_output_record_count"], 1)
+        self.assertEqual(
+            evidence.details["semantic_output_sha256"],
+            baseline.canonical_semantic_sha256(tuple(evidence.waves)),
+        )
+        self.assertEqual(evidence.milestones, ["wave:single"])
+
+    def test_startup_identity_is_retained_before_measurement(self) -> None:
+        evidence = baseline.RunEvidence()
+        health, _, _ = identity_fixture()
+        baseline.record_execution_identity(evidence, health)
+        self.assertEqual(
+            evidence.details,
+            {
+                "effective_environment_sha256": "sha256:" + "a" * 64,
+                "effective_server_config_sha256": "sha256:" + "a" * 64,
+                "execution_provenance_sha256": "sha256:" + "a" * 64,
+                "kernel_contract_sha256": "sha256:" + "a" * 64,
+            },
+        )
+
+    def test_runtime_observations_retain_startup_device_faults(self) -> None:
+        evidence = baseline.RunEvidence()
+        evidence.record_runtime_observations(
+            [
+                baseline.mixed.ObservedEvent(
+                    1.0, "device_fault", "device lost during prewarm"
+                )
+            ],
+            [],
+            [],
+            [],
+        )
+        self.assertEqual(evidence.values["device_fault_count"], 1)
+        self.assertEqual(evidence.values["memory_sample_count"], 0)
+
     def test_main_publishes_a_structured_result_through_the_shared_writer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -245,7 +292,7 @@ class ServeVulkanBaselineTests(unittest.TestCase):
                 mock.patch.object(
                     baseline,
                     "execute",
-                    return_value=(baseline.zero_metrics(), '{"evidence":true}'),
+                    return_value=None,
                 ),
             ):
                 exit_code = baseline.main(
@@ -256,6 +303,49 @@ class ServeVulkanBaselineTests(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["case_id"], baseline.CASE_ID)
         self.assertEqual(result["effective_config"], baseline.EFFECTIVE_CONFIG)
+
+    def test_main_serializes_partial_failure_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = root / "model"
+            result_path = root / "result.json"
+            model.mkdir()
+
+            def fail(
+                _model: Path,
+                _seed: int,
+                evidence: baseline.RunEvidence,
+            ) -> None:
+                evidence.values["binary_build_count"] = 1
+                evidence.details["kiln_binary_sha256"] = "sha256:" + "a" * 64
+                evidence.milestones.append("build")
+                raise baseline.VulkanBaselineError("synthetic startup failure")
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        baseline.VARIANT_ENV: baseline.VARIANT_ID,
+                        baseline.RESULT_ENV: str(result_path),
+                    },
+                ),
+                mock.patch.object(baseline, "execute", side_effect=fail),
+            ):
+                exit_code = baseline.main(
+                    ["--model-path", str(model), "--seed", "7"]
+                )
+
+            result = json.loads(result_path.read_text())
+        self.assertEqual(exit_code, 1)
+        by_name = {
+            record["name"]: record["value"] for record in result["metrics"]
+        }
+        self.assertEqual(by_name["binary_build_count"], 1)
+        self.assertEqual(by_name["request_count"], 0)
+        self.assertEqual(by_name["request_failure_count"], 0)
+        details = json.loads(result["details"])
+        self.assertEqual(details["milestones"], ["build"])
+        self.assertIn("synthetic startup failure", details["error"])
 
 
 if __name__ == "__main__":

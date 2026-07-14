@@ -330,6 +330,25 @@ hash of all 25 streamed semantic outputs. Dynamic response IDs and timestamps
 are excluded from the semantic hash; request names, usage counts, and semantic
 deltas are included.
 
+A failed result preserves every boundary it actually crossed instead of
+replacing the run with a generic zero record. Its compact `details.milestones`
+array advances through `build`, `config`, `startup`, `warmup`, each completed
+`wave:<name>`, `measurement`, and `teardown`. The build and generated-config
+digests survive startup failure; a returned startup identity survives a later
+warmup or request failure; and every completed wave immediately contributes its
+real request, token, latency, termination, pause, and ordered semantic-output
+hash evidence. Typed device, graph, resize, and reclaim events are collected
+from server start through shutdown, while memory samples span measured load.
+The final pass/fail gate therefore sees post-measurement teardown faults as
+well as events observed during load.
+
+Metrics for a boundary absent from `milestones` mean "not observed," not a
+successful zero-count measurement. For example, zero requests with no
+`wave:*` milestone says that the workload never issued a complete measured
+wave; zero shutdown failures with no `teardown` milestone does not attest clean
+shutdown. Keep and validate these failed receipts as causal counterexamples,
+but do not compare their partial performance metrics with passing baselines.
+
 The gate fails on any request error, non-length or short output, missing actor
 timing, adapter identity, device fault, resize/reclaim/graph event, batching
 error, failed or at-least-100-ms external-yield synchronization, changed KV
