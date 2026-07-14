@@ -6312,14 +6312,14 @@ mod tests {
         let err = validate_grpo_submission_source(&both, None).unwrap_err();
         assert_eq!(
             err.message,
-            "GRPO request must use exactly one of groups, dataset_path, or dataset"
+            "Invalid training request: GRPO request must use exactly one of groups, dataset_path, or dataset"
         );
 
         let empty = grpo_req(None, Vec::new());
         let err = validate_grpo_submission_source(&empty, None).unwrap_err();
         assert_eq!(
             err.message,
-            "GRPO request must use exactly one of groups, dataset_path, or dataset"
+            "Invalid training request: GRPO request must use exactly one of groups, dataset_path, or dataset"
         );
 
         let inline = grpo_req(None, vec![grpo_group()]);
