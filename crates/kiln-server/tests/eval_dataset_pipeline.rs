@@ -158,6 +158,7 @@ async fn synthesis_preview_round_trip() {
     });
     let (status, json) = json_call(&router, "POST", "/v1/eval/datasets/smoke/preview", &body).await;
     assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["source_split"], "holdout");
     let examples = json["examples"].as_array().unwrap();
     assert!(
         !examples.is_empty(),
@@ -209,11 +210,15 @@ async fn tool_call_strategy_produces_tool_call_scorer() {
         "strategy": "tool_call_predict",
         "scorer": {"kind": "auto_detect"},
         "sampling": {"max_examples": 10, "max_prompt_chars": 1000000, "max_target_chars": 100000, "seed": 11, "dedupe": false},
+        // This fixture's tool-call rows are in the persisted train partition.
+        // This test exercises strategy classification, not held-out evaluation.
+        "source_split": "train",
         "head_n": 10,
     });
     let (status, preview) =
         json_call(&router, "POST", "/v1/eval/datasets/agent/preview", &body).await;
     assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["source_split"], "train");
     // We seeded 2 assistant tool-call turns; the strategy must produce ≥1.
     let examples = preview["examples"].as_array().unwrap();
     assert!(
