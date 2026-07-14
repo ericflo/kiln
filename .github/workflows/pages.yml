@@ -11,6 +11,7 @@ on:
       - 'contracts/thinking-budget-v1.conformance.json'
       - 'contracts/kiln-config-v1.schema.json'
       - 'contracts/kiln-http-api-v1.openapi.json'
+      - 'contracts/kiln-inference-v1.schema.json'
       - 'contracts/runtime-defaults-v1.json'
       - 'crates/kiln-server/src/ui/index.html'
       - 'desktop/ui/dashboard.html'
@@ -21,6 +22,7 @@ on:
       - 'scripts/check_release_versions.py'
       - 'scripts/check_config_schema.py'
       - 'scripts/check_http_api_contract.py'
+      - 'scripts/json_schema_subset.py'
       - 'scripts/docs-site/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:

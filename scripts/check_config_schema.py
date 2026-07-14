@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import sys
 import tomllib
 from pathlib import Path
 from typing import Any
+
+from json_schema_subset import validate_instance
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -197,130 +198,6 @@ def validate_contract_metadata(schema: dict[str, Any]) -> list[str]:
     if credentials.get("additionalProperties") != {"$ref": "#/$defs/teacher_credential"}:
         errors.append("teachers.credentials values must reference teacher_credential")
 
-    return errors
-
-
-def resolve_ref(schema: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
-    reference = schema.get("$ref")
-    if reference is None:
-        return schema
-    if not isinstance(reference, str) or not reference.startswith("#/"):
-        raise ContractError(f"unsupported schema reference {reference!r}")
-    current: Any = root
-    for part in reference[2:].split("/"):
-        current = current[part.replace("~1", "/").replace("~0", "~")]
-    if not isinstance(current, dict):
-        raise ContractError(f"schema reference {reference} does not resolve to an object")
-    return current
-
-
-def type_matches(value: Any, expected: str) -> bool:
-    if expected == "object":
-        return isinstance(value, dict)
-    if expected == "array":
-        return isinstance(value, list)
-    if expected == "string":
-        return isinstance(value, str)
-    if expected == "boolean":
-        return isinstance(value, bool)
-    if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-    if expected == "null":
-        return value is None
-    return False
-
-
-def validate_instance(
-    value: Any,
-    schema: dict[str, Any],
-    root: dict[str, Any],
-    path: str = "$",
-) -> list[str]:
-    schema = resolve_ref(schema, root)
-    errors: list[str] = []
-
-    for subschema in schema.get("allOf", []):
-        errors.extend(validate_instance(value, subschema, root, path))
-    if "if" in schema and not validate_instance(value, schema["if"], root, path):
-        branch = schema.get("then")
-        if isinstance(branch, dict):
-            errors.extend(validate_instance(value, branch, root, path))
-    elif "if" in schema:
-        branch = schema.get("else")
-        if isinstance(branch, dict):
-            errors.extend(validate_instance(value, branch, root, path))
-
-    if "oneOf" in schema:
-        matches = [
-            option
-            for option in schema["oneOf"]
-            if not validate_instance(value, option, root, path)
-        ]
-        if len(matches) != 1:
-            errors.append(f"{path}: must match exactly one oneOf branch")
-        return errors
-
-    if "const" in schema and value != schema["const"]:
-        errors.append(f"{path}: must equal {schema['const']!r}")
-    if "enum" in schema and value not in schema["enum"]:
-        errors.append(f"{path}: must be one of {schema['enum']!r}")
-    expected_type = schema.get("type")
-    if isinstance(expected_type, str) and not type_matches(value, expected_type):
-        errors.append(f"{path}: expected {expected_type}, got {type(value).__name__}")
-        return errors
-
-    if isinstance(value, dict):
-        required = schema.get("required", [])
-        for name in required:
-            if name not in value:
-                errors.append(f"{path}: missing required property {name}")
-        properties = schema.get("properties", {})
-        additional = schema.get("additionalProperties", True)
-        for name, item in value.items():
-            item_path = f"{path}.{name}"
-            if name in properties:
-                errors.extend(validate_instance(item, properties[name], root, item_path))
-            elif additional is False:
-                errors.append(f"{item_path}: unknown property")
-            elif isinstance(additional, dict):
-                errors.extend(validate_instance(item, additional, root, item_path))
-            property_names = schema.get("propertyNames")
-            if isinstance(property_names, dict):
-                errors.extend(validate_instance(name, property_names, root, item_path))
-        for ordering in schema.get("x-kiln-dependent-order", []):
-            low = ordering["less-or-equal"]
-            high = ordering["greater-or-equal"]
-            if low in value and high in value and value[low] > value[high]:
-                errors.append(f"{path}.{high}: must be at least {path}.{low}")
-        toggle = schema.get("x-kiln-compatible-mode-toggle")
-        if isinstance(toggle, dict) and toggle["mode"] in value and toggle["toggle"] in value:
-            expected = toggle["true-value"] if value[toggle["toggle"]] else toggle["false-value"]
-            if value[toggle["mode"]] != expected:
-                errors.append(
-                    f"{path}.{toggle['mode']}: conflicts with deprecated {path}.{toggle['toggle']}"
-                )
-
-    if isinstance(value, str):
-        if "minLength" in schema and len(value) < schema["minLength"]:
-            errors.append(f"{path}: shorter than minLength {schema['minLength']}")
-        if "maxLength" in schema and len(value) > schema["maxLength"]:
-            errors.append(f"{path}: longer than maxLength {schema['maxLength']}")
-        if "pattern" in schema and re.search(schema["pattern"], value) is None:
-            errors.append(f"{path}: does not match pattern {schema['pattern']}")
-
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if "minimum" in schema and value < schema["minimum"]:
-            errors.append(f"{path}: below minimum {schema['minimum']}")
-        if "maximum" in schema and value > schema["maximum"]:
-            errors.append(f"{path}: above maximum {schema['maximum']}")
-        if "exclusiveMinimum" in schema and value <= schema["exclusiveMinimum"]:
-            errors.append(f"{path}: must exceed {schema['exclusiveMinimum']}")
-        if "exclusiveMaximum" in schema and value >= schema["exclusiveMaximum"]:
-            errors.append(f"{path}: must be below {schema['exclusiveMaximum']}")
-        if "multipleOf" in schema and value % schema["multipleOf"] != 0:
-            errors.append(f"{path}: must be a multiple of {schema['multipleOf']}")
     return errors
 
 

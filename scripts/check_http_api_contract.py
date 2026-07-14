@@ -12,9 +12,27 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from json_schema_subset import SchemaResolutionError, resolve_ref, validate_instance
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "contracts" / "kiln-http-api-v1.openapi.json"
+INFERENCE_SCHEMA_PATH = ROOT / "contracts" / "kiln-inference-v1.schema.json"
+THINKING_SCHEMA_PATH = ROOT / "contracts" / "thinking-budget-v1.schema.json"
+INFERENCE_ENTRYPOINTS = (
+    "BatchCompletionRequest",
+    "BatchCompletionResponse",
+    "ChatCompletionChunkStream",
+    "ChatCompletionRequest",
+    "ChatCompletionResponse",
+    "TextCompletionRequest",
+    "TextCompletionResponse",
+)
+EXPECTED_COMPONENT_SCHEMA_COUNTS = {
+    "complete": 17,
+    "migration_pending": 88,
+    "total": 105,
+}
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
 EXPECTED_METHOD_COUNTS = {"DELETE": 12, "GET": 53, "POST": 47}
 EXPECTED_TAG_COUNTS = {
@@ -54,14 +72,18 @@ class ContractError(Exception):
     pass
 
 
-def load_contract() -> dict[str, Any]:
+def load_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(CONTRACT_PATH.read_text())
+        value = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
-        raise ContractError(f"cannot read {CONTRACT_PATH.relative_to(ROOT)}: {error}") from error
+        raise ContractError(f"cannot read {path.relative_to(ROOT)}: {error}") from error
     if not isinstance(value, dict):
-        raise ContractError(f"{CONTRACT_PATH.relative_to(ROOT)} must contain a JSON object")
+        raise ContractError(f"{path.relative_to(ROOT)} must contain a JSON object")
     return value
+
+
+def load_contract() -> dict[str, Any]:
+    return load_json(CONTRACT_PATH)
 
 
 def iter_operations(document: dict[str, Any]):
@@ -77,11 +99,19 @@ def iter_operations(document: dict[str, Any]):
                 yield path, method, operation
 
 
-def resolve_local_ref(document: dict[str, Any], reference: str) -> Any:
-    if not reference.startswith("#/"):
-        raise ContractError(f"only local OpenAPI references are supported, got {reference!r}")
-    value: Any = document
-    for part in reference[2:].split("/"):
+def resolve_contract_ref(document: dict[str, Any], reference: str) -> Any:
+    document_name, separator, fragment = reference.partition("#")
+    if not separator:
+        fragment = ""
+    if document_name:
+        if document_name != INFERENCE_SCHEMA_PATH.name:
+            raise ContractError(f"unsupported external OpenAPI reference {reference!r}")
+        value: Any = load_json(INFERENCE_SCHEMA_PATH)
+    else:
+        value = document
+    if fragment and not fragment.startswith("/"):
+        raise ContractError(f"unsupported OpenAPI reference fragment {reference!r}")
+    for part in fragment[1:].split("/") if fragment else ():
         key = part.replace("~1", "/").replace("~0", "~")
         if not isinstance(value, dict) or key not in value:
             raise ContractError(f"unresolved OpenAPI reference {reference!r}")
@@ -92,14 +122,16 @@ def resolve_local_ref(document: dict[str, Any], reference: str) -> Any:
 def schema_rust_type(document: dict[str, Any], schema: Any) -> str | None:
     if not isinstance(schema, dict):
         return None
+    value = schema.get("x-kiln-rust-type")
+    if isinstance(value, str):
+        return value
     if "$ref" in schema:
         try:
-            resolved = resolve_local_ref(document, schema["$ref"])
+            resolved = resolve_contract_ref(document, schema["$ref"])
         except ContractError:
             return None
         return resolved.get("x-kiln-rust-type") if isinstance(resolved, dict) else None
-    value = schema.get("x-kiln-rust-type")
-    return value if isinstance(value, str) else None
+    return None
 
 
 def content_media_types(content: Any) -> list[str]:
@@ -116,6 +148,7 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         "x-kiln-method-counts": EXPECTED_METHOD_COUNTS,
         "x-kiln-tag-counts": EXPECTED_TAG_COUNTS,
         "x-kiln-field-schema-status": "migration_pending",
+        "x-kiln-component-schema-counts": EXPECTED_COMPONENT_SCHEMA_COUNTS,
     }
     for key, expected in expected_root.items():
         if document.get(key) != expected:
@@ -324,7 +357,7 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     api_error = schemas.get("ApiError")
     if not isinstance(api_error, dict) or api_error.get("additionalProperties") is not False:
         errors.append("ApiError must be a closed component schema")
-    migration_pending = 0
+    status_counts: Counter[str] = Counter()
     for name, schema in schemas.items():
         if not isinstance(schema, dict):
             errors.append(f"component schema {name} must be an object")
@@ -332,17 +365,33 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         rust_type = schema.get("x-kiln-rust-type")
         if not isinstance(rust_type, str) or not rust_type:
             errors.append(f"component schema {name} must declare x-kiln-rust-type")
-        if schema.get("type") == "object" and schema.get("additionalProperties") is True:
-            migration_pending += 1
+        status = schema.get("x-kiln-field-schema-status")
+        if status not in {"complete", "migration_pending"}:
+            errors.append(f"component schema {name} must declare a supported field-schema status")
+            continue
+        status_counts[status] += 1
+        if status == "migration_pending":
             description = schema.get("description", "")
-            if "Field-level schema migration is tracked separately" not in description:
-                errors.append(f"open component schema {name} must state its migration status")
-    if migration_pending == 0:
-        errors.append("migration_pending status requires at least one explicitly open component schema")
+            if "migration" not in description.lower():
+                errors.append(f"migration-pending component schema {name} must state its status")
+        elif "Field-level schema migration is tracked separately" in schema.get("description", ""):
+            errors.append(f"complete component schema {name} retains a stale migration description")
+    observed_counts = {
+        "complete": status_counts["complete"],
+        "migration_pending": status_counts["migration_pending"],
+        "total": len(schemas),
+    }
+    if observed_counts != EXPECTED_COMPONENT_SCHEMA_COUNTS:
+        errors.append(f"component field-schema counts drifted: {observed_counts}")
+    for entrypoint in INFERENCE_ENTRYPOINTS:
+        schema = schemas.get(entrypoint, {})
+        expected_ref = f"{INFERENCE_SCHEMA_PATH.name}#/$defs/{entrypoint}"
+        if schema.get("$ref") != expected_ref or schema.get("x-kiln-field-schema-status") != "complete":
+            errors.append(f"inference component {entrypoint} must use complete ref {expected_ref}")
 
     for reference in collect_references(document):
         try:
-            resolve_local_ref(document, reference)
+            resolve_contract_ref(document, reference)
         except ContractError as error:
             errors.append(str(error))
     return errors
@@ -360,7 +409,178 @@ def collect_references(value: Any):
             yield from collect_references(child)
 
 
-def run_self_tests(document: dict[str, Any]) -> list[str]:
+def validate_inference_schema(
+    schema: dict[str, Any], thinking_schema: dict[str, Any]
+) -> list[str]:
+    errors: list[str] = []
+    expected_identity = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://ericflo.github.io/kiln/contracts/kiln-inference-v1.schema.json",
+        "x-kiln-field-schema-status": "complete",
+    }
+    for key, expected in expected_identity.items():
+        if schema.get(key) != expected:
+            errors.append(f"inference schema {key} must be {expected!r}")
+    if schema.get("x-kiln-entrypoints") != list(INFERENCE_ENTRYPOINTS):
+        errors.append("inference schema entrypoints drifted")
+    if schema.get("oneOf") != [
+        {"$ref": f"#/$defs/{name}"}
+        for name in INFERENCE_ENTRYPOINTS
+        if name != "ChatCompletionChunkStream"
+    ]:
+        errors.append("inference schema root union must contain the six JSON entrypoints")
+
+    definitions = schema.get("$defs")
+    if not isinstance(definitions, dict):
+        errors.append("inference schema $defs must be an object")
+        return errors
+    if len(definitions) != 52:
+        errors.append(f"inference schema must contain 52 definitions, got {len(definitions)}")
+    if list(definitions) != sorted(definitions):
+        errors.append("inference schema definitions must be sorted")
+
+    expected_rust_types = {
+        "BatchCompletionRequest": "BatchCompletionRequest",
+        "BatchCompletionResponse": "BatchCompletionResponse",
+        "ChatCompletionChunkStream": "ChatCompletionChunkStream",
+        "ChatCompletionRequest": "ChatCompletionRequest",
+        "ChatCompletionResponse": "ChatCompletionResponse",
+        "TextCompletionRequest": "TextCompletionRequest",
+        "TextCompletionResponse": "TextCompletionResponse",
+    }
+    for name, rust_type in expected_rust_types.items():
+        definition = definitions.get(name, {})
+        if definition.get("x-kiln-rust-type") != rust_type:
+            errors.append(f"inference definition {name} must bind Rust type {rust_type}")
+        if definition.get("x-kiln-field-schema-status") != "complete":
+            errors.append(f"inference definition {name} must be field-schema complete")
+
+    for name in ("BatchCompletionRequest", "ChatCompletionRequest", "TextCompletionRequest"):
+        definition = definitions.get(name, {})
+        if definition.get("additionalProperties") is not True:
+            errors.append(f"{name} must expose its runtime-compatible open input policy")
+        if definition.get("x-kiln-unknown-field-policy") != "accepted_and_ignored":
+            errors.append(f"{name} must name the accepted-and-ignored unknown-field policy")
+    for name in ("BatchCompletionResponse", "ChatCompletionResponse", "TextCompletionResponse"):
+        if definitions.get(name, {}).get("additionalProperties") is not False:
+            errors.append(f"{name} must be a closed emitted response schema")
+    stream = definitions.get("ChatCompletionChunkStream", {})
+    if stream.get("type") != "string" or stream.get("contentMediaType") != "text/event-stream":
+        errors.append("ChatCompletionChunkStream must describe the SSE transport body")
+    if len(stream.get("x-kiln-event-schemas", [])) != 2:
+        errors.append("ChatCompletionChunkStream must enumerate chunk and token-timing events")
+
+    preset = definitions.get("SamplingPreset", {})
+    if preset.get("x-kiln-unknown-value-policy") != "fallback_to_qwen3_thinking_general":
+        errors.append("SamplingPreset must expose the current unknown-value fallback footgun")
+    sampling_number = definitions.get("NullableSamplingNumber", {})
+    if sampling_number.get("x-kiln-runtime-validation") != "finite_json_number_only":
+        errors.append("sampling-number fields must expose the current range-validation gap")
+
+    registry = {
+        THINKING_SCHEMA_PATH.name: thinking_schema,
+        thinking_schema.get("$id", ""): thinking_schema,
+        schema.get("$id", ""): schema,
+    }
+    for reference in collect_references(schema):
+        try:
+            resolve_ref({"$ref": reference}, schema, registry)
+        except SchemaResolutionError as error:
+            errors.append(str(error))
+
+    reachable: set[str] = set()
+    pending = list(INFERENCE_ENTRYPOINTS)
+    while pending:
+        name = pending.pop()
+        if name in reachable or name not in definitions:
+            continue
+        reachable.add(name)
+        for reference in collect_references(definitions[name]):
+            match = re.fullmatch(r"#/\$defs/([^/]+)", reference)
+            if match:
+                pending.append(match.group(1))
+    orphaned = sorted(set(definitions) - reachable)
+    if orphaned:
+        errors.append("inference schema has unreachable definitions: " + ", ".join(orphaned))
+
+    examples = schema.get("x-kiln-examples")
+    expected_examples = {
+        "BatchCompletionRequest",
+        "BatchCompletionResponse",
+        "ChatCompletionChunk",
+        "ChatCompletionRequest",
+        "ChatCompletionResponse",
+        "RolloutProvenanceV1",
+        "StreamingTokenTiming",
+        "TextCompletionRequest",
+        "TextCompletionResponse",
+    }
+    if not isinstance(examples, dict) or set(examples) != expected_examples:
+        errors.append("inference schema examples must cover every public JSON shape and stream event")
+    else:
+        for name, values in examples.items():
+            if not isinstance(values, list) or not values:
+                errors.append(f"inference examples for {name} must be a non-empty array")
+                continue
+            for index, value in enumerate(values):
+                errors.extend(
+                    validate_instance(
+                        value,
+                        {"$ref": f"#/$defs/{name}"},
+                        schema,
+                        f"example({name})[{index}]",
+                        registry=registry,
+                    )
+                )
+    return errors
+
+
+def run_inference_self_tests(
+    schema: dict[str, Any], thinking_schema: dict[str, Any]
+) -> list[str]:
+    examples = schema["x-kiln-examples"]
+    cases: list[tuple[str, dict[str, Any], str]] = []
+
+    cases.append(("ChatCompletionRequest", {}, "missing messages"))
+    chat_stream_n = copy.deepcopy(examples["ChatCompletionRequest"][0])
+    chat_stream_n.update({"stream": True, "n": 2})
+    cases.append(("ChatCompletionRequest", chat_stream_n, "streaming multiple choices"))
+    chat_adapters = copy.deepcopy(examples["ChatCompletionRequest"][0])
+    chat_adapters.update({"adapter": "one", "adapters": [{"name": "two", "scale": 1}]})
+    cases.append(("ChatCompletionRequest", chat_adapters, "adapter exclusivity"))
+    cases.append(("BatchCompletionRequest", {"prompts": []}, "empty batch"))
+    cases.append(("TextCompletionRequest", {"prompt": [1]}, "missing prompt_logprobs"))
+    cases.append(
+        (
+            "TextCompletionRequest",
+            {"prompt": [1], "prompt_logprobs": 1, "max_tokens": 2},
+            "generation-only text completion",
+        )
+    )
+    response_extra = copy.deepcopy(examples["ChatCompletionResponse"][0])
+    response_extra["unknown"] = True
+    cases.append(("ChatCompletionResponse", response_extra, "unknown response field"))
+    bad_rollout = copy.deepcopy(examples["RolloutProvenanceV1"][0])
+    bad_rollout["action_tokens"][0]["behavior_logprob"] = None
+    cases.append(("RolloutProvenanceV1", bad_rollout, "sampled action probability"))
+
+    registry = {
+        THINKING_SCHEMA_PATH.name: thinking_schema,
+        thinking_schema.get("$id", ""): thinking_schema,
+    }
+    errors = []
+    for name, value, label in cases:
+        observed = validate_instance(
+            value, {"$ref": f"#/$defs/{name}"}, schema, registry=registry
+        )
+        if not observed:
+            errors.append(f"inference self-test {label!r} unexpectedly passed")
+    return errors
+
+
+def run_self_tests(
+    document: dict[str, Any], inference_schema: dict[str, Any], thinking_schema: dict[str, Any]
+) -> list[str]:
     mutations = []
 
     duplicate = copy.deepcopy(document)
@@ -389,14 +609,18 @@ def run_self_tests(document: dict[str, Any]) -> list[str]:
         observed = validate_contract(mutated)
         if not any(expected_fragment in error for error in observed):
             errors.append(f"self-test mutation did not produce {expected_fragment!r}: {observed[:3]}")
+    errors.extend(run_inference_self_tests(inference_schema, thinking_schema))
     return errors
 
 
 def check(*, self_test: bool) -> None:
     document = load_contract()
+    inference_schema = load_json(INFERENCE_SCHEMA_PATH)
+    thinking_schema = load_json(THINKING_SCHEMA_PATH)
     errors = validate_contract(document)
+    errors.extend(validate_inference_schema(inference_schema, thinking_schema))
     if self_test:
-        errors.extend(run_self_tests(document))
+        errors.extend(run_self_tests(document, inference_schema, thinking_schema))
     if errors:
         raise ContractError("HTTP API contract failed:\n- " + "\n- ".join(errors))
     print(
@@ -404,7 +628,10 @@ def check(*, self_test: bool) -> None:
         f"{document['x-kiln-path-count']} paths, "
         f"{document['x-kiln-operation-count']} operations "
         f"({document['x-kiln-method-counts']}), "
-        f"{len(document['components']['schemas'])} payload components"
+        f"{len(document['components']['schemas'])} payload components "
+        f"({document['x-kiln-component-schema-counts']['complete']} complete, "
+        f"{document['x-kiln-component-schema-counts']['migration_pending']} migration pending), "
+        f"{len(inference_schema['$defs'])} inference definitions"
     )
 
 

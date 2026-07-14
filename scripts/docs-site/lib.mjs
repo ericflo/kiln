@@ -259,6 +259,9 @@ function schemaConstraints(schema) {
   }
   if (nonEmptyString(schema.pattern)) constraints.push(`pattern ${schema.pattern}`);
   if (nonEmptyString(schema.format)) constraints.push(`format ${schema.format}`);
+  if (nonEmptyString(schema.contentMediaType)) {
+    constraints.push(`content media type ${schema.contentMediaType}`);
+  }
   if (schema.uniqueItems === true) constraints.push('unique items');
   if (schema.additionalProperties === false) constraints.push('closed object');
   return constraints;
@@ -332,6 +335,17 @@ function schemaStructuralMarkdown(schema, headingLevel) {
   return `${heading} Composition and conditional rules\n\nThe following JSON is copied exactly from this schema node.\n\n\`\`\`json\n${JSON.stringify(rules, null, 2)}\n\`\`\`\n`;
 }
 
+function schemaContractAnnotations(schema, headingLevel) {
+  const annotations = Object.fromEntries(
+    Object.entries(schema ?? {})
+      .filter(([key]) => key.startsWith('x-kiln-'))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+  if (Object.keys(annotations).length === 0) return '';
+  const heading = '#'.repeat(headingLevel);
+  return `${heading} Kiln contract annotations\n\nThese machine-readable annotations are copied exactly from this schema node.\n\n\`\`\`json\n${JSON.stringify(annotations, null, 2)}\n\`\`\`\n`;
+}
+
 function renderJsonSchemaMarkdown(schema, document) {
   const lines = [`# ${document.title}`, ''];
   if (nonEmptyString(schema.description)) lines.push(schema.description.trim(), '');
@@ -345,6 +359,8 @@ function renderJsonSchemaMarkdown(schema, document) {
   lines.push('## Root fields', '', schemaFieldTable(schema));
   const rootRules = schemaStructuralMarkdown(schema, 3);
   if (rootRules) lines.push(rootRules);
+  const rootAnnotations = schemaContractAnnotations(schema, 3);
+  if (rootAnnotations) lines.push(rootAnnotations);
 
   const definitions = schema.$defs ?? schema.definitions ?? {};
   if (definitions && typeof definitions === 'object' && !Array.isArray(definitions)) {
@@ -358,6 +374,8 @@ function renderJsonSchemaMarkdown(schema, document) {
       if (definition?.properties) lines.push(schemaFieldTable(definition));
       const definitionRules = schemaStructuralMarkdown(definition, 4);
       if (definitionRules) lines.push(definitionRules);
+      const definitionAnnotations = schemaContractAnnotations(definition, 4);
+      if (definitionAnnotations) lines.push(definitionAnnotations);
     }
   }
   return `${lines.join('\n').trim()}\n`;
@@ -413,12 +431,16 @@ function openApiResponseSummary(operation) {
 
 function renderOpenApiMarkdown(spec, document) {
   const operations = openApiOperations(spec);
+  const schemaCounts = spec?.['x-kiln-component-schema-counts'];
+  const schemaProgress = schemaCounts && typeof schemaCounts === 'object'
+    ? ` Of ${schemaCounts.total} top-level payload components, **${schemaCounts.complete} are field-complete** and **${schemaCounts.migration_pending} remain migration pending**.`
+    : '';
   const lines = [`# ${document.title}`, ''];
   if (nonEmptyString(spec?.info?.description)) lines.push(spec.info.description.trim(), '');
   lines.push('## Contract status', '');
   lines.push(
     `This contract contains **${Object.keys(spec?.paths ?? {}).length} paths** and **${operations.length} operations**. `
-      + `Field-level payload schemas are \`${spec?.['x-kiln-field-schema-status'] ?? 'unspecified'}\`; every operation and transport remains canonical even while explicitly open payload components are migrated.`,
+      + `The aggregate field status is \`${spec?.['x-kiln-field-schema-status'] ?? 'unspecified'}\`; every operation and transport remains canonical while the remaining payload components are migrated.${schemaProgress}`,
     '',
   );
   lines.push('## OpenAPI identity', '');
@@ -469,9 +491,12 @@ function renderOpenApiMarkdown(spec, document) {
     if (schema?.type === 'object') {
       shape += schema.additionalProperties === false ? '; closed' : '; open';
     }
-    const status = schema?.type === 'object' && schema.additionalProperties === true
-      ? 'migration pending'
-      : 'declared';
+    const explicitStatus = schema?.['x-kiln-field-schema-status'];
+    const status = nonEmptyString(explicitStatus)
+      ? explicitStatus.replaceAll('_', ' ')
+      : (schema?.type === 'object' && schema.additionalProperties === true
+        ? 'migration pending'
+        : 'declared');
     lines.push(`| \`${markdownTableCell(name)}\` | \`${markdownTableCell(schema?.['x-kiln-rust-type'] ?? 'unknown')}\` | ${markdownTableCell(shape)} | ${status} |`);
   }
   lines.push('');

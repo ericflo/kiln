@@ -79,6 +79,14 @@
       "description": "Generated canonical inventory of every production route, method, transport, handler owner, request type, response type, status, media type, and structured error envelope."
     },
     {
+      "source": "contracts/kiln-inference-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "inference-schema",
+      "title": "Inference API Schema",
+      "section": "serving",
+      "description": "Generated field-level request, response, SSE event, thinking metadata, performance metadata, prompt-logprob, batch, and rollout-provenance contract for all three inference endpoints."
+    },
+    {
       "source": "CHANGELOG.md",
       "slug": "changelog",
       "title": "Changelog",

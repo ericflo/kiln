@@ -1,0 +1,1256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/contracts/kiln-inference-v1.schema.json",
+  "title": "Kiln inference API contract v1",
+  "description": "Canonical field-level wire contract for POST /v1/chat/completions, POST /v1/completions, and POST /v1/completions/batch. Request objects explicitly identify Kiln's OpenAI-compatibility policy for unknown inputs; response objects describe only fields Kiln emits. Arbitrary JSON remains deliberate only for OpenAI tool definitions, tool choices, calls, and chat-template extension values.",
+  "oneOf": [
+    { "$ref": "#/$defs/BatchCompletionRequest" },
+    { "$ref": "#/$defs/BatchCompletionResponse" },
+    { "$ref": "#/$defs/ChatCompletionRequest" },
+    { "$ref": "#/$defs/ChatCompletionResponse" },
+    { "$ref": "#/$defs/TextCompletionRequest" },
+    { "$ref": "#/$defs/TextCompletionResponse" }
+  ],
+  "x-kiln-entrypoints": [
+    "BatchCompletionRequest",
+    "BatchCompletionResponse",
+    "ChatCompletionChunkStream",
+    "ChatCompletionRequest",
+    "ChatCompletionResponse",
+    "TextCompletionRequest",
+    "TextCompletionResponse"
+  ],
+  "x-kiln-field-schema-status": "complete",
+  "$defs": {
+    "AdapterRef": {
+      "type": "object",
+      "required": ["name", "scale"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Saved adapter name. The runtime also rejects path separators, traversal, and absolute paths."
+        },
+        "scale": {
+          "type": "number",
+          "description": "Composition scale forwarded to merge_concat. The current request edge requires a finite JSON number but applies no narrower range."
+        }
+      },
+      "additionalProperties": true,
+      "x-kiln-rust-type": "AdapterRef",
+      "x-kiln-unknown-field-policy": "accepted_and_ignored"
+    },
+    "BatchCompletionItem": {
+      "type": "object",
+      "required": [
+        "prompt_index",
+        "completion_index",
+        "text",
+        "finish_reason",
+        "usage"
+      ],
+      "properties": {
+        "prompt_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-based index into request.prompts."
+        },
+        "completion_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-based choice index for this prompt."
+        },
+        "text": {
+          "type": "string",
+          "description": "Final answer content after separated reasoning."
+        },
+        "reasoning_content": {
+          "type": "string",
+          "description": "Reasoning text inside the model's thinking block; omitted when absent."
+        },
+        "tool_calls": {
+          "$ref": "#/$defs/ToolCallArray",
+          "description": "OpenAI-shaped tool calls; omitted when absent."
+        },
+        "finish_reason": { "$ref": "#/$defs/FinishReason" },
+        "thinking_budget": {
+          "$ref": "thinking-budget-v1.schema.json#/$defs/outcome",
+          "description": "Completion-specific terminal thinking-budget outcome; omitted when no budget applied."
+        },
+        "usage": { "$ref": "#/$defs/Usage" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "BatchCompletionItem"
+    },
+    "BatchCompletionMetadata": {
+      "type": "object",
+      "required": ["thinking_budget"],
+      "properties": {
+        "thinking_budget": { "$ref": "#/$defs/ThinkingBudgetConfigurationMetadata" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "BatchCompletionMetadata"
+    },
+    "BatchCompletionRequest": {
+      "type": "object",
+      "required": ["prompts"],
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/NullableString",
+          "description": "Served model ID. Missing or null selects the configured served_model_id."
+        },
+        "prompts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/ChatMessageInput" }
+          },
+          "description": "One message array per prompt. prompts.length multiplied by n must not exceed 64 outputs."
+        },
+        "n": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 1, "maximum": 64 }
+          ],
+          "default": 1,
+          "description": "Completions per prompt. Missing or null means 1."
+        },
+        "temperature": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "top_p": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "top_k": { "$ref": "#/$defs/NullableUint32" },
+        "min_p": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "presence_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "frequency_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "repetition_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "sampling_preset": { "$ref": "#/$defs/SamplingPreset" },
+        "max_tokens": { "$ref": "#/$defs/NullableNonNegativeInteger" },
+        "max_completion_tokens": {
+          "$ref": "#/$defs/NullableNonNegativeInteger",
+          "description": "Newer OpenAI alias. max_tokens wins when both are non-null."
+        },
+        "ignore_eos": {
+          "type": "boolean",
+          "default": false,
+          "description": "Treat tokenizer EOS IDs as ordinary tokens; max_tokens and explicit stop sequences still bound generation."
+        },
+        "thinking_budget_tokens": {
+          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride"
+        },
+        "thinking_budget_ms": {
+          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride"
+        },
+        "stop": { "$ref": "#/$defs/StopInput" },
+        "seed": { "$ref": "#/$defs/NullableUint64" },
+        "adapter": {
+          "$ref": "#/$defs/NullableString",
+          "description": "One adapter applied to every prompt. Mutually exclusive with adapters."
+        },
+        "adapters": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "items": { "$ref": "#/$defs/AdapterRef" }
+            }
+          ],
+          "description": "Request-wide adapter composition. Mutually exclusive with adapter."
+        },
+        "tools": { "$ref": "#/$defs/NullableToolArray" },
+        "tool_choice": {
+          "description": "Opaque OpenAI tool_choice value forwarded to the chat template."
+        },
+        "chat_template_kwargs": { "$ref": "#/$defs/NullableTemplateKwargs" }
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": ["adapter", "adapters"],
+            "properties": {
+              "adapter": { "type": "string" },
+              "adapters": { "type": "array" }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true,
+      "x-kiln-rust-type": "BatchCompletionRequest",
+      "x-kiln-field-schema-status": "complete",
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "x-kiln-semantic-constraints": [
+        "prompts.length * (n or 1) <= 64",
+        "the effective max_tokens must fit the active tokenizer's reasoning close sequence when a thinking budget applies"
+      ]
+    },
+    "BatchCompletionResponse": {
+      "type": "object",
+      "required": ["id", "object", "created", "model", "completions", "usage", "metadata"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^batchcmpl-" },
+        "object": { "const": "batch.completion" },
+        "created": { "$ref": "#/$defs/UnixSeconds" },
+        "model": { "type": "string" },
+        "completions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/BatchCompletionItem" }
+        },
+        "usage": { "$ref": "#/$defs/Usage" },
+        "metadata": { "$ref": "#/$defs/BatchCompletionMetadata" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "BatchCompletionResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ChatCompletionChunk": {
+      "type": "object",
+      "required": ["id", "object", "created", "model", "choices"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^chatcmpl-" },
+        "object": { "const": "chat.completion.chunk" },
+        "created": { "$ref": "#/$defs/UnixSeconds" },
+        "model": { "type": "string" },
+        "choices": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ChunkChoice" }
+        },
+        "metadata": { "$ref": "#/$defs/StreamingTerminalMetadata" },
+        "usage": { "$ref": "#/$defs/Usage" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "ChatCompletionChunk"
+    },
+    "ChatCompletionChunkStream": {
+      "type": "string",
+      "contentMediaType": "text/event-stream",
+      "description": "SSE body containing JSON ChatCompletionChunk events, optional kiln.token_timing events when include_performance is explicitly true, an optional empty-choices usage chunk when stream_options.include_usage is true, and a final data: [DONE] sentinel. The terminal finish chunk carries thinking-budget metadata before the usage chunk and sentinel.",
+      "x-kiln-event-schemas": [
+        { "$ref": "#/$defs/ChatCompletionChunk" },
+        { "$ref": "#/$defs/StreamingTokenTiming" }
+      ],
+      "x-kiln-rust-type": "ChatCompletionChunkStream",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ChatCompletionMetadata": {
+      "type": "object",
+      "required": [
+        "thinking_enabled",
+        "thinking_mode",
+        "thinking_source",
+        "final_content_empty",
+        "reasoning_folded_into_content",
+        "thinking_budget"
+      ],
+      "properties": {
+        "thinking_enabled": { "type": "boolean" },
+        "thinking_mode": {
+          "type": "string",
+          "enum": ["non_reasoning", "reasoning"],
+          "description": "Mode observed from the rendered prompt."
+        },
+        "thinking_source": {
+          "type": "string",
+          "enum": ["custom", "request", "server_default", "template_default"]
+        },
+        "default_thinking_enabled": { "type": "boolean" },
+        "final_content_empty": { "type": "boolean" },
+        "content_empty_reason": {
+          "type": "string",
+          "enum": ["no_content", "reasoning_without_final_content", "tool_call"]
+        },
+        "reasoning_folded_into_content": { "type": "boolean" },
+        "thinking_budget": {
+          "$ref": "thinking-budget-v1.schema.json#/$defs/record"
+        },
+        "config_hashes": { "$ref": "#/$defs/ConfigHashes" },
+        "performance": { "$ref": "#/$defs/ChatCompletionPerformanceMetadata" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "ChatCompletionMetadata"
+    },
+    "ChatCompletionPerformanceMetadata": {
+      "type": "object",
+      "required": [
+        "prompt_tokens",
+        "completion_tokens",
+        "ttft_ms",
+        "prefill_ms",
+        "actor_queue_ms",
+        "actor_admission_ms",
+        "actor_prefill_wall_ms",
+        "decode_ms",
+        "total_latency_ms",
+        "decode_tokens_per_sec",
+        "adapter_used",
+        "thinking_mode",
+        "finish_reason"
+      ],
+      "properties": {
+        "prompt_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
+        "completion_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
+        "ttft_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "prefill_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "actor_queue_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "actor_admission_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "actor_prefill_wall_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "decode_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "total_latency_ms": { "type": "number", "minimum": 0 },
+        "decode_tokens_per_sec": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "adapter_used": { "type": "string" },
+        "thinking_mode": { "type": "string" },
+        "finish_reason": { "$ref": "#/$defs/FinishReason" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "ChatCompletionPerformanceMetadata"
+    },
+    "ChatCompletionRequest": {
+      "type": "object",
+      "required": ["messages"],
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/NullableString",
+          "description": "Served model ID. Missing or null selects the configured served_model_id."
+        },
+        "messages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ChatMessageInput" },
+          "description": "Conversation messages in template order."
+        },
+        "n": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 1, "maximum": 64 }
+          ],
+          "default": 1,
+          "description": "Number of choices. Values above 1 require stream=false."
+        },
+        "temperature": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "top_p": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "top_k": { "$ref": "#/$defs/NullableUint32" },
+        "min_p": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "presence_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "frequency_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "repetition_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
+        "sampling_preset": { "$ref": "#/$defs/SamplingPreset" },
+        "max_tokens": { "$ref": "#/$defs/NullableNonNegativeInteger" },
+        "max_completion_tokens": {
+          "$ref": "#/$defs/NullableNonNegativeInteger",
+          "description": "Newer OpenAI alias. max_tokens wins when both are non-null."
+        },
+        "ignore_eos": {
+          "type": "boolean",
+          "default": false,
+          "description": "Treat tokenizer EOS IDs as ordinary tokens; incompatible with rollout_provenance=true."
+        },
+        "thinking_budget_tokens": {
+          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride"
+        },
+        "thinking_budget_ms": {
+          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride"
+        },
+        "stream": {
+          "type": "boolean",
+          "default": false
+        },
+        "stream_options": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/StreamOptions" }
+          ]
+        },
+        "stop": { "$ref": "#/$defs/StopInput" },
+        "seed": { "$ref": "#/$defs/NullableUint64" },
+        "adapter": {
+          "$ref": "#/$defs/NullableString",
+          "description": "Missing uses the server default; null or an empty string selects base; a non-empty string selects a named adapter. Mutually exclusive with adapters."
+        },
+        "adapters": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "items": { "$ref": "#/$defs/AdapterRef" }
+            }
+          ],
+          "description": "Per-request adapter composition. Mutually exclusive with adapter."
+        },
+        "tools": { "$ref": "#/$defs/NullableToolArray" },
+        "tool_choice": {
+          "description": "Opaque OpenAI tool_choice value forwarded to the chat template."
+        },
+        "chat_template_kwargs": { "$ref": "#/$defs/NullableTemplateKwargs" },
+        "fold_reasoning_into_content": { "$ref": "#/$defs/NullableBoolean" },
+        "include_performance": { "$ref": "#/$defs/NullableBoolean" },
+        "include_config_hashes": { "$ref": "#/$defs/NullableBoolean" },
+        "rollout_provenance": {
+          "type": "boolean",
+          "default": false,
+          "description": "Emit exact behavior-policy provenance. Requires one non-streaming real batched choice, ignore_eos=false, no non-empty tools or tool_choice, and positive effective generation capacity."
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": ["adapter", "adapters"],
+            "properties": { "adapters": { "type": "array" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["stream"],
+            "properties": { "stream": { "const": true } }
+          },
+          "then": {
+            "not": {
+              "required": ["n"],
+              "properties": { "n": { "type": "integer", "minimum": 2 } }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["rollout_provenance"],
+            "properties": { "rollout_provenance": { "const": true } }
+          },
+          "then": {
+            "properties": {
+              "ignore_eos": { "const": false },
+              "stream": { "const": false },
+              "n": {
+                "oneOf": [
+                  { "type": "null" },
+                  { "const": 1 }
+                ]
+              },
+              "max_tokens": {
+                "oneOf": [
+                  { "type": "null" },
+                  { "type": "integer", "minimum": 1 }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true,
+      "x-kiln-rust-type": "ChatCompletionRequest",
+      "x-kiln-field-schema-status": "complete",
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "x-kiln-semantic-constraints": [
+        "rollout_provenance=true requires the real batching engine and content-addressed base-policy identity",
+        "rollout_provenance=true rejects non-empty tools and non-null tool_choice",
+        "the effective max_tokens must fit the active tokenizer's reasoning close sequence when a thinking budget applies"
+      ]
+    },
+    "ChatCompletionResponse": {
+      "type": "object",
+      "required": ["id", "object", "created", "model", "choices", "usage", "metadata"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^chatcmpl-" },
+        "object": { "const": "chat.completion" },
+        "created": { "$ref": "#/$defs/UnixSeconds" },
+        "model": { "type": "string" },
+        "choices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/Choice" }
+        },
+        "usage": { "$ref": "#/$defs/Usage" },
+        "metadata": { "$ref": "#/$defs/ChatCompletionMetadata" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "ChatCompletionResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ChatMessageInput": {
+      "type": "object",
+      "required": ["role"],
+      "properties": {
+        "role": {
+          "type": "string",
+          "description": "Template-visible role. Kiln forwards the string rather than enforcing a fixed vocabulary."
+        },
+        "content": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string" },
+            { "type": "array", "items": {} }
+          ],
+          "default": "",
+          "description": "String, null, or OpenAI content-part array. Text/input_text/output_text parts are concatenated and non-text parts are ignored."
+        },
+        "reasoning_content": { "$ref": "#/$defs/NullableString" },
+        "tool_calls": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/ToolCallArray" }
+          ]
+        },
+        "name": { "$ref": "#/$defs/NullableString" },
+        "tool_call_id": { "$ref": "#/$defs/NullableString" }
+      },
+      "additionalProperties": true,
+      "x-kiln-rust-type": "Message",
+      "x-kiln-unknown-field-policy": "accepted_and_ignored"
+    },
+    "ChatMessageOutput": {
+      "type": "object",
+      "required": ["role", "content"],
+      "properties": {
+        "role": { "type": "string" },
+        "content": { "type": "string" },
+        "reasoning_content": { "type": "string" },
+        "tool_calls": { "$ref": "#/$defs/ToolCallArray" },
+        "name": { "type": "string" },
+        "tool_call_id": { "type": "string" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "Message"
+    },
+    "Choice": {
+      "type": "object",
+      "required": ["index", "message", "finish_reason"],
+      "properties": {
+        "index": { "$ref": "#/$defs/NonNegativeInteger" },
+        "message": { "$ref": "#/$defs/ChatMessageOutput" },
+        "finish_reason": { "$ref": "#/$defs/FinishReason" },
+        "thinking_budget": {
+          "$ref": "thinking-budget-v1.schema.json#/$defs/outcome"
+        },
+        "rollout_provenance": { "$ref": "#/$defs/RolloutProvenanceV1" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "Choice"
+    },
+    "ChunkChoice": {
+      "type": "object",
+      "required": ["index", "delta"],
+      "properties": {
+        "index": { "$ref": "#/$defs/NonNegativeInteger" },
+        "delta": { "$ref": "#/$defs/Delta" },
+        "finish_reason": { "$ref": "#/$defs/FinishReason" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "ChunkChoice"
+    },
+    "ConfigHashes": {
+      "type": "object",
+      "properties": {
+        "tokenizer_config_hash": { "$ref": "#/$defs/Sha256" },
+        "chat_template_hash": { "$ref": "#/$defs/Sha256" },
+        "training_chat_template_hash": { "$ref": "#/$defs/Sha256" },
+        "model_config_hash": { "$ref": "#/$defs/Sha256" },
+        "kiln_env_config_hash": { "$ref": "#/$defs/Sha256" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "ConfigHashes"
+    },
+    "Delta": {
+      "type": "object",
+      "properties": {
+        "role": { "type": "string" },
+        "content": { "type": "string" },
+        "reasoning_content": { "type": "string" },
+        "tool_calls": { "$ref": "#/$defs/ToolCallArray" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "Delta"
+    },
+    "FinishReason": {
+      "type": "string",
+      "enum": ["error", "length", "stop", "tool_calls"],
+      "description": "Why generation ended. error is used for per-item batch failures; ordinary model termination emits stop, length, or tool_calls."
+    },
+    "NonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "NullableBoolean": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" }
+      ]
+    },
+    "NullableNonNegativeInteger": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/NonNegativeInteger" }
+      ]
+    },
+    "NullableNonNegativeNumber": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "number", "minimum": 0 }
+      ]
+    },
+    "NullableSamplingNumber": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "number" }
+      ],
+      "description": "Finite JSON number. The current chat/batch edge applies no additional range check before sampling; this is an explicit runtime-validation gap, not a documented recommendation.",
+      "x-kiln-runtime-validation": "finite_json_number_only"
+    },
+    "NullableString": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string" }
+      ]
+    },
+    "NullableTemplateKwargs": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Template-specific JSON values, including enable_thinking."
+        }
+      ]
+    },
+    "NullableToolArray": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "array",
+          "items": {},
+          "description": "Opaque OpenAI tool definitions forwarded to the chat template."
+        }
+      ]
+    },
+    "NullableUint32": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      ]
+    },
+    "NullableUint64": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      ]
+    },
+    "PromptLogprobEntry": {
+      "type": "object",
+      "required": ["logprob", "rank", "decoded_token"],
+      "properties": {
+        "logprob": { "type": "number" },
+        "rank": { "type": "integer", "minimum": 1 },
+        "decoded_token": { "type": "string" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "PromptLogprobEntry"
+    },
+    "PromptLogprobMap": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[0-9]+$" },
+      "additionalProperties": { "$ref": "#/$defs/PromptLogprobEntry" },
+      "description": "Map from decimal token ID strings to the observed/top-K log-probability entry.",
+      "x-kiln-rust-type": "BTreeMap<String, PromptLogprobEntry>"
+    },
+    "RolloutActionTokenV1": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["sequence_index", "token_id", "source", "behavior_logprob"],
+          "properties": {
+            "sequence_index": { "$ref": "#/$defs/NonNegativeInteger" },
+            "token_id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "source": { "const": "sampled" },
+            "behavior_logprob": { "type": "number", "maximum": 0.000001 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["sequence_index", "token_id", "source", "behavior_logprob"],
+          "properties": {
+            "sequence_index": { "$ref": "#/$defs/NonNegativeInteger" },
+            "token_id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "source": { "const": "forced" },
+            "behavior_logprob": { "type": "null" }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "x-kiln-rust-type": "RolloutActionTokenV1"
+    },
+    "RolloutAdapterIdentityV1": {
+      "type": "object",
+      "required": ["name", "content_sha256"],
+      "properties": {
+        "name": { "$ref": "#/$defs/RolloutIdentityText" },
+        "content_sha256": { "$ref": "#/$defs/Sha256" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "RolloutAdapterIdentityV1"
+    },
+    "RolloutBehaviorPolicyIdentityV1": {
+      "type": "object",
+      "required": [
+        "served_model_id",
+        "base_model_sha256",
+        "inference_config_sha256",
+        "implementation"
+      ],
+      "properties": {
+        "served_model_id": { "$ref": "#/$defs/RolloutIdentityText" },
+        "base_model_sha256": { "$ref": "#/$defs/Sha256" },
+        "adapter": { "$ref": "#/$defs/RolloutAdapterIdentityV1" },
+        "inference_config_sha256": { "$ref": "#/$defs/Sha256" },
+        "implementation": { "$ref": "#/$defs/RolloutIdentityText" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "RolloutBehaviorPolicyIdentityV1"
+    },
+    "RolloutChatTemplateInvocationV1": {
+      "type": "object",
+      "properties": {
+        "tools": { "type": "array", "maxItems": 256, "items": {} },
+        "tool_choice": {},
+        "template_kwargs": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "additionalProperties": {}
+        }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "RolloutChatTemplateInvocationV1",
+      "x-kiln-semantic-constraints": ["serialized object size <= 1048576 bytes"]
+    },
+    "RolloutIdentityText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+      "description": "Non-empty, trimmed, control-free identity text. maxLength bounds code points; the runtime additionally rejects surrounding whitespace and enforces at most 256 UTF-8 bytes.",
+      "x-kiln-max-utf8-bytes": 256
+    },
+    "RolloutProvenanceV1": {
+      "type": "object",
+      "required": [
+        "schema",
+        "input_token_ids",
+        "prompt_token_count",
+        "prompt_messages_sha256",
+        "scored_payload_sha256",
+        "action_tokens",
+        "behavior_policy",
+        "tokenizer",
+        "sampling",
+        "seed",
+        "generation_backend"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.rollout-provenance.v1" },
+        "input_token_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16777216,
+          "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+        },
+        "prompt_token_count": { "type": "integer", "minimum": 1 },
+        "prompt_messages_sha256": { "$ref": "#/$defs/Sha256" },
+        "scored_payload_sha256": { "$ref": "#/$defs/Sha256" },
+        "action_tokens": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/RolloutActionTokenV1" }
+        },
+        "behavior_policy": { "$ref": "#/$defs/RolloutBehaviorPolicyIdentityV1" },
+        "tokenizer": { "$ref": "#/$defs/RolloutTokenizerIdentityV1" },
+        "template_invocation": { "$ref": "#/$defs/RolloutChatTemplateInvocationV1" },
+        "sampling": { "$ref": "#/$defs/RolloutSamplingConfigV1" },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "generation_backend": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+          "x-kiln-max-utf8-bytes": 64
+        }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "kiln_train::RolloutProvenanceV1",
+      "x-kiln-semantic-constraints": [
+        "prompt_token_count <= input_token_ids.length",
+        "action token sequence_index values are strictly increasing and index generated tokens",
+        "each action token_id equals input_token_ids[sequence_index]",
+        "at least one action token is sampled",
+        "forced action token IDs belong to sampling.thinking_budget.close_token_ids"
+      ]
+    },
+    "RolloutSamplingConfigV1": {
+      "type": "object",
+      "required": [
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "max_tokens",
+        "repetition_penalty",
+        "presence_penalty",
+        "frequency_penalty",
+        "stop"
+      ],
+      "properties": {
+        "temperature": { "type": "number", "minimum": 0 },
+        "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
+        "top_k": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "min_p": { "type": "number", "minimum": 0, "maximum": 1 },
+        "max_tokens": { "type": "integer", "minimum": 1 },
+        "repetition_penalty": { "type": "number", "exclusiveMinimum": 0 },
+        "presence_penalty": { "type": "number", "minimum": -2, "maximum": 2 },
+        "frequency_penalty": { "type": "number", "minimum": -2, "maximum": 2 },
+        "stop": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "thinking_budget": { "$ref": "#/$defs/RolloutThinkingBudgetV1" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "RolloutSamplingConfigV1",
+      "x-kiln-semantic-constraints": ["sum of UTF-8 stop-sequence bytes <= 16384"]
+    },
+    "RolloutThinkingBudgetV1": {
+      "type": "object",
+      "required": ["close_token_ids"],
+      "properties": {
+        "max_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
+        "max_time_ms": { "$ref": "#/$defs/NonNegativeInteger" },
+        "close_token_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+        }
+      },
+      "anyOf": [
+        { "required": ["max_tokens"] },
+        { "required": ["max_time_ms"] }
+      ],
+      "additionalProperties": false,
+      "x-kiln-rust-type": "RolloutThinkingBudgetV1"
+    },
+    "RolloutTokenizerIdentityV1": {
+      "type": "object",
+      "required": ["vocab_sha256", "config_sha256", "chat_template_sha256"],
+      "properties": {
+        "vocab_sha256": { "$ref": "#/$defs/Sha256" },
+        "config_sha256": { "$ref": "#/$defs/Sha256" },
+        "chat_template_sha256": { "$ref": "#/$defs/Sha256" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "RolloutTokenizerIdentityV1"
+    },
+    "SamplingPreset": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string" }
+      ],
+      "description": "Named sampling profile. Known values are qwen3-thinking-general, qwen3-thinking-coding, qwen3-non-thinking-general, qwen3-non-thinking-reasoning, and greedy. The current runtime silently maps unknown strings to qwen3-thinking-general; this compatibility behavior is an explicit footgun pending fail-closed migration.",
+      "x-kiln-known-values": [
+        "greedy",
+        "qwen3-non-thinking-general",
+        "qwen3-non-thinking-reasoning",
+        "qwen3-thinking-coding",
+        "qwen3-thinking-general"
+      ],
+      "x-kiln-unknown-value-policy": "fallback_to_qwen3_thinking_general"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "StopInput": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ],
+      "description": "Missing/null means no explicit stop sequence. One string and an array of strings normalize to the same internal list."
+    },
+    "StreamOptions": {
+      "type": "object",
+      "properties": {
+        "include_usage": {
+          "type": "boolean",
+          "default": false,
+          "description": "Emit a final empty-choices chunk containing usage before [DONE]."
+        }
+      },
+      "additionalProperties": true,
+      "x-kiln-rust-type": "StreamOptions",
+      "x-kiln-unknown-field-policy": "accepted_and_ignored"
+    },
+    "StreamingTerminalMetadata": {
+      "type": "object",
+      "required": ["thinking_budget"],
+      "properties": {
+        "thinking_budget": { "$ref": "thinking-budget-v1.schema.json#/$defs/record" },
+        "performance": { "$ref": "#/$defs/ChatCompletionPerformanceMetadata" }
+      },
+      "additionalProperties": false,
+      "description": "Metadata attached only to the terminal finish chunk."
+    },
+    "StreamingTokenTiming": {
+      "type": "object",
+      "required": [
+        "object",
+        "token_index",
+        "ready_ms",
+        "handler_received_ms",
+        "queue_delay_ms"
+      ],
+      "properties": {
+        "object": { "const": "kiln.token_timing" },
+        "token_index": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "ready_ms": { "type": "number", "minimum": 0 },
+        "handler_received_ms": { "type": "number", "minimum": 0 },
+        "queue_delay_ms": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "StreamingTokenTiming"
+    },
+    "TextCompletionChoice": {
+      "type": "object",
+      "required": ["index", "text", "finish_reason"],
+      "properties": {
+        "index": { "$ref": "#/$defs/NonNegativeInteger" },
+        "text": { "type": "string" },
+        "finish_reason": { "$ref": "#/$defs/FinishReason" },
+        "prompt_logprobs": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "null" },
+              { "$ref": "#/$defs/PromptLogprobMap" }
+            ]
+          },
+          "description": "One entry per prompt token. The first is null; later maps contain the observed token plus requested top-K candidates."
+        }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "TextCompletionChoice"
+    },
+    "TextCompletionRequest": {
+      "type": "object",
+      "required": ["prompt", "prompt_logprobs"],
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/NullableString",
+          "description": "Must match the served base model when non-null."
+        },
+        "prompt": {
+          "oneOf": [
+            { "type": "string" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 4096,
+              "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+            }
+          ],
+          "description": "Text or raw token IDs. The tokenized prompt is capped at 4096 and the served context length."
+        },
+        "max_tokens": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 0, "maximum": 1 }
+          ],
+          "default": 1,
+          "description": "Only correctness-first prompt-logprobs mode is supported."
+        },
+        "prompt_logprobs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256,
+          "description": "Requested top K. The runtime also caps K by vocabulary size and total returned candidates at 65536."
+        },
+        "n": {
+          "oneOf": [
+            { "type": "null" },
+            { "const": 1 }
+          ],
+          "default": 1
+        },
+        "stream": { "const": false, "default": false },
+        "add_special_tokens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Tokenizer special-token insertion for text prompts; ignored for token-ID prompts."
+        }
+      },
+      "additionalProperties": true,
+      "x-kiln-rust-type": "TextCompletionRequest",
+      "x-kiln-field-schema-status": "complete",
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "x-kiln-semantic-constraints": [
+        "the tokenized prompt is non-empty and has at most min(4096, served context length) tokens",
+        "raw token IDs and prompt_logprobs do not exceed the served vocabulary",
+        "scored positions * (prompt_logprobs + 1) <= 65536",
+        "real scoring rejects an active LoRA until adapter revision identity can be pinned"
+      ]
+    },
+    "TextCompletionResponse": {
+      "type": "object",
+      "required": [
+        "id",
+        "object",
+        "created",
+        "model",
+        "system_fingerprint",
+        "choices",
+        "usage"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^cmpl-" },
+        "object": { "const": "text_completion" },
+        "created": { "$ref": "#/$defs/UnixSeconds" },
+        "model": { "type": "string" },
+        "system_fingerprint": {
+          "$ref": "#/$defs/NullableString",
+          "description": "Canonical content-addressed teacher identity; mock responses retain the field as null."
+        },
+        "choices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/TextCompletionChoice" }
+        },
+        "usage": { "$ref": "#/$defs/Usage" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "TextCompletionResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ThinkingBudgetConfigurationMetadata": {
+      "type": "object",
+      "required": ["configured", "tokens_source", "time_source"],
+      "properties": {
+        "configured": { "type": "boolean" },
+        "max_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
+        "max_time_ms": { "$ref": "#/$defs/NonNegativeInteger" },
+        "tokens_source": { "$ref": "thinking-budget-v1.schema.json#/$defs/source" },
+        "time_source": { "$ref": "thinking-budget-v1.schema.json#/$defs/source" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "ThinkingBudgetConfigurationMetadata"
+    },
+    "ToolCallArray": {
+      "type": "array",
+      "items": {},
+      "description": "Opaque OpenAI-shaped tool-call values. Kiln normalizes generated Qwen tool calls but preserves prior-turn values for template round trips."
+    },
+    "UnixSeconds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Whole seconds since the Unix epoch."
+    },
+    "Usage": {
+      "type": "object",
+      "required": ["prompt_tokens", "completion_tokens", "total_tokens"],
+      "properties": {
+        "prompt_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
+        "completion_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
+        "total_tokens": { "$ref": "#/$defs/NonNegativeInteger" }
+      },
+      "additionalProperties": false,
+      "x-kiln-rust-type": "Usage",
+      "x-kiln-semantic-constraints": ["total_tokens = prompt_tokens + completion_tokens"]
+    }
+  },
+  "x-kiln-examples": {
+    "BatchCompletionRequest": [
+      {
+        "prompts": [
+          [{ "role": "user", "content": "Name one primary color." }],
+          [{ "role": "user", "content": "Name one secondary color." }]
+        ],
+        "n": 2,
+        "max_tokens": 16,
+        "thinking_budget_tokens": null
+      },
+      {
+        "prompts": [[{ "role": "user", "content": "Name one color." }]],
+        "adapter": null,
+        "adapters": [{ "name": "style", "scale": 1 }]
+      }
+    ],
+    "BatchCompletionResponse": [
+      {
+        "id": "batchcmpl-example",
+        "object": "batch.completion",
+        "created": 1700000000,
+        "model": "example-model",
+        "completions": [
+          {
+            "prompt_index": 0,
+            "completion_index": 0,
+            "text": "Red.",
+            "finish_reason": "stop",
+            "usage": { "prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10 }
+          }
+        ],
+        "usage": { "prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10 },
+        "metadata": {
+          "thinking_budget": {
+            "configured": false,
+            "tokens_source": "unlimited",
+            "time_source": "unlimited"
+          }
+        }
+      }
+    ],
+    "ChatCompletionChunk": [
+      {
+        "id": "chatcmpl-example",
+        "object": "chat.completion.chunk",
+        "created": 1700000000,
+        "model": "example-model",
+        "choices": [
+          {
+            "index": 0,
+            "delta": { "content": "Blue" }
+          }
+        ]
+      }
+    ],
+    "ChatCompletionRequest": [
+      {
+        "messages": [{ "role": "user", "content": "What is 2 + 2?" }],
+        "max_tokens": 64,
+        "thinking_budget_tokens": 32,
+        "thinking_budget_ms": null,
+        "stream": false
+      },
+      {
+        "messages": [{ "role": "user", "content": "What is 3 + 3?" }],
+        "adapter": "math",
+        "adapters": null
+      }
+    ],
+    "ChatCompletionResponse": [
+      {
+        "id": "chatcmpl-example",
+        "object": "chat.completion",
+        "created": 1700000000,
+        "model": "example-model",
+        "choices": [
+          {
+            "index": 0,
+            "message": { "role": "assistant", "content": "4" },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": { "prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13 },
+        "metadata": {
+          "thinking_enabled": false,
+          "thinking_mode": "non_reasoning",
+          "thinking_source": "template_default",
+          "final_content_empty": false,
+          "reasoning_folded_into_content": false,
+          "thinking_budget": {
+            "configured": false,
+            "applied": false,
+            "tokens_source": "unlimited",
+            "time_source": "unlimited",
+            "triggered": false
+          }
+        }
+      }
+    ],
+    "RolloutProvenanceV1": [
+      {
+        "schema": "kiln.rollout-provenance.v1",
+        "input_token_ids": [1, 2],
+        "prompt_token_count": 1,
+        "prompt_messages_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "scored_payload_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "action_tokens": [
+          {
+            "sequence_index": 1,
+            "token_id": 2,
+            "source": "sampled",
+            "behavior_logprob": -0.25
+          }
+        ],
+        "behavior_policy": {
+          "served_model_id": "example-model",
+          "base_model_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "inference_config_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "implementation": "kiln"
+        },
+        "tokenizer": {
+          "vocab_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "config_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "chat_template_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "sampling": {
+          "temperature": 0.9,
+          "top_p": 0.95,
+          "top_k": 20,
+          "min_p": 0,
+          "max_tokens": 64,
+          "repetition_penalty": 1,
+          "presence_penalty": 0,
+          "frequency_penalty": 0,
+          "stop": []
+        },
+        "seed": 42,
+        "generation_backend": "rocm"
+      }
+    ],
+    "StreamingTokenTiming": [
+      {
+        "object": "kiln.token_timing",
+        "token_index": 0,
+        "ready_ms": 12.5,
+        "handler_received_ms": 12.8,
+        "queue_delay_ms": 0.3
+      }
+    ],
+    "TextCompletionRequest": [
+      {
+        "prompt": [1, 42, 314],
+        "max_tokens": 0,
+        "prompt_logprobs": 5,
+        "add_special_tokens": true
+      }
+    ],
+    "TextCompletionResponse": [
+      {
+        "id": "cmpl-example",
+        "object": "text_completion",
+        "created": 1700000000,
+        "model": "example-model",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "",
+            "finish_reason": "length",
+            "prompt_logprobs": [
+              null,
+              {
+                "42": { "logprob": -0.25, "rank": 1, "decoded_token": "answer" }
+              }
+            ]
+          }
+        ],
+        "usage": { "prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3 }
+      }
+    ]
+  }
+}

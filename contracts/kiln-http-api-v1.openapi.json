@@ -4180,37 +4180,43 @@
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type AdapterDetail. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "AdapterDetail"
+        "x-kiln-rust-type": "AdapterDetail",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "AdapterUploadMultipart": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type AdapterUploadMultipart. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "AdapterUploadMultipart"
+        "x-kiln-rust-type": "AdapterUploadMultipart",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "AdaptersResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type AdaptersResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "AdaptersResponse"
+        "x-kiln-rust-type": "AdaptersResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "AgentRunRecord": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type AgentRunRecord. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "AgentRunRecord"
+        "x-kiln-rust-type": "AgentRunRecord",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "AgentTrace": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type AgentTrace. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "AgentTrace"
+        "x-kiln-rust-type": "AgentTrace",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "AgentTracesListResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type AgentTracesListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "AgentTracesListResponse"
+        "x-kiln-rust-type": "AgentTracesListResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "ApiError": {
         "type": "object",
@@ -4240,594 +4246,679 @@
             }
           }
         },
-        "x-kiln-rust-type": "ApiError"
+        "x-kiln-rust-type": "ApiError",
+        "x-kiln-field-schema-status": "complete"
       },
       "AppendJudgmentBody": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type AppendJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "AppendJudgmentBody"
+        "x-kiln-rust-type": "AppendJudgmentBody",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "AppendJudgmentResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type AppendJudgmentResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "AppendJudgmentResponse"
+        "x-kiln-rust-type": "AppendJudgmentResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "BatchCompletionRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type BatchCompletionRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "BatchCompletionRequest"
+        "$ref": "kiln-inference-v1.schema.json#/$defs/BatchCompletionRequest",
+        "x-kiln-rust-type": "BatchCompletionRequest",
+        "x-kiln-field-schema-status": "complete"
       },
       "BatchCompletionResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type BatchCompletionResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "BatchCompletionResponse"
+        "$ref": "kiln-inference-v1.schema.json#/$defs/BatchCompletionResponse",
+        "x-kiln-rust-type": "BatchCompletionResponse",
+        "x-kiln-field-schema-status": "complete"
       },
       "BinaryArchive": {
         "type": "string",
         "format": "binary",
-        "description": "Runtime payload represented by Rust type BinaryArchive. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "BinaryArchive"
+        "description": "Binary response body.",
+        "x-kiln-rust-type": "BinaryArchive",
+        "x-kiln-field-schema-status": "complete"
       },
       "CacheStatsResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type CacheStatsResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "CacheStatsResponse"
+        "x-kiln-rust-type": "CacheStatsResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "CapacityRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type CapacityRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "CapacityRequest"
+        "x-kiln-rust-type": "CapacityRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "CapacityResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type CapacityResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "CapacityResponse"
+        "x-kiln-rust-type": "CapacityResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "ChatCompletionChunkStream": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type ChatCompletionChunkStream. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ChatCompletionChunkStream"
+        "$ref": "kiln-inference-v1.schema.json#/$defs/ChatCompletionChunkStream",
+        "x-kiln-rust-type": "ChatCompletionChunkStream",
+        "x-kiln-field-schema-status": "complete"
       },
       "ChatCompletionRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type ChatCompletionRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ChatCompletionRequest"
+        "$ref": "kiln-inference-v1.schema.json#/$defs/ChatCompletionRequest",
+        "x-kiln-rust-type": "ChatCompletionRequest",
+        "x-kiln-field-schema-status": "complete"
       },
       "ChatCompletionResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type ChatCompletionResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ChatCompletionResponse"
+        "$ref": "kiln-inference-v1.schema.json#/$defs/ChatCompletionResponse",
+        "x-kiln-rust-type": "ChatCompletionResponse",
+        "x-kiln-field-schema-status": "complete"
       },
       "CompatibilityResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type CompatibilityResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "CompatibilityResponse"
+        "x-kiln-rust-type": "CompatibilityResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "CompileJudgmentBody": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type CompileJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "CompileJudgmentBody"
+        "x-kiln-rust-type": "CompileJudgmentBody",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "ConfigResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type ConfigResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ConfigResponse"
+        "x-kiln-rust-type": "ConfigResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "CorrectionRow": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type CorrectionRow. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "CorrectionRow"
+        "x-kiln-rust-type": "CorrectionRow",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "CreateJudgmentBody": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type CreateJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "CreateJudgmentBody"
+        "x-kiln-rust-type": "CreateJudgmentBody",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "CreateRunRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type CreateRunRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "CreateRunRequest"
+        "x-kiln-rust-type": "CreateRunRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "CssStylesheet": {
         "type": "string",
-        "description": "Runtime payload represented by Rust type CssStylesheet. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "CssStylesheet"
+        "description": "CSS response body.",
+        "x-kiln-rust-type": "CssStylesheet",
+        "x-kiln-field-schema-status": "complete"
       },
       "DatasetListResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DatasetListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DatasetListResponse"
+        "x-kiln-rust-type": "DatasetListResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "DatasetManifest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DatasetManifest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DatasetManifest"
+        "x-kiln-rust-type": "DatasetManifest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "DatasetUploadMultipart": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DatasetUploadMultipart. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DatasetUploadMultipart"
+        "x-kiln-rust-type": "DatasetUploadMultipart",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "DecodeStatsSnapshot": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DecodeStatsSnapshot. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DecodeStatsSnapshot"
+        "x-kiln-rust-type": "DecodeStatsSnapshot",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "DeleteAdapterResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DeleteAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DeleteAdapterResponse"
+        "x-kiln-rust-type": "DeleteAdapterResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "DeleteExportResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DeleteExportResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DeleteExportResponse"
+        "x-kiln-rust-type": "DeleteExportResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "DiscoverRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DiscoverRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DiscoverRequest"
+        "x-kiln-rust-type": "DiscoverRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "DiscoverResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DiscoverResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DiscoverResponse"
+        "x-kiln-rust-type": "DiscoverResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "DistillMergeRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DistillMergeRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DistillMergeRequest"
+        "x-kiln-rust-type": "DistillMergeRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "DistillPumpRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DistillPumpRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DistillPumpRequest"
+        "x-kiln-rust-type": "DistillPumpRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "DistillRefreshRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DistillRefreshRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DistillRefreshRequest"
+        "x-kiln-rust-type": "DistillRefreshRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "DistillSelfRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type DistillSelfRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DistillSelfRequest"
+        "x-kiln-rust-type": "DistillSelfRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "EvalCompareSpec": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type EvalCompareSpec. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "EvalCompareSpec"
+        "x-kiln-rust-type": "EvalCompareSpec",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "EvalJobListResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type EvalJobListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "EvalJobListResponse"
+        "x-kiln-rust-type": "EvalJobListResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "EvalResult": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type EvalResult. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "EvalResult"
+        "x-kiln-rust-type": "EvalResult",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "EvalRunRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type EvalRunRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "EvalRunRequest"
+        "x-kiln-rust-type": "EvalRunRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "EvalRunResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type EvalRunResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "EvalRunResponse"
+        "x-kiln-rust-type": "EvalRunResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "EvalSuite": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type EvalSuite. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "EvalSuite"
+        "x-kiln-rust-type": "EvalSuite",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "ExportDetail": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type ExportDetail. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ExportDetail"
+        "x-kiln-rust-type": "ExportDetail",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "ExportList": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type ExportList. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ExportList"
+        "x-kiln-rust-type": "ExportList",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "ExportSummary": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type ExportSummary. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ExportSummary"
+        "x-kiln-rust-type": "ExportSummary",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "FrontDoorRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type FrontDoorRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "FrontDoorRequest"
+        "x-kiln-rust-type": "FrontDoorRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "FrontDoorResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type FrontDoorResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "FrontDoorResponse"
+        "x-kiln-rust-type": "FrontDoorResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "GrpoExportRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type GrpoExportRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "GrpoExportRequest"
+        "x-kiln-rust-type": "GrpoExportRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "GrpoRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type GrpoRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "GrpoRequest"
+        "x-kiln-rust-type": "GrpoRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "HealthResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type HealthResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "HealthResponse"
+        "x-kiln-rust-type": "HealthResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "HtmlDocument": {
         "type": "string",
-        "description": "Runtime payload represented by Rust type HtmlDocument. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "HtmlDocument"
+        "description": "HTML response body.",
+        "x-kiln-rust-type": "HtmlDocument",
+        "x-kiln-field-schema-status": "complete"
       },
       "ImportPeftResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type ImportPeftResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ImportPeftResponse"
+        "x-kiln-rust-type": "ImportPeftResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "JavaScriptSource": {
         "type": "string",
-        "description": "Runtime payload represented by Rust type JavaScriptSource. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "JavaScriptSource"
+        "description": "JavaScript response body.",
+        "x-kiln-rust-type": "JavaScriptSource",
+        "x-kiln-field-schema-status": "complete"
       },
       "JsonValue": {
-        "description": "Runtime payload represented by Rust type serde_json::Value. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "serde_json::Value"
+        "description": "Arbitrary JSON is the complete intentional wire shape for this operation.",
+        "x-kiln-rust-type": "serde_json::Value",
+        "x-kiln-field-schema-status": "complete"
       },
       "JsonValueArray": {
         "type": "array",
         "items": {
           "$ref": "#/components/schemas/JsonValue"
         },
-        "description": "Runtime payload represented by Rust type Vec<serde_json::Value>. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "Vec<serde_json::Value>"
+        "description": "Array of arbitrary JSON values is the complete intentional wire shape for this operation.",
+        "x-kiln-rust-type": "Vec<serde_json::Value>",
+        "x-kiln-field-schema-status": "complete"
       },
       "JudgeDistillRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type JudgeDistillRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "JudgeDistillRequest"
+        "x-kiln-rust-type": "JudgeDistillRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "JudgeDistillResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type JudgeDistillResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "JudgeDistillResponse"
+        "x-kiln-rust-type": "JudgeDistillResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "JudgeDriftCheckRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type JudgeDriftCheckRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "JudgeDriftCheckRequest"
+        "x-kiln-rust-type": "JudgeDriftCheckRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "JudgmentListResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type JudgmentListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "JudgmentListResponse"
+        "x-kiln-rust-type": "JudgmentListResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "JudgmentManifest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type JudgmentManifest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "JudgmentManifest"
+        "x-kiln-rust-type": "JudgmentManifest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "LibraryListResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type LibraryListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "LibraryListResponse"
+        "x-kiln-rust-type": "LibraryListResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "ListResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type ListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ListResponse"
+        "x-kiln-rust-type": "ListResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "LoadAdapterRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type LoadAdapterRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "LoadAdapterRequest"
+        "x-kiln-rust-type": "LoadAdapterRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "LoadAdapterResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type LoadAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "LoadAdapterResponse"
+        "x-kiln-rust-type": "LoadAdapterResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "MarkTrainedRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type MarkTrainedRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "MarkTrainedRequest"
+        "x-kiln-rust-type": "MarkTrainedRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "MergeAdapterRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type MergeAdapterRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "MergeAdapterRequest"
+        "x-kiln-rust-type": "MergeAdapterRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "MergeAdapterResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type MergeAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "MergeAdapterResponse"
+        "x-kiln-rust-type": "MergeAdapterResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "MessageRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type MessageRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "MessageRequest"
+        "x-kiln-rust-type": "MessageRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "ModelStateResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type ModelStateResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ModelStateResponse"
+        "x-kiln-rust-type": "ModelStateResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "ModelsResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type ModelsResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ModelsResponse"
+        "x-kiln-rust-type": "ModelsResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "OpdRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type OpdRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "OpdRequest"
+        "x-kiln-rust-type": "OpdRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "PrometheusText": {
         "type": "string",
-        "description": "Runtime payload represented by Rust type PrometheusText. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "PrometheusText"
+        "description": "Prometheus text exposition response body.",
+        "x-kiln-rust-type": "PrometheusText",
+        "x-kiln-field-schema-status": "complete"
       },
       "PromoteJudgmentBody": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type PromoteJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "PromoteJudgmentBody"
+        "x-kiln-rust-type": "PromoteJudgmentBody",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "PublishPayload": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type PublishPayload. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "PublishPayload"
+        "x-kiln-rust-type": "PublishPayload",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "QueueResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type QueueResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "QueueResponse"
+        "x-kiln-rust-type": "QueueResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "RecipeRunRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type RecipeRunRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "RecipeRunRequest"
+        "x-kiln-rust-type": "RecipeRunRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "RecipeRunResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type RecipeRunResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "RecipeRunResponse"
+        "x-kiln-rust-type": "RecipeRunResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "RecipesListResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type RecipesListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "RecipesListResponse"
+        "x-kiln-rust-type": "RecipesListResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "Redirect": {
         "type": "string",
-        "description": "Runtime payload represented by Rust type Redirect. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "Redirect"
+        "description": "HTTP redirect response body.",
+        "x-kiln-rust-type": "Redirect",
+        "x-kiln-field-schema-status": "complete"
       },
       "RequestRecord": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type RequestRecord. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "RequestRecord"
+        "x-kiln-rust-type": "RequestRecord",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "RerunBody": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type RerunBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "RerunBody"
+        "x-kiln-rust-type": "RerunBody",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "SelfImproveRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type SelfImproveRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "SelfImproveRequest"
+        "x-kiln-rust-type": "SelfImproveRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "SelfImproveResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type SelfImproveResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "SelfImproveResponse"
+        "x-kiln-rust-type": "SelfImproveResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "SftExportRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type SftExportRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "SftExportRequest"
+        "x-kiln-rust-type": "SftExportRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "SftRequest": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type SftRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "SftRequest"
+        "x-kiln-rust-type": "SftRequest",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "SuiteListResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type SuiteListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "SuiteListResponse"
+        "x-kiln-rust-type": "SuiteListResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "SuiteSaveResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type SuiteSaveResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "SuiteSaveResponse"
+        "x-kiln-rust-type": "SuiteSaveResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "SynthesisPreviewBody": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type SynthesisPreviewBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "SynthesisPreviewBody"
+        "x-kiln-rust-type": "SynthesisPreviewBody",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "SynthesizeBody": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type SynthesizeBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "SynthesizeBody"
+        "x-kiln-rust-type": "SynthesizeBody",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "TeacherEntry": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type TeacherEntry. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "TeacherEntry"
+        "x-kiln-rust-type": "TeacherEntry",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "TeachersListResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type TeachersListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "TeachersListResponse"
+        "x-kiln-rust-type": "TeachersListResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "TextCompletionRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type TextCompletionRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "TextCompletionRequest"
+        "$ref": "kiln-inference-v1.schema.json#/$defs/TextCompletionRequest",
+        "x-kiln-rust-type": "TextCompletionRequest",
+        "x-kiln-field-schema-status": "complete"
       },
       "TextCompletionResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type TextCompletionResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "TextCompletionResponse"
+        "$ref": "kiln-inference-v1.schema.json#/$defs/TextCompletionResponse",
+        "x-kiln-rust-type": "TextCompletionResponse",
+        "x-kiln-field-schema-status": "complete"
       },
       "TierDefaultsListResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type TierDefaultsListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "TierDefaultsListResponse"
+        "x-kiln-rust-type": "TierDefaultsListResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "TierDefaultsResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type TierDefaultsResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "TierDefaultsResponse"
+        "x-kiln-rust-type": "TierDefaultsResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "TrainingJobDetail": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type TrainingJobDetail. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "TrainingJobDetail"
+        "x-kiln-rust-type": "TrainingJobDetail",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "TrainingResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type TrainingResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "TrainingResponse"
+        "x-kiln-rust-type": "TrainingResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "TrainingStatus": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type TrainingStatus. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "TrainingStatus"
+        "x-kiln-rust-type": "TrainingStatus",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "UnloadAdapterResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type UnloadAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "UnloadAdapterResponse"
+        "x-kiln-rust-type": "UnloadAdapterResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "UploadAdapterResponse": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type UploadAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "UploadAdapterResponse"
+        "x-kiln-rust-type": "UploadAdapterResponse",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "Vec_RequestRecord": {
         "type": "array",
         "items": {
           "$ref": "#/components/schemas/RequestRecord"
         },
-        "description": "Runtime payload represented by Rust type Vec<RequestRecord>. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "Vec<RequestRecord>"
+        "description": "Runtime payload represented by Rust type Vec<RequestRecord>. The referenced item field schema is still migration pending.",
+        "x-kiln-rust-type": "Vec<RequestRecord>",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "Vec_TrainingStatus": {
         "type": "array",
         "items": {
           "$ref": "#/components/schemas/TrainingStatus"
         },
-        "description": "Runtime payload represented by Rust type Vec<TrainingStatus>. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "Vec<TrainingStatus>"
+        "description": "Runtime payload represented by Rust type Vec<TrainingStatus>. The referenced item field schema is still migration pending.",
+        "x-kiln-rust-type": "Vec<TrainingStatus>",
+        "x-kiln-field-schema-status": "migration_pending"
       },
       "WebSocketUpgrade": {
         "type": "string",
         "format": "binary",
-        "description": "Runtime payload represented by Rust type WebSocketUpgrade. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "WebSocketUpgrade"
+        "description": "WebSocket upgrade transport body.",
+        "x-kiln-rust-type": "WebSocketUpgrade",
+        "x-kiln-field-schema-status": "complete"
       },
       "kiln_train_AdapterReceipt": {
         "type": "object",
         "additionalProperties": true,
         "description": "Runtime payload represented by Rust type kiln_train::AdapterReceipt. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "kiln_train::AdapterReceipt"
+        "x-kiln-rust-type": "kiln_train::AdapterReceipt",
+        "x-kiln-field-schema-status": "migration_pending"
       }
     }
   },
@@ -4853,5 +4944,10 @@
     "training": 15,
     "ui": 9
   },
-  "x-kiln-field-schema-status": "migration_pending"
+  "x-kiln-field-schema-status": "migration_pending",
+  "x-kiln-component-schema-counts": {
+    "complete": 17,
+    "migration_pending": 88,
+    "total": 105
+  }
 }

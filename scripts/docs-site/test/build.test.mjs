@@ -264,6 +264,7 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
       description: 'Canonical receipt envelope.',
       type: 'object',
       additionalProperties: false,
+      'x-kiln-field-schema-status': 'complete',
       required: ['schema_version', 'result'],
       properties: {
         schema_version: { type: 'integer', const: 1, description: 'Envelope version.' },
@@ -302,6 +303,11 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
             },
           },
         },
+        eventStream: {
+          type: 'string',
+          contentMediaType: 'text/event-stream',
+          'x-kiln-event-types': ['result'],
+        },
       },
     }, null, 2)}\n`,
   );
@@ -328,6 +334,10 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
   assert.match(html, /KILN_CONFIGURED \(deprecated compatibility\)/);
   assert.match(html, /Composition and conditional rules/);
   assert.match(html, /&quot;then&quot;: \{/);
+  assert.match(html, /Kiln contract annotations/);
+  assert.match(html, /x-kiln-field-schema-status/);
+  assert.match(html, /content media type text\/event-stream/);
+  assert.match(html, /x-kiln-event-types/);
 
   const index = JSON.parse(await readFile(resolve(output, 'docs/search-index.json'), 'utf8'));
   const entry = index.find((item) => item.slug === 'receipt-schema');

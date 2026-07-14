@@ -1494,6 +1494,15 @@ kiln serve --config kiln.toml</code></pre>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/completions</code> &mdash; bounded, vLLM-shaped prompt-logprobs scoring for remote OPD teachers (no generation-only mode, no streaming; prompts capped at the smaller of 4096 tokens and the served model context).</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt text generation, with request-wide effective budget provenance in <code>metadata.thinking_budget</code> and completion-specific outcomes, but without per-token behavior-policy provenance.</div>
         </div>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
+          The generated <a href="docs/inference-schema/">Inference API Schema</a> is the canonical,
+          complete field reference for these three endpoints: request requiredness and nullability,
+          runtime bounds, ignored-unknown compatibility policy, response closure, SSE event variants,
+          thinking and performance metadata, prompt-logprob maps, and exact rollout provenance. The
+          <a href="docs/http-api/">HTTP API Contract</a> is the canonical route, media, status, header,
+          and handler inventory. The guidance below explains workflows and operational tradeoffs; it
+          does not redefine either machine-readable contract.
+        </p>
         <h3 id="performance-timing" class="text-xl font-semibold mt-6 mb-3">Attribute first-token latency</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           Set <code>include_performance: true</code> on a chat request to receive terminal
@@ -1892,6 +1901,11 @@ curl -s http://localhost:8420/v1/train/opd \
           Inference responses follow OpenAI-compatible <code>choices</code> payloads. Training submissions return
           queued job metadata with a <code>job_id</code>, then <code>/v1/train/status</code> and the per-job
           <code>/v1/train/status/{job_id}</code> lookup report state, loss, adapter name, and any failure message.
+        </p>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
+          Use the generated <a href="docs/inference-schema/">Inference API Schema</a> for every inference
+          request, response, nested object, optional field, and stream event rather than treating these
+          workflow summaries or examples as a field contract.
         </p>
         <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
           For thinking responses, <code>choices[].message.reasoning_content</code> contains text before the
