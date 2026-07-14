@@ -447,13 +447,19 @@ def run_adapter_arm(
             max_tokens=MAX_TOKENS,
             seed=seed + 100,
             absolute_deadline=deadline,
+            adapter=ADAPTER_NAME,
         )
         assert_stream(adapter_output, "adapter request")
         if (
             adapter_output.loaded_adapter,
             adapter_output.loaded_adapter_revision,
         ) != (ADAPTER_NAME, content_revision):
-            raise LifecycleError("adapter response headers do not bind the loaded revision")
+            raise LifecycleError(
+                "adapter response headers do not bind the loaded revision: "
+                f"expected={(ADAPTER_NAME, content_revision)!r}, "
+                "observed="
+                f"{(adapter_output.loaded_adapter, adapter_output.loaded_adapter_revision)!r}"
+            )
         wait_drained(port, deadline, "adapter inference")
 
         unload_started = time.monotonic()

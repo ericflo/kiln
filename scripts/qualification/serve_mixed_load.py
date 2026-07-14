@@ -957,11 +957,17 @@ class StreamResult:
         ]
 
 
-def request_body(prompt: str, max_tokens: int, seed: int) -> dict[str, Any]:
+def request_body(
+    prompt: str,
+    max_tokens: int,
+    seed: int,
+    *,
+    adapter: str | None = None,
+) -> dict[str, Any]:
     return {
         "model": MODEL_ID,
         "messages": [{"role": "user", "content": prompt}],
-        "adapter": None,
+        "adapter": adapter,
         "max_tokens": max_tokens,
         "ignore_eos": True,
         "temperature": 0.0,
@@ -1122,6 +1128,7 @@ def run_stream(
     absolute_deadline: float | None = None,
     abort_event: threading.Event | None = None,
     request_timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
+    adapter: str | None = None,
 ) -> StreamResult:
     started = time.monotonic()
     if not math.isfinite(request_timeout_seconds) or request_timeout_seconds <= 0:
@@ -1156,6 +1163,7 @@ def run_stream(
             deterministic_prompt(marker, prompt_words),
             max_tokens,
             seed,
+            adapter=adapter,
         )
         payload = json.dumps(body, separators=(",", ":"))
         connection.request(

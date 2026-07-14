@@ -2398,6 +2398,11 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertTrue(body["ignore_eos"])
         self.assertTrue(body["stream_options"]["include_usage"])
         self.assertFalse(body["chat_template_kwargs"]["enable_thinking"])
+        self.assertIsNone(body["adapter"])
+
+    def test_request_body_can_pin_a_named_adapter(self) -> None:
+        body = serve.request_body("prompt", 12, 7, adapter="qualification-adapter")
+        self.assertEqual(body["adapter"], "qualification-adapter")
 
     def test_workload_markers_are_variant_invariant_and_path_safe(self) -> None:
         markers = {
