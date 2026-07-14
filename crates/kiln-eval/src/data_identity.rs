@@ -222,7 +222,18 @@ pub fn normalized_sha256_json(value: &serde_json::Value) -> String {
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    format!("sha256:{digest:x}")
+    sha256_digest_string(digest.as_slice())
+}
+
+fn sha256_digest_string(digest: &[u8]) -> String {
+    use std::fmt::Write;
+
+    let mut encoded = String::with_capacity("sha256:".len() + digest.len() * 2);
+    encoded.push_str("sha256:");
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }
 
 pub fn row_identity(row_number: u64, value: &serde_json::Value) -> DatasetRowIdentity {
@@ -303,7 +314,7 @@ fn aggregate_identities<'a>(
         hasher.update((identity.len() as u64).to_be_bytes());
         hasher.update(identity.as_bytes());
     }
-    format!("sha256:{:x}", hasher.finalize())
+    sha256_digest_string(hasher.finalize().as_slice())
 }
 
 pub fn build_split_manifest(
@@ -337,7 +348,7 @@ pub fn build_split_manifest(
     for (root, members) in &components {
         let key = members
             .iter()
-            .map(|index| index.rows[*index].normalized_sha256.as_str())
+            .map(|row_index| index.rows[*row_index].normalized_sha256.as_str())
             .min()
             .unwrap_or("");
         let bucket = split_bucket(config.seed, key);
