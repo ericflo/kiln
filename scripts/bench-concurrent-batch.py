@@ -10,6 +10,8 @@ request path.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import dataclasses
 import datetime as dt
 import glob
@@ -20,6 +22,7 @@ import os
 import platform
 import re
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -32,14 +35,67 @@ from typing import Any, Iterable
 
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
-DRIVER_VERSION = "2"
-PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
+DRIVER_VERSION = "3"
+SUPPORTED_DRIVER_VERSIONS = {"2", DRIVER_VERSION}
+LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
+PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
 ROOT = Path(__file__).resolve().parents[1]
 QUALIFICATION_DIR = ROOT / "scripts" / "qualification"
 if str(QUALIFICATION_DIR) not in sys.path:
     sys.path.insert(0, str(QUALIFICATION_DIR))
 
+from model_fingerprint import (  # noqa: E402
+    ModelFingerprintError,
+    fingerprint_model,
+)
 from strict_json import loads as strict_json_loads  # noqa: E402
+
+PROFILE_CONTRACTS = {
+    "greedy-short": {
+        "prompt_profile": "short",
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "require_uniform_prompt_tokens": True,
+        "comparison_mode": "exact_output",
+    },
+    "api-default-sampled": {
+        "prompt_profile": "short",
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "require_uniform_prompt_tokens": True,
+        "comparison_mode": "inputs_only",
+    },
+    "long-prefill": {
+        "prompt_profile": "long-prefill",
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "require_uniform_prompt_tokens": True,
+        "comparison_mode": "exact_output",
+    },
+    "prefix-hit": {
+        "prompt_profile": "prefix-hit",
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "require_uniform_prompt_tokens": True,
+        "comparison_mode": "exact_output",
+    },
+    "mixed": {
+        "prompt_profile": "mixed",
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "require_uniform_prompt_tokens": False,
+        "comparison_mode": "exact_output",
+    },
+}
+
+LONG_PROMPT_BLOCK = (
+    "A production inference system must preserve request identity, bounded resource "
+    "ownership, deterministic accounting, explicit cancellation, and observable phase "
+    "transitions. Measurements must distinguish admission, prefill, decode, streaming, "
+    "and teardown while retaining errors and tail latency. Shared prefixes exercise cache "
+    "reuse only when every byte before the unique suffix is identical. "
+)
+LONG_PROMPT_REPETITIONS = 64
 
 PROMPT_MARKERS = (
     "amber",
@@ -134,6 +190,23 @@ RUN_KEYS = {
     "gates",
     "verdict",
 }
+RUN_KEYS_V3 = RUN_KEYS | {"prompt_token_counts"}
+MODEL_IDENTITY_KEYS = {
+    "id",
+    "path",
+    "weight_files",
+    "config_hash",
+    "tokenizer_hash",
+    "chat_template_hash",
+    "content_sha256",
+}
+RUNTIME_ARTIFACT_KEYS = {"path", "bytes", "sha256"}
+VLLM_RUNTIME_MANIFEST_KEYS = {
+    "identity",
+    "canonical_json",
+    "system_fingerprint",
+    "runtime_content_sha256",
+}
 
 
 class BenchmarkError(RuntimeError):
@@ -190,6 +263,166 @@ def _positive_int(value: Any, label: str) -> int:
     return value
 
 
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def model_content(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": value["id"],
+        "weight_files": value["weight_files"],
+        "config_hash": value["config_hash"],
+        "tokenizer_hash": value["tokenizer_hash"],
+        "chat_template_hash": value["chat_template_hash"],
+    }
+
+
+def bind_model_identity(value: dict[str, Any]) -> dict[str, Any]:
+    result = dict(value)
+    result["content_sha256"] = canonical_sha256(model_content(result))
+    return result
+
+
+def validate_model_identity(value: Any, label: str) -> dict[str, Any]:
+    identity = _object(value, label)
+    _exact_keys(identity, MODEL_IDENTITY_KEYS, label)
+    if not isinstance(identity["id"], str) or not identity["id"]:
+        raise BenchmarkError(f"{label}.id must be a non-empty string")
+    if not isinstance(identity["path"], str) or not Path(identity["path"]).is_absolute():
+        raise BenchmarkError(f"{label}.path must be an absolute path")
+    weights = identity["weight_files"]
+    if not isinstance(weights, list) or not weights:
+        raise BenchmarkError(f"{label}.weight_files must be a non-empty array")
+    paths: list[str] = []
+    for index, item_value in enumerate(weights):
+        item = _object(item_value, f"{label}.weight_files[{index}]")
+        _exact_keys(item, {"path", "sha256", "bytes"}, f"{label}.weight_files[{index}]")
+        if not isinstance(item["path"], str) or not item["path"]:
+            raise BenchmarkError(f"{label}.weight_files[{index}].path must be non-empty")
+        paths.append(item["path"])
+        _positive_int(item["bytes"], f"{label}.weight_files[{index}].bytes")
+        _sha256(item["sha256"], f"{label}.weight_files[{index}].sha256")
+    if paths != sorted(set(paths), key=lambda path: path.encode("utf-8")):
+        raise BenchmarkError(f"{label}.weight_files must be unique and bytewise sorted")
+    for name in ("config_hash", "tokenizer_hash"):
+        _sha256(identity[name], f"{label}.{name}")
+    if identity["chat_template_hash"] is not None:
+        _sha256(identity["chat_template_hash"], f"{label}.chat_template_hash")
+    expected = canonical_sha256(model_content(identity))
+    if _sha256(identity["content_sha256"], f"{label}.content_sha256") != expected:
+        raise BenchmarkError(f"{label}.content_sha256 does not match model content")
+    return identity
+
+
+def fingerprint_runtime_artifact(path: Path) -> dict[str, Any]:
+    absolute = path.expanduser().absolute()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(absolute, flags)
+    except OSError as exc:
+        raise BenchmarkError(f"cannot open runtime artifact {absolute}: {exc}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
+            raise BenchmarkError(f"runtime artifact is not a non-empty regular file: {absolute}")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 8 * 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        try:
+            path_after = absolute.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise BenchmarkError(f"cannot recheck runtime artifact {absolute}: {exc}") from exc
+        if (
+            _stat_identity(before) != _stat_identity(after)
+            or _stat_identity(before) != _stat_identity(path_after)
+        ):
+            raise BenchmarkError(f"runtime artifact changed while hashing: {absolute}")
+        return {
+            "path": str(absolute),
+            "bytes": before.st_size,
+            "sha256": "sha256:" + digest.hexdigest(),
+        }
+    finally:
+        os.close(descriptor)
+
+
+def validate_runtime_artifact(value: Any, label: str) -> dict[str, Any]:
+    artifact = _object(value, label)
+    _exact_keys(artifact, RUNTIME_ARTIFACT_KEYS, label)
+    if not isinstance(artifact["path"], str) or not Path(artifact["path"]).is_absolute():
+        raise BenchmarkError(f"{label}.path must be an absolute path")
+    _positive_int(artifact["bytes"], f"{label}.bytes")
+    _sha256(artifact["sha256"], f"{label}.sha256")
+    return artifact
+
+
+def validate_vllm_runtime_manifest(value: Any, label: str) -> dict[str, Any]:
+    manifest = _object(value, label)
+    _exact_keys(manifest, VLLM_RUNTIME_MANIFEST_KEYS, label)
+    identity = _object(manifest["identity"], f"{label}.identity")
+    canonical_json = manifest["canonical_json"]
+    if not isinstance(canonical_json, str) or not canonical_json:
+        raise BenchmarkError(f"{label}.canonical_json must be non-empty")
+    expected_json = json.dumps(
+        identity,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+    if canonical_json != expected_json:
+        raise BenchmarkError(f"{label}.canonical_json does not match its identity")
+    fingerprint = manifest["system_fingerprint"]
+    if not isinstance(fingerprint, str):
+        raise BenchmarkError(f"{label}.system_fingerprint must be a string")
+    parts = fingerprint.split(".")
+    if (
+        len(parts) != 3
+        or parts[0] != "kiln-teacher-v1"
+        or re.fullmatch(r"[A-Za-z0-9_-]+", parts[1]) is None
+        or re.fullmatch(r"[0-9a-f]{64}", parts[2]) is None
+    ):
+        raise BenchmarkError(f"{label}.system_fingerprint has an invalid shape")
+    try:
+        payload = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
+    except (ValueError, binascii.Error) as exc:
+        raise BenchmarkError(f"{label}.system_fingerprint has invalid base64url") from exc
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    if (
+        encoded != parts[1]
+        or payload != canonical_json.encode("utf-8")
+        or hashlib.sha256(payload).hexdigest() != parts[2]
+    ):
+        raise BenchmarkError(f"{label}.system_fingerprint does not bind canonical_json")
+    runtime_hash = manifest["runtime_content_sha256"]
+    if not isinstance(runtime_hash, str) or re.fullmatch(r"[0-9a-f]{64}", runtime_hash) is None:
+        raise BenchmarkError(f"{label}.runtime_content_sha256 must be 64 lowercase hex")
+    if not isinstance(identity.get("implementation"), str) or not identity[
+        "implementation"
+    ].startswith("vllm:"):
+        raise BenchmarkError(f"{label}.identity implementation must identify vLLM")
+    if not isinstance(identity.get("served_model_id"), str) or not identity[
+        "served_model_id"
+    ]:
+        raise BenchmarkError(f"{label}.identity served_model_id must be non-empty")
+    return manifest
+
+
+def load_vllm_runtime_manifest(path: Path) -> dict[str, Any]:
+    try:
+        value = strict_json_loads(path.expanduser().absolute().read_bytes())
+    except Exception as exc:
+        raise BenchmarkError(f"cannot load vLLM runtime manifest {path}: {exc}") from exc
+    return validate_vllm_runtime_manifest(value, "vLLM runtime manifest")
+
+
 def validate_benchmark_run(
     value: Any,
     *,
@@ -197,9 +430,12 @@ def validate_benchmark_run(
     concurrency: int,
     repeat: int,
     max_tokens: int,
+    driver_version: str,
+    memory_limit_bytes: int | None,
+    workload_profile: str | None,
 ) -> None:
     row = _object(value, label)
-    _exact_keys(row, RUN_KEYS, label)
+    _exact_keys(row, RUN_KEYS_V3 if driver_version == "3" else RUN_KEYS, label)
     if row["concurrency"] != concurrency or row["repeat"] != repeat:
         raise BenchmarkError(f"{label} does not match its declared concurrency/repeat")
     if row["request_count"] != concurrency:
@@ -238,12 +474,51 @@ def validate_benchmark_run(
             _nonnegative_number(row[name], f"{label}.{name}")
     _sha256(row["prompt_set_sha256"], f"{label}.prompt_set_sha256")
     _sha256(row["output_set_sha256"], f"{label}.output_set_sha256")
+    if driver_version == "3":
+        prompt_token_counts = row["prompt_token_counts"]
+        if (
+            not isinstance(prompt_token_counts, list)
+            or len(prompt_token_counts) != concurrency
+            or any(
+                isinstance(count, bool) or not isinstance(count, int) or count < 0
+                for count in prompt_token_counts
+            )
+        ):
+            raise BenchmarkError(
+                f"{label}.prompt_token_counts must contain one non-negative integer per request"
+            )
+        if min(prompt_token_counts) != row["prompt_tokens_min"] or max(
+            prompt_token_counts
+        ) != row["prompt_tokens_max"]:
+            raise BenchmarkError(f"{label}.prompt token summaries disagree")
 
     errors = row["errors"]
-    if not isinstance(errors, list) or any(not isinstance(error, str) for error in errors):
-        raise BenchmarkError(f"{label}.errors must be an array of strings")
+    if not isinstance(errors, list):
+        raise BenchmarkError(f"{label}.errors must be an array")
+    error_indices: set[int] = set()
+    for index, error_value in enumerate(errors):
+        error = _object(error_value, f"{label}.errors[{index}]")
+        _exact_keys(error, {"index", "error"}, f"{label}.errors[{index}]")
+        if (
+            isinstance(error["index"], bool)
+            or not isinstance(error["index"], int)
+            or not 0 <= error["index"] < concurrency
+            or error["index"] in error_indices
+        ):
+            raise BenchmarkError(f"{label}.errors has an invalid or duplicate index")
+        if not isinstance(error["error"], str) or not error["error"]:
+            raise BenchmarkError(f"{label}.errors[{index}].error must be non-empty")
+        error_indices.add(error["index"])
     if len(errors) != row["error_count"]:
         raise BenchmarkError(f"{label}.error_count does not match errors")
+    if row["success_count"] + row["error_count"] != concurrency:
+        raise BenchmarkError(f"{label} success and error counts must cover every request")
+    if driver_version == "3":
+        for index, count in enumerate(row["prompt_token_counts"]):
+            if (index in error_indices) != (count == 0):
+                raise BenchmarkError(
+                    f"{label}.prompt_token_counts does not align with request errors"
+                )
     gates = row["gates"]
     if not isinstance(gates, list) or not gates:
         raise BenchmarkError(f"{label}.gates must be a non-empty array")
@@ -259,10 +534,48 @@ def validate_benchmark_run(
 
     if row["memory"] is not None:
         memory = _object(row["memory"], f"{label}.memory")
-        _exact_keys(memory, {"baseline_bytes", "peak_bytes", "peak_delta_bytes", "samples"}, f"{label}.memory")
+        _exact_keys(
+            memory,
+            {"baseline_bytes", "peak_bytes", "peak_delta_bytes", "samples"},
+            f"{label}.memory",
+        )
         for name, item in memory.items():
             if item is not None:
                 _nonnegative_number(item, f"{label}.memory.{name}")
+    if memory_limit_bytes is not None:
+        memory_gate = next(
+            (item for item in gates if item["name"] == "absolute_memory_limit"), None
+        )
+        expected_memory_pass = (
+            row["memory"] is not None
+            and row["memory"]["peak_bytes"] <= memory_limit_bytes
+        )
+        if memory_gate is None or memory_gate["passed"] != expected_memory_pass:
+            raise BenchmarkError(f"{label} has an inconsistent absolute-memory gate")
+        memory_measured_gate = next(
+            (item for item in gates if item["name"] == "memory_measured"), None
+        )
+        expected_measured = row["memory"] is not None and row["memory"]["samples"] >= 2
+        if memory_measured_gate is None or memory_measured_gate["passed"] != expected_measured:
+            raise BenchmarkError(f"{label} has an inconsistent memory-measurement gate")
+    if driver_version == "3" and workload_profile is not None:
+        uniform = PROFILE_CONTRACTS[workload_profile]["require_uniform_prompt_tokens"]
+        expected_name = (
+            "mixed_prompt_tokens"
+            if workload_profile == "mixed" and concurrency > 1
+            else "uniform_prompt_tokens" if uniform else None
+        )
+        if expected_name is not None:
+            token_gate = next(
+                (item for item in gates if item["name"] == expected_name), None
+            )
+            expected_pass = (
+                len(set(row["prompt_token_counts"])) > 1
+                if expected_name == "mixed_prompt_tokens"
+                else len(set(row["prompt_token_counts"])) == 1
+            )
+            if token_gate is None or token_gate["passed"] != expected_pass:
+                raise BenchmarkError(f"{label} has an inconsistent prompt-shape gate")
     if row["server"] is not None:
         server = _object(row["server"], f"{label}.server")
         required_server = set(COUNTER_FIELDS) | {
@@ -291,8 +604,10 @@ def validate_benchmark_run(
 def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     receipt = _object(value, "receipt")
     _exact_keys(receipt, RECEIPT_KEYS, "receipt", {"comparison"})
-    if receipt["schema"] != SCHEMA or receipt["driver_version"] != DRIVER_VERSION:
-        raise BenchmarkError(f"receipt must use {SCHEMA} driver version {DRIVER_VERSION}")
+    driver_version = receipt["driver_version"]
+    if receipt["schema"] != SCHEMA or driver_version not in SUPPORTED_DRIVER_VERSIONS:
+        supported = ", ".join(sorted(SUPPORTED_DRIVER_VERSIONS))
+        raise BenchmarkError(f"receipt must use {SCHEMA} driver version in {{{supported}}}")
     try:
         created_at = dt.datetime.fromisoformat(receipt["created_at"])
     except (TypeError, ValueError) as exc:
@@ -315,7 +630,15 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         "available_models",
         "authentication_configured",
     }
-    _exact_keys(engine, engine_keys, "receipt.engine", {"authentication_source"})
+    engine_optional = {"authentication_source"}
+    if driver_version == "3":
+        engine_keys |= {
+            "model_identity",
+            "runtime_artifact",
+            "runtime_execution_identity",
+            "runtime_manifest",
+        }
+    _exact_keys(engine, engine_keys, "receipt.engine", engine_optional)
     if engine["name"] not in {"kiln", "vllm"}:
         raise BenchmarkError("receipt.engine.name must be kiln or vllm")
     for name in ("runtime_identity", "base_url", "model"):
@@ -328,16 +651,83 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             raise BenchmarkError("receipt.engine.authentication_source is invalid")
         if engine["authentication_configured"] != (engine["authentication_source"] != "none"):
             raise BenchmarkError("receipt.engine authentication fields disagree")
+    if driver_version == "3":
+        model_identity = validate_model_identity(
+            engine["model_identity"], "receipt.engine.model_identity"
+        )
+        if model_identity["id"] != engine["model"]:
+            raise BenchmarkError("receipt.engine model alias and model identity disagree")
+        artifact = validate_runtime_artifact(
+            engine["runtime_artifact"], "receipt.engine.runtime_artifact"
+        )
+        execution_identity = engine["runtime_execution_identity"]
+        if engine["name"] == "kiln":
+            execution_identity = _object(
+                execution_identity, "receipt.engine.runtime_execution_identity"
+            )
+            if execution_identity.get("executable_sha256") != artifact["sha256"]:
+                raise BenchmarkError(
+                    "receipt Kiln execution identity does not bind the runtime artifact"
+                )
+            if (
+                execution_identity.get("provenance_type")
+                != "kiln.execution-provenance.v1"
+            ):
+                raise BenchmarkError("receipt Kiln execution provenance type is unsupported")
+            for name in ("backend", "device", "inference_dtype", "training_policy"):
+                if (
+                    not isinstance(execution_identity.get(name), str)
+                    or not execution_identity[name]
+                ):
+                    raise BenchmarkError(
+                        f"receipt.engine.runtime_execution_identity.{name} must be non-empty"
+                    )
+            for name in (
+                "provenance_sha256",
+                "executable_sha256",
+                "numerical_runtime_sha256",
+                "kernel_contract_sha256",
+                "effective_server_config_sha256",
+                "effective_environment_sha256",
+            ):
+                _sha256(
+                    execution_identity.get(name),
+                    f"receipt.engine.runtime_execution_identity.{name}",
+                )
+        elif execution_identity is not None:
+            raise BenchmarkError("receipt vLLM runtime execution identity must be null")
+        runtime_manifest = engine["runtime_manifest"]
+        if engine["name"] == "vllm":
+            runtime_manifest = validate_vllm_runtime_manifest(
+                runtime_manifest, "receipt.engine.runtime_manifest"
+            )
+            if runtime_manifest["identity"]["served_model_id"] != engine["model"]:
+                raise BenchmarkError(
+                    "receipt vLLM runtime manifest model disagrees with engine model"
+                )
+        elif runtime_manifest is not None:
+            raise BenchmarkError("receipt Kiln runtime manifest must be null")
 
-    driver_environment = _object(receipt["driver_environment"], "receipt.driver_environment")
+    driver_environment = _object(
+        receipt["driver_environment"], "receipt.driver_environment"
+    )
     _exact_keys(
         driver_environment,
         {"hostname", "platform", "machine", "python", "repository"},
         "receipt.driver_environment",
     )
-    repository = _object(driver_environment["repository"], "receipt.driver_environment.repository")
-    _exact_keys(repository, {"commit", "dirty", "source_tree_sha256"}, "receipt.driver_environment.repository")
-    if not isinstance(repository["commit"], str) or re.fullmatch(r"[0-9a-f]{40}", repository["commit"]) is None:
+    repository = _object(
+        driver_environment["repository"], "receipt.driver_environment.repository"
+    )
+    _exact_keys(
+        repository,
+        {"commit", "dirty", "source_tree_sha256"},
+        "receipt.driver_environment.repository",
+    )
+    if (
+        not isinstance(repository["commit"], str)
+        or re.fullmatch(r"[0-9a-f]{40}", repository["commit"]) is None
+    ):
         raise BenchmarkError("receipt repository commit must be 40 lowercase hex characters")
     if not isinstance(repository["dirty"], bool):
         raise BenchmarkError("receipt repository dirty flag must be boolean")
@@ -364,24 +754,130 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         "max_dispatch_spread_ms",
         "slo",
     }
+    if driver_version == "3":
+        workload_keys |= {"profile", "comparison_mode", "memory_limit_bytes"}
     _exact_keys(workload, workload_keys, "receipt.workload")
-    if workload["schema"] != WORKLOAD_SCHEMA or workload["prompt_template_version"] != PROMPT_TEMPLATE_VERSION:
+    expected_template = (
+        PROMPT_TEMPLATE_VERSION if driver_version == "3" else LEGACY_PROMPT_TEMPLATE_VERSION
+    )
+    if (
+        workload["schema"] != WORKLOAD_SCHEMA
+        or workload["prompt_template_version"] != expected_template
+    ):
         raise BenchmarkError("receipt workload schema or prompt template version is unsupported")
+    for name in ("run_id", "model"):
+        if not isinstance(workload[name], str) or not workload[name]:
+            raise BenchmarkError(f"receipt.workload.{name} must be a non-empty string")
+    if workload["endpoint"] != "/v1/chat/completions":
+        raise BenchmarkError("receipt workload endpoint is unsupported")
+    if workload["stream"] is not True or workload["stream_include_usage"] is not True:
+        raise BenchmarkError("receipt workload must stream with usage enabled")
+    if workload["arrival_pattern"] != "thread_barrier_all_at_once":
+        raise BenchmarkError("receipt workload arrival pattern is unsupported")
+    if workload["require_max_tokens"] is not True:
+        raise BenchmarkError("receipt workload must require fixed output length")
+    if not isinstance(workload["require_uniform_prompt_tokens"], bool):
+        raise BenchmarkError("receipt workload prompt-token policy must be boolean")
+    sampling = _object(workload["sampling"], "receipt.workload.sampling")
+    _exact_keys(
+        sampling,
+        {
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "repetition_penalty",
+            "seed",
+        },
+        "receipt.workload.sampling",
+    )
+    for name in (
+        "temperature",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "repetition_penalty",
+    ):
+        _nonnegative_number(sampling[name], f"receipt.workload.sampling.{name}")
+    if (
+        sampling["presence_penalty"] != 0.0
+        or sampling["frequency_penalty"] != 0.0
+        or sampling["repetition_penalty"] != 1.0
+    ):
+        raise BenchmarkError("receipt workload penalties are not neutral")
+    if isinstance(sampling["seed"], bool) or not isinstance(sampling["seed"], int):
+        raise BenchmarkError("receipt workload seed must be an integer")
+    template_kwargs = _object(
+        workload["chat_template_kwargs"], "receipt.workload.chat_template_kwargs"
+    )
+    _exact_keys(
+        template_kwargs,
+        {"enable_thinking"},
+        "receipt.workload.chat_template_kwargs",
+    )
+    if not isinstance(template_kwargs["enable_thinking"], bool):
+        raise BenchmarkError("receipt workload enable_thinking must be boolean")
+    slo = _object(workload["slo"], "receipt.workload.slo")
+    _exact_keys(slo, {"ttft_ms", "client_visible_itl_ms", "e2e_ms"}, "receipt.workload.slo")
+    for name, value in slo.items():
+        if _nonnegative_number(value, f"receipt.workload.slo.{name}") <= 0:
+            raise BenchmarkError(f"receipt.workload.slo.{name} must be positive")
+    memory_limit_bytes: int | None = None
+    if driver_version == "3":
+        if workload["profile"] not in PROFILE_CONTRACTS:
+            raise BenchmarkError("receipt.workload.profile is unsupported")
+        profile = PROFILE_CONTRACTS[workload["profile"]]
+        if workload["comparison_mode"] != profile["comparison_mode"]:
+            raise BenchmarkError("receipt.workload comparison mode disagrees with its profile")
+        if (
+            sampling.get("temperature") != profile["temperature"]
+            or sampling.get("top_p") != profile["top_p"]
+            or workload["require_uniform_prompt_tokens"]
+            is not profile["require_uniform_prompt_tokens"]
+        ):
+            raise BenchmarkError(
+                "receipt.workload sampling/token contract disagrees with its profile"
+            )
+        memory_limit_bytes = _positive_int(
+            workload["memory_limit_bytes"], "receipt.workload.memory_limit_bytes"
+        )
     sizes = workload["concurrency"]
-    if not isinstance(sizes, list) or any(isinstance(size, bool) or not isinstance(size, int) for size in sizes):
+    if not isinstance(sizes, list) or any(
+        isinstance(size, bool) or not isinstance(size, int) for size in sizes
+    ):
         raise BenchmarkError("receipt.workload.concurrency must be an integer array")
-    if sizes != sorted(set(sizes)) or not sizes or any(size <= 0 or size > 4096 for size in sizes):
-        raise BenchmarkError("receipt.workload.concurrency must be unique, increasing, and in 1..=4096")
+    if (
+        sizes != sorted(set(sizes))
+        or not sizes
+        or any(size <= 0 or size > 4096 for size in sizes)
+    ):
+        raise BenchmarkError(
+            "receipt.workload.concurrency must be unique, increasing, and in 1..=4096"
+        )
     repeats = _positive_int(workload["repeats"], "receipt.workload.repeats")
     max_tokens = _positive_int(workload["max_tokens"], "receipt.workload.max_tokens")
     warmup_requests = workload["warmup_requests"]
-    if isinstance(warmup_requests, bool) or not isinstance(warmup_requests, int) or warmup_requests < 0:
+    if (
+        isinstance(warmup_requests, bool)
+        or not isinstance(warmup_requests, int)
+        or warmup_requests < 0
+    ):
         raise BenchmarkError("receipt.workload.warmup_requests must be a non-negative integer")
-    if canonical_sha256(workload) != _sha256(receipt["workload_fingerprint"], "receipt.workload_fingerprint"):
+    if canonical_sha256(workload) != _sha256(
+        receipt["workload_fingerprint"], "receipt.workload_fingerprint"
+    ):
         raise BenchmarkError("receipt.workload_fingerprint does not match workload")
 
     memory_sampler = _object(receipt["memory_sampler"], "receipt.memory_sampler")
     _exact_keys(memory_sampler, {"source", "path", "interval_ms"}, "receipt.memory_sampler")
+    if driver_version == "3":
+        if (
+            memory_sampler["source"] != "drm_vram_used"
+            or not isinstance(memory_sampler["path"], str)
+            or not memory_sampler["path"]
+        ):
+            raise BenchmarkError("driver v3 requires a DRM device-memory counter")
+        _positive_int(memory_sampler["interval_ms"], "receipt.memory_sampler.interval_ms")
     diagnostics = _object(receipt["diagnostics"], "receipt.diagnostics")
     _exact_keys(diagnostics, {"url", "timed_request_path_affected"}, "receipt.diagnostics")
     if diagnostics["timed_request_path_affected"] is not False:
@@ -396,6 +892,9 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             concurrency=warmup_requests,
             repeat=-1,
             max_tokens=min(16, max_tokens),
+            driver_version=driver_version,
+            memory_limit_bytes=memory_limit_bytes,
+            workload_profile=workload.get("profile"),
         )
     elif receipt["warmup"] is not None:
         raise BenchmarkError("receipt has an undeclared warmup")
@@ -416,6 +915,9 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 concurrency=pair[0],
                 repeat=pair[1],
                 max_tokens=max_tokens,
+                driver_version=driver_version,
+                memory_limit_bytes=memory_limit_bytes,
+                workload_profile=workload.get("profile"),
             )
     if actual_pairs != expected_pairs:
         raise BenchmarkError("receipt.runs do not exactly match declared concurrency and repeats")
@@ -423,14 +925,32 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     comparison_passed = True
     if "comparison" in receipt:
         comparison = _object(receipt["comparison"], "receipt.comparison")
+        comparison_keys = {
+            "reference_receipt_sha256",
+            "reference_engine",
+            "matched",
+            "mismatches",
+        }
+        if driver_version == "3":
+            comparison_keys.add("comparison_mode")
         _exact_keys(
             comparison,
-            {"reference_receipt_sha256", "reference_engine", "matched", "mismatches"},
+            comparison_keys,
             "receipt.comparison",
         )
-        _sha256(comparison["reference_receipt_sha256"], "receipt.comparison.reference_receipt_sha256")
-        if not isinstance(comparison["matched"], bool) or not isinstance(comparison["mismatches"], list):
+        _sha256(
+            comparison["reference_receipt_sha256"],
+            "receipt.comparison.reference_receipt_sha256",
+        )
+        if not isinstance(comparison["matched"], bool) or not isinstance(
+            comparison["mismatches"], list
+        ):
             raise BenchmarkError("receipt.comparison has invalid field types")
+        if (
+            driver_version == "3"
+            and comparison["comparison_mode"] != workload["comparison_mode"]
+        ):
+            raise BenchmarkError("receipt.comparison mode disagrees with its workload")
         comparison_passed = comparison["matched"]
     passed = (
         not repository["dirty"]
@@ -485,14 +1005,19 @@ def parse_sizes(raw: str) -> list[int]:
     return sizes
 
 
-def deterministic_prompt(run_id: str, phase: str, request_index: int) -> str:
+def deterministic_prompt(
+    run_id: str,
+    phase: str,
+    request_index: int,
+    prompt_profile: str = "short",
+) -> str:
     def marker_key(marker: str) -> bytes:
         material = f"{run_id}\0{phase}\0{request_index}\0{marker}".encode("utf-8")
         return hashlib.sha256(material).digest()
 
     markers = sorted(PROMPT_MARKERS, key=marker_key)
     marker_sequence = " | ".join(markers)
-    return (
+    short_suffix = (
         "Write a detailed technical paragraph explaining why deterministic, "
         "reproducible performance measurements need controlled workloads, "
         "explicit error accounting, and tail-latency reporting. Continue until "
@@ -500,6 +1025,21 @@ def deterministic_prompt(run_id: str, phase: str, request_index: int) -> str:
         f"Benchmark run: {run_id}; phase: {phase}.\n"
         f"Marker sequence: {marker_sequence}."
     )
+    if prompt_profile == "short":
+        return short_suffix
+    if prompt_profile == "long-prefill":
+        prefix = LONG_PROMPT_BLOCK * LONG_PROMPT_REPETITIONS
+    elif prompt_profile == "prefix-hit":
+        prefix = (
+            "Shared prefix for a cache-reuse workload. "
+            + LONG_PROMPT_BLOCK * LONG_PROMPT_REPETITIONS
+        )
+    elif prompt_profile == "mixed":
+        repetitions = (0, 4, 16, LONG_PROMPT_REPETITIONS)[request_index % 4]
+        prefix = LONG_PROMPT_BLOCK * repetitions
+    else:
+        raise BenchmarkError(f"unsupported prompt profile: {prompt_profile}")
+    return prefix + "\nUnique request suffix follows.\n" + short_suffix
 
 
 def build_request_body(
@@ -594,7 +1134,12 @@ class RequestResult:
         return text_sha256(self.reasoning_content + "\x1e" + self.content)
 
 
-def failed_result(index: int, prompt_sha256: str, started: float, exc: BaseException) -> RequestResult:
+def failed_result(
+    index: int,
+    prompt_sha256: str,
+    started: float,
+    exc: BaseException,
+) -> RequestResult:
     return RequestResult(
         index=index,
         prompt_sha256=prompt_sha256,
@@ -904,12 +1449,14 @@ def summarize_run(
     max_tokens: int,
     require_max_tokens: bool,
     require_uniform_prompt_tokens: bool,
+    require_nonuniform_prompt_tokens: bool,
     max_dispatch_spread_ms: float,
     slo_ttft_ms: float,
     slo_itl_ms: float,
     slo_e2e_ms: float,
     memory: dict[str, int] | None,
     require_memory: bool,
+    memory_limit_bytes: int | None,
     server: dict[str, Any] | None,
     diagnostics_error: str | None,
 ) -> dict[str, Any]:
@@ -923,7 +1470,8 @@ def summarize_run(
     e2es = [result.e2e_ms for result in successes]
     itls = [itl for result in successes for itl in result.itls_ms]
     completion_tokens = sum(result.completion_tokens for result in successes)
-    prompt_token_values = [result.prompt_tokens for result in successes]
+    ordered_results = sorted(results, key=lambda result: result.index)
+    prompt_token_values = [result.prompt_tokens for result in ordered_results]
     dispatch_times = [result.started for result in results]
     dispatch_spread_ms = (
         (max(dispatch_times) - min(dispatch_times)) * 1000.0 if dispatch_times else 0.0
@@ -980,12 +1528,33 @@ def summarize_run(
                 f"observed prompt-token counts: {sorted(set(prompt_token_values))}",
             )
         )
+    if require_nonuniform_prompt_tokens:
+        gates.append(
+            gate(
+                "mixed_prompt_tokens",
+                len(prompt_token_values) == concurrency
+                and len(set(prompt_token_values)) > 1,
+                f"observed prompt-token counts: {sorted(set(prompt_token_values))}",
+            )
+        )
     if require_memory:
         gates.append(
             gate(
                 "memory_measured",
                 memory is not None and memory["samples"] >= 2,
                 "a local device-memory counter must be sampled during the run",
+            )
+        )
+    if memory_limit_bytes is not None:
+        gates.append(
+            gate(
+                "absolute_memory_limit",
+                memory is not None and memory["peak_bytes"] <= memory_limit_bytes,
+                (
+                    "memory unavailable"
+                    if memory is None
+                    else f"{memory['peak_bytes']} bytes <= {memory_limit_bytes} bytes"
+                ),
             )
         )
     if server is not None:
@@ -1021,6 +1590,9 @@ def summarize_run(
         "errors": errors,
         "prompt_tokens_min": min(prompt_token_values) if prompt_token_values else 0,
         "prompt_tokens_max": max(prompt_token_values) if prompt_token_values else 0,
+        "prompt_token_counts": [
+            result.prompt_tokens for result in ordered_results
+        ],
         "completion_tokens": completion_tokens,
         "request_throughput_per_s": len(successes) / elapsed_s if elapsed_s else 0.0,
         "output_token_throughput_per_s": completion_tokens / elapsed_s if elapsed_s else 0.0,
@@ -1066,7 +1638,12 @@ def run_once(
     bodies: list[dict[str, Any]] = []
     prompts: set[str] = set()
     for index in range(concurrency):
-        prompt = deterministic_prompt(args.run_id, phase, index)
+        prompt = deterministic_prompt(
+            args.run_id,
+            phase,
+            index,
+            PROFILE_CONTRACTS[args.workload_profile]["prompt_profile"],
+        )
         if prompt in prompts:
             raise BenchmarkError("deterministic prompt construction produced a duplicate")
         prompts.add(prompt)
@@ -1147,12 +1724,16 @@ def run_once(
         max_tokens=max_tokens,
         require_max_tokens=args.require_max_tokens,
         require_uniform_prompt_tokens=args.require_uniform_prompt_tokens,
+        require_nonuniform_prompt_tokens=(
+            args.workload_profile == "mixed" and concurrency > 1
+        ),
         max_dispatch_spread_ms=args.max_dispatch_spread_ms,
         slo_ttft_ms=args.slo_ttft_ms,
         slo_itl_ms=args.slo_itl_ms,
         slo_e2e_ms=args.slo_e2e_ms,
         memory=sampler.snapshot(),
         require_memory=args.require_memory,
+        memory_limit_bytes=args.memory_limit_bytes,
         server=server_delta,
         diagnostics_error=diagnostics_error,
     )
@@ -1166,10 +1747,18 @@ def compare_reference(receipt: dict[str, Any], reference_path: Path) -> dict[str
         raise BenchmarkError(
             f"cannot load reference receipt {reference_path}: {type(exc).__name__}: {exc}"
         ) from exc
-    if reference.get("schema") != SCHEMA:
-        raise BenchmarkError(f"reference receipt does not use {SCHEMA}")
+    validate_benchmark_receipt(reference)
+    if reference.get("driver_version") != DRIVER_VERSION:
+        raise BenchmarkError(
+            f"reference receipt must use current driver version {DRIVER_VERSION}"
+        )
     if reference.get("workload_fingerprint") != receipt.get("workload_fingerprint"):
         raise BenchmarkError("reference receipt has a different workload fingerprint")
+    current_model = receipt.get("engine", {}).get("model_identity", {})
+    reference_model = reference.get("engine", {}).get("model_identity", {})
+    if current_model.get("content_sha256") != reference_model.get("content_sha256"):
+        raise BenchmarkError("reference receipt has different model content")
+    comparison_mode = receipt["workload"]["comparison_mode"]
     current_rows = {
         (row["concurrency"], row["repeat"]): row for row in receipt.get("runs", [])
     }
@@ -1186,13 +1775,21 @@ def compare_reference(receipt: dict[str, Any], reference_path: Path) -> dict[str
             mismatches.append(
                 {"concurrency": key[0], "repeat": key[1], "reason": "prompt_mismatch"}
             )
-        elif current["output_set_sha256"] != expected["output_set_sha256"]:
+        elif current["prompt_token_counts"] != expected["prompt_token_counts"]:
+            mismatches.append(
+                {"concurrency": key[0], "repeat": key[1], "reason": "prompt_token_mismatch"}
+            )
+        elif (
+            comparison_mode == "exact_output"
+            and current["output_set_sha256"] != expected["output_set_sha256"]
+        ):
             mismatches.append(
                 {"concurrency": key[0], "repeat": key[1], "reason": "output_mismatch"}
             )
     return {
         "reference_receipt_sha256": "sha256:" + hashlib.sha256(reference_bytes).hexdigest(),
         "reference_engine": reference.get("engine"),
+        "comparison_mode": comparison_mode,
         "matched": not mismatches,
         "mismatches": mismatches,
     }
@@ -1226,12 +1823,18 @@ def require_repository_unchanged(expected: dict[str, Any]) -> None:
         )
 
 
-def probe_models(base_url: str, headers: dict[str, str], timeout_secs: float) -> list[str]:
+def probe_models(
+    base_url: str, headers: dict[str, str], timeout_secs: float
+) -> list[str]:
     value = fetch_json(f"{base_url}/v1/models", headers, timeout_secs)
     data = value.get("data")
     if not isinstance(data, list):
         raise BenchmarkError("/v1/models response omits data array")
-    models = [row.get("id") for row in data if isinstance(row, dict) and isinstance(row.get("id"), str)]
+    models = [
+        row.get("id")
+        for row in data
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+    ]
     if not models:
         raise BenchmarkError("/v1/models returned no model identifiers")
     return models
@@ -1264,6 +1867,8 @@ def workload_contract(args: argparse.Namespace, sizes: list[int]) -> dict[str, A
     return {
         "schema": WORKLOAD_SCHEMA,
         "prompt_template_version": PROMPT_TEMPLATE_VERSION,
+        "profile": args.workload_profile,
+        "comparison_mode": PROFILE_CONTRACTS[args.workload_profile]["comparison_mode"],
         "run_id": args.run_id,
         "model": args.model,
         "endpoint": "/v1/chat/completions",
@@ -1273,6 +1878,7 @@ def workload_contract(args: argparse.Namespace, sizes: list[int]) -> dict[str, A
         "repeats": args.repeats,
         "warmup_requests": args.warmup_requests,
         "max_tokens": args.max_tokens,
+        "memory_limit_bytes": args.memory_limit_bytes,
         "sampling": {
             "temperature": args.temperature,
             "top_p": args.top_p,
@@ -1317,7 +1923,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--engine", choices=("kiln", "vllm"), default="kiln")
     parser.add_argument("--base-url", "--host", dest="base_url", default="http://127.0.0.1:8420")
     parser.add_argument("--model", default="Qwen3.5-4B")
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        help="local checkpoint whose exact weights/tokenizer/template are served",
+    )
     parser.add_argument("--runtime-identity")
+    parser.add_argument(
+        "--runtime-artifact",
+        type=Path,
+        help="Kiln binary or immutable vLLM launch/runtime manifest",
+    )
     parser.add_argument(
         "--run-id",
         default="manual-v1",
@@ -1327,9 +1943,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--warmup-requests", type=int, default=1)
-    parser.add_argument("--warmup", action="store_true", help="Compatibility alias; warmup is already on")
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="Compatibility alias; warmup is already on",
+    )
+    parser.add_argument(
+        "--workload-profile",
+        choices=tuple(PROFILE_CONTRACTS),
+        default="greedy-short",
+    )
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--top-p", type=float)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--enable-thinking", action="store_true")
     parser.add_argument(
@@ -1338,7 +1963,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--require-uniform-prompt-tokens",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
     )
     parser.add_argument("--max-dispatch-spread-ms", type=float, default=250.0)
     parser.add_argument("--slo-ttft-ms", type=float, default=5_000.0)
@@ -1349,6 +1974,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--memory-path", default="auto")
     parser.add_argument("--memory-sample-ms", type=int, default=50)
     parser.add_argument("--require-memory", action="store_true")
+    parser.add_argument("--memory-limit-bytes", type=int)
     authentication = parser.add_mutually_exclusive_group()
     authentication.add_argument(
         "--api-key",
@@ -1376,6 +2002,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
     args.base_url = args.base_url.rstrip("/")
+    profile = PROFILE_CONTRACTS[args.workload_profile]
+    for name in ("temperature", "top_p", "require_uniform_prompt_tokens"):
+        expected = profile[name]
+        supplied = getattr(args, name)
+        if supplied is not None and supplied != expected:
+            parser.error(
+                f"--workload-profile {args.workload_profile} requires "
+                f"{name.replace('_', '-')}={expected}"
+            )
+        setattr(args, name, expected)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,127}", args.run_id):
         parser.error("run-id must be 3..128 portable identifier characters")
     if not 0 < args.repeats <= 1000 or not 0 < args.max_tokens <= 2**31:
@@ -1397,6 +2033,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("timeouts, dispatch limit, and SLO thresholds must be finite and positive")
     if args.memory_sample_ms <= 0:
         parser.error("memory sampling cadence must be positive")
+    if args.memory_limit_bytes is not None and args.memory_limit_bytes <= 0:
+        parser.error("memory-limit-bytes must be positive")
     if not 0 <= args.seed <= 2**64 - 1:
         parser.error("seed must fit an unsigned 64-bit integer")
     args.api_key_source = "none"
@@ -1424,6 +2062,15 @@ def main(argv: list[str] | None = None) -> int:
                 validate_benchmark_receipt_path(path)
                 print(f"OK {path}")
             return 0
+        if args.model_path is None:
+            raise BenchmarkError("--model-path is required for a measured run")
+        if args.runtime_artifact is None:
+            raise BenchmarkError("--runtime-artifact is required for a measured run")
+        if args.memory_limit_bytes is None:
+            raise BenchmarkError("--memory-limit-bytes is required for a measured run")
+        if not args.require_max_tokens:
+            raise BenchmarkError("measured runs cannot disable the fixed output-length gate")
+        args.require_memory = True
         if args.out is not None and args.out.exists():
             raise BenchmarkError(f"refusing to overwrite existing receipt: {args.out}")
         sizes = parse_sizes(args.sizes)
@@ -1432,12 +2079,31 @@ def main(argv: list[str] | None = None) -> int:
             raise BenchmarkError("seed plus the largest request index exceeds u64")
         repo = repository_identity()
         if repo["dirty"] and not args.allow_dirty:
-            raise BenchmarkError("repository is dirty; commit first or use --allow-dirty for a diagnostic")
+            raise BenchmarkError(
+                "repository is dirty; commit first or use --allow-dirty for a diagnostic"
+            )
         if args.runtime_identity is None:
             if args.engine == "kiln" and repo["commit"] and not repo["dirty"]:
                 args.runtime_identity = f"kiln-git:{repo['commit']}"
             else:
                 raise BenchmarkError("--runtime-identity is required for this engine/source state")
+        try:
+            model_identity = bind_model_identity(
+                fingerprint_model(args.model_path, args.model)
+            )
+        except ModelFingerprintError as exc:
+            raise BenchmarkError(f"model fingerprint failed: {exc}") from exc
+        runtime_artifact = fingerprint_runtime_artifact(args.runtime_artifact)
+        runtime_manifest = (
+            load_vllm_runtime_manifest(args.runtime_artifact)
+            if args.engine == "vllm"
+            else None
+        )
+        if (
+            runtime_manifest is not None
+            and runtime_manifest["identity"]["served_model_id"] != args.model
+        ):
+            raise BenchmarkError("vLLM runtime manifest model disagrees with --model")
 
         headers = {
             "Accept": "text/event-stream",
@@ -1451,6 +2117,18 @@ def main(argv: list[str] | None = None) -> int:
             raise BenchmarkError(
                 f"requested model {args.model!r} is absent from /v1/models: {models}"
             )
+        health_version = None
+        runtime_execution_identity: dict[str, Any] | None = None
+        if args.engine == "kiln":
+            health = fetch_json(f"{args.base_url}/health", headers, args.timeout_secs)
+            health_version = health.get("version")
+            runtime_execution_identity = _object(
+                health.get("execution_identity"), "Kiln health.execution_identity"
+            )
+            if runtime_execution_identity.get("executable_sha256") != runtime_artifact["sha256"]:
+                raise BenchmarkError(
+                    "Kiln health execution identity does not match --runtime-artifact"
+                )
 
         diagnostics_url: str | None
         if args.diagnostics_url == "none":
@@ -1461,6 +2139,8 @@ def main(argv: list[str] | None = None) -> int:
             diagnostics_url = args.diagnostics_url
 
         memory_path = resolve_memory_path(args.memory_path)
+        if memory_path is None:
+            raise BenchmarkError("a DRM device-memory counter is required for a measured run")
         sampler = MemorySampler(memory_path, args.memory_sample_ms)
         sampler.start()
         try:
@@ -1476,7 +2156,10 @@ def main(argv: list[str] | None = None) -> int:
                     sampler=sampler,
                     diagnostics_url=diagnostics_url,
                 )
-                print(f"[warmup] {warmup['verdict']} ok={warmup['success_count']}/{warmup['request_count']}")
+                print(
+                    f"[warmup] {warmup['verdict']} "
+                    f"ok={warmup['success_count']}/{warmup['request_count']}"
+                )
 
             runs: list[dict[str, Any]] = []
             if warmup is None or warmup["verdict"] == "passed":
@@ -1498,13 +2181,23 @@ def main(argv: list[str] | None = None) -> int:
             sampler.stop()
 
         require_repository_unchanged(repo)
+        try:
+            model_after = bind_model_identity(fingerprint_model(args.model_path, args.model))
+        except ModelFingerprintError as exc:
+            raise BenchmarkError(f"model fingerprint recheck failed: {exc}") from exc
+        if model_after != model_identity:
+            raise BenchmarkError("model identity changed during measurement; discard the run")
+        if fingerprint_runtime_artifact(args.runtime_artifact) != runtime_artifact:
+            raise BenchmarkError("runtime artifact changed during measurement; discard the run")
+        if args.engine == "vllm" and load_vllm_runtime_manifest(
+            args.runtime_artifact
+        ) != runtime_manifest:
+            raise BenchmarkError("vLLM runtime manifest changed during measurement")
         workload = workload_contract(args, sizes)
-        health_version = None
-        if diagnostics_url is not None:
-            try:
-                health_version = fetch_json(diagnostics_url, headers, args.timeout_secs).get("version")
-            except Exception:
-                pass
+        if args.engine == "kiln":
+            health_after = fetch_json(f"{args.base_url}/health", headers, args.timeout_secs)
+            if health_after.get("execution_identity") != runtime_execution_identity:
+                raise BenchmarkError("Kiln execution identity changed during measurement")
         receipt: dict[str, Any] = {
             "schema": SCHEMA,
             "driver_version": DRIVER_VERSION,
@@ -1518,6 +2211,10 @@ def main(argv: list[str] | None = None) -> int:
                 "available_models": models,
                 "authentication_configured": bool(args.api_key),
                 "authentication_source": args.api_key_source,
+                "model_identity": model_identity,
+                "runtime_artifact": runtime_artifact,
+                "runtime_execution_identity": runtime_execution_identity,
+                "runtime_manifest": runtime_manifest,
             },
             "driver_environment": {
                 "hostname": socket.gethostname(),
@@ -1543,6 +2240,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.reference_receipt is not None:
             receipt["comparison"] = compare_reference(receipt, args.reference_receipt)
         passed = (
+            not repo["dirty"]
+            and
             (warmup is None or warmup["verdict"] == "passed")
             and len(runs) == len(sizes) * args.repeats
             and all(row["verdict"] == "passed" for row in runs)

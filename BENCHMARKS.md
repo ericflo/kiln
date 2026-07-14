@@ -13,12 +13,19 @@ streaming `POST /v1/chat/completions` API. Kiln `/health` snapshots are taken
 before and after a run when available, outside the timed request path; they do
 not alter request bodies or scheduling.
 
-The driver:
+New measurements use driver version 3. The driver:
 
-- builds unique prompts by permuting one fixed marker multiset, never from wall
-  clock time, and rejects a row if reported prompt-token counts differ;
-- pins model, template thinking mode, output length, neutral penalties,
-  temperature, top-p, seeds, all-at-once arrival, warmup, and concurrency;
+- fingerprints every weight shard plus the model config, tokenizer, and chat
+  template before traffic and rechecks the complete identity after traffic;
+- hashes the exact Kiln binary or immutable vLLM runtime manifest before and
+  after traffic; for Kiln, the hash must also equal the running process's
+  `/health.execution_identity.executable_sha256`;
+- uses one of five fixed workload profiles instead of accepting an arbitrary
+  prompt/sampling combination;
+- records every request's observed prompt-token count and requires the same
+  ordered counts from the reference engine, not only the same prompt text;
+- pins template thinking mode, output length, neutral penalties, seeds,
+  all-at-once arrival, warmup, concurrency, and profile-defined sampling;
 - starts every row behind one thread barrier and records dispatch spread;
 - requires one `[DONE]`, one positive usage record, one finish reason, and the
   requested number of generated tokens from every request;
@@ -27,8 +34,30 @@ The driver:
   device memory;
 - records Kiln's effective decode ceiling, observed width, mean rows per
   forward, phase time, and error deltas when its diagnostics are enabled;
-- writes an atomic, self-hashing receipt and can require exact prompt/output
-  hashes to match a reference engine receipt.
+- samples one explicit DRM memory counter, fails any row above the declared
+  absolute byte limit, and records both absolute peak and baseline delta;
+- writes an atomic, self-hashing receipt and requires a current v3 reference
+  receipt with identical workload and model content for cross-engine runs.
+
+Driver version 2 remains accepted only so the historical checked-in receipts
+continue to validate. It cannot produce new receipts and does not satisfy the
+current acceptance protocol.
+
+### Fixed workload profiles
+
+| Profile | Prompt shape | Sampling | Cross-engine comparison |
+|---|---|---|---|
+| `greedy-short` | unique short prompts with the same marker multiset | temperature 0, top-p 1 | prompt text, ordered prompt-token counts, exact output |
+| `api-default-sampled` | the same short prompts | temperature 1, top-p 1, fixed per-request seeds | prompt text and ordered prompt-token counts; output hashes are retained but not required to match across different samplers |
+| `long-prefill` | a fixed long body plus a unique suffix | temperature 0, top-p 1 | prompt text, ordered prompt-token counts, exact output |
+| `prefix-hit` | a byte-identical long shared prefix plus a unique suffix | temperature 0, top-p 1 | prompt text, ordered prompt-token counts, exact output |
+| `mixed` | deterministic short, medium, long, and longest rows | temperature 0, top-p 1 | prompt text, ordered non-uniform prompt-token counts, exact output |
+
+The profile owns temperature, top-p, and whether prompt lengths must be
+uniform. Conflicting CLI overrides fail before traffic. Exact output is not a
+meaningful cross-implementation requirement for sampled decoding because the
+seed does not standardize sampler implementation details; the sampled profile
+therefore retains each output hash without pretending it is parity evidence.
 
 Current serving accepts only effective speculative method `off`; this driver
 therefore measures the ordinary serving path. A configured `skip_layer` or
@@ -44,7 +73,8 @@ driver does not request Kiln-only token-timing events because that would make
 the two measured request bodies different.
 
 Run Kiln first from a clean checkout. Use an explicit DRM path on machines with
-more than one GPU:
+more than one GPU. Choose the absolute memory limit before either engine starts
+and use the same value for both engines; do not derive it from an observed peak.
 
 Use a checked-in or receipt-bound TOML policy for serving. For CUDA, ROCm, and
 Vulkan throughput qualification, start with true batched decode and preserve
@@ -92,46 +122,79 @@ mode, maximum batch, wait, and mixed-sequence values. Do not infer routing from
 `(1,0,false)`, ROCm `(8,0,false)`, Metal `(8,100,true)`, and Vulkan
 `(64,5000,true)`, with maximum batch clamped to effective decode width.
 
+The campaign command runs all five profiles at concurrency 1, 8, 16, 32, 64,
+and 128, continues after a failed profile so counterevidence is retained, and
+writes five detailed receipts plus an atomic self-hashing campaign summary:
+
 ```bash
-RUN_ID=qwen35-4b-greedy-short-20260710
-python3 scripts/bench-concurrent-batch.py \
+python3 scripts/run-serving-benchmark-campaign.py \
   --engine kiln \
   --base-url http://127.0.0.1:8420 \
   --model Qwen3.5-4B \
-  --run-id "$RUN_ID" \
+  --model-path ./Qwen3.5-4B \
+  --runtime-identity "kiln-git:$(git rev-parse HEAD)" \
+  --runtime-artifact ./target/release/kiln \
+  --campaign-id qwen35-4b-rocm-20260713 \
   --sizes 1,8,16,32,64,128 \
   --repeats 3 \
   --max-tokens 64 \
-  --require-memory \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
-  --out /tmp/kiln-serving.json
+  --memory-limit-bytes 30000000000 \
+  --out-dir /tmp/kiln-serving-campaign
 ```
 
-Run vLLM with the same `RUN_ID`, model alias, sizes, and generation settings.
-The runtime identity must be supplied for a non-Kiln engine. The reference
-receipt makes prompt and greedy output parity a release gate:
+Run vLLM with the same campaign ID, model alias, checkpoint, sizes, limits, and
+SLOs. `--runtime-artifact` must name the immutable launcher/runtime manifest
+that fingerprints the installed vLLM, Torch, Transformers, tokenizer, launch
+configuration, and accelerator; a version string alone is not sufficient.
+Generate it with the exact model, limits, and vLLM arguments used by the real
+launch (see [Immutable vLLM teachers](docs/VLLM_TEACHER_IDENTITY.md)):
 
 ```bash
-python3 scripts/bench-concurrent-batch.py \
+python3 scripts/vllm_teacher.py \
+  --manifest-only \
+  --model-path ./Qwen3.5-4B \
+  --served-model-id Qwen3.5-4B \
+  --max-top-k 20 \
+  --max-model-len 32768 \
+  -- --dtype=bfloat16 \
+  > /tmp/vllm-runtime-manifest.json
+```
+
+The benchmark rejects an arbitrary file: the manifest's canonical identity,
+runtime-content hash, served model, vLLM implementation, and embedded
+`kiln-teacher-v1` fingerprint must verify. Start vLLM through the launcher with
+the same identity-bearing arguments. The campaign runner then pairs each
+profile with the corresponding Kiln receipt:
+
+```bash
+python3 scripts/run-serving-benchmark-campaign.py \
   --engine vllm \
   --base-url http://127.0.0.1:8000 \
   --model Qwen3.5-4B \
-  --runtime-identity vllm:VERSION+BUILD \
-  --run-id "$RUN_ID" \
+  --model-path ./Qwen3.5-4B \
+  --runtime-identity vllm:VERSION+RUNTIME-CONTENT-SHA256 \
+  --runtime-artifact /tmp/vllm-runtime-manifest.json \
+  --campaign-id qwen35-4b-rocm-20260713 \
   --sizes 1,8,16,32,64,128 \
   --repeats 3 \
   --max-tokens 64 \
-  --diagnostics-url none \
-  --require-memory \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
-  --reference-receipt /tmp/kiln-serving.json \
-  --out /tmp/vllm-serving.json
+  --memory-limit-bytes 30000000000 \
+  --reference-dir /tmp/kiln-serving-campaign \
+  --out-dir /tmp/vllm-serving-campaign
 ```
 
-An official receipt must not use `--allow-dirty`, disable fixed output or
-uniform prompt-token gates, omit runtime identity, or include failed/zero-token
-requests in throughput. Use a shared run ID for both engines and restart the
-engine between implementations so device-memory baselines are independent.
+Use `scripts/bench-concurrent-batch.py` directly for a focused profile run.
+Select a profile with `--workload-profile` (default `greedy-short`).
+`--model-path`, `--runtime-artifact`, `--memory-path`, and
+`--memory-limit-bytes` are mandatory; none of the provenance or memory
+requirements are optional.
+
+An official receipt must not use `--allow-dirty`, disable fixed output, omit
+runtime/model/memory identity, or include failed/zero-token requests in
+throughput. Use a shared run ID for both engines and restart the engine between
+implementations so device-memory baselines are independent.
 Authenticated endpoints must opt in with `--api-key-env VARIABLE` (preferred)
 or `--api-key VALUE`. The driver never inherits `OPENAI_API_KEY` implicitly and
 never writes the credential or environment-variable name into a receipt.
@@ -173,7 +236,11 @@ with `scripts/bench-concurrent-batch.py --validate-receipt PATH...`. The latter
 rejects unknown or missing fields, non-finite metrics, inconsistent gates,
 dirty passed sources, workload/run mismatches, and an invalid canonical
 self-hash. It also rejects a run if the repository identity changes while
-measurement is in progress.
+measurement is in progress. New v3 receipts additionally reject altered model
+content identities, runtime-artifact mismatches, missing Kiln executable
+provenance, profile/sampling drift, prompt-token summary drift, and an
+inconsistent absolute-memory gate. Historical v2 validation is compatibility,
+not current performance evidence.
 
 ## Historical CUDA setup
 

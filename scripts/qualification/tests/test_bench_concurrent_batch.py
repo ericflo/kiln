@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -24,6 +26,27 @@ sys.modules[SPEC.name] = bench
 SPEC.loader.exec_module(bench)
 
 
+def valid_vllm_manifest(model: str = "test-model") -> dict:
+    identity = {
+        "schema": "kiln.teacher-identity.v1",
+        "served_model_id": model,
+        "implementation": "vllm:0.25.0",
+    }
+    canonical_json = json.dumps(
+        identity, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    )
+    payload = canonical_json.encode()
+    encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    return {
+        "identity": identity,
+        "canonical_json": canonical_json,
+        "system_fingerprint": (
+            f"kiln-teacher-v1.{encoded}.{hashlib.sha256(payload).hexdigest()}"
+        ),
+        "runtime_content_sha256": "a" * 64,
+    }
+
+
 class FakeState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -31,6 +54,19 @@ class FakeState:
         self.max_active = 0
         self.bodies: list[dict] = []
         self.counters = {field: 0 for field in bench.COUNTER_FIELDS}
+        self.execution_identity = {
+            "provenance_type": "kiln.execution-provenance.v1",
+            "backend": "test",
+            "device": "test:0",
+            "inference_dtype": "f32",
+            "training_policy": "test",
+            "provenance_sha256": "sha256:" + "1" * 64,
+            "executable_sha256": "sha256:" + "2" * 64,
+            "numerical_runtime_sha256": "sha256:" + "3" * 64,
+            "kernel_contract_sha256": "sha256:" + "4" * 64,
+            "effective_server_config_sha256": "sha256:" + "5" * 64,
+            "effective_environment_sha256": "sha256:" + "6" * 64,
+        }
 
     def health(self) -> dict:
         with self.lock:
@@ -41,6 +77,7 @@ class FakeState:
             }
         return {
             "version": "test-v1",
+            "execution_identity": self.execution_identity,
             "decode_runtime": {"batching_engine": snapshot},
         }
 
@@ -158,12 +195,60 @@ class FakeServer:
 
 class ServingBenchmarkTests(unittest.TestCase):
     def test_prompts_are_unique_per_row_and_preserve_the_marker_multiset(self) -> None:
-        prompts = [bench.deterministic_prompt("shared", "measure-c008-r000", i) for i in range(8)]
+        prompts = [
+            bench.deterministic_prompt("shared", "measure-c008-r000", i)
+            for i in range(8)
+        ]
         self.assertEqual(len(prompts), len(set(prompts)))
-        marker_rows = [prompt.split("Marker sequence: ", 1)[1].removesuffix(".") for prompt in prompts]
+        marker_rows = [
+            prompt.split("Marker sequence: ", 1)[1].removesuffix(".")
+            for prompt in prompts
+        ]
         expected = sorted(bench.PROMPT_MARKERS)
         for row in marker_rows:
             self.assertEqual(sorted(row.split(" | ")), expected)
+
+    def test_fixed_workload_profiles_pin_sampling_and_prompt_shapes(self) -> None:
+        expected = {
+            "greedy-short": (0.0, True, "exact_output"),
+            "api-default-sampled": (1.0, True, "inputs_only"),
+            "long-prefill": (0.0, True, "exact_output"),
+            "prefix-hit": (0.0, True, "exact_output"),
+            "mixed": (0.0, False, "exact_output"),
+        }
+        for profile, (temperature, uniform, comparison_mode) in expected.items():
+            args = bench.parse_args(["--workload-profile", profile])
+            self.assertEqual(args.temperature, temperature)
+            self.assertEqual(args.top_p, 1.0)
+            self.assertEqual(args.require_uniform_prompt_tokens, uniform)
+            self.assertEqual(
+                bench.PROFILE_CONTRACTS[profile]["comparison_mode"], comparison_mode
+            )
+
+        short = bench.deterministic_prompt("shared", "phase", 0, "short")
+        long_prompt = bench.deterministic_prompt(
+            "shared", "phase", 0, "long-prefill"
+        )
+        prefix_prompts = [
+            bench.deterministic_prompt("shared", "phase", index, "prefix-hit")
+            for index in range(2)
+        ]
+        mixed_lengths = {
+            len(bench.deterministic_prompt("shared", "phase", index, "mixed"))
+            for index in range(4)
+        }
+        self.assertGreater(len(long_prompt), len(short) * 10)
+        self.assertNotEqual(prefix_prompts[0], prefix_prompts[1])
+        shared_prefix = "Shared prefix for a cache-reuse workload. " + (
+            bench.LONG_PROMPT_BLOCK * bench.LONG_PROMPT_REPETITIONS
+        )
+        self.assertTrue(all(prompt.startswith(shared_prefix) for prompt in prefix_prompts))
+        self.assertEqual(len(mixed_lengths), 4)
+
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            bench.parse_args(
+                ["--workload-profile", "api-default-sampled", "--temperature", "0"]
+            )
 
     def test_sse_parser_handles_comments_and_multiline_data(self) -> None:
         parser = bench.SSEParser()
@@ -260,12 +345,14 @@ class ServingBenchmarkTests(unittest.TestCase):
             max_tokens=1,
             require_max_tokens=True,
             require_uniform_prompt_tokens=True,
+            require_nonuniform_prompt_tokens=False,
             max_dispatch_spread_ms=1.0,
             slo_ttft_ms=1000.0,
             slo_itl_ms=1000.0,
             slo_e2e_ms=1000.0,
             memory=None,
             require_memory=False,
+            memory_limit_bytes=None,
             server=None,
             diagnostics_error=None,
         )
@@ -273,6 +360,99 @@ class ServingBenchmarkTests(unittest.TestCase):
         checks = {row["name"]: row["passed"] for row in summary["gates"]}
         self.assertFalse(checks["positive_completion_usage"])
         self.assertFalse(checks["fixed_output_length"])
+
+    def test_absolute_memory_limit_is_a_verdict_gate(self) -> None:
+        now = time.perf_counter()
+        result = bench.RequestResult(
+            index=0,
+            prompt_sha256="sha256:prompt",
+            started=now,
+            ended=now + 0.1,
+            semantic_times=[now + 0.05],
+            content="text",
+            reasoning_content="",
+            prompt_tokens=10,
+            completion_tokens=1,
+            total_tokens=11,
+            finish_reason="length",
+            done=True,
+            error=None,
+        )
+        summary = bench.summarize_run(
+            concurrency=1,
+            repeat=0,
+            elapsed_s=0.1,
+            results=[result],
+            max_tokens=1,
+            require_max_tokens=True,
+            require_uniform_prompt_tokens=True,
+            require_nonuniform_prompt_tokens=False,
+            max_dispatch_spread_ms=1.0,
+            slo_ttft_ms=1000.0,
+            slo_itl_ms=1000.0,
+            slo_e2e_ms=1000.0,
+            memory={
+                "baseline_bytes": 100,
+                "peak_bytes": 201,
+                "peak_delta_bytes": 101,
+                "samples": 2,
+            },
+            require_memory=True,
+            memory_limit_bytes=200,
+            server=None,
+            diagnostics_error=None,
+        )
+        checks = {row["name"]: row["passed"] for row in summary["gates"]}
+        self.assertEqual(summary["verdict"], "failed")
+        self.assertFalse(checks["absolute_memory_limit"])
+
+    def test_failed_run_remains_a_valid_structured_counterexample(self) -> None:
+        now = time.perf_counter()
+        result = bench.failed_result(
+            0,
+            "sha256:prompt",
+            now,
+            RuntimeError("injected request failure"),
+        )
+        summary = bench.summarize_run(
+            concurrency=1,
+            repeat=0,
+            elapsed_s=0.1,
+            results=[result],
+            max_tokens=1,
+            require_max_tokens=True,
+            require_uniform_prompt_tokens=True,
+            require_nonuniform_prompt_tokens=False,
+            max_dispatch_spread_ms=1.0,
+            slo_ttft_ms=1000.0,
+            slo_itl_ms=1000.0,
+            slo_e2e_ms=1000.0,
+            memory={
+                "baseline_bytes": 100,
+                "peak_bytes": 100,
+                "peak_delta_bytes": 0,
+                "samples": 2,
+            },
+            require_memory=True,
+            memory_limit_bytes=200,
+            server=None,
+            diagnostics_error=None,
+        )
+        self.assertEqual(summary["verdict"], "failed")
+        self.assertEqual(
+            summary["errors"],
+            [{"index": 0, "error": "RuntimeError: injected request failure"}],
+        )
+        bench.validate_benchmark_run(
+            summary,
+            label="counterexample",
+            concurrency=1,
+            repeat=0,
+            max_tokens=1,
+            driver_version=bench.DRIVER_VERSION,
+            memory_limit_bytes=200,
+            workload_profile="greedy-short",
+        )
 
     def test_batching_counter_regression_is_rejected(self) -> None:
         before = {field: 1 for field in bench.COUNTER_FIELDS}
@@ -286,32 +466,54 @@ class ServingBenchmarkTests(unittest.TestCase):
     def test_reference_comparison_binds_workload_prompts_and_outputs(self) -> None:
         current = {
             "schema": bench.SCHEMA,
+            "driver_version": bench.DRIVER_VERSION,
             "workload_fingerprint": "sha256:workload",
+            "workload": {"comparison_mode": "exact_output"},
+            "engine": {"model_identity": {"content_sha256": "sha256:model"}},
             "runs": [
                 {
                     "concurrency": 1,
                     "repeat": 0,
+                    "prompt_token_counts": [42],
                     "prompt_set_sha256": "sha256:prompts",
                     "output_set_sha256": "sha256:outputs",
                 }
             ],
         }
         reference = json.loads(json.dumps(current))
-        reference["engine"] = {"name": "kiln"}
+        reference["engine"]["name"] = "kiln"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "reference.json"
             path.write_text(json.dumps(reference))
-            comparison = bench.compare_reference(current, path)
-            self.assertTrue(comparison["matched"])
-            reference["runs"][0]["output_set_sha256"] = "sha256:different"
-            path.write_text(json.dumps(reference))
-            comparison = bench.compare_reference(current, path)
-            self.assertFalse(comparison["matched"])
-            self.assertEqual(comparison["mismatches"][0]["reason"], "output_mismatch")
+            with mock.patch.object(bench, "validate_benchmark_receipt"):
+                comparison = bench.compare_reference(current, path)
+                self.assertTrue(comparison["matched"])
+                reference["runs"][0]["output_set_sha256"] = "sha256:different"
+                path.write_text(json.dumps(reference))
+                comparison = bench.compare_reference(current, path)
+                self.assertFalse(comparison["matched"])
+                self.assertEqual(
+                    comparison["mismatches"][0]["reason"], "output_mismatch"
+                )
 
-            path.write_text('{"schema":"first","schema":"second"}')
-            with self.assertRaisesRegex(bench.BenchmarkError, "duplicate JSON object key"):
-                bench.compare_reference(current, path)
+                reference["workload"]["comparison_mode"] = "inputs_only"
+                current["workload"]["comparison_mode"] = "inputs_only"
+                path.write_text(json.dumps(reference))
+                comparison = bench.compare_reference(current, path)
+                self.assertTrue(comparison["matched"])
+                reference["runs"][0]["prompt_token_counts"] = [43]
+                path.write_text(json.dumps(reference))
+                comparison = bench.compare_reference(current, path)
+                self.assertEqual(
+                    comparison["mismatches"][0]["reason"],
+                    "prompt_token_mismatch",
+                )
+
+                path.write_text('{"schema":"first","schema":"second"}')
+                with self.assertRaisesRegex(
+                    bench.BenchmarkError, "duplicate JSON object key"
+                ):
+                    bench.compare_reference(current, path)
 
     def test_memory_sampler_records_peak_delta(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -333,6 +535,28 @@ class ServingBenchmarkTests(unittest.TestCase):
     def test_cli_writes_a_self_hashing_passed_receipt(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "receipt.json"
+            runtime_artifact = Path(directory) / "kiln-server"
+            runtime_artifact.write_bytes(b"test runtime")
+            fake.state.execution_identity["executable_sha256"] = (
+                "sha256:" + hashlib.sha256(b"test runtime").hexdigest()
+            )
+            memory_counter = Path(directory) / "vram-used"
+            memory_counter.write_text("1024")
+            model_path = Path(directory) / "model"
+            model_fingerprint = {
+                "id": "test-model",
+                "path": str(model_path),
+                "weight_files": [
+                    {
+                        "path": "model.safetensors",
+                        "bytes": 8,
+                        "sha256": "sha256:" + "c" * 64,
+                    }
+                ],
+                "config_hash": "sha256:" + "d" * 64,
+                "tokenizer_hash": "sha256:" + "e" * 64,
+                "chat_template_hash": "sha256:" + "f" * 64,
+            }
             clean_repository = {
                 "commit": "a" * 40,
                 "dirty": False,
@@ -340,6 +564,8 @@ class ServingBenchmarkTests(unittest.TestCase):
             }
             with mock.patch.object(
                 bench, "repository_identity", return_value=clean_repository
+            ), mock.patch.object(
+                bench, "fingerprint_model", return_value=model_fingerprint
             ):
                 return_code = bench.main(
                     [
@@ -349,6 +575,10 @@ class ServingBenchmarkTests(unittest.TestCase):
                         "test-model",
                         "--runtime-identity",
                         "test-runtime",
+                        "--runtime-artifact",
+                        str(runtime_artifact),
+                        "--model-path",
+                        str(model_path),
                         "--run-id",
                         "cli-fixture-v1",
                         "--sizes",
@@ -358,7 +588,9 @@ class ServingBenchmarkTests(unittest.TestCase):
                         "--warmup-requests",
                         "0",
                         "--memory-path",
-                        "none",
+                        str(memory_counter),
+                        "--memory-limit-bytes",
+                        "2048",
                         "--out",
                         str(output),
                     ]
@@ -372,6 +604,23 @@ class ServingBenchmarkTests(unittest.TestCase):
             tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
             with self.assertRaisesRegex(bench.BenchmarkError, "unknown keys"):
                 bench.validate_benchmark_receipt(tampered)
+
+            tampered = json.loads(json.dumps(receipt))
+            tampered["engine"]["model_identity"]["config_hash"] = (
+                "sha256:" + "0" * 64
+            )
+            tampered.pop("receipt_sha256")
+            tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+            with self.assertRaisesRegex(bench.BenchmarkError, "model content"):
+                bench.validate_benchmark_receipt(tampered)
+
+            vllm_receipt = json.loads(json.dumps(receipt))
+            vllm_receipt["engine"]["name"] = "vllm"
+            vllm_receipt["engine"]["runtime_execution_identity"] = None
+            vllm_receipt["engine"]["runtime_manifest"] = valid_vllm_manifest()
+            vllm_receipt.pop("receipt_sha256")
+            vllm_receipt["receipt_sha256"] = bench.canonical_sha256(vllm_receipt)
+            bench.validate_benchmark_receipt(vllm_receipt)
 
         self.assertEqual(return_code, 0)
         self.assertEqual(receipt["schema"], bench.SCHEMA)
@@ -407,6 +656,21 @@ class ServingBenchmarkTests(unittest.TestCase):
             args = bench.parse_args(["--api-key-env", "BENCH_FIXTURE_KEY"])
         self.assertEqual(args.api_key, "fixture-secret")
         self.assertEqual(args.api_key_source, "environment")
+
+    def test_vllm_runtime_manifest_is_canonical_and_model_bound(self) -> None:
+        manifest = valid_vllm_manifest()
+        self.assertEqual(
+            bench.validate_vllm_runtime_manifest(manifest, "fixture"), manifest
+        )
+        tampered = json.loads(json.dumps(manifest))
+        tampered["identity"]["implementation"] = "vllm:changed"
+        with self.assertRaisesRegex(bench.BenchmarkError, "canonical_json"):
+            bench.validate_vllm_runtime_manifest(tampered, "fixture")
+
+        tampered = json.loads(json.dumps(manifest))
+        tampered["system_fingerprint"] = tampered["system_fingerprint"][:-1] + "0"
+        with self.assertRaisesRegex(bench.BenchmarkError, "does not bind"):
+            bench.validate_vllm_runtime_manifest(tampered, "fixture")
 
     def test_source_mutation_during_measurement_is_rejected(self) -> None:
         before = {
