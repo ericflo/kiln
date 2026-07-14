@@ -427,6 +427,23 @@ def debug_fixture(
 
 
 class ServeMixedLoadTests(unittest.TestCase):
+    def test_serving_run_directories_are_private_and_namespace_collision_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "serving"
+            first = serve.create_serving_run_dir("lifecycle", parent=parent)
+            second = serve.create_serving_run_dir("lifecycle", parent=parent)
+
+            self.assertNotEqual(first, second)
+            self.assertEqual(first.parent, parent)
+            self.assertEqual(second.parent, parent)
+            self.assertTrue(first.name.startswith("lifecycle-"))
+            self.assertTrue(second.name.startswith("lifecycle-"))
+            self.assertEqual(first.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(second.stat().st_mode & 0o777, 0o700)
+
+        with self.assertRaisesRegex(serve.QualificationError, "prefix"):
+            serve.create_serving_run_dir("../escape")
+
     def test_wait_ready_refreshes_health_after_prewarm_log(self) -> None:
         def ready_health(generation: int) -> dict[str, object]:
             return {

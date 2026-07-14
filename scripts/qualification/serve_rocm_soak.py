@@ -376,7 +376,7 @@ def execute(
         sha256=binary_hash,
     )
     port = mixed.free_loopback_port()
-    run_dir = ROOT / ".qualification/serving" / f"soak-{os.getpid()}"
+    run_dir = mixed.create_serving_run_dir("soak")
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
     config_path = run_dir / "kiln.toml"

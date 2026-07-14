@@ -19,6 +19,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -2117,6 +2118,20 @@ def snapshot_payload_residue(snapshot_dir: Path) -> list[str]:
     )[:8]
 
 
+def create_serving_run_dir(
+    prefix: str,
+    *,
+    parent: Path | None = None,
+) -> Path:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", prefix):
+        raise QualificationError(f"invalid serving run directory prefix {prefix!r}")
+    root = parent or ROOT / ".qualification/serving"
+    root.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix=f"{prefix}-", dir=root))
+    run_dir.chmod(0o700)
+    return run_dir
+
+
 def health_reports_ready_after_prewarm(health: dict[str, Any]) -> bool:
     checks = health.get("checks")
     return (
@@ -3593,7 +3608,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         sha256=binary_hash,
     )
     port = free_loopback_port()
-    run_dir = ROOT / ".qualification/serving" / f"{variant}-{os.getpid()}"
+    run_dir = create_serving_run_dir(variant)
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
     config_path = run_dir / "kiln.toml"

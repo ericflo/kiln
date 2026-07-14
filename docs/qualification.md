@@ -73,6 +73,14 @@ available/reserve/limit values. Do not lower the floor or bypass the wrapper to
 obtain a receipt. Let the machine recover memory and rerun from the same clean
 commit.
 
+Every serving driver creates a collision-resistant mode-0700 workspace below
+`.qualification/serving` (the pressure driver uses
+`.qualification/serving-pressure`). Names never depend on the sandbox PID,
+because PID namespaces can assign the same PID on every run. Normal teardown
+removes the workspace and private model snapshot. An externally interrupted
+run can leave ignored payloads behind; confirm that no qualification or Kiln
+process references a stale directory before removing that exact directory.
+
 Batching qualification must bind the complete typed startup policy, not only a
 legacy actor environment switch. A serving workload that exercises the actor
 declares `[batching]` values in its source-bound config, restarts the server,

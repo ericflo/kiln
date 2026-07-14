@@ -547,7 +547,7 @@ def run_arm(
 ) -> ArmRun:
     policy_events_started = time.monotonic()
     port = mixed.free_loopback_port()
-    run_dir = ROOT / ".qualification/serving" / f"sync-ab-{mode}-{os.getpid()}"
+    run_dir = mixed.create_serving_run_dir(f"sync-ab-{mode}")
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
     config_path = run_dir / "kiln.toml"

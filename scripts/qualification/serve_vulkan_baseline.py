@@ -562,7 +562,7 @@ def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str]:
         sha256=binary_sha256,
     )
     port = mixed.free_loopback_port()
-    run_dir = ROOT / ".qualification/serving" / f"{VARIANT_ID}-{os.getpid()}"
+    run_dir = mixed.create_serving_run_dir(VARIANT_ID)
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
     config_path = run_dir / "kiln.toml"

@@ -332,7 +332,7 @@ def run_arm(
 ) -> ArmRun:
     budget_bytes = ARM_BUDGETS[arm]
     port = mixed.free_loopback_port()
-    run_dir = ROOT / ".qualification/serving" / f"graph-resilience-{arm}-{os.getpid()}"
+    run_dir = mixed.create_serving_run_dir(f"graph-resilience-{arm}")
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
     config_path = run_dir / "kiln.toml"

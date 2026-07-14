@@ -470,7 +470,7 @@ def run_adapter_arm(
 ) -> AdapterArm:
     started = time.monotonic()
     port = mixed.free_loopback_port()
-    run_dir = ROOT / ".qualification/serving" / f"public-lifecycle-adapter-{os.getpid()}"
+    run_dir = mixed.create_serving_run_dir("public-lifecycle-adapter")
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
     config_path = run_dir / "kiln.toml"
@@ -704,7 +704,7 @@ def run_maintenance_arm(
     del seed
     started = time.monotonic()
     port = mixed.free_loopback_port()
-    run_dir = ROOT / ".qualification/serving" / f"public-lifecycle-maintenance-{os.getpid()}"
+    run_dir = mixed.create_serving_run_dir("public-lifecycle-maintenance")
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
     config_path = run_dir / "kiln.toml"

@@ -598,7 +598,10 @@ def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str | No
         sha256=binary_hash,
     )
     port = mixed.free_loopback_port()
-    run_dir = ROOT / ".qualification/serving-pressure" / str(os.getpid())
+    run_dir = mixed.create_serving_run_dir(
+        "pressure",
+        parent=ROOT / ".qualification/serving-pressure",
+    )
     adapter_dir = run_dir / "adapters"
     snapshot_dir = run_dir / "model-snapshots"
     config_path = run_dir / "kiln.toml"
