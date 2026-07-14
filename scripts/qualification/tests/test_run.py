@@ -229,11 +229,12 @@ def case_result_script(
     metric_unit: str = "items",
     lower_is_better: bool = False,
     details: str | None = None,
+    status: str = "passed",
 ) -> str:
     value = {
         "schema_version": 1,
         "case_id": "smoke-case",
-        "status": "passed",
+        "status": status,
         "duration_seconds": 0.01,
         "effective_config": effective_config or {},
         "metrics": [
@@ -584,6 +585,26 @@ class RunnerTests(unittest.TestCase):
         outcome = self.execute(repository)
         self.assertEqual(outcome.exit_code, 0)
         self.assertEqual(outcome.receipt["effective_config"], config)
+        self.assert_valid(outcome, repository.root)
+
+    def test_required_accelerator_skip_becomes_a_failed_valid_receipt(self) -> None:
+        repository = Repository(
+            environment_workload(
+                [sys.executable, "-c", case_result_script(status="skipped")],
+                protocol=command_protocol(),
+            )
+        )
+        self.addCleanup(repository.close)
+
+        outcome = self.execute(repository)
+
+        self.assertEqual(outcome.exit_code, 1)
+        self.assertEqual(outcome.receipt["qualification"]["verdict"], "failed")
+        self.assertEqual(outcome.receipt["results"][0]["status"], "failed")
+        self.assertIn(
+            "variant skip_policy forbids skipped cases",
+            outcome.receipt["results"][0]["details"],
+        )
         self.assert_valid(outcome, repository.root)
 
     def test_runner_receipts_pass_declared_ab_comparison(self) -> None:
