@@ -531,6 +531,10 @@ file with graphs disabled, `memory.kv_autoscale = true`, and
 `gpu_memory_operation` resize with reason `forced_configuration`, an initial
 capacity above the target, exact `requested_blocks` and `actual_blocks` of one,
 and finite nonnegative barrier/GPU/model wait and total mutation durations.
+Because this profile intentionally disables inference, `/health` must return a
+structured HTTP 503 with status `maintenance`, a failed
+`inference_admission` check, and every other readiness check passing. That is
+maintenance readiness, not a transport or startup failure.
 `/v1/config` must observe the one-block physical capacity while health and debug
 report the requested target and `config_file` provenance. A public chat request
 must return HTTP 503 with `inference_disabled_by_profile` without changing

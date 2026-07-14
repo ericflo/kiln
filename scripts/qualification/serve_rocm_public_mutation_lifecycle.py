@@ -322,7 +322,7 @@ def wait_maintenance_ready(
                 + "\n".join(server_log.tail)
             )
         try:
-            health = mixed.json_request(port, "GET", "/health")
+            health = maintenance_health(port)
             checks = health.get("checks")
             by_name = {
                 check.get("name"): check.get("pass")
@@ -345,6 +345,15 @@ def wait_maintenance_ready(
             last_error = f"{type(exc).__name__}: {exc}"
         time.sleep(0.25)
     raise TimeoutError(f"maintenance readiness failed: {last_error}")
+
+
+def maintenance_health(port: int) -> dict[str, Any]:
+    status, _, body = json_response(port, "GET", "/health")
+    if status != 503 or not isinstance(body, dict):
+        raise LifecycleError(
+            f"maintenance health returned HTTP {status}: {body!r}"
+        )
+    return body
 
 
 def copy_adapter(source: Path, destination_root: Path) -> tuple[str, str, int]:
@@ -808,7 +817,7 @@ def run_maintenance_arm(
                 "maintenance_inference_status": status,
             }
         )
-        health_end = mixed.json_request(port, "GET", "/health")
+        health_end = maintenance_health(port)
         batching_after_rejection = mixed.batching_snapshot(health_end)
         for field in (
             "total_admission_calls",

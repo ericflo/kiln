@@ -200,6 +200,39 @@ class ServeRocmPublicMutationLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(lifecycle.LifecycleError, "identity"):
                 lifecycle.adapter_state(1234, lifecycle.ADAPTER_NAME, revision)
 
+    def test_maintenance_readiness_accepts_only_structured_503_health(self) -> None:
+        health = {
+            "status": "maintenance",
+            "checks": [
+                {"name": "inference_admission", "pass": False},
+                {"name": "inference_prewarm_complete", "pass": True},
+                {"name": "model_loaded", "pass": True},
+            ],
+        }
+        process = mock.Mock()
+        process.poll.return_value = None
+        server_log = mock.Mock()
+        with mock.patch.object(
+            lifecycle,
+            "json_response",
+            return_value=(503, {}, health),
+        ):
+            observed = lifecycle.wait_maintenance_ready(
+                1234,
+                process,
+                server_log,
+                lifecycle.time.monotonic() + 1.0,
+            )
+        self.assertIs(observed, health)
+
+        with mock.patch.object(
+            lifecycle,
+            "json_response",
+            return_value=(200, {}, health),
+        ):
+            with self.assertRaisesRegex(lifecycle.LifecycleError, "HTTP 200"):
+                lifecycle.maintenance_health(1234)
+
     def test_metric_records_are_closed_sorted_and_finite(self) -> None:
         values = {name: index for index, name in enumerate(lifecycle.METRIC_DEFINITIONS)}
         records = lifecycle.metric_records(values)
