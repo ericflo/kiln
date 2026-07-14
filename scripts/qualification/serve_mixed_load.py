@@ -1557,7 +1557,10 @@ def classify_server_event(
         return "graph_fallback"
     if lowered == "adapter transition (barrier swap)":
         return "adapter_transition"
-    if lowered == "background inference prewarm complete":
+    if lowered in {
+        "background inference prewarm complete",
+        "vulkan decode weight prewarm complete",
+    }:
         return "prewarm_complete"
     if lowered in {
         "kv autoscaler resized cache",

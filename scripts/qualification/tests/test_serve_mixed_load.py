@@ -1160,6 +1160,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
     def test_server_event_classifier_is_causal_and_narrow(self) -> None:
         cases = {
             "background inference prewarm complete": "prewarm_complete",
+            "Vulkan decode weight prewarm complete": "prewarm_complete",
             "KV autoscaler resized cache": "kv_resize",
             "KV cache physical resize completed": "kv_resize",
             "ROCm pool reclaim completed": "memory_reclaim",

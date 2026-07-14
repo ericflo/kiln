@@ -302,6 +302,10 @@ private TOML selects the experimental profile only to keep the batching actor
 available; it explicitly disables KV autoscaling, allocator reclaim, and ROCm
 graphs. Runtime attestation requires all three policies and their
 `config_file` provenance before measurement and again after the final wave.
+Readiness requires both the passing health check and causal log evidence. The
+Vulkan-native path satisfies the latter with `Vulkan decode weight prewarm
+complete`; it does not run or claim the synthetic inference prewarm used by
+other serving paths.
 
 After one fixed warmup, four thread-barrier waves dispatch concurrency 1, 4, 8,
 and 12 with mixed prompt lengths from 16 through 1,024 deterministic words.
