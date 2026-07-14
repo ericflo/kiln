@@ -59,7 +59,7 @@
           "description": "Compare every parameter and F32 first/second moment after ten ordinary and ten low-gradient updates with the pinned PyTorch trajectory.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",
@@ -101,7 +101,7 @@
           "description": "Require the ROCm BF16 fused kernel to execute all 20 updates and stay within the declared PyTorch parameter and moment ULP envelopes without a silent skip.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",
@@ -192,7 +192,7 @@
           "description": "Compare every parameter and F32 first/second moment after ten ordinary and ten low-gradient updates with the pinned PyTorch trajectory.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",
@@ -234,7 +234,7 @@
           "description": "Require the Vulkan F32 fused kernel to execute all 20 updates and stay within the declared PyTorch mixed tolerance without a silent skip.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",

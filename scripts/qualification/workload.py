@@ -478,6 +478,11 @@ def _validate_case(
                     errors.append(f"{context}.command[0] executable cannot be a variable")
         executable = command[0] if command and isinstance(command[0], str) else ""
         executable_name = PurePosixPath(executable).name.lower()
+        if executable_name == "cargo":
+            errors.append(
+                f"{context}.command must route Cargo through "
+                "scripts/qualification/cargo-test-bounded.sh"
+            )
         if executable_name in SHELL_EXECUTABLES and any(
             isinstance(argument, str) and argument.lower() in SHELL_EVAL_FLAGS
             for argument in command[1:]

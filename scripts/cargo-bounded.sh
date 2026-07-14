@@ -20,8 +20,8 @@ Overrides:
   KILN_CARGO_MAX_MEMORY_GIB       Explicit aggregate ceiling (default: available minus reserve)
   KILN_CARGO_EXECUTION_MODE       scope (default) or transient-service
   KILN_CARGO_PRIVATE_NETWORK      1 requires a private network in transient-service mode
-  KILN_CARGO_ENVIRONMENT_POLICY   closed-source-build-v1 (transient-service default)
-                                  or inherit
+  KILN_CARGO_ENVIRONMENT_POLICY   closed-source-build-v1 (transient-service default),
+                                  closed-qualification-test-v1, or inherit
   KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS
                                   Hard transient-service deadline (default: 3600)
 EOF
@@ -155,8 +155,8 @@ if [[ -z "$environment_policy" ]]; then
         environment_policy="inherit"
     fi
 fi
-if [[ "$environment_policy" != "closed-source-build-v1" && "$environment_policy" != "inherit" ]]; then
-    echo "error: KILN_CARGO_ENVIRONMENT_POLICY must be closed-source-build-v1 or inherit, got '$environment_policy'" >&2
+if [[ "$environment_policy" != "closed-source-build-v1" && "$environment_policy" != "closed-qualification-test-v1" && "$environment_policy" != "inherit" ]]; then
+    echo "error: KILN_CARGO_ENVIRONMENT_POLICY must be closed-source-build-v1, closed-qualification-test-v1, or inherit, got '$environment_policy'" >&2
     exit 2
 fi
 service_runtime_max_seconds="${KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS:-3600}"
@@ -219,6 +219,9 @@ else
         USER
         XDG_RUNTIME_DIR
     )
+    if [[ "$environment_policy" == "closed-qualification-test-v1" ]]; then
+        closed_source_build_environment+=(KILN_QUALIFICATION)
+    fi
     for name in "${closed_source_build_environment[@]}"; do
         if [[ -v "$name" ]]; then
             environment_args+=("--setenv=$name")

@@ -44,8 +44,19 @@ building. Configuration changes must be declared in a committed workload
 variant; inherited shell overrides are never silently ignored or accepted as
 source-bound evidence.
 
-Source-building ROCm and Vulkan serving workloads never invoke Cargo directly.
-Their drivers select an immutable backend build specification, resolve the
+No checked-in qualification case may invoke Cargo directly. Workload validation
+rejects `cargo` by basename, including an absolute path. Standalone Rust test
+cases use `scripts/qualification/cargo-test-bounded.sh`, which pins one job, the
+unchanged 15 GiB admission floor, offline Cargo, transient-service execution,
+zero service swap, private networking, and a 1,740-second service cap. Its
+`closed-qualification-test-v1` environment is the source-build allowlist plus
+only the non-secret `KILN_QUALIFICATION` required-device gate; credentials,
+ambient compiler flags, target directories, and unrelated `KILN_*` values do
+not enter the service. The wrapper path and arguments remain part of the
+committed workload and effective run artifact.
+
+Source-building ROCm and Vulkan serving drivers likewise select an immutable
+backend build specification, resolve the
 requested toolchain, then execute the exact package, binary, feature, locked,
 and offline build through `scripts/cargo-bounded.sh` with one job and a 15 GiB
 `MemAvailable` floor. ROCm alone receives `ROCM_PATH` and

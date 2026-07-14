@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "scripts" / "cargo-bounded.sh"
+QUALIFICATION_SCRIPT = ROOT / "scripts" / "qualification" / "cargo-test-bounded.sh"
 
 
 class BoundedCargoTests(unittest.TestCase):
@@ -25,6 +26,22 @@ class BoundedCargoTests(unittest.TestCase):
         self.assertIn("aggregate", completed.stdout)
         self.assertIn("CARGO", completed.stdout)
         self.assertIn("KILN_CARGO_MAX_MEMORY_GIB", completed.stdout)
+        self.assertIn("closed-qualification-test-v1", completed.stdout)
+
+    def test_qualification_launcher_pins_the_host_safety_contract(self) -> None:
+        self.assertTrue(os.access(QUALIFICATION_SCRIPT, os.X_OK))
+        source = QUALIFICATION_SCRIPT.read_text(encoding="utf-8")
+        for assignment in (
+            "CARGO_NET_OFFLINE=true",
+            "KILN_CARGO_ENVIRONMENT_POLICY=closed-qualification-test-v1",
+            "KILN_CARGO_EXECUTION_MODE=transient-service",
+            "KILN_CARGO_JOBS=1",
+            "KILN_CARGO_MIN_AVAILABLE_GIB=15",
+            "KILN_CARGO_PRIVATE_NETWORK=1",
+            "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS=1740",
+        ):
+            self.assertIn(f"export {assignment}", source)
+        self.assertIn('exec scripts/cargo-bounded.sh "$@"', source)
 
     def test_memory_preflight_refuses_before_launching_cargo(self) -> None:
         environment = dict(os.environ)
@@ -93,6 +110,7 @@ class BoundedCargoTests(unittest.TestCase):
                     "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
                     "KILN_CARGO_PRIVATE_NETWORK": "1",
                     "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": "300",
+                    "KILN_QUALIFICATION": "1",
                     "KILN_TEST_SECRET_TOKEN": "must-not-enter-service",
                     "KILN_TEST_SYSTEMD_RUN_ARGS": str(arguments_path),
                     "PATH": f"{tool_dir}:{environment['PATH']}",
@@ -122,6 +140,24 @@ class BoundedCargoTests(unittest.TestCase):
                 "check",
             ):
                 self.assertIn(expected, arguments)
+            self.assertNotIn("--setenv=KILN_TEST_SECRET_TOKEN", arguments)
+            self.assertNotIn("--setenv=KILN_QUALIFICATION", arguments)
+
+            environment["KILN_CARGO_ENVIRONMENT_POLICY"] = (
+                "closed-qualification-test-v1"
+            )
+            completed = subprocess.run(
+                [str(SCRIPT), "test"],
+                cwd=ROOT,
+                check=False,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            arguments = arguments_path.read_text(encoding="utf-8").splitlines()
+            self.assertIn("--setenv=KILN_QUALIFICATION", arguments)
             self.assertNotIn("--setenv=KILN_TEST_SECRET_TOKEN", arguments)
 
     def test_private_network_requires_transient_service(self) -> None:

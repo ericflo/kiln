@@ -54,7 +54,7 @@
           "description": "Mix an eight-token short decode with literal 1K and 16K prefills under a 32-token actor budget and prove decode-first round-robin progress plus cancellation cleanup.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",
@@ -101,7 +101,7 @@
           "description": "Compare monolithic and six-quantum paged prefill for a deterministic nonzero GDN-plus-full-attention model on Device::Rocm(0), including recurrent state, split snapshot, next token, following decode token, and block release.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",
@@ -188,7 +188,7 @@
           "description": "Run the same literal short-decode, 1K-prefill, and 16K-prefill actor contract in a Vulkan feature build.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",
@@ -233,7 +233,7 @@
           "description": "Run the same deterministic nonzero six-quantum hybrid-model prefill parity contract through the production Vulkan runtime: CPU-backed BF16 model and canonical paged pools, followed by native resident-cache decode.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",

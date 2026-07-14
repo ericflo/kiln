@@ -49,7 +49,7 @@
           "description": "Run real-device ROCm tensor allocation, transfer, layout, and finite-value parity tests.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",
@@ -89,7 +89,7 @@
           "description": "Run deterministic ROCm dense matmul parity against the CPU oracle.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",
@@ -167,7 +167,7 @@
           "description": "Run Vulkan tensor forward, backward, transfer, and reduction parity against CPU oracles.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",
@@ -204,7 +204,7 @@
           "description": "Run deterministic Vulkan dense matmul parity against the CPU oracle.",
           "required": true,
           "command": [
-            "cargo",
+            "scripts/qualification/cargo-test-bounded.sh",
             "test",
             "--locked",
             "--offline",

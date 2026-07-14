@@ -11,6 +11,7 @@ from pathlib import Path
 
 QUALIFICATION_DIR = Path(__file__).resolve().parents[1]
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(QUALIFICATION_DIR))
 SPEC = importlib.util.spec_from_file_location(
     "qualification_workload", QUALIFICATION_DIR / "workload.py"
 )
@@ -90,25 +91,20 @@ def valid_performance_workload() -> dict:
 
 
 class WorkloadTests(unittest.TestCase):
-    def test_checked_in_environment_and_correctness_workloads_validate(self) -> None:
-        for name in (
-            "environment-v1.json",
-            "correctness-core-v1.json",
-            "prefill-scheduling-v1.json",
-            "serving-mixed-rocm-v1.json",
-            "serving-rocm-graph-correctness-v1.json",
-            "serving-rocm-graph-failure-containment-v1.json",
-            "serving-rocm-graph-resilience-v1.json",
-            "serving-rocm-public-mutation-lifecycle-v1.json",
-            "serving-rocm-development-soak-v1.json",
-            "serving-rocm-memory-pressure-v1.json",
-            "serving-rocm-sync-ab-v1.json",
-        ):
-            with self.subTest(name=name):
-                path = ROOT / "qualification/workloads" / name
+    def test_every_checked_in_workload_validates(self) -> None:
+        paths = sorted((ROOT / "qualification/workloads").glob("*.json"))
+        self.assertGreaterEqual(len(paths), 14)
+        for path in paths:
+            with self.subTest(name=path.name):
                 workload = workload_module.load_workload(path)
                 self.assertEqual(workload_module.validate_workload(workload), [])
                 self.assertRegex(workload_module.workload_file_sha256(path), r"^sha256:[0-9a-f]{64}$")
+
+    def test_workload_cases_cannot_invoke_raw_cargo(self) -> None:
+        value = valid_performance_workload()
+        value["variants"][0]["cases"][0]["command"] = ["/usr/bin/cargo", "test"]
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("cargo-test-bounded.sh" in error for error in errors))
 
     def test_valid_same_environment_performance_policy(self) -> None:
         self.assertEqual(workload_module.validate_workload(valid_performance_workload()), [])
