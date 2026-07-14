@@ -31,8 +31,10 @@ use std::path::{Path, PathBuf};
 
 use crate::batching_engine::{EngineActionTokenSource, EngineEvent, EngineRequest};
 use crate::error::ApiError;
+#[cfg(test)]
+use crate::latency_observability::TokenPhaseDurations;
 use crate::latency_observability::{
-    EngineTokenTiming, RequestLatencyDiagnostics, RequestLatencyTracker, TokenPhaseDurations,
+    EngineTokenTiming, RequestLatencyDiagnostics, RequestLatencyTracker,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::metrics::RequestStatus;
@@ -7270,7 +7272,7 @@ async fn generate_real_batched_streaming(
             let mut completion_token_count: u32 = 0;
             let mut generated_tokens: Vec<TokenId> = Vec::new();
             let mut first_token_ready_at: Option<std::time::Instant> = None;
-            let latency_tracker = std::cell::RefCell::new(RequestLatencyTracker::new(
+            let latency_tracker = std::sync::Mutex::new(RequestLatencyTracker::new(
                 request_start,
                 tokenization_duration,
             ));
@@ -7284,7 +7286,7 @@ async fn generate_real_batched_streaming(
             let record_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
             let record_error_for_record = record_error.clone();
             let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
-                let latency = latency_tracker.borrow().diagnostics();
+                let latency = latency_tracker.lock().unwrap().diagnostics();
                 let error =
                     record_error_for_record
                         .lock()
@@ -7407,7 +7409,8 @@ async fn generate_real_batched_streaming(
                                 completion_token_count = completion_token_count.saturating_add(1);
                                 metrics.add_tokens(1);
                                 let gap = latency_tracker
-                                    .borrow_mut()
+                                    .lock()
+                                    .unwrap()
                                     .record_token(timing, handler_received_at);
                                 if let Some(gap) = gap {
                                     metrics.observe_token_gap(gap);
@@ -7489,10 +7492,13 @@ async fn generate_real_batched_streaming(
                                     }
                                     Ok(true) => {
                                         let body_enqueued_at = std::time::Instant::now();
-                                        latency_tracker.borrow_mut().record_client_delivery(
-                                            handler_received_at,
-                                            body_enqueued_at,
-                                        );
+                                        latency_tracker
+                                            .lock()
+                                            .unwrap()
+                                            .record_client_delivery(
+                                                handler_received_at,
+                                                body_enqueued_at,
+                                            );
                                         if let Some(timing_payload) = streaming_token_timing_json(
                                             include_token_timing,
                                             completion_token_count,
@@ -7691,7 +7697,8 @@ async fn generate_real_batched_streaming(
                                 let total_latency = request_start.elapsed();
                                 let ttft = first_token_ready_at
                                     .map(|ready_at| ready_at.saturating_duration_since(request_start));
-                                let latency_diagnostics = latency_tracker.borrow().diagnostics();
+                                let latency_diagnostics =
+                                    latency_tracker.lock().unwrap().diagnostics();
                                 let performance = include_performance.then(|| {
                                     ChatCompletionPerformanceMetadata {
                                         prompt_tokens: prompt_token_count,
