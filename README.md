@@ -1016,13 +1016,15 @@ Kiln uses a typed TOML config file. Environment overrides are resolved during st
 | `server.default_thinking_budget_tokens` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block. The environment value must be a non-negative base-10 integer or `unlimited`; malformed values stop startup |
 | `server.default_thinking_budget_ms` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget before Kiln closes an open thinking block. The environment value must be a non-negative base-10 integer or `unlimited`; malformed values stop startup |
 | `server.fold_reasoning_into_content` | `KILN_SERVER_FOLD_REASONING_INTO_CONTENT` | false | Also copy separated reasoning into chat `content` for compatibility |
-| `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference vs training |
+| `memory.inference_memory_fraction` | `KILN_MEMORY_INFERENCE_MEMORY_FRACTION` | 0.7 | VRAM fraction for inference vs training |
+| `memory.reclaim_mode` | `KILN_MEMORY_RECLAIM_MODE` | `off` | Device-pool reclaim policy: `off`, `on-demand`, or `automatic`; the serving profile can suppress it |
+| `memory.kv_autoscale` | `KILN_MEMORY_KV_AUTOSCALE` | true | Request pressure-driven physical KV resizing; effective state is profile/backend gated |
+| `memory.kv_force_blocks` | `KILN_MEMORY_KV_FORCE_BLOCKS` | 0 | Maintenance-only one-shot startup resize; positive values require `kv_autoscale=true` and the maintenance profile |
 | `memory.kv_cache_fp8` | `KILN_MEMORY_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
 | `training.recompute_checkpoint_boundaries` | `KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES` | `auto` | Checkpointed SFT sparse-boundary replay: `auto`, `enabled`, or `disabled`. Auto enables replay at the configured sequence-length threshold. Restart required |
 | `training.recompute_boundary_threshold_tokens` | `KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` | 8192 | Positive sequence length where automatic SFT boundary replay begins. Ignored for dispatch when replay is explicitly enabled or disabled. Restart required |
 | `training.checkpoint_boundary_anchor_stride` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` | `auto` | `auto` derives the sparse anchor stride from the admitted tensor shape and cache target; a positive integer pins the segment stride. Restart required |
 | `training.checkpoint_boundary_cache_gb` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB` | 6.0 | Finite positive GiB target used only to derive an automatic anchor stride. Restart required |
-| — | `KILN_MEMORY_RECLAIM_MODE` | `off` | Device-pool reclaim policy: `off`, `on-demand`, or `automatic`. Automatic mode triggers at 10% free, stays armed until 25% free, waits 8s after a successful reclaim, and backs zero-yield attempts off from 2s to 128s. |
 | `logging.format` | `KILN_LOGGING_FORMAT` | auto | `auto` (default; pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, or `human` |
 | `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
 | `prefix_cache.max_blocks` | `KILN_PREFIX_CACHE_MAX_BLOCKS` | auto | Cap retained KV blocks for shared prefixes (auto = 50% of KV block pool) |

@@ -249,26 +249,26 @@ def expected_policy(mode: str) -> dict[str, Any]:
         "schema_id": "kiln.accelerator-runtime-policy.v2",
         "version": 2,
         "serving_profile": "experimental",
-        "serving_profile_source": "file",
+        "serving_profile_source": "config_file",
         "rocm_synchronization_mode": {
             "configured": mode,
             "effective": mode,
-            "source": "file",
+            "source": "config_file",
         },
         "rocm_graph_mode": {
             "configured": "disabled",
             "effective": "disabled",
-            "source": "file",
+            "source": "config_file",
         },
         "rocm_graph_cache_entries": {
             "configured": 8,
             "effective": 8,
-            "source": "file",
+            "source": "config_file",
         },
         "rocm_graph_cache_max_bytes": {
             "configured": 1 << 30,
             "effective": 1 << 30,
-            "source": "file",
+            "source": "config_file",
         },
     }
 

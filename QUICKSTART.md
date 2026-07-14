@@ -1041,7 +1041,10 @@ Key settings:
 | `server.deterministic` | `KILN_SERVER_DETERMINISTIC` | false | Strict serving-repeatability mode; freezes the process-wide determinism selector and forces effective decode width 1. It does not make every accelerator kernel bitwise deterministic |
 | `server.default_thinking_budget_tokens` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
 | `server.default_thinking_budget_ms` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block; the override must be a non-negative base-10 integer or `unlimited`, otherwise startup fails |
-| `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference (rest for training) |
+| `memory.inference_memory_fraction` | `KILN_MEMORY_INFERENCE_MEMORY_FRACTION` | 0.7 | VRAM fraction for inference (rest for training) |
+| `memory.reclaim_mode` | `KILN_MEMORY_RECLAIM_MODE` | `off` | Device-pool reclaim policy, gated by the serving profile |
+| `memory.kv_autoscale` | `KILN_MEMORY_KV_AUTOSCALE` | true | Request pressure-driven physical KV resizing; profile/backend policy remains authoritative |
+| `memory.kv_force_blocks` | `KILN_MEMORY_KV_FORCE_BLOCKS` | 0 | Maintenance-only one-shot startup resize; zero disables it |
 | `memory.kv_cache_fp8` | `KILN_MEMORY_KV_CACHE_FP8` | false | FP8 KV cache (halves memory, ~2x context) |
 | `training.recompute_checkpoint_boundaries` | `KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES` | `auto` | SFT sparse-boundary replay mode: auto at the threshold, always enabled, or disabled |
 | `training.recompute_boundary_threshold_tokens` | `KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` | 8192 | Positive sequence-length crossover used by automatic replay |

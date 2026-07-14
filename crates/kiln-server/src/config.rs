@@ -1739,6 +1739,120 @@ impl<'de> Deserialize<'de> for MemoryReclaimModeSetting {
     }
 }
 
+/// Immutable KV autoscaler request and the startup source that selected it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvAutoscaleSetting {
+    enabled: bool,
+    source: ConfigValueSource,
+}
+
+impl KvAutoscaleSetting {
+    pub const fn new(enabled: bool, source: ConfigValueSource) -> Self {
+        Self { enabled, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let enabled = parse_required_bool_env(name, raw)?;
+        Ok(Self::new(enabled, ConfigValueSource::Environment))
+    }
+
+    pub const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for KvAutoscaleSetting {
+    fn default() -> Self {
+        Self::new(true, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for KvAutoscaleSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bool(self.enabled)
+    }
+}
+
+impl<'de> Deserialize<'de> for KvAutoscaleSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::new(
+            bool::deserialize(deserializer)?,
+            ConfigValueSource::ConfigFile,
+        ))
+    }
+}
+
+/// One-shot startup KV resize target. Zero disables the forced resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvForceBlocksSetting {
+    blocks: usize,
+    source: ConfigValueSource,
+}
+
+impl KvForceBlocksSetting {
+    pub const fn new(blocks: usize, source: ConfigValueSource) -> Self {
+        Self { blocks, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let blocks = parse_decimal_env::<usize>(name, raw, "a non-negative decimal integer")?;
+        Ok(Self::new(blocks, ConfigValueSource::Environment))
+    }
+
+    pub const fn blocks(self) -> usize {
+        self.blocks
+    }
+
+    pub const fn target(self) -> Option<usize> {
+        if self.blocks == 0 {
+            None
+        } else {
+            Some(self.blocks)
+        }
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for KvForceBlocksSetting {
+    fn default() -> Self {
+        Self::new(0, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for KvForceBlocksSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(self.blocks as u64)
+    }
+}
+
+impl<'de> Deserialize<'de> for KvForceBlocksSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::new(
+            usize::deserialize(deserializer)?,
+            ConfigValueSource::ConfigFile,
+        ))
+    }
+}
+
 /// Validated stream-stall grace plus the startup source that selected it.
 ///
 /// The custom serde implementation keeps `server.stream_stall_grace_ms` an
@@ -2462,6 +2576,11 @@ pub struct MemoryConfig {
     pub probe_ms: u64,
     /// Whether allocator reclaim is disabled, explicit only, or automatic.
     pub reclaim_mode: MemoryReclaimModeSetting,
+    /// Enable pressure-driven physical KV-cache resizing when the serving
+    /// profile and backend both permit it.
+    pub kv_autoscale: KvAutoscaleSetting,
+    /// One-shot startup KV resize target. Zero disables the forced resize.
+    pub kv_force_blocks: KvForceBlocksSetting,
     /// Enable FP8 (E4M3FN) quantization for KV cache, halving memory usage.
     /// When enabled, K/V values are stored as 8-bit floats with per-tensor scaling.
     /// Default: false
@@ -4126,6 +4245,18 @@ impl NormalizedEnvValue for MemoryReclaimModeSetting {
     }
 }
 
+impl NormalizedEnvValue for KvAutoscaleSetting {
+    fn normalized_env_value(&self) -> String {
+        self.enabled().normalized_env_value()
+    }
+}
+
+impl NormalizedEnvValue for KvForceBlocksSetting {
+    fn normalized_env_value(&self) -> String {
+        self.blocks().normalized_env_value()
+    }
+}
+
 impl NormalizedEnvValue for StreamStallGrace {
     fn normalized_env_value(&self) -> String {
         self.millis().normalized_env_value()
@@ -4387,6 +4518,12 @@ macro_rules! public_env_parser {
     };
     (memory_reclaim_mode) => {
         MemoryReclaimModeSetting::from_named_environment_value
+    };
+    (kv_autoscale) => {
+        KvAutoscaleSetting::from_named_environment_value
+    };
+    (kv_force_blocks) => {
+        KvForceBlocksSetting::from_named_environment_value
     };
     (deterministic) => {
         DeterministicInference::from_named_environment_value
@@ -4705,6 +4842,12 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         memory.reclaim_mode,
         "KILN_MEMORY_RECLAIM_MODE"
     ),
+    public_env_field!(kv_autoscale, memory.kv_autoscale, "KILN_KV_AUTOSCALE"),
+    public_env_field!(
+        kv_force_blocks,
+        memory.kv_force_blocks,
+        "KILN_KV_FORCE_BLOCKS"
+    ),
     public_env_field!(bool, memory.kv_cache_fp8, "KILN_KV_CACHE_FP8"),
     public_env_field!(bool, memory.cuda_graphs, "KILN_CUDA_GRAPHS"),
     public_env_field!(
@@ -4922,6 +5065,8 @@ impl Default for MemoryConfig {
             floor_gb: 1.0,
             probe_ms: 500,
             reclaim_mode: MemoryReclaimModeSetting::default(),
+            kv_autoscale: KvAutoscaleSetting::default(),
+            kv_force_blocks: KvForceBlocksSetting::default(),
             kv_cache_fp8: false,
             // Default-ON (#34): CUDA graph capture/replay is now bit-identical to
             // eager decode. BUG2 (the replay divergence) was the captured graph
@@ -5381,6 +5526,14 @@ impl KilnConfig {
         if self.memory.probe_ms == 0 {
             anyhow::bail!("memory.probe_ms must be > 0, got 0");
         }
+        if self.memory.kv_force_blocks.target().is_some() {
+            if !self.memory.kv_autoscale.enabled() {
+                anyhow::bail!("memory.kv_force_blocks requires memory.kv_autoscale=true");
+            }
+            if self.server.serving_profile.profile() != ServingProfile::Maintenance {
+                anyhow::bail!("memory.kv_force_blocks requires server.serving_profile=maintenance");
+            }
+        }
 
         if self.training.grad_checkpoint_segments == Some(0) {
             anyhow::bail!("training.grad_checkpoint_segments must be > 0 when set, got Some(0)");
@@ -5771,7 +5924,9 @@ mod tests {
         "KILN_MEMORY_FLOOR_GB",
         "KILN_MEMORY_GPU_MEMORY_GB",
         "KILN_MEMORY_INFERENCE_MEMORY_FRACTION",
+        "KILN_MEMORY_KV_AUTOSCALE",
         "KILN_MEMORY_KV_CACHE_FP8",
+        "KILN_MEMORY_KV_FORCE_BLOCKS",
         "KILN_MEMORY_NUM_BLOCKS",
         "KILN_MEMORY_PROBE_MS",
         "KILN_MEMORY_RECLAIM_MODE",
@@ -6110,6 +6265,16 @@ mod tests {
         );
         assert_eq!(
             config.memory.reclaim_mode.source(),
+            ConfigValueSource::Default
+        );
+        assert!(config.memory.kv_autoscale.enabled());
+        assert_eq!(
+            config.memory.kv_autoscale.source(),
+            ConfigValueSource::Default
+        );
+        assert_eq!(config.memory.kv_force_blocks.target(), None);
+        assert_eq!(
+            config.memory.kv_force_blocks.source(),
             ConfigValueSource::Default
         );
         assert!(!config.memory.kv_cache_fp8);
@@ -6553,7 +6718,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 82);
+        assert_eq!(original_len, 84);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -6588,8 +6753,8 @@ rocm_graph_cache_max_bytes = 17179869184
             })
             .count();
         assert_eq!(canonical_only_aliases, 22);
-        assert_eq!(compatibility_aliases, 61);
-        assert_eq!(compatibility_alias_fields, 58);
+        assert_eq!(compatibility_aliases, 63);
+        assert_eq!(compatibility_alias_fields, 60);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(
@@ -6624,7 +6789,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 90);
+        assert_eq!(serialized_leaves.len(), 92);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 8);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -6667,7 +6832,7 @@ rocm_graph_cache_max_bytes = 17179869184
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_eighty_two_public_fields() {
+    fn public_env_canonical_only_loads_all_eighty_four_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
@@ -6722,6 +6887,8 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_MEMORY_FLOOR_GB", "2.5"),
             ("KILN_MEMORY_PROBE_MS", "750"),
             ("KILN_MEMORY_RECLAIM_MODE", "on-demand"),
+            ("KILN_MEMORY_KV_AUTOSCALE", "false"),
+            ("KILN_MEMORY_KV_FORCE_BLOCKS", "0"),
             ("KILN_MEMORY_KV_CACHE_FP8", "true"),
             ("KILN_MEMORY_CUDA_GRAPHS", "false"),
             ("KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS", "4"),
@@ -6871,6 +7038,16 @@ rocm_graph_cache_max_bytes = 17179869184
             config.memory.reclaim_mode.source(),
             ConfigValueSource::Environment
         );
+        assert!(!config.memory.kv_autoscale.enabled());
+        assert_eq!(
+            config.memory.kv_autoscale.source(),
+            ConfigValueSource::Environment
+        );
+        assert_eq!(config.memory.kv_force_blocks.target(), None);
+        assert_eq!(
+            config.memory.kv_force_blocks.source(),
+            ConfigValueSource::Environment
+        );
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
         assert_eq!(config.training.grad_checkpoint_segments, Some(4));
@@ -6972,6 +7149,8 @@ rocm_graph_cache_max_bytes = 17179869184
                 .batching
                 .direct_decode_rendezvous_mixed_seq_lens
                 .source(),
+            config.memory.kv_autoscale.source(),
+            config.memory.kv_force_blocks.source(),
             config.training.recompute_checkpoint_boundaries.source(),
             config.training.recompute_boundary_threshold_tokens.source(),
             config.training.checkpoint_boundary_anchor_stride.source(),
@@ -7193,6 +7372,8 @@ rocm_graph_cache_max_bytes = 17179869184
             ),
             ("KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD", "sometimes"),
             ("KILN_MEMORY_RECLAIM_MODE", "whenever"),
+            ("KILN_MEMORY_KV_AUTOSCALE", "sometimes"),
+            ("KILN_MEMORY_KV_FORCE_BLOCKS", "-1"),
             ("KILN_SPECULATIVE_METHOD", "guessing"),
             ("KILN_REQUEST_LOG_COMPRESS", "occasionally"),
         ] {
@@ -8627,6 +8808,8 @@ training_memory_gb = 6.0
 floor_gb = 2.0
 probe_ms = 250
 reclaim_mode = "automatic"
+kv_autoscale = false
+kv_force_blocks = 0
 kv_cache_fp8 = true
 cuda_graphs = false
 
@@ -8747,6 +8930,16 @@ composed_cache_max_entries = 8
         );
         assert_eq!(
             config.memory.reclaim_mode.source(),
+            ConfigValueSource::ConfigFile
+        );
+        assert!(!config.memory.kv_autoscale.enabled());
+        assert_eq!(
+            config.memory.kv_autoscale.source(),
+            ConfigValueSource::ConfigFile
+        );
+        assert_eq!(config.memory.kv_force_blocks.target(), None);
+        assert_eq!(
+            config.memory.kv_force_blocks.source(),
             ConfigValueSource::ConfigFile
         );
         assert!(config.memory.kv_cache_fp8);
@@ -9191,6 +9384,37 @@ port = 3000
         let mut unrepresentable_capacity = KilnConfig::default();
         unrepresentable_capacity.memory.gpu_memory_gb = Some(f64::MAX);
         assert!(unrepresentable_capacity.validate().is_err());
+
+        let mut force_without_autoscale = KilnConfig::default();
+        force_without_autoscale.memory.kv_autoscale =
+            KvAutoscaleSetting::new(false, ConfigValueSource::ConfigFile);
+        force_without_autoscale.memory.kv_force_blocks =
+            KvForceBlocksSetting::new(1, ConfigValueSource::ConfigFile);
+        assert!(
+            force_without_autoscale
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("memory.kv_autoscale=true")
+        );
+
+        let mut force_outside_maintenance = KilnConfig::default();
+        force_outside_maintenance.memory.kv_force_blocks =
+            KvForceBlocksSetting::new(1, ConfigValueSource::ConfigFile);
+        assert!(
+            force_outside_maintenance
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("server.serving_profile=maintenance")
+        );
+
+        let mut maintenance_force = KilnConfig::default();
+        maintenance_force.server.serving_profile =
+            ServingProfileSetting::new(ServingProfile::Maintenance, ConfigValueSource::ConfigFile);
+        maintenance_force.memory.kv_force_blocks =
+            KvForceBlocksSetting::new(1, ConfigValueSource::ConfigFile);
+        maintenance_force.validate().unwrap();
     }
 
     #[test]

@@ -5,7 +5,6 @@ import json
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -20,6 +19,30 @@ assert SPEC is not None and SPEC.loader is not None
 serve = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = serve
 SPEC.loader.exec_module(serve)
+
+
+def parse_generated_toml(source: str) -> dict[str, dict[str, object]]:
+    """Parse the closed JSON-scalar TOML subset emitted by the test target."""
+    parsed: dict[str, dict[str, object]] = {}
+    section: dict[str, object] | None = None
+    for line_number, raw in enumerate(source.splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1]
+            if not name or name in parsed:
+                raise AssertionError(f"invalid generated TOML section on line {line_number}")
+            section = {}
+            parsed[name] = section
+            continue
+        if section is None or "=" not in line:
+            raise AssertionError(f"invalid generated TOML scalar on line {line_number}")
+        key, raw_value = (part.strip() for part in line.split("=", 1))
+        if not key or key in section:
+            raise AssertionError(f"duplicate generated TOML key on line {line_number}")
+        section[key] = json.loads(raw_value)
+    return parsed
 
 
 def http_fixture() -> dict:
@@ -160,26 +183,26 @@ def health_fixture(
         "schema_id": "kiln.accelerator-runtime-policy.v2",
         "version": 2,
         "serving_profile": serving_profile,
-        "serving_profile_source": "file",
+        "serving_profile_source": "config_file",
         "rocm_synchronization_mode": {
             "configured": "legacy_host_barriers",
             "effective": "legacy_host_barriers",
-            "source": "file",
+            "source": "config_file",
         },
         "rocm_graph_mode": {
             "configured": "profile" if rocm_graphs_requested else "disabled",
             "effective": "lazy_capture_replay" if rocm_graphs else "disabled",
-            "source": "file",
+            "source": "config_file",
         },
         "rocm_graph_cache_entries": {
             "configured": 8,
             "effective": 8,
-            "source": "file",
+            "source": "config_file",
         },
         "rocm_graph_cache_max_bytes": {
             "configured": 1 << 30,
             "effective": 1 << 30,
-            "source": "file",
+            "source": "config_file",
         },
     }
     return {
@@ -187,7 +210,7 @@ def health_fixture(
         "backend_runtime": {"external_yield_sync": []},
         "serving_profile": {
             "profile": serving_profile,
-            "source": "file",
+            "source": "config_file",
             "immutable_after_startup": True,
             "request_overrides_allowed": False,
             "effective_policy_source": "serving_profile",
@@ -203,6 +226,9 @@ def health_fixture(
             "rocm_graphs": graph,
             "kv_autoscaler": {
                 "requested": kv_autoscale_requested,
+                "requested_source": "config_file",
+                "force_blocks": None,
+                "force_blocks_source": "config_file",
                 "enabled": kv_autoscale,
                 "state": (
                     "unavailable"
@@ -212,23 +238,23 @@ def health_fixture(
                 "reason": (
                     "serving_profile_stable"
                     if serving_profile == "stable"
-                    else "active" if kv_autoscale else "environment"
+                    else "active" if kv_autoscale else "configuration"
                 ),
             },
             "memory_governor": {
                 "reclaim_mode": memory_reclaim_mode,
                 "requested_reclaim_mode": memory_reclaim_requested_mode,
                 "automatic_monitor_enabled": memory_reclaim_mode == "automatic",
-                "source": "file",
+                "source": "config_file",
                 "disabled_by_serving_profile": serving_profile == "stable",
             },
             "batching_engine": {
                 "stream_stall_grace_ms": serve.STREAM_STALL_GRACE_MS,
-                "stream_stall_grace_source": "file",
+                "stream_stall_grace_source": "config_file",
                 "max_prefill_tokens_per_cycle": serve.MAX_PREFILL_TOKENS_PER_CYCLE,
-                "max_prefill_tokens_per_cycle_source": "file",
+                "max_prefill_tokens_per_cycle_source": "config_file",
                 "max_prefill_layers_per_cycle": serve.MAX_PREFILL_LAYERS_PER_CYCLE,
-                "max_prefill_layers_per_cycle_source": "file",
+                "max_prefill_layers_per_cycle_source": "config_file",
                 "active_decode": 0,
                 "active_prefill": 0,
                 "active_staged_requests": 0,
@@ -282,9 +308,6 @@ def debug_fixture(
     rocm_graphs_enabled = (
         rocm_graphs if rocm_graphs_enabled is None else rocm_graphs_enabled
     )
-    def flag(enabled: bool) -> dict:
-        return {"present": not enabled, "value": None if enabled else "0"}
-
     health_graph = health_fixture(
         kv_autoscale=kv_autoscale,
         rocm_graphs=rocm_graphs_enabled,
@@ -317,28 +340,28 @@ def debug_fixture(
             "schema_id": "kiln.accelerator-runtime-policy.v2",
             "version": 2,
             "serving_profile": serving_profile,
-            "serving_profile_source": "file",
+            "serving_profile_source": "config_file",
             "rocm_synchronization_mode": {
                 "configured": "legacy_host_barriers",
                 "effective": "legacy_host_barriers",
-                "source": "file",
+                "source": "config_file",
             },
             "rocm_graph_mode": {
                 "configured": "profile" if rocm_graphs else "disabled",
                 "effective": (
                     "lazy_capture_replay" if rocm_graphs_enabled else "disabled"
                 ),
-                "source": "file",
+                "source": "config_file",
             },
             "rocm_graph_cache_entries": {
                 "configured": 8,
                 "effective": 8,
-                "source": "file",
+                "source": "config_file",
             },
             "rocm_graph_cache_max_bytes": {
                 "configured": 1 << 30,
                 "effective": 1 << 30,
-                "source": "file",
+                "source": "config_file",
             },
         },
         "rocm_graphs": {
@@ -351,17 +374,25 @@ def debug_fixture(
             field: value for field, value in health_graph.items() if field in telemetry_fields
         },
         "rocm_graph_telemetry_unavailable_reason": None,
+        "kv_autoscaler": health_fixture(
+            kv_autoscale=kv_autoscale and serving_profile != "stable",
+            rocm_graphs=rocm_graphs_enabled,
+            serving_profile=serving_profile,
+            kv_autoscale_requested=kv_autoscale,
+            rocm_graphs_requested=rocm_graphs,
+            memory_reclaim_requested_mode=memory_reclaim_requested_mode,
+        )["decode_runtime"]["kv_autoscaler"],
         "http": http_fixture(),
         "batching_engine": {
             "backend": "model",
             "enabled": True,
             "snapshot": {
                 "stream_stall_grace_ms": serve.STREAM_STALL_GRACE_MS,
-                "stream_stall_grace_source": "file",
+                "stream_stall_grace_source": "config_file",
                 "max_prefill_tokens_per_cycle": serve.MAX_PREFILL_TOKENS_PER_CYCLE,
-                "max_prefill_tokens_per_cycle_source": "file",
+                "max_prefill_tokens_per_cycle_source": "config_file",
                 "max_prefill_layers_per_cycle": serve.MAX_PREFILL_LAYERS_PER_CYCLE,
-                "max_prefill_layers_per_cycle_source": "file",
+                "max_prefill_layers_per_cycle_source": "config_file",
                 "max_decode_batch": serve.MAX_DECODE_BATCH,
                 "max_prefill_staging_slots": serve.MAX_PREFILL_STAGING_SLOTS,
                 "max_active_requests": serve.MAX_ACTIVE_REQUESTS,
@@ -371,7 +402,6 @@ def debug_fixture(
             },
         },
         "env_flags": {
-            "KILN_KV_AUTOSCALE": flag(kv_autoscale),
             "KILN_MEMORY_RECLAIM_MODE": {
                 "present": False,
                 "value": None,
@@ -1239,12 +1269,19 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     serve.write_server_config(
                         config_path, variant, model, 1234, adapters, snapshots
                     )
-                    parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+                    parsed = parse_generated_toml(
+                        config_path.read_text(encoding="utf-8")
+                    )
                     expected = config["runtime"]
                     self.assertEqual(
                         parsed["memory"]["reclaim_mode"],
                         expected["memory_reclaim_requested_mode"],
                     )
+                    self.assertEqual(
+                        parsed["memory"]["kv_autoscale"],
+                        expected["kv_autoscale_requested"],
+                    )
+                    self.assertEqual(parsed["memory"]["kv_force_blocks"], 0)
                     self.assertEqual(
                         parsed["server"]["serving_profile"],
                         expected["serving_profile"],
@@ -1272,19 +1309,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     env = serve.server_environment(variant)
                     self.assertEqual(env["KILN_DEBUG_ENDPOINTS"], "1")
                     self.assertEqual(
-                        env.get("KILN_KV_AUTOSCALE"),
-                        None if expected["kv_autoscale_requested"] else "0",
-                    )
-                    self.assertEqual(
                         sorted(key for key in env if key.startswith("KILN_")),
-                        sorted(
-                            ["KILN_DEBUG_ENDPOINTS"]
-                            + (
-                                []
-                                if expected["kv_autoscale_requested"]
-                                else ["KILN_KV_AUTOSCALE"]
-                            )
-                        ),
+                        ["KILN_DEBUG_ENDPOINTS"],
                     )
 
     def test_server_config_overrides_are_typed_and_source_bound(self) -> None:
@@ -1304,7 +1330,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 rocm_graph_cache_entries=12,
                 rocm_graph_cache_max_bytes=64 << 20,
             )
-            parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+            parsed = parse_generated_toml(path.read_text(encoding="utf-8"))
 
         self.assertTrue(parsed["server"]["deterministic"])
         self.assertEqual(parsed["server"]["port"], 4321)
@@ -1491,7 +1517,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "retained_bytes_accounting_complete"
         ] = False
         health["decode_runtime"]["rocm_graphs"]["quarantined_retained_bytes"] = 4096
-        debug["env_flags"]["KILN_KV_AUTOSCALE"] = {"present": True, "value": "1"}
+        debug["kv_autoscaler"]["requested_source"] = "environment"
         debug["http"]["send_buffer_effective_bytes"] *= 2
         debug["http"]["send_buffer_kernel_readback_bytes"] *= 2
         health["decode_runtime"]["batching_engine"][
@@ -1506,7 +1532,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertTrue(any("retained bytes exceed" in failure for failure in failures))
         self.assertTrue(any("accounting is incomplete" in failure for failure in failures))
         self.assertTrue(any("quarantined retained bytes" in failure for failure in failures))
-        self.assertTrue(any("must remain absent" in failure for failure in failures))
+        self.assertTrue(
+            any("debug KV autoscaler requested_source" in failure for failure in failures)
+        )
         self.assertTrue(any("disagree exactly" in failure for failure in failures))
         self.assertTrue(any("grace source" in failure for failure in failures))
         self.assertTrue(

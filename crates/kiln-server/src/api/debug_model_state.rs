@@ -44,6 +44,7 @@ struct ModelStateResponse {
     rocm_graph_telemetry: Option<kiln_model::RocmGraphLiveTelemetry>,
     rocm_graph_telemetry_unavailable_reason:
         Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
+    kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState,
     streaming_prefill: StreamingPrefillRuntimeConfig,
     training: TrainingDebugState,
     env_flags: BTreeMap<&'static str, EnvFlagState>,
@@ -313,6 +314,7 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
         rocm_graph_telemetry: rocm_graph_observation.telemetry,
         rocm_graph_telemetry_unavailable_reason: rocm_graph_observation
             .telemetry_unavailable_reason,
+        kv_autoscaler: state.kv_autoscaler,
         streaming_prefill: state.streaming_prefill_runtime_config,
         training: TrainingDebugState {
             checkpoint_boundary_policy: state.training_runtime.checkpoint_boundary_policy(),
@@ -465,7 +467,6 @@ fn selected_env_flags() -> BTreeMap<&'static str, EnvFlagState> {
         "KILN_DEFAULT_THINKING_ENABLED",
         "KILN_DEFAULT_NO_THINK",
         "KILN_CUDA_GRAPHS",
-        "KILN_KV_AUTOSCALE",
         "KILN_KV_CACHE_FP8",
         "KILN_PREFIX_CACHE_ENABLED",
         "KILN_NUM_BLOCKS",
@@ -913,7 +914,13 @@ mod tests {
             true
         );
         assert!(json["env_flags"]["KILN_ROCM_GRAPHS"].is_null());
-        assert!(json["env_flags"]["KILN_KV_AUTOSCALE"].is_object());
+        assert!(json["env_flags"]["KILN_KV_AUTOSCALE"].is_null());
+        assert_eq!(json["kv_autoscaler"]["requested"], true);
+        assert_eq!(json["kv_autoscaler"]["requested_source"], "default");
+        assert!(json["kv_autoscaler"]["force_blocks"].is_null());
+        assert_eq!(json["kv_autoscaler"]["force_blocks_source"], "default");
+        assert_eq!(json["kv_autoscaler"]["state"], "unavailable");
+        assert_eq!(json["kv_autoscaler"]["reason"], "mock_backend");
         assert!(json["env_flags"]["KILN_HTTP_SEND_BUFFER_BYTES"].is_object());
         assert!(json["env_flags"]["KILN_STREAM_STALL_GRACE_MS"].is_object());
         assert!(json["env_flags"]["KILN_MAX_BATCH_TOKENS"].is_object());

@@ -138,6 +138,7 @@ struct KvCacheConfig {
     num_blocks: usize,
     num_blocks_source: &'static str,
     fp8_enabled: bool,
+    autoscaler: crate::kv_autoscaler::KvAutoscalerState,
 }
 
 #[derive(Serialize)]
@@ -364,6 +365,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
                 ModelBackend::Real { paged_cache, .. } => paged_cache.is_fp8(),
                 ModelBackend::Mock { .. } => false,
             },
+            autoscaler: state.kv_autoscaler,
         },
         training: TrainingConfig {
             runtime_device: state
@@ -986,6 +988,16 @@ mod tests {
         assert_eq!(json["vram"]["governor"]["probe_ms"], 500);
         assert_eq!(json["vram"]["governor"]["reclaim_mode_requested"], "off");
         assert_eq!(json["vram"]["governor"]["reclaim_mode_effective"], "off");
+        assert_eq!(json["kv_cache"]["autoscaler"]["requested"], true);
+        assert_eq!(
+            json["kv_cache"]["autoscaler"]["requested_source"],
+            "default"
+        );
+        assert!(json["kv_cache"]["autoscaler"]["force_blocks"].is_null());
+        assert_eq!(
+            json["kv_cache"]["autoscaler"]["force_blocks_source"],
+            "default"
+        );
         assert_eq!(json["training"]["runtime_device"], "cpu");
         assert_eq!(json["training"]["model_weight_device"], "cpu");
         assert_eq!(json["training"]["native_training_supported"], false);

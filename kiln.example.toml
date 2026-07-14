@@ -220,6 +220,14 @@ reclaim_mode = "off"                  # off | on-demand | automatic. On-demand p
                                       # the pressure monitor when the serving profile permits
                                       # allocator reclaim. Override via
                                       # KILN_MEMORY_RECLAIM_MODE.
+kv_autoscale = true                   # Pressure-driven KV resize request. Stable mode and
+                                      # backends without device-resident KV pressure keep it
+                                      # unavailable. Canonical override:
+                                      # KILN_MEMORY_KV_AUTOSCALE.
+kv_force_blocks = 0                   # 0 disables. A positive one-shot startup resize is
+                                      # accepted only in the maintenance serving profile with
+                                      # kv_autoscale=true. Canonical override:
+                                      # KILN_MEMORY_KV_FORCE_BLOCKS.
 # kv_cache_fp8 = true                # FP8 (E4M3) KV cache quantization — halves memory, ~2x longer context
                                       # Also settable via KILN_MEMORY_KV_CACHE_FP8=1 env var
 cuda_graphs = true                    # CUDA graph capture/replay policy. Non-CUDA backends

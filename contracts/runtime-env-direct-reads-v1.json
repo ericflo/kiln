@@ -7165,28 +7165,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_KV_AUTOSCALE",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/kv_autoscaler.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_KV_FORCE_BLOCKS",
-      "argument_kind": "literal",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/kv_autoscaler.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "name",
       "argument_kind": "expression",
       "count": 1,
@@ -9236,7 +9214,7 @@
   "summary": {
     "process_mutation_call_sites": 376,
     "process_mutation_entries": 217,
-    "read_call_sites": 925,
-    "read_entries": 621
+    "read_call_sites": 923,
+    "read_entries": 619
   }
 }

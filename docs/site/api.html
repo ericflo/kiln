@@ -1290,8 +1290,19 @@
                 <code>effective</code>, and <code>effective_source</code>.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>kv_cache</code> reports <code>num_blocks</code>, <code>num_blocks_source</code>, and
-                <code>fp8_enabled</code>. <code>generation</code> reports
+                <code>kv_cache</code> reports <code>num_blocks</code>, <code>num_blocks_source</code>,
+                <code>fp8_enabled</code>, and the complete <code>autoscaler</code> runtime object.
+                The autoscaler object separates <code>requested</code> from <code>enabled</code>, reports
+                <code>requested_source</code>, the one-shot <code>force_blocks</code> request and its
+                source, and a bounded <code>state</code>/<code>reason</code>. The same object appears at
+                <code>/health.decode_runtime.kv_autoscaler</code> and the trusted debug endpoint.
+                <code>memory.kv_autoscale</code> defaults true but remains subject to profile and backend
+                policy. A positive <code>memory.kv_force_blocks</code> is accepted only with autoscaling
+                requested in maintenance mode; zero disables it. No endpoint re-reads either deprecated
+                environment alias.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>generation</code> reports
                 <code>default_thinking_enabled</code>, <code>default_thinking_budget_tokens</code>,
                 <code>default_thinking_budget_ms</code>, and <code>fold_reasoning_into_content</code>.
                 Nullable generation defaults are returned as <code>null</code> when the server leaves that

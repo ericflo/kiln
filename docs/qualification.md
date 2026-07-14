@@ -241,12 +241,23 @@ transport bounds, scheduling ceilings, logging, memory reclaim, synchronization,
 graph mode, graph entry capacity, and graph byte capacity therefore travel
 through the same typed parser and source diagnostics as an operator config.
 The process environment is scrubbed of ambient `KILN_*` controls before build
-and launch. Two narrow exceptions remain visible rather than hidden:
-`KILN_DEBUG_ENDPOINTS=1` is the internal qualification capability that grants
-the trusted debug readback, and the legacy `KILN_KV_AUTOSCALE=0` switch remains
-only on arms that disable the not-yet-typed autoscaler. Moving that final switch
-under `[memory]` is still configuration-migration work; qualification rejects
-any other ambient runtime control.
+and launch. `memory.kv_autoscale` now carries both enabled and disabled requests,
+and every serving arm writes `memory.kv_force_blocks = 0`; health and debug must
+report `config_file` provenance for both fields. `KILN_DEBUG_ENDPOINTS=1` is the
+only `KILN_*` launch exception: it is the internal qualification capability that
+grants the trusted debug readback, not public server policy. `RUST_LOG` remains
+the ordinary tracing filter. Qualification rejects every other ambient runtime
+control, including the deprecated `KILN_KV_AUTOSCALE` and
+`KILN_KV_FORCE_BLOCKS` aliases.
+
+A positive `memory.kv_force_blocks` value is intentionally narrower than the
+normal control loop. It is accepted only with `memory.kv_autoscale = true` and
+`server.serving_profile = "maintenance"`, where inference admission is already
+disabled. The one-shot resize still reserves the complete replacement pool,
+drains the actor, invalidates graphs, publishes capacity transactionally, and
+emits a `gpu_memory_operation` record with reason `forced_configuration`.
+`/health`, `/v1/config`, and the trusted debug state expose the requested value,
+effective autoscaler state, bounded reason, and `config_file` source.
 
 For the supported Strix Halo ROCm serving contract, run the `stable` arm. It
 deliberately requests autoscaling, automatic allocator reclaim, and ROCm graphs,

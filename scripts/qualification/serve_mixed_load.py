@@ -1660,8 +1660,6 @@ def server_environment(
             "RUST_LOG": "kiln=info,kiln_server=info,kiln_model=info,kiln_memory=info,tower_http=warn",
         }
     )
-    if not config["runtime"]["kv_autoscale_requested"]:
-        environment["KILN_KV_AUTOSCALE"] = "0"
     return environment
 
 
@@ -1730,6 +1728,8 @@ def write_server_config(
         "",
         "[memory]",
         f"reclaim_mode = {_toml_string(runtime['memory_reclaim_requested_mode'])}",
+        f"kv_autoscale = {'true' if runtime['kv_autoscale_requested'] else 'false'}",
+        "kv_force_blocks = 0",
         "",
         "[logging]",
         'format = "json"',
@@ -1927,26 +1927,26 @@ def accelerator_policy_attestation_failures(
         "schema_id": "kiln.accelerator-runtime-policy.v2",
         "version": 2,
         "serving_profile": serving_profile,
-        "serving_profile_source": "file",
+        "serving_profile_source": "config_file",
         "rocm_synchronization_mode": {
             "configured": synchronization_mode,
             "effective": synchronization_mode,
-            "source": "file",
+            "source": "config_file",
         },
         "rocm_graph_mode": {
             "configured": configured_graph_mode,
             "effective": "lazy_capture_replay" if graphs_enabled else "disabled",
-            "source": "file",
+            "source": "config_file",
         },
         "rocm_graph_cache_entries": {
             "configured": graph_cache_entries,
             "effective": graph_cache_entries,
-            "source": "file",
+            "source": "config_file",
         },
         "rocm_graph_cache_max_bytes": {
             "configured": graph_cache_max_bytes,
             "effective": graph_cache_max_bytes,
-            "source": "file",
+            "source": "config_file",
         },
     }
     return [
@@ -1977,7 +1977,7 @@ def attest_runtime(
     else:
         expected_profile_fields = {
             "profile": expected_profile,
-            "source": "file",
+            "source": "config_file",
             "immutable_after_startup": True,
             "request_overrides_allowed": False,
             "effective_policy_source": "serving_profile",
@@ -2157,10 +2157,21 @@ def attest_runtime(
         else:
             expected_autoscaler_fields = {
                 "requested": expected["kv_autoscale_requested"],
+                "requested_source": "config_file",
+                "force_blocks": None,
+                "force_blocks_source": "config_file",
                 "enabled": expected_autoscaler,
                 "state": "enabled" if expected_autoscaler else "disabled",
-                "reason": "active" if expected_autoscaler else "environment",
+                "reason": "active" if expected_autoscaler else "configuration",
             }
+        if expected_profile == "stable":
+            expected_autoscaler_fields.update(
+                {
+                    "requested_source": "config_file",
+                    "force_blocks": None,
+                    "force_blocks_source": "config_file",
+                }
+            )
         for field, value in expected_autoscaler_fields.items():
             if autoscaler.get(field) != value:
                 failures.append(
@@ -2182,7 +2193,7 @@ def attest_runtime(
             failures.append(
                 "memory governor automatic monitor state does not match effective mode"
             )
-        if governor.get("source") != "file":
+        if governor.get("source") != "config_file":
             failures.append("memory reclaim mode was not sourced from the launch file")
         if governor.get("disabled_by_serving_profile") != (
             expected_profile == "stable"
@@ -2197,7 +2208,7 @@ def attest_runtime(
         ]
         if batching.get("stream_stall_grace_ms") != expected_stall_grace:
             failures.append("health batching stream-stall grace does not match config")
-        if batching.get("stream_stall_grace_source") != "file":
+        if batching.get("stream_stall_grace_source") != "config_file":
             failures.append("health batching stream-stall grace source is not file")
         expected_active_policy = {
             "max_decode_batch": VARIANT_CONFIGS[variant]["server"]["max_decode_batch"],
@@ -2222,7 +2233,7 @@ def attest_runtime(
         ]
         if batching.get("max_prefill_tokens_per_cycle") != expected_prefill_ceiling:
             failures.append("health batching prefill-token ceiling does not match config")
-        if batching.get("max_prefill_tokens_per_cycle_source") != "file":
+        if batching.get("max_prefill_tokens_per_cycle_source") != "config_file":
             failures.append("health batching prefill-token ceiling source is not file")
         expected_prefill_layer_ceiling = VARIANT_CONFIGS[variant]["server"][
             "max_prefill_layers_per_cycle"
@@ -2232,7 +2243,7 @@ def attest_runtime(
             != expected_prefill_layer_ceiling
         ):
             failures.append("health batching prefill-layer ceiling does not match config")
-        if batching.get("max_prefill_layers_per_cycle_source") != "file":
+        if batching.get("max_prefill_layers_per_cycle_source") != "config_file":
             failures.append("health batching prefill-layer ceiling source is not file")
 
         debug_batching = debug.get("batching_engine")
@@ -2246,7 +2257,7 @@ def attest_runtime(
         else:
             if (
                 debug_snapshot.get("stream_stall_grace_ms") != expected_stall_grace
-                or debug_snapshot.get("stream_stall_grace_source") != "file"
+                or debug_snapshot.get("stream_stall_grace_source") != "config_file"
             ):
                 failures.append("debug batching stream-stall policy does not match file")
             for field, expected_value in expected_active_policy.items():
@@ -2258,13 +2269,13 @@ def attest_runtime(
             if (
                 debug_snapshot.get("max_prefill_tokens_per_cycle")
                 != expected_prefill_ceiling
-                or debug_snapshot.get("max_prefill_tokens_per_cycle_source") != "file"
+                or debug_snapshot.get("max_prefill_tokens_per_cycle_source") != "config_file"
             ):
                 failures.append("debug batching prefill-token ceiling does not match file")
             if (
                 debug_snapshot.get("max_prefill_layers_per_cycle")
                 != expected_prefill_layer_ceiling
-                or debug_snapshot.get("max_prefill_layers_per_cycle_source") != "file"
+                or debug_snapshot.get("max_prefill_layers_per_cycle_source") != "config_file"
             ):
                 failures.append("debug batching prefill-layer ceiling does not match file")
 
@@ -2272,16 +2283,25 @@ def attest_runtime(
     if not isinstance(flags, dict):
         failures.append("debug env_flags are missing")
         return failures
-    for name, enabled in (
-        ("KILN_KV_AUTOSCALE", expected["kv_autoscale_requested"]),
-    ):
-        state = flags.get(name)
-        if not isinstance(state, dict):
-            failures.append(f"debug flag {name} is missing")
-        elif enabled and state.get("present") is not False:
-            failures.append(f"default-on flag {name} must remain absent")
-        elif not enabled and (state.get("present") is not True or state.get("value") != "0"):
-            failures.append(f"disabled flag {name} must be present with value 0")
+    debug_autoscaler = debug.get("kv_autoscaler")
+    if not isinstance(debug_autoscaler, dict):
+        failures.append("debug KV autoscaler runtime state is missing")
+    elif isinstance(autoscaler, dict):
+        for field in (
+            "requested",
+            "requested_source",
+            "force_blocks",
+            "force_blocks_source",
+            "enabled",
+            "state",
+            "reason",
+        ):
+            if debug_autoscaler.get(field) != autoscaler.get(field):
+                failures.append(
+                    f"debug KV autoscaler {field} disagrees with health runtime state"
+                )
+    if "KILN_KV_AUTOSCALE" in flags:
+        failures.append("legacy KV autoscale environment flag remains in debug state")
     for name, label in (
         ("KILN_MEMORY_RECLAIM_MODE", "memory reclaim"),
         ("KILN_HTTP_SEND_BUFFER_BYTES", "HTTP send-buffer"),

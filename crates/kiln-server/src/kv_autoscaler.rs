@@ -16,7 +16,6 @@
 //! Conservative by design — a control loop that thrashes would stall decode
 //! (each resize briefly blocks the GPU). Hysteresis (distinct shrink/grow
 //! thresholds), a step cap, a minimum floor, and a cooldown prevent oscillation.
-//! Disable with `KILN_KV_AUTOSCALE=0`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,12 +24,25 @@ use kiln_memory::{MemoryGovernor, MemoryPressure, Reservation};
 use kiln_model::{GpuAllocatorMemoryProbePolicy, PagedKvCacheKt};
 
 use crate::batching_engine::{BatchingEngineHandle, KvResizeReason};
+use crate::config::ConfigValueSource;
+
+/// Immutable startup inputs resolved by the typed memory configuration.
+#[derive(Clone, Copy, Debug)]
+pub struct KvAutoscalerConfig {
+    pub requested: bool,
+    pub requested_source: ConfigValueSource,
+    pub force_blocks: Option<usize>,
+    pub force_blocks_source: ConfigValueSource,
+}
 
 /// Startup state exposed through `/health`. This distinguishes an operator
 /// request from a control loop that actually owns a usable device KV pool.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct KvAutoscalerState {
     pub requested: bool,
+    pub requested_source: ConfigValueSource,
+    pub force_blocks: Option<usize>,
+    pub force_blocks_source: ConfigValueSource,
     pub enabled: bool,
     pub state: &'static str,
     pub reason: &'static str,
@@ -40,9 +52,12 @@ pub struct KvAutoscalerState {
 }
 
 impl KvAutoscalerState {
-    pub fn unavailable(reason: &'static str) -> Self {
+    pub fn unavailable(config: KvAutoscalerConfig, reason: &'static str) -> Self {
         Self {
-            requested: !is_disabled(),
+            requested: config.requested,
+            requested_source: config.requested_source,
+            force_blocks: config.force_blocks,
+            force_blocks_source: config.force_blocks_source,
             enabled: false,
             state: "unavailable",
             reason,
@@ -52,12 +67,15 @@ impl KvAutoscalerState {
         }
     }
 
-    fn disabled() -> Self {
+    pub fn disabled(config: KvAutoscalerConfig) -> Self {
         Self {
             requested: false,
+            requested_source: config.requested_source,
+            force_blocks: config.force_blocks,
+            force_blocks_source: config.force_blocks_source,
             enabled: false,
             state: "disabled",
-            reason: "environment",
+            reason: "configuration",
             start_blocks: None,
             min_blocks: None,
             bytes_per_block: None,
@@ -225,29 +243,23 @@ struct ResizeMemorySnapshot {
     pressure: MemoryPressure,
 }
 
-fn is_disabled() -> bool {
-    matches!(
-        std::env::var("KILN_KV_AUTOSCALE").as_deref(),
-        Ok("0") | Ok("false") | Ok("FALSE") | Ok("off") | Ok("OFF") | Ok("no")
-    )
-}
-
 /// Spawn the autoscaler thread. No-op (returns without spawning) if disabled, or
 /// if the cache can't report its geometry. Idempotent is the CALLER's concern.
 pub fn spawn(
     engine: BatchingEngineHandle,
     paged_cache: Arc<PagedKvCacheKt>,
     gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy,
+    config: KvAutoscalerConfig,
 ) -> KvAutoscalerState {
-    if is_disabled() {
-        tracing::info!("KV autoscaler disabled (KILN_KV_AUTOSCALE=0)");
-        return KvAutoscalerState::disabled();
+    if !config.requested {
+        tracing::info!(source = %config.requested_source, "KV autoscaler disabled by configuration");
+        return KvAutoscalerState::disabled(config);
     }
     let bytes_per_block = paged_cache.bytes_per_block();
     let start_blocks = paged_cache.num_blocks();
     if bytes_per_block == 0 || start_blocks == 0 {
         tracing::info!("KV autoscaler not started: cache reports no geometry");
-        return KvAutoscalerState::unavailable("cache_geometry");
+        return KvAutoscalerState::unavailable(config, "cache_geometry");
     }
     // Keep at least a quarter of the startup cache (and >= 1) under any pressure.
     let bounds = Bounds {
@@ -258,7 +270,10 @@ pub fn spawn(
         start_blocks,
         min_blocks = bounds.min_blocks,
         bytes_per_block,
-        "KV autoscaler started (set KILN_KV_AUTOSCALE=0 to disable)"
+        requested_source = %config.requested_source,
+        force_blocks = config.force_blocks,
+        force_blocks_source = %config.force_blocks_source,
+        "KV autoscaler started"
     );
 
     std::thread::Builder::new()
@@ -270,12 +285,16 @@ pub fn spawn(
                 gpu_allocator_memory_probe_policy,
                 bytes_per_block as u64,
                 bounds,
+                config.force_blocks,
             )
         })
         .expect("spawn kv autoscaler");
 
     KvAutoscalerState {
         requested: true,
+        requested_source: config.requested_source,
+        force_blocks: config.force_blocks,
+        force_blocks_source: config.force_blocks_source,
         enabled: true,
         state: "enabled",
         reason: "active",
@@ -291,18 +310,15 @@ fn run(
     gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy,
     bytes_per_block: u64,
     bounds: Bounds,
+    force_blocks: Option<usize>,
 ) {
     let gov = MemoryGovernor::global();
     let mut next_attempt = Instant::now();
     let mut retry_backoff = COOLDOWN;
 
-    // Verification/debug knob: KILN_KV_FORCE_BLOCKS=N performs ONE resize to N
-    // blocks at startup (then normal policy resumes). Lets an operator confirm
-    // the full resize path end-to-end on a box that isn't under real pressure.
-    if let Some(target) = std::env::var("KILN_KV_FORCE_BLOCKS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-    {
+    // A typed nonzero target performs one resize at startup, then the normal
+    // policy resumes. Cross-field validation limits this to maintenance mode.
+    if let Some(target) = force_blocks {
         let requested = target;
         let cur = paged_cache.num_blocks();
         let memory =
@@ -362,7 +378,7 @@ fn run(
                                 planned = plan.target_blocks,
                                 achieved,
                                 replacement_mb = plan.replacement_bytes / (1024 * 1024),
-                                "KV autoscaler FORCED resize (KILN_KV_FORCE_BLOCKS)"
+                                "KV autoscaler forced resize"
                             );
                         }
                         Err(err) => {

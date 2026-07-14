@@ -465,7 +465,9 @@ const generatedDocsPages = [
     terms: [
       'private TOML file',
       'KILN_DEBUG_ENDPOINTS=1',
-      'KILN_KV_AUTOSCALE=0',
+      'memory.kv_autoscale',
+      'memory.kv_force_blocks',
+      'config_file',
       'serving-rocm-graph-resilience-v1.json',
       'headroom-vs-tight-budget',
       'concurrency 1, 8, 16, 32, and 64',

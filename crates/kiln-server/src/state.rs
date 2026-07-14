@@ -3269,6 +3269,13 @@ impl AppState {
                 kiln_tensor::Device::Cpu,
             ));
         let speculative_config = crate::config::SpeculativeDecodingConfig::default();
+        let memory_config = crate::config::MemoryConfig::default();
+        let kv_autoscaler_config = crate::kv_autoscaler::KvAutoscalerConfig {
+            requested: memory_config.kv_autoscale.enabled(),
+            requested_source: memory_config.kv_autoscale.source(),
+            force_blocks: memory_config.kv_force_blocks.target(),
+            force_blocks_source: memory_config.kv_force_blocks.source(),
+        };
         Self {
             serving_profile: crate::config::ServingProfileSetting::default(),
             decode_runtime_config,
@@ -3300,7 +3307,10 @@ impl AppState {
             hf_trl_export_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 0, 0, 1.0, None)),
-            kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState::unavailable("mock_backend"),
+            kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState::unavailable(
+                kv_autoscaler_config,
+                "mock_backend",
+            ),
             gpu_lock: Arc::new(RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
             training_data_admission_lock: Arc::new(std::sync::Mutex::new(())),
@@ -3326,7 +3336,7 @@ impl AppState {
                 clamped: false,
             },
             vram_probe_selector: kiln_memory::vram::VramProbeSelector::None,
-            memory_config: crate::config::MemoryConfig::default(),
+            memory_config,
             training_runtime: kiln_train::TrainingRuntimeContext::new_for_device(
                 kiln_tensor::Device::Cpu,
                 kiln_memory::vram::GpuVramInfo {
@@ -3513,6 +3523,22 @@ impl AppState {
             memory_cfg.governor_config_for_capacity(vram_capacity_resolution.effective.total_bytes),
         )?;
         let serving_policy = serving_profile.runtime_policy();
+        let kv_autoscaler_config = crate::kv_autoscaler::KvAutoscalerConfig {
+            requested: memory_cfg.kv_autoscale.enabled(),
+            requested_source: memory_cfg.kv_autoscale.source(),
+            force_blocks: memory_cfg.kv_force_blocks.target(),
+            force_blocks_source: memory_cfg.kv_force_blocks.source(),
+        };
+        if kv_autoscaler_config.force_blocks.is_some() {
+            anyhow::ensure!(
+                kv_autoscaler_config.requested,
+                "memory.kv_force_blocks requires memory.kv_autoscale=true"
+            );
+            anyhow::ensure!(
+                serving_profile.profile() == crate::config::ServingProfile::Maintenance,
+                "memory.kv_force_blocks requires server.serving_profile=maintenance"
+            );
+        }
         let base_weight_shard_manifest = runner
             .weights
             .base_weight_shard_manifest
@@ -4317,22 +4343,32 @@ impl AppState {
         // arbitrate. The autoscaler shrinks KV when VRAM gets tight and grows it
         // back when headroom returns; the resize itself runs on the engine actor
         // at its barrier under exclusive GPU access.
-        let kv_autoscaler = if !serving_policy.dynamic_kv_resize {
-            crate::kv_autoscaler::KvAutoscalerState::unavailable("serving_profile_stable")
+        let kv_autoscaler = if !kv_autoscaler_config.requested {
+            crate::kv_autoscaler::KvAutoscalerState::disabled(kv_autoscaler_config)
+        } else if !serving_policy.dynamic_kv_resize {
+            crate::kv_autoscaler::KvAutoscalerState::unavailable(
+                kv_autoscaler_config,
+                "serving_profile_stable",
+            )
         } else if let Some(engine) = batching_engine.clone() {
             if backend_capabilities.storage.kv_cache_device_memory_pressure {
                 crate::kv_autoscaler::spawn(
                     engine,
                     paged_cache.clone(),
                     gpu_allocator_memory_probe_policy,
+                    kv_autoscaler_config,
                 )
             } else {
                 crate::kv_autoscaler::KvAutoscalerState::unavailable(
+                    kv_autoscaler_config,
                     "backend_pool_not_device_resident",
                 )
             }
         } else {
-            crate::kv_autoscaler::KvAutoscalerState::unavailable("batching_engine_disabled")
+            crate::kv_autoscaler::KvAutoscalerState::unavailable(
+                kv_autoscaler_config,
+                "batching_engine_disabled",
+            )
         };
         let decode_batcher = if let Some(config) = decode_batcher_config {
             tracing::info!(

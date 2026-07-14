@@ -982,11 +982,12 @@ Current audit findings and migration order (2026-07-12):
   namespace the remaining tuning/debug flags and remove test env mutation.
 - The source-bound ROCm serving qualification drivers now exercise that target
   boundary themselves: declared public launch policy is written to a private
-  TOML file and health/debug must report `source=file`. Ambient `KILN_*` values
-  are rejected. `KILN_DEBUG_ENDPOINTS` is the explicit internal qualification
-  capability; `KILN_KV_AUTOSCALE=0` is the one visible legacy exception on
-  autoscaler-off arms and remains migration work rather than being disguised as
-  typed configuration.
+  TOML file and health/debug must report `source=config_file`. Ambient `KILN_*`
+  values are rejected. `KILN_DEBUG_ENDPOINTS` is the sole internal qualification
+  capability. `memory.kv_autoscale` and maintenance-only
+  `memory.kv_force_blocks` replace both direct autoscaler environment reads;
+  the old spellings are warning compatibility aliases resolved only by the
+  central registry.
 
 - [ ] Inventory every direct `KILN_*` read and classify it as public stable,
   experimental/debug, build-time, or test-only.
@@ -1248,8 +1249,9 @@ graph-budget A/B and exact concurrency 1/8/16/32/64 corpus, while
 graph fallback/lifecycle/poison cases into a bounded non-skippable receipt.
 All six ROCm serving drivers now materialize their declared public policy as a
 private typed TOML file instead of a handwritten public `KILN_*` launch map;
-only the internal trusted-debug gate and the still-untyped KV autoscaler-off
-compatibility switch remain in their scrubbed process environment. Portable
+only the internal trusted-debug gate remains in their scrubbed `KILN_*` process
+environment. Autoscaler enablement and the disabled one-shot maintenance target
+are explicit `[memory]` fields with `config_file` runtime provenance. Portable
 source and 370 qualification-tooling checks are the evidence for this
 checkpoint. Bounded Cargo
 correctly refused to start below the unchanged 15 GiB available-memory floor,
@@ -1719,6 +1721,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-12 | ROCm graph checkpoint hosted regression repair | `sha256:cc3e80493e66210a5ca54df36b0f8318f0f80eca6a9e0febb8293060f5d3f142` | `cd5e81014` | portable CPU CI; accelerator jobs skipped by manual-only policy | CI `29303211231`; qualification contract `29303211233`; formatting, cargo-deny, default build/tests, substrate tests, anomaly envelope, CUDA dependency-tree assertion, and qualification tooling/receipt validation | passed | The first hosted run `29302966646` compiled the default tree but exposed one stale exact-spelling assertion in `rocm_graph_state_uses_bounded_reusable_slots`; Pages `29302966717`, UI smoke `29302966639`, release drift `29302966649`, and qualification `29302966626` were green. The repair now checks the actual invariant: every decode/capture path binds geometry to a reusable owner, and the same pre-native `cache_key` reaches final admission. The complete cheap lane is green on the superseding source hash. ROCm/Vulkan builds and hardware behavior remain unclaimed. |
 
 | 2026-07-13 | Source-bound ROCm graph resilience and containment qualification | `sha256:0a0782b7acc4e5f5209040ae901efc5ebe8cc2bc2c14c3876e83419419a83a06` | this commit | portable qualification and documentation contract; Strix Halo ROCm execution pending | 370 qualification-tooling tests; exact runtime-environment contract at 925 reads/376 process mutations; Python compilation; 8/8 docs-builder tests; 30-document/5-asset website build and generated static smoke; diff hygiene | passed static checkpoint | All six ROCm serving drivers now write private typed TOML and require `source=file` attestation instead of constructing public `KILN_*` launch maps. The only launch-environment exceptions are internal debug authorization, `RUST_LOG`, and the still-untyped legacy KV-autoscaler disable flag. The new two-arm resilience workload runs the same deterministic corpus at concurrency 1/8/16/32/64 against one exact release artifact, requires canonical streamed semantic parity, proves headroom capture/replay, forces a typed 64 MiB graph-byte-budget action, bounds graph residency, rejects device faults, dirty teardown, and attributed or unexplained ITL stalls, and emits per-concurrency latency and memory evidence. The companion real-device harness requires all three ignored graph geometry/lifecycle/stale-generation tests to execute and pass under the bounded Cargo wrapper. No compile or accelerator process started below the unchanged 15 GiB host-memory floor, so ROCm correctness, resilience, pause, memory, and throughput gates remain open until clean pushed-source receipts exist. |
+
+| 2026-07-13 | Typed KV autoscaler and maintenance-resize authority | `sha256:4eec157a0521b840822455706a1bd659d703f150dac2537b772dfe8aaf512707` | this commit | portable configuration/product/qualification contract; compile and accelerator execution pending | 84-field mechanical public-config registry; exact runtime-environment contract reduced to 923 reads/376 process mutations; 370 qualification-tooling tests; Rust 2024 formatting; Python compilation; 8/8 docs-builder tests; 30-document/5-asset website build and generated static smoke; diff hygiene; bounded Cargo refusal at 8 GiB available | passed static checkpoint | `memory.kv_autoscale` and maintenance-only `memory.kv_force_blocks` replace the autoscaler's last two direct environment reads. Canonical names are mechanically derived; old names are warning compatibility aliases parsed only by the central registry. The forced target is zero/off by default and a positive value fails unless autoscaling is requested under the maintenance profile. The immutable policy flows into the control thread without an environment read and is reported with exact request, effective state, bounded reason, target, and default/config-file/environment provenance through health, `/v1/config`, and trusted debug state. All six ROCm serving drivers now express autoscaler-off in private TOML and launch with no public `KILN_*` control. Review also corrected the new harness's impossible `source=file` expectation to Rust's public `config_file` vocabulary. Hosted run `29304680991` then exposed Python 3.10's lack of `tomllib`; the test now parses only the generator's closed JSON-scalar TOML subset without an external dependency. No compile or GPU process started below the unchanged 15 GiB floor, so maintenance resize and ROCm behavior remain unclaimed until clean-source receipts exist. |
 
 ## Known Starting Defects
 
