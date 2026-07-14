@@ -65,7 +65,7 @@ impl DatasetSplitConfig {
         let assigned = u16::from(self.train_percent) + u16::from(self.validation_percent);
         if assigned >= 100 {
             return Err(
-                "train_percent + validation_percent must be less than 100 so holdout is non-empty by policy"
+                "train_percent + validation_percent must be less than 100 to reserve a non-zero holdout percentage"
                     .to_string(),
             );
         }
@@ -527,7 +527,15 @@ fn ensure_useful_small_dataset_assignments(
         && !assignments
             .values()
             .any(|split| *split == DatasetSplit::Holdout)
-        && let Some(root) = movable_component(assignments, component_buckets.iter().rev())
+        && let Some(root) = movable_component(
+            assignments,
+            component_buckets.iter().rev(),
+            if component_buckets.len() >= 3 && config.validation_percent > 0 {
+                &[DatasetSplit::Train, DatasetSplit::Validation]
+            } else {
+                &[DatasetSplit::Train]
+            },
+        )
     {
         assignments.insert(root, DatasetSplit::Holdout);
     }
@@ -536,7 +544,11 @@ fn ensure_useful_small_dataset_assignments(
         && !assignments
             .values()
             .any(|split| *split == DatasetSplit::Validation)
-        && let Some(root) = movable_component(assignments, component_buckets.iter())
+        && let Some(root) = movable_component(
+            assignments,
+            component_buckets.iter(),
+            &[DatasetSplit::Train, DatasetSplit::Holdout],
+        )
     {
         assignments.insert(root, DatasetSplit::Validation);
     }
@@ -545,15 +557,25 @@ fn ensure_useful_small_dataset_assignments(
 fn movable_component<'a>(
     assignments: &HashMap<usize, DatasetSplit>,
     candidates: impl IntoIterator<Item = &'a (usize, u8)>,
+    protected: &[DatasetSplit],
 ) -> Option<usize> {
     let mut counts = HashMap::<DatasetSplit, usize>::new();
     for split in assignments.values() {
         *counts.entry(*split).or_default() += 1;
     }
-    candidates
+    let candidates = candidates
         .into_iter()
         .map(|(root, _)| *root)
+        .collect::<Vec<_>>();
+    candidates
+        .iter()
+        .copied()
         .find(|root| counts.get(&assignments[root]).copied().unwrap_or(0) > 1)
+        .or_else(|| {
+            candidates
+                .into_iter()
+                .find(|root| !protected.contains(&assignments[root]))
+        })
 }
 
 fn split_bucket(seed: u64, key: &str) -> u8 {
@@ -697,6 +719,57 @@ mod tests {
                 .collect::<BTreeMap<_, _>>()
         };
         assert_eq!(assignments(&original), assignments(&reversed));
+    }
+
+    #[test]
+    fn small_dataset_repair_exhaustively_populates_every_possible_partition() {
+        let splits = [
+            DatasetSplit::Train,
+            DatasetSplit::Validation,
+            DatasetSplit::Holdout,
+        ];
+        for first in splits {
+            for second in splits {
+                let mut assignments = HashMap::from([(0, first), (1, second)]);
+                let mut buckets = [(0, 10), (1, 90)];
+                ensure_useful_small_dataset_assignments(
+                    &mut assignments,
+                    &mut buckets,
+                    &DatasetSplitConfig::default(),
+                );
+                assert!(
+                    assignments
+                        .values()
+                        .any(|split| *split == DatasetSplit::Train)
+                );
+                assert!(
+                    assignments
+                        .values()
+                        .any(|split| *split == DatasetSplit::Holdout),
+                    "two-component assignment {first:?}/{second:?} omitted holdout"
+                );
+            }
+        }
+
+        for first in splits {
+            for second in splits {
+                for third in splits {
+                    let mut assignments = HashMap::from([(0, first), (1, second), (2, third)]);
+                    let mut buckets = [(0, 10), (1, 50), (2, 90)];
+                    ensure_useful_small_dataset_assignments(
+                        &mut assignments,
+                        &mut buckets,
+                        &DatasetSplitConfig::default(),
+                    );
+                    for required in splits {
+                        assert!(
+                            assignments.values().any(|split| *split == required),
+                            "three-component assignment {first:?}/{second:?}/{third:?} omitted {required:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn contamination_suite(

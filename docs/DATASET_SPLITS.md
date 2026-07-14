@@ -103,11 +103,13 @@ especially when a large group or session must remain intact. Inspect
 `split_counts`; do not assume that an 80/10/10 policy produced exact row
 counts.
 
-For small datasets, Kiln repairs the hash assignment when possible:
+For small datasets, Kiln deterministically repairs the hash assignment when
+the number of independent components permits the partition:
 
 - one or more independent components always produce a train partition;
-- two or more can produce a holdout partition;
-- three or more can produce train, validation, and holdout partitions.
+- two or more always produce distinct train and holdout partitions;
+- three or more always produce distinct train, validation, and holdout
+  partitions when `validation_percent` is non-zero.
 
 A corpus whose rows all belong to one connected component cannot be honestly
 split. Reading an empty materialized partition for training or synthesis
