@@ -435,11 +435,14 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
   memory pressure, and maintenance-mode resize.
   - The existing mixed-load, pressure, correctness, and soak gates cover prefix,
     cancellation, slow-consumer, pressure, and graph invalidation behavior in
-    separate receipts. The new `serving-rocm-graph-failure-containment-v1`
-    workload makes the three real-device shape fallback, prefix/cancellation/
-    adapter lifecycle, and poisoned-generation cases source-bound and
-    non-skippable. Public adapter load/unload and maintenance resize still need
-    one combined current-source receipt, so this item remains open.
+    separate receipts. `serving-rocm-graph-failure-containment-v1` makes the
+    three real-device shape fallback, prefix/cancellation/adapter lifecycle, and
+    poisoned-generation cases source-bound and non-skippable. The new
+    `serving-rocm-public-mutation-lifecycle-v1` gate builds one binary for a
+    content-attested public load/infer/unload/base-restore arm and a separate
+    typed maintenance forced-resize/inference-rejection arm. Its static contract
+    is complete; this item remains open only until the clean Strix Halo receipt
+    is checked in alongside the existing prefix/cancellation/pressure evidence.
 - [x] Run a 30-minute development soak after each material serving change.
   - The source-bound `serving-rocm-development-soak-v1` gate now holds one
     graph-on, fixed-capacity server process under mixed bucket/concurrency waves
@@ -1247,12 +1250,15 @@ fallback, live-phase, and typed-unavailability contracts.
 graph-budget A/B and exact concurrency 1/8/16/32/64 corpus, while
 `serving-rocm-graph-failure-containment-v1` turns the three ignored real-device
 graph fallback/lifecycle/poison cases into a bounded non-skippable receipt.
-All six ROCm serving drivers now materialize their declared public policy as a
-private typed TOML file instead of a handwritten public `KILN_*` launch map;
+`serving-rocm-public-mutation-lifecycle-v1` adds a one-binary public adapter
+barrier-swap/base-restoration arm and a typed maintenance-resize arm with
+fail-closed inference admission. All seven ROCm serving drivers now materialize
+their declared public policy as a private typed TOML file instead of a
+handwritten public `KILN_*` launch map;
 only the internal trusted-debug gate remains in their scrubbed `KILN_*` process
 environment. Autoscaler enablement and the disabled one-shot maintenance target
 are explicit `[memory]` fields with `config_file` runtime provenance. Portable
-source and 370 qualification-tooling checks are the evidence for this
+source and 378 qualification-tooling checks are the evidence for this
 checkpoint. Bounded Cargo
 correctly refused to start below the unchanged 15 GiB available-memory floor,
 and GPU execution was not attempted under the current host pressure, so this
@@ -1723,6 +1729,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-13 | Source-bound ROCm graph resilience and containment qualification | `sha256:0a0782b7acc4e5f5209040ae901efc5ebe8cc2bc2c14c3876e83419419a83a06` | this commit | portable qualification and documentation contract; Strix Halo ROCm execution pending | 370 qualification-tooling tests; exact runtime-environment contract at 925 reads/376 process mutations; Python compilation; 8/8 docs-builder tests; 30-document/5-asset website build and generated static smoke; diff hygiene | passed static checkpoint | All six ROCm serving drivers now write private typed TOML and require `source=file` attestation instead of constructing public `KILN_*` launch maps. The only launch-environment exceptions are internal debug authorization, `RUST_LOG`, and the still-untyped legacy KV-autoscaler disable flag. The new two-arm resilience workload runs the same deterministic corpus at concurrency 1/8/16/32/64 against one exact release artifact, requires canonical streamed semantic parity, proves headroom capture/replay, forces a typed 64 MiB graph-byte-budget action, bounds graph residency, rejects device faults, dirty teardown, and attributed or unexplained ITL stalls, and emits per-concurrency latency and memory evidence. The companion real-device harness requires all three ignored graph geometry/lifecycle/stale-generation tests to execute and pass under the bounded Cargo wrapper. No compile or accelerator process started below the unchanged 15 GiB host-memory floor, so ROCm correctness, resilience, pause, memory, and throughput gates remain open until clean pushed-source receipts exist. |
 
 | 2026-07-13 | Typed KV autoscaler and maintenance-resize authority | `sha256:4eec157a0521b840822455706a1bd659d703f150dac2537b772dfe8aaf512707` | this commit | portable configuration/product/qualification contract; compile and accelerator execution pending | 84-field mechanical public-config registry; exact runtime-environment contract reduced to 923 reads/376 process mutations; 370 qualification-tooling tests; Rust 2024 formatting; Python compilation; 8/8 docs-builder tests; 30-document/5-asset website build and generated static smoke; diff hygiene; bounded Cargo refusal at 8 GiB available | passed static checkpoint | `memory.kv_autoscale` and maintenance-only `memory.kv_force_blocks` replace the autoscaler's last two direct environment reads. Canonical names are mechanically derived; old names are warning compatibility aliases parsed only by the central registry. The forced target is zero/off by default and a positive value fails unless autoscaling is requested under the maintenance profile. The immutable policy flows into the control thread without an environment read and is reported with exact request, effective state, bounded reason, target, and default/config-file/environment provenance through health, `/v1/config`, and trusted debug state. All six ROCm serving drivers now express autoscaler-off in private TOML and launch with no public `KILN_*` control. Review also corrected the new harness's impossible `source=file` expectation to Rust's public `config_file` vocabulary. Hosted run `29304680991` then exposed Python 3.10's lack of `tomllib`; the test now parses only the generator's closed JSON-scalar TOML subset without an external dependency. No compile or GPU process started below the unchanged 15 GiB floor, so maintenance resize and ROCm behavior remain unclaimed until clean-source receipts exist. |
+
+| 2026-07-13 | Source-bound public adapter and maintenance mutation lifecycle | `sha256:5dd91bbac36e5ec13a4dd6a8949c4a8fd0593aa4aaf0553085fde267b1184625` | this commit | portable qualification/product contract; Strix Halo ROCm execution pending | 378 qualification-tooling tests; exact runtime-environment contract at 923 reads/376 process mutations; strict workload validation; Python compilation; 8/8 docs-builder tests; 30-document/5-asset website build and generated static smoke; release/link and diff hygiene | passed static checkpoint | One exact source-built binary now drives two isolated public lifecycle arms. The experimental arm privately copies and SHA-256 attests a real adapter, proves load/list/health/debug/chat-header revision agreement, requires ordered barrier-swap logs and captured-graph invalidation, unloads, and requires exact canonical base-output restoration. The maintenance arm expresses autoscaling plus a one-block forced target only in typed TOML, requires one exact structured physical resize with finite coordination timing, observes the target through config/health/debug, and proves an HTTP 503 inference rejection changes no batching work counter. Both arms reject device faults, dirty shutdown, and snapshot residue; result details bind the binary, adapter inputs/content revision, generated configs, and semantic outputs. The permanent qualification website documents the invocation, evidence, hard failures, and non-promises. No compile or GPU process started below the unchanged 15 GiB floor, so the Phase 1.7 checkbox remains open until the clean pushed-source Strix Halo receipt exists. |
 
 ## Known Starting Defects
 

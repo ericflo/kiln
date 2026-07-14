@@ -1654,6 +1654,9 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
         <p class="mt-3" style="color: var(--fg-dim);">
           Upload, merge, delete, training publication, eval-gate demotion, and live weight transitions share one serialized revision barrier. Hidden staging directories never appear in the adapter list. Delete returns <code>adapter_active</code> when the name is the server default and <code>adapter_loaded</code> when its revision is physically loaded; both are HTTP 409 responses with an unload-and-retry hint. Gate demotion swaps loaded rejected weights to base before renaming them to <code>.failed</code>.
         </p>
+        <p class="mt-3" style="color: var(--fg-dim);">
+          The required-device <code>serving-rocm-public-mutation-lifecycle-v1</code> qualification uses one exact source-built binary for two isolated arms. The experimental arm hashes and privately copies a real adapter, proves the public load/list/chat-header/unload identity chain, requires captured-graph invalidation, and compares identical base output before load and after unload. The maintenance arm uses typed <code>memory.kv_force_blocks</code>, requires the structured resize to reach its exact target, then proves a rejected chat request changed no admission, prefill, decode, or used-block counter. Both arms fail on device faults, dirty teardown, or snapshot residue. The complete command, input rules, metrics, receipt bindings, and non-promises are in the <a href="https://ericflo.github.io/kiln/docs/hardware-qualification/#rocm-public-mutation-lifecycle">Qualification guide</a>.
+        </p>
       </article>
 
       <article class="card p-6">

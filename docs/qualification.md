@@ -241,8 +241,9 @@ transport bounds, scheduling ceilings, logging, memory reclaim, synchronization,
 graph mode, graph entry capacity, and graph byte capacity therefore travel
 through the same typed parser and source diagnostics as an operator config.
 The process environment is scrubbed of ambient `KILN_*` controls before build
-and launch. `memory.kv_autoscale` now carries both enabled and disabled requests,
-and every serving arm writes `memory.kv_force_blocks = 0`; health and debug must
+and launch. `memory.kv_autoscale` now carries both enabled and disabled requests.
+Ordinary serving arms write `memory.kv_force_blocks = 0`; the dedicated
+maintenance arm writes its declared positive target. Health and debug must
 report `config_file` provenance for both fields. `KILN_DEBUG_ENDPOINTS=1` is the
 only `KILN_*` launch exception: it is the internal qualification capability that
 grants the trusted debug readback, not public server policy. `RUST_LOG` remains
@@ -389,6 +390,66 @@ either proof, or any armed/unclassified capture guard leaving scope, must
 publish sticky STOP, use `error_recovery` only for a post-STOP diagnostic drain,
 reject the eager continuation, and require process restart. Qualification must
 never classify that quarantine as an expected fallback.
+
+### ROCm Public Mutation Lifecycle
+
+Run the public adapter and maintenance-mutation gate with a real adapter whose
+base model matches the selected Qwen3.5 model:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" ROCM_PATH=/opt/rocm \
+python3 scripts/qualification/run.py \
+  --variant public-mutation-lifecycle \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  --var adapter_path=/absolute/path/to/Qwen3.5-4B/adapters/rocm-sft-test \
+  qualification/workloads/serving-rocm-public-mutation-lifecycle-v1.json
+```
+
+The adapter input must be an absolute directory containing regular,
+non-symlink `adapter_config.json` and `adapter_model.safetensors` files. The
+driver copies only those two files into a private per-run adapter registry,
+re-hashes the copy, and records both source SHA-256 values in the command result
+details. It also records the one exact source-built `kiln` binary hash and the
+two generated typed-config hashes. The qualification runner separately binds
+the clean source tree, model weights, tokenizer, template, manifest, variable,
+stdout, and command-result artifacts in the receipt.
+
+The first arm starts that binary under the experimental profile with KV
+autoscaling and reclaim off and lazy ROCm graph execution on. It requires real
+capture and replay before measuring the lifecycle. A deterministic base request
+must return `x-kiln-loaded-adapter: base` and revision `base`. Public
+`POST /v1/adapters/load` must return one 64-hex content revision; health,
+trusted debug state, `GET /v1/adapters`, and the next chat response headers must
+all publish that same name/revision. The driver then calls the public unload
+endpoint, requires every surface and response header to return to base, and
+compares canonical streamed semantic deltas from identical pre-load and
+post-unload base requests exactly. Dynamic IDs and creation timestamps are the
+only excluded envelope fields. Both barrier-swap reasons must appear in order,
+at least one captured graph must be invalidated, and the actor, graph slots,
+owners, process, and snapshot directory must drain cleanly.
+
+The second arm reuses the same binary under a separate maintenance-profile TOML
+file with graphs disabled, `memory.kv_autoscale = true`, and
+`memory.kv_force_blocks = 1`. It requires exactly one structured
+`gpu_memory_operation` resize with reason `forced_configuration`, an initial
+capacity above the target, exact `requested_blocks` and `actual_blocks` of one,
+and finite nonnegative barrier/GPU/model wait and total mutation durations.
+`/v1/config` must observe the one-block physical capacity while health and debug
+report the requested target and `config_file` provenance. A public chat request
+must return HTTP 503 with `inference_disabled_by_profile` without changing
+batching admission, prefill, decode, or used-block counters.
+
+Either arm fails on an HTTP or stream error, malformed identity, stale adapter
+header, changed base output, missing graph invalidation, wrong resize target,
+inference work in maintenance, device-fault signature, forced/nonzero shutdown,
+or private snapshot residue. The receipt publishes transition and rejection
+counts, adapter bytes, load/unload latency, graph invalidations, resize source
+and target blocks, released bytes, coordination wait, mutation duration, and
+all failure counters. This gate proves one controlled lifecycle at one source
+revision; it does not replace concurrent mixed-load stress, the graduated
+concurrency gate, or the long soak.
 
 The stable serving run also attests the default 64-token prompt-work ceiling
 (`server.max_prefill_tokens_per_cycle`), the default four-layer yield ceiling

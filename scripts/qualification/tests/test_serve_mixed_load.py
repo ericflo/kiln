@@ -592,7 +592,11 @@ class ServeMixedLoadTests(unittest.TestCase):
         sock = mock.Mock()
         connection = mock.Mock(sock=sock)
         response = mock.Mock(status=200)
-        response.getheader.return_value = "text/event-stream"
+        response.getheader.side_effect = lambda name, default=None: {
+            "Content-Type": "text/event-stream",
+            "X-Kiln-Loaded-Adapter": "fixture-adapter",
+            "X-Kiln-Loaded-Adapter-Revision": "a" * 64,
+        }.get(name, default)
         response.fp.peek.return_value = b"data"
         response.read1.return_value = (
             b'data: {"choices":[{"delta":{"content":"token"}}]}\n\n'
@@ -620,6 +624,8 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertTrue(result.cancelled)
         self.assertEqual(len(result.semantic_times), 1)
         self.assertEqual(len(result.semantic_deltas), 1)
+        self.assertEqual(result.loaded_adapter, "fixture-adapter")
+        self.assertEqual(result.loaded_adapter_revision, "a" * 64)
         sock.setblocking.assert_called_once_with(False)
         sock.settimeout.assert_called_once()
         response.read1.assert_called_once_with(4096)
@@ -1329,6 +1335,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 rocm_graph_mode="disabled",
                 rocm_graph_cache_entries=12,
                 rocm_graph_cache_max_bytes=64 << 20,
+                kv_force_blocks=7,
             )
             parsed = parse_generated_toml(path.read_text(encoding="utf-8"))
 
@@ -1343,6 +1350,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(
             parsed["accelerator"]["rocm_graph_cache_max_bytes"], 64 << 20
         )
+        self.assertEqual(parsed["memory"]["kv_force_blocks"], 7)
         self.assertEqual(parsed["model"]["path"], str(root / 'model "quoted"'))
 
     def test_all_rocm_serving_drivers_launch_through_the_typed_file(self) -> None:
@@ -1350,6 +1358,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "serve_mixed_load.py",
             "serve_rocm_graph_correctness.py",
             "serve_rocm_graph_resilience.py",
+            "serve_rocm_public_mutation_lifecycle.py",
             "serve_rocm_pressure.py",
             "serve_rocm_soak.py",
             "serve_rocm_sync_ab.py",

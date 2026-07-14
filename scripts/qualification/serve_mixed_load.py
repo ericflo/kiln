@@ -234,6 +234,15 @@ PROFILE_POLICIES: dict[str, dict[str, bool | str]] = {
         "live_graph_capture": False,
         "exclusive_gpu_behavior": "reject",
     },
+    "maintenance": {
+        "inference_admission": False,
+        "training_gpu_ownership": True,
+        "adapter_weight_transitions": True,
+        "dynamic_kv_resize": True,
+        "allocator_reclaim": True,
+        "live_graph_capture": False,
+        "exclusive_gpu_behavior": "inference_disabled_drain_then_exclusive",
+    },
 }
 
 GRAPH_PHASE_NAMES = (
@@ -700,6 +709,8 @@ class StreamResult:
     actor_admission_ms: float | None = None
     actor_prefill_wall_ms: float | None = None
     semantic_deltas: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    loaded_adapter: str | None = None
+    loaded_adapter_revision: str | None = None
 
     @property
     def success(self) -> bool:
@@ -921,6 +932,8 @@ def run_stream(
     done = False
     cancelled = False
     error: str | None = None
+    loaded_adapter: str | None = None
+    loaded_adapter_revision: str | None = None
     connection = http.client.HTTPConnection(
         "127.0.0.1", port, timeout=max(0.1, deadline - time.monotonic())
     )
@@ -946,6 +959,10 @@ def run_stream(
         )
         response = connection.getresponse()
         content_type = response.getheader("Content-Type", "")
+        loaded_adapter = response.getheader("X-Kiln-Loaded-Adapter")
+        loaded_adapter_revision = response.getheader(
+            "X-Kiln-Loaded-Adapter-Revision"
+        )
         if response.status != 200:
             raise QualificationError(f"{name} returned HTTP {response.status}: {response.read(512)!r}")
         if "text/event-stream" not in content_type.lower():
@@ -1020,6 +1037,8 @@ def run_stream(
                             cancelled=True,
                             error=None,
                             semantic_deltas=semantic_deltas,
+                            loaded_adapter=loaded_adapter,
+                            loaded_adapter_revision=loaded_adapter_revision,
                         )
                 reasons.extend(finish_reasons(value))
                 if "usage" in value:
@@ -1086,6 +1105,8 @@ def run_stream(
         actor_admission_ms=actor_admission_ms,
         actor_prefill_wall_ms=actor_prefill_wall_ms,
         semantic_deltas=semantic_deltas,
+        loaded_adapter=loaded_adapter,
+        loaded_adapter_revision=loaded_adapter_revision,
     )
 
 
@@ -1313,6 +1334,8 @@ def classify_server_event(
     lowered = lowered_event or lowered_message
     if lowered == "rocm_graph_fallback":
         return "graph_fallback"
+    if lowered == "adapter transition (barrier swap)":
+        return "adapter_transition"
     if lowered == "background inference prewarm complete":
         return "prewarm_complete"
     if lowered in {
@@ -1681,6 +1704,7 @@ def write_server_config(
     rocm_graph_mode: str | None = None,
     rocm_graph_cache_entries: int = 8,
     rocm_graph_cache_max_bytes: int = 1 << 30,
+    kv_force_blocks: int = 0,
 ) -> None:
     """Write the complete public qualification launch policy as typed TOML."""
     config = VARIANT_CONFIGS[variant]
@@ -1729,7 +1753,7 @@ def write_server_config(
         "[memory]",
         f"reclaim_mode = {_toml_string(runtime['memory_reclaim_requested_mode'])}",
         f"kv_autoscale = {'true' if runtime['kv_autoscale_requested'] else 'false'}",
-        "kv_force_blocks = 0",
+        f"kv_force_blocks = {kv_force_blocks}",
         "",
         "[logging]",
         'format = "json"',
@@ -1963,6 +1987,7 @@ def attest_runtime(
     *,
     rocm_graph_cache_entries: int = 8,
     rocm_graph_cache_max_bytes: int = 1 << 30,
+    kv_force_blocks: int | None = None,
 ) -> list[str]:
     expected = VARIANT_CONFIGS[variant]["runtime"]
     failures: list[str] = []
@@ -2158,7 +2183,7 @@ def attest_runtime(
             expected_autoscaler_fields = {
                 "requested": expected["kv_autoscale_requested"],
                 "requested_source": "config_file",
-                "force_blocks": None,
+                "force_blocks": kv_force_blocks,
                 "force_blocks_source": "config_file",
                 "enabled": expected_autoscaler,
                 "state": "enabled" if expected_autoscaler else "disabled",
@@ -2168,7 +2193,7 @@ def attest_runtime(
             expected_autoscaler_fields.update(
                 {
                     "requested_source": "config_file",
-                    "force_blocks": None,
+                    "force_blocks": kv_force_blocks,
                     "force_blocks_source": "config_file",
                 }
             )

@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "kind": "correctness",
+  "workload_id": "serving-rocm-public-mutation-lifecycle-v1",
+  "description": "Build one source-bound ROCm server binary, prove public adapter load/inference/unload identity and base restoration, then prove an exact typed maintenance-only KV resize and fail-closed inference admission.",
+  "determinism": {
+    "seed": 20260713,
+    "seed_delivery": "argv",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [
+    {
+      "name": "adapter_path",
+      "description": "Absolute path to a real Qwen3.5 LoRA directory containing adapter_config.json and adapter_model.safetensors; both inputs are copied privately and SHA-256 attested.",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "constraints": {
+        "allowed_values": [],
+        "minimum": null,
+        "maximum": null,
+        "pattern": "^/.+$"
+      }
+    }
+  ],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  },
+  "variants": [
+    {
+      "id": "public-mutation-lifecycle",
+      "description": "Run a real adapter barrier swap and an exact forced KV shrink through public typed configuration on required gfx1151 ROCm.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "cargo_jobs": 1,
+          "cargo_memory_scope": "systemd_user_memory_max_no_swap",
+          "cargo_min_available_gib": 15,
+          "cargo_wrapper": "scripts/cargo-bounded.sh",
+          "features": "rocm",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "rocm_archs": "gfx1151",
+          "rocm_path": "/opt/rocm"
+        },
+        "runtime": {
+          "adapter_arm": {
+            "kv_autoscale_enabled": false,
+            "kv_autoscale_requested": false,
+            "memory_reclaim_mode": "off",
+            "memory_reclaim_requested_mode": "off",
+            "rocm_graph_mode": "lazy_capture_replay",
+            "rocm_graphs_enabled": true,
+            "rocm_graphs_requested": true,
+            "serving_profile": "experimental"
+          },
+          "maintenance_resize_arm": {
+            "kv_autoscale_enabled": true,
+            "kv_autoscale_requested": true,
+            "kv_force_blocks": 1,
+            "memory_reclaim_mode": "off",
+            "memory_reclaim_requested_mode": "off",
+            "rocm_graph_mode": "disabled",
+            "rocm_graphs_enabled": false,
+            "rocm_graphs_requested": false,
+            "serving_profile": "maintenance"
+          }
+        },
+        "server": {
+          "chat_performance_metadata_enabled": true,
+          "debug_endpoints_enabled": true,
+          "default_thinking_enabled": false,
+          "http_send_buffer_bytes": 4096,
+          "log_format": "json",
+          "max_active_requests": 12,
+          "max_decode_batch": 8,
+          "max_prefill_layers_per_cycle": 4,
+          "max_prefill_staging_priority_burst": 4,
+          "max_prefill_staging_slots": 4,
+          "max_prefill_tokens_per_cycle": 64,
+          "request_timeout_seconds": 180,
+          "stream_stall_grace_ms": 2000
+        },
+        "workload": {
+          "adapter_files": {
+            "file_0": "adapter_config.json",
+            "file_1": "adapter_model.safetensors"
+          },
+          "adapter_input_attestation": "source_and_private_copy_sha256_in_result_details",
+          "adapter_name": "qualification-adapter",
+          "arm_order": {
+            "arm_0": "adapter",
+            "arm_1": "maintenance_resize"
+          },
+          "base_output_restore": "exact_canonical_streamed_semantic_deltas",
+          "build_reuse": "one_source_bound_binary_for_both_arms",
+          "forced_kv_blocks": 1,
+          "graph_cache_entries": 8,
+          "graph_cache_max_bytes": 1073741824,
+          "max_tokens": 16,
+          "prompt_words": 64,
+          "public_endpoints": {
+            "endpoint_0": "POST /v1/adapters/load",
+            "endpoint_1": "GET /v1/adapters",
+            "endpoint_2": "POST /v1/chat/completions",
+            "endpoint_3": "POST /v1/adapters/unload",
+            "endpoint_4": "GET /v1/config"
+          },
+          "warmup_attempts": 8
+        }
+      },
+      "cases": [
+        {
+          "id": "rocm-public-mutation-lifecycle",
+          "description": "Require exact adapter source identity, response revision headers, deterministic base restoration, graph invalidation, a typed maintenance resize to one block, inference rejection before model work, zero device faults, and clean teardown.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_rocm_public_mutation_lifecycle.py",
+            "--model-path",
+            "${model_path}",
+            "--adapter-path",
+            "${adapter_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "adapter_load_count",
+              "adapter_load_ms",
+              "adapter_revision_header_mismatch_count",
+              "adapter_transition_count",
+              "adapter_unload_count",
+              "adapter_unload_ms",
+              "adapter_weights_bytes",
+              "base_output_mismatch_count",
+              "binary_build_count",
+              "device_fault_count",
+              "dirty_shutdown_count",
+              "forced_resize_actual_blocks",
+              "forced_resize_count",
+              "forced_resize_duration_ms",
+              "forced_resize_from_blocks",
+              "forced_resize_released_bytes",
+              "forced_resize_wait_ms",
+              "graph_invalidation_eviction_count",
+              "maintenance_inference_rejection_count",
+              "request_failure_count",
+              "snapshot_residue_count"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
