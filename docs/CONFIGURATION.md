@@ -119,18 +119,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 92 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 98 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 92 fixed fields:
+credential. Of the 98 fixed fields:
 
-- 84 implement the canonical mechanical environment name;
-- 60 also retain one or more deprecated compatibility spellings (63 aliases
+- 93 implement the canonical mechanical environment name;
+- 66 also retain one or more deprecated compatibility spellings (69 aliases
   total);
-- 8 are config-file-only and have no environment override;
-- the 63 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+- 5 are config-file-only and have no environment override;
+- the 69 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 92 fixed fields and both dynamic credential fields.
+The tables below cover all 98 fixed fields and both dynamic credential fields.
 The schema additionally records the accepted deprecated TOML-only
 `streaming_prefill.enabled` compatibility field so validators match the loader.
 
@@ -143,6 +143,7 @@ The schema additionally records the accepted deprecated TOML-only
 | `server.host` | string; `"127.0.0.1"` | `KILN_SERVER_HOST` (implemented) | `KILN_HOST` (deprecated compatibility) | Must be non-empty. Binding beyond loopback exposes an unauthenticated inference and training API; use a trusted network or authenticated reverse proxy. |
 | `server.port` | unsigned 16-bit integer; `8420` | `KILN_SERVER_PORT` (implemented) | `KILN_PORT` (deprecated compatibility) | `1..=65535`. |
 | `server.request_timeout_secs` | unsigned integer; `600` | `KILN_SERVER_REQUEST_TIMEOUT_SECS` (implemented) | `KILN_REQUEST_TIMEOUT_SECS` (deprecated compatibility) | Must be greater than zero. Bounds a request, including model work and cleanup settlement. |
+| `server.terminal_access` | string enum; `"loopback_only"` | `KILN_SERVER_TERMINAL_ACCESS` (implemented) | `KILN_TERMINAL` (deprecated compatibility; boolean spellings map to enabled/disabled) | `loopback_only`, `enabled`, or `disabled`. Compatibility boolean spellings are accepted from the environment. This capability can execute arbitrary code; changing it requires restart. |
 | `server.http_send_buffer_bytes` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_HTTP_SEND_BUFFER_BYTES` (implemented) | `KILN_HTTP_SEND_BUFFER_BYTES` (deprecated compatibility) | When set, `1024..=16777216`. Applied to accepted sockets. Startup preflights the listener and rejects an OS read-back smaller than requested. |
 | `server.stream_stall_grace_ms` | unsigned integer; `2000` | `KILN_SERVER_STREAM_STALL_GRACE_MS` (implemented) | `KILN_STREAM_STALL_GRACE_MS` (deprecated compatibility) | `10..=2000`. A request retaining KV state with no streaming delivery progress is selected for cancellation after this grace. |
 | `server.max_batch_tokens` | unsigned integer; `512` | `KILN_SERVER_MAX_BATCH_TOKENS` (implemented) | `KILN_MAX_BATCH_TOKENS` (deprecated compatibility) | `2..=65536`. Combined decode-plus-prefill token budget for one batching-actor cycle. |
@@ -625,6 +626,7 @@ typed PCI-address or UUID identity.
 | `training.checkpoint_boundary_cache_gb` | positive floating-point GiB value; `6.0` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB` (implemented) | `KILN_CHECKPOINT_BOUNDARY_CACHE_GB` (deprecated compatibility) | Automatic anchor-stride memory target. Despite the historical `_gb` spelling, the unit is GiB (`2^30` bytes). The value must be finite, positive, convert to at least one byte, and remain below the `u64` byte limit. Startup converts it once to integral bytes using the historical truncating conversion. |
 | `training.checkpoint_interval` | optional unsigned integer; omitted (`None`) | `KILN_TRAINING_CHECKPOINT_INTERVAL` (implemented) | `KILN_CHECKPOINT_INTERVAL` (deprecated compatibility) | Must be greater than zero when set. Number of committed optimizer steps between checkpoints; per-job configuration overrides it. Omission disables periodic checkpoints. |
 | `training.webhook_url` | optional string; omitted (`None`) | `KILN_TRAINING_WEBHOOK_URL` (implemented) | `KILN_TRAINING_WEBHOOK_URL` | Must be a non-empty valid HTTP(S) URL. An exactly empty environment value clears a TOML URL; whitespace is not a clearing value and fails validation. Delivery is fire-and-forget with a five-second timeout after terminal state is recorded. |
+| `training.logit_cache_dir` | optional path string; omitted (beside the effective adapter directory) | `KILN_TRAINING_LOGIT_CACHE_DIR` (implemented) | `KILN_LOGIT_CACHE_DIR` (deprecated compatibility) | Must be a non-empty path when set. Resolved once at startup; request handlers never reread the environment. |
 | `training.max_queued_jobs` | unsigned integer; `32` | `KILN_TRAINING_MAX_QUEUED_JOBS` (implemented) | `KILN_TRAINING_MAX_QUEUED_JOBS` | Must be greater than zero. At capacity, submissions return HTTP 503 with `Retry-After: 30`. |
 | `training.max_tracked_jobs` | unsigned integer; `1024` | `KILN_TRAINING_MAX_TRACKED_JOBS` (implemented) | `KILN_TRAINING_MAX_TRACKED_JOBS` | Must be greater than zero and at least `max_queued_jobs`. Counts queued, running, completed, and failed entries. |
 | `training.tracked_job_ttl_secs` | unsigned integer; `604800` | `KILN_TRAINING_TRACKED_JOB_TTL_SECS` (implemented) | `KILN_TRAINING_TRACKED_JOB_TTL_SECS` | Must be greater than zero. Terminal entries older than the TTL are removed; active jobs are never age-evicted. |
@@ -1225,6 +1227,7 @@ detached_full_attn_tile_tokens = "auto"
 
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
 |---|---|---|---|---|
+| `adapters.library_url` | string URL; `"https://library.kiln.run"` | `KILN_ADAPTERS_LIBRARY_URL` (implemented) | `KILN_ADAPTER_LIBRARY_URL` (deprecated compatibility) | Must be a non-empty valid HTTP(S) URL. Resolved once at startup. |
 | `adapters.max_disk_bytes` | optional unsigned integer; `107374182400` (100 GiB) | `KILN_ADAPTERS_MAX_DISK_BYTES` (implemented) | `KILN_ADAPTERS_MAX_DISK_BYTES` | Caps finalized adapter bytes under `adapter_dir`, excluding upload staging and the composed cache. For the environment alias only, empty or `0` means `None` and disables the cap. TOML `0` is accepted as a literal zero cap, not as `None`. |
 | `adapters.composed_cache_max_bytes` | optional unsigned integer; `10737418240` (10 GiB) | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES` (implemented) | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES` | LRU byte cap for `.composed`. Environment empty or `0` disables this dimension; TOML `0` remains a zero cap. |
 | `adapters.composed_cache_max_entries` | optional unsigned integer; `64` | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES` (implemented) | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES` | LRU entry-count cap for `.composed`. Environment empty or `0` disables this dimension; TOML `0` remains a zero cap. |
@@ -1300,10 +1303,19 @@ timeout.
 
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
 |---|---|---|---|---|
-| `agent.self_improve_interval_hours` | optional unsigned integer; omitted (`None`) | `KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS` (target only; not implemented) | none | Omission disables scheduling. `0` is accepted and also results in no scheduler. The first run occurs one full interval after startup; cadence is persisted under the adapter directory. |
+| `agent.self_improve_interval_hours` | optional unsigned integer; omitted (`None`) | `KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS` (implemented) | `KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS` | Omission disables scheduling. `0` is accepted and also results in no scheduler. The first run occurs one full interval after startup; cadence is persisted under the adapter directory. |
 | `agent.self_improve` | optional structured value; omitted (`None`) | `KILN_AGENT_SELF_IMPROVE` (target only; not implemented) | none | Request template submitted to the same self-improvement path as the API. This value is intentionally open structured data; its inner request contract is validated by that subsystem rather than by `KilnConfig`. |
-| `agent.max_concurrent_runs` | unsigned integer; `2` | `KILN_AGENT_MAX_CONCURRENT_RUNS` (target only; not implemented) | none | Must be greater than zero. Embedded pi runs above the limit queue FIFO. |
-| `agent.run_timeout_secs` | unsigned integer; `900` | `KILN_AGENT_RUN_TIMEOUT_SECS` (target only; not implemented) | none | Must be at least `10`. A per-run timeout can override the server default. |
+| `agent.max_concurrent_runs` | unsigned integer; `2` | `KILN_AGENT_MAX_CONCURRENT_RUNS` (implemented) | `KILN_AGENT_MAX_CONCURRENT_RUNS` | Must be greater than zero. Embedded pi runs above the limit queue FIFO. |
+| `agent.run_timeout_secs` | unsigned integer; `900` | `KILN_AGENT_RUN_TIMEOUT_SECS` (implemented) | `KILN_AGENT_RUN_TIMEOUT_SECS` | Must be at least `10`. A per-run timeout can override the server default. |
+| `agent.runs_access` | string enum; `"loopback_only"` | `KILN_AGENT_RUNS_ACCESS` (implemented) | `KILN_AGENT_RUNS` (deprecated compatibility; boolean spellings map to enabled/disabled) | `loopback_only`, `enabled`, or `disabled`. Compatibility boolean spellings are accepted from the environment. Embedded runs can execute arbitrary code; changing this requires restart. |
+| `agent.pi_bin` | optional path string; omitted (search startup PATH) | `KILN_AGENT_PI_BIN` (implemented) | `KILN_PI_BIN` (deprecated compatibility) | Must name a non-empty existing file when explicitly configured. The resolved executable is immutable for the process lifetime. |
+| `agent.pi_sessions_dir` | optional path string; omitted (`$HOME/.pi/agent/sessions`) | `KILN_AGENT_PI_SESSIONS_DIR` (implemented) | `KILN_PI_SESSIONS_DIR` (deprecated compatibility) | Must be a non-empty path when set. Relative paths and the HOME fallback are resolved once at startup. |
+
+Terminal and embedded-run access default to `loopback_only`. The host decision,
+the pi executable, session root, adapter-library URL, and teacher-logit cache
+root are resolved once during startup and published under `operational` in
+`GET /v1/config`. Request handlers use that immutable snapshot; changing TOML,
+`PATH`, `HOME`, or a compatibility environment alias requires a restart.
 
 ## Effective values and provenance
 

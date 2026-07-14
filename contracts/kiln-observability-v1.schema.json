@@ -501,6 +501,17 @@
           "default_thinking_budget_tokens": 0,
           "default_thinking_budget_ms": 0,
           "fold_reasoning_into_content": false
+        },
+        "operational": {
+          "bind_host": "value",
+          "terminal_access": "loopback_only",
+          "terminal_enabled": false,
+          "agent_runs_access": "loopback_only",
+          "agent_runs_enabled": false,
+          "pi_bin": "value",
+          "pi_sessions_dir": "value",
+          "adapter_library_url": "value",
+          "logit_cache_dir": "value"
         }
       }
     ],
@@ -2654,7 +2665,8 @@
         "kv_cache",
         "training",
         "memory_budget",
-        "generation"
+        "generation",
+        "operational"
       ],
       "properties": {
         "serving_profile": {
@@ -2729,6 +2741,9 @@
         },
         "generation": {
           "$ref": "#/$defs/GenerationConfig"
+        },
+        "operational": {
+          "$ref": "#/$defs/OperationalRuntimeConfig"
         }
       },
       "description": "Complete resolved configuration and live capacity response.",
@@ -4410,6 +4425,17 @@
       "x-kiln-rust-type": "LoadedAdapterDebugState",
       "x-kiln-field-schema-status": "complete"
     },
+    "LocalCapabilityAccess": {
+      "type": "string",
+      "enum": [
+        "loopback_only",
+        "enabled",
+        "disabled"
+      ],
+      "description": "The immutable access policy for an arbitrary-code-execution-grade local capability.",
+      "x-kiln-rust-type": "config::LocalCapabilityAccess",
+      "x-kiln-field-schema-status": "complete"
+    },
     "MaxDecodeBatchDiagnostics": {
       "type": "object",
       "additionalProperties": false,
@@ -4982,6 +5008,60 @@
       "minimum": 0,
       "description": "A finite non-negative Rust floating-point value.",
       "x-kiln-rust-type": "f32 | f64",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OperationalRuntimeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bind_host",
+        "terminal_access",
+        "terminal_enabled",
+        "agent_runs_access",
+        "agent_runs_enabled",
+        "pi_bin",
+        "pi_sessions_dir",
+        "adapter_library_url",
+        "logit_cache_dir"
+      ],
+      "properties": {
+        "bind_host": {
+          "$ref": "#/$defs/String"
+        },
+        "terminal_access": {
+          "$ref": "#/$defs/LocalCapabilityAccess"
+        },
+        "terminal_enabled": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "agent_runs_access": {
+          "$ref": "#/$defs/LocalCapabilityAccess"
+        },
+        "agent_runs_enabled": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "pi_bin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pi_sessions_dir": {
+          "$ref": "#/$defs/String"
+        },
+        "adapter_library_url": {
+          "$ref": "#/$defs/String"
+        },
+        "logit_cache_dir": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Startup-resolved operational paths and local-capability access policy retained by request handlers.",
+      "x-kiln-rust-type": "config::OperationalRuntimeConfig",
       "x-kiln-field-schema-status": "complete"
     },
     "PositiveInteger": {

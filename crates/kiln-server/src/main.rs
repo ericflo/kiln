@@ -545,7 +545,6 @@ async fn main() -> Result<()> {
     }
 
     let host = &config.server.host;
-    kiln_server::api::terminal::set_bind_host(host);
     let port = config.server.port;
     // Embedded agent runs configure the spawned pi against this URL.
     kiln_server::agent_runs::set_self_url(host, port);
@@ -904,6 +903,12 @@ async fn main() -> Result<()> {
         );
         state
     };
+
+    state.operational_runtime = Arc::new(
+        config
+            .resolve_operational_runtime(&state.adapter_dir)
+            .context("failed to resolve immutable operational runtime configuration")?,
+    );
 
     let decode_runtime = state.decode_runtime_config;
     tracing::info!(

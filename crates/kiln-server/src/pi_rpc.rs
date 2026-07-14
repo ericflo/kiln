@@ -13,26 +13,22 @@
 //! must NOT split records — `read_until(b'\n')` gets this right where
 //! generic line readers would not.
 
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 
-/// Locate the `pi` binary: `KILN_PI_BIN` wins (tests point this at a
-/// stub; operators at non-PATH installs), then a PATH scan.
-pub fn find_pi() -> Option<PathBuf> {
-    if let Ok(bin) = std::env::var("KILN_PI_BIN") {
-        if !bin.is_empty() {
-            let p = PathBuf::from(bin);
-            if p.is_file() {
-                return Some(p);
-            }
-        }
+/// Resolve the `pi` binary from typed configuration or a startup-owned PATH
+/// snapshot. Runtime request handling retains the result and never rereads the
+/// process environment.
+pub fn find_pi(configured: Option<&Path>, search_path: Option<&OsStr>) -> Option<PathBuf> {
+    if let Some(path) = configured {
+        return path.is_file().then(|| path.to_path_buf());
     }
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
+    for dir in std::env::split_paths(search_path?) {
         let candidate = dir.join("pi");
         if candidate.is_file() {
             return Some(candidate);
@@ -237,16 +233,11 @@ mod tests {
     }
 
     #[test]
-    fn find_pi_honors_env_override() {
-        let _env_guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+    fn find_pi_prefers_typed_config() {
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("pi");
         std::fs::write(&fake, "#!/bin/sh\n").unwrap();
-        unsafe { std::env::set_var("KILN_PI_BIN", &fake) };
-        let found = find_pi();
-        unsafe { std::env::remove_var("KILN_PI_BIN") };
+        let found = find_pi(Some(&fake), None);
         assert_eq!(found, Some(fake));
     }
 }

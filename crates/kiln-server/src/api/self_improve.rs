@@ -117,7 +117,11 @@ async fn judge_distill(
     // §10.6.1: the judge corpus is (turn, context) pairs from the user's
     // own indexed pi sessions. Static admission has passed, so resolution
     // cannot spend corpus work for a full queue or unsupported substrate.
-    let (pump_req, num_pairs) = build_judge_pump_request(&state.adapter_dir, &req)?;
+    let (pump_req, num_pairs) = build_judge_pump_request(
+        &state.adapter_dir,
+        &state.operational_runtime.pi_sessions_dir,
+        &req,
+    )?;
     let mut queued = QueuedJob::DistillPump(pump_req);
     let top_k_adjustment = super::training::normalize_queued_opd_top_k(&state, &mut queued)?;
 
@@ -247,7 +251,11 @@ pub fn submit_self_improve(
     // Resolve the week's tasks from the §10.3 trace index now. The admitted
     // prompt snapshot is what the worker consumes after dequeue; sessions
     // arriving later belong to the next round.
-    let (opd_phase, crisp_pump, num_tasks) = build_self_improve_jobs(&state.adapter_dir, &req)?;
+    let (opd_phase, crisp_pump, num_tasks) = build_self_improve_jobs(
+        &state.adapter_dir,
+        &state.operational_runtime.pi_sessions_dir,
+        &req,
+    )?;
     let mut opd_phase = QueuedJob::Opd(opd_phase);
     let opd_top_k_adjustment = super::training::normalize_queued_opd_top_k(state, &mut opd_phase)?;
     let mut crisp_pump = crisp_pump.map(QueuedJob::DistillPump);
@@ -375,9 +383,10 @@ async fn judge_drift_check(
 /// pump request and the corpus size.
 fn build_judge_pump_request(
     adapter_dir: &std::path::Path,
+    pi_sessions_dir: &std::path::Path,
     req: &JudgeDistillRequest,
 ) -> Result<(DistillPumpRequest, usize), ApiError> {
-    super::agent_traces::ensure_agent_trace_index(adapter_dir);
+    super::agent_traces::ensure_agent_trace_index(adapter_dir, pi_sessions_dir);
     let judge_prompts = crate::dataset_resolve::resolve_agent_trace_prompts(
         adapter_dir,
         "agent_traces:judge_turns",
@@ -406,13 +415,14 @@ fn build_judge_pump_request(
 #[allow(clippy::type_complexity)]
 fn build_self_improve_jobs(
     adapter_dir: &std::path::Path,
+    pi_sessions_dir: &std::path::Path,
     req: &SelfImproveRequest,
 ) -> Result<(OpdRequest, Option<DistillPumpRequest>, usize), ApiError> {
     let now_ms = crate::recent_requests::now_unix_ms() as i64;
     // Canonical onboarding: build the trace index from the default pi
     // sessions dir when it doesn't exist yet, instead of hard-failing
     // and demanding a manual POST /v1/agent/traces/discover.
-    super::agent_traces::ensure_agent_trace_index(adapter_dir);
+    super::agent_traces::ensure_agent_trace_index(adapter_dir, pi_sessions_dir);
     let weekly = crate::dataset_resolve::resolve_agent_trace_prompts(
         adapter_dir,
         "agent_traces:weekly",
@@ -673,7 +683,7 @@ mod tests {
         seeded_trace_index(dir.path());
         let req: JudgeDistillRequest = serde_json::from_str("{}").unwrap();
 
-        let (pump, num_pairs) = build_judge_pump_request(dir.path(), &req).unwrap();
+        let (pump, num_pairs) = build_judge_pump_request(dir.path(), dir.path(), &req).unwrap();
 
         assert_eq!(num_pairs, 2, "one judge prompt per assistant action");
         let DistillPumpMode::Examples { examples } = &pump.mode else {
@@ -690,21 +700,13 @@ mod tests {
 
     #[test]
     fn judge_pump_without_index_carries_discover_remediation() {
-        let _env_guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        // Point auto-discovery away from the developer's real ~/.pi
-        // sessions so the missing-index path actually exercises. Restored
-        // after the call; tests in this mod run on separate adapter dirs.
-        let prev = std::env::var("KILN_PI_SESSIONS_DIR").ok();
-        unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", "/nonexistent/pi/sessions") };
         let req: JudgeDistillRequest = serde_json::from_str("{}").unwrap();
-        let result = build_judge_pump_request(dir.path(), &req);
-        match prev {
-            Some(v) => unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", v) },
-            None => unsafe { std::env::remove_var("KILN_PI_SESSIONS_DIR") },
-        }
+        let result = build_judge_pump_request(
+            dir.path(),
+            std::path::Path::new("/nonexistent/pi/sessions"),
+            &req,
+        );
         let msg = format!("{:?}", result.unwrap_err());
         assert!(msg.contains("/v1/agent/traces/discover"), "{msg}");
     }
@@ -715,7 +717,8 @@ mod tests {
         seeded_trace_index(dir.path());
         let req: SelfImproveRequest = serde_json::from_str("{}").unwrap();
 
-        let (opd, crisp, num_tasks) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        let (opd, crisp, num_tasks) =
+            build_self_improve_jobs(dir.path(), dir.path(), &req).unwrap();
 
         assert_eq!(num_tasks, 1);
         assert_eq!(opd.dataset_path.as_deref(), Some("agent_traces:weekly"));
@@ -749,13 +752,13 @@ mod tests {
         let req: SelfImproveRequest = serde_json::from_str("{}").unwrap();
 
         // First cycle: no adapter dir → base model.
-        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), dir.path(), &req).unwrap();
         assert!(opd.config.base_adapter.is_none());
         assert!(crisp.unwrap().config.base_adapter.is_none());
 
         // Later cycles: the agent adapter exists → warm start.
         std::fs::create_dir(dir.path().join("pi-coder-current")).unwrap();
-        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), dir.path(), &req).unwrap();
         assert_eq!(opd.config.base_adapter.as_deref(), Some("pi-coder-current"));
         assert_eq!(
             crisp.unwrap().config.base_adapter.as_deref(),
@@ -768,7 +771,7 @@ mod tests {
         // base). Without this, the weekly scheduler retrained from base
         // and overwrote last week's product forever.
         std::fs::create_dir(dir.path().join("pi-coder-current-improve")).unwrap();
-        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), dir.path(), &req).unwrap();
         assert_eq!(
             opd.config.base_adapter.as_deref(),
             Some("pi-coder-current-improve")
@@ -781,7 +784,7 @@ mod tests {
         // Explicit base_adapter wins over the warm-start default.
         let req: SelfImproveRequest =
             serde_json::from_str(r#"{"config": {"base_adapter": "my-pinned-base"}}"#).unwrap();
-        let (opd, _, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        let (opd, _, _) = build_self_improve_jobs(dir.path(), dir.path(), &req).unwrap();
         assert_eq!(opd.config.base_adapter.as_deref(), Some("my-pinned-base"));
     }
 
@@ -795,7 +798,7 @@ mod tests {
             r#"{"post_eval": {"suite": "qwen3.5-agentic-core", "min_accuracy": 0.7}}"#,
         )
         .unwrap();
-        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), dir.path(), &req).unwrap();
         assert_eq!(
             opd.post_eval.as_ref().unwrap().suite,
             "qwen3.5-agentic-core"
@@ -812,7 +815,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seeded_trace_index(dir.path());
         let req: SelfImproveRequest = serde_json::from_str(r#"{"crisp": false}"#).unwrap();
-        let (_, crisp, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        let (_, crisp, _) = build_self_improve_jobs(dir.path(), dir.path(), &req).unwrap();
         assert!(crisp.is_none());
     }
 }

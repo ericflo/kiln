@@ -1224,110 +1224,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_AGENT_RUNS",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/api/agent_runs.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_AGENT_RUNS",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/api/agent_runs.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_LOGIT_CACHE_DIR",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/api/cache.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_LOGIT_CACHE_DIR",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/api/cache.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_ADAPTER_LIBRARY_URL",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/api/library.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_ADAPTER_LIBRARY_URL",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/api/library.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_PI_SESSIONS_DIR",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/api/self_improve.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_PI_SESSIONS_DIR",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/api/self_improve.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
       "argument": "& name",
       "argument_kind": "expression",
       "classification": "test_only",
@@ -2394,45 +2290,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_PI_BIN",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/pi_rpc.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_PI_BIN",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/pi_rpc.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_VK_FLCE_CHUNK_LEN",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/training_preflight.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
       "argument": "VAR",
       "argument_kind": "expression",
       "classification": "test_only",
@@ -2753,19 +2610,6 @@
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-vulkan-kernel/src/device.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_VK_FLCE_CHUNK_LEN",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-vulkan-kernel/tests/vk_flce_parity.rs",
       "phase": "runtime",
       "surface": "unit-test"
     },
@@ -8051,84 +7895,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_AGENT_RUNS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/agent_runs.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "HOME",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/agent_traces.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_PI_SESSIONS_DIR",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/agent_traces.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_LOGIT_CACHE_DIR",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/cache.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_LOGIT_CACHE_DIR",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/cache.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_BATCH_PREPARED_PROMPTS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/completions.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "name",
       "argument_kind": "expression",
       "classification": "experimental_debug",
@@ -8164,45 +7930,6 @@
       "operation": "read",
       "path": "crates/kiln-server/src/api/health.rs",
       "phase": "compile-time",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ADAPTER_LIBRARY_URL",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/library.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_PI_SESSIONS_DIR",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/self_improve.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_TERMINAL",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/terminal.rs",
-      "phase": "runtime",
       "surface": "source"
     },
     {
@@ -8401,6 +8128,32 @@
       "surface": "source"
     },
     {
+      "api": "var_os",
+      "argument": "HOME",
+      "argument_kind": "literal",
+      "classification": "public_stable",
+      "classification_basis": "central typed startup configuration boundary",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-server/src/config.rs",
+      "phase": "runtime",
+      "surface": "source"
+    },
+    {
+      "api": "var_os",
+      "argument": "PATH",
+      "argument_kind": "literal",
+      "classification": "public_stable",
+      "classification_basis": "central typed startup configuration boundary",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-server/src/config.rs",
+      "phase": "runtime",
+      "surface": "source"
+    },
+    {
       "api": "var",
       "argument": "KILN_EVAL_MODE",
       "argument_kind": "literal",
@@ -8571,32 +8324,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_PI_BIN",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/pi_rpc.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var_os",
-      "argument": "PATH",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/pi_rpc.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "policy . env",
       "argument_kind": "expression",
       "classification": "experimental_debug",
@@ -8633,19 +8360,6 @@
       "path": "crates/kiln-server/src/teacher_identity.rs",
       "phase": "compile-time",
       "surface": "unit-test"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_FLCE_CHUNK_LEN",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/training_preflight.rs",
-      "phase": "runtime",
-      "surface": "source"
     },
     {
       "api": "var",
@@ -10716,19 +10430,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_VK_FLCE_CHUNK_LEN",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/flce.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_VK_GDN_CHUNK_PREP_BWD_CPU",
       "argument_kind": "literal",
       "classification": "experimental_debug",
@@ -10962,27 +10663,27 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 546,
-    "literal_kiln_read_names": 374,
+    "literal_kiln_read_call_sites": 534,
+    "literal_kiln_read_names": 366,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 333,
+      "experimental_debug": 325,
       "public_stable": 1,
-      "test_only": 43
+      "test_only": 41
     },
-    "process_mutation_call_sites": 376,
+    "process_mutation_call_sites": 361,
     "process_mutation_call_sites_by_classification": {
       "build_time": 8,
-      "test_only": 368
+      "test_only": 353
     },
-    "process_mutation_entries": 217,
-    "read_call_sites": 921,
+    "process_mutation_entries": 205,
+    "read_call_sites": 909,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 444,
-      "public_stable": 7,
-      "test_only": 142
+      "experimental_debug": 432,
+      "public_stable": 9,
+      "test_only": 140
     },
-    "read_entries": 625
+    "read_entries": 614
   }
 }

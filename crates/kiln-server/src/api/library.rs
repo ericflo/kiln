@@ -6,10 +6,8 @@
 //! `adapter_dir`. Publish bundles the local adapter + receipt + any
 //! eval scores into a tarball POSTed to the registry.
 //!
-//! For milestone-10 the library backend is **configurable but
-//! optional**: set `KILN_ADAPTER_LIBRARY_URL` (default
-//! `https://library.kiln.run`) for the real backend. When the var is
-//! unset or points at a local-only URL, the endpoints surface a
+//! The library backend is configured once as `adapters.library_url`. Until the
+//! operational backend ships, the endpoints surface a
 //! sensible "not configured" message rather than failing hard. This
 //! keeps the §4 endpoint contract real without forcing a managed
 //! S3/CDN dependency for unit tests.
@@ -21,8 +19,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
-
-const DEFAULT_LIBRARY_URL: &str = "https://library.kiln.run";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LibraryAdapterEntry {
@@ -52,12 +48,8 @@ struct LibraryListResponse {
     note: Option<String>,
 }
 
-fn library_url() -> String {
-    std::env::var("KILN_ADAPTER_LIBRARY_URL").unwrap_or_else(|_| DEFAULT_LIBRARY_URL.to_string())
-}
-
-async fn list_library(State(_state): State<AppState>) -> Json<LibraryListResponse> {
-    let backend = library_url();
+async fn list_library(State(state): State<AppState>) -> Json<LibraryListResponse> {
+    let backend = state.operational_runtime.adapter_library_url.clone();
     // Real HTTP fetch lives behind a feature gate once the library
     // backend is operational; for now we return an empty list +
     // configured backend URL so the endpoint contract is honoured.
@@ -80,8 +72,7 @@ async fn install_from_library(
     // The fetch step proper lands when the library backend opens up;
     // we surface the failure path and the expected return shape now
     // so callers can wire the dashboard against a known contract.
-    let backend = library_url();
-    let _ = state;
+    let backend = state.operational_runtime.adapter_library_url.clone();
     Err(ApiError::training_invalid_request(format!(
         "library install for {id:?} not yet operational (backend = {backend}); \
          see grand plan §3.10 for the launch timeline"
@@ -129,7 +120,7 @@ async fn publish_to_library(
             ))
         })?;
 
-    let backend = library_url();
+    let backend = state.operational_runtime.adapter_library_url.clone();
     // Real publish wires once the backend is live. We surface the
     // pieces the dashboard / CLI expect: backend URL, receipt
     // digest, intended id format. Caller can use this to decide
@@ -152,43 +143,4 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/library", get(list_library))
         .route("/v1/library/install/{id}", post(install_from_library))
         .route("/v1/library/publish/{name}", post(publish_to_library))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Serialize tests in this module that mutate the
-    /// `KILN_ADAPTER_LIBRARY_URL` process-env so they don't race:
-    /// cargo's test harness runs `#[test]`s in parallel by default,
-    /// and a `set_var` from one test will leak into another's
-    /// `library_url()` read otherwise. CI run 26347552033 failed on
-    /// 39555704 with `default_library_url_when_env_unset` seeing
-    /// `https://custom.example/` (the override test's value).
-    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    #[test]
-    fn default_library_url_when_env_unset() {
-        let _g = env_test_lock();
-        unsafe {
-            std::env::remove_var("KILN_ADAPTER_LIBRARY_URL");
-        }
-        assert_eq!(library_url(), DEFAULT_LIBRARY_URL);
-    }
-
-    #[test]
-    fn env_var_override_takes_precedence() {
-        let _g = env_test_lock();
-        unsafe {
-            std::env::set_var("KILN_ADAPTER_LIBRARY_URL", "https://custom.example/");
-        }
-        assert_eq!(library_url(), "https://custom.example/");
-        unsafe {
-            std::env::remove_var("KILN_ADAPTER_LIBRARY_URL");
-        }
-    }
 }

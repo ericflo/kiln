@@ -15,15 +15,14 @@
 //!
 //! Security gate: an interactive agent terminal is arbitrary-code-execution
 //! grade, so it is enabled only when the server is bound to a loopback
-//! address (the default), or when the operator explicitly opts in with
-//! `KILN_TERMINAL=1`. `KILN_TERMINAL=0` force-disables it everywhere.
+//! address (the default), or when the operator sets
+//! `server.terminal_access = "enabled"`. `"disabled"` closes it everywhere.
 //! Before each session the server runs the same non-destructive config merge
 //! as `kiln pi-setup`, pointed at this server's own URL, so the embedded pi
 //! is the user's pi — already connected.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
@@ -38,51 +37,33 @@ use serde::Serialize;
 
 use crate::state::AppState;
 
-static BIND_HOST: OnceLock<String> = OnceLock::new();
 /// One interactive session at a time — a second tab gets a clean refusal
 /// instead of two keyboards fighting over one PTY.
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Record the host the server bound to (from main) so the gate can tell
-/// loopback from network exposure.
-pub fn set_bind_host(host: &str) {
-    let _ = BIND_HOST.set(host.to_string());
-}
-
-pub(crate) fn bind_host_is_loopback() -> bool {
-    let host = BIND_HOST.get().map(String::as_str).unwrap_or("127.0.0.1");
-    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
-}
-
 /// (enabled, human-readable reason when disabled)
-fn terminal_gate() -> (bool, Option<String>) {
-    match std::env::var("KILN_TERMINAL").as_deref() {
-        Ok("0") => {
-            return (
-                false,
-                Some("disabled by KILN_TERMINAL=0 on the server".into()),
-            );
-        }
-        Ok("1") => return (true, None),
-        _ => {}
+fn terminal_gate(state: &AppState) -> (bool, Option<String>) {
+    use crate::config::LocalCapabilityAccess;
+
+    let runtime = state.operational_runtime.as_ref();
+    if runtime.terminal_enabled {
+        return (true, None);
     }
-    if bind_host_is_loopback() {
-        (true, None)
-    } else {
-        (
+    match runtime.terminal_access {
+        LocalCapabilityAccess::Disabled => (
+            false,
+            Some("disabled by server.terminal_access on the server".into()),
+        ),
+        LocalCapabilityAccess::LoopbackOnly => (
             false,
             Some(format!(
                 "the server is bound to {} (not loopback) — an interactive terminal would be \
-                 network-exposed. Set KILN_TERMINAL=1 to enable it anyway.",
-                BIND_HOST.get().map(String::as_str).unwrap_or("?")
+                 network-exposed. Set server.terminal_access=\"enabled\" to opt in.",
+                runtime.bind_host
             )),
-        )
+        ),
+        LocalCapabilityAccess::Enabled => (false, Some("terminal gate is inconsistent".into())),
     }
-}
-
-/// Locate `pi` — shared with the embedded-run engine (honors KILN_PI_BIN).
-fn find_pi() -> Option<PathBuf> {
-    crate::pi_rpc::find_pi()
 }
 
 #[derive(Debug, Serialize)]
@@ -95,9 +76,11 @@ struct TerminalStatusResponse {
     session_active: bool,
 }
 
-async fn terminal_status() -> Json<TerminalStatusResponse> {
-    let (enabled, reason) = terminal_gate();
-    let pi = find_pi();
+async fn terminal_status(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Json<TerminalStatusResponse> {
+    let (enabled, reason) = terminal_gate(&state);
+    let pi = state.operational_runtime.pi_bin.clone();
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "?".into());
@@ -131,7 +114,7 @@ async fn terminal_ws(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let (enabled, reason) = terminal_gate();
+    let (enabled, reason) = terminal_gate(&state);
     if !enabled {
         return (
             axum::http::StatusCode::FORBIDDEN,
@@ -141,11 +124,17 @@ async fn terminal_ws(
     }
     let kiln_url = kiln_url_from_headers(&headers);
     let served_model_id = state.served_model_id.clone();
-    ws.on_upgrade(move |socket| handle_session(socket, kiln_url, served_model_id))
+    let pi_path = state.operational_runtime.pi_bin.clone();
+    ws.on_upgrade(move |socket| handle_session(socket, kiln_url, served_model_id, pi_path))
         .into_response()
 }
 
-async fn handle_session(mut socket: WebSocket, kiln_url: String, served_model_id: String) {
+async fn handle_session(
+    mut socket: WebSocket,
+    kiln_url: String,
+    served_model_id: String,
+    pi_path: Option<PathBuf>,
+) {
     // Single-session guard.
     if SESSION_ACTIVE.swap(true, Ordering::SeqCst) {
         let _ = socket
@@ -167,10 +156,10 @@ async fn handle_session(mut socket: WebSocket, kiln_url: String, served_model_id
     }
     let _release = Release;
 
-    let Some(pi_path) = find_pi() else {
+    let Some(pi_path) = pi_path else {
         let _ = socket
             .send(Message::Text(
-                serde_json::json!({"type":"error","message":"`pi` is not installed on the server's PATH"})
+                serde_json::json!({"type":"error","message":"`pi` was not resolved from agent.pi_bin or the startup PATH"})
                     .to_string()
                     .into(),
             ))

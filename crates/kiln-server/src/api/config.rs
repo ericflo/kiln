@@ -2,7 +2,7 @@ use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
 use crate::config::{
-    BatchingRuntimeConfig, ConfigValueSource, DecodeRuntimeConfig,
+    BatchingRuntimeConfig, ConfigValueSource, DecodeRuntimeConfig, OperationalRuntimeConfig,
     ResolvedAcceleratorRuntimePolicy, ServingProfileDiagnostics, SpecMethod,
     StreamingPrefillRuntimeConfig,
 };
@@ -34,6 +34,7 @@ struct ConfigResponse {
     batching: BatchingConfigResponse,
     streaming_prefill: StreamingPrefillRuntimeConfig,
     speculative: SpeculativeConfig,
+    operational: OperationalRuntimeConfig,
     vram: VramConfig,
     kv_cache: KvCacheConfig,
     training: TrainingConfig,
@@ -357,6 +358,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         },
         streaming_prefill: state.streaming_prefill_runtime_config,
         speculative: build_speculative_config(&state),
+        operational: state.operational_runtime.as_ref().clone(),
         vram: build_vram_config(&state, memory_observation),
         kv_cache: KvCacheConfig {
             num_blocks,

@@ -2455,6 +2455,9 @@ pub struct AppState {
     pub speculative_config: crate::config::SpeculativeDecodingConfig,
     /// Immutable backend capability snapshot used by diagnostics.
     pub speculative_runtime_policy: SpeculativeRuntimePolicy,
+    /// Immutable operational policy consumed by request handlers without
+    /// rereading process environment.
+    pub operational_runtime: Arc<crate::config::OperationalRuntimeConfig>,
     pub model_config: ModelConfig,
     /// Configured model directory path for real inference mode. `None` in mock mode.
     pub model_path: Option<PathBuf>,
@@ -3285,6 +3288,7 @@ impl AppState {
                 .resolved_policy(crate::config::ServingProfileSetting::default()),
             speculative_config,
             speculative_runtime_policy: SpeculativeRuntimePolicy::default(),
+            operational_runtime: Arc::new(crate::config::OperationalRuntimeConfig::default()),
             model_config,
             model_path: None,
             base_teacher_identity: None,
@@ -4421,6 +4425,7 @@ impl AppState {
                 .resolved_policy(serving_profile),
             speculative_config,
             speculative_runtime_policy,
+            operational_runtime: Arc::new(crate::config::OperationalRuntimeConfig::default()),
             model_config,
             model_path: None,
             base_teacher_identity,

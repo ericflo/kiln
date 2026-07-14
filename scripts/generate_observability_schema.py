@@ -142,6 +142,12 @@ def build_definitions() -> None:
         "Operator intent for production batching-actor ownership.",
     )
     add_enum(
+        "LocalCapabilityAccess",
+        "config::LocalCapabilityAccess",
+        ["loopback_only", "enabled", "disabled"],
+        "The immutable access policy for an arbitrary-code-execution-grade local capability.",
+    )
+    add_enum(
         "BatchingEffectiveSource",
         "BatchingEffectiveSource",
         ["default", "backend_policy", "config_file", "environment", "effective_decode_width"],
@@ -1172,6 +1178,17 @@ def build_definitions() -> None:
         "serving_unavailable_reason": ref("String"), "draft_token_ceiling": ref("NonNegativeInteger"),
         "backend_mtp": ref("SpeculativeBackendMtpConfig"),
     }, "Configured, effective, and currently routable speculative-decoding state.")
+    add_object("OperationalRuntimeConfig", "config::OperationalRuntimeConfig", {
+        "bind_host": ref("String"),
+        "terminal_access": ref("LocalCapabilityAccess"),
+        "terminal_enabled": ref("Boolean"),
+        "agent_runs_access": ref("LocalCapabilityAccess"),
+        "agent_runs_enabled": ref("Boolean"),
+        "pi_bin": nullable(ref("String")),
+        "pi_sessions_dir": ref("String"),
+        "adapter_library_url": ref("String"),
+        "logit_cache_dir": ref("String"),
+    }, "Startup-resolved operational paths and local-capability access policy retained by request handlers.")
     add_object("ConfigResponse", "ConfigResponse", {
         "serving_profile": ref("ServingProfileDiagnostics"),
         "accelerator_runtime": ref("ResolvedAcceleratorRuntimePolicy"),
@@ -1183,7 +1200,7 @@ def build_definitions() -> None:
         "streaming_prefill": ref("StreamingPrefillRuntimeConfig"), "speculative": ref("SpeculativeConfig"),
         "vram": ref("VramConfig"), "kv_cache": ref("KvCacheConfig"),
         "training": ref("TrainingConfigResponse"), "memory_budget": ref("MemoryBudgetConfig"),
-        "generation": ref("GenerationConfig"),
+        "generation": ref("GenerationConfig"), "operational": ref("OperationalRuntimeConfig"),
     }, "Complete resolved configuration and live capacity response.")
 
     add_object("LoadedAdapterDebugState", "LoadedAdapterDebugState", {

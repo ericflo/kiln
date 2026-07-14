@@ -117,6 +117,21 @@
           "x-kiln-environment": "KILN_REQUEST_TIMEOUT_SECS (deprecated compatibility)",
           "x-kiln-validation": "Must be greater than zero. Bounds a request, including model work and cleanup settlement."
         },
+        "terminal_access": {
+          "type": "string",
+          "enum": [
+            "loopback_only",
+            "enabled",
+            "disabled"
+          ],
+          "default": "loopback_only",
+          "description": "Process-lifetime access policy for the embedded interactive terminal. loopback_only enables it only for localhost or a loopback IP bind; enabled explicitly permits network binds; disabled closes it everywhere.",
+          "x-kiln-path": "server.terminal_access",
+          "x-kiln-type-and-default": "string enum; \"loopback_only\"",
+          "x-kiln-canonical-env": "KILN_SERVER_TERMINAL_ACCESS (implemented)",
+          "x-kiln-environment": "KILN_TERMINAL (deprecated compatibility; boolean spellings map to enabled/disabled)",
+          "x-kiln-validation": "loopback_only, enabled, or disabled. Compatibility boolean spellings are accepted from the environment. This capability can execute arbitrary code; changing it requires restart."
+        },
         "http_send_buffer_bytes": {
           "type": "integer",
           "minimum": 1024,
@@ -781,6 +796,16 @@
           "x-kiln-environment": "KILN_TRAINING_WEBHOOK_URL",
           "x-kiln-validation": "Must be a non-empty valid HTTP(S) URL. An exactly empty environment value clears a TOML URL; whitespace is not a clearing value and fails validation. Delivery is fire-and-forget with a five-second timeout after terminal state is recorded."
         },
+        "logit_cache_dir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional teacher-logit cache root. Relative paths are resolved once against the startup working directory. Omission places logit-cache beside the effective adapter directory.",
+          "x-kiln-path": "training.logit_cache_dir",
+          "x-kiln-type-and-default": "optional path string; omitted (beside the effective adapter directory)",
+          "x-kiln-canonical-env": "KILN_TRAINING_LOGIT_CACHE_DIR (implemented)",
+          "x-kiln-environment": "KILN_LOGIT_CACHE_DIR (deprecated compatibility)",
+          "x-kiln-validation": "Must be a non-empty path when set. Resolved once at startup; request handlers never reread the environment."
+        },
         "max_queued_jobs": {
           "type": "integer",
           "minimum": 1,
@@ -1081,6 +1106,19 @@
       "description": "Finalized adapter and composed-cache disk limits.",
       "additionalProperties": false,
       "properties": {
+        "library_url": {
+          "type": "string",
+          "minLength": 1,
+          "format": "uri",
+          "pattern": "^https?://",
+          "default": "https://library.kiln.run",
+          "description": "HTTP(S) adapter-library endpoint returned by the library API. The endpoint remains contract-only until the remote library backend launches.",
+          "x-kiln-path": "adapters.library_url",
+          "x-kiln-type-and-default": "string URL; \"https://library.kiln.run\"",
+          "x-kiln-canonical-env": "KILN_ADAPTERS_LIBRARY_URL (implemented)",
+          "x-kiln-environment": "KILN_ADAPTER_LIBRARY_URL (deprecated compatibility)",
+          "x-kiln-validation": "Must be a non-empty valid HTTP(S) URL. Resolved once at startup."
+        },
         "max_disk_bytes": {
           "type": "integer",
           "minimum": 0,
@@ -1248,7 +1286,7 @@
     },
     "agent": {
       "type": "object",
-      "description": "Self-improvement schedule and embedded agent-run limits.",
+      "description": "Self-improvement schedule, embedded agent-run limits, and immutable pi runtime policy.",
       "additionalProperties": false,
       "properties": {
         "self_improve_interval_hours": {
@@ -1257,8 +1295,8 @@
           "description": "Omission disables scheduling. 0 is accepted and also results in no scheduler. The first run occurs one full interval after startup; cadence is persisted under the adapter directory.",
           "x-kiln-path": "agent.self_improve_interval_hours",
           "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
-          "x-kiln-canonical-env": "KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS (target only; not implemented)",
-          "x-kiln-environment": "none",
+          "x-kiln-canonical-env": "KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS (implemented)",
+          "x-kiln-environment": "KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS",
           "x-kiln-validation": "Omission disables scheduling. 0 is accepted and also results in no scheduler. The first run occurs one full interval after startup; cadence is persisted under the adapter directory."
         },
         "self_improve": {
@@ -1278,8 +1316,8 @@
           "description": "Must be greater than zero. Embedded pi runs above the limit queue FIFO.",
           "x-kiln-path": "agent.max_concurrent_runs",
           "x-kiln-type-and-default": "unsigned integer; 2",
-          "x-kiln-canonical-env": "KILN_AGENT_MAX_CONCURRENT_RUNS (target only; not implemented)",
-          "x-kiln-environment": "none",
+          "x-kiln-canonical-env": "KILN_AGENT_MAX_CONCURRENT_RUNS (implemented)",
+          "x-kiln-environment": "KILN_AGENT_MAX_CONCURRENT_RUNS",
           "x-kiln-validation": "Must be greater than zero. Embedded pi runs above the limit queue FIFO."
         },
         "run_timeout_secs": {
@@ -1289,9 +1327,44 @@
           "description": "Must be at least 10. A per-run timeout can override the server default.",
           "x-kiln-path": "agent.run_timeout_secs",
           "x-kiln-type-and-default": "unsigned integer; 900",
-          "x-kiln-canonical-env": "KILN_AGENT_RUN_TIMEOUT_SECS (target only; not implemented)",
-          "x-kiln-environment": "none",
+          "x-kiln-canonical-env": "KILN_AGENT_RUN_TIMEOUT_SECS (implemented)",
+          "x-kiln-environment": "KILN_AGENT_RUN_TIMEOUT_SECS",
           "x-kiln-validation": "Must be at least 10. A per-run timeout can override the server default."
+        },
+        "runs_access": {
+          "type": "string",
+          "enum": [
+            "loopback_only",
+            "enabled",
+            "disabled"
+          ],
+          "default": "loopback_only",
+          "description": "Process-lifetime access policy for embedded pi runs and their prompt, event, steering, and abort APIs. loopback_only enables them only for localhost or a loopback IP bind.",
+          "x-kiln-path": "agent.runs_access",
+          "x-kiln-type-and-default": "string enum; \"loopback_only\"",
+          "x-kiln-canonical-env": "KILN_AGENT_RUNS_ACCESS (implemented)",
+          "x-kiln-environment": "KILN_AGENT_RUNS (deprecated compatibility; boolean spellings map to enabled/disabled)",
+          "x-kiln-validation": "loopback_only, enabled, or disabled. Compatibility boolean spellings are accepted from the environment. Embedded runs can execute arbitrary code; changing this requires restart."
+        },
+        "pi_bin": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional explicit pi executable. Omission searches the startup PATH once. Relative paths are resolved against the startup working directory.",
+          "x-kiln-path": "agent.pi_bin",
+          "x-kiln-type-and-default": "optional path string; omitted (search startup PATH)",
+          "x-kiln-canonical-env": "KILN_AGENT_PI_BIN (implemented)",
+          "x-kiln-environment": "KILN_PI_BIN (deprecated compatibility)",
+          "x-kiln-validation": "Must name a non-empty existing file when explicitly configured. The resolved executable is immutable for the process lifetime."
+        },
+        "pi_sessions_dir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional external pi session root used for trace discovery. Omission resolves $HOME/.pi/agent/sessions once at startup, with /tmp/pi/agent/sessions as the no-HOME fallback.",
+          "x-kiln-path": "agent.pi_sessions_dir",
+          "x-kiln-type-and-default": "optional path string; omitted ($HOME/.pi/agent/sessions)",
+          "x-kiln-canonical-env": "KILN_AGENT_PI_SESSIONS_DIR (implemented)",
+          "x-kiln-environment": "KILN_PI_SESSIONS_DIR (deprecated compatibility)",
+          "x-kiln-validation": "Must be a non-empty path when set. Relative paths and the HOME fallback are resolved once at startup."
         }
       },
       "default": {}
@@ -1471,11 +1544,11 @@
       }
     }
   ],
-  "x-kiln-field-count": 92,
+  "x-kiln-field-count": 98,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 84,
-  "x-kiln-config-file-only-count": 8,
-  "x-kiln-compatibility-field-count": 60,
-  "x-kiln-compatibility-alias-count": 63,
+  "x-kiln-canonical-environment-count": 93,
+  "x-kiln-config-file-only-count": 5,
+  "x-kiln-compatibility-field-count": 66,
+  "x-kiln-compatibility-alias-count": 69,
   "x-kiln-toml-compatibility-field-count": 1
 }

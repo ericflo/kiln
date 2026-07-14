@@ -37,6 +37,10 @@ host = "127.0.0.1"                    # Kiln has no built-in auth. Set "0.0.0.0"
                                       # Tailscale) — see README "Security model".
 port = 8420
 request_timeout_secs = 600
+terminal_access = "loopback_only"        # loopback_only | enabled | disabled. The embedded terminal
+                                        # can execute arbitrary code. Network binds remain closed
+                                        # unless enabled explicitly; disabled closes loopback too.
+                                        # KILN_SERVER_TERMINAL_ACCESS overrides this strictly.
 shutdown_timeout_secs = 5
 chat_performance_metadata = false       # Include per-request timing metadata in chat responses.
 chat_config_hash_metadata = false       # Include effective config hashes in chat responses.
@@ -269,6 +273,9 @@ checkpoint_boundary_cache_gb = 6.0   # GiB target for automatic sparse anchors. 
                                      # checkpoint identity, APIs, and the dashboard share the
                                      # immutable result. Changing one requires a server restart.
 # checkpoint_interval = 50           # Save adapter every N training steps
+# logit_cache_dir = "/fast/kiln/logit-cache" # Optional teacher-logit cache root. Omission places
+                                            # logit-cache beside the effective adapter directory.
+                                            # Relative paths resolve once at startup.
 max_queued_jobs = 32                  # Admission bound for queued/running training jobs.
 max_tracked_jobs = 1024               # In-memory bound including terminal job records.
 tracked_job_ttl_secs = 604800         # Retain terminal records for seven days.
@@ -344,9 +351,13 @@ max_tracked_jobs = 1024               # In-memory bound including terminal eval 
 # self_improve_interval_hours = 168
 # # Embedded pi runs (POST /v1/agent/runs): the server drives pi itself,
 # # streams the trajectory live, and auto-indexes finished sessions into
-# # the agent-trace layer. Network-bound serving requires the security model
-# # documented in README.md; arbitrary runtime environment flags are not
-# # part of this typed configuration contract.
+# # the agent-trace layer. runs_access is loopback_only | enabled | disabled;
+# # network-bound serving must opt in because runs can execute arbitrary code.
+# runs_access = "loopback_only"
+# # Omit pi_bin to resolve `pi` from PATH once at startup. Omit pi_sessions_dir
+# # to resolve $HOME/.pi/agent/sessions once, with a /tmp fallback if HOME is absent.
+# pi_bin = "/usr/local/bin/pi"
+# pi_sessions_dir = "/var/lib/pi/agent/sessions"
 # max_concurrent_runs = 2       # runs executing at once (FIFO queue)
 # run_timeout_secs = 900        # wall-clock cap per run (abort + index partial)
 # # Optional request overrides (same shape as POST /v1/agent/self_improve).
@@ -380,6 +391,8 @@ compress = true                       # Gzip rotated files
 max_capture_bytes = 4194304           # Per-body cap stored in a row (wire is never truncated)
 
 [adapters]
+library_url = "https://library.kiln.run" # HTTP(S) endpoint published by the adapter-library API.
+                                         # Override with KILN_ADAPTERS_LIBRARY_URL.
 max_disk_bytes = 107374182400         # 100 GiB cap on total finalized adapter_dir size.
                                       # Rejects POST /v1/adapters/upload with HTTP 507
                                       # `adapter_disk_quota_exceeded` when the sum of

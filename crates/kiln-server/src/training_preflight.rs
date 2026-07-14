@@ -333,8 +333,7 @@ pub fn checkpoint_boundary_anchor_count(num_segments: usize, anchor_stride: usiz
 ///   grad-hidden accumulator `[num_active, hidden]` (F32, lives across the
 ///       whole vocab loop).
 ///
-/// Uses the same shape-aware default as the runtime path so long-context
-/// GRPO does not require the operator to tune `KILN_VK_FLCE_CHUNK_LEN`.
+/// Uses the same shape-aware policy as the runtime path.
 fn flce_chunk_intermediate_bytes(cfg: &ModelConfig, max_seq_len: usize) -> u64 {
     let h = usize_to_u64_saturating(cfg.hidden_size);
     let t = usize_to_u64_saturating(max_seq_len);
@@ -353,11 +352,6 @@ fn flce_chunk_intermediate_bytes(cfg: &ModelConfig, max_seq_len: usize) -> u64 {
 }
 
 fn active_flce_chunk_len(cfg: &ModelConfig, max_active_tokens: usize) -> usize {
-    let forced = std::env::var("KILN_VK_FLCE_CHUNK_LEN")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&v| v > 0);
-
     let active = usize_to_u64_saturating(max_active_tokens.max(1));
     let hidden = usize_to_u64_saturating(cfg.hidden_size.max(1));
     let bytes_per_vocab_col = 4u64.saturating_mul(active.saturating_add(hidden.saturating_mul(2)));
@@ -374,7 +368,7 @@ fn active_flce_chunk_len(cfg: &ModelConfig, max_active_tokens: usize) -> usize {
         1usize << (usize::BITS - 1 - raw.leading_zeros())
     };
     let safe = rounded.max(1).min(cfg.vocab_size.max(1));
-    forced.map(|v| v.clamp(1, safe)).unwrap_or(safe)
+    safe
 }
 
 fn sft_loss_workspace_bytes(cfg: &ModelConfig, max_seq_len: usize, sft: SftEstimateOptions) -> u64 {
@@ -1304,7 +1298,6 @@ pub fn format_oom_message_with_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TEST_ENV_LOCK as ENV_LOCK;
     use kiln_core::config::ModelConfig;
     use kiln_memory::vram::{GpuVramInfo, VramSource};
 
@@ -1906,11 +1899,6 @@ mod tests {
 
     #[test]
     fn flce_chunk_len_shrinks_for_long_context_without_env_tuning() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("KILN_VK_FLCE_CHUNK_LEN");
-        }
-
         let cfg = qwen_4b();
         let short = active_flce_chunk_len(&cfg, 512);
         let long = active_flce_chunk_len(&cfg, 65_536);

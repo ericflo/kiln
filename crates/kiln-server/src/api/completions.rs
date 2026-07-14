@@ -9712,18 +9712,6 @@ fn batch_prompt_groups(prompts: &[Vec<Message>]) -> Vec<BatchPromptGroup> {
     groups
 }
 
-fn batch_prepared_prompts_disabled() -> bool {
-    matches!(
-        std::env::var("KILN_DISABLE_BATCH_PREPARED_PROMPTS")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
-
 #[cfg(test)]
 fn deterministic_batch_cache_key(
     req: &BatchCompletionRequest,
@@ -10752,7 +10740,7 @@ async fn batch_completions_inner(
         && batch_can_clone_identical_prompt_groups(&req);
     let prompt_count = req.prompts.len();
     let prompt_groups = batch_prompt_groups(&req.prompts);
-    let prepare_prompt_groups = !batch_prepared_prompts_disabled() && !clone_greedy_completions;
+    let prepare_prompt_groups = !clone_greedy_completions;
     let mut handles = Vec::with_capacity(prompt_groups.len());
     for prompt_group in prompt_groups {
         let state_clone = state.clone();

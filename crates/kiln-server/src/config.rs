@@ -27,6 +27,8 @@ pub const DEFAULT_SERVER_CLIENT_HOST: &str = "localhost";
 /// Shared default listen/client port. Keep this aligned with
 /// `contracts/runtime-defaults-v1.json` and the desktop conformance checks.
 pub const DEFAULT_SERVER_PORT: u16 = 8420;
+/// Adapter-library endpoint advertised by the contract-only library API.
+pub const DEFAULT_ADAPTER_LIBRARY_URL: &str = "https://library.kiln.run";
 
 /// Default base URL used by local HTTP clients.
 pub fn default_server_url() -> String {
@@ -2336,6 +2338,16 @@ pub struct AgentConfig {
     /// overrides this.
     #[serde(default = "default_run_timeout_secs")]
     pub run_timeout_secs: u64,
+    /// Access policy for arbitrary-code-execution-grade embedded runs.
+    #[serde(default)]
+    pub runs_access: LocalCapabilityAccess,
+    /// Explicit `pi` executable. Omit to resolve `pi` from the startup PATH.
+    #[serde(default)]
+    pub pi_bin: Option<PathBuf>,
+    /// External pi session directory used for trace discovery. Omit to use
+    /// `$HOME/.pi/agent/sessions`, resolved once during startup.
+    #[serde(default)]
+    pub pi_sessions_dir: Option<PathBuf>,
 }
 
 impl Default for AgentConfig {
@@ -2345,6 +2357,84 @@ impl Default for AgentConfig {
             self_improve: None,
             max_concurrent_runs: default_max_concurrent_runs(),
             run_timeout_secs: default_run_timeout_secs(),
+            runs_access: LocalCapabilityAccess::default(),
+            pi_bin: None,
+            pi_sessions_dir: None,
+        }
+    }
+}
+
+/// Access policy for local capabilities that can execute arbitrary code.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalCapabilityAccess {
+    /// Enable only when the immutable listen host is loopback.
+    #[default]
+    LoopbackOnly,
+    /// Enable even on a network bind.
+    Enabled,
+    /// Disable even on loopback.
+    Disabled,
+}
+
+impl LocalCapabilityAccess {
+    pub fn parse(name: &str, raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "loopback_only" | "auto" => Ok(Self::LoopbackOnly),
+            "enabled" | "true" | "1" | "yes" | "on" => Ok(Self::Enabled),
+            "disabled" | "false" | "0" | "no" | "off" => Ok(Self::Disabled),
+            _ => anyhow::bail!("{name} must be loopback_only, enabled, or disabled, got {raw:?}"),
+        }
+    }
+
+    pub fn enabled_for_host(self, host: &str) -> bool {
+        match self {
+            Self::LoopbackOnly => host_is_loopback(host),
+            Self::Enabled => true,
+            Self::Disabled => false,
+        }
+    }
+}
+
+pub fn host_is_loopback(host: &str) -> bool {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
+}
+
+/// Immutable operational policy resolved once after the adapter root is known.
+#[derive(Debug, Clone, Serialize)]
+pub struct OperationalRuntimeConfig {
+    pub bind_host: String,
+    pub terminal_access: LocalCapabilityAccess,
+    pub terminal_enabled: bool,
+    pub agent_runs_access: LocalCapabilityAccess,
+    pub agent_runs_enabled: bool,
+    pub pi_bin: Option<PathBuf>,
+    pub pi_sessions_dir: PathBuf,
+    pub adapter_library_url: String,
+    pub logit_cache_dir: PathBuf,
+}
+
+impl Default for OperationalRuntimeConfig {
+    fn default() -> Self {
+        let bind_host = DEFAULT_SERVER_HOST.to_owned();
+        let terminal_access = LocalCapabilityAccess::default();
+        let agent_runs_access = LocalCapabilityAccess::default();
+        Self {
+            terminal_enabled: terminal_access.enabled_for_host(&bind_host),
+            agent_runs_enabled: agent_runs_access.enabled_for_host(&bind_host),
+            bind_host,
+            terminal_access,
+            agent_runs_access,
+            pi_bin: None,
+            pi_sessions_dir: PathBuf::from("/tmp/pi/agent/sessions"),
+            adapter_library_url: DEFAULT_ADAPTER_LIBRARY_URL.to_owned(),
+            logit_cache_dir: PathBuf::from("logit-cache"),
         }
     }
 }
@@ -2404,6 +2494,8 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub request_timeout_secs: u64,
+    /// Access policy for the embedded interactive terminal.
+    pub terminal_access: LocalCapabilityAccess,
     /// Optional `SO_SNDBUF` request applied to every accepted HTTP socket.
     /// Operating systems may round or account for bookkeeping differently;
     /// Kiln preflights the listener, normalizes platform accounting, and
@@ -2988,6 +3080,9 @@ pub struct TrainingConfig {
     /// Override via `KILN_TRAINING_WEBHOOK_URL`. To clear a TOML-set
     /// URL via env, set the variable to the empty string.
     pub webhook_url: Option<String>,
+    /// Root for immutable teacher-logit cache entries. Omit to place it next
+    /// to the adapter directory.
+    pub logit_cache_dir: Option<PathBuf>,
     /// Maximum number of training jobs that may sit in the queue at once.
     /// Submissions to `/v1/train/sft` and `/v1/train/grpo` while the queue
     /// is at this cap return HTTP 503 with a `Retry-After: 30` header
@@ -3965,6 +4060,9 @@ impl<'de> Deserialize<'de> for StreamingPrefillConfig {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdaptersConfig {
+    /// Adapter-library service URL. The current API publishes this resolved
+    /// endpoint but remains contract-only until the library backend launches.
+    pub library_url: String,
     /// Maximum total size in bytes for `adapter_dir/` (excluding the
     /// `.upload-tmp-*/` staging dirs and the `.composed/<hash>/` cache —
     /// those are bounded by separate limits). Uploads to
@@ -4088,6 +4186,17 @@ impl NormalizedEnvValue for String {
 impl NormalizedEnvValue for PathBuf {
     fn normalized_env_value(&self) -> String {
         self.as_os_str().to_string_lossy().into_owned()
+    }
+}
+
+impl NormalizedEnvValue for LocalCapabilityAccess {
+    fn normalized_env_value(&self) -> String {
+        match self {
+            Self::LoopbackOnly => "loopback_only",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+        .to_owned()
     }
 }
 
@@ -4315,6 +4424,17 @@ fn parse_public_request_log_dir(name: &str, raw: &str) -> Result<Option<PathBuf>
     Ok(Some(PathBuf::from(raw)))
 }
 
+fn parse_public_optional_path(name: &str, raw: &str) -> Result<Option<PathBuf>> {
+    if raw.trim().is_empty() {
+        anyhow::bail!("{name} must be a non-empty path, got {raw:?}");
+    }
+    Ok(Some(PathBuf::from(raw)))
+}
+
+fn parse_public_local_capability_access(name: &str, raw: &str) -> Result<LocalCapabilityAccess> {
+    LocalCapabilityAccess::parse(name, raw)
+}
+
 fn parse_public_bool(name: &str, raw: &str) -> Result<bool> {
     parse_required_bool_env(name, raw)
 }
@@ -4467,6 +4587,12 @@ macro_rules! public_env_parser {
     };
     (request_log_dir) => {
         parse_public_request_log_dir
+    };
+    (optional_path) => {
+        parse_public_optional_path
+    };
+    (local_capability_access) => {
+        parse_public_local_capability_access
     };
     (bool) => {
         parse_public_bool
@@ -4677,6 +4803,37 @@ macro_rules! public_env_field {
         }
     };
 }
+
+macro_rules! optional_section_public_env_field {
+    ($kind:ident, $section:ident.$field:ident) => {
+        PublicEnvField {
+            section: stringify!($section),
+            field: stringify!($field),
+            supported_aliases: &[],
+            reject_multiple_compatibility_aliases: false,
+            apply: |config, name, raw| {
+                let value = (public_env_parser!($kind))(name, raw)?;
+                let normalized = value.normalized_env_value();
+                config.$section.get_or_insert_with(Default::default).$field = value;
+                Ok(normalized)
+            },
+        }
+    };
+    ($kind:ident, $section:ident.$field:ident, $legacy:expr) => {
+        PublicEnvField {
+            section: stringify!($section),
+            field: stringify!($field),
+            supported_aliases: &[EnvAlias::value($legacy)],
+            reject_multiple_compatibility_aliases: false,
+            apply: |config, name, raw| {
+                let value = (public_env_parser!($kind))(name, raw)?;
+                let normalized = value.normalized_env_value();
+                config.$section.get_or_insert_with(Default::default).$field = value;
+                Ok(normalized)
+            },
+        }
+    };
+}
 /// Complete public environment contract for fixed typed leaves. Keep this as
 /// the sole list: canonical names, compatibility aliases, duplicate handling,
 /// and conformance tests all derive from it.
@@ -4708,6 +4865,11 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         u64,
         server.request_timeout_secs,
         "KILN_REQUEST_TIMEOUT_SECS"
+    ),
+    public_env_field!(
+        local_capability_access,
+        server.terminal_access,
+        "KILN_TERMINAL"
     ),
     public_env_field!(
         http_send_buffer,
@@ -4887,6 +5049,11 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         "KILN_TRAINING_WEBHOOK_URL"
     ),
     public_env_field!(
+        optional_path,
+        training.logit_cache_dir,
+        "KILN_LOGIT_CACHE_DIR"
+    ),
+    public_env_field!(
         usize,
         training.max_queued_jobs,
         "KILN_TRAINING_MAX_QUEUED_JOBS"
@@ -4967,6 +5134,7 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         adapters.composed_cache_max_entries,
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES"
     ),
+    public_env_field!(text, adapters.library_url, "KILN_ADAPTER_LIBRARY_URL"),
     public_env_field!(bool, request_log.enabled, "KILN_REQUEST_LOG_ENABLED"),
     public_env_field!(request_log_dir, request_log.dir, "KILN_REQUEST_LOG_DIR"),
     public_env_field!(
@@ -4984,6 +5152,20 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         usize,
         request_log.max_capture_bytes,
         "KILN_REQUEST_LOG_MAX_CAPTURE_BYTES"
+    ),
+    optional_section_public_env_field!(optional_u64, agent.self_improve_interval_hours),
+    optional_section_public_env_field!(usize, agent.max_concurrent_runs),
+    optional_section_public_env_field!(u64, agent.run_timeout_secs),
+    optional_section_public_env_field!(
+        local_capability_access,
+        agent.runs_access,
+        "KILN_AGENT_RUNS"
+    ),
+    optional_section_public_env_field!(optional_path, agent.pi_bin, "KILN_PI_BIN"),
+    optional_section_public_env_field!(
+        optional_path,
+        agent.pi_sessions_dir,
+        "KILN_PI_SESSIONS_DIR"
     ),
 ];
 
@@ -5019,6 +5201,7 @@ impl Default for ServerConfig {
             host: DEFAULT_SERVER_HOST.into(),
             port: DEFAULT_SERVER_PORT,
             request_timeout_secs: 600,
+            terminal_access: LocalCapabilityAccess::default(),
             http_send_buffer_bytes: None,
             stream_stall_grace_ms: StreamStallGrace::default(),
             max_batch_tokens: BatchTokenBudget::default(),
@@ -5150,6 +5333,7 @@ impl Default for TrainingConfig {
             checkpoint_boundary_cache_gb: CheckpointBoundaryCacheGbSetting::default(),
             checkpoint_interval: None,
             webhook_url: None,
+            logit_cache_dir: None,
             max_queued_jobs: 32,
             max_tracked_jobs: 1024,
             tracked_job_ttl_secs: 604_800,
@@ -5271,6 +5455,7 @@ impl Default for StreamingPrefillConfig {
 impl Default for AdaptersConfig {
     fn default() -> Self {
         Self {
+            library_url: DEFAULT_ADAPTER_LIBRARY_URL.to_owned(),
             // 100 GiB. Large enough for many real adapters, small enough
             // to catch a runaway upload loop before it fills the disk.
             max_disk_bytes: Some(100 * 1024u64.pow(3)),
@@ -5426,6 +5611,61 @@ impl KilnConfig {
         Ok(())
     }
 
+    /// Resolve request-handler operational policy once, after the effective
+    /// adapter directory is known. This is the only post-load startup boundary
+    /// that consults PATH/HOME; handlers retain the immutable result.
+    pub fn resolve_operational_runtime(
+        &self,
+        adapter_dir: &Path,
+    ) -> Result<OperationalRuntimeConfig> {
+        let agent = self.agent.clone().unwrap_or_default();
+        let absolute = |path: PathBuf| std::path::absolute(&path).unwrap_or(path);
+        let configured_pi = agent.pi_bin.map(absolute);
+        let search_path = std::env::var_os("PATH");
+        let pi_bin =
+            crate::pi_rpc::find_pi(configured_pi.as_deref(), search_path.as_deref()).map(absolute);
+        let pi_sessions_dir = agent
+            .pi_sessions_dir
+            .map(absolute)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| {
+                    absolute(
+                        PathBuf::from(home)
+                            .join(".pi")
+                            .join("agent")
+                            .join("sessions"),
+                    )
+                })
+            })
+            .unwrap_or_else(|| PathBuf::from("/tmp/pi/agent/sessions"));
+        let logit_cache_dir = self
+            .training
+            .logit_cache_dir
+            .clone()
+            .map(absolute)
+            .unwrap_or_else(|| {
+                absolute(
+                    adapter_dir
+                        .parent()
+                        .map(|parent| parent.join("logit-cache"))
+                        .unwrap_or_else(|| PathBuf::from("logit-cache")),
+                )
+            });
+        let bind_host = self.server.host.clone();
+
+        Ok(OperationalRuntimeConfig {
+            terminal_access: self.server.terminal_access,
+            terminal_enabled: self.server.terminal_access.enabled_for_host(&bind_host),
+            agent_runs_access: agent.runs_access,
+            agent_runs_enabled: agent.runs_access.enabled_for_host(&bind_host),
+            bind_host,
+            pi_bin,
+            pi_sessions_dir,
+            adapter_library_url: self.adapters.library_url.clone(),
+            logit_cache_dir,
+        })
+    }
+
     /// Validate configuration values. Returns an error describing the first invalid value.
     fn validate(&self) -> Result<()> {
         self.accelerator
@@ -5571,6 +5811,14 @@ impl KilnConfig {
             "training.webhook_url",
             self.training.webhook_url.as_deref(),
         )?;
+        if self
+            .training
+            .logit_cache_dir
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            anyhow::bail!("training.logit_cache_dir must be non-empty when set");
+        }
 
         let valid_levels = ["trace", "debug", "info", "warn", "error"];
         let level = self.logging.level.to_ascii_lowercase();
@@ -5648,6 +5896,8 @@ impl KilnConfig {
             anyhow::bail!("prefix_cache.max_entries must be > 0 when set, got Some(0)");
         }
 
+        validate_required_http_url("adapters.library_url", &self.adapters.library_url)?;
+
         self.teachers.validate()?;
 
         if let Some(eval) = &self.eval {
@@ -5693,6 +5943,22 @@ impl KilnConfig {
                     agent.run_timeout_secs
                 );
             }
+            for (field, path) in [
+                ("agent.pi_bin", agent.pi_bin.as_ref()),
+                ("agent.pi_sessions_dir", agent.pi_sessions_dir.as_ref()),
+            ] {
+                if path.is_some_and(|path| path.as_os_str().is_empty()) {
+                    anyhow::bail!("{field} must be non-empty when set");
+                }
+            }
+            if let Some(pi_bin) = &agent.pi_bin
+                && !pi_bin.is_file()
+            {
+                anyhow::bail!(
+                    "agent.pi_bin must name an existing file, got {}",
+                    pi_bin.display()
+                );
+            }
         }
 
         self.request_log.validate()?;
@@ -5707,6 +5973,18 @@ fn validate_optional_webhook_url(field: &str, value: Option<&str>) -> Result<()>
     };
     if value.trim().is_empty() {
         anyhow::bail!("{field} must be a non-empty HTTP(S) URL when set, got {value:?}");
+    }
+    let parsed = reqwest::Url::parse(value)
+        .with_context(|| format!("{field} must be a valid HTTP(S) URL, got {value:?}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!("{field} must use the http or https scheme, got {value:?}");
+    }
+    Ok(())
+}
+
+fn validate_required_http_url(field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        anyhow::bail!("{field} must be a non-empty HTTP(S) URL, got {value:?}");
     }
     let parsed = reqwest::Url::parse(value)
         .with_context(|| format!("{field} must be a valid HTTP(S) URL, got {value:?}"))?;
@@ -5909,7 +6187,14 @@ mod tests {
         "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE",
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES",
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES",
+        "KILN_ADAPTERS_LIBRARY_URL",
         "KILN_ADAPTERS_MAX_DISK_BYTES",
+        "KILN_AGENT_MAX_CONCURRENT_RUNS",
+        "KILN_AGENT_PI_BIN",
+        "KILN_AGENT_PI_SESSIONS_DIR",
+        "KILN_AGENT_RUNS_ACCESS",
+        "KILN_AGENT_RUN_TIMEOUT_SECS",
+        "KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS",
         "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH",
         "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
         "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE",
@@ -5966,6 +6251,7 @@ mod tests {
         "KILN_SERVER_SHUTDOWN_TIMEOUT_SECS",
         "KILN_SERVER_SLOW_REQUEST_WARN_SECS",
         "KILN_SERVER_STREAM_STALL_GRACE_MS",
+        "KILN_SERVER_TERMINAL_ACCESS",
         "KILN_SPECULATIVE_DRAFT_LAYERS",
         "KILN_SPECULATIVE_ENABLED",
         "KILN_SPECULATIVE_METHOD",
@@ -5983,6 +6269,7 @@ mod tests {
         "KILN_TRAINING_MAX_QUEUED_JOBS",
         "KILN_TRAINING_MAX_TRACKED_JOBS",
         "KILN_TRAINING_NO_GRAD_CHECKPOINT",
+        "KILN_TRAINING_LOGIT_CACHE_DIR",
         "KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS",
         "KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES",
         "KILN_TRAINING_TRACKED_JOB_TTL_SECS",
@@ -5994,18 +6281,12 @@ mod tests {
         "KILN_EVAL_MAX_QUEUED_JOBS",
         "KILN_EVAL_MAX_TRACKED_JOBS",
         "KILN_EVAL_WEBHOOK_URL",
-        "KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS",
         "KILN_AGENT_SELF_IMPROVE",
-        "KILN_AGENT_MAX_CONCURRENT_RUNS",
-        "KILN_AGENT_RUN_TIMEOUT_SECS",
         "KILN_TEACHERS_CREDENTIALS",
     ];
 
     const CONFIG_FILE_ONLY_FIXED_FIELDS: &[&str] = &[
-        "agent.max_concurrent_runs",
-        "agent.run_timeout_secs",
         "agent.self_improve",
-        "agent.self_improve_interval_hours",
         "eval.eval_dir",
         "eval.max_queued_jobs",
         "eval.max_tracked_jobs",
@@ -6718,7 +6999,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 84);
+        assert_eq!(original_len, 93);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -6753,8 +7034,8 @@ rocm_graph_cache_max_bytes = 17179869184
             })
             .count();
         assert_eq!(canonical_only_aliases, 22);
-        assert_eq!(compatibility_aliases, 63);
-        assert_eq!(compatibility_alias_fields, 60);
+        assert_eq!(compatibility_aliases, 69);
+        assert_eq!(compatibility_alias_fields, 66);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(
@@ -6789,8 +7070,8 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 92);
-        assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 8);
+        assert_eq!(serialized_leaves.len(), 98);
+        assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
             .iter()
@@ -6832,7 +7113,7 @@ rocm_graph_cache_max_bytes = 17179869184
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_eighty_four_public_fields() {
+    fn public_env_canonical_only_loads_all_ninety_three_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
@@ -6848,6 +7129,7 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_SERVER_HOST", "127.0.0.2"),
             ("KILN_SERVER_PORT", "9444"),
             ("KILN_SERVER_REQUEST_TIMEOUT_SECS", "321"),
+            ("KILN_SERVER_TERMINAL_ACCESS", "disabled"),
             ("KILN_SERVER_HTTP_SEND_BUFFER_BYTES", "4096"),
             ("KILN_SERVER_STREAM_STALL_GRACE_MS", "100"),
             ("KILN_SERVER_MAX_BATCH_TOKENS", "1024"),
@@ -6899,6 +7181,7 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB", "2.5"),
             ("KILN_TRAINING_CHECKPOINT_INTERVAL", "5"),
             ("KILN_TRAINING_WEBHOOK_URL", "https://hook.example/test"),
+            ("KILN_TRAINING_LOGIT_CACHE_DIR", "/tmp/canonical-logits"),
             ("KILN_TRAINING_MAX_QUEUED_JOBS", "7"),
             ("KILN_TRAINING_MAX_TRACKED_JOBS", "9"),
             ("KILN_TRAINING_TRACKED_JOB_TTL_SECS", "11"),
@@ -6923,12 +7206,19 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_ADAPTERS_MAX_DISK_BYTES", "1024"),
             ("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", "512"),
             ("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES", "6"),
+            ("KILN_ADAPTERS_LIBRARY_URL", "https://library.example/test"),
             ("KILN_REQUEST_LOG_ENABLED", "false"),
             ("KILN_REQUEST_LOG_DIR", "/tmp/canonical-request-log"),
             ("KILN_REQUEST_LOG_MAX_FILE_BYTES", "8192"),
             ("KILN_REQUEST_LOG_MAX_TOTAL_BYTES", "16384"),
             ("KILN_REQUEST_LOG_COMPRESS", "false"),
             ("KILN_REQUEST_LOG_MAX_CAPTURE_BYTES", "2048"),
+            ("KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS", "12"),
+            ("KILN_AGENT_MAX_CONCURRENT_RUNS", "3"),
+            ("KILN_AGENT_RUN_TIMEOUT_SECS", "45"),
+            ("KILN_AGENT_RUNS_ACCESS", "enabled"),
+            ("KILN_AGENT_PI_BIN", "/bin/sh"),
+            ("KILN_AGENT_PI_SESSIONS_DIR", "/tmp/canonical-pi-sessions"),
         ] {
             environment.set(name, value);
         }
@@ -6959,6 +7249,10 @@ rocm_graph_cache_max_bytes = 17179869184
         assert_eq!(config.server.host, "127.0.0.2");
         assert_eq!(config.server.port, 9444);
         assert_eq!(config.server.request_timeout_secs, 321);
+        assert_eq!(
+            config.server.terminal_access,
+            LocalCapabilityAccess::Disabled
+        );
         assert_eq!(config.server.http_send_buffer_bytes, Some(4096));
         assert_eq!(config.server.stream_stall_grace_ms.millis(), 100);
         assert_eq!(config.server.max_batch_tokens.tokens(), 1024);
@@ -7077,6 +7371,10 @@ rocm_graph_cache_max_bytes = 17179869184
             config.training.webhook_url.as_deref(),
             Some("https://hook.example/test")
         );
+        assert_eq!(
+            config.training.logit_cache_dir.as_deref(),
+            Some(Path::new("/tmp/canonical-logits"))
+        );
         assert_eq!(config.training.max_queued_jobs, 7);
         assert_eq!(config.training.max_tracked_jobs, 9);
         assert_eq!(config.training.tracked_job_ttl_secs, 11);
@@ -7116,6 +7414,7 @@ rocm_graph_cache_max_bytes = 17179869184
         assert_eq!(config.adapters.max_disk_bytes, Some(1024));
         assert_eq!(config.adapters.composed_cache_max_bytes, Some(512));
         assert_eq!(config.adapters.composed_cache_max_entries, Some(6));
+        assert_eq!(config.adapters.library_url, "https://library.example/test");
         assert!(!config.request_log.enabled);
         assert_eq!(
             config.request_log.dir.as_deref(),
@@ -7125,6 +7424,16 @@ rocm_graph_cache_max_bytes = 17179869184
         assert_eq!(config.request_log.max_total_bytes, 16384);
         assert!(!config.request_log.compress);
         assert_eq!(config.request_log.max_capture_bytes, 2048);
+        let agent = config.agent.as_ref().unwrap();
+        assert_eq!(agent.self_improve_interval_hours, Some(12));
+        assert_eq!(agent.max_concurrent_runs, 3);
+        assert_eq!(agent.run_timeout_secs, 45);
+        assert_eq!(agent.runs_access, LocalCapabilityAccess::Enabled);
+        assert_eq!(agent.pi_bin.as_deref(), Some(Path::new("/bin/sh")));
+        assert_eq!(
+            agent.pi_sessions_dir.as_deref(),
+            Some(Path::new("/tmp/canonical-pi-sessions"))
+        );
 
         for source in [
             config.server.serving_profile.source(),
@@ -7185,6 +7494,8 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_MAX_DECODE_BATCH", "auto"),
             ("KILN_SERVER_SERVING_PROFILE", "EXPERIMENTAL"),
             ("KILN_SERVING_PROFILE", "experimental"),
+            ("KILN_SERVER_TERMINAL_ACCESS", "disabled"),
+            ("KILN_TERMINAL", "0"),
             ("KILN_BATCHING_MODE", "enabled"),
             ("KILN_BATCHING_ENGINE", "1"),
             ("KILN_BATCHING_ROWWISE_DECODE", "true"),
@@ -7212,6 +7523,8 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE", "AUTO"),
             ("KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB", "6.0"),
             ("KILN_CHECKPOINT_BOUNDARY_CACHE_GB", "6"),
+            ("KILN_TRAINING_LOGIT_CACHE_DIR", "/tmp/equivalent-logits"),
+            ("KILN_LOGIT_CACHE_DIR", "/tmp/equivalent-logits"),
             ("KILN_STREAMING_PREFILL_MODE", "enabled"),
             ("KILN_STREAMING_PREFILL_ENABLED", "true"),
             ("KILN_STREAMING_PREFILL", "on"),
@@ -7219,6 +7532,14 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_STREAMING_TILE_TOKENS", "02048"),
             ("KILN_MEMORY_INFERENCE_MEMORY_FRACTION", "0.70"),
             ("KILN_INFERENCE_MEMORY_FRACTION", ".7"),
+            ("KILN_ADAPTERS_LIBRARY_URL", "https://library.example"),
+            ("KILN_ADAPTER_LIBRARY_URL", "https://library.example"),
+            ("KILN_AGENT_RUNS_ACCESS", "enabled"),
+            ("KILN_AGENT_RUNS", "1"),
+            ("KILN_AGENT_PI_BIN", "/tmp/equivalent-pi"),
+            ("KILN_PI_BIN", "/tmp/equivalent-pi"),
+            ("KILN_AGENT_PI_SESSIONS_DIR", "/tmp/equivalent-pi-sessions"),
+            ("KILN_PI_SESSIONS_DIR", "/tmp/equivalent-pi-sessions"),
         ] {
             environment.set(name, value);
         }
@@ -7297,6 +7618,42 @@ rocm_graph_cache_max_bytes = 17179869184
             Some(2048)
         );
         assert_eq!(config.memory.inference_memory_fraction, 0.7);
+        assert_eq!(
+            config.server.terminal_access,
+            LocalCapabilityAccess::Disabled
+        );
+        assert_eq!(
+            config.training.logit_cache_dir.as_deref(),
+            Some(Path::new("/tmp/equivalent-logits"))
+        );
+        assert_eq!(config.adapters.library_url, "https://library.example");
+        let agent = config.agent.as_ref().unwrap();
+        assert_eq!(agent.runs_access, LocalCapabilityAccess::Enabled);
+        assert_eq!(
+            agent.pi_bin.as_deref(),
+            Some(Path::new("/tmp/equivalent-pi"))
+        );
+        assert_eq!(
+            agent.pi_sessions_dir.as_deref(),
+            Some(Path::new("/tmp/equivalent-pi-sessions"))
+        );
+    }
+
+    #[test]
+    fn local_capability_access_recognizes_all_loopback_ip_forms() {
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "127.42.0.9",
+            "::1",
+            "[::1]",
+        ] {
+            assert!(host_is_loopback(host), "{host}");
+        }
+        for host in ["0.0.0.0", "192.168.1.10", "::", "kiln.internal"] {
+            assert!(!host_is_loopback(host), "{host}");
+        }
     }
 
     #[test]
@@ -7346,6 +7703,7 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES", "67108863"),
             ("KILN_SERVER_PORT", "nine-thousand"),
             ("KILN_SERVER_DETERMINISTIC", "maybe"),
+            ("KILN_SERVER_TERMINAL_ACCESS", "sometimes"),
             ("KILN_SERVER_DEFAULT_THINKING_BUDGET_MS", "2.5"),
             ("KILN_BATCHING_MODE", "sometimes"),
             ("KILN_BATCHING_ROWWISE_DECODE", "row-by-row-ish"),
@@ -7362,6 +7720,7 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS", "0"),
             ("KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE", "0"),
             ("KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB", "inf"),
+            ("KILN_TRAINING_LOGIT_CACHE_DIR", ""),
             ("KILN_STREAMING_PREFILL_MODE", "true"),
             ("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS", "0"),
             ("KILN_STREAMING_PREFILL_TILE_TOKENS", "65"),
@@ -7376,6 +7735,9 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_MEMORY_KV_FORCE_BLOCKS", "-1"),
             ("KILN_SPECULATIVE_METHOD", "guessing"),
             ("KILN_REQUEST_LOG_COMPRESS", "occasionally"),
+            ("KILN_AGENT_RUNS_ACCESS", "trusted-ish"),
+            ("KILN_AGENT_PI_BIN", ""),
+            ("KILN_AGENT_PI_SESSIONS_DIR", ""),
         ] {
             environment.set(name, invalid);
             let error = KilnConfig::default().apply_env_overrides().unwrap_err();

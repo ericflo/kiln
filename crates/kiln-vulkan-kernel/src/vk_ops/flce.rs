@@ -618,24 +618,10 @@ const FLCE_FALLBACK_SCRATCH_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 const FLCE_MIN_SCRATCH_BUDGET_BYTES: u64 = 16 * 1024 * 1024;
 const FLCE_MAX_SCRATCH_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Returns the active FLCE chunk length, honoring `KILN_VK_FLCE_CHUNK_LEN`
-/// when set.
-///
 /// Prefer `flce_recommended_chunk_len_for_tensors` for new Vulkan-native
 /// training code so ordinary use is shape/device-aware without manual tuning.
 pub fn flce_active_chunk_len() -> usize {
-    std::env::var("KILN_VK_FLCE_CHUNK_LEN")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(FLCE_DEFAULT_CHUNK)
-}
-
-fn env_flce_chunk_len() -> Option<usize> {
-    std::env::var("KILN_VK_FLCE_CHUNK_LEN")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&v| v > 0)
+    FLCE_DEFAULT_CHUNK
 }
 
 fn floor_power_of_two(n: usize) -> usize {
@@ -685,9 +671,7 @@ pub fn flce_recommended_chunk_len_from_limits(
         .min(by_dispatch)
         .max(FLCE_MIN_CHUNK);
     let safe = floor_power_of_two(raw).max(FLCE_MIN_CHUNK).min(vocab);
-    env_flce_chunk_len()
-        .map(|forced| forced.clamp(FLCE_MIN_CHUNK, safe))
-        .unwrap_or(safe)
+    safe
 }
 
 pub fn flce_recommended_chunk_len(

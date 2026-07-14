@@ -13,8 +13,8 @@
 //!
 //! Security gate: an embedded run is arbitrary-code-execution grade —
 //! same posture as the dashboard terminal. Enabled when the server is
-//! bound to loopback (the default); `KILN_AGENT_RUNS=1` opts in on
-//! network binds, `KILN_AGENT_RUNS=0` force-disables.
+//! bound to loopback (the default); `[agent].runs_access = "enabled"` opts in
+//! on network binds, while `"disabled"` force-disables.
 
 use std::path::PathBuf;
 
@@ -30,28 +30,27 @@ use crate::state::AppState;
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh"];
 
 /// (enabled, human-readable reason when disabled)
-fn runs_gate() -> (bool, Option<String>) {
-    match std::env::var("KILN_AGENT_RUNS").as_deref() {
-        Ok("0") => {
-            return (
-                false,
-                Some("disabled by KILN_AGENT_RUNS=0 on the server".into()),
-            );
-        }
-        Ok("1") => return (true, None),
-        _ => {}
+fn runs_gate(state: &AppState) -> (bool, Option<String>) {
+    use crate::config::LocalCapabilityAccess;
+
+    let runtime = state.operational_runtime.as_ref();
+    if runtime.agent_runs_enabled {
+        return (true, None);
     }
-    if super::terminal::bind_host_is_loopback() {
-        (true, None)
-    } else {
-        (
+    match runtime.agent_runs_access {
+        LocalCapabilityAccess::Disabled => (
             false,
-            Some(
-                "the server is not bound to loopback — embedded runs execute arbitrary \
-                 code. Set KILN_AGENT_RUNS=1 to enable them anyway."
-                    .into(),
-            ),
-        )
+            Some("disabled by agent.runs_access on the server".into()),
+        ),
+        LocalCapabilityAccess::LoopbackOnly => (
+            false,
+            Some(format!(
+                "the server is bound to {} (not loopback) — embedded runs execute arbitrary \
+                 code. Set agent.runs_access=\"enabled\" to opt in.",
+                runtime.bind_host
+            )),
+        ),
+        LocalCapabilityAccess::Enabled => (false, Some("agent run gate is inconsistent".into())),
     }
 }
 
@@ -59,8 +58,8 @@ fn runs_gate() -> (bool, Option<String>) {
 /// prompts, server paths, and raw tool output — closing the gate must
 /// take the data side off the network, not just creation. /status
 /// stays open (it only reports the gate itself).
-fn require_runs_enabled() -> Result<(), ApiError> {
-    let (enabled, reason) = runs_gate();
+fn require_runs_enabled(state: &AppState) -> Result<(), ApiError> {
+    let (enabled, reason) = runs_gate(state);
     if !enabled {
         return Err(ApiError::agent_runs_disabled(
             reason.unwrap_or_else(|| "gate closed".into()),
@@ -81,8 +80,8 @@ struct AgentRunsStatusResponse {
 }
 
 async fn runs_status(State(state): State<AppState>) -> Json<AgentRunsStatusResponse> {
-    let (enabled, reason) = runs_gate();
-    let pi = crate::pi_rpc::find_pi();
+    let (enabled, reason) = runs_gate(&state);
+    let pi = state.operational_runtime.pi_bin.clone();
     Json(AgentRunsStatusResponse {
         enabled,
         disabled_reason: reason,
@@ -125,7 +124,7 @@ async fn create_run(
     state
         .ensure_inference_admission_allowed()
         .map_err(|_| ApiError::inference_disabled_by_profile(state.serving_profile.profile()))?;
-    require_runs_enabled()?;
+    require_runs_enabled(&state)?;
     let task = req.task.trim();
     if task.is_empty() {
         return Err(ApiError::agent_run_invalid_request(
@@ -161,9 +160,9 @@ async fn create_run(
             ApiError::agent_run_invalid_request(format!("server cwd unavailable: {e}"))
         })?,
     };
-    let Some(pi_bin) = crate::pi_rpc::find_pi() else {
+    let Some(pi_bin) = state.operational_runtime.pi_bin.clone() else {
         return Err(ApiError::agent_runs_unavailable(
-            "`pi` is not installed on the server's PATH",
+            "`pi` was not resolved from agent.pi_bin or the startup PATH",
         ));
     };
     let record = state.agent_runs.start_run(NewRunParams {
@@ -194,7 +193,7 @@ async fn list_runs(
     State(state): State<AppState>,
     Query(q): Query<ListRunsQuery>,
 ) -> Result<Json<AgentRunListResponse>, ApiError> {
-    require_runs_enabled()?;
+    require_runs_enabled(&state)?;
     let mut runs = state.agent_runs.list();
     if let Some(label) = &q.label {
         runs.retain(|r| r.label.as_deref() == Some(label.as_str()));
@@ -211,7 +210,7 @@ async fn get_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<AgentRunRecord>, ApiError> {
-    require_runs_enabled()?;
+    require_runs_enabled(&state)?;
     state
         .agent_runs
         .get(&id)
@@ -231,7 +230,7 @@ async fn run_events(
     AxumPath(id): AxumPath<String>,
     Query(q): Query<EventsQuery>,
 ) -> Result<Json<AgentRunEventsResponse>, ApiError> {
-    require_runs_enabled()?;
+    require_runs_enabled(&state)?;
     let Some(page) = state.agent_runs.events_after(&id, q.after) else {
         return Err(ApiError::agent_run_not_found(&id));
     };
@@ -288,7 +287,7 @@ async fn steer_run(
     AxumPath(id): AxumPath<String>,
     Json(req): Json<MessageRequest>,
 ) -> Result<Json<AgentRunQueuedResponse>, ApiError> {
-    require_runs_enabled()?;
+    require_runs_enabled(&state)?;
     if req.message.trim().is_empty() {
         return Err(ApiError::agent_run_invalid_request(
             "`message` must be non-empty",
@@ -306,7 +305,7 @@ async fn follow_up_run(
     AxumPath(id): AxumPath<String>,
     Json(req): Json<MessageRequest>,
 ) -> Result<Json<AgentRunQueuedResponse>, ApiError> {
-    require_runs_enabled()?;
+    require_runs_enabled(&state)?;
     if req.message.trim().is_empty() {
         return Err(ApiError::agent_run_invalid_request(
             "`message` must be non-empty",
@@ -328,7 +327,7 @@ async fn abort_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<AgentRunAbortResponse>, ApiError> {
-    require_runs_enabled()?;
+    require_runs_enabled(&state)?;
     state
         .agent_runs
         .abort(&id)
@@ -355,24 +354,6 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn gate_env_overrides_win() {
-        let _env_guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        // Cannot mutate the bind-host OnceLock here, but the env
-        // overrides short-circuit before the host check.
-        unsafe { std::env::set_var("KILN_AGENT_RUNS", "0") };
-        let (enabled, reason) = runs_gate();
-        assert!(!enabled);
-        assert!(reason.unwrap().contains("KILN_AGENT_RUNS=0"));
-        unsafe { std::env::set_var("KILN_AGENT_RUNS", "1") };
-        let (enabled, reason) = runs_gate();
-        assert!(enabled);
-        assert!(reason.is_none());
-        unsafe { std::env::remove_var("KILN_AGENT_RUNS") };
-    }
 
     #[test]
     fn create_run_request_minimal_body_parses() {

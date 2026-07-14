@@ -10,8 +10,8 @@
 //! disabled until a versioned archive can be staged, fully validated against
 //! registered teacher identities, and atomically published.
 //!
-//! Cache root lives at `adapter_dir.parent()/logit-cache/` by
-//! default; configurable via `KILN_LOGIT_CACHE_DIR`.
+//! Cache root lives at `adapter_dir.parent()/logit-cache/` by default and is
+//! resolved once from `training.logit_cache_dir` during startup.
 
 use anyhow::Context;
 use axum::body::{Body, Bytes};
@@ -23,7 +23,6 @@ use axum::{Json, Router};
 use kiln_train::{CacheStats, LogitCache};
 use serde::Serialize;
 use std::io::Read;
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tempfile::NamedTempFile;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
@@ -42,17 +41,9 @@ fn try_cache_operation_permit() -> Result<OwnedSemaphorePermit, ApiError> {
         .map_err(|_| ApiError::cache_operation_busy())
 }
 
-/// Resolve the cache root. Honors `KILN_LOGIT_CACHE_DIR` if set;
-/// otherwise places the cache next to the adapters directory.
-pub(crate) fn cache_root(state: &AppState) -> PathBuf {
-    if let Ok(path) = std::env::var("KILN_LOGIT_CACHE_DIR") {
-        return PathBuf::from(path);
-    }
-    state
-        .adapter_dir
-        .parent()
-        .map(|p| p.join("logit-cache"))
-        .unwrap_or_else(|| PathBuf::from("logit-cache"))
+/// Return the immutable startup-resolved cache root.
+pub(crate) fn cache_root(state: &AppState) -> std::path::PathBuf {
+    state.operational_runtime.logit_cache_dir.clone()
 }
 
 #[derive(Debug, Serialize)]
@@ -150,26 +141,4 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/cache/stats", get(cache_stats))
         .route("/v1/cache/export", get(cache_export))
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn cache_root_honors_env_var() {
-        let _env_guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        unsafe {
-            std::env::set_var("KILN_LOGIT_CACHE_DIR", "/tmp/kiln-cache-test");
-        }
-        // Build a minimal AppState via the mock constructor; we just
-        // need adapter_dir set so `cache_root` can hit the env-var path.
-        // The mock construct is heavyweight; skip and assert directly
-        // on the env-var resolution.
-        let resolved = std::env::var("KILN_LOGIT_CACHE_DIR").ok();
-        assert_eq!(resolved.as_deref(), Some("/tmp/kiln-cache-test"));
-        unsafe {
-            std::env::remove_var("KILN_LOGIT_CACHE_DIR");
-        }
-    }
 }

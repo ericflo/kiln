@@ -776,7 +776,7 @@ impl ApiError {
             status: StatusCode::FORBIDDEN,
             code: "agent_runs_disabled",
             message: format!("Embedded agent runs are disabled: {reason}"),
-            hint: "Embedded runs execute arbitrary code on the server. They are enabled on loopback binds by default; set KILN_AGENT_RUNS=1 to opt in on network binds.",
+            hint: "Embedded runs execute arbitrary code on the server. They are enabled on loopback binds by default; set agent.runs_access=\"enabled\" to opt in on network binds.",
             retry_after_seconds: None,
         }
     }
@@ -786,7 +786,7 @@ impl ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "agent_runs_unavailable",
             message: format!("{detail}"),
-            hint: "Install pi (npm i -g @earendil-works/pi-coding-agent) on the server, or set KILN_PI_BIN to the binary path.",
+            hint: "Install pi (npm i -g @earendil-works/pi-coding-agent) on the startup PATH, or set agent.pi_bin to the binary path.",
             retry_after_seconds: Some(30),
         }
     }

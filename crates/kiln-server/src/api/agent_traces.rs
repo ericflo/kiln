@@ -133,25 +133,6 @@ struct DiscoverResponse {
     path: String,
 }
 
-fn default_pi_sessions_dir() -> PathBuf {
-    // KILN_PI_SESSIONS_DIR overrides the conventional location — for
-    // non-standard pi setups, and so tests can isolate auto-discovery
-    // from the developer's real ~/.pi sessions.
-    if let Ok(dir) = std::env::var("KILN_PI_SESSIONS_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home)
-            .join(".pi")
-            .join("agent")
-            .join("sessions")
-    } else {
-        PathBuf::from("/tmp/pi/agent/sessions")
-    }
-}
-
 /// How deep below the sessions root to look for `*.jsonl` files. pi nests
 /// sessions one level down under a per-project slug directory
 /// (`sessions/<project-slug>/<session>.jsonl`); depth 3 leaves headroom for
@@ -243,19 +224,21 @@ pub(crate) fn index_session_file(adapter_dir: &Path, session_path: &Path) -> Opt
 /// /v1/agent/traces/discover first. An existing index is left alone
 /// (re-discovery stays explicit), and a missing sessions dir falls
 /// through to the resolver's actionable error.
-pub(crate) fn ensure_agent_trace_index(adapter_dir: &Path) -> Option<usize> {
+pub(crate) fn ensure_agent_trace_index(
+    adapter_dir: &Path,
+    pi_sessions_dir: &Path,
+) -> Option<usize> {
     if adapter_dir.join("agent_traces.json").exists() {
         return None;
     }
-    let sessions = default_pi_sessions_dir();
-    if !sessions.exists() {
+    if !pi_sessions_dir.exists() {
         return None;
     }
-    match discover_traces_into(&sessions, adapter_dir) {
+    match discover_traces_into(pi_sessions_dir, adapter_dir) {
         Ok(count) => {
             tracing::info!(
                 indexed = count,
-                sessions_dir = %sessions.display(),
+                sessions_dir = %pi_sessions_dir.display(),
                 "auto-discovered pi agent traces for self_improve"
             );
             Some(count)
@@ -274,7 +257,7 @@ async fn discover_traces(
     let path = req
         .path
         .map(PathBuf::from)
-        .unwrap_or_else(default_pi_sessions_dir);
+        .unwrap_or_else(|| state.operational_runtime.pi_sessions_dir.clone());
     if !path.exists() {
         return Err(ApiError::training_invalid_request(format!(
             "pi sessions dir {} does not exist (pass `path` to override)",
@@ -803,7 +786,7 @@ mod tests {
 
         // An existing index is never clobbered by the auto path.
         std::fs::write(&index_path, "{\"sessions\":[]}").unwrap();
-        assert!(ensure_agent_trace_index(adapters.path()).is_none());
+        assert!(ensure_agent_trace_index(adapters.path(), sessions.path()).is_none());
         assert_eq!(
             std::fs::read_to_string(&index_path).unwrap(),
             "{\"sessions\":[]}"

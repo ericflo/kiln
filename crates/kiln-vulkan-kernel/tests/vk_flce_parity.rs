@@ -32,10 +32,6 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 
 #[test]
 fn flce_recommended_chunk_len_is_dynamic() {
-    unsafe {
-        std::env::remove_var("KILN_VK_FLCE_CHUNK_LEN");
-    }
-
     let short_context =
         flce_recommended_chunk_len_from_limits(512, 2560, 248_320, 24 * 1024 * 1024 * 1024, 65_535);
     let long_context = flce_recommended_chunk_len_from_limits(

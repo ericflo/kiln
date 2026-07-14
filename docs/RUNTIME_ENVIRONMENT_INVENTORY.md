@@ -16,19 +16,19 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **921 direct read call sites** and
-**376 process-mutation call sites**. It can
-statically name **374 distinct literal `KILN_*`
-read names** across **546 call sites**.
+The scanner records **909 direct read call sites** and
+**361 process-mutation call sites**. It can
+statically name **366 distinct literal `KILN_*`
+read names** across **534 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
-| Public stable | 7 | 1 | 0 |
-| Experimental/debug migration | 444 | 333 | 0 |
+| Public stable | 9 | 1 | 0 |
+| Experimental/debug migration | 432 | 325 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
-| Test only | 142 | 43 | 368 |
+| Test only | 140 | 41 | 353 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -89,17 +89,14 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-model/src/backend/metal_config.rs` | 2 | 0 |
 | `crates/kiln-model/src/backend/vulkan_attention.rs` | 2 | 2 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | 2 | 0 |
-| `crates/kiln-server/src/api/agent_traces.rs` | 2 | 1 |
 | `crates/kiln-server/src/api/debug_model_state.rs` | 2 | 1 |
 | `crates/kiln-server/src/cli.rs` | 2 | 0 |
-| `crates/kiln-server/src/pi_rpc.rs` | 2 | 1 |
 | `crates/kiln-tensor/src/metal_kernels.rs` | 2 | 2 |
 | `crates/kiln-tensor/src/rocm_matmul.rs` | 2 | 1 |
 | `crates/kiln-tensor/src/rocm_ops/concat.rs` | 2 | 2 |
 | `crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs` | 2 | 2 |
 | `crates/kiln-tensor/src/rocm_storage.rs` | 2 | 2 |
 | `crates/kiln-vulkan-kernel/src/vk_ops/attention.rs` | 2 | 2 |
-| `crates/kiln-vulkan-kernel/src/vk_ops/flce.rs` | 2 | 1 |
 | `crates/kiln-vulkan-kernel/src/vk_ops/mod.rs` | 2 | 2 |
 | `crates/kiln-autograd/src/anomaly.rs` | 1 | 1 |
 | `crates/kiln-autograd/src/backwards/lora_delta_add.rs` | 1 | 0 |
@@ -116,13 +113,7 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-opd-loss-kernel/src/lib.rs` | 1 | 1 |
 | `crates/kiln-rmsnorm-kernel/src/kt_api.rs` | 1 | 1 |
 | `crates/kiln-rocblas/src/algo_cache.rs` | 1 | 0 |
-| `crates/kiln-server/src/api/agent_runs.rs` | 1 | 1 |
-| `crates/kiln-server/src/api/cache.rs` | 1 | 1 |
-| `crates/kiln-server/src/api/completions.rs` | 1 | 1 |
-| `crates/kiln-server/src/api/library.rs` | 1 | 1 |
-| `crates/kiln-server/src/api/terminal.rs` | 1 | 1 |
 | `crates/kiln-server/src/state.rs` | 1 | 0 |
-| `crates/kiln-server/src/training_preflight.rs` | 1 | 1 |
 | `crates/kiln-tensor/src/capture_alloc.rs` | 1 | 1 |
 | `crates/kiln-tensor/src/determinism.rs` | 1 | 1 |
 | `crates/kiln-tensor/src/metal_rt/commands.rs` | 1 | 0 |
@@ -141,9 +132,7 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 
 | Name | Class | Read call sites | Owners |
 |---|---|---:|---|
-| `KILN_ADAPTER_LIBRARY_URL` | Experimental/debug migration | 1 | `crates/kiln-server/src/api/library.rs` |
 | `KILN_ADAPTER_SMOKE_PROMPT_FILE` | Experimental/debug migration | 1 | `crates/kiln-train/src/trainer.rs` |
-| `KILN_AGENT_RUNS` | Experimental/debug migration | 1 | `crates/kiln-server/src/api/agent_runs.rs` |
 | `KILN_ARENA_FORCE_ZERO` | Experimental/debug migration | 2 | `crates/kiln-tensor/src/capture_alloc.rs`, `crates/kiln-tensor/src/rocm_capture_alloc.rs` |
 | `KILN_BENCH_FORCE_MTP` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
 | `KILN_BENCH_LOG_ITL` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
@@ -181,7 +170,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/capability.rs` |
 | `KILN_DETECT_ANOMALY` | Experimental/debug migration | 1 | `crates/kiln-autograd/src/anomaly.rs` |
 | `KILN_DETERMINISTIC` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/determinism.rs` |
-| `KILN_DISABLE_BATCH_PREPARED_PROMPTS` | Experimental/debug migration | 1 | `crates/kiln-server/src/api/completions.rs` |
 | `KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
 | `KILN_DISABLE_CUDA_GDN_AB_IN_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
@@ -355,7 +343,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_FULL_ATTN_SCORE_TILE_MAX_ELEMENTS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_GPU_TRAINING_MLP_CHUNK_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_KEEP_PROJECTION_ORIGINALS` | Test only | 3 | `crates/kiln-model/src/forward.rs` |
-| `KILN_LOGIT_CACHE_DIR` | Experimental/debug migration, Test only | 2 | `crates/kiln-server/src/api/cache.rs` |
 | `KILN_METAL_GRAPHS` | Experimental/debug migration, Test only | 3 | `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/metal_graph.rs` |
 | `KILN_METAL_GRAPH_STABLE_PAGED_METADATA` | Experimental/debug migration, Test only | 3 | `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/metal_graph.rs` |
 | `KILN_METAL_LORA_LINEAR_BENCH_ITERS` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
@@ -389,8 +376,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_MTP_SWAP_FC_NORMS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
 | `KILN_OPD_SAMPLER_SEGMENTS` | Experimental/debug migration | 1 | `crates/kiln-train/src/opd.rs` |
 | `KILN_OPD_USE_CHAT_TEMPLATE_RENDER` | Experimental/debug migration | 1 | `crates/kiln-train/src/opd.rs` |
-| `KILN_PI_BIN` | Experimental/debug migration | 1 | `crates/kiln-server/src/pi_rpc.rs` |
-| `KILN_PI_SESSIONS_DIR` | Experimental/debug migration, Test only | 2 | `crates/kiln-server/src/api/agent_traces.rs`, `crates/kiln-server/src/api/self_improve.rs` |
 | `KILN_PROFILE_GDN_STAGE_LAYER` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_PROFILE_METAL_GRAPH_STAGES` | Experimental/debug migration | 1 | `crates/kiln-model/src/metal_graph.rs` |
 | `KILN_PROFILE_PAGED_SECTIONS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
@@ -446,7 +431,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_TENSOR_METAL_TEST` | Test only | 2 | `crates/kiln-tensor/src/metal_allocator.rs`, `crates/kiln-tensor/src/metal_storage.rs` |
 | `KILN_TENSOR_ROCM_TEST` | Test only | 1 | `crates/kiln-tensor/src/rocm_allocator.rs` |
 | `KILN_TENSOR_VULKAN_TEST` | Test only | 25 | `crates/kiln-model/src/backend/vulkan_linear.rs`, `crates/kiln-model/src/backend/vulkan_weights.rs`, `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/lora_loader.rs`, `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-model/tests/vk_bwd_adapter_parity.rs`, `crates/kiln-model/tests/vk_sft_step_proof.rs`, `crates/kiln-model/tests/vk_tape_record_proof.rs`, `crates/kiln-tensor/src/device_op.rs`, `crates/kiln-tensor/src/ops/log_softmax.rs`, `crates/kiln-tensor/src/ops/matmul.rs`, `crates/kiln-tensor/src/ops/reduce.rs`, `crates/kiln-tensor/src/ops/scalar.rs`, `crates/kiln-tensor/src/vulkan_allocator.rs`, `crates/kiln-tensor/src/vulkan_storage.rs`, `crates/kiln-train/src/opd.rs`, `crates/kiln-train/src/trainer.rs` |
-| `KILN_TERMINAL` | Experimental/debug migration | 1 | `crates/kiln-server/src/api/terminal.rs` |
 | `KILN_TEST_FLAG_FALSY` | Test only | 1 | `crates/kiln-core/src/env_flag.rs` |
 | `KILN_TEST_FLAG_GIBBERISH` | Test only | 2 | `crates/kiln-core/src/env_flag.rs` |
 | `KILN_TEST_FLAG_TRUTHY` | Test only | 1 | `crates/kiln-core/src/env_flag.rs` |
@@ -480,7 +464,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_VK_EXP_TILE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/mod.rs` |
 | `KILN_VK_FLASH_ROWS_TILE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/attention.rs` |
 | `KILN_VK_FLASH_ROW_WORK_TILE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/attention.rs` |
-| `KILN_VK_FLCE_CHUNK_LEN` | Experimental/debug migration | 3 | `crates/kiln-server/src/training_preflight.rs`, `crates/kiln-vulkan-kernel/src/vk_ops/flce.rs` |
 | `KILN_VK_GDN_CHUNK_PREP_BWD_CPU` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs` |
 | `KILN_VK_GDN_CHUNK_SCAN_BWD_CPU` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs` |
 | `KILN_VK_GDN_GATED_RMS_NORM_BWD_CPU` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_gated_rms_norm.rs` |
@@ -620,7 +603,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-rocblas/build.rs` | `var_os` | `CARGO_PRIMARY_PACKAGE` | Build time/provenance | 1 |
 | `crates/kiln-rocblas/src/algo_cache.rs` | `var` | `HOME` | Experimental/debug migration | 1 |
 | `crates/kiln-rocblas/src/backend_matmul.rs` | `env!` | `CARGO_PKG_VERSION_MAJOR` | Build time/provenance | 1 |
-| `crates/kiln-server/src/api/agent_traces.rs` | `var` | `HOME` | Experimental/debug migration | 1 |
 | `crates/kiln-server/src/api/debug_model_state.rs` | `var` | `name` | Experimental/debug migration | 1 |
 | `crates/kiln-server/src/api/health.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/bench.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
@@ -629,13 +611,14 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-server/src/cli.rs` | `var` | `HOME` | Experimental/debug migration | 2 |
 | `crates/kiln-server/src/config.rs` | `var` | `& credential . api_key_env` | Public stable | 2 |
 | `crates/kiln-server/src/config.rs` | `var` | `name` | Public stable | 1 |
+| `crates/kiln-server/src/config.rs` | `var_os` | `HOME` | Public stable | 1 |
+| `crates/kiln-server/src/config.rs` | `var_os` | `PATH` | Public stable | 1 |
 | `crates/kiln-server/src/config.rs` | `var_os` | `& name` | Test only | 1 |
 | `crates/kiln-server/src/execution_provenance.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
 | `crates/kiln-server/src/execution_provenance.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 2 |
 | `crates/kiln-server/src/execution_provenance.rs` | `env!` | `CARGO_PKG_VERSION` | Test only | 2 |
 | `crates/kiln-server/src/logging.rs` | `var` | `name` | Public stable | 1 |
 | `crates/kiln-server/src/logging.rs` | `var` | `RUST_LOG` | Public stable | 1 |
-| `crates/kiln-server/src/pi_rpc.rs` | `var_os` | `PATH` | Experimental/debug migration | 1 |
 | `crates/kiln-server/src/state.rs` | `var` | `policy . env` | Experimental/debug migration | 1 |
 | `crates/kiln-server/src/teacher_identity.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/teacher_identity.rs` | `env!` | `CARGO_PKG_VERSION` | Test only | 1 |
