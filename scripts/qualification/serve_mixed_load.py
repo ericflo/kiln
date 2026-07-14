@@ -2117,6 +2117,22 @@ def snapshot_payload_residue(snapshot_dir: Path) -> list[str]:
     )[:8]
 
 
+def health_reports_ready_after_prewarm(health: dict[str, Any]) -> bool:
+    checks = health.get("checks")
+    return (
+        health.get("status") == "ok"
+        and isinstance(checks, list)
+        and bool(checks)
+        and all(item.get("pass") is True for item in checks if isinstance(item, dict))
+        and any(
+            item.get("name") == "inference_prewarm_complete"
+            and item.get("pass") is True
+            for item in checks
+            if isinstance(item, dict)
+        )
+    )
+
+
 def wait_ready(
     port: int,
     process: subprocess.Popen[str],
@@ -2134,24 +2150,15 @@ def wait_ready(
             raise QualificationError(f"server exited during startup ({process.returncode}):\n{tail}")
         try:
             health = json_request(port, "GET", "/health")
-            checks = health.get("checks")
-            if (
-                health.get("status") == "ok"
-                and isinstance(checks, list)
-                and checks
-                and all(item.get("pass") is True for item in checks if isinstance(item, dict))
-                and any(
-                    item.get("name") == "inference_prewarm_complete"
-                    and item.get("pass") is True
-                    for item in checks
-                    if isinstance(item, dict)
-                )
-            ):
+            if health_reports_ready_after_prewarm(health):
                 if not server_log.prewarm_complete.wait(
                     timeout=remaining_until(deadline, "server prewarm log", 5.0)
                 ):
                     raise QualificationError("health passed without prewarm completion log evidence")
-                return health
+                health = json_request(port, "GET", "/health")
+                if health_reports_ready_after_prewarm(health):
+                    return health
+                last_error = "health regressed after prewarm completion log"
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
         time.sleep(1.0)

@@ -427,6 +427,38 @@ def debug_fixture(
 
 
 class ServeMixedLoadTests(unittest.TestCase):
+    def test_wait_ready_refreshes_health_after_prewarm_log(self) -> None:
+        def ready_health(generation: int) -> dict[str, object]:
+            return {
+                "status": "ok",
+                "checks": [
+                    {"name": "model_loaded", "pass": True},
+                    {"name": "inference_prewarm_complete", "pass": True},
+                ],
+                "generation": generation,
+            }
+
+        process = mock.Mock()
+        process.poll.return_value = None
+        server_log = mock.Mock()
+        server_log.prewarm_complete = serve.threading.Event()
+        server_log.prewarm_complete.set()
+
+        with mock.patch.object(
+            serve,
+            "json_request",
+            side_effect=[ready_health(1), ready_health(2)],
+        ) as request:
+            health = serve.wait_ready(
+                1234,
+                process,
+                server_log,
+                serve.time.monotonic() + 5.0,
+            )
+
+        self.assertEqual(health["generation"], 2)
+        self.assertEqual(request.call_count, 2)
+
     def test_stream_reader_waits_for_readiness_before_touching_http_buffer(self) -> None:
         sock = mock.Mock()
         connection = mock.Mock(sock=sock)
