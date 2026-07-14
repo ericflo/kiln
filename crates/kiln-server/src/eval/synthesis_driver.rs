@@ -174,8 +174,9 @@ mod tests {
             2,
         )
         .unwrap();
-        // Preview head_n=2 + 2 example conversations → 2 examples
-        assert_eq!(preview.examples.len(), 2);
+        // A two-component dataset is repaired into one train and one holdout
+        // component, so a holdout preview cannot leak the training row.
+        assert_eq!(preview.examples.len(), 1);
         assert_eq!(preview.suite_name, "preview-suite");
     }
 
