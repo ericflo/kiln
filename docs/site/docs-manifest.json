@@ -194,6 +194,14 @@
       "description": "Suites, scorers, comparisons, datasets, post-training gates, and judge training."
     },
     {
+      "source": "contracts/kiln-evals-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "eval-api-schema",
+      "title": "Eval and Judgment API Schema",
+      "section": "training",
+      "description": "Generated field-level contract for suites and scorers, eval admission and results, uploaded datasets, deterministic synthesis, and pairwise-judgment compilation and validation."
+    },
+    {
       "source": "docs/HF_TRL_INTEROP.md",
       "slug": "hf-trl-interoperability",
       "title": "HF/TRL Interoperability",

@@ -1942,7 +1942,7 @@
         "summary": "Delete dataset",
         "operationId": "eval_delete_dataset_delete_v1_eval_datasets_name",
         "x-kiln-handler": "eval::delete_dataset",
-        "x-kiln-rust-signature": "async fn delete_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn delete_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DeleteDatasetResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -1961,11 +1961,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/DeleteDatasetResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "DeleteDatasetResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -2018,7 +2018,7 @@
         "summary": "Synthesize dataset preview",
         "operationId": "eval_synthesize_dataset_preview_post_v1_eval_datasets_name_preview",
         "x-kiln-handler": "eval::synthesize_dataset_preview",
-        "x-kiln-rust-signature": "async fn synthesize_dataset_preview( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<SynthesisPreviewBody>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn synthesize_dataset_preview( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<SynthesisPreviewBody>, ) -> Result<Json<SynthesisPreview>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -2048,11 +2048,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/SynthesisPreview"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "SynthesisPreview"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -2108,7 +2108,7 @@
         "summary": "Synthesize dataset",
         "operationId": "eval_synthesize_dataset_post_v1_eval_datasets_name_synthesize",
         "x-kiln-handler": "eval::synthesize_dataset",
-        "x-kiln-rust-signature": "async fn synthesize_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<SynthesizeBody>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn synthesize_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<SynthesizeBody>, ) -> Result<Json<SynthesizeDatasetResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -2138,11 +2138,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/SynthesizeDatasetResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "SynthesizeDatasetResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -2186,7 +2186,7 @@
         "summary": "Cancel job",
         "operationId": "eval_cancel_job_delete_v1_eval_jobs_job_id",
         "x-kiln-handler": "eval::cancel_job",
-        "x-kiln-rust-signature": "async fn cancel_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn cancel_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<CancelEvalJobResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -2205,11 +2205,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/CancelEvalJobResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "CancelEvalJobResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -2417,7 +2417,7 @@
         "summary": "Delete suite",
         "operationId": "eval_delete_suite_delete_v1_eval_suites_name",
         "x-kiln-handler": "eval::delete_suite",
-        "x-kiln-rust-signature": "async fn delete_suite( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn delete_suite( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DeleteSuiteResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -2436,11 +2436,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/DeleteSuiteResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "DeleteSuiteResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -2594,7 +2594,7 @@
         "summary": "Render judgment prompt",
         "operationId": "eval_render_judgment_prompt_post_v1_judgments_render_prompt",
         "x-kiln-handler": "eval::render_judgment_prompt",
-        "x-kiln-rust-signature": "async fn render_judgment_prompt(Json(body): Json<AppendJudgmentBody>) -> Json<serde_json::Value>",
+        "x-kiln-rust-signature": "async fn render_judgment_prompt( Json(body): Json<AppendJudgmentBody>, ) -> Json<RenderJudgmentPromptResponse>",
         "x-kiln-transport": "http",
         "requestBody": {
           "required": true,
@@ -2613,11 +2613,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/RenderJudgmentPromptResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "RenderJudgmentPromptResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -2633,7 +2633,7 @@
         "summary": "Delete judgment dataset",
         "operationId": "eval_delete_judgment_dataset_delete_v1_judgments_name",
         "x-kiln-handler": "eval::delete_judgment_dataset",
-        "x-kiln-rust-signature": "async fn delete_judgment_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn delete_judgment_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DeleteJudgmentResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -2652,11 +2652,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/DeleteJudgmentResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "DeleteJudgmentResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -2672,7 +2672,7 @@
         "summary": "Compile judgment",
         "operationId": "eval_compile_judgment_post_v1_judgments_name_compile",
         "x-kiln-handler": "eval::compile_judgment",
-        "x-kiln-rust-signature": "async fn compile_judgment( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<CompileJudgmentBody>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn compile_judgment( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<CompileJudgmentBody>, ) -> Result<Json<CompileJudgmentResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -2702,11 +2702,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/CompileJudgmentResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "CompileJudgmentResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -2820,7 +2820,7 @@
         "summary": "Validate judgment adapter",
         "operationId": "eval_validate_judgment_adapter_post_v1_judgments_name_validate",
         "x-kiln-handler": "eval::validate_judgment_adapter",
-        "x-kiln-rust-signature": "async fn validate_judgment_adapter( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<PromoteJudgmentBody>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn validate_judgment_adapter( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<PromoteJudgmentBody>, ) -> Result<Json<ValidateJudgmentResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -2850,11 +2850,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/ValidateJudgmentResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "ValidateJudgmentResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -4285,18 +4285,14 @@
         "x-kiln-field-schema-status": "complete"
       },
       "AppendJudgmentBody": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type AppendJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/AppendJudgmentBody",
         "x-kiln-rust-type": "AppendJudgmentBody",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "AppendJudgmentResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type AppendJudgmentResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/AppendJudgmentResponse",
         "x-kiln-rust-type": "AppendJudgmentResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "BatchCompletionRequest": {
         "$ref": "kiln-inference-v1.schema.json#/$defs/BatchCompletionRequest",
@@ -4318,6 +4314,11 @@
       "CacheStatsResponse": {
         "$ref": "kiln-observability-v1.schema.json#/$defs/CacheStatsResponse",
         "x-kiln-rust-type": "CacheStatsResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
+      "CancelEvalJobResponse": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/CancelEvalJobResponse",
+        "x-kiln-rust-type": "CancelEvalJobResponse",
         "x-kiln-field-schema-status": "complete"
       },
       "CapacityRequest": {
@@ -4357,11 +4358,14 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "CompileJudgmentBody": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type CompileJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/CompileJudgmentBody",
         "x-kiln-rust-type": "CompileJudgmentBody",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
+      },
+      "CompileJudgmentResponse": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/CompileJudgmentResponse",
+        "x-kiln-rust-type": "CompileJudgmentResponse",
+        "x-kiln-field-schema-status": "complete"
       },
       "ConfigResponse": {
         "$ref": "kiln-observability-v1.schema.json#/$defs/ConfigResponse",
@@ -4376,11 +4380,9 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "CreateJudgmentBody": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type CreateJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/CreateJudgmentBody",
         "x-kiln-rust-type": "CreateJudgmentBody",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "CreateRunRequest": {
         "type": "object",
@@ -4396,25 +4398,19 @@
         "x-kiln-field-schema-status": "complete"
       },
       "DatasetListResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DatasetListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/DatasetListResponse",
         "x-kiln-rust-type": "DatasetListResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "DatasetManifest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DatasetManifest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/DatasetManifest",
         "x-kiln-rust-type": "DatasetManifest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "DatasetUploadMultipart": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DatasetUploadMultipart. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/DatasetUploadMultipart",
         "x-kiln-rust-type": "DatasetUploadMultipart",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "DebugDisabledResponse": {
         "$ref": "kiln-observability-v1.schema.json#/$defs/DebugDisabledResponse",
@@ -4437,11 +4433,26 @@
         "x-kiln-field-schema-status": "complete",
         "x-kiln-rust-type": "DeleteAdapterResponse"
       },
+      "DeleteDatasetResponse": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/DeleteDatasetResponse",
+        "x-kiln-rust-type": "DeleteDatasetResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
       "DeleteExportResponse": {
         "$ref": "kiln-artifacts-v1.schema.json#/$defs/DeleteExportResponse",
         "description": "Confirmation that an immutable export bundle was deleted.",
         "x-kiln-field-schema-status": "complete",
         "x-kiln-rust-type": "DeleteExportResponse"
+      },
+      "DeleteJudgmentResponse": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/DeleteJudgmentResponse",
+        "x-kiln-rust-type": "DeleteJudgmentResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
+      "DeleteSuiteResponse": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/DeleteSuiteResponse",
+        "x-kiln-rust-type": "DeleteSuiteResponse",
+        "x-kiln-field-schema-status": "complete"
       },
       "DeleteTeacherResponse": {
         "$ref": "kiln-artifacts-v1.schema.json#/$defs/DeleteTeacherResponse",
@@ -4492,46 +4503,34 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "EvalCompareSpec": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type EvalCompareSpec. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/EvalCompareSpec",
         "x-kiln-rust-type": "EvalCompareSpec",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "EvalJobListResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type EvalJobListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/EvalJobListResponse",
         "x-kiln-rust-type": "EvalJobListResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "EvalResult": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type EvalResult. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/EvalResult",
         "x-kiln-rust-type": "EvalResult",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "EvalRunRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type EvalRunRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/EvalRunRequest",
         "x-kiln-rust-type": "EvalRunRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "EvalRunResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type EvalRunResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/EvalRunResponse",
         "x-kiln-rust-type": "EvalRunResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "EvalSuite": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type EvalSuite. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/EvalSuite",
         "x-kiln-rust-type": "EvalSuite",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "ExportDetail": {
         "$ref": "kiln-artifacts-v1.schema.json#/$defs/ExportDetail",
@@ -4637,18 +4636,14 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "JudgmentListResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type JudgmentListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/JudgmentListResponse",
         "x-kiln-rust-type": "JudgmentListResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "JudgmentManifest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type JudgmentManifest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/JudgmentManifest",
         "x-kiln-rust-type": "JudgmentManifest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "LibraryListResponse": {
         "type": "object",
@@ -4726,11 +4721,9 @@
         "x-kiln-field-schema-status": "complete"
       },
       "PromoteJudgmentBody": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type PromoteJudgmentBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/PromoteJudgmentBody",
         "x-kiln-rust-type": "PromoteJudgmentBody",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "PublishPayload": {
         "type": "object",
@@ -4779,17 +4772,20 @@
         "x-kiln-field-schema-status": "complete",
         "x-kiln-rust-type": "RegisterTeacherRequest"
       },
+      "RenderJudgmentPromptResponse": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/RenderJudgmentPromptResponse",
+        "x-kiln-rust-type": "RenderJudgmentPromptResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
       "RequestRecord": {
         "$ref": "kiln-observability-v1.schema.json#/$defs/RequestRecord",
         "x-kiln-rust-type": "RequestRecord",
         "x-kiln-field-schema-status": "complete"
       },
       "RerunBody": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type RerunBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/RerunBody",
         "x-kiln-rust-type": "RerunBody",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "SelfImproveRequest": {
         "type": "object",
@@ -4819,32 +4815,34 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "SuiteListResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type SuiteListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/SuiteListResponse",
         "x-kiln-rust-type": "SuiteListResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "SuiteSaveResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type SuiteSaveResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/SuiteSaveResponse",
         "x-kiln-rust-type": "SuiteSaveResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
+      },
+      "SynthesisPreview": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/SynthesisPreview",
+        "x-kiln-rust-type": "SynthesisPreview",
+        "x-kiln-field-schema-status": "complete"
       },
       "SynthesisPreviewBody": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type SynthesisPreviewBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/SynthesisPreviewBody",
         "x-kiln-rust-type": "SynthesisPreviewBody",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "SynthesizeBody": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type SynthesizeBody. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-evals-v1.schema.json#/$defs/SynthesizeBody",
         "x-kiln-rust-type": "SynthesizeBody",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
+      },
+      "SynthesizeDatasetResponse": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/SynthesizeDatasetResponse",
+        "x-kiln-rust-type": "SynthesizeDatasetResponse",
+        "x-kiln-field-schema-status": "complete"
       },
       "TeacherEntry": {
         "$ref": "kiln-artifacts-v1.schema.json#/$defs/TeacherEntry",
@@ -4915,6 +4913,11 @@
         "x-kiln-field-schema-status": "complete",
         "x-kiln-rust-type": "UploadAdapterResponse"
       },
+      "ValidateJudgmentResponse": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/ValidateJudgmentResponse",
+        "x-kiln-rust-type": "ValidateJudgmentResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
       "Vec_RequestRecord": {
         "$ref": "kiln-observability-v1.schema.json#/$defs/Vec_RequestRecord",
         "x-kiln-rust-type": "Vec<RequestRecord>",
@@ -4968,8 +4971,8 @@
   },
   "x-kiln-field-schema-status": "migration_pending",
   "x-kiln-component-schema-counts": {
-    "complete": 49,
-    "migration_pending": 60,
-    "total": 109
+    "complete": 79,
+    "migration_pending": 39,
+    "total": 118
   }
 }

@@ -1,0 +1,3527 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/contracts/kiln-evals-v1.schema.json",
+  "title": "Kiln Eval, Dataset Synthesis, and Judgment API",
+  "description": "Complete field-level wire contract for eval suites and jobs, uploaded datasets, deterministic suite synthesis, and the pairwise-judgment flywheel. Open input objects explicitly preserve serde's accepted-and-ignored unknown-field behavior; emitted objects are closed.",
+  "x-kiln-field-schema-status": "complete",
+  "x-kiln-entrypoints": [
+    "AppendJudgmentBody",
+    "AppendJudgmentResponse",
+    "CancelEvalJobResponse",
+    "CompileJudgmentBody",
+    "CompileJudgmentResponse",
+    "CreateJudgmentBody",
+    "DatasetListResponse",
+    "DatasetManifest",
+    "DatasetUploadMultipart",
+    "DeleteDatasetResponse",
+    "DeleteJudgmentResponse",
+    "DeleteSuiteResponse",
+    "EvalCompareSpec",
+    "EvalJobListResponse",
+    "EvalResult",
+    "EvalRunRequest",
+    "EvalRunResponse",
+    "EvalSuite",
+    "JudgmentListResponse",
+    "JudgmentManifest",
+    "PromoteJudgmentBody",
+    "RenderJudgmentPromptResponse",
+    "RerunBody",
+    "SuiteListResponse",
+    "SuiteSaveResponse",
+    "SynthesisPreview",
+    "SynthesisPreviewBody",
+    "SynthesizeBody",
+    "SynthesizeDatasetResponse",
+    "ValidateJudgmentResponse"
+  ],
+  "x-kiln-external-contracts": [
+    "kiln-observability-v1.schema.json",
+    "thinking-budget-v1.schema.json"
+  ],
+  "oneOf": [
+    {
+      "$ref": "#/$defs/AppendJudgmentBody"
+    },
+    {
+      "$ref": "#/$defs/AppendJudgmentResponse"
+    },
+    {
+      "$ref": "#/$defs/CancelEvalJobResponse"
+    },
+    {
+      "$ref": "#/$defs/CompileJudgmentBody"
+    },
+    {
+      "$ref": "#/$defs/CompileJudgmentResponse"
+    },
+    {
+      "$ref": "#/$defs/CreateJudgmentBody"
+    },
+    {
+      "$ref": "#/$defs/DatasetListResponse"
+    },
+    {
+      "$ref": "#/$defs/DatasetManifest"
+    },
+    {
+      "$ref": "#/$defs/DatasetUploadMultipart"
+    },
+    {
+      "$ref": "#/$defs/DeleteDatasetResponse"
+    },
+    {
+      "$ref": "#/$defs/DeleteJudgmentResponse"
+    },
+    {
+      "$ref": "#/$defs/DeleteSuiteResponse"
+    },
+    {
+      "$ref": "#/$defs/EvalCompareSpec"
+    },
+    {
+      "$ref": "#/$defs/EvalJobListResponse"
+    },
+    {
+      "$ref": "#/$defs/EvalResult"
+    },
+    {
+      "$ref": "#/$defs/EvalRunRequest"
+    },
+    {
+      "$ref": "#/$defs/EvalRunResponse"
+    },
+    {
+      "$ref": "#/$defs/EvalSuite"
+    },
+    {
+      "$ref": "#/$defs/JudgmentListResponse"
+    },
+    {
+      "$ref": "#/$defs/JudgmentManifest"
+    },
+    {
+      "$ref": "#/$defs/PromoteJudgmentBody"
+    },
+    {
+      "$ref": "#/$defs/RenderJudgmentPromptResponse"
+    },
+    {
+      "$ref": "#/$defs/RerunBody"
+    },
+    {
+      "$ref": "#/$defs/SuiteListResponse"
+    },
+    {
+      "$ref": "#/$defs/SuiteSaveResponse"
+    },
+    {
+      "$ref": "#/$defs/SynthesisPreview"
+    },
+    {
+      "$ref": "#/$defs/SynthesisPreviewBody"
+    },
+    {
+      "$ref": "#/$defs/SynthesizeBody"
+    },
+    {
+      "$ref": "#/$defs/SynthesizeDatasetResponse"
+    },
+    {
+      "$ref": "#/$defs/ValidateJudgmentResponse"
+    }
+  ],
+  "$defs": {
+    "AggregateMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "num_examples",
+        "num_pass",
+        "num_fail",
+        "num_invalid",
+        "num_error",
+        "accuracy",
+        "accuracy_confidence_interval",
+        "mean_score",
+        "weighted_mean_score",
+        "latency",
+        "total_prompt_tokens",
+        "total_completion_tokens",
+        "elapsed_secs",
+        "pass_rate_by_tag",
+        "by_scorer",
+        "reasoning_length",
+        "num_unclosed_thinking",
+        "num_non_xml_tool_calls",
+        "num_schema_missing_required",
+        "num_schema_extra_unknown"
+      ],
+      "properties": {
+        "num_examples": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_pass": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_fail": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_invalid": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_error": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "accuracy": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "accuracy_confidence_interval": {
+          "$ref": "#/$defs/PassRateConfidenceInterval"
+        },
+        "mean_score": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "weighted_mean_score": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "latency": {
+          "$ref": "#/$defs/LatencyStats"
+        },
+        "total_prompt_tokens": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_completion_tokens": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "elapsed_secs": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "pass_rate_by_tag": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/UnitInterval"
+          }
+        },
+        "tag_breakdown": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/TagBreakdown"
+          }
+        },
+        "by_scorer": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScorerBreakdown"
+          }
+        },
+        "pass_rate_by_tool": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ToolBreakdown"
+          }
+        },
+        "reasoning_length": {
+          "$ref": "#/$defs/ReasoningLengthStats"
+        },
+        "num_unclosed_thinking": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_non_xml_tool_calls": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "confusion_by_tool": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/NonNegativeInteger"
+            }
+          }
+        },
+        "num_schema_missing_required": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_schema_extra_unknown": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Complete aggregate metrics for one suite/adapter run.",
+      "x-kiln-rust-type": "kiln_eval::AggregateMetrics",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AnyJson": {
+      "description": "Any JSON value carried without field-level interpretation.",
+      "x-kiln-rust-type": "serde_json::Value",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AppendJudgmentBody": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "prompt",
+        "response_a",
+        "response_b",
+        "winner"
+      ],
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvalChatMessage"
+          }
+        },
+        "adapter_a": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_b": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response_a": {
+          "$ref": "#/$defs/String"
+        },
+        "response_b": {
+          "$ref": "#/$defs/String"
+        },
+        "winner": {
+          "$ref": "#/$defs/JudgmentWinner"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Append one exact A/B preference row.",
+      "x-kiln-rust-type": "AppendJudgmentBody",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AppendJudgmentResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "judgment_id",
+        "name",
+        "description",
+        "num_rows",
+        "created_at",
+        "updated_at",
+        "winner_histogram"
+      ],
+      "properties": {
+        "judgment_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "num_rows": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        },
+        "winner_histogram": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/NonNegativeInteger"
+          }
+        },
+        "last_compiled_split": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "last_compiled_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        }
+      },
+      "description": "Assigned row ID flattened with the updated judgment manifest.",
+      "x-kiln-rust-type": "AppendJudgmentResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ArgsScoring": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "keys_only"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "structural"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "auto"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "scorers"
+          ],
+          "properties": {
+            "kind": {
+              "const": "per_key"
+            },
+            "scorers": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Scorer"
+              }
+            },
+            "extra_key_penalty": {
+              "$ref": "#/$defs/FiniteNumber"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Tool-argument scoring policy, including recursive per-key scorers.",
+      "x-kiln-rust-type": "kiln_eval::scorers::ArgsScoring",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Boolean": {
+      "type": "boolean",
+      "description": "A serialized Rust boolean.",
+      "x-kiln-rust-type": "bool",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CancelEvalJobResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "job_id",
+            "was_in_queue"
+          ],
+          "properties": {
+            "status": {
+              "const": "cancelled"
+            },
+            "job_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "was_in_queue": {
+              "$ref": "#/$defs/Boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "job_id",
+            "note"
+          ],
+          "properties": {
+            "status": {
+              "const": "cancelling"
+            },
+            "job_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "note": {
+              "const": "running job will exit at the next example boundary"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "job_id",
+            "removed_archive_file"
+          ],
+          "properties": {
+            "status": {
+              "const": "deleted"
+            },
+            "job_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "removed_archive_file": {
+              "$ref": "#/$defs/Boolean"
+            }
+          }
+        }
+      ],
+      "description": "Queued cancellation, cooperative running cancellation, or terminal-record deletion result.",
+      "x-kiln-rust-type": "CancelEvalJobResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CodeStyle": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "any_block"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "exact_block"
+            },
+            "strip_comments": {
+              "$ref": "#/$defs/Boolean"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "token_similarity"
+            },
+            "min_jaccard": {
+              "$ref": "#/$defs/FiniteNumber"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "line_coverage"
+            },
+            "min_coverage": {
+              "$ref": "#/$defs/FiniteNumber"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Code comparison policy. Variant-specific defaulted fields may be omitted on input.",
+      "x-kiln-rust-type": "kiln_eval::scorers::CodeStyle",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CompileJudgmentBody": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "output_dataset"
+      ],
+      "properties": {
+        "output_dataset": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "include_skips": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "holdout_n": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Compile judgment rows to a swap-augmented SFT dataset with a holdout.",
+      "x-kiln-rust-type": "CompileJudgmentBody",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CompileJudgmentResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "rows",
+        "holdout_n",
+        "train_validation_split",
+        "dataset",
+        "warnings"
+      ],
+      "properties": {
+        "status": {
+          "const": "compiled"
+        },
+        "rows": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "holdout_n": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "train_validation_split": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "dataset": {
+          "$ref": "#/$defs/DatasetManifest"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        }
+      },
+      "description": "Compiled SFT dataset and exact train/validation boundary.",
+      "x-kiln-rust-type": "CompileJudgmentResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ContainsMode": {
+      "type": "string",
+      "enum": [
+        "any",
+        "all",
+        "none"
+      ],
+      "description": "How phrase containment matches combine.",
+      "x-kiln-rust-type": "ContainsMode",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CreateJudgmentBody": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Create an append-only judgment dataset.",
+      "x-kiln-rust-type": "CreateJudgmentBody",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DatasetFormat": {
+      "type": "string",
+      "enum": [
+        "sft_chat",
+        "grpo_groups",
+        "raw"
+      ],
+      "description": "Canonical persisted dataset format.",
+      "x-kiln-rust-type": "DatasetFormat",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DatasetListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "datasets"
+      ],
+      "properties": {
+        "datasets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DatasetManifest"
+          }
+        }
+      },
+      "description": "All uploaded eval/training datasets.",
+      "x-kiln-rust-type": "DatasetListResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DatasetManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "format",
+        "description",
+        "num_rows",
+        "size_bytes",
+        "created_at",
+        "updated_at",
+        "stats"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "format": {
+          "$ref": "#/$defs/DatasetFormat"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "num_rows": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        },
+        "stats": {
+          "$ref": "#/$defs/DatasetStats"
+        }
+      },
+      "description": "Persisted dataset identity and structural summary.",
+      "x-kiln-rust-type": "DatasetManifest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DatasetStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "num_assistant_turns",
+        "num_tool_messages",
+        "num_with_tool_calls",
+        "max_messages_per_conv",
+        "max_content_chars",
+        "avg_messages_per_conv",
+        "sample_role_patterns"
+      ],
+      "properties": {
+        "num_assistant_turns": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_tool_messages": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_with_tool_calls": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_messages_per_conv": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_content_chars": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "avg_messages_per_conv": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "sample_role_patterns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        }
+      },
+      "description": "Bounded structural statistics computed from an uploaded dataset.",
+      "x-kiln-rust-type": "DatasetStats",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DatasetUploadFormat": {
+      "type": "string",
+      "enum": [
+        "sft_chat",
+        "sft",
+        "grpo_groups",
+        "grpo",
+        "raw"
+      ],
+      "description": "Accepted multipart dataset format including request aliases.",
+      "x-kiln-rust-type": "DatasetUploadMultipart::format",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DatasetUploadMultipart": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name",
+        "file"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "format": {
+          "$ref": "#/$defs/DatasetUploadFormat"
+        },
+        "description": {
+          "$ref": "#/$defs/String"
+        },
+        "file": {
+          "type": "string",
+          "format": "binary",
+          "contentMediaType": "application/jsonl"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "x-kiln-default-format": "sft_chat",
+      "description": "Multipart dataset upload. Unknown parts are drained and ignored.",
+      "x-kiln-rust-type": "DatasetUploadMultipart",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DecimalU64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "description": "An exact unsigned 64-bit value serialized as a base-10 string for JavaScript safety.",
+      "x-kiln-rust-type": "u64",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DeleteDatasetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "name"
+      ],
+      "properties": {
+        "status": {
+          "const": "deleted"
+        },
+        "name": {
+          "$ref": "#/$defs/EvalResourceName"
+        }
+      },
+      "description": "Confirmation that a dataset was deleted.",
+      "x-kiln-rust-type": "DeleteDatasetResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DeleteJudgmentResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "name"
+      ],
+      "properties": {
+        "status": {
+          "const": "deleted"
+        },
+        "name": {
+          "$ref": "#/$defs/EvalResourceName"
+        }
+      },
+      "description": "Confirmation that a judgment dataset was deleted.",
+      "x-kiln-rust-type": "DeleteJudgmentResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DeleteSuiteResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "name"
+      ],
+      "properties": {
+        "status": {
+          "const": "deleted"
+        },
+        "name": {
+          "$ref": "#/$defs/EvalResourceName"
+        }
+      },
+      "description": "Confirmation that a suite was deleted.",
+      "x-kiln-rust-type": "DeleteSuiteResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalChatMessage": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/String"
+        },
+        "content": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              }
+            }
+          ]
+        },
+        "tool_calls": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Canonical chat message. Non-string input content is normalized by the runtime's compatibility deserializer.",
+      "x-kiln-rust-type": "kiln_core::tokenizer::ChatMessage",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalCompareSpec": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "suite",
+        "adapters"
+      ],
+      "properties": {
+        "suite": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "adapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "seed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "generation": {
+          "$ref": "#/$defs/EvalGenerationParams"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Run one registered suite against one to eight ordered adapters. Empty adapter names select the base model.",
+      "x-kiln-rust-type": "EvalCompareSpec",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalExample": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "messages"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/String"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvalChatMessage"
+          },
+          "minItems": 1
+        },
+        "target": {
+          "$ref": "#/$defs/String"
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "metadata": {
+          "$ref": "#/$defs/AnyJson"
+        },
+        "scorer": {
+          "$ref": "#/$defs/Scorer"
+        },
+        "generation": {
+          "$ref": "#/$defs/EvalGenerationParams"
+        },
+        "weight": {
+          "type": "number",
+          "minimum": 0
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          }
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "One prompt/target pair with optional scoring and generation overrides.",
+      "x-kiln-rust-type": "kiln_eval::EvalExample",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalGenerationParams": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "temperature": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "top_p": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "top_k": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_tokens": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "n": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "stop": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "seed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thinking_budget_tokens": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thinking_budget_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "chat_template_kwargs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AnyJson"
+          }
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "x-kiln-thinking-budget-contract": "thinking-budget-v1.schema.json",
+      "description": "Eval decode parameters. Omitted thinking budgets inherit; explicit null is unlimited; finite values include zero.",
+      "x-kiln-rust-type": "kiln_eval::EvalGenerationParams",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalJobInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "suite_name",
+        "adapters",
+        "submission_kind",
+        "state",
+        "progress",
+        "finished_runs",
+        "headline_accuracy",
+        "error",
+        "source_training_job_id",
+        "submitted_at_iso",
+        "started_at_iso",
+        "finished_at_iso"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "suite_name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "adapters": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/String"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "submission_kind": {
+          "$ref": "#/$defs/EvalSubmissionKind"
+        },
+        "base_weight_shard_manifest": {
+          "$ref": "kiln-observability-v1.schema.json#/$defs/BaseWeightShardManifest"
+        },
+        "execution_provenance": {
+          "$ref": "kiln-observability-v1.schema.json#/$defs/ExecutionProvenanceV1"
+        },
+        "effective_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "state": {
+          "$ref": "#/$defs/EvalJobState"
+        },
+        "progress": {
+          "$ref": "#/$defs/EvalProgress"
+        },
+        "finished_runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SuiteResult"
+          }
+        },
+        "headline_accuracy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_training_job_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "submitted_at_iso": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        },
+        "started_at_iso": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rfc3339Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finished_at_iso": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rfc3339Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "post_eval_gate": {
+          "$ref": "#/$defs/PostEvalGate"
+        }
+      },
+      "description": "Tracked eval-job list record; runtime-only Instants and cancellation handles are never serialized.",
+      "x-kiln-rust-type": "EvalJobInfo",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalJobListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobs"
+      ],
+      "properties": {
+        "jobs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvalJobInfo"
+          }
+        }
+      },
+      "description": "All retained eval jobs in descending submission order.",
+      "x-kiln-rust-type": "EvalJobListResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalJobState": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "description": "Evaluation job lifecycle state.",
+      "x-kiln-rust-type": "kiln_eval::EvalJobState",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalOutcomeKind": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail",
+        "invalid",
+        "error"
+      ],
+      "description": "Per-completion scoring outcome.",
+      "x-kiln-rust-type": "kiln_eval::EvalOutcomeKind",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "examples_completed",
+        "examples_total",
+        "running_accuracy",
+        "running_mean_score"
+      ],
+      "properties": {
+        "examples_completed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "examples_total": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "running_accuracy": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "running_mean_score": {
+          "$ref": "#/$defs/UnitInterval"
+        }
+      },
+      "description": "Live progress for the active adapter run.",
+      "x-kiln-rust-type": "kiln_eval::EvalProgress",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalResourceName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![\\s\\S]*(?:/|\\\\|\\.\\.))(?=[\\s\\S]*\\S)[\\s\\S]+$",
+      "description": "A non-blank suite, dataset, or judgment name without path separators or '..'.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "state",
+        "runs"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "state": {
+          "$ref": "#/$defs/EvalJobState"
+        },
+        "base_weight_shard_manifest": {
+          "$ref": "kiln-observability-v1.schema.json#/$defs/BaseWeightShardManifest"
+        },
+        "execution_provenance": {
+          "$ref": "kiln-observability-v1.schema.json#/$defs/ExecutionProvenanceV1"
+        },
+        "effective_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "seed_derivation": {
+          "$ref": "#/$defs/String"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SuiteResult"
+          }
+        },
+        "progress": {
+          "$ref": "#/$defs/EvalProgress"
+        },
+        "error": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Top-level retained result for a single- or multi-adapter eval job.",
+      "x-kiln-rust-type": "EvalResult",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalRunRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "suite": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "inline_suite": {
+          "$ref": "#/$defs/EvalSuite"
+        },
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "generation": {
+          "$ref": "#/$defs/EvalGenerationParams"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "oneOf": [
+        {
+          "required": [
+            "suite"
+          ],
+          "not": {
+            "required": [
+              "inline_suite"
+            ]
+          }
+        },
+        {
+          "required": [
+            "inline_suite"
+          ],
+          "not": {
+            "required": [
+              "suite"
+            ]
+          }
+        }
+      ],
+      "description": "Submit exactly one registered or inline suite for evaluation.",
+      "x-kiln-rust-type": "EvalRunRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalRunResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "state",
+        "effective_seed",
+        "message"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "state": {
+          "const": "queued"
+        },
+        "effective_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "message": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "description": "Immutable admission receipt for a queued eval job.",
+      "x-kiln-rust-type": "EvalRunResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalSubmissionKind": {
+      "type": "string",
+      "enum": [
+        "on_demand",
+        "post_training",
+        "compare"
+      ],
+      "description": "Admission path that created an eval job.",
+      "x-kiln-rust-type": "EvalSubmissionKind",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalSuite": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name",
+        "default_scorer",
+        "examples"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default_scorer": {
+          "$ref": "#/$defs/Scorer"
+        },
+        "generation": {
+          "$ref": "#/$defs/EvalGenerationParams"
+        },
+        "system_prompt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvalExample"
+          },
+          "minItems": 1
+        },
+        "schema_version": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          }
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "x-kiln-semantic-constraints": [
+        "resolved example IDs are unique",
+        "weights are finite and non-negative",
+        "tool entries have a non-empty function.name or name"
+      ],
+      "description": "A validated evaluation suite. Defaulted fields may be omitted on input and are materialized when serialized.",
+      "x-kiln-rust-type": "EvalSuite",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalSuiteSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "num_examples",
+        "default_scorer_kind",
+        "tags"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "num_examples": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "default_scorer_kind": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "tags": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/NonNegativeInteger"
+          }
+        }
+      },
+      "description": "List-view projection of a registered suite.",
+      "x-kiln-rust-type": "kiln_eval::EvalSuiteSummary",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ExampleOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "example_id",
+        "completion_index",
+        "completion_text",
+        "kind",
+        "score"
+      ],
+      "properties": {
+        "example_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "completion_index": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "generation_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "completion_text": {
+          "$ref": "#/$defs/String"
+        },
+        "raw_completion_text": {
+          "$ref": "#/$defs/String"
+        },
+        "thinking_budget": {
+          "$ref": "thinking-budget-v1.schema.json#/$defs/record"
+        },
+        "kind": {
+          "$ref": "#/$defs/EvalOutcomeKind"
+        },
+        "score": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "detail": {
+          "$ref": "#/$defs/String"
+        },
+        "prompt_tokens": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "completion_tokens": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "latency_ms": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "metadata": {
+          "$ref": "#/$defs/AnyJson"
+        },
+        "reasoning_text": {
+          "$ref": "#/$defs/String"
+        },
+        "unclosed_thinking": {
+          "$ref": "#/$defs/Boolean"
+        }
+      },
+      "description": "One scored completion with optional raw reasoning, latency, seed, and thinking-budget evidence.",
+      "x-kiln-rust-type": "kiln_eval::ExampleOutcome",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "FiniteNumber": {
+      "type": "number",
+      "description": "A finite JSON number.",
+      "x-kiln-rust-type": "f32 | f64",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "JudgmentListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "judgments"
+      ],
+      "properties": {
+        "judgments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JudgmentManifest"
+          }
+        }
+      },
+      "description": "All retained pairwise-judgment datasets.",
+      "x-kiln-rust-type": "JudgmentListResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "JudgmentManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "num_rows",
+        "created_at",
+        "updated_at",
+        "winner_histogram"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "num_rows": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        },
+        "winner_histogram": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/NonNegativeInteger"
+          }
+        },
+        "last_compiled_split": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "last_compiled_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        }
+      },
+      "description": "Persisted pairwise-judgment dataset identity and compile split.",
+      "x-kiln-rust-type": "JudgmentManifest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "JudgmentWinner": {
+      "type": "string",
+      "enum": [
+        "a",
+        "b",
+        "tie",
+        "skip"
+      ],
+      "description": "Human pairwise preference label.",
+      "x-kiln-rust-type": "JudgmentWinner",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "LatencyStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "p50_ms",
+        "p90_ms",
+        "p99_ms",
+        "mean_ms",
+        "max_ms"
+      ],
+      "properties": {
+        "p50_ms": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "p90_ms": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "p99_ms": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "mean_ms": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "max_ms": {
+          "$ref": "#/$defs/FiniteNumber"
+        }
+      },
+      "description": "Latency distribution summary in milliseconds.",
+      "x-kiln-rust-type": "kiln_eval::LatencyStats",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "NameMatch": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "exact"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "case_insensitive"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "allowed"
+          ],
+          "properties": {
+            "kind": {
+              "const": "one_of"
+            },
+            "allowed": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/String"
+              }
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Tool-name matching policy.",
+      "x-kiln-rust-type": "kiln_eval::scorers::NameMatch",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "NonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A non-empty UTF-8 string.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "NonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "A non-negative integer.",
+      "x-kiln-rust-type": "u64 | u32 | usize",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PassRateConfidenceInterval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "confidence_level",
+        "lower",
+        "upper"
+      ],
+      "properties": {
+        "confidence_level": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "lower": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "upper": {
+          "$ref": "#/$defs/UnitInterval"
+        }
+      },
+      "description": "Wilson confidence interval for a pass rate.",
+      "x-kiln-rust-type": "kiln_eval::PassRateConfidenceInterval",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PositiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "A positive integer.",
+      "x-kiln-rust-type": "u64 | u32 | usize",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PostEvalGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_accuracy",
+        "adapter_name",
+        "training_job_id",
+        "auto_load_on_pass"
+      ],
+      "properties": {
+        "min_accuracy": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "relative_recovery": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "absolute_gain": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "adapter_name": {
+          "$ref": "#/$defs/String"
+        },
+        "training_job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "auto_load_on_pass": {
+          "$ref": "#/$defs/Boolean"
+        }
+      },
+      "description": "Post-training promotion thresholds retained on an eval job.",
+      "x-kiln-rust-type": "PostEvalGate",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PromoteJudgmentBody": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "adapter"
+      ],
+      "properties": {
+        "adapter": {
+          "$ref": "#/$defs/String"
+        },
+        "holdout_n": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Queue held-out validation for a trained judge adapter.",
+      "x-kiln-rust-type": "PromoteJudgmentBody",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ReasoningLengthStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "num_with_thinking",
+        "mean_chars",
+        "p50_chars",
+        "p90_chars",
+        "max_chars"
+      ],
+      "properties": {
+        "num_with_thinking": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "mean_chars": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "p50_chars": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "p90_chars": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_chars": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Reasoning-block character-length summary.",
+      "x-kiln-rust-type": "kiln_eval::ReasoningLengthStats",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RenderJudgmentPromptResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prompt"
+      ],
+      "properties": {
+        "prompt": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Exact pairwise prompt used by both judge training and inference.",
+      "x-kiln-rust-type": "RenderJudgmentPromptResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RerunBody": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome_kinds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvalOutcomeKind"
+          }
+        },
+        "include_pass": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "seed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Select outcomes and adapter identity for a failure-focused re-run.",
+      "x-kiln-rust-type": "RerunBody",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Rfc3339Timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "An RFC 3339 timestamp.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Sampling": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "max_examples": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_prompt_chars": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_target_chars": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "seed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dedupe": {
+          "$ref": "#/$defs/Boolean"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Synthesis sampling and filtering controls.",
+      "x-kiln-rust-type": "kiln_eval::synthesis::Sampling",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Scorer": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "exact_match"
+            },
+            "case_sensitive": {
+              "$ref": "#/$defs/Boolean"
+            },
+            "strip_whitespace": {
+              "$ref": "#/$defs/Boolean"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "phrases"
+          ],
+          "properties": {
+            "kind": {
+              "const": "contains"
+            },
+            "phrases": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/String"
+              }
+            },
+            "mode": {
+              "$ref": "#/$defs/ContainsMode"
+            },
+            "case_sensitive": {
+              "$ref": "#/$defs/Boolean"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "pattern"
+          ],
+          "properties": {
+            "kind": {
+              "const": "regex"
+            },
+            "pattern": {
+              "$ref": "#/$defs/String"
+            },
+            "capture_group": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NonNegativeInteger"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "case_sensitive": {
+              "$ref": "#/$defs/Boolean"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "json_validity"
+            },
+            "require_object": {
+              "$ref": "#/$defs/Boolean"
+            },
+            "required_paths": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/String"
+              }
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "multiple_choice"
+            },
+            "choices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/String"
+              }
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "numeric_tolerance"
+            },
+            "atol": {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            "rtol": {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            "integer_only": {
+              "$ref": "#/$defs/Boolean"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "llm_judge"
+            },
+            "judge_adapter": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "template": {
+              "$ref": "#/$defs/String"
+            },
+            "score_regex": {
+              "$ref": "#/$defs/String"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "tool_call"
+            },
+            "name_match": {
+              "$ref": "#/$defs/NameMatch"
+            },
+            "args": {
+              "$ref": "#/$defs/ArgsScoring"
+            },
+            "weights": {
+              "$ref": "#/$defs/ToolCallWeights"
+            },
+            "require_xml_format": {
+              "$ref": "#/$defs/Boolean"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "code"
+            },
+            "language": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "style": {
+              "$ref": "#/$defs/CodeStyle"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "python_doctest"
+            },
+            "timeout_seconds": {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            "python_bin": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "scorers"
+          ],
+          "properties": {
+            "kind": {
+              "const": "all"
+            },
+            "scorers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Scorer"
+              }
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "scorers"
+          ],
+          "properties": {
+            "kind": {
+              "const": "any"
+            },
+            "scorers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Scorer"
+              }
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Complete built-in scorer union. Unknown fields are accepted and ignored within each input variant.",
+      "x-kiln-rust-type": "kiln_eval::scorers::Scorer",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ScorerBreakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scorer_kind",
+        "num_examples",
+        "mean_score",
+        "pass_rate"
+      ],
+      "properties": {
+        "scorer_kind": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "num_examples": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "mean_score": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "pass_rate": {
+          "$ref": "#/$defs/UnitInterval"
+        }
+      },
+      "description": "Aggregate metrics for one scorer kind.",
+      "x-kiln-rust-type": "kiln_eval::ScorerBreakdown",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ScorerChoice": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "auto_detect"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind",
+            "scorer"
+          ],
+          "properties": {
+            "kind": {
+              "const": "fixed"
+            },
+            "scorer": {
+              "$ref": "#/$defs/Scorer"
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "judge"
+            },
+            "judge_adapter": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/String"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "x-kiln-unknown-field-policy": "accepted_and_ignored"
+        }
+      ],
+      "description": "Synthesis scorer policy. Fixed scorers use a nested scorer field so both tagged unions remain unambiguous.",
+      "x-kiln-rust-type": "kiln_eval::synthesis::ScorerChoice",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "String": {
+      "type": "string",
+      "description": "A serialized UTF-8 Rust string.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SuiteListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "suites"
+      ],
+      "properties": {
+        "suites": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvalSuiteSummary"
+          }
+        }
+      },
+      "description": "All registered evaluation suites.",
+      "x-kiln-rust-type": "SuiteListResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SuiteResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "suite_name",
+        "adapter",
+        "metrics",
+        "outcomes",
+        "started_at",
+        "finished_at",
+        "suite_hash"
+      ],
+      "properties": {
+        "suite_name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "metrics": {
+          "$ref": "#/$defs/AggregateMetrics"
+        },
+        "outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExampleOutcome"
+          }
+        },
+        "started_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        },
+        "suite_hash": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "effective_generation_hash": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "description": "Complete result for one suite and adapter.",
+      "x-kiln-rust-type": "kiln_eval::SuiteResult",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SuiteSaveResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "path",
+        "status"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "path": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "status": {
+          "enum": [
+            "created",
+            "overwritten"
+          ]
+        }
+      },
+      "description": "Suite persistence confirmation.",
+      "x-kiln-rust-type": "SuiteSaveResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SynthesisPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "examples",
+        "stats",
+        "suite_name",
+        "default_scorer_kind"
+      ],
+      "properties": {
+        "examples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvalExample"
+          }
+        },
+        "stats": {
+          "$ref": "#/$defs/SynthesisStats"
+        },
+        "suite_name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "default_scorer_kind": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "description": "Non-persisted synthesis preview.",
+      "x-kiln-rust-type": "SynthesisPreview",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SynthesisPreviewBody": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "suite_name"
+      ],
+      "properties": {
+        "suite_name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "strategy": {
+          "$ref": "#/$defs/SynthesisStrategy"
+        },
+        "scorer": {
+          "$ref": "#/$defs/ScorerChoice"
+        },
+        "generation": {
+          "$ref": "#/$defs/EvalGenerationParams"
+        },
+        "sampling": {
+          "$ref": "#/$defs/Sampling"
+        },
+        "system_prompt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "strip_system_prompt": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "suite_tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          }
+        },
+        "head_n": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Preview a synthesized suite without persisting it.",
+      "x-kiln-rust-type": "SynthesisPreviewBody",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SynthesisStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trajectories_seen",
+        "trajectories_used",
+        "examples_generated",
+        "skipped_no_target",
+        "skipped_prompt_too_long",
+        "skipped_target_too_long",
+        "skipped_duplicate",
+        "skipped_strategy_match",
+        "sample_kept",
+        "effective_seed",
+        "auto_scorer_histogram"
+      ],
+      "properties": {
+        "trajectories_seen": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "trajectories_used": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "examples_generated": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "skipped_no_target": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "skipped_prompt_too_long": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "skipped_target_too_long": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "skipped_duplicate": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "skipped_strategy_match": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "sample_kept": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "effective_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "auto_scorer_histogram": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/NonNegativeInteger"
+          }
+        }
+      },
+      "description": "Complete synthesis filtering and deterministic seed statistics. The u64 seed is emitted as an exact decimal string.",
+      "x-kiln-rust-type": "kiln_eval::synthesis::SynthesisStats",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SynthesisStrategy": {
+      "type": "string",
+      "enum": [
+        "final_assistant",
+        "first_assistant_turn",
+        "every_assistant_turn",
+        "tool_call_predict",
+        "tool_response_followup",
+        "end_of_trajectory_answer"
+      ],
+      "description": "How a conversation is decomposed into eval examples.",
+      "x-kiln-rust-type": "SynthesisStrategy",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SynthesizeBody": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "suite_name"
+      ],
+      "properties": {
+        "suite_name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "strategy": {
+          "$ref": "#/$defs/SynthesisStrategy"
+        },
+        "scorer": {
+          "$ref": "#/$defs/ScorerChoice"
+        },
+        "generation": {
+          "$ref": "#/$defs/EvalGenerationParams"
+        },
+        "sampling": {
+          "$ref": "#/$defs/Sampling"
+        },
+        "system_prompt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "strip_system_prompt": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "suite_tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          }
+        },
+        "force": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "run_against": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/String"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Persist a synthesized suite and optionally queue it against adapters.",
+      "x-kiln-rust-type": "SynthesizeBody",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SynthesizeDatasetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "suite",
+        "stats",
+        "queued_eval_job_ids"
+      ],
+      "properties": {
+        "suite": {
+          "$ref": "#/$defs/EvalSuiteSummary"
+        },
+        "stats": {
+          "$ref": "#/$defs/SynthesisStats"
+        },
+        "queued_eval_job_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        }
+      },
+      "description": "Persisted suite summary plus any auto-queued eval job IDs.",
+      "x-kiln-rust-type": "SynthesizeDatasetResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TagBreakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "num_examples",
+        "num_pass",
+        "pass_rate",
+        "confidence_interval"
+      ],
+      "properties": {
+        "num_examples": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_pass": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "pass_rate": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "confidence_interval": {
+          "$ref": "#/$defs/PassRateConfidenceInterval"
+        }
+      },
+      "description": "Per-tag pass counts and interval.",
+      "x-kiln-rust-type": "kiln_eval::TagBreakdown",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ToolBreakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "num_examples",
+        "num_pass",
+        "pass_rate",
+        "confidence_interval"
+      ],
+      "properties": {
+        "num_examples": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_pass": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "pass_rate": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "confidence_interval": {
+          "$ref": "#/$defs/PassRateConfidenceInterval"
+        }
+      },
+      "description": "Per-tool pass counts and interval.",
+      "x-kiln-rust-type": "kiln_eval::ToolBreakdown",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ToolCallWeights": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name",
+        "structure",
+        "content"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "structure": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "content": {
+          "$ref": "#/$defs/FiniteNumber"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Relative tool-call name, structure, and content weights.",
+      "x-kiln-rust-type": "kiln_eval::scorers::ToolCallWeights",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "UnitInterval": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "A score or rate in the closed interval [0, 1].",
+      "x-kiln-rust-type": "f32",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ValidateJudgmentResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "eval_job_id",
+        "effective_seed",
+        "validation_suite",
+        "warnings"
+      ],
+      "properties": {
+        "status": {
+          "const": "queued"
+        },
+        "eval_job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "effective_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "validation_suite": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        }
+      },
+      "description": "Held-out judge-validation admission receipt.",
+      "x-kiln-rust-type": "ValidateJudgmentResponse",
+      "x-kiln-field-schema-status": "complete"
+    }
+  },
+  "x-kiln-examples": {
+    "AppendJudgmentBody": [
+      {
+        "prompt": [
+          {
+            "role": "user",
+            "content": "Explain the answer."
+          }
+        ],
+        "adapter_a": null,
+        "adapter_b": "concise-v1",
+        "response_a": "A long answer",
+        "response_b": "A concise answer",
+        "winner": "b",
+        "tags": [
+          "style"
+        ]
+      }
+    ],
+    "AppendJudgmentResponse": [
+      {
+        "judgment_id": "judgment-1",
+        "name": "style-prefs",
+        "description": "Concise-answer preferences",
+        "num_rows": 1,
+        "created_at": "2026-07-14T12:00:00Z",
+        "updated_at": "2026-07-14T12:01:00Z",
+        "winner_histogram": {
+          "a": 1
+        }
+      }
+    ],
+    "CancelEvalJobResponse": [
+      {
+        "status": "cancelled",
+        "job_id": "eval-1",
+        "was_in_queue": true
+      },
+      {
+        "status": "cancelling",
+        "job_id": "eval-2",
+        "note": "running job will exit at the next example boundary"
+      },
+      {
+        "status": "deleted",
+        "job_id": "eval-3",
+        "removed_archive_file": true
+      }
+    ],
+    "CompileJudgmentBody": [
+      {
+        "output_dataset": "style-prefs-sft",
+        "include_skips": false,
+        "holdout_n": 1
+      }
+    ],
+    "CompileJudgmentResponse": [
+      {
+        "status": "compiled",
+        "rows": 2,
+        "holdout_n": 1,
+        "train_validation_split": 1,
+        "dataset": {
+          "name": "math-sft",
+          "format": "sft_chat",
+          "description": "Arithmetic conversations",
+          "num_rows": 1,
+          "size_bytes": 64,
+          "created_at": "2026-07-14T12:00:00Z",
+          "updated_at": "2026-07-14T12:00:00Z",
+          "stats": {
+            "num_assistant_turns": 1,
+            "num_tool_messages": 0,
+            "num_with_tool_calls": 0,
+            "max_messages_per_conv": 2,
+            "max_content_chars": 8,
+            "avg_messages_per_conv": 2.0,
+            "sample_role_patterns": [
+              "user>assistant"
+            ]
+          }
+        },
+        "warnings": []
+      }
+    ],
+    "CreateJudgmentBody": [
+      {
+        "name": "style-prefs",
+        "description": "Concise-answer preferences"
+      }
+    ],
+    "DatasetListResponse": [
+      {
+        "datasets": [
+          {
+            "name": "math-sft",
+            "format": "sft_chat",
+            "description": "Arithmetic conversations",
+            "num_rows": 1,
+            "size_bytes": 64,
+            "created_at": "2026-07-14T12:00:00Z",
+            "updated_at": "2026-07-14T12:00:00Z",
+            "stats": {
+              "num_assistant_turns": 1,
+              "num_tool_messages": 0,
+              "num_with_tool_calls": 0,
+              "max_messages_per_conv": 2,
+              "max_content_chars": 8,
+              "avg_messages_per_conv": 2.0,
+              "sample_role_patterns": [
+                "user>assistant"
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "DatasetManifest": [
+      {
+        "name": "math-sft",
+        "format": "sft_chat",
+        "description": "Arithmetic conversations",
+        "num_rows": 1,
+        "size_bytes": 64,
+        "created_at": "2026-07-14T12:00:00Z",
+        "updated_at": "2026-07-14T12:00:00Z",
+        "stats": {
+          "num_assistant_turns": 1,
+          "num_tool_messages": 0,
+          "num_with_tool_calls": 0,
+          "max_messages_per_conv": 2,
+          "max_content_chars": 8,
+          "avg_messages_per_conv": 2.0,
+          "sample_role_patterns": [
+            "user>assistant"
+          ]
+        }
+      }
+    ],
+    "DatasetUploadMultipart": [
+      {
+        "name": "math-sft",
+        "format": "sft_chat",
+        "description": "Arithmetic",
+        "file": "<binary JSONL body>"
+      }
+    ],
+    "DeleteDatasetResponse": [
+      {
+        "status": "deleted",
+        "name": "math-sft"
+      }
+    ],
+    "DeleteJudgmentResponse": [
+      {
+        "status": "deleted",
+        "name": "style-prefs"
+      }
+    ],
+    "DeleteSuiteResponse": [
+      {
+        "status": "deleted",
+        "name": "math-smoke"
+      }
+    ],
+    "EvalCompareSpec": [
+      {
+        "suite": "math-smoke",
+        "adapters": [
+          "",
+          "math-v1"
+        ],
+        "seed": 42
+      }
+    ],
+    "EvalJobListResponse": [
+      {
+        "jobs": [
+          {
+            "job_id": "eval-1",
+            "suite_name": "math-smoke",
+            "adapters": [
+              null
+            ],
+            "submission_kind": "on_demand",
+            "effective_seed": "42",
+            "state": "completed",
+            "progress": {
+              "examples_completed": 1,
+              "examples_total": 1,
+              "running_accuracy": 1.0,
+              "running_mean_score": 1.0
+            },
+            "finished_runs": [
+              {
+                "suite_name": "math-smoke",
+                "adapter": null,
+                "metrics": {
+                  "num_examples": 1,
+                  "num_pass": 1,
+                  "num_fail": 0,
+                  "num_invalid": 0,
+                  "num_error": 0,
+                  "accuracy": 1.0,
+                  "accuracy_confidence_interval": {
+                    "confidence_level": 0.95,
+                    "lower": 0.2,
+                    "upper": 1.0
+                  },
+                  "mean_score": 1.0,
+                  "weighted_mean_score": 1.0,
+                  "latency": {
+                    "p50_ms": 10.0,
+                    "p90_ms": 10.0,
+                    "p99_ms": 10.0,
+                    "mean_ms": 10.0,
+                    "max_ms": 10.0
+                  },
+                  "total_prompt_tokens": 8,
+                  "total_completion_tokens": 1,
+                  "elapsed_secs": 0.01,
+                  "pass_rate_by_tag": {
+                    "math": 1.0
+                  },
+                  "tag_breakdown": {
+                    "math": {
+                      "num_examples": 1,
+                      "num_pass": 1,
+                      "pass_rate": 1.0,
+                      "confidence_interval": {
+                        "confidence_level": 0.95,
+                        "lower": 0.2,
+                        "upper": 1.0
+                      }
+                    }
+                  },
+                  "by_scorer": [
+                    {
+                      "scorer_kind": "exact_match",
+                      "num_examples": 1,
+                      "mean_score": 1.0,
+                      "pass_rate": 1.0
+                    }
+                  ],
+                  "reasoning_length": {
+                    "num_with_thinking": 0,
+                    "mean_chars": 0.0,
+                    "p50_chars": 0,
+                    "p90_chars": 0,
+                    "max_chars": 0
+                  },
+                  "num_unclosed_thinking": 0,
+                  "num_non_xml_tool_calls": 0,
+                  "num_schema_missing_required": 0,
+                  "num_schema_extra_unknown": 0
+                },
+                "outcomes": [
+                  {
+                    "example_id": "two-plus-two",
+                    "completion_index": 0,
+                    "generation_seed": "43",
+                    "completion_text": "4",
+                    "kind": "pass",
+                    "score": 1.0,
+                    "tags": [
+                      "math"
+                    ]
+                  }
+                ],
+                "started_at": "2026-07-14T12:00:00Z",
+                "finished_at": "2026-07-14T12:00:01Z",
+                "suite_hash": "suite-sha256"
+              }
+            ],
+            "headline_accuracy": 1.0,
+            "error": null,
+            "source_training_job_id": null,
+            "submitted_at_iso": "2026-07-14T12:00:00Z",
+            "started_at_iso": "2026-07-14T12:00:00Z",
+            "finished_at_iso": "2026-07-14T12:00:01Z"
+          }
+        ]
+      }
+    ],
+    "EvalResult": [
+      {
+        "job_id": "eval-1",
+        "state": "completed",
+        "effective_seed": "42",
+        "seed_derivation": "kiln.eval-seed.v1",
+        "runs": [
+          {
+            "suite_name": "math-smoke",
+            "adapter": null,
+            "metrics": {
+              "num_examples": 1,
+              "num_pass": 1,
+              "num_fail": 0,
+              "num_invalid": 0,
+              "num_error": 0,
+              "accuracy": 1.0,
+              "accuracy_confidence_interval": {
+                "confidence_level": 0.95,
+                "lower": 0.2,
+                "upper": 1.0
+              },
+              "mean_score": 1.0,
+              "weighted_mean_score": 1.0,
+              "latency": {
+                "p50_ms": 10.0,
+                "p90_ms": 10.0,
+                "p99_ms": 10.0,
+                "mean_ms": 10.0,
+                "max_ms": 10.0
+              },
+              "total_prompt_tokens": 8,
+              "total_completion_tokens": 1,
+              "elapsed_secs": 0.01,
+              "pass_rate_by_tag": {
+                "math": 1.0
+              },
+              "tag_breakdown": {
+                "math": {
+                  "num_examples": 1,
+                  "num_pass": 1,
+                  "pass_rate": 1.0,
+                  "confidence_interval": {
+                    "confidence_level": 0.95,
+                    "lower": 0.2,
+                    "upper": 1.0
+                  }
+                }
+              },
+              "by_scorer": [
+                {
+                  "scorer_kind": "exact_match",
+                  "num_examples": 1,
+                  "mean_score": 1.0,
+                  "pass_rate": 1.0
+                }
+              ],
+              "reasoning_length": {
+                "num_with_thinking": 0,
+                "mean_chars": 0.0,
+                "p50_chars": 0,
+                "p90_chars": 0,
+                "max_chars": 0
+              },
+              "num_unclosed_thinking": 0,
+              "num_non_xml_tool_calls": 0,
+              "num_schema_missing_required": 0,
+              "num_schema_extra_unknown": 0
+            },
+            "outcomes": [
+              {
+                "example_id": "two-plus-two",
+                "completion_index": 0,
+                "generation_seed": "43",
+                "completion_text": "4",
+                "kind": "pass",
+                "score": 1.0,
+                "tags": [
+                  "math"
+                ]
+              }
+            ],
+            "started_at": "2026-07-14T12:00:00Z",
+            "finished_at": "2026-07-14T12:00:01Z",
+            "suite_hash": "suite-sha256"
+          }
+        ]
+      }
+    ],
+    "EvalRunRequest": [
+      {
+        "suite": "math-smoke",
+        "adapter": "math-v1",
+        "seed": 42
+      }
+    ],
+    "EvalRunResponse": [
+      {
+        "job_id": "eval-1",
+        "state": "queued",
+        "effective_seed": "42",
+        "message": "Queued eval against suite `math-smoke`"
+      }
+    ],
+    "EvalSuite": [
+      {
+        "name": "math-smoke",
+        "description": "One deterministic arithmetic case",
+        "default_scorer": {
+          "kind": "exact_match",
+          "case_sensitive": false,
+          "strip_whitespace": true
+        },
+        "generation": {
+          "temperature": 0.0,
+          "top_p": 1.0,
+          "top_k": 0,
+          "max_tokens": 32,
+          "n": 1,
+          "stop": [],
+          "seed": null
+        },
+        "examples": [
+          {
+            "id": "two-plus-two",
+            "messages": [
+              {
+                "role": "user",
+                "content": "2 + 2?"
+              }
+            ],
+            "target": "4",
+            "weight": 1.0
+          }
+        ],
+        "schema_version": 1
+      }
+    ],
+    "JudgmentListResponse": [
+      {
+        "judgments": [
+          {
+            "name": "style-prefs",
+            "description": "Concise-answer preferences",
+            "num_rows": 1,
+            "created_at": "2026-07-14T12:00:00Z",
+            "updated_at": "2026-07-14T12:01:00Z",
+            "winner_histogram": {
+              "a": 1
+            }
+          }
+        ]
+      }
+    ],
+    "JudgmentManifest": [
+      {
+        "name": "style-prefs",
+        "description": "Concise-answer preferences",
+        "num_rows": 1,
+        "created_at": "2026-07-14T12:00:00Z",
+        "updated_at": "2026-07-14T12:01:00Z",
+        "winner_histogram": {
+          "a": 1
+        }
+      }
+    ],
+    "PromoteJudgmentBody": [
+      {
+        "adapter": "judge-v1",
+        "holdout_n": 20
+      }
+    ],
+    "RenderJudgmentPromptResponse": [
+      {
+        "prompt": "Compare the following two assistant replies..."
+      }
+    ],
+    "RerunBody": [
+      {
+        "adapter": "math-v2",
+        "outcome_kinds": [
+          "fail",
+          "invalid",
+          "error"
+        ],
+        "include_pass": false,
+        "seed": 42
+      }
+    ],
+    "SuiteListResponse": [
+      {
+        "suites": [
+          {
+            "name": "math-smoke",
+            "description": "One deterministic arithmetic case",
+            "num_examples": 1,
+            "default_scorer_kind": "exact_match",
+            "tags": {
+              "math": 1
+            }
+          }
+        ]
+      }
+    ],
+    "SuiteSaveResponse": [
+      {
+        "name": "math-smoke",
+        "path": "/srv/kiln/.eval/suites/math-smoke.json",
+        "status": "created"
+      }
+    ],
+    "SynthesisPreview": [
+      {
+        "examples": [
+          {
+            "id": "two-plus-two",
+            "messages": [
+              {
+                "role": "user",
+                "content": "2 + 2?"
+              }
+            ],
+            "target": "4",
+            "weight": 1.0
+          }
+        ],
+        "stats": {
+          "trajectories_seen": 1,
+          "trajectories_used": 1,
+          "examples_generated": 1,
+          "skipped_no_target": 0,
+          "skipped_prompt_too_long": 0,
+          "skipped_target_too_long": 0,
+          "skipped_duplicate": 0,
+          "skipped_strategy_match": 0,
+          "sample_kept": 1,
+          "effective_seed": "42",
+          "auto_scorer_histogram": {
+            "exact_match": 1
+          }
+        },
+        "suite_name": "math-smoke",
+        "default_scorer_kind": "exact_match"
+      }
+    ],
+    "SynthesisPreviewBody": [
+      {
+        "suite_name": "math-smoke",
+        "strategy": "final_assistant",
+        "scorer": {
+          "kind": "fixed",
+          "scorer": {
+            "kind": "exact_match"
+          }
+        },
+        "sampling": {
+          "max_examples": 100,
+          "seed": 42
+        },
+        "head_n": 5
+      }
+    ],
+    "SynthesizeBody": [
+      {
+        "suite_name": "math-smoke",
+        "strategy": "final_assistant",
+        "scorer": {
+          "kind": "fixed",
+          "scorer": {
+            "kind": "exact_match"
+          }
+        },
+        "sampling": {
+          "max_examples": 100,
+          "seed": 42
+        },
+        "force": true,
+        "run_against": [
+          ""
+        ]
+      }
+    ],
+    "SynthesizeDatasetResponse": [
+      {
+        "suite": {
+          "name": "math-smoke",
+          "description": "One deterministic arithmetic case",
+          "num_examples": 1,
+          "default_scorer_kind": "exact_match",
+          "tags": {
+            "math": 1
+          }
+        },
+        "stats": {
+          "trajectories_seen": 1,
+          "trajectories_used": 1,
+          "examples_generated": 1,
+          "skipped_no_target": 0,
+          "skipped_prompt_too_long": 0,
+          "skipped_target_too_long": 0,
+          "skipped_duplicate": 0,
+          "skipped_strategy_match": 0,
+          "sample_kept": 1,
+          "effective_seed": "42",
+          "auto_scorer_histogram": {
+            "exact_match": 1
+          }
+        },
+        "queued_eval_job_ids": [
+          "eval-1"
+        ]
+      }
+    ],
+    "ValidateJudgmentResponse": [
+      {
+        "status": "queued",
+        "eval_job_id": "eval-judge-1",
+        "effective_seed": "42",
+        "validation_suite": "judge-validate-style-prefs",
+        "warnings": []
+      }
+    ]
+  }
+}

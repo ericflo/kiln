@@ -591,8 +591,9 @@ The table below is a curated workflow index. The generated
 complete route, transport, status, header, and error inventory. Field-level
 wire semantics live in the generated
 [inference](contracts/kiln-inference-v1.schema.json),
-[observability](contracts/kiln-observability-v1.schema.json), and
-[artifact lifecycle](contracts/kiln-artifacts-v1.schema.json) schemas; those
+[observability](contracts/kiln-observability-v1.schema.json),
+[artifact lifecycle](contracts/kiln-artifacts-v1.schema.json), and
+[eval and judgment](contracts/kiln-evals-v1.schema.json) schemas; those
 contracts distinguish required, nullable, omitted, closed, and deliberately
 open inputs and include validated examples for every public entrypoint.
 

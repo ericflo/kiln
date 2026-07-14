@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use axum::extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use kiln_eval::synthesis::SynthesisConfig;
+use kiln_eval::synthesis::{SynthesisConfig, SynthesisStats};
 use kiln_eval::{
     EvalCompareSpec, EvalGenerationParams, EvalJobState, EvalResult, EvalSuite, EvalSuiteSummary,
 };
@@ -30,7 +30,7 @@ use crate::eval::judgments::{
     compile_judgments_to_sft, format_judge_prompt,
 };
 use crate::eval::queue::{EvalJobInfo, EvalSubmissionKind, QueuedEvalJob};
-use crate::eval::synthesis_driver::{preview_synthesis, synthesize_and_save};
+use crate::eval::synthesis_driver::{SynthesisPreview, preview_synthesis, synthesize_and_save};
 use crate::state::AppState;
 
 /// Submission body for `POST /v1/eval/run`.
@@ -82,6 +82,12 @@ struct SuiteSaveResponse {
     name: String,
     path: String,
     status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct DeleteSuiteResponse {
+    status: &'static str,
+    name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,7 +161,7 @@ async fn save_suite(
 async fn delete_suite(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<DeleteSuiteResponse>, ApiError> {
     let reg = state
         .suite_registry
         .as_ref()
@@ -165,7 +171,10 @@ async fn delete_suite(
         crate::eval::SuiteRegistryError::NotFound(_) => ApiError::eval_suite_not_found(&name),
         other => ApiError::eval_invalid_request(format!("{other}")),
     })?;
-    Ok(Json(serde_json::json!({"status": "deleted", "name": name})))
+    Ok(Json(DeleteSuiteResponse {
+        status: "deleted",
+        name,
+    }))
 }
 
 async fn submit_eval(
@@ -459,7 +468,7 @@ async fn rerun_job(
 async fn cancel_job(
     State(state): State<AppState>,
     AxumPath(job_id): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<CancelEvalJobResponse>, ApiError> {
     // Remove from queue if still pending.
     let removed = {
         let mut q = state.eval_queue.lock().unwrap();
@@ -479,11 +488,10 @@ async fn cancel_job(
                 job.finished_at_iso = Some(chrono::Utc::now().to_rfc3339());
                 job.finished_at = Some(std::time::Instant::now());
             }
-            Ok(Json(serde_json::json!({
-                "status": "cancelled",
-                "job_id": job_id,
-                "was_in_queue": removed,
-            })))
+            Ok(Json(CancelEvalJobResponse::Cancelled {
+                job_id,
+                was_in_queue: removed,
+            }))
         }
         Some(EvalJobState::Running) => {
             // Cooperative cancellation: flip the executor's flag (checked at
@@ -497,11 +505,10 @@ async fn cancel_job(
                     flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
-            Ok(Json(serde_json::json!({
-                "status": "cancelling",
-                "job_id": job_id,
-                "note": "running job will exit at the next example boundary",
-            })))
+            Ok(Json(CancelEvalJobResponse::Cancelling {
+                job_id,
+                note: "running job will exit at the next example boundary",
+            }))
         }
         Some(EvalJobState::Cancelled | EvalJobState::Completed | EvalJobState::Failed) => {
             // Terminal — DELETE means "remove from tracking + archive".
@@ -522,13 +529,29 @@ async fn cancel_job(
                     )));
                 }
             };
-            Ok(Json(serde_json::json!({
-                "status": "deleted",
-                "job_id": job_id,
-                "removed_archive_file": removed_file,
-            })))
+            Ok(Json(CancelEvalJobResponse::Deleted {
+                job_id,
+                removed_archive_file: removed_file,
+            }))
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum CancelEvalJobResponse {
+    Cancelled {
+        job_id: String,
+        was_in_queue: bool,
+    },
+    Cancelling {
+        job_id: String,
+        note: &'static str,
+    },
+    Deleted {
+        job_id: String,
+        removed_archive_file: bool,
+    },
 }
 
 // ── Datasets ────────────────────────────────────────────────────────
@@ -536,6 +559,12 @@ async fn cancel_job(
 #[derive(Debug, Serialize)]
 struct DatasetListResponse {
     datasets: Vec<DatasetManifest>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeleteDatasetResponse {
+    status: &'static str,
+    name: String,
 }
 
 async fn list_datasets(State(state): State<AppState>) -> Json<DatasetListResponse> {
@@ -599,7 +628,7 @@ async fn dataset_rows(
 async fn delete_dataset(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<DeleteDatasetResponse>, ApiError> {
     let reg = state
         .dataset_registry
         .as_ref()
@@ -609,7 +638,10 @@ async fn delete_dataset(
         crate::eval::DatasetError::InvalidName(n) => ApiError::dataset_invalid(n),
         other => ApiError::dataset_invalid(format!("{other}")),
     })?;
-    Ok(Json(serde_json::json!({"status": "deleted", "name": name})))
+    Ok(Json(DeleteDatasetResponse {
+        status: "deleted",
+        name,
+    }))
 }
 
 /// `POST /v1/eval/datasets/upload` — multipart with fields `name`,
@@ -743,7 +775,7 @@ async fn synthesize_dataset_preview(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
     Json(body): Json<SynthesisPreviewBody>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<SynthesisPreview>, ApiError> {
     let datasets = state
         .dataset_registry
         .as_ref()
@@ -755,7 +787,7 @@ async fn synthesize_dataset_preview(
             }
             other => ApiError::dataset_invalid(format!("{other}")),
         })?;
-    Ok(Json(serde_json::to_value(&preview).unwrap_or_default()))
+    Ok(Json(preview))
 }
 
 #[derive(Debug, Deserialize)]
@@ -771,11 +803,18 @@ struct SynthesizeBody {
     run_against: Option<Vec<String>>,
 }
 
+#[derive(Debug, Serialize)]
+struct SynthesizeDatasetResponse {
+    suite: EvalSuiteSummary,
+    stats: SynthesisStats,
+    queued_eval_job_ids: Vec<String>,
+}
+
 async fn synthesize_dataset(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
     Json(body): Json<SynthesizeBody>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<SynthesizeDatasetResponse>, ApiError> {
     let datasets = state
         .dataset_registry
         .as_ref()
@@ -816,11 +855,11 @@ async fn synthesize_dataset(
                 .map_err(|error| map_eval_enqueue_error(&state, error))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Json(serde_json::json!({
-        "suite": outcome.suite,
-        "stats": outcome.stats,
-        "queued_eval_job_ids": queued_jobs,
-    })))
+    Ok(Json(SynthesizeDatasetResponse {
+        suite: outcome.suite,
+        stats: outcome.stats,
+        queued_eval_job_ids: queued_jobs,
+    }))
 }
 
 // ── Judgments ────────────────────────────────────────────────────────
@@ -894,6 +933,12 @@ struct AppendJudgmentResponse {
     manifest: JudgmentManifest,
 }
 
+#[derive(Debug, Serialize)]
+struct DeleteJudgmentResponse {
+    status: &'static str,
+    name: String,
+}
+
 async fn append_judgment(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -945,7 +990,7 @@ async fn remove_judgment_row(
 async fn delete_judgment_dataset(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<DeleteJudgmentResponse>, ApiError> {
     let store = state
         .judgment_store
         .as_ref()
@@ -955,7 +1000,10 @@ async fn delete_judgment_dataset(
         crate::eval::JudgmentError::InvalidName(n) => ApiError::dataset_invalid(n),
         other => ApiError::judgment_invalid(format!("{other}")),
     })?;
-    Ok(Json(serde_json::json!({"status": "deleted", "name": name})))
+    Ok(Json(DeleteJudgmentResponse {
+        status: "deleted",
+        name,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -973,11 +1021,21 @@ struct CompileJudgmentBody {
     holdout_n: Option<usize>,
 }
 
+#[derive(Debug, Serialize)]
+struct CompileJudgmentResponse {
+    status: &'static str,
+    rows: u64,
+    holdout_n: usize,
+    train_validation_split: u64,
+    dataset: DatasetManifest,
+    warnings: Vec<String>,
+}
+
 async fn compile_judgment(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
     Json(body): Json<CompileJudgmentBody>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<CompileJudgmentResponse>, ApiError> {
     let store = state
         .judgment_store
         .as_ref()
@@ -1013,14 +1071,14 @@ async fn compile_judgment(
     let manifest = datasets
         .load_manifest(&body.output_dataset)
         .map_err(|e| ApiError::judgment_invalid(format!("{e}")))?;
-    Ok(Json(serde_json::json!({
-        "status": "compiled",
-        "rows": compiled,
-        "holdout_n": holdout_n,
-        "train_validation_split": split,
-        "dataset": manifest,
-        "warnings": warnings,
-    })))
+    Ok(Json(CompileJudgmentResponse {
+        status: "compiled",
+        rows: compiled,
+        holdout_n,
+        train_validation_split: split,
+        dataset: manifest,
+        warnings,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1032,6 +1090,16 @@ struct PromoteJudgmentBody {
     holdout_n: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct ValidateJudgmentResponse {
+    status: &'static str,
+    eval_job_id: String,
+    #[serde(with = "kiln_eval::result::u64_decimal")]
+    effective_seed: u64,
+    validation_suite: String,
+    warnings: Vec<String>,
+}
+
 fn default_holdout() -> usize {
     20
 }
@@ -1040,7 +1108,7 @@ async fn validate_judgment_adapter(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
     Json(body): Json<PromoteJudgmentBody>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ValidateJudgmentResponse>, ApiError> {
     let store = state
         .judgment_store
         .as_ref()
@@ -1084,20 +1152,27 @@ async fn validate_judgment_adapter(
             },
         )
         .map_err(|error| map_eval_enqueue_error(&state, error))?;
-    Ok(Json(serde_json::json!({
-        "status": "queued",
-        "eval_job_id": enqueued.job_id,
-        "effective_seed": enqueued.effective_seed.to_string(),
-        "validation_suite": format!("judge-validate-{name}"),
-        "warnings": warnings,
-    })))
+    Ok(Json(ValidateJudgmentResponse {
+        status: "queued",
+        eval_job_id: enqueued.job_id,
+        effective_seed: enqueued.effective_seed,
+        validation_suite: format!("judge-validate-{name}"),
+        warnings,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct RenderJudgmentPromptResponse {
+    prompt: String,
 }
 
 /// `POST /v1/judgments/render_prompt` — given a candidate prompt + two
 /// replies, render the judging prompt string the way the SFT compiler
 /// would. Lets the UI display the exact text that the judge LoRA will
 /// see, before the user commits a judgment.
-async fn render_judgment_prompt(Json(body): Json<AppendJudgmentBody>) -> Json<serde_json::Value> {
+async fn render_judgment_prompt(
+    Json(body): Json<AppendJudgmentBody>,
+) -> Json<RenderJudgmentPromptResponse> {
     let row = JudgmentRow {
         id: body.id.unwrap_or_default(),
         prompt: body.prompt,
@@ -1110,7 +1185,9 @@ async fn render_judgment_prompt(Json(body): Json<AppendJudgmentBody>) -> Json<se
         tags: body.tags,
         submitted_at: String::new(),
     };
-    Json(serde_json::json!({"prompt": format_judge_prompt(&row)}))
+    Json(RenderJudgmentPromptResponse {
+        prompt: format_judge_prompt(&row),
+    })
 }
 
 pub fn routes() -> Router<AppState> {

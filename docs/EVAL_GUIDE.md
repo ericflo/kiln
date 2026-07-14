@@ -6,6 +6,14 @@ inference, share the same model weights, and slot into the same job-queue
 machinery as training — so you can `train → eval → compare` in one HTTP
 loop without touching Python.
 
+The generated [Eval and Judgment API Schema](../contracts/kiln-evals-v1.schema.json)
+is the normative field-level reference for every suite, scorer, job, dataset,
+synthesis, and judgment payload in this guide. It records defaults, bounds,
+decimal seed encoding, thinking-budget provenance, response closure, conditional
+source rules, and the input objects where unknown fields are intentionally
+accepted and ignored. The generated [HTTP API Contract](../contracts/kiln-http-api-v1.openapi.json)
+owns route methods, media types, response statuses, handler bindings, and errors.
+
 That one-process loop requires `KILN_SERVER_SERVING_PROFILE=experimental`. The
 default `stable` profile admits eval inference but rejects training and real
 adapter weight transitions. A `maintenance` process admits training and
@@ -551,6 +559,10 @@ other generation settings. Otherwise Kiln uses the selected run-level
 `generation.seed`, then the suite-level `generation.seed`, and finally a
 random value. The submission response, job list/detail, on-disk job archive,
 CLI, and dashboard all expose the resolved value.
+
+Eval admission/results and dataset-synthesis `stats.effective_seed` emit the
+`u64` as a decimal string, so JavaScript clients do not lose precision. The
+synthesis decoder still accepts legacy numeric archives.
 
 Execution uses the versioned `kiln.eval-seed.v1` derivation over the selected
 base seed, stable `example_id`, and `completion_index`. Each outcome persists

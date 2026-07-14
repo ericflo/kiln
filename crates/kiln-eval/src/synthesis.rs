@@ -148,8 +148,10 @@ pub enum ScorerChoice {
     /// extracted key phrases. The suite-level default scorer falls back to
     /// `exact_match` for safety.
     AutoDetect,
-    /// Use a single fixed scorer for every example.
-    Fixed(Scorer),
+    /// Use a single fixed scorer for every example. The named field keeps
+    /// this enum's `kind=fixed` discriminator separate from the nested
+    /// scorer's own `kind` discriminator on the JSON wire.
+    Fixed { scorer: Scorer },
     /// Use the LLM-as-judge scorer (the executor wires the judge later).
     Judge {
         #[serde(default)]
@@ -232,6 +234,7 @@ pub struct SynthesisStats {
     pub skipped_duplicate: u64,
     pub skipped_strategy_match: u64,
     pub sample_kept: u64,
+    #[serde(with = "crate::result::u64_decimal")]
     pub effective_seed: u64,
     /// Histogram of which auto-detected scorer was assigned per example
     /// (only populated under `ScorerChoice::AutoDetect`).
@@ -583,7 +586,7 @@ where
     }
 
     let default_scorer = match &config.scorer {
-        ScorerChoice::Fixed(s) => s.clone(),
+        ScorerChoice::Fixed { scorer } => scorer.clone(),
         ScorerChoice::Judge { judge_adapter } => Scorer::LlmJudge {
             judge_adapter: judge_adapter.clone(),
             template: crate::scorers::llm_judge::default_judge_template(),
@@ -1190,7 +1193,7 @@ fn trajectory_metadata(conv: &SftConversation) -> Option<serde_json::Value> {
 fn scorer_kind_for_stats(choice: &ScorerChoice, target: &str) -> Option<&'static str> {
     match choice {
         ScorerChoice::AutoDetect => Some(auto_detect_scorer(target).kind_label()),
-        ScorerChoice::Fixed(s) => Some(s.kind_label()),
+        ScorerChoice::Fixed { scorer } => Some(scorer.kind_label()),
         ScorerChoice::Judge { .. } => Some("llm_judge"),
     }
 }
@@ -1420,15 +1423,55 @@ mod tests {
     fn fixed_scorer_choice_sets_default_only() {
         let c = conv(&[("user", "q"), ("assistant", "a")]);
         let mut cfg = SynthesisConfig::new("test");
-        cfg.scorer = ScorerChoice::Fixed(Scorer::Contains {
-            phrases: vec!["a".into()],
-            mode: ContainsMode::Any,
-            case_sensitive: false,
-        });
+        cfg.scorer = ScorerChoice::Fixed {
+            scorer: Scorer::Contains {
+                phrases: vec!["a".into()],
+                mode: ContainsMode::Any,
+                case_sensitive: false,
+            },
+        };
         let (suite, _) = synthesize_suite(vec![c], &cfg).unwrap();
         assert!(matches!(suite.default_scorer, Scorer::Contains { .. }));
         // No per-example overrides in Fixed mode.
         assert!(suite.examples[0].scorer.is_none());
+    }
+
+    #[test]
+    fn fixed_scorer_choice_has_unambiguous_nested_wire_shape() {
+        let choice = ScorerChoice::Fixed {
+            scorer: Scorer::ExactMatch {
+                case_sensitive: false,
+                strip_whitespace: true,
+            },
+        };
+        let value = serde_json::to_value(&choice).unwrap();
+        assert_eq!(value["kind"], "fixed");
+        assert_eq!(value["scorer"]["kind"], "exact_match");
+        assert_eq!(
+            serde_json::from_value::<ScorerChoice>(value).unwrap(),
+            choice
+        );
+    }
+
+    #[test]
+    fn synthesis_stats_preserve_exact_u64_seed_on_the_wire() {
+        let stats = SynthesisStats {
+            effective_seed: u64::MAX,
+            ..SynthesisStats::default()
+        };
+        let value = serde_json::to_value(&stats).unwrap();
+        assert_eq!(value["effective_seed"], u64::MAX.to_string());
+        let decoded: SynthesisStats = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.effective_seed, u64::MAX);
+
+        let mut legacy = serde_json::to_value(SynthesisStats::default()).unwrap();
+        legacy["effective_seed"] = serde_json::json!(42);
+        assert_eq!(
+            serde_json::from_value::<SynthesisStats>(legacy)
+                .unwrap()
+                .effective_seed,
+            42
+        );
     }
 
     #[test]
@@ -1456,10 +1499,12 @@ mod tests {
         ]);
         let mut cfg = SynthesisConfig::new("test");
         cfg.strategy = SynthesisStrategy::ToolCallPredict;
-        cfg.scorer = ScorerChoice::Fixed(Scorer::JsonValidity {
-            require_object: true,
-            required_paths: vec![],
-        });
+        cfg.scorer = ScorerChoice::Fixed {
+            scorer: Scorer::JsonValidity {
+                require_object: true,
+                required_paths: vec![],
+            },
+        };
         let (suite, _) = synthesize_suite(vec![c], &cfg).unwrap();
         assert_eq!(suite.examples.len(), 1);
         assert!(
