@@ -266,6 +266,26 @@ python3 scripts/qualification/run.py \
   qualification/workloads/correctness-core-v1.json
 ```
 
+### Current Vulkan core result
+
+The source-bound 2026-07-14 run on RADV Strix Halo passed from clean commit
+`ea4c0775f` and tree hash
+`sha256:9f25964ce481ac7eb09c4e23d86c17ee631b6abd2a00bcd53efc61305d7b4e2f`.
+Its retained receipt is
+`qualification/receipts/vulkan/strix-halo/20260714t235017349724z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1.json`.
+The required device probe selected the AMD Radeon 8060S Graphics through RADV
+Mesa 26.1.3. The bounded, private-network Cargo service then ran 16 Vulkan
+tensor, cast, transfer, reduction, reshape, and autograd parity tests and nine
+dense, transposed, batched-BF16, and LoRA-composition matmul parity tests. All
+25 passed, none failed or were ignored, both output-skip guards remained clear,
+and the complete receipt plus every local artifact hash validated against the
+current source before documentation mutation.
+
+This lower-level receipt does not load a model and therefore makes no claim
+about tokenizer behavior, model logits, sampling, paged-cache lifecycle,
+cancellation, eval, public serving, or throughput. Those remain separate
+source-bound Vulkan gates.
+
 Model-serving workloads additionally require `--model` with the exact local
 model directory and `--model-id` with its public identity. Select each declared
 A/B arm explicitly; the manifest, not an ambient environment variable, owns
