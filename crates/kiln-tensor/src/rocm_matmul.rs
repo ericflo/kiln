@@ -9,8 +9,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use kiln_hip::RocmContext;
+use kiln_hip::{RocmContext, RocmStream};
 use kiln_rocblas::{AlgoCache, Epilogue, HipblasLtMatmulHandle, MatmulLayout, MatmulRequest};
+
+pub use kiln_rocblas::HipblasLtWorkspaceLease;
 
 use crate::blaslt_request::{
     BlasLtEpilogue, BlasLtMatmulLayout, BlasLtMatmulRequest, blaslt_dtype_name,
@@ -24,14 +26,14 @@ use crate::{DType, Layout, Result, Storage, Tensor, TensorId};
 
 struct HandleRegistry {
     by_device: Mutex<HashMap<usize, Arc<HipblasLtMatmulHandle>>>,
-    shared_cache: Arc<Mutex<AlgoCache>>,
+    cache_by_device: Mutex<HashMap<usize, Arc<Mutex<AlgoCache>>>>,
 }
 
 fn handle_registry() -> &'static HandleRegistry {
     static REGISTRY: OnceLock<HandleRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| HandleRegistry {
         by_device: Mutex::new(HashMap::new()),
-        shared_cache: Arc::new(Mutex::new(AlgoCache::new())),
+        cache_by_device: Mutex::new(HashMap::new()),
     })
 }
 
@@ -47,10 +49,20 @@ fn get_or_init_handle(
     if let Some(h) = by_device.get(&device_index) {
         return Ok(Arc::clone(h));
     }
+    let algo_cache = {
+        let mut cache_by_device = reg.cache_by_device.lock().map_err(|_| {
+            crate::Error::Msg("rocm_matmul: algo cache registry mutex poisoned".to_string())
+        })?;
+        Arc::clone(
+            cache_by_device
+                .entry(device_index)
+                .or_insert_with(|| Arc::new(Mutex::new(AlgoCache::new()))),
+        )
+    };
     let handle = HipblasLtMatmulHandle::new_ctx(
         Arc::clone(rocm_ctx),
         device_index,
-        Arc::clone(&reg.shared_cache),
+        algo_cache,
         None,
     )
     .map_err(|e| {
@@ -61,6 +73,24 @@ fn get_or_init_handle(
     let arc = Arc::new(handle);
     by_device.insert(device_index, Arc::clone(&arc));
     Ok(arc)
+}
+
+/// Bind a private graph-capture stream's hipBLASLt workspace lifetime to an
+/// explicit lease. Failed/deferred capture attempts drop the lease immediately;
+/// successful captures retain it alongside the graph.
+pub fn rocm_blaslt_workspace_lease(
+    device_index: usize,
+    rocm_ctx: &Arc<RocmContext>,
+    stream: &Arc<RocmStream>,
+) -> Result<HipblasLtWorkspaceLease> {
+    if rocm_ctx.ordinal() != device_index || stream.ordinal() != device_index {
+        return Err(crate::Error::Msg(format!(
+            "rocm_blaslt_workspace_lease: device {device_index}, context {}, and stream {} must match",
+            rocm_ctx.ordinal(),
+            stream.ordinal()
+        )));
+    }
+    Ok(get_or_init_handle(device_index, rocm_ctx)?.workspace_lease(rocm_ctx, stream))
 }
 
 fn rocm_storage<'a>(t: &'a Tensor, op: &str, which: &str) -> Result<&'a RocmStorage> {
@@ -143,48 +173,18 @@ fn env_truthy(name: &str) -> bool {
     })
 }
 
-fn rocm_matmul_sync_outputs_mode() -> Option<bool> {
-    std::env::var("KILN_ROCM_MATMUL_SYNC_OUTPUTS")
-        .ok()
-        .and_then(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            match value.as_str() {
-                "0" | "false" | "no" | "off" => Some(false),
-                "1" | "true" | "yes" | "on" => Some(true),
-                _ => None,
-            }
-        })
-}
-
-fn rocm_matmul_output_elems_sync_threshold() -> u128 {
-    std::env::var("KILN_ROCM_MATMUL_SYNC_OUTPUT_ELEMS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u128>().ok())
-        .unwrap_or(1_048_576)
-}
-
-fn rocm_matmul_work_sync_threshold() -> u128 {
-    std::env::var("KILN_ROCM_MATMUL_SYNC_WORK")
-        .ok()
-        .and_then(|value| value.trim().parse::<u128>().ok())
-        .unwrap_or(268_435_456)
-}
+const ROCM_MATMUL_OUTPUT_ELEMS_SYNC_THRESHOLD: u128 = 1_048_576;
+const ROCM_MATMUL_WORK_SYNC_THRESHOLD: u128 = 268_435_456;
 
 fn should_sync_rocm_matmul_output(m: usize, n: usize, k: usize, batch: usize) -> bool {
-    match rocm_matmul_sync_outputs_mode() {
-        Some(false) => return false,
-        Some(true) => return true,
-        None => {}
-    }
-
     let batch = batch.max(1) as u128;
     let m = m as u128;
     let n = n as u128;
     let k = k as u128;
     let output_elems = batch.saturating_mul(m).saturating_mul(n);
     let work = output_elems.saturating_mul(k);
-    output_elems >= rocm_matmul_output_elems_sync_threshold()
-        || work >= rocm_matmul_work_sync_threshold()
+    output_elems >= ROCM_MATMUL_OUTPUT_ELEMS_SYNC_THRESHOLD
+        || work >= ROCM_MATMUL_WORK_SYNC_THRESHOLD
 }
 
 fn should_skip_rocm_strided_batched_matmul(
@@ -237,40 +237,71 @@ fn should_skip_rocm_strided_batched_matmul(
 }
 
 fn sync_after_rocm_matmul_if_needed(
-    device_index: usize,
+    rocm_ctx: &Arc<RocmContext>,
+    inputs: &[&RocmStorage],
     op: &str,
     m: usize,
     n: usize,
     k: usize,
     batch: usize,
 ) -> Result<()> {
-    if !should_sync_rocm_matmul_output(m, n, k, batch) {
-        return Ok(());
-    }
-
     if crate::rocm_capture_arena_active() {
         return Ok(());
     }
 
-    // HIP graph capture cannot synchronize inside the captured region. Outside
-    // capture, use a device-wide sync: ROCm/hipBLASLt has exposed stale reads
-    // after very large training GEMMs when only the active stream is drained.
-    crate::rocm_synchronize_default_stream(device_index).map_err(|e| {
+    // Legacy behavior only paid this barrier for historically risky large
+    // GEMMs. Stream-ordered mode must still inspect owner lifetimes at every
+    // size: a small GEMM can read a Borrowed or cross-stream allocation whose
+    // final owner is dropped immediately after this function returns.
+    if rocm_ctx.execution_policy().synchronization_mode
+        == crate::RocmSynchronizationMode::LegacyHostBarriers
+        && !should_sync_rocm_matmul_output(m, n, k, batch)
+    {
+        return Ok(());
+    }
+
+    // Legacy execution keeps the historical device-wide barrier: ROCm/
+    // hipBLASLt has exposed stale reads after very large training GEMMs when
+    // only the active stream is drained. Stream-ordered execution is an
+    // explicit qualification mode and records this proven same-stream barrier
+    // as skipped.
+    crate::rocm_storage::rocm_synchronize_context_legacy_device_same_stream_dependency_with_inputs(
+        rocm_ctx,
+        inputs,
+        crate::RocmSyncReason::MatmulOutput,
+    )
+    .map_err(|e| {
         crate::Error::Msg(format!(
-            "{op}: synchronize after large ROCm matmul m={m} n={n} k={k} batch={batch}: {e}"
+            "{op}: synchronize after ROCm matmul m={m} n={n} k={k} batch={batch}: {e}"
         ))
     })
 }
 
 fn sync_rocm_device_for_matmul_boundary(
-    device_index: usize,
+    rocm_ctx: &Arc<RocmContext>,
+    inputs: &[&RocmStorage],
     op: &str,
     boundary: &str,
 ) -> Result<()> {
     if crate::rocm_capture_arena_active() {
         return Ok(());
     }
-    crate::rocm_synchronize_default_stream(device_index).map_err(|e| {
+    let result = if inputs.is_empty() {
+        // The post-cast output was allocated and produced on the active stream;
+        // there is no borrowed input owner to protect. Keep the legacy device
+        // barrier, but let StreamOrdered record the proven FIFO dependency.
+        crate::rocm_storage::rocm_synchronize_context_legacy_device_same_stream_dependency(
+            rocm_ctx,
+            crate::RocmSyncReason::MatmulCastBoundary,
+        )
+    } else {
+        crate::rocm_storage::rocm_synchronize_context_legacy_device_same_stream_dependency_with_inputs(
+            rocm_ctx,
+            inputs,
+            crate::RocmSyncReason::MatmulCastBoundary,
+        )
+    };
+    result.map_err(|e| {
         crate::Error::Msg(format!(
             "{op}: synchronize {boundary} f32-output BF16 cast: {e}"
         ))
@@ -783,6 +814,11 @@ fn rocm_matmul_dispatch(
     let device_index = rocm_device_index(a_storage, op)?;
 
     let ctx = a_storage.context();
+    if !Arc::ptr_eq(&ctx, &b_storage.context()) {
+        return Err(crate::Error::Msg(format!(
+            "{op}: both inputs must share one ROCm context"
+        )));
+    }
     let batch: usize = out_shape[..out_shape.len() - 2]
         .iter()
         .product::<usize>()
@@ -806,9 +842,9 @@ fn rocm_matmul_dispatch(
             b_layout,
             op,
         )?;
-        sync_rocm_device_for_matmul_boundary(device_index, op, "before")?;
+        sync_rocm_device_for_matmul_boundary(&ctx, &[a_storage, b_storage], op, "before")?;
         let out = out_f32.to_dtype(DType::BF16)?;
-        sync_rocm_device_for_matmul_boundary(device_index, op, "after")?;
+        sync_rocm_device_for_matmul_boundary(&ctx, &[], op, "after")?;
         return Ok(out);
     }
 
@@ -862,7 +898,7 @@ fn rocm_matmul_dispatch(
         let batched =
             unsafe { handle.matmul(&stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null()) };
         if batched.is_ok() {
-            sync_after_rocm_matmul_if_needed(device_index, op, m, n, k, batch)?;
+            sync_after_rocm_matmul_if_needed(&ctx, &[a_storage, b_storage], op, m, n, k, batch)?;
             let storage_arc: Storage = Arc::new(out_storage);
             return Tensor::from_parts(
                 storage_arc,
@@ -912,7 +948,7 @@ fn rocm_matmul_dispatch(
         }
     }
 
-    sync_after_rocm_matmul_if_needed(device_index, op, m, n, k, batch)?;
+    sync_after_rocm_matmul_if_needed(&ctx, &[a_storage, b_storage], op, m, n, k, batch)?;
     let storage_arc: Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(out_shape), TensorId::next())
 }
@@ -981,6 +1017,11 @@ pub fn rocm_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
     }
     let device_index = rocm_device_index(a_storage, OP)?;
     let ctx = a_storage.context();
+    if !Arc::ptr_eq(&ctx, &b_storage.context()) || !Arc::ptr_eq(&ctx, &dst_storage.context()) {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: inputs and destination must share one ROCm context"
+        )));
+    }
     let handle = get_or_init_handle(device_index, &ctx)?;
 
     let batch: usize = a_shape[..a_rank - 2].iter().product::<usize>().max(1);
@@ -1025,7 +1066,15 @@ pub fn rocm_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
                 })?;
         }
     }
-    sync_after_rocm_matmul_if_needed(device_index, OP, m, n, k_a, batch)?;
+    sync_after_rocm_matmul_if_needed(
+        &ctx,
+        &[a_storage, b_storage, dst_storage],
+        OP,
+        m,
+        n,
+        k_a,
+        batch,
+    )?;
     Ok(())
 }
 
@@ -1089,6 +1138,11 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
     }
     let device_index = rocm_device_index(a_storage, OP)?;
     let ctx = a_storage.context();
+    if !Arc::ptr_eq(&ctx, &b_storage.context()) || !Arc::ptr_eq(&ctx, &bias_storage.context()) {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: all inputs must share one ROCm context"
+        )));
+    }
     let batch: usize = a_shape[..a_rank - 2].iter().product::<usize>().max(1);
     let mut out_shape = a_shape[..a_rank - 2].to_vec();
     out_shape.push(m);
@@ -1141,7 +1195,15 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
         }
     }
 
-    sync_after_rocm_matmul_if_needed(device_index, OP, m, n, k_a, batch)?;
+    sync_after_rocm_matmul_if_needed(
+        &ctx,
+        &[a_storage, b_storage, bias_storage],
+        OP,
+        m,
+        n,
+        k_a,
+        batch,
+    )?;
     let storage_arc: Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(out_shape), TensorId::next())
 }

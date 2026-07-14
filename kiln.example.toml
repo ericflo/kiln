@@ -109,6 +109,25 @@ max_decode_batch = "auto"                # Concurrent decode-row ceiling. "auto"
                                       # reasoning_content into content. Requests can override
                                       # this with fold_reasoning_into_content.
 
+[accelerator]
+rocm_synchronization_mode = "legacy_host_barriers" # Qualified default. `stream_ordered` removes
+                                      # only proven same-stream host barriers and uses a primary-
+                                      # stream external-yield wait; it requires
+                                      # server.serving_profile="experimental" until local ROCm
+                                      # parity/latency/memory qualification passes. Override with
+                                      # KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE.
+rocm_graph_mode = "profile"           # profile | disabled | warmup_then_eager |
+                                      # lazy_capture_replay. Profile resolves to disabled under
+                                      # stable/maintenance and lazy capture/replay under
+                                      # experimental. Explicit non-disabled modes require the
+                                      # experimental profile. Override with
+                                      # KILN_ACCELERATOR_ROCM_GRAPH_MODE. Historical
+                                      # KILN_ROCM_GRAPHS/KILN_ROCM_GRAPH_CAPTURE are deprecated
+                                      # startup aliases and cannot both be set.
+rocm_graph_cache_entries = 8          # Bounded retained native graph entries, 1..=64. Override
+                                      # with KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES; historical
+                                      # KILN_ROCM_GRAPH_CACHE_MAX is a deprecated startup alias.
+
 [batching]
 mode = "auto"                         # auto | enabled | disabled. Auto preserves the active
                                       # backend's immutable actor-selection policy: enabled on

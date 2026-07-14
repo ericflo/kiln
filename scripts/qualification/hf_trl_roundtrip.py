@@ -257,7 +257,7 @@ class _Server:
                 "KILN_NUM_BLOCKS": "256",
                 "KILN_SERVING_PROFILE": "experimental",
                 "KILN_CUDA_GRAPHS": "0",
-                "KILN_ROCM_GRAPHS": "0",
+                "KILN_ACCELERATOR_ROCM_GRAPH_MODE": "disabled",
                 "KILN_LOG_LEVEL": "info",
             }
         )

@@ -62,6 +62,14 @@ def response_fixture(*, second_token: int = 4, second_logprob: float = -0.2) -> 
 
 
 class ServeRocmGraphCorrectnessTests(unittest.TestCase):
+    def test_completion_request_rejects_invalid_bounds_before_http(self) -> None:
+        with self.assertRaisesRegex(correctness.CorrectnessError, "max_tokens"):
+            correctness.completion_request(1, "test", "prompt", 7, max_tokens=0)
+        with self.assertRaisesRegex(correctness.CorrectnessError, "timeout_seconds"):
+            correctness.completion_request(
+                1, "test", "prompt", 7, timeout_seconds=math.inf
+            )
+
     def test_parse_completion_preserves_exact_actions_and_logprobs(self) -> None:
         record = correctness.parse_completion(response_fixture(), "short", 7)
         self.assertEqual(record.scenario, "short")

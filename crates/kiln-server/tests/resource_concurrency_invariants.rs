@@ -454,6 +454,42 @@ fn blaslt_workspace_is_stream_owned_not_handle_global() {
 }
 
 #[test]
+fn rocm_graph_workspace_lifetime_is_leased_and_device_scoped() {
+    let handle = read("crates/kiln-rocblas/src/hipblaslt_handle.rs");
+    let tensor = read("crates/kiln-tensor/src/rocm_matmul.rs");
+    let graph = read("crates/kiln-model/src/rocm_graph.rs");
+
+    for required in [
+        "pub struct HipblasLtWorkspaceLease",
+        "pub fn workspace_lease(",
+        "impl Drop for HipblasLtWorkspaceLease",
+        "RocmSyncReason::AllocationLifetime",
+        "RocmSyncReason::MemoryReclaim",
+    ] {
+        assert!(
+            handle.contains(required),
+            "ROCm hipBLASLt capture workspace lifecycle is missing {required}"
+        );
+    }
+    assert!(
+        tensor.contains("cache_by_device"),
+        "ROCm hipBLASLt algorithm caches must be scoped per device"
+    );
+    assert!(
+        !tensor.contains("shared_cache: Arc<Mutex<AlgoCache>>"),
+        "ROCm must not share opaque hipBLASLt algorithm blobs across devices"
+    );
+    assert!(
+        graph.contains("_blaslt_workspace_lease: kiln_tensor::HipblasLtWorkspaceLease"),
+        "captured ROCm graphs must retain their stream workspace lease"
+    );
+    assert!(
+        graph.contains("rocm_blaslt_workspace_lease(device_idx, &context, &stream)"),
+        "ROCm capture attempts must lease workspace before warmup/capture"
+    );
+}
+
+#[test]
 fn paged_kv_row_scatter_materializes_rows_before_slice_set() {
     let src = read("crates/kiln-model/src/paged_kv_cache_kt.rs");
     assert!(
@@ -1242,9 +1278,20 @@ fn rocm_graph_replay_failure_is_a_circuit_breaker() {
         rocm_graph.matches("self.enabled = false;").count() >= 3,
         "ROCm graph replay/capture failure paths must set a runner-local circuit breaker"
     );
+    for required in [
+        "release_captured_after_device_settlement(\"replay_failure\")",
+        "context.quarantine_execution();",
+        "std::mem::forget(retained);",
+        "execution is quarantined",
+    ] {
+        assert!(
+            rocm_graph.contains(required),
+            "ROCm graph replay containment is missing {required}"
+        );
+    }
     assert!(
-        rocm_graph.matches("self.captured.clear();").count() >= 4,
-        "ROCm graph replay failures must clear captured graph state before eager fallback"
+        rocm_graph.contains("Ok(()) if !context.cleanup_quarantined()"),
+        "captured graph state may be destroyed only after settlement without a sticky device quarantine"
     );
 }
 
@@ -1265,21 +1312,24 @@ fn rocm_graph_warm_pass_prewarms_capture_stream() {
     assert!(
         capture.contains("attributed_rocm_graph_synchronize(")
             && capture.contains("\"default_inputs_before_warmup\"")
-            && capture.contains("kiln_tensor::rocm_synchronize_default_stream(device_idx)"),
+            && capture.contains("&default_stream,")
+            && capture.contains("kiln_tensor::RocmSyncReason::GraphBoundary"),
         "ROCm graph capture must attribute and drain default-stream input fills before warming the capture stream"
     );
     assert!(
-        warm_pass.contains("kiln_tensor::with_active_rocm_stream(stream.clone(), ||"),
+        warm_pass.contains("kiln_tensor::with_rocm_graph_capture_stream(stream.clone(), ||"),
         "ROCm graph warm pass must run on the same stream that will be captured, so hipBLASLt per-stream workspace is preallocated before begin_capture"
     );
     assert!(
         capture.contains("\"capture_stream_warmup_completion\"")
-            && capture.contains("stream\n                    .synchronize()"),
+            && capture.contains(
+                ".synchronize_stream_for(&stream, kiln_tensor::RocmSyncReason::GraphBoundary)"
+            ),
         "ROCm graph capture must attribute and wait for the warm pass before restoring state or falling back"
     );
 
     let warm_stream = capture
-        .find("kiln_tensor::with_active_rocm_stream(stream.clone(), ||")
+        .find("kiln_tensor::with_rocm_graph_capture_stream(stream.clone(), ||")
         .expect("warm pass should install active ROCm stream");
     let begin_capture = capture
         .find(".begin_capture()")
@@ -1287,6 +1337,83 @@ fn rocm_graph_warm_pass_prewarms_capture_stream() {
     assert!(
         warm_stream < begin_capture,
         "ROCm capture stream must be warmed before hipStreamBeginCapture"
+    );
+}
+
+#[test]
+fn rocm_stream_ordering_protects_input_lifetimes_and_external_yield() {
+    let storage = read("crates/kiln-tensor/src/rocm_storage.rs");
+    let active_stream = read("crates/kiln-tensor/src/active_rocm_stream.rs");
+    let hip = read("crates/kiln-hip/src/lib.rs");
+
+    for required in [
+        "owner_release_is_ordered_on",
+        "SliceOwner::Owned(slice) => Arc::ptr_eq(slice.stream(), stream)",
+        "SliceOwner::Borrowed { .. } => false",
+        "rocm_synchronize_context_same_stream_dependency_with_inputs",
+        "rocm_synchronize_context_legacy_device_same_stream_dependency_with_inputs",
+        "&& !owners_are_stream_ordered",
+    ] {
+        assert!(
+            storage.contains(required),
+            "ROCm stream-ordered input lifetime guard is missing {required}"
+        );
+    }
+    for path in [
+        "crates/kiln-tensor/src/rocm_ops/activation.rs",
+        "crates/kiln-tensor/src/rocm_ops/cast.rs",
+        "crates/kiln-tensor/src/rocm_ops/elementwise.rs",
+        "crates/kiln-tensor/src/rocm_ops/bf16_matmul.rs",
+        "crates/kiln-tensor/src/rocm_ops/concat.rs",
+        "crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs",
+        "crates/kiln-tensor/src/rocm_matmul.rs",
+    ] {
+        assert!(
+            read(path).contains("same_stream_dependency_with_inputs"),
+            "{path}: asynchronous ROCm operation must make its input-owner proof explicit"
+        );
+    }
+    for required in [
+        "ACTIVE_ROCM_STREAMS",
+        "LAST_ROCM_PRODUCER_STREAMS",
+        "HashMap<usize, Arc<RocmStream>>",
+        ".insert(device_ordinal, stream.clone())",
+        "last_rocm_producer_stream",
+        "clear_last_rocm_producer_stream",
+        ".get(&ctx.ordinal())",
+    ] {
+        assert!(
+            active_stream.contains(required),
+            "ROCm active-stream producer tracking is missing {required}"
+        );
+    }
+    assert!(
+        active_stream.contains("pub unsafe fn with_rocm_graph_capture_stream")
+            && active_stream.contains("crate::rocm_capture_arena_active()"),
+        "private ROCm stream overrides must be unsafe and restricted to graph capture arenas"
+    );
+    assert!(
+        !active_stream.contains("Weak<RocmStream>")
+            && !active_stream.contains("Arc::downgrade(&stream)"),
+        "the last ROCm producer must remain strongly owned until external-yield settlement"
+    );
+    assert!(
+        hip.contains("pub fn synchronize_external_yield_for("),
+        "ROCm context must support settling an explicitly identified producer stream"
+    );
+    assert!(
+        storage.contains("rocm_synchronize_external_yield_for_stream"),
+        "cross-thread ROCm embeddings need an explicit producer-stream yield boundary"
+    );
+    assert!(
+        storage.contains("if result.is_ok()")
+            && storage.contains("clear_last_rocm_producer_stream"),
+        "producer retention may clear only after successful external-yield settlement"
+    );
+    assert!(
+        storage.contains("pub unsafe fn from_slice_ctx(")
+            && storage.contains("pub unsafe fn from_borrowed_ctx("),
+        "external/private ROCm storage constructors must expose their producer-ordering obligation as unsafe"
     );
 }
 
@@ -1488,4 +1615,44 @@ fn speculative_configuration_has_bounded_geometry() {
     assert!(
         config.contains("self.speculative.num_speculative_tokens > MAX_SPECULATIVE_DRAFT_TOKENS")
     );
+}
+
+#[test]
+fn central_backend_admission_latches_live_rocm_health_failures() {
+    let state = read("crates/kiln-server/src/state.rs");
+    let observer = source_between(
+        &state,
+        "    pub(crate) fn observe_rocm_runtime_health(",
+        "    /// Return why this process cannot execute `workload`",
+    );
+    assert!(
+        observer.contains("self.rocm_synchronization_runtime_stats()")
+            && observer.contains("latch_rocm_runtime_health"),
+        "the shared server observer must latch the live ROCm synchronization snapshot"
+    );
+
+    let gate = source_between(
+        &state,
+        "    pub(crate) fn ensure_backend_healthy(&self) -> anyhow::Result<()> {",
+        "    /// Process-lifetime inference admission.",
+    );
+    assert!(
+        gate.contains("self.observe_rocm_runtime_health()"),
+        "every central backend admission must observe low-level ROCm health"
+    );
+    assert_eq!(
+        gate.matches("backend_health.ensure_healthy()?").count(),
+        2,
+        "the central gate must reject both a pre-existing latch and a fault found by the live observation"
+    );
+
+    let runtime = read("crates/kiln-server/src/accelerator_runtime.rs");
+    let reason = source_between(
+        &runtime,
+        "    pub fn fail_closed_reason(&self) -> Option<String> {",
+        "}\n\nimpl Default for RocmSynchronizationRuntimeStats",
+    );
+    assert!(reason.contains("if !self.active"));
+    assert!(reason.contains("!self.telemetry_available || self.telemetry_error.is_some()"));
+    assert!(reason.contains("self.cleanup_quarantined"));
 }

@@ -266,6 +266,14 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
     synchronization now share bounded `gpu_memory_operation` fields. ROCm graph
     capture establishment and failure recovery are covered as well; the gate
     remains open for the CUDA graph synchronization inventory on its machine.
+  - Progress: ROCm execution now classifies every host wait through one fixed
+    22-reason enum and reports device/stream attempts, skipped waits, and total
+    wait duration by reason. Stream-ordered mode removes proven same-stream
+    waits while explicit external-yield, graph, allocation-lifetime, reclaim,
+    and error-recovery boundaries stay observable. The qualification harness
+    independently gates failures, 250 ms stalls, and 2 second pauses. This
+    source/static checkpoint still requires the Strix Halo
+    legacy-versus-stream A/B before it can close any hardware latency gate.
 - [x] Attribute backend external-yield synchronization with a bounded boundary
   label, call/failure/slow counts, and total/max duration in health, debug
   state, Prometheus, and the 100 ms slow-sync log.
@@ -1148,14 +1156,40 @@ tests remain serialized by the shared poison-tolerant GPU test lock. This is a
 portable source/static checkpoint only: backend execution and numerical
 qualification remain pending on ROCm, Vulkan, CUDA, and Metal.
 
-Next large bite: move the ROCm pause candidates through one ordered authority
-and measurement sequence: first ratchet startup-resolved runtime policy through
-the API; then bind graph, KV, workspace, and scratch ownership with telemetry;
-then A/B the matmul/attention event handoff and remove avoidable host/device
-synchronization; finally add the fused batched sampler. NVIDIA work need not
-wait for fused sampling or every Vulkan cleanup. It can begin once ROCm has a
-trustworthy baseline that passes the event-handoff gate, while the remaining
-ROCm/Vulkan throughput work continues independently.
+ROCm execution-policy checkpoint (source-complete 2026-07-13): `[accelerator]`
+now owns synchronization mode, graph mode, and graph entry capacity through
+mechanically derived canonical environment names and strict deprecated graph
+aliases. Startup installs one immutable per-device policy before model or
+tensor allocation. Stable defaults retain legacy host barriers and disable
+graphs; stream ordering and graph execution require the experimental profile.
+The same resolved state is visible through config, health, trusted debug,
+metrics, CLI, dashboard, and the permanent website documentation.
+
+The low-level boundary now uses reasoned waits, strong producer ownership,
+fallible raw-stream acquisition, stream/context identity checks, capture
+rollback guards, and a process-lifetime per-device cleanup quarantine. Unsafe
+settlement never retries partially advanced work and readiness/admission fail
+closed until process restart. Graph streams, graphs, execs, events, tensor
+allocations, hipBLASLt handles, and workspaces retain uncertain resources
+rather than destructing them on the wrong or quarantined device. Concurrent
+hipBLASLt submissions hold shared workspace allocation ownership across FFI,
+so a resize cannot retire the pointer being submitted.
+
+`serving-rocm-sync-ab-v1` defines exact-provenance legacy/stream arms at
+concurrency 1, 2, and 4, reconciles all 22 reason counters, fails on 250 ms
+stalls or 2 second pauses, samples memory, and requires clean teardown. The
+portable qualification tests, environment contract, docs build/static smoke,
+syntax checks, Rust formatting, and independent ownership review pass. Bounded
+Cargo correctly refused below the unchanged 15 GiB available-memory floor, so
+this checkpoint makes no compile, ROCm execution, parity, pause, memory, or
+throughput claim.
+
+Next large bite: add a typed retained-byte budget, byte telemetry, and
+pressure-aware eviction to the ROCm graph cache, then run the local
+legacy-versus-stream A/B and graduated concurrency 8/16 and 32/64 only after
+the smaller arms are clean. NVIDIA work need not wait for fused sampling or
+every Vulkan cleanup; it can begin once this ROCm event-handoff gate produces a
+trustworthy source-bound baseline.
 
 ### 8.2 One scheduling model
 
@@ -1605,6 +1639,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-13 | Phase 8.1 immutable optimizer authority | `sha256:da62190c4a4dedd29e1fcb6cec02f1aacb807c124b52b5ae691ae99e17b0737a` | this commit | portable static; accelerator execution pending | exact runtime-environment ratchet at 944 reads/530 mutations; seven focused environment-contract tests; generated backend-capability report self-test/generate/check; release-version and Python compilation checks; Rust 2024 formatting and diff hygiene; independent tuple, identity, admission-order, checkpoint, and compatibility-wrapper review; bounded Cargo admission at the unchanged 15 GiB floor | passed static checkpoint | One typed contract now binds exact backend/device identity, resident base dtype, resolved LoRA dtype, optimizer kind, rank, and immutable round-to-nearest execution. CPU uses the F32 reference implementation; CUDA/ROCm, Metal, and Vulkan require their exact supported native hooks, with F16 excluded from training. Submission and dequeue plus direct SFT, inline/streamed GRPO, and OPD fail before physical-memory probes, corpus work, or accelerator ownership and revalidate against the initialized backend. The four backend fallback variables, global training fallback variable, and stochastic-rounding variable have no alias or replacement; legacy stochastic checkpoints fail closed. Review caught and repaired a false broad source assertion, non-exhaustive device matching, Vulkan authority contamination after failed initialization, a CUDA streamed-JSONL open before admission, and standalone memory probes before the cheap tuple guard. Missing expected LoRA gradients remain a separately recorded tape-authority defect. Cargo correctly refused with 8 GiB available, so this checkpoint makes no compiled, accelerator-correctness, or throughput claim; inexpensive hosted CPU validation must be monitored after push. |
 | 2026-07-13 | Optimizer admission API, UI, and documentation contract | this commit | `6f6eecad5` with repairs `a2d361717`, `7d529efd0`, `f180dbaf9`, `af216a821`, `75fea561c`, `772576fe8`, `9214c9522`, and `e5e491d78` | portable static/product surface; accelerator execution pending | Rust 2024 formatting and diff hygiene; independent Rust/recipe blocker audit; versioned config-schema tests; fail-closed dashboard state and request guards; server UI static smoke; 8/8 docs builder tests; 30-document site validation; generated-site static smoke; JSON and JavaScript syntax checks | passed static checkpoint | `/v1/config` separates raw optimizer implementations, resident executable tuples, four workload gates, and live-memory admission. Rank state distinguishes backend, model, and effective ceilings. Direct forms and recipes disable unsupported tuples without substitution and expose exact reasons. Distill refresh is a distinct fail-closed workload until exact two-phase preparation and reservation exist. Common admission and dequeue revalidate workload, tuple, full checkpoint-manifest identity, artifact hashes, and effective seed before corpus or governor work. The permanent website and repository references describe the complete schema and non-promises. The listed repair commits address regressions and stale contracts found after the product checkpoint; this row does not claim a current hosted-CI result. Local Cargo remains blocked below the unchanged 15 GiB floor; ROCm/Vulkan execution must follow, so no hardware gate closes here. |
 | 2026-07-13 | Phase 8.1 tape-scope, exact-gradient, and frozen-ownership authority | `sha256:6a2d9fd48779d5433b370366ceeecec13deda7f94ba371572ade70123b1ad3a2` | this commit | portable static and documentation portal; accelerator execution pending | Rust 2024 formatting across all 32 modified crate sources; diff hygiene; 13 model tape-routing, 3 GDN frozen-kernel, and 1 ROCm RMSNorm stream/context standalone contracts; exact runtime-environment ratchet at 936 reads/376 mutations; generated backend-capability self-test/check; Python/JavaScript/JSON syntax and release/link checks; 37/37 explicit poison-tolerant CUDA test locks; 8/8 docs-builder tests, 30-document/5-asset build, and generated static smoke; independent compile/API, ownership, and documentation audits; bounded Cargo refusal at 7 GiB available under the unchanged 15 GiB floor | passed static checkpoint | Active training scope is the only tape authority and eight runtime switches are removed without aliases or replacement fields. Inference keeps forward-only paths; graph-preserving RoPE, attention, projection, normalization, GDN, reshape, and loss routes fail closed inside scope. Four unused prefill helpers and the ROCm W8 output leaf explicitly reject active training until their full graphs are recorded. The optimizer requires the exact LoRA ID/shape/backward-dtype/master-device set before mutation, accepts valid zeros, scans finiteness after accumulation, and rejects missing, unknown, duplicate-segment, disconnected registered-input, and non-finite gradients. Bridge fan-in is deterministic and split Q/gate chunks retain the original full A/B IDs, zero-pad each dB slice, accumulate both contributions, and preserve taped reshapes. LoRA A/B are the only trainable model leaves: embeddings, base projections, RMSNorm/GDN norm weights and gate constants, MTP projections, and FLCE/OPD/GRPO heads are constants. Their portable and fused adjoints omit frozen gradients and dWeight GEMMs; fused RMSNorm/GDN kernels compile out dWeight atomics, final-norm training is dx-only, RMSNorm scratch is one hidden-width buffer, and ROCm backward preserves owning context while rejecting capture-context mismatches. Metal finite checking uses a synchronized host correctness fallback. Historical switch documents are explicitly marked non-operational and the permanent website/reference/troubleshooting surface pins the contract. Cargo correctly did not start, and this row makes no ROCm, Vulkan, CUDA, Metal, numerical, stability, memory, or throughput qualification claim. |
+
+| 2026-07-13 | Phase 1.3/8.1 ROCm execution-policy and fail-closed ownership | `sha256:065d8a0ae8675315cb636a1e85a0af21016d94add702df6b573c6392560d4ded` | this commit | portable static + Strix Halo qualification contract; ROCm execution pending | 98 focused qualification tests; exact runtime-environment contract at 925 reads/376 process mutations; thinking-budget contract; 8/8 docs-builder tests and generated static smoke; Python/Bash/JavaScript syntax; Rust 2024 formatting and diff hygiene; independent crash/correctness re-audit; bounded Cargo refusal below the unchanged 15 GiB floor | passed static checkpoint | Typed startup policy owns ROCm synchronization and graph modes; 22 reasoned wait classes are observable across product surfaces; stream, graph, allocation, capture rollback, and workspace ownership fail closed under sticky per-device quarantine. Review found and repaired first-launch state double advance, warmup retry after partial state, and concurrent hipBLASLt workspace retirement. The source-bound legacy/stream A/B contract is ready, but no compile, GPU, parity, pause, memory, or throughput claim is made. Retained-byte graph budgeting and linearizable quarantine/FFI admission are the next checkpoint. |
 
 ## Known Starting Defects
 

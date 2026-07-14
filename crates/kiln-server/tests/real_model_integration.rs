@@ -5019,7 +5019,7 @@ async fn rocm_eager_and_graph_decode_survive_active_shrink_and_grow() {
         config.clone(),
         ModelRunnerRuntimeOptions {
             cuda_graphs: false,
-            rocm_graphs: true,
+            rocm_graph: kiln_model::RocmGraphExecutionPolicy::lazy_capture_replay(),
             metal_graphs: false,
             max_decode_batch: Some(1),
             streaming_prefill: None,

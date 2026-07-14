@@ -13,6 +13,7 @@ memory ceiling with swap disabled. It also refuses to overlap another Cargo or
 rustc process.
 
 Overrides:
+  CARGO                           Cargo executable/name (default: PATH, then ~/.cargo/bin/cargo)
   KILN_CARGO_JOBS                 Build jobs (default: 1)
   KILN_CARGO_MIN_AVAILABLE_GIB    Preflight floor (default: 2/3 host RAM, min 8)
   KILN_CARGO_HOST_RESERVE_GIB     Memory kept outside each child (default: 1/4 host RAM, min 4)
@@ -26,12 +27,36 @@ if [[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     exit 2
 fi
 
-for tool in cargo awk ps systemd-run; do
+for tool in awk ps systemd-run; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "error: required tool '$tool' is not available" >&2
         exit 2
     fi
 done
+
+cargo_executable="${CARGO:-}"
+if [[ -n "$cargo_executable" ]]; then
+    if [[ "$cargo_executable" == */* ]]; then
+        if [[ ! -x "$cargo_executable" ]]; then
+            echo "error: CARGO='$cargo_executable' is not executable" >&2
+            exit 2
+        fi
+    elif ! cargo_executable="$(command -v "$cargo_executable")"; then
+        echo "error: CARGO='${CARGO}' is not available" >&2
+        exit 2
+    fi
+elif cargo_executable="$(command -v cargo 2>/dev/null)"; then
+    :
+elif [[ -n "${HOME:-}" && -x "$HOME/.cargo/bin/cargo" ]]; then
+    cargo_executable="$HOME/.cargo/bin/cargo"
+else
+    echo "error: required tool 'cargo' is not available" >&2
+    exit 2
+fi
+if [[ "$cargo_executable" -ef "$0" ]]; then
+    echo "error: CARGO cannot point to scripts/cargo-bounded.sh itself" >&2
+    exit 2
+fi
 if [[ ! -r /proc/meminfo ]]; then
     echo "error: bounded Cargo requires Linux /proc/meminfo" >&2
     exit 2
@@ -105,4 +130,4 @@ exec systemd-run \
     -p "MemoryMax=${limit_gib}G" \
     -p MemorySwapMax=0 \
     -p OOMPolicy=kill \
-    cargo "$@"
+    "$cargo_executable" "$@"

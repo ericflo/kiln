@@ -1925,6 +1925,10 @@ function renderRuntimeConfigBody(cfg) {
   const vram = cfg.vram || {};
   const live = vram.live || {};
   const governor = vram.governor || {};
+  const acceleratorRuntime = cfg.accelerator_runtime || {};
+  const rocmSynchronization = acceleratorRuntime.rocm_synchronization_mode || {};
+  const rocmGraphMode = acceleratorRuntime.rocm_graph_mode || {};
+  const rocmGraphCache = acceleratorRuntime.rocm_graph_cache_entries || {};
   const kv = cfg.kv_cache || {};
   const train = cfg.training || {};
   const b = cfg.memory_budget || {};
@@ -2147,6 +2151,14 @@ function renderRuntimeConfigBody(cfg) {
         ${runtimeConfigRow('Free floor', memory(governor.floor_gib, governor.floor_bytes), 'Memory kept free rather than admitted to model work.')}
         ${runtimeConfigRow('Probe cadence', `<strong>${typeof governor.probe_ms === 'number' && isFinite(governor.probe_ms) ? num(governor.probe_ms) + ' ms' : '—'}</strong>`, 'How often the memory governor refreshes live observations.')}
         ${runtimeConfigRow('Reclaim', `<strong>${escapeHtml(reclaimEffective == null ? '—' : String(reclaimEffective))}</strong>${srcChip(governor.reclaim_mode_source)}${reclaimRequestedChip}`, 'Effective process-lifetime reclaim policy. A differing requested value is shown alongside it.')}
+      </div>
+      <div class="rc-group">
+        <div class="rc-group-title">ROCm execution</div>
+        ${runtimeConfigRow('Policy schema', `<strong>${escapeHtml(acceleratorRuntime.schema_id || '—')}</strong>${acceleratorRuntime.version == null ? '' : flagChip(`v${acceleratorRuntime.version}`, 'Accelerator runtime policy schema version.')}`, 'Versioned process-lifetime accelerator policy installed before device initialization.')}
+        ${runtimeConfigRow('Synchronization', `<strong>${escapeHtml(rocmSynchronization.effective || '—')}</strong>${srcChip(rocmSynchronization.source)}`, 'Effective ROCm synchronization discipline. Stream-ordered mode is restricted to the experimental serving profile until locally qualified.')}
+        ${runtimeConfigRow('Graph configured', `<strong>${escapeHtml(rocmGraphMode.configured || '—')}</strong>${srcChip(rocmGraphMode.source)}`, 'Configured graph lifecycle before serving-profile resolution.')}
+        ${runtimeConfigRow('Graph effective', `<strong>${escapeHtml(rocmGraphMode.effective || '—')}</strong>`, 'Effective immutable graph lifecycle. Stable and maintenance profiles resolve profile mode to disabled.')}
+        ${runtimeConfigRow('Graph cache', `<strong>${num(rocmGraphCache.effective)}</strong>${srcChip(rocmGraphCache.source)}`, 'Bounded number of retained ROCm graph entries; valid range 1 through 64.')}
       </div>
       <div class="rc-group">
         <div class="rc-group-title">KV cache</div>

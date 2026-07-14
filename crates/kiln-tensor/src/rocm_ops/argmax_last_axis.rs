@@ -71,7 +71,7 @@ pub fn rocm_argmax_last_axis(x: &Tensor) -> Result<Tensor> {
     let out_elem_count: usize = out_shape.iter().product::<usize>().max(1);
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::I64, out_elem_count)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * in_dtype.size_in_bytes()) as u64;

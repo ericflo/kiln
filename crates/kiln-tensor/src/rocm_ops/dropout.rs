@@ -74,7 +74,7 @@ pub fn rocm_dropout(x: &Tensor, p: f32, seed: u64) -> Result<(Tensor, Tensor)> {
     let y_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
     let mask_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::U8, n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (y_base, _) = y_storage.device_ptr_raw();
     let (mask_base, _) = mask_storage.device_ptr_raw();

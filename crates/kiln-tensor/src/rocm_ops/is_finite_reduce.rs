@@ -108,7 +108,7 @@ pub fn rocm_is_finite(src: &Tensor) -> Result<bool> {
     // into it on the first non-finite hit.
     let flag_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::U32, 1)?;
 
-    let raw_stream = contig_storage.rocm_stream_raw();
+    let raw_stream = contig_storage.rocm_stream_raw()?;
 
     // `rocm_contiguous` produces start_offset == 0, so no byte-offset math.
     let (x_base, _) = contig_storage.device_ptr_raw();

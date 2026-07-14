@@ -2,8 +2,9 @@ use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
 use crate::config::{
-    BatchingRuntimeConfig, ConfigValueSource, DecodeRuntimeConfig, ServingProfileDiagnostics,
-    SpecMethod, StreamingPrefillRuntimeConfig,
+    BatchingRuntimeConfig, ConfigValueSource, DecodeRuntimeConfig,
+    ResolvedAcceleratorRuntimePolicy, ServingProfileDiagnostics, SpecMethod,
+    StreamingPrefillRuntimeConfig,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::state::{AppState, DirectDecodeRendezvousRuntimeState, ModelBackend, TrainingWorkload};
@@ -19,6 +20,7 @@ fn gib(bytes: u64) -> f64 {
 #[derive(Serialize)]
 struct ConfigResponse {
     serving_profile: ServingProfileDiagnostics,
+    accelerator_runtime: ResolvedAcceleratorRuntimePolicy,
     decode_runtime: DecodeRuntimeConfig,
     batching: BatchingConfigResponse,
     streaming_prefill: StreamingPrefillRuntimeConfig,
@@ -324,6 +326,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
 
     Json(ConfigResponse {
         serving_profile: state.serving_profile.diagnostics(),
+        accelerator_runtime: state.accelerator_runtime_policy,
         decode_runtime: state.decode_runtime_config,
         batching: BatchingConfigResponse {
             configuration: state.batching_runtime_config,
@@ -750,6 +753,8 @@ mod tests {
             crate::config::ServingProfile::Experimental,
             crate::config::ConfigValueSource::Environment,
         );
+        state.accelerator_runtime_policy = crate::config::AcceleratorRuntimeConfig::default()
+            .resolved_policy(state.serving_profile);
         state.default_thinking_budget_tokens = Some(64);
         state.default_thinking_budget_ms = Some(1_500);
         let checkpoint_boundary_policy = kiln_train::CheckpointBoundaryPolicy::from_parts(
@@ -788,6 +793,19 @@ mod tests {
         assert_eq!(json["serving_profile"]["source"], "environment");
         assert_eq!(json["serving_profile"]["immutable_after_startup"], true);
         assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
+        assert_eq!(
+            json["accelerator_runtime"]["schema_id"],
+            "kiln.accelerator-runtime-policy.v1"
+        );
+        assert_eq!(json["accelerator_runtime"]["version"], 1);
+        assert_eq!(
+            json["accelerator_runtime"]["rocm_synchronization_mode"]["effective"],
+            "legacy_host_barriers"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["rocm_graph_mode"]["effective"],
+            "lazy_capture_replay"
+        );
         assert_eq!(json["generation"]["default_thinking_budget_tokens"], 64);
         assert_eq!(json["generation"]["default_thinking_budget_ms"], 1_500);
         assert_eq!(json["decode_runtime"]["deterministic"]["enabled"], false);

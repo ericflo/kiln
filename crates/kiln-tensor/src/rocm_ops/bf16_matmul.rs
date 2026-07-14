@@ -69,6 +69,11 @@ pub fn rocm_bf16_matmul_bf16_out(a: &Tensor, b: &Tensor) -> Result<Tensor> {
             b_storage.device()
         )));
     }
+    if !Arc::ptr_eq(&a_storage.context(), &b_storage.context()) {
+        return Err(Error::Msg(format!(
+            "{OP}: both inputs must share one ROCm context"
+        )));
+    }
     let device_index = match a.device() {
         Device::Rocm(i) => i,
         other => {
@@ -84,7 +89,7 @@ pub fn rocm_bf16_matmul_bf16_out(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 
     let ctx = a_storage.context();
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::BF16, m * n)?;
-    let stream = a_storage.rocm_stream_raw();
+    let stream = a_storage.rocm_stream_raw()?;
     let bpe = DType::BF16.size_in_bytes();
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
@@ -101,11 +106,12 @@ pub fn rocm_bf16_matmul_bf16_out(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     if status != 0 {
         return Err(Error::Msg(format!("{OP}: FFI returned status {status}")));
     }
-    if !crate::rocm_capture_arena_active() {
-        crate::active_rocm_stream(&ctx)
-            .synchronize()
-            .map_err(|e| Error::Msg(format!("{OP}: synchronize after kernel launch: {e:?}")))?;
-    }
+    crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
+        &ctx,
+        &[a_storage, b_storage],
+        crate::RocmSyncReason::MatmulOutput,
+    )
+    .map_err(|e| Error::Msg(format!("{OP}: synchronize after kernel launch: {e:?}")))?;
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(

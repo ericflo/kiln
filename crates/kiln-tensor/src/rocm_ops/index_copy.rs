@@ -4,7 +4,7 @@
 //! `dst[indices[i], ..] = src[i, ..]`, written through `dst`'s existing device
 //! buffer (no realloc). The destination pointer is therefore stable, and the
 //! copy is issued on `dst`'s ACTIVE stream — so inside a
-//! `with_active_rocm_stream` scope it lands on (and records into) the HIP-graph
+//! `with_rocm_graph_capture_stream` scope it lands on (and records into) the HIP-graph
 //! capture stream. This is what lets the paged-KV slot write store K/V into
 //! `pool[*slot]` with a DEVICE slot index, with no host readback, so the write
 //! is recordable into a captured decode graph.
@@ -101,7 +101,7 @@ pub fn rocm_index_copy_dim0(dst: &Tensor, indices: &Tensor, src: &Tensor) -> Res
             Error::Msg("rocm_index_copy_dim0: indices must be ROCm storage".to_string())
         })?;
 
-    let raw_stream = dst_storage.rocm_stream_raw();
+    let raw_stream = dst_storage.rocm_stream_raw()?;
     let (dst_base, _) = dst_storage.device_ptr_raw();
     let (src_base, _) = src_storage.device_ptr_raw();
     let (idx_base, _) = idx_storage.device_ptr_raw();
@@ -114,7 +114,7 @@ pub fn rocm_index_copy_dim0(dst: &Tensor, indices: &Tensor, src: &Tensor) -> Res
 
     // SAFETY: all three pointers address contiguous device buffers of the
     // validated extents; `raw_stream` is `dst`'s active ROCm stream (the capture
-    // stream under a with_active_rocm_stream scope).
+    // stream under a with_rocm_graph_capture_stream scope).
     let status = unsafe {
         kiln_index_copy_dim0_async(
             src_ptr,

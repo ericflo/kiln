@@ -85,7 +85,7 @@ pub fn rocm_sum_squared_last_axis(x: &Tensor) -> Result<Tensor> {
     let out_storage =
         RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, n_rows as usize)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -149,7 +149,7 @@ pub fn rocm_l2norm_last_axis(x: &Tensor, eps: f32) -> Result<Tensor> {
     // zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (sum_sq_base, _) = sum_sq_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
@@ -214,7 +214,7 @@ fn rocm_reduce_last_axis_impl(x: &Tensor, divisor: f32, label: &str) -> Result<T
     let out_elem_count: usize = out_shape.iter().product::<usize>().max(1);
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;

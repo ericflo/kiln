@@ -80,7 +80,7 @@ pub fn rocm_lerp(a: &Tensor, b: &Tensor, weight: f32) -> Result<Tensor> {
     // so allocate uninitialized and skip the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = a_storage.rocm_stream_raw();
+    let raw_stream = a_storage.rocm_stream_raw()?;
 
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();

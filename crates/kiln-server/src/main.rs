@@ -30,13 +30,15 @@ use state::{AppState, GpuCoordinationLock, ModelBackend, SpeculativeRuntimePolic
 
 fn resolve_model_runner_runtime_options(
     policy: kiln_server::config::ServingRuntimePolicy,
+    accelerator_policy: kiln_server::config::ResolvedAcceleratorRuntimePolicy,
     cuda_graphs_requested: bool,
     max_decode_batch: Option<usize>,
-) -> ModelRunnerRuntimeOptions {
-    if policy.live_graph_capture {
+) -> anyhow::Result<ModelRunnerRuntimeOptions> {
+    let rocm_graph = kiln_server::accelerator_runtime::model_rocm_graph_policy(accelerator_policy)?;
+    Ok(if policy.live_graph_capture {
         ModelRunnerRuntimeOptions {
             cuda_graphs: cuda_graphs_requested,
-            rocm_graphs: true,
+            rocm_graph,
             metal_graphs: true,
             max_decode_batch,
             streaming_prefill: None,
@@ -46,7 +48,7 @@ fn resolve_model_runner_runtime_options(
             max_decode_batch,
             ..ModelRunnerRuntimeOptions::eager_only()
         }
-    }
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -503,6 +505,9 @@ async fn main() -> Result<()> {
         .configure(config.server.deterministic.enabled())
         .context("failed to fix deterministic tensor behavior from startup configuration")?;
     let serving_policy = config.server.serving_profile.runtime_policy();
+    let accelerator_runtime_policy = config
+        .accelerator
+        .resolved_policy(config.server.serving_profile);
 
     let validated_level = args.effective_log_level(&config.logging.level);
     if bootstrap_level != validated_level || bootstrap_logging.format != config.logging.format {
@@ -639,9 +644,17 @@ async fn main() -> Result<()> {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::debug!("loading model weights from {mp}");
         let load_spinner = cli::make_startup_spinner("selecting device");
-        let mut graph_options =
-            resolve_model_runner_runtime_options(serving_policy, config.memory.cuda_graphs, None);
+        let mut graph_options = resolve_model_runner_runtime_options(
+            serving_policy,
+            accelerator_runtime_policy,
+            config.memory.cuda_graphs,
+            None,
+        )?;
         let device_kt = select_device_with_options_kt(graph_options.cuda_graphs)?;
+        kiln_server::accelerator_runtime::install_startup_policy(
+            device_kt,
+            accelerator_runtime_policy,
+        )?;
         let vram_probe_selector =
             kiln_server::state::ensure_accelerator_memory_probe_identity(device_kt)?;
         let physical_vram = kiln_memory::vram::detect_vram_for(vram_probe_selector);
@@ -990,6 +1003,7 @@ async fn main() -> Result<()> {
 
     // Apply server-level checkpoint_interval from config
     state.serving_profile = config.server.serving_profile;
+    state = state.with_accelerator_runtime_policy(accelerator_runtime_policy)?;
     state.speculative_config = config.speculative;
     state.memory_config = config.memory.clone();
     state.training_runtime = kiln_train::TrainingRuntimeContext::new_for_device(
@@ -1814,8 +1828,19 @@ mod tests {
             kiln_server::config::ServingProfile::Stable,
             kiln_server::config::ServingProfile::Maintenance,
         ] {
-            let options =
-                resolve_model_runner_runtime_options(profile.runtime_policy(), true, Some(17));
+            let profile_setting = kiln_server::config::ServingProfileSetting::new(
+                profile,
+                kiln_server::config::ConfigValueSource::Default,
+            );
+            let accelerator_policy = kiln_server::config::AcceleratorRuntimeConfig::default()
+                .resolved_policy(profile_setting);
+            let options = resolve_model_runner_runtime_options(
+                profile.runtime_policy(),
+                accelerator_policy,
+                true,
+                Some(17),
+            )
+            .unwrap();
             assert_eq!(
                 options,
                 ModelRunnerRuntimeOptions {
@@ -1828,18 +1853,29 @@ mod tests {
 
     #[test]
     fn experimental_profile_preserves_explicit_graph_eligibility() {
-        let policy = kiln_server::config::ServingProfile::Experimental.runtime_policy();
+        let profile = kiln_server::config::ServingProfile::Experimental;
+        let policy = profile.runtime_policy();
+        let accelerator_policy = kiln_server::config::AcceleratorRuntimeConfig::default()
+            .resolved_policy(kiln_server::config::ServingProfileSetting::new(
+                profile,
+                kiln_server::config::ConfigValueSource::ConfigFile,
+            ));
         assert_eq!(
-            resolve_model_runner_runtime_options(policy, true, Some(17)),
+            resolve_model_runner_runtime_options(policy, accelerator_policy, true, Some(17))
+                .unwrap(),
             ModelRunnerRuntimeOptions {
                 cuda_graphs: true,
-                rocm_graphs: true,
+                rocm_graph: kiln_model::RocmGraphExecutionPolicy::lazy_capture_replay(),
                 metal_graphs: true,
                 max_decode_batch: Some(17),
                 streaming_prefill: None,
             }
         );
-        assert!(!resolve_model_runner_runtime_options(policy, false, Some(17)).cuda_graphs);
+        assert!(
+            !resolve_model_runner_runtime_options(policy, accelerator_policy, false, Some(17))
+                .unwrap()
+                .cuda_graphs
+        );
     }
 
     #[test]

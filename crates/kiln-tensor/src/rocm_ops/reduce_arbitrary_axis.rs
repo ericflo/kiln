@@ -97,7 +97,7 @@ fn rocm_reduce_arbitrary_axis_impl(
     // so every output is fully written — uninit alloc is safe.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -211,7 +211,7 @@ fn rocm_minmax_arbitrary_axis_impl(
     let out_elem_count: usize = (outer as usize) * (inner as usize);
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -295,7 +295,7 @@ pub fn rocm_bool_reduce_axis(mask: &Tensor, axis: usize, kind: u8) -> Result<Ten
     let out_elem_count: usize = (outer as usize) * (inner as usize);
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::U8, out_elem_count)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (mask.layout().start_offset() * DType::U8.size_in_bytes()) as u64;

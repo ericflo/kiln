@@ -85,4 +85,4 @@ pub fn phase() -> &'static str {
 mod hipblaslt_handle;
 
 #[cfg(feature = "hipblaslt")]
-pub use hipblaslt_handle::{FfiError, HipblasLtMatmulHandle};
+pub use hipblaslt_handle::{FfiError, HipblasLtMatmulHandle, HipblasLtWorkspaceLease};

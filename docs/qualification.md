@@ -44,6 +44,17 @@ building. Configuration changes must be declared in a committed workload
 variant; inherited shell overrides are never silently ignored or accepted as
 source-bound evidence.
 
+Source-building ROCm serving workloads never invoke Cargo directly. Their
+drivers resolve the requested toolchain, then execute the exact package, bin,
+feature, locked, and offline build through `scripts/cargo-bounded.sh` with one
+job and a 15 GiB `MemAvailable` floor. The wrapper refuses overlapping
+Cargo/rustc processes and runs the complete compiler/linker tree in a transient
+systemd user scope with an aggregate `MemoryMax`, host reserve, and zero swap.
+The committed effective build config records the wrapper, job count, floor, and
+scope policy; bounded stderr records the machine-specific available/reserve/
+limit values. Do not lower the floor or bypass the wrapper to obtain a receipt.
+Let the machine recover memory and rerun from the same clean commit.
+
 Batching qualification must bind the complete typed startup policy, not only a
 legacy actor environment switch. A serving workload that exercises the actor
 declares `[batching]` values in its source-bound config, restarts the server,
@@ -311,6 +322,90 @@ python3 scripts/qualification/run.py \
 The variant named `default` preserves the graph-on/autoscale-on A/B baseline,
 not the production serving default. The manifest intentionally applies one
 shared qualification transport envelope to every arm.
+
+### ROCm Synchronization A/B
+
+Run the synchronization policy checkpoint before a longer mixed-load or soak
+after changing ROCm stream ownership, eager operators, graph boundaries, tensor
+handoffs, allocator lifetime, or host readback. The workload is self-contained:
+it builds one exact binary and sequentially starts two isolated servers from
+that binary, first with `legacy_host_barriers` and then with `stream_ordered`.
+Do not launch the arms by exporting old `KILN_ROCM_*` switches yourself.
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" ROCM_PATH=/opt/rocm \
+python3 scripts/qualification/run.py \
+  --variant legacy-vs-stream-ordered \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  qualification/workloads/serving-rocm-sync-ab-v1.json
+```
+
+Both arms use the experimental serving profile because `stream_ordered` is an
+explicitly gated experiment. The workload disables ROCm graphs, physical KV
+autoscaling, and allocator reclaim in both arms so the first checkpoint changes
+only synchronization discipline. It warms one short request, then runs fixed
+32-token waves at concurrency 1, 2, and 4 with prompt lengths from 16 to 384
+words. The per-request deadline is 90 seconds and build/startup/work across
+both arms shares a 10-minute deadline. Each server then gets the standard
+separate 60-second graceful teardown bound before a forced kill is reported as
+failure. Gaps at least 250 ms are retained as stall evidence, and any
+inter-token gap at least two seconds fails. This is the small admission
+checkpoint; it does not replace the full mixed-load, memory pressure,
+30-minute development soak, or final 24-hour soak.
+
+Before timing begins, each arm also runs the same fixed-seed, non-streaming
+provenance request through the public API. The existing full-model correctness
+parser validates its action-token coverage and finite selected-token
+log-probabilities. The two normalized semantic traces, action token IDs, and
+behavior log-probabilities must match exactly. This probe is excluded from the
+timing and synchronization deltas, so semantic confidence does not contaminate
+the measured A/B window.
+
+At startup, after warmup, and after the measured wave, the driver requires the
+resolved policy from both `/v1/config.accelerator_runtime` and
+`/health.decode_runtime.accelerator_runtime` to match the arm exactly. It also
+requires `/health.decode_runtime.rocm_synchronization` to expose all 22 fixed
+reason dimensions, internally consistent aggregate counts, no telemetry error,
+`cleanup_quarantined=false`, and monotonically increasing counters. Every health
+reason/count/duration is
+reconciled with these Prometheus families:
+
+```text
+kiln_rocm_synchronization_policy_info{mode}
+kiln_rocm_cleanup_quarantined
+kiln_rocm_synchronizations_total{reason,scope}
+kiln_rocm_synchronization_wait_seconds_total{reason}
+kiln_rocm_synchronization_skipped_total{reason}
+```
+
+The Prometheus quarantine gauge must remain `0` while telemetry availability is
+`1`. A true health field or nonzero gauge is a hard arm failure: do not classify
+it as an expected graph fallback or continue collecting throughput samples.
+
+The legacy arm must execute an `external_yield` device wait and skip no
+barrier. The stream-ordered arm must execute an `external_yield` stream wait
+and skip at least one proven same-stream barrier. Both must produce the same
+request names, prompt-token counts, exact 32-token length termination, no
+request or device fault, clean unforced shutdown, and no private snapshot
+residue. The receipt records TTFT, E2E, ITL p50/p99/max, throughput, peak GPU
+memory, stall and pause counts, aggregate wait scope/count/time, and skipped
+barriers for each arm. After each concurrency wave, its bounded raw output
+records maximum ITL, stall/pause counts, and every per-reason counter/time
+delta for that interval. This narrows pause attribution to a specific wave and
+reason family instead of assigning a temporal gap speculatively to VRAM
+rebalancing.
+
+Passing this checkpoint means stream ordering preserved the bounded workload
+and the diagnostics are trustworthy. It does not mean stream ordering is
+faster: review both arms' latency, throughput, memory, and per-reason traces,
+then proceed to the existing mixed-load workload with the promising policy.
+New qualification drivers use the mechanically derived
+`KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE`,
+`KILN_ACCELERATOR_ROCM_GRAPH_MODE`, and
+`KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` names. The shorter graph variables
+remain deployment compatibility aliases and are not new evidence vocabulary.
 
 ### ROCm Development Soak
 

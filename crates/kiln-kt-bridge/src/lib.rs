@@ -331,7 +331,11 @@ pub fn rocm_stream_raw_of(
         .as_any()
         .downcast_ref::<RocmStorage>()
         .ok_or_else(|| BridgeError::new(format!("kt-bridge: {name} must be ROCm")))?;
-    Ok(st.rocm_stream_raw())
+    st.rocm_stream_raw().map_err(|error| {
+        BridgeError::new(format!(
+            "kt-bridge: {name} ROCm stream acquisition failed: {error}"
+        ))
+    })
 }
 
 // ----------------------------------------------------------------------

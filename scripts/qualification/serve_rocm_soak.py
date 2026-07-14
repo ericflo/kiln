@@ -136,7 +136,7 @@ def effective_config(
             "cancellation_prompt_words": CANCELLATION_PROMPT_WORDS,
             "cancel_every_waves": CANCEL_EVERY_WAVES,
             "max_tokens": MAX_TOKENS,
-            "rocm_graph_cache_max": GRAPH_CACHE_MAX,
+            "rocm_graph_cache_entries": GRAPH_CACHE_MAX,
             "memory_growth_limit_bytes": memory_growth_limit_bytes,
             "minimum_duration_seconds": minimum_duration_seconds,
             "outlier_absolute_ms": int(mixed.OUTLIER_ABSOLUTE_MS),
@@ -384,7 +384,7 @@ def execute(
     environment = mixed.server_environment(
         RUNTIME_VARIANT, model_path, port, adapter_dir, snapshot_dir
     )
-    environment["KILN_ROCM_GRAPH_CACHE_MAX"] = str(GRAPH_CACHE_MAX)
+    environment[mixed.ROCM_GRAPH_CACHE_ENTRIES_ENV] = str(GRAPH_CACHE_MAX)
     process = subprocess.Popen(
         [str(binary), "--config", "/dev/null", "serve", "--served-model-id", mixed.MODEL_ID],
         cwd=ROOT,
@@ -415,7 +415,14 @@ def execute(
         mixed.wait_ready(port, process, server_log, deadline)
         health_startup = mixed.read_stable_health(port, deadline, "soak startup health")
         debug_start = mixed.json_request(port, "GET", "/v1/debug/model-state")
-        failures.extend(mixed.attest_runtime(RUNTIME_VARIANT, health_startup, debug_start))
+        failures.extend(
+            mixed.attest_runtime(
+                RUNTIME_VARIANT,
+                health_startup,
+                debug_start,
+                rocm_graph_cache_entries=GRAPH_CACHE_MAX,
+            )
+        )
         warmup: mixed.StreamResult | None = None
         health_start: dict[str, Any] | None = None
         for attempt in range(mixed.MAX_WARMUP_REQUESTS):
@@ -485,6 +492,7 @@ def execute(
                 RUNTIME_VARIANT,
                 health_start,
                 mixed.json_request(port, "GET", "/v1/debug/model-state"),
+                rocm_graph_cache_entries=GRAPH_CACHE_MAX,
             )
             if graph_warm["failures"] != 0 or graph_warm["fallback_total"] != 0:
                 warm_failures.append("graph failure or fallback occurred during steady warmup")
@@ -562,6 +570,7 @@ def execute(
                         RUNTIME_VARIANT,
                         health_start,
                         mixed.json_request(port, "GET", "/v1/debug/model-state"),
+                        rocm_graph_cache_entries=GRAPH_CACHE_MAX,
                     )
                 )
                 if (
@@ -704,7 +713,12 @@ def execute(
             health = wait_drained(port, deadline, f"soak wave {wave}")
             debug = mixed.json_request(port, "GET", "/v1/debug/model-state")
             wave_failures.extend(
-                mixed.attest_runtime(RUNTIME_VARIANT, health, debug)
+                mixed.attest_runtime(
+                    RUNTIME_VARIANT,
+                    health,
+                    debug,
+                    rocm_graph_cache_entries=GRAPH_CACHE_MAX,
+                )
             )
             graph = mixed.graph_snapshot(health)
             batching = mixed.batching_snapshot(health)

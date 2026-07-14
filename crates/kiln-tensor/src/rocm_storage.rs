@@ -17,7 +17,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use kiln_hip::{RocmContext, RocmSlice};
+use kiln_hip::{
+    RocmContext, RocmExecutionPolicy, RocmSlice, RocmSyncReason, RocmSyncTelemetrySnapshot,
+};
 
 /// Diagnostic: counts host<->device round-trips (each one synchronizes its
 /// stream via `memcpy_dtoh`/`memcpy_htod`). When `KILN_ROCM_PROFILE` is set,
@@ -198,6 +200,22 @@ pub struct RocmStorage {
 }
 
 impl RocmStorage {
+    fn validate_context_device(
+        ctx: &Arc<RocmContext>,
+        device_index: usize,
+        operation: &'static str,
+    ) -> Result<()> {
+        ctx.ensure_execution_available(operation)
+            .map_err(|error| Error::Msg(format!("{operation}: {error}")))?;
+        if ctx.ordinal() != device_index {
+            return Err(Error::Msg(format!(
+                "{operation}: context device {} does not match requested device {device_index}",
+                ctx.ordinal()
+            )));
+        }
+        Ok(())
+    }
+
     /// Allocate `n_elements` of `dtype`, zero-initialized, on `ctx`. Routes
     /// through the thread-local active stream so the alloc is captured on the
     /// capture stream during HIP-graph capture (Phase R.9); outside capture
@@ -208,6 +226,7 @@ impl RocmStorage {
         dtype: DType,
         n_elements: usize,
     ) -> Result<Self> {
+        Self::validate_context_device(ctx, device_index, "RocmStorage::zeros_ctx")?;
         // HIP-graph freeze-pointers (R.9): while a capture arena is active on
         // this thread, route through it (Borrowed view into a pre-allocated,
         // pointer-stable arena buffer) instead of a fresh hipMallocAsync.
@@ -240,6 +259,7 @@ impl RocmStorage {
         dtype: DType,
         n_elements: usize,
     ) -> Result<Self> {
+        Self::validate_context_device(ctx, device_index, "RocmStorage::alloc_uninit_ctx")?;
         // HIP-graph freeze-pointers (R.9): see `zeros_ctx`. `zero = false` here
         // — the arena hands out an uninitialized Borrowed view on Record, and on
         // Replay re-zeros only under KILN_ARENA_FORCE_ZERO.
@@ -265,12 +285,24 @@ impl RocmStorage {
 
     /// Wrap an existing `RocmSlice` allocated by the caller. Validates length
     /// against `dtype.size_in_bytes()` for non-packed dtypes.
-    pub fn from_slice_ctx(
+    ///
+    /// # Safety
+    /// The caller must prove all writes that initialize `slice` are complete or
+    /// ordered before the primary context's default stream consumes this
+    /// storage. Safe kiln call sites use a synchronizing host-to-device copy.
+    pub unsafe fn from_slice_ctx(
         ctx: &Arc<RocmContext>,
         device_index: usize,
         dtype: DType,
         slice: RocmSlice,
     ) -> Result<Self> {
+        Self::validate_context_device(ctx, device_index, "RocmStorage::from_slice_ctx")?;
+        if slice.stream().ordinal() != device_index {
+            return Err(Error::Msg(format!(
+                "RocmStorage::from_slice_ctx: allocation stream device {} does not match requested device {device_index}",
+                slice.stream().ordinal()
+            )));
+        }
         if !dtype.is_packed() {
             let per = dtype.size_in_bytes();
             if per > 0 && !slice.len().is_multiple_of(per) {
@@ -293,7 +325,12 @@ impl RocmStorage {
 
     /// Wrap an externally-owned HIP buffer as a kt `RocmStorage` without
     /// copying. `keep_alive` must outlive every read from `device_ptr`.
-    pub fn from_borrowed_ctx(
+    ///
+    /// # Safety
+    /// The caller must establish producer-to-consumer ordering for
+    /// `device_ptr`. Kiln uses this only for capture-arena views whose owned
+    /// buffer and all consumers are explicitly ordered on the graph stream.
+    pub unsafe fn from_borrowed_ctx(
         ctx: &Arc<RocmContext>,
         device_index: usize,
         dtype: DType,
@@ -301,6 +338,7 @@ impl RocmStorage {
         byte_len: usize,
         keep_alive: Arc<dyn Any + Send + Sync>,
     ) -> Result<Self> {
+        Self::validate_context_device(ctx, device_index, "RocmStorage::from_borrowed_ctx")?;
         if !dtype.is_packed() {
             let per = dtype.size_in_bytes();
             if per > 0 && !byte_len.is_multiple_of(per) {
@@ -371,17 +409,45 @@ impl RocmStorage {
         self.ctx.clone()
     }
 
-    /// Raw HIP stream pointer for FFI dispatch — the `stream` argument every
-    /// kernel-crate FFI declaration expects (`*mut c_void`). Resolves through
-    /// the thread-local active stream (capture stream during HIP-graph capture;
-    /// `ctx.default_stream()` otherwise).
-    pub fn rocm_stream_raw(&self) -> *mut core::ffi::c_void {
-        crate::active_rocm_stream(&self.ctx).hip_stream() as *mut core::ffi::c_void
+    /// Fallibly acquire the raw HIP stream pointer for FFI dispatch.
+    ///
+    /// Resolves through the thread-local active stream (capture stream during
+    /// HIP-graph capture; `ctx.default_stream()` otherwise), but refuses to
+    /// expose a launch handle after cleanup has been quarantined. The checked
+    /// stream accessor also rebinds its device on this thread immediately
+    /// before the caller crosses FFI.
+    pub fn rocm_stream_raw(&self) -> Result<*mut core::ffi::c_void> {
+        self.ctx
+            .ensure_execution_available("RocmStorage::rocm_stream_raw")
+            .map_err(|error| {
+                Error::Msg(format!(
+                    "RocmStorage::rocm_stream_raw: execution unavailable: {error}"
+                ))
+            })?;
+        crate::active_rocm_stream(&self.ctx)
+            .hip_stream_for_execution()
+            .map(|stream| stream as *mut core::ffi::c_void)
+            .map_err(|error| {
+                Error::Msg(format!(
+                    "RocmStorage::rocm_stream_raw: stream unavailable: {error}"
+                ))
+            })
     }
 
     /// Crate-internal accessor for the slice owner.
     pub(crate) fn slice_owner(&self) -> &SliceOwner {
         &self.slice
+    }
+
+    /// Whether dropping this storage after an asynchronously launched consumer
+    /// is ordered behind that consumer on `stream`.
+    fn owner_release_is_ordered_on(&self, stream: &Arc<kiln_hip::RocmStream>) -> bool {
+        match &self.slice {
+            SliceOwner::Owned(slice) => Arc::ptr_eq(slice.stream(), stream),
+            // The opaque external owner may free on another stream or by a
+            // synchronous API as soon as its keep-alive Arc is dropped.
+            SliceOwner::Borrowed { .. } => false,
+        }
     }
 }
 
@@ -397,9 +463,27 @@ impl RocmStorage {
 /// One cached context per device serializes alloc/memset/kernel/readback on the
 /// shared default stream, matching the CUDA backend's single-primary-stream
 /// behavior. `Err` if the device isn't available.
-pub fn primary_rocm_context(device_index: usize) -> Result<Arc<RocmContext>> {
+fn primary_rocm_context_cache() -> &'static Mutex<HashMap<usize, Arc<RocmContext>>> {
     static CACHE: OnceLock<Mutex<HashMap<usize, Arc<RocmContext>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn validate_primary_rocm_context_policy(
+    device_index: usize,
+    existing: RocmExecutionPolicy,
+    requested: RocmExecutionPolicy,
+) -> Result<()> {
+    if existing == requested {
+        return Ok(());
+    }
+    Err(Error::Msg(format!(
+        "primary ROCm context for device {device_index} already uses execution policy {existing:?}; \
+         requested {requested:?}. Install the policy before model or tensor initialization"
+    )))
+}
+
+pub fn primary_rocm_context(device_index: usize) -> Result<Arc<RocmContext>> {
+    let cache = primary_rocm_context_cache();
     let mut map = cache
         .lock()
         .map_err(|_| Error::Msg("primary_rocm_context: cache mutex poisoned".to_string()))?;
@@ -410,6 +494,54 @@ pub fn primary_rocm_context(device_index: usize) -> Result<Arc<RocmContext>> {
         .map_err(|e| Error::Msg(format!("primary_rocm_context({device_index}): {e}")))?;
     map.insert(device_index, Arc::clone(&ctx));
     Ok(ctx)
+}
+
+/// Install `execution_policy` while creating the primary context, or validate
+/// that an already-created primary context has the same immutable policy.
+///
+/// Runtime configuration must call this before model or tensor initialization.
+/// A conflicting late request fails instead of silently mixing synchronization
+/// disciplines within one device's shared stream.
+pub fn primary_rocm_context_with_execution_policy(
+    device_index: usize,
+    execution_policy: RocmExecutionPolicy,
+) -> Result<Arc<RocmContext>> {
+    let cache = primary_rocm_context_cache();
+    let mut map = cache.lock().map_err(|_| {
+        Error::Msg("primary_rocm_context_with_execution_policy: cache mutex poisoned".to_string())
+    })?;
+    if let Some(ctx) = map.get(&device_index) {
+        validate_primary_rocm_context_policy(
+            device_index,
+            ctx.execution_policy(),
+            execution_policy,
+        )?;
+        return Ok(Arc::clone(ctx));
+    }
+    let ctx =
+        RocmContext::new_with_execution_policy(device_index, execution_policy).map_err(|e| {
+            Error::Msg(format!(
+                "primary_rocm_context_with_execution_policy({device_index}): {e}"
+            ))
+        })?;
+    map.insert(device_index, Arc::clone(&ctx));
+    Ok(ctx)
+}
+
+/// Effective immutable execution policy for the primary ROCm context.
+pub fn rocm_execution_policy(device_index: usize) -> Result<RocmExecutionPolicy> {
+    Ok(primary_rocm_context(device_index)?.execution_policy())
+}
+
+/// Point-in-time fixed-cardinality synchronization telemetry for a ROCm device.
+pub fn rocm_sync_telemetry_snapshot(device_index: usize) -> Result<RocmSyncTelemetrySnapshot> {
+    Ok(primary_rocm_context(device_index)?.sync_telemetry_snapshot())
+}
+
+/// Whether failed synchronization recovery has quarantined further execution
+/// and destruction for the primary ROCm context.
+pub fn rocm_cleanup_quarantined(device_index: usize) -> Result<bool> {
+    Ok(primary_rocm_context(device_index)?.cleanup_quarantined())
 }
 
 /// Whether a HIP runtime + at least one AMD device is present. The ROCm analog
@@ -454,12 +586,60 @@ pub fn rocm_zeros_ctx(
 /// Block until all work on `device_index`'s device completes. ROCm analog of
 /// `cuda_synchronize_default_stream`.
 pub fn rocm_synchronize_default_stream(device_index: usize) -> Result<()> {
+    rocm_synchronize_device_for(device_index, RocmSyncReason::ExplicitDeviceDrain)
+}
+
+/// Always drain all work on `device_index`, accounting it under `reason`.
+pub fn rocm_synchronize_device_for(device_index: usize, reason: RocmSyncReason) -> Result<()> {
     let ctx = primary_rocm_context(device_index)?;
-    ctx.synchronize().map_err(|e| {
+    ctx.synchronize_device_for(reason).map_err(|e| {
         Error::Msg(format!(
-            "rocm_synchronize_default_stream({device_index}): {e:?}"
+            "rocm_synchronize_device_for({device_index}, {}): {e:?}",
+            reason.as_str()
         ))
     })
+}
+
+/// Synchronize generated work before it becomes visible outside the backend.
+///
+/// Legacy policy drains the device. Stream-ordered policy drains the primary
+/// stream, which graph replay explicitly orders after its capture stream.
+pub fn rocm_synchronize_external_yield(device_index: usize) -> Result<()> {
+    let ctx = primary_rocm_context(device_index)?;
+    let producer_stream = crate::active_rocm_stream::last_rocm_producer_stream(&ctx)
+        .unwrap_or_else(|| ctx.default_stream());
+    let result = ctx
+        .synchronize_external_yield_for(&producer_stream)
+        .map_err(|e| {
+            Error::Msg(format!(
+                "rocm_synchronize_external_yield({device_index}): {e:?}"
+            ))
+        });
+    if result.is_ok() {
+        crate::active_rocm_stream::clear_last_rocm_producer_stream(&ctx, &producer_stream);
+    }
+    result
+}
+
+/// Settle an explicitly identified ROCm producer stream before external yield.
+/// This is the cross-thread embedding form; ordinary same-thread dispatch uses
+/// [`rocm_synchronize_external_yield`] and its remembered producer stream.
+pub fn rocm_synchronize_external_yield_for_stream(
+    device_index: usize,
+    producer_stream: &Arc<kiln_hip::RocmStream>,
+) -> Result<()> {
+    let ctx = primary_rocm_context(device_index)?;
+    let result = ctx
+        .synchronize_external_yield_for(producer_stream)
+        .map_err(|e| {
+            Error::Msg(format!(
+                "rocm_synchronize_external_yield_for_stream({device_index}): {e:?}"
+            ))
+        });
+    if result.is_ok() {
+        crate::active_rocm_stream::clear_last_rocm_producer_stream(&ctx, producer_stream);
+    }
+    result
 }
 
 /// `(reserved, used)` bytes of device `device_index`'s stream-ordered memory
@@ -501,6 +681,14 @@ pub fn rocm_trim_pool(device_index: usize, min_keep_bytes: usize) -> Result<u64>
 /// than [`rocm_synchronize_default_stream`] when other (e.g. hipBLASLt-internal)
 /// streams have pending work we don't need to wait on.
 pub fn rocm_synchronize_compute_stream(device_index: usize) -> Result<()> {
+    rocm_synchronize_compute_stream_for(device_index, RocmSyncReason::ExplicitStreamDrain)
+}
+
+/// Always drain the active compute stream, accounting it under `reason`.
+pub fn rocm_synchronize_compute_stream_for(
+    device_index: usize,
+    reason: RocmSyncReason,
+) -> Result<()> {
     // HIP rejects hipStreamSynchronize while that stream is being captured.
     // Graph capture installs the arena and routes every kt op onto one active
     // capture stream; same-stream ordering plus the graph runner's explicit
@@ -509,9 +697,139 @@ pub fn rocm_synchronize_compute_stream(device_index: usize) -> Result<()> {
         return Ok(());
     }
     let ctx = primary_rocm_context(device_index)?;
-    crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
+    let stream = crate::active_rocm_stream(ctx);
+    ctx.synchronize_stream_for(&stream, reason).map_err(|e| {
         Error::Msg(format!(
-            "rocm_synchronize_compute_stream({device_index}): {e:?}"
+            "rocm_synchronize_compute_stream_for({device_index}, {}): {e:?}",
+            reason.as_str()
+        ))
+    })
+}
+
+/// Order a proven same-stream producer/consumer dependency.
+///
+/// Legacy policy performs the historical active-stream wait. Stream-ordered
+/// policy relies on FIFO ordering and records the omitted barrier in telemetry.
+pub fn rocm_synchronize_same_stream_dependency(
+    device_index: usize,
+    reason: RocmSyncReason,
+) -> Result<()> {
+    let ctx = primary_rocm_context(device_index)?;
+    rocm_synchronize_context_same_stream_dependency(&ctx, reason)
+}
+
+pub(crate) fn rocm_synchronize_context_same_stream_dependency(
+    ctx: &Arc<RocmContext>,
+    reason: RocmSyncReason,
+) -> Result<()> {
+    if crate::rocm_capture_arena_active() {
+        return Ok(());
+    }
+    let stream = crate::active_rocm_stream(&ctx);
+    ctx.synchronize_same_stream_dependency(&stream, reason)
+        .map_err(|e| {
+            Error::Msg(format!(
+                "rocm_synchronize_same_stream_dependency({}, {}): {e:?}",
+                ctx.ordinal(),
+                reason.as_str()
+            ))
+        })
+}
+
+/// Order a post-launch boundary while also protecting the lifetime of every
+/// input owner read by that launch.
+///
+/// Stream-ordered mode may omit the host wait only when every owned input was
+/// allocated on the active stream. A borrowed owner or allocation from another
+/// stream requires an active-stream wait before the caller can drop it.
+pub(crate) fn rocm_synchronize_context_same_stream_dependency_with_inputs(
+    ctx: &Arc<RocmContext>,
+    inputs: &[&RocmStorage],
+    reason: RocmSyncReason,
+) -> Result<()> {
+    if crate::rocm_capture_arena_active() {
+        return Ok(());
+    }
+    let stream = crate::active_rocm_stream(ctx);
+    let owners_are_stream_ordered = !inputs.is_empty()
+        && inputs
+            .iter()
+            .all(|storage| storage.owner_release_is_ordered_on(&stream));
+    let result = if ctx.execution_policy().synchronization_mode
+        == crate::RocmSynchronizationMode::StreamOrdered
+        && !owners_are_stream_ordered
+    {
+        ctx.synchronize_stream_for(&stream, reason)
+    } else {
+        ctx.synchronize_same_stream_dependency(&stream, reason)
+    };
+    result.map_err(|e| {
+        Error::Msg(format!(
+            "rocm_synchronize_same_stream_dependency_with_inputs({}, {}): {e:?}",
+            ctx.ordinal(),
+            reason.as_str()
+        ))
+    })
+}
+
+/// Preserve a historical device-wide barrier in legacy mode and omit it in
+/// stream-ordered mode for a proven same-stream dependency.
+pub fn rocm_synchronize_legacy_device_same_stream_dependency(
+    device_index: usize,
+    reason: RocmSyncReason,
+) -> Result<()> {
+    let ctx = primary_rocm_context(device_index)?;
+    rocm_synchronize_context_legacy_device_same_stream_dependency(&ctx, reason)
+}
+
+pub(crate) fn rocm_synchronize_context_legacy_device_same_stream_dependency(
+    ctx: &Arc<RocmContext>,
+    reason: RocmSyncReason,
+) -> Result<()> {
+    if crate::rocm_capture_arena_active() {
+        return Ok(());
+    }
+    let stream = crate::active_rocm_stream(ctx);
+    ctx.synchronize_legacy_device_same_stream_dependency(&stream, reason)
+        .map_err(|e| {
+            Error::Msg(format!(
+                "rocm_synchronize_legacy_device_same_stream_dependency({}, {}): \
+                 {e:?}",
+                ctx.ordinal(),
+                reason.as_str()
+            ))
+        })
+}
+
+/// Preserve a historical device-wide legacy boundary while allowing a
+/// stream-ordered skip only when all asynchronously consumed owners will also
+/// be released on the active stream.
+pub(crate) fn rocm_synchronize_context_legacy_device_same_stream_dependency_with_inputs(
+    ctx: &Arc<RocmContext>,
+    inputs: &[&RocmStorage],
+    reason: RocmSyncReason,
+) -> Result<()> {
+    if crate::rocm_capture_arena_active() {
+        return Ok(());
+    }
+    let stream = crate::active_rocm_stream(ctx);
+    let owners_are_stream_ordered = !inputs.is_empty()
+        && inputs
+            .iter()
+            .all(|storage| storage.owner_release_is_ordered_on(&stream));
+    let result = if ctx.execution_policy().synchronization_mode
+        == crate::RocmSynchronizationMode::StreamOrdered
+        && !owners_are_stream_ordered
+    {
+        ctx.synchronize_stream_for(&stream, reason)
+    } else {
+        ctx.synchronize_legacy_device_same_stream_dependency(&stream, reason)
+    };
+    result.map_err(|e| {
+        Error::Msg(format!(
+            "rocm_synchronize_legacy_device_same_stream_dependency_with_inputs({}, {}): {e:?}",
+            ctx.ordinal(),
+            reason.as_str()
         ))
     })
 }
@@ -521,6 +839,11 @@ pub fn rocm_synchronize_compute_stream(device_index: usize) -> Result<()> {
 /// been allocated on a context already in hand, rather than re-acquiring the
 /// primary context by device index.
 pub fn rocm_synchronize_tensor_stream(t: &crate::Tensor) -> Result<()> {
+    rocm_synchronize_tensor_stream_for(t, RocmSyncReason::TensorHandoff)
+}
+
+/// Always drain a ROCm tensor's active storage stream under `reason`.
+pub fn rocm_synchronize_tensor_stream_for(t: &crate::Tensor, reason: RocmSyncReason) -> Result<()> {
     let storage = t
         .storage()
         .as_any()
@@ -530,9 +853,33 @@ pub fn rocm_synchronize_tensor_stream(t: &crate::Tensor) -> Result<()> {
         return Ok(());
     }
     let ctx = storage.context();
-    crate::active_rocm_stream(&ctx)
-        .synchronize()
-        .map_err(|e| Error::Msg(format!("rocm_synchronize_tensor_stream: {e:?}")))
+    let stream = crate::active_rocm_stream(&ctx);
+    ctx.synchronize_stream_for(&stream, reason).map_err(|e| {
+        Error::Msg(format!(
+            "rocm_synchronize_tensor_stream_for({}, {}): {e:?}",
+            t.device(),
+            reason.as_str()
+        ))
+    })
+}
+
+/// Order a proven same-stream dependency using a tensor's storage context.
+pub fn rocm_synchronize_tensor_same_stream_dependency(
+    t: &crate::Tensor,
+    reason: RocmSyncReason,
+) -> Result<()> {
+    let storage = t
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| {
+            Error::Msg("rocm_synchronize_tensor_same_stream_dependency: tensor must be ROCm".into())
+        })?;
+    if crate::rocm_capture_arena_active() {
+        return Ok(());
+    }
+    let ctx = storage.context();
+    rocm_synchronize_context_same_stream_dependency_with_inputs(&ctx, &[storage], reason)
 }
 
 /// Refresh `dst`'s contents in place from a host slice WITHOUT reallocating —
@@ -679,13 +1026,16 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
                         Error::Msg(format!("rocm_contiguous: dense D2D copy failed: {e:?}"))
                     })?;
             }
-            if !crate::rocm_capture_arena_active() {
-                stream.synchronize().map_err(|e| {
-                    Error::Msg(format!(
-                        "rocm_contiguous: synchronize after dense D2D copy: {e:?}"
-                    ))
-                })?;
-            }
+            rocm_synchronize_context_same_stream_dependency_with_inputs(
+                &ctx,
+                &[src_storage],
+                RocmSyncReason::ContiguousOutput,
+            )
+            .map_err(|e| {
+                Error::Msg(format!(
+                    "rocm_contiguous: synchronize after dense D2D copy: {e:?}"
+                ))
+            })?;
         }
         let storage_arc: crate::Storage = Arc::new(dst_storage);
         return crate::Tensor::from_parts(
@@ -699,7 +1049,7 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
     if let Some((bsz, heads, seq, dim, stride_b, stride_h, stride_t)) =
         rocm_view_is_4d_axis12_transpose(shape, strides_elems)
     {
-        let stream = crate::active_rocm_stream(&ctx);
+        let raw_stream = src_storage.rocm_stream_raw()?;
         let status = unsafe {
             kiln_transpose_4d_12_copy_async(
                 src_ptr,
@@ -712,7 +1062,7 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
                 stride_h as i64,
                 stride_t as i64,
                 bpe as i32,
-                stream.hip_stream() as *mut core::ffi::c_void,
+                raw_stream,
             )
         };
         if status != 0 {
@@ -720,13 +1070,16 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
                 "rocm_contiguous: kiln_transpose_4d_12_copy_async returned status {status}"
             )));
         }
-        if !crate::rocm_capture_arena_active() {
-            stream.synchronize().map_err(|e| {
-                Error::Msg(format!(
-                    "rocm_contiguous: synchronize after 4d axis12 transpose copy: {e:?}"
-                ))
-            })?;
-        }
+        rocm_synchronize_context_same_stream_dependency_with_inputs(
+            &ctx,
+            &[src_storage],
+            RocmSyncReason::ContiguousOutput,
+        )
+        .map_err(|e| {
+            Error::Msg(format!(
+                "rocm_contiguous: synchronize after 4d axis12 transpose copy: {e:?}"
+            ))
+        })?;
         let storage_arc: crate::Storage = Arc::new(dst_storage);
         return crate::Tensor::from_parts(
             storage_arc,
@@ -738,7 +1091,7 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
 
     let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
     let strides_i64: Vec<i64> = strides_elems.iter().map(|&s| s as i64).collect();
-    let stream = crate::active_rocm_stream(&ctx);
+    let raw_stream = src_storage.rocm_stream_raw()?;
 
     let status = unsafe {
         kiln_contiguous_copy_async(
@@ -749,7 +1102,7 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
             rank as i32,
             bpe as i32,
             n_elements as i64,
-            stream.hip_stream() as *mut core::ffi::c_void,
+            raw_stream,
         )
     };
     if status != 0 {
@@ -757,13 +1110,16 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
             "rocm_contiguous: kiln_contiguous_copy_async returned status {status}"
         )));
     }
-    if !crate::rocm_capture_arena_active() {
-        stream.synchronize().map_err(|e| {
-            Error::Msg(format!(
-                "rocm_contiguous: synchronize after strided D2D copy: {e:?}"
-            ))
-        })?;
-    }
+    rocm_synchronize_context_same_stream_dependency_with_inputs(
+        &ctx,
+        &[src_storage],
+        RocmSyncReason::ContiguousOutput,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "rocm_contiguous: synchronize after strided D2D copy: {e:?}"
+        ))
+    })?;
 
     let storage_arc: crate::Storage = Arc::new(dst_storage);
     crate::Tensor::from_parts(
@@ -886,7 +1242,7 @@ pub fn rocm_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
 
     let ctx = dst_storage.context();
     let stream = crate::active_rocm_stream(&ctx);
-    let raw_stream = stream.hip_stream() as *mut core::ffi::c_void;
+    let raw_stream = dst_storage.rocm_stream_raw()?;
     let (src_base, _) = src_storage.device_ptr_raw();
     let (dst_base, _) = dst_storage.device_ptr_raw();
     let src_byte_off = (src.layout().start_offset() * bpe) as u64;
@@ -922,8 +1278,7 @@ pub fn rocm_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
     // the caller back to Rust. This matches the API's visible mutation
     // semantics and prevents row-tiled reducers from copying from freed tiles.
     if !crate::rocm_capture_arena_active() {
-        stream
-            .synchronize()
+        ctx.synchronize_stream_for(&stream, RocmSyncReason::InPlaceMutation)
             .map_err(|e| Error::Msg(format!("rocm_slice_set: synchronize after copy: {e:?}")))?;
     }
     Ok(())
@@ -1100,7 +1455,10 @@ pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
         }
     }
 
-    let rocm_storage = RocmStorage::from_slice_ctx(&ctx, device_index, dtype, device_slice)?;
+    // SAFETY: clone_htod synchronizes its stream before returning, so the
+    // wrapped slice is fully initialized before any tensor consumer can run.
+    let rocm_storage =
+        unsafe { RocmStorage::from_slice_ctx(&ctx, device_index, dtype, device_slice) }?;
 
     let storage_arc: crate::Storage = Arc::new(rocm_storage);
     crate::Tensor::from_parts(
@@ -1179,7 +1537,7 @@ fn rocm_last_axis_normalization(
     let out_storage =
         RocmStorage::alloc_uninit_ctx(&ctx, device_index, output_dtype, x.element_count())?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -1238,4 +1596,25 @@ pub fn rocm_log_softmax_last_axis_f32(x: &crate::Tensor) -> Result<crate::Tensor
         kiln_log_softmax_last_axis_f32_async,
         DType::F32,
     )
+}
+
+#[cfg(test)]
+mod execution_policy_tests {
+    use super::*;
+    use kiln_hip::RocmSynchronizationMode;
+
+    #[test]
+    fn primary_context_policy_rejects_late_mismatch() {
+        let legacy = RocmExecutionPolicy::default();
+        let stream_ordered = RocmExecutionPolicy::new(RocmSynchronizationMode::StreamOrdered);
+
+        validate_primary_rocm_context_policy(0, legacy, legacy).expect("matching policy");
+        let error = validate_primary_rocm_context_policy(0, legacy, stream_ordered)
+            .expect_err("conflicting policy must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("before model or tensor initialization")
+        );
+    }
 }

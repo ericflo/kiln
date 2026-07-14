@@ -57,7 +57,7 @@ def mode_config(graphs: bool) -> dict[str, Any]:
     value["server"]["max_prefill_staging_priority_burst"] = 0
     value["workload"] = {
         "comparison": "exact_action_tokens_and_selected_logprobs",
-        "graph_cache_max": GRAPH_CACHE_MAX,
+        "graph_cache_entries": GRAPH_CACHE_MAX,
         "max_tokens": MAX_TOKENS,
         "request_timeout_seconds": int(REQUEST_TIMEOUT_SECONDS),
         "scenarios": {name: words for name, words in SCENARIOS},
@@ -267,12 +267,24 @@ def parse_completion(value: Any, scenario: str, seed: int) -> CompletionRecord:
     )
 
 
-def completion_request(port: int, scenario: str, prompt: str, seed: int) -> CompletionRecord:
+def completion_request(
+    port: int,
+    scenario: str,
+    prompt: str,
+    seed: int,
+    *,
+    max_tokens: int = MAX_TOKENS,
+    timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
+) -> CompletionRecord:
+    if max_tokens < 1:
+        raise CorrectnessError("completion max_tokens must be positive")
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise CorrectnessError("completion timeout_seconds must be finite and positive")
     body = {
         "model": mixed.MODEL_ID,
         "messages": [{"role": "user", "content": prompt}],
         "adapter": None,
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": max_tokens,
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 16,
@@ -286,7 +298,7 @@ def completion_request(port: int, scenario: str, prompt: str, seed: int) -> Comp
         "rollout_provenance": True,
     }
     connection = http.client.HTTPConnection(
-        "127.0.0.1", port, timeout=REQUEST_TIMEOUT_SECONDS
+        "127.0.0.1", port, timeout=timeout_seconds
     )
     try:
         payload = json.dumps(body, separators=(",", ":"))
@@ -375,7 +387,7 @@ def run_mode(
     environment.update(
         {
             "KILN_DETERMINISTIC": "1",
-            "KILN_ROCM_GRAPH_CACHE_MAX": str(GRAPH_CACHE_MAX),
+            mixed.ROCM_GRAPH_CACHE_ENTRIES_ENV: str(GRAPH_CACHE_MAX),
         }
     )
     process = subprocess.Popen(
@@ -397,7 +409,12 @@ def run_mode(
         mixed.wait_ready(port, process, server_log, deadline)
         health = wait_drained(port, deadline, f"{mode} startup")
         debug = mixed.json_request(port, "GET", "/v1/debug/model-state")
-        attestation_failures = mixed.attest_runtime(mode, health, debug)
+        attestation_failures = mixed.attest_runtime(
+            mode,
+            health,
+            debug,
+            rocm_graph_cache_entries=GRAPH_CACHE_MAX,
+        )
         if attestation_failures:
             raise CorrectnessError("; ".join(attestation_failures))
 

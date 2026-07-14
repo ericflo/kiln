@@ -3179,7 +3179,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
 }
 
 #[test]
-fn external_yield_synchronization_is_backend_owned_and_device_wide() {
+fn external_yield_synchronization_is_backend_owned() {
     let root = workspace_root();
     let backend_dir = root.join("crates/kiln-model/src/backend");
     let read = |name: &str| {
@@ -3223,8 +3223,8 @@ fn external_yield_synchronization_is_backend_owned_and_device_wide() {
     );
     assert!(
         compact_body(rocm_impl)
-            .contains("kiln_tensor::rocm_synchronize_default_stream(device_index)"),
-        "ROCm external yields must use the device-wide hipDeviceSynchronize wrapper"
+            .contains("kiln_tensor::rocm_synchronize_external_yield(device_index)"),
+        "ROCm external yields must use the execution-policy-aware synchronization boundary"
     );
 
     let metal = read("metal_runtime.rs");
@@ -3282,6 +3282,58 @@ fn external_yield_synchronization_is_backend_owned_and_device_wide() {
             "owned Vulkan queue synchronization should preserve {required}"
         );
     }
+}
+
+#[test]
+fn rocm_model_handoffs_use_typed_synchronization_policy() {
+    let root = workspace_root();
+    let forward = fs::read_to_string(root.join("crates/kiln-model/src/forward.rs"))
+        .expect("forward.rs should be readable");
+    let production = production_source_before_tests(&forward);
+
+    for retired_name in [
+        ["KILN", "ROCM", "FULL", "ATTN", "DEVICE", "SYNC"].join("_"),
+        ["KILN", "ROCM", "FULL", "ATTN", "HANDOFF", "SYNC"].join("_"),
+    ] {
+        assert!(
+            !production.contains(&retired_name),
+            "retired ROCm synchronization override {retired_name} must not return"
+        );
+    }
+
+    let profiling_sync = source_between(
+        production,
+        "fn synchronize_for_profile",
+        "fn synchronize_tensor_ready_for_model_handoff",
+    );
+    assert!(
+        profiling_sync.contains("rocm_synchronize_compute_stream_for")
+            && profiling_sync.contains("RocmSyncReason::ExplicitStreamDrain"),
+        "ROCm profiling drains must use the typed explicit-stream reason"
+    );
+
+    let model_handoff = source_between(
+        production,
+        "fn synchronize_tensor_ready_for_model_handoff",
+        "fn synchronize_tensor_ready_for_full_attn_handoff",
+    );
+    assert!(
+        model_handoff.contains("rocm_synchronize_tensor_same_stream_dependency")
+            && model_handoff.contains("RocmSyncReason::ModelHandoff"),
+        "ROCm model handoffs must flow through the typed same-stream policy"
+    );
+
+    let full_attention_handoff = source_between(
+        production,
+        "fn synchronize_tensor_ready_for_full_attn_handoff",
+        "#[cfg(feature = \"metal\")]",
+    );
+    assert!(
+        full_attention_handoff.contains("rocm_capture_arena_active")
+            && full_attention_handoff.contains("rocm_synchronize_tensor_same_stream_dependency")
+            && full_attention_handoff.contains("RocmSyncReason::FullAttentionHandoff"),
+        "ROCm full-attention handoffs must preserve capture safety and typed synchronization"
+    );
 }
 
 #[test]

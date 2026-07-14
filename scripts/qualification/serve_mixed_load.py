@@ -31,6 +31,9 @@ CASE_ID = "mixed-load"
 RESULT_ENV = "KILN_QUALIFICATION_CASE_RESULT"
 VARIANT_ENV = "KILN_QUALIFICATION_VARIANT_ID"
 RUNNER_OWNED_KILN_ENVIRONMENT = frozenset({RESULT_ENV, VARIANT_ENV})
+ROCM_GRAPH_MODE_ENV = "KILN_ACCELERATOR_ROCM_GRAPH_MODE"
+ROCM_GRAPH_CACHE_ENTRIES_ENV = "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES"
+ROCM_SYNCHRONIZATION_MODE_ENV = "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE"
 MODEL_ID = "Qwen3.5-4B"
 BUILD_PACKAGE = "kiln-server"
 BUILD_BINARY = "kiln"
@@ -38,6 +41,10 @@ BUILD_PROFILE = "release"
 BUILD_FEATURES = "rocm"
 BUILD_ROCM_PATH = "/opt/rocm"
 BUILD_ROCM_ARCHS = "gfx1151"
+BUILD_CARGO_WRAPPER = "scripts/cargo-bounded.sh"
+BUILD_CARGO_JOBS = 1
+BUILD_CARGO_MIN_AVAILABLE_GIB = 15
+BUILD_CARGO_MEMORY_SCOPE = "systemd_user_memory_max_no_swap"
 STARTUP_TIMEOUT_SECONDS = 240.0
 REQUEST_TIMEOUT_SECONDS = 120.0
 OVERALL_TIMEOUT_SECONDS = 420.0
@@ -92,6 +99,10 @@ def _variant_config(
     return {
         "build": {
             "binary": BUILD_BINARY,
+            "cargo_jobs": BUILD_CARGO_JOBS,
+            "cargo_memory_scope": BUILD_CARGO_MEMORY_SCOPE,
+            "cargo_min_available_gib": BUILD_CARGO_MIN_AVAILABLE_GIB,
+            "cargo_wrapper": BUILD_CARGO_WRAPPER,
             "features": BUILD_FEATURES,
             "locked": True,
             "no_default_features": True,
@@ -1484,9 +1495,9 @@ def resolve_cargo_executable(environment: dict[str, str]) -> str:
     )
 
 
-def source_bound_build_command(cargo_executable: str) -> list[str]:
+def source_bound_build_command() -> list[str]:
     return [
-        cargo_executable,
+        str(ROOT / BUILD_CARGO_WRAPPER),
         "build",
         "--quiet",
         f"--{BUILD_PROFILE}",
@@ -1502,17 +1513,30 @@ def source_bound_build_command(cargo_executable: str) -> list[str]:
     ]
 
 
-def build_binary(absolute_deadline: float) -> tuple[Path, str, float]:
-    started = time.monotonic()
-    environment = sanitized_environment(dict(os.environ))
+def source_bound_build_environment(source: dict[str, str]) -> dict[str, str]:
+    environment = sanitized_environment(source)
     environment.update(
         {
             "CARGO_NET_OFFLINE": "true",
+            "KILN_CARGO_JOBS": str(BUILD_CARGO_JOBS),
+            "KILN_CARGO_MIN_AVAILABLE_GIB": str(BUILD_CARGO_MIN_AVAILABLE_GIB),
             "KILN_ROCM_ARCHS": BUILD_ROCM_ARCHS,
             "ROCM_PATH": BUILD_ROCM_PATH,
         }
     )
-    command = source_bound_build_command(resolve_cargo_executable(environment))
+    cargo_executable = resolve_cargo_executable(environment)
+    if Path(cargo_executable).name not in {"cargo", "cargo.exe"}:
+        raise QualificationError(
+            f"resolved CARGO must name the cargo executable, got {cargo_executable!r}"
+        )
+    environment["CARGO"] = cargo_executable
+    return environment
+
+
+def build_binary(absolute_deadline: float) -> tuple[Path, str, float]:
+    started = time.monotonic()
+    environment = source_bound_build_environment(dict(os.environ))
+    command = source_bound_build_command()
     completed = subprocess.run(
         command,
         cwd=ROOT,
@@ -1545,6 +1569,11 @@ def server_environment(
     environment.update(
         {
             "KILN_ADAPTER_DIR": str(adapter_dir),
+            ROCM_GRAPH_MODE_ENV: (
+                "profile"
+                if config["runtime"]["rocm_graphs_requested"]
+                else "disabled"
+            ),
             "KILN_CHAT_PERFORMANCE_METADATA": (
                 "true" if config["server"]["chat_performance_metadata_enabled"] else "false"
             ),
@@ -1576,8 +1605,6 @@ def server_environment(
     )
     if not config["runtime"]["kv_autoscale_requested"]:
         environment["KILN_KV_AUTOSCALE"] = "0"
-    if not config["runtime"]["rocm_graphs_requested"]:
-        environment["KILN_ROCM_GRAPHS"] = "0"
     return environment
 
 
@@ -1749,8 +1776,56 @@ def gpu_memory_attestation_failures(value: Any) -> list[str]:
     return failures
 
 
+def accelerator_policy_attestation_failures(
+    value: Any,
+    *,
+    label: str,
+    serving_profile: str,
+    graphs_requested: bool,
+    graphs_enabled: bool,
+    synchronization_mode: str = "legacy_host_barriers",
+    graph_cache_entries: int = 8,
+) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{label}.accelerator_runtime is missing"]
+    expected = {
+        "schema_id": "kiln.accelerator-runtime-policy.v1",
+        "version": 1,
+        "serving_profile": serving_profile,
+        "serving_profile_source": "environment",
+        "rocm_synchronization_mode": {
+            "configured": synchronization_mode,
+            "effective": synchronization_mode,
+            "source": (
+                "environment"
+                if synchronization_mode != "legacy_host_barriers"
+                else "default"
+            ),
+        },
+        "rocm_graph_mode": {
+            "configured": "profile" if graphs_requested else "disabled",
+            "effective": "lazy_capture_replay" if graphs_enabled else "disabled",
+            "source": "environment",
+        },
+        "rocm_graph_cache_entries": {
+            "configured": graph_cache_entries,
+            "effective": graph_cache_entries,
+            "source": "environment" if graph_cache_entries != 8 else "default",
+        },
+    }
+    return [
+        f"{label}.accelerator_runtime.{field}={value.get(field)!r}, expected {expected_value!r}"
+        for field, expected_value in expected.items()
+        if value.get(field) != expected_value
+    ]
+
+
 def attest_runtime(
-    variant: str, health: dict[str, Any], debug: dict[str, Any]
+    variant: str,
+    health: dict[str, Any],
+    debug: dict[str, Any],
+    *,
+    rocm_graph_cache_entries: int = 8,
 ) -> list[str]:
     expected = VARIANT_CONFIGS[variant]["runtime"]
     failures: list[str] = []
@@ -1802,6 +1877,26 @@ def attest_runtime(
     runtime = health.get("decode_runtime")
     if not isinstance(runtime, dict):
         return failures + ["health.decode_runtime is missing"]
+    failures.extend(
+        accelerator_policy_attestation_failures(
+            runtime.get("accelerator_runtime"),
+            label="health.decode_runtime",
+            serving_profile=expected_profile,
+            graphs_requested=expected["rocm_graphs_requested"],
+            graphs_enabled=expected["rocm_graphs_enabled"],
+            graph_cache_entries=rocm_graph_cache_entries,
+        )
+    )
+    failures.extend(
+        accelerator_policy_attestation_failures(
+            debug.get("accelerator_runtime"),
+            label="debug",
+            serving_profile=expected_profile,
+            graphs_requested=expected["rocm_graphs_requested"],
+            graphs_enabled=expected["rocm_graphs_enabled"],
+            graph_cache_entries=rocm_graph_cache_entries,
+        )
+    )
     graph = runtime.get("rocm_graphs")
     expected_graphs = expected["rocm_graphs_enabled"]
     if not isinstance(graph, dict):
@@ -1949,7 +2044,6 @@ def attest_runtime(
         return failures
     for name, enabled in (
         ("KILN_KV_AUTOSCALE", expected["kv_autoscale_requested"]),
-        ("KILN_ROCM_GRAPHS", expected["rocm_graphs_requested"]),
     ):
         state = flags.get(name)
         if not isinstance(state, dict):

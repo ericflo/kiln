@@ -4,20 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kiln Troubleshooting &mdash; First-run checks</title>
-  <meta name="description" content="Compact troubleshooting notes for first-time Kiln setup: binaries, CUDA, Vulkan, Apple Silicon, model paths, health checks, training endpoints, and adapters.">
+  <meta name="description" content="Kiln troubleshooting for first-time setup, ROCm inference pauses, accelerator policy, memory pressure, health checks, training endpoints, and adapters.">
   <link rel="canonical" href="https://ericflo.github.io/kiln/troubleshooting.html">
   <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
   <link rel="alternate icon" type="image/png" href="assets/logo.png">
   <link rel="apple-touch-icon" href="assets/logo.png">
 
   <meta property="og:title" content="Kiln Troubleshooting &mdash; First-run checks">
-  <meta property="og:description" content="Compact first-run checks for Kiln setup, model paths, health, training endpoints, and adapters.">
+  <meta property="og:description" content="First-run checks and evidence-based diagnosis for Kiln setup, ROCm inference pauses, memory pressure, health, training endpoints, and adapters.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://ericflo.github.io/kiln/troubleshooting.html">
   <meta property="og:image" content="https://ericflo.github.io/kiln/assets/og-image.png">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Kiln Troubleshooting &mdash; First-run checks">
-  <meta name="twitter:description" content="Compact first-run checks for Kiln setup, model paths, health, training endpoints, and adapters.">
+  <meta name="twitter:description" content="First-run checks and evidence-based diagnosis for Kiln setup, ROCm inference pauses, memory pressure, health, training endpoints, and adapters.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image.png">
 
   <script src="https://cdn.tailwindcss.com"></script>
@@ -278,6 +278,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#desktop-app-first-launch">Desktop first launch</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#wrong-binary-or-gpu-path">GPU path</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#memory-budget-or-sampler">Memory budget</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#rocm-token-pauses">ROCm token pauses</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-pauses-or-oom">Prefill pauses/OOM</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#tape-scope-or-removed-switches">Training tape</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#model-weights-not-found">Model weights</a>
@@ -450,6 +451,132 @@ curl -s http://localhost:8420/metrics \
           <code>(8,100,true)</code>, and Vulkan <code>(64,5000,true)</code>, with width clamped to effective
           decode width. Malformed canonical or deprecated values fail startup instead of silently selecting a
           fallback.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <h2 id="rocm-token-pauses" class="text-xl font-semibold mb-4">ROCm token pauses or irregular decode latency</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>Token delivery stops briefly during an otherwise healthy ROCm decode, inter-token latency has a long tail, or a new decode shape pauses once and then runs normally. A pause alone is not evidence that Kiln rebalanced VRAM.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Attribute before tuning</div>
+            <ul class="list-disc pl-5">
+              <li>Capture <code>GET /v1/config</code> at <code>accelerator_runtime</code> so configured, effective, and source values are part of the result.</li>
+              <li>Compare health <code>decode_runtime.rocm_synchronization</code> before and after the request. Rising wait time in <code>external_yield</code>, eager-output, matmul, or handoff reasons supports a synchronization-boundary hypothesis.</li>
+              <li>Inspect <code>decode_runtime.rocm_graphs</code>. New capture attempts, deferrals, successes, or fallback duration around a new shape support a graph-lifecycle hypothesis.</li>
+              <li>Require matching allocator reclaim, physical KV resize, primary/host-backed memory movement, or host pressure before calling the event VRAM rebalancing.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Interpret carefully</div>
+            <p><code>waited_ns</code> measures host wall time at the named boundary. It identifies where the host observed unfinished GPU work, not necessarily which earlier kernel produced it. Correlate reason deltas with actor phase timing, graph counters, memory telemetry, and token timestamps rather than treating one counter as a causal profile.</p>
+          </div>
+        </div>
+
+        <h3 class="font-semibold mt-6 mb-3">Record the immutable policy and reasoned telemetry</h3>
+        <pre><code>curl -s http://localhost:8420/v1/config \
+  | jq '.accelerator_runtime'
+curl -s http://localhost:8420/health \
+  | jq '.decode_runtime.accelerator_runtime,
+        .decode_runtime.rocm_synchronization,
+        .decode_runtime.rocm_graphs'
+curl -s http://localhost:8420/v1/debug/model-state \
+  | jq '.accelerator_runtime, .rocm_synchronization'
+curl -s http://localhost:8420/metrics \
+  | grep -E 'kiln_rocm_(cleanup_quarantined|synchronization|synchronizations)'</code></pre>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Trusted debug must already be enabled; do not expose it merely to collect this comparison. The
+          synchronization snapshot is a fixed 22-reason atomic read and does not wait on the device or probe
+          the driver. Prometheus separates device and stream wait counts by <code>{reason,scope}</code>, host
+          wait seconds by <code>{reason}</code>, and barriers deliberately skipped by stream-ordered policy.
+          <code>telemetry_available=false</code> invalidates the synchronization comparison instead of implying
+          zero waits. Require <code>cleanup_quarantined=false</code> and
+          <code>kiln_rocm_cleanup_quarantined 0</code> while telemetry is available. A quarantine is a hard
+          safety fault, not a normal capture fallback: stop the arm, preserve the health/metrics/log evidence,
+          and restart the process before resuming service. Quarantine is process-lifetime sticky; a later
+          recovery drain cannot clear it. Active ROCm telemetry loss is equally fatal, even when the quarantine
+          bit reads false. The shared backend gate rejects inference, adapter, training, and import admission
+          once either condition is observed. The runtime rejects new
+          execution and retains possibly in-flight HIP resources until process exit rather than destroying them
+          without proof of quiescence.
+        </p>
+
+        <h3 class="font-semibold mt-6 mb-3">Run a controlled legacy versus stream-ordered A/B</h3>
+        <p class="mb-4 leading-relaxed" style="color: var(--fg-dim);">
+          Use the same binary, model, request corpus, prompt order, seed, sampling parameters, memory budget,
+          batching configuration, concurrency, and warmup. Run the arms serially after separate restarts. Both
+          arms use the experimental serving profile because <code>stream_ordered</code> is qualification-only;
+          both explicitly disable graphs so capture does not become a second changed variable.
+        </p>
+        <pre><code># rocm-legacy.toml
+[server]
+serving_profile = "experimental"
+
+[accelerator]
+rocm_synchronization_mode = "legacy_host_barriers"
+rocm_graph_mode = "disabled"
+rocm_graph_cache_entries = 8
+
+# rocm-stream-ordered.toml: identical except this field
+# rocm_synchronization_mode = "stream_ordered"
+
+kiln config --file rocm-legacy.toml
+kiln serve --config rocm-legacy.toml
+# Stop the first server before starting the second arm.
+kiln config --file rocm-stream-ordered.toml
+kiln serve --config rocm-stream-ordered.toml</code></pre>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Save pre/post health and metrics snapshots for each arm. Compare token or logit parity, completed
+          requests, throughput at concurrency 1/8/16/32/64, p50/p95/p99/max inter-token latency, per-reason
+          wait and skip deltas, and primary plus host-backed memory peaks and post-run plateaus. Stop the arm on
+          a parity error, replay/capture failure, cleanup quarantine, OOM, telemetry loss, host-memory pressure,
+          or incomplete request. A lower wait count without parity and stability is not a pass.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          <code>legacy_host_barriers</code> remains the qualified default. It preserves historical device and
+          active-stream waits, including a device-wide external-yield drain. <code>stream_ordered</code> skips
+          only call sites proven FIFO-ordered on the same HIP stream and changes external yield to a primary
+          stream wait. Host readback, buffer lifetime, in-place mutation, allocator reclaim, graph transition,
+          error recovery, and global-state drains still wait.
+        </p>
+
+        <h3 class="font-semibold mt-6 mb-3">Isolate graph lifecycle separately</h3>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm" style="color: var(--fg-dim);">
+            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Mode</th><th class="text-left p-2">Lifecycle</th><th class="text-left p-2">Profile rule</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>profile</code></td><td class="p-2">Resolves to disabled under stable/maintenance and lazy capture/replay under experimental.</td><td class="p-2">Recommended default.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>disabled</code></td><td class="p-2">No graph-shaped warmup, capture, or replay.</td><td class="p-2">Valid in every profile.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>warmup_then_eager</code></td><td class="p-2">One graph-shaped eager warmup, then eager decode without capture.</td><td class="p-2">Experimental only.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lazy_capture_replay</code></td><td class="p-2">Eager warmup followed by lazy capture/replay for eligible decode shapes; cache bounded to 1&ndash;64 entries.</td><td class="p-2">Experimental only.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Compare <code>disabled</code> with <code>warmup_then_eager</code> before testing native capture. A
+          one-time pause paired with new capture counters can be a deterministic bucket transition; repeated
+          fallback growth or replay failures are not. Graph replay records completion on its capture stream,
+          orders that event into the primary stream, and only then permits the external-yield wait to publish
+          progress. See <a href="architecture.html#rocm-execution-policy">ROCm execution policy</a> for the
+          ordering contract.
+        </p>
+
+        <h3 class="font-semibold mt-6 mb-3">Rollback</h3>
+        <pre><code>[server]
+serving_profile = "stable"
+
+[accelerator]
+rocm_synchronization_mode = "legacy_host_barriers"
+rocm_graph_mode = "profile"</code></pre>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Validate, restart, and require effective graph mode <code>disabled</code>. Removing the explicit
+          <code>[accelerator]</code> section produces the same stable defaults. Stable startup rejects
+          <code>stream_ordered</code> and explicit non-disabled graph modes rather than silently weakening the
+          request. Do not change these process-lifetime fields in the shell or file and assume a running server
+          observed them.
         </p>
       </article>
 

@@ -2447,6 +2447,9 @@ pub struct AppState {
     /// Immutable streaming-prefill dispatch and tiling policy resolved against
     /// the selected backend during startup.
     pub streaming_prefill_runtime_config: crate::config::StreamingPrefillRuntimeConfig,
+    /// Versioned accelerator execution policy resolved before device context
+    /// and model-runner construction.
+    pub accelerator_runtime_policy: crate::config::ResolvedAcceleratorRuntimePolicy,
     /// Immutable speculative-decoding policy resolved once during startup.
     pub speculative_config: crate::config::SpeculativeDecodingConfig,
     /// Immutable backend capability snapshot used by diagnostics.
@@ -2752,7 +2755,63 @@ pub fn ensure_accelerator_memory_floor(
     )
 }
 
+fn latch_rocm_runtime_health(
+    backend_health: &BackendHealthHandle,
+    synchronization: &crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
+) {
+    if backend_health.snapshot().quarantined {
+        return;
+    }
+    if let Some(reason) = synchronization.fail_closed_reason() {
+        backend_health.quarantine(reason);
+    }
+}
+
 impl AppState {
+    /// Bind the exact accelerator policy already used to construct the device
+    /// context and model runner. This builder avoids adding another argument to
+    /// the compatibility constructors while still rejecting profile drift.
+    pub fn with_accelerator_runtime_policy(
+        mut self,
+        policy: crate::config::ResolvedAcceleratorRuntimePolicy,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            policy.serving_profile == self.serving_profile.profile(),
+            "accelerator runtime policy serving profile {} does not match application state profile {}",
+            policy.serving_profile,
+            self.serving_profile.profile(),
+        );
+        anyhow::ensure!(
+            policy.serving_profile_source == self.serving_profile.source(),
+            "accelerator runtime policy profile source {} does not match application state source {}",
+            policy.serving_profile_source,
+            self.serving_profile.source(),
+        );
+        self.accelerator_runtime_policy = policy;
+        Ok(self)
+    }
+
+    /// Read ROCm synchronization atomics without synchronizing or probing the
+    /// device. Other backends return an inactive snapshot.
+    pub fn rocm_synchronization_runtime_stats(
+        &self,
+    ) -> crate::accelerator_runtime::RocmSynchronizationRuntimeStats {
+        crate::accelerator_runtime::rocm_synchronization_runtime_stats(self.model_weight_device)
+    }
+
+    /// Observe live ROCm runtime health and make any unsafe state sticky in the
+    /// process-lifetime backend-health latch. Inactive non-ROCm backends are
+    /// unchanged.
+    pub(crate) fn observe_rocm_runtime_health(
+        &self,
+    ) -> crate::accelerator_runtime::RocmSynchronizationRuntimeStats {
+        let synchronization = self.rocm_synchronization_runtime_stats();
+        if let Some(backend_health) = self.backend_health_handle() {
+            latch_rocm_runtime_health(&backend_health, &synchronization);
+        }
+        synchronization
+    }
+
     /// Return why this process cannot execute `workload` on its immutable
     /// native-training substrate, or `None` when static admission may proceed.
     ///
@@ -2913,6 +2972,8 @@ impl AppState {
     /// mutate real backend state.
     pub(crate) fn ensure_backend_healthy(&self) -> anyhow::Result<()> {
         if let Some(backend_health) = self.backend_health_handle() {
+            backend_health.ensure_healthy()?;
+            self.observe_rocm_runtime_health();
             backend_health.ensure_healthy()?;
         }
         Ok(())
@@ -3212,6 +3273,8 @@ impl AppState {
             decode_runtime_config,
             batching_runtime_config,
             streaming_prefill_runtime_config,
+            accelerator_runtime_policy: crate::config::AcceleratorRuntimeConfig::default()
+                .resolved_policy(crate::config::ServingProfileSetting::default()),
             speculative_config,
             speculative_runtime_policy: SpeculativeRuntimePolicy::default(),
             model_config,
@@ -4316,6 +4379,8 @@ impl AppState {
             decode_runtime_config,
             batching_runtime_config,
             streaming_prefill_runtime_config,
+            accelerator_runtime_policy: crate::config::AcceleratorRuntimeConfig::default()
+                .resolved_policy(serving_profile),
             speculative_config,
             speculative_runtime_policy,
             model_config,
@@ -5266,6 +5331,32 @@ fn format_oom_remediation_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rocm_runtime_health_latch_is_inert_off_rocm_and_sticky_on_fault() {
+        let backend_health = BackendHealthHandle::default();
+        let inactive = crate::accelerator_runtime::RocmSynchronizationRuntimeStats::default();
+        latch_rocm_runtime_health(&backend_health, &inactive);
+        backend_health.ensure_healthy().unwrap();
+
+        let mut unavailable = inactive;
+        unavailable.active = true;
+        unavailable.telemetry_error = Some("injected telemetry failure".to_string());
+        latch_rocm_runtime_health(&backend_health, &unavailable);
+
+        let error = backend_health.ensure_healthy().unwrap_err().to_string();
+        assert!(error.contains("requires restart"));
+        assert!(error.contains("telemetry is unavailable"));
+        assert!(error.contains("injected telemetry failure"));
+
+        let first_reason = backend_health.snapshot().reason;
+        let mut cleanup_quarantined = unavailable;
+        cleanup_quarantined.telemetry_available = true;
+        cleanup_quarantined.telemetry_error = None;
+        cleanup_quarantined.cleanup_quarantined = true;
+        latch_rocm_runtime_health(&backend_health, &cleanup_quarantined);
+        assert_eq!(backend_health.snapshot().reason, first_reason);
+    }
 
     #[test]
     fn training_workload_labels_are_wire_stable() {

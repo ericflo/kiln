@@ -329,13 +329,13 @@ impl Metrics {
                 u8::from(gauges.backend_quarantined)
             ),
         );
-        out.push_str("# HELP kiln_backend_external_yield_sync_calls_total Device-wide synchronization calls before external progress or resource reuse.\n");
+        out.push_str("# HELP kiln_backend_external_yield_sync_calls_total Backend completion waits before external progress or resource reuse.\n");
         out.push_str("# TYPE kiln_backend_external_yield_sync_calls_total counter\n");
-        out.push_str("# HELP kiln_backend_external_yield_sync_failures_total Failed device-wide synchronization calls.\n");
+        out.push_str("# HELP kiln_backend_external_yield_sync_failures_total Failed backend completion waits.\n");
         out.push_str("# TYPE kiln_backend_external_yield_sync_failures_total counter\n");
-        out.push_str("# HELP kiln_backend_external_yield_sync_seconds_total Total wall time spent in device-wide synchronization.\n");
+        out.push_str("# HELP kiln_backend_external_yield_sync_seconds_total Total wall time spent proving backend completion.\n");
         out.push_str("# TYPE kiln_backend_external_yield_sync_seconds_total counter\n");
-        out.push_str("# HELP kiln_backend_external_yield_sync_max_seconds Maximum observed device-wide synchronization time.\n");
+        out.push_str("# HELP kiln_backend_external_yield_sync_max_seconds Maximum observed backend completion wait.\n");
         out.push_str("# TYPE kiln_backend_external_yield_sync_max_seconds gauge\n");
         out.push_str("# HELP kiln_backend_external_yield_sync_slow_total Synchronization calls taking at least 100 milliseconds.\n");
         out.push_str("# TYPE kiln_backend_external_yield_sync_slow_total counter\n");
@@ -376,6 +376,81 @@ impl Metrics {
                 "boundary",
                 &stats.boundary,
                 stats.slow_calls,
+            );
+        }
+        out.push_str(
+            "# HELP kiln_rocm_synchronization_active Whether the selected model backend is ROCm.\n",
+        );
+        out.push_str("# TYPE kiln_rocm_synchronization_active gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rocm_synchronization_active {}",
+                u8::from(gauges.rocm_synchronization.active)
+            ),
+        );
+        out.push_str("# HELP kiln_rocm_synchronization_telemetry_available Whether the selected ROCm context supplied an atomic telemetry snapshot.\n");
+        out.push_str("# TYPE kiln_rocm_synchronization_telemetry_available gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rocm_synchronization_telemetry_available {}",
+                u8::from(gauges.rocm_synchronization.telemetry_available)
+            ),
+        );
+        out.push_str("# HELP kiln_rocm_cleanup_quarantined Whether failed ROCm recovery made further execution and resource destruction unsafe. Valid only when synchronization telemetry is available.\n");
+        out.push_str("# TYPE kiln_rocm_cleanup_quarantined gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rocm_cleanup_quarantined {}",
+                u8::from(gauges.rocm_synchronization.cleanup_quarantined)
+            ),
+        );
+        out.push_str("# HELP kiln_rocm_synchronization_policy_info Immutable ROCm synchronization policy selected at startup.\n");
+        out.push_str("# TYPE kiln_rocm_synchronization_policy_info gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rocm_synchronization_policy_info{{mode=\"{}\"}} 1",
+                gauges.rocm_synchronization_mode
+            ),
+        );
+        out.push_str("# HELP kiln_rocm_synchronizations_total ROCm host wait attempts by fixed reason and scope.\n");
+        out.push_str("# TYPE kiln_rocm_synchronizations_total counter\n");
+        out.push_str("# HELP kiln_rocm_synchronization_wait_seconds_total Host wall time spent in ROCm waits by fixed reason.\n");
+        out.push_str("# TYPE kiln_rocm_synchronization_wait_seconds_total counter\n");
+        out.push_str("# HELP kiln_rocm_synchronization_skipped_total Same-stream ROCm barriers omitted by stream-ordered policy.\n");
+        out.push_str("# TYPE kiln_rocm_synchronization_skipped_total counter\n");
+        for stats in &gauges.rocm_synchronization.reasons {
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_synchronizations_total{{reason=\"{}\",scope=\"device\"}} {}",
+                    stats.reason, stats.device_wait_count
+                ),
+            );
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_synchronizations_total{{reason=\"{}\",scope=\"stream\"}} {}",
+                    stats.reason, stats.stream_wait_count
+                ),
+            );
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_synchronization_wait_seconds_total{{reason=\"{}\"}} {}",
+                    stats.reason,
+                    stats.waited_ns as f64 / 1_000_000_000.0
+                ),
+            );
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_synchronization_skipped_total{{reason=\"{}\"}} {}",
+                    stats.reason, stats.skipped_count
+                ),
             );
         }
         prom_counter(
@@ -1892,6 +1967,8 @@ pub struct SnapshotGauges {
     pub(crate) memory_governor: CachedMemoryGovernorObservation,
     pub backend_quarantined: bool,
     pub external_yield_sync: Vec<ExternalYieldSyncStats>,
+    pub rocm_synchronization_mode: &'static str,
+    pub rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
     pub scheduler_waiting: usize,
     pub scheduler_running: usize,
     pub blocks_used: usize,
@@ -2170,6 +2247,24 @@ mod tests {
                 max_micros: 125_000,
                 slow_calls: 1,
             }],
+            rocm_synchronization_mode: "stream_ordered",
+            rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats {
+                active: true,
+                telemetry_available: true,
+                cleanup_quarantined: true,
+                telemetry_error: None,
+                total_device_wait_count: 2,
+                total_stream_wait_count: 3,
+                total_waited_ns: 250_000_000,
+                total_skipped_count: 7,
+                reasons: vec![crate::accelerator_runtime::RocmSynchronizationReasonStats {
+                    reason: "external_yield",
+                    device_wait_count: 2,
+                    stream_wait_count: 3,
+                    waited_ns: 250_000_000,
+                    skipped_count: 7,
+                }],
+            },
             scheduler_waiting: 3,
             scheduler_running: 1,
             blocks_used: 10,
@@ -2325,6 +2420,22 @@ mod tests {
         assert!(output.contains(
             "kiln_backend_external_yield_sync_slow_total{boundary=\"batched decode step\"} 1"
         ));
+        assert!(
+            output.contains("kiln_rocm_synchronization_policy_info{mode=\"stream_ordered\"} 1")
+        );
+        assert!(output.contains("kiln_rocm_cleanup_quarantined 1"));
+        assert!(output.contains(
+            "kiln_rocm_synchronizations_total{reason=\"external_yield\",scope=\"device\"} 2"
+        ));
+        assert!(output.contains(
+            "kiln_rocm_synchronizations_total{reason=\"external_yield\",scope=\"stream\"} 3"
+        ));
+        assert!(output.contains(
+            "kiln_rocm_synchronization_wait_seconds_total{reason=\"external_yield\"} 0.25"
+        ));
+        assert!(
+            output.contains("kiln_rocm_synchronization_skipped_total{reason=\"external_yield\"} 7")
+        );
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"hit\"} 7"));
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"miss\"} 3"));
         assert!(output.contains("kiln_prefix_cache_hit_tokens_total 112"));
@@ -2486,6 +2597,9 @@ mod tests {
             memory_governor: CachedMemoryGovernorObservation::default(),
             backend_quarantined: false,
             external_yield_sync: Vec::new(),
+            rocm_synchronization_mode: "legacy_host_barriers",
+            rocm_synchronization:
+                crate::accelerator_runtime::RocmSynchronizationRuntimeStats::default(),
             scheduler_waiting: 0,
             scheduler_running: 0,
             blocks_used: 0,

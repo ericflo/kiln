@@ -286,6 +286,8 @@ struct PromptCacheInfo {
 #[derive(Serialize)]
 struct DecodeRuntimeInfo {
     configuration: DecodeRuntimeConfig,
+    accelerator_runtime: crate::config::ResolvedAcceleratorRuntimePolicy,
+    rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
     batching_configuration: BatchingRuntimeConfig,
     direct_decode_rendezvous: DirectDecodeRendezvousRuntimeState,
     cuda_graphs: GraphInfo,
@@ -561,6 +563,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let real_backend = matches!(state.backend.as_ref(), ModelBackend::Real { .. });
     let execution_provenance_ready =
         execution_provenance_ready(real_backend, state.execution_provenance.as_deref());
+    let rocm_synchronization = state.observe_rocm_runtime_health();
 
     // Adapter info
     let active_adapter = state.active_adapter_name.read().unwrap().clone();
@@ -579,7 +582,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     // Scheduler stats (works for both Mock and Real backends)
     let (
         backend_name,
-        backend_runtime,
+        mut backend_runtime,
         scheduler_stats,
         prefix_cache,
         decode_batcher,
@@ -680,6 +683,8 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         }
     };
 
+    apply_rocm_runtime_health(&mut backend_runtime, &rocm_synchronization);
+
     let requests = request_metrics(&state);
     let request_count = requests.total;
     let recent_requests = recent_request_metrics(&state);
@@ -688,6 +693,8 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         CachedMemoryGovernorObservation::capture_global_for(state.vram_probe_selector);
     let decode_runtime = DecodeRuntimeInfo {
         configuration: state.decode_runtime_config,
+        accelerator_runtime: state.accelerator_runtime_policy,
+        rocm_synchronization,
         batching_configuration: state.batching_runtime_config,
         direct_decode_rendezvous: state.direct_decode_rendezvous_runtime_state(),
         cuda_graphs,
@@ -901,6 +908,21 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         (StatusCode::OK, Json(response)).into_response()
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, Json(response)).into_response()
+    }
+}
+
+fn apply_rocm_runtime_health(
+    backend_runtime: &mut BackendRuntimeInfo,
+    synchronization: &crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
+) {
+    let Some(reason) = synchronization.fail_closed_reason() else {
+        return;
+    };
+    backend_runtime.healthy = false;
+    backend_runtime.quarantined = true;
+    backend_runtime.restart_required = true;
+    if backend_runtime.reason.is_none() {
+        backend_runtime.reason = Some(reason);
     }
 }
 
@@ -1538,6 +1560,26 @@ mod tests {
             false
         );
         assert_eq!(
+            json["decode_runtime"]["accelerator_runtime"]["schema_id"],
+            "kiln.accelerator-runtime-policy.v1"
+        );
+        assert_eq!(
+            json["decode_runtime"]["accelerator_runtime"]["rocm_synchronization_mode"]["effective"],
+            "legacy_host_barriers"
+        );
+        assert_eq!(
+            json["decode_runtime"]["rocm_synchronization"]["active"],
+            false
+        );
+        assert_eq!(
+            json["decode_runtime"]["rocm_synchronization"]["telemetry_available"],
+            false
+        );
+        assert_eq!(
+            json["decode_runtime"]["rocm_synchronization"]["cleanup_quarantined"],
+            false
+        );
+        assert_eq!(
             json["decode_runtime"]["configuration"]["max_decode_batch"]["effective"],
             8
         );
@@ -1681,6 +1723,56 @@ mod tests {
         tampered.backend.device = "different".into();
         assert!(!execution_provenance_ready(true, Some(&tampered)));
         assert!(execution_provenance_ready(false, Some(&tampered)));
+    }
+
+    #[test]
+    fn rocm_cleanup_quarantine_fails_backend_readiness_closed() {
+        let mut runtime = BackendRuntimeInfo {
+            healthy: true,
+            quarantined: false,
+            reason: None,
+            restart_required: false,
+            external_yield_sync: Vec::new(),
+        };
+        let mut synchronization =
+            crate::accelerator_runtime::RocmSynchronizationRuntimeStats::default();
+        synchronization.active = true;
+        synchronization.telemetry_available = true;
+        synchronization.cleanup_quarantined = true;
+
+        apply_rocm_runtime_health(&mut runtime, &synchronization);
+
+        assert!(!runtime.healthy);
+        assert!(runtime.quarantined);
+        assert!(runtime.restart_required);
+        assert_eq!(
+            runtime.reason.as_deref(),
+            Some(crate::accelerator_runtime::ROCM_CLEANUP_QUARANTINE_REASON)
+        );
+    }
+
+    #[test]
+    fn unavailable_active_rocm_telemetry_fails_backend_readiness_closed() {
+        let mut runtime = BackendRuntimeInfo {
+            healthy: true,
+            quarantined: false,
+            reason: None,
+            restart_required: false,
+            external_yield_sync: Vec::new(),
+        };
+        let mut synchronization =
+            crate::accelerator_runtime::RocmSynchronizationRuntimeStats::default();
+        synchronization.active = true;
+        synchronization.telemetry_error = Some("injected telemetry failure".to_string());
+
+        apply_rocm_runtime_health(&mut runtime, &synchronization);
+
+        assert!(!runtime.healthy);
+        assert!(runtime.quarantined);
+        assert!(runtime.restart_required);
+        let reason = runtime.reason.unwrap();
+        assert!(reason.contains("telemetry is unavailable"));
+        assert!(reason.contains("injected telemetry failure"));
     }
 
     #[tokio::test]

@@ -15,6 +15,7 @@ use crate::state::{AppState, ModelBackend};
 use kiln_train::TrainingState;
 
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let rocm_synchronization = state.observe_rocm_runtime_health();
     // Snapshot scheduler gauges.
     let (
         scheduler_waiting,
@@ -26,7 +27,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         decode_batcher,
         batching_engine_enabled,
         batching_engine,
-        backend_quarantined,
+        backend_health_quarantined,
         external_yield_sync,
     ) = match state.backend.as_ref() {
         ModelBackend::Mock { scheduler, .. } => {
@@ -102,13 +103,18 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         state.rendered_prompt_cache.lock().unwrap().stats();
     let (prompt_token_cache_hits, prompt_token_cache_misses, prompt_token_cache_entries) =
         state.prompt_token_cache.lock().unwrap().stats();
-
     let gauges = SnapshotGauges {
         memory_governor: CachedMemoryGovernorObservation::capture_global_for(
             state.vram_probe_selector,
         ),
-        backend_quarantined,
+        backend_quarantined: backend_health_quarantined || rocm_synchronization.cleanup_quarantined,
         external_yield_sync,
+        rocm_synchronization_mode: state
+            .accelerator_runtime_policy
+            .rocm_synchronization_mode
+            .effective
+            .as_str(),
+        rocm_synchronization,
         scheduler_waiting,
         scheduler_running,
         blocks_used,

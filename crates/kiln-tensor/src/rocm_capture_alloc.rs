@@ -7,7 +7,7 @@
 //! # The bug this fixes
 //!
 //! Decode HIP-graph capture engages on a non-default stream
-//! ([`crate::with_active_rocm_stream`]). The forward's Q/K/V projections and
+//! ([`crate::with_rocm_graph_capture_stream`]). The forward's Q/K/V projections and
 //! per-layer activations are allocated by [`crate::RocmStorage::zeros_ctx`] /
 //! [`crate::RocmStorage::alloc_uninit_ctx`] straight through the stream-ordered
 //! allocator (`hipMallocAsync`) with no allocator indirection, so they are
@@ -169,14 +169,18 @@ impl RocmCaptureArena {
     fn borrow_view(&self, dtype: DType, storage: &Arc<RocmStorage>) -> Result<RocmStorage> {
         let (ptr, byte_len) = storage.device_ptr_raw();
         let keep_alive: Arc<dyn Any + Send + Sync> = storage.clone();
-        RocmStorage::from_borrowed_ctx(
-            &self.ctx,
-            self.device_index,
-            dtype,
-            ptr,
-            byte_len,
-            keep_alive,
-        )
+        // SAFETY: the arena owns the allocation and routes initialization plus
+        // every consumer through the same explicitly ordered graph stream.
+        unsafe {
+            RocmStorage::from_borrowed_ctx(
+                &self.ctx,
+                self.device_index,
+                dtype,
+                ptr,
+                byte_len,
+                keep_alive,
+            )
+        }
     }
 
     /// Zero the buffer on the active ROCm stream (captured during the replay

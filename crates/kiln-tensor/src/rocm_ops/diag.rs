@@ -76,7 +76,7 @@ pub fn rocm_diagonal_extract(x: &Tensor) -> Result<Tensor> {
     // The kernel writes all `n` output elements, so skip the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * bpe) as u64;
@@ -129,7 +129,7 @@ pub fn rocm_diag_build(v: &Tensor) -> Result<Tensor> {
     // The kernel only writes the n diagonal entries — pre-zero the rest.
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, n * n)?;
 
-    let raw_stream = v_storage.rocm_stream_raw();
+    let raw_stream = v_storage.rocm_stream_raw()?;
     let (v_base, _) = v_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let v_off = (v.layout().start_offset() * bpe) as u64;

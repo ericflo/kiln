@@ -106,7 +106,7 @@ pub fn rocm_layernorm_last_axis(
     // out[row, c] for all rows × cols), so skip the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
 
     let (x_base, _) = x_storage.device_ptr_raw();
     let (weight_base, _) = weight_storage.device_ptr_raw();

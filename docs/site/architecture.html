@@ -4,20 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kiln Architecture &mdash; Single-process inference and training</title>
-  <meta name="description" content="A docs-site architecture guide for Kiln: single-process serving, request flow, LoRA hot-swap training, and CUDA, Vulkan, and Metal backend kernels.">
+  <meta name="description" content="Kiln architecture: single-process serving, ROCm stream ordering and graph lifecycle, request flow, LoRA hot-swap training, and GPU backend kernels.">
   <link rel="canonical" href="https://ericflo.github.io/kiln/architecture.html">
   <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
   <link rel="alternate icon" type="image/png" href="assets/logo.png">
   <link rel="apple-touch-icon" href="assets/logo.png">
 
   <meta property="og:title" content="Kiln Architecture &mdash; Single-process inference and training">
-  <meta property="og:description" content="A compact architecture guide for Kiln internals: server, scheduler, model engine, live LoRA training, and GPU backend kernels.">
+  <meta property="og:description" content="Kiln internals: server, scheduler, model engine, ROCm execution policy, live LoRA training, and GPU backend kernels.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://ericflo.github.io/kiln/architecture.html">
   <meta property="og:image" content="https://ericflo.github.io/kiln/assets/og-image.png">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Kiln Architecture &mdash; Single-process inference and training">
-  <meta name="twitter:description" content="A compact architecture guide for Kiln internals: server, scheduler, model engine, live LoRA training, and GPU backend kernels.">
+  <meta name="twitter:description" content="Kiln internals: server, scheduler, model engine, ROCm execution policy, live LoRA training, and GPU backend kernels.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image.png">
 
   <script src="https://cdn.tailwindcss.com"></script>
@@ -278,6 +278,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#single-process-server">Single-process server</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#request-path-and-batching">Request path</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-authority">Streaming prefill</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#rocm-execution-policy">ROCm execution</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#gated-deltanet-hybrid">Gated DeltaNet hybrid</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-hot-swap-training-queue">LoRA hot-swap</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#backend-owned-sft-loss-routing">SFT loss routing</a>
@@ -367,6 +368,145 @@ training request
           observes a changed shell or file. The canonical Kiln prompt-logprob teacher identity hashes
           every resolved field under inference-contract v2. Changing the policy therefore changes the
           teacher revision and invalidates identity-bound logit caches and OPD resume bindings.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Accelerator execution</div>
+        <h2 id="rocm-execution-policy" class="text-2xl font-semibold mb-4">ROCm execution policy, stream ordering, and graph lifecycle</h2>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
+          runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
+          to produce <code>kiln.accelerator-runtime-policy.v1</code>. The same resolved object is installed in
+          the tensor context, projected into the model graph runner, stored in server state, and returned by
+          product diagnostics. Tensor, model, and kernel code do not re-read the public graph or
+          synchronization environment names during inference.
+        </p>
+        <pre class="mt-5"><code>typed [server] + [accelerator] configuration
+  -> strict parse, source attribution, and serving-profile gate
+  -> immutable accelerator runtime policy v1
+  -> primary ROCm context synchronization discipline
+  -> ModelRunner graph lifecycle and bounded graph cache
+  -> /v1/config + /health + trusted debug + dashboard + Prometheus</code></pre>
+
+        <div class="grid md:grid-cols-3 gap-5 check-list mt-5" style="color: var(--fg-dim);">
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);"><code>legacy_host_barriers</code></h3>
+            <p>The qualified default preserves historical device and active-stream waits, including the device-wide external-yield drain and established large hipBLASLt and cast boundaries. The reasoned telemetry is new; the ordering behavior is intentionally retained.</p>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);"><code>stream_ordered</code></h3>
+            <p>The experimental mode omits only barriers whose call site asserts a same-stream FIFO dependency. External yield waits on the primary producer stream. Host reads, borrowed-buffer lifetimes, in-place mutation, reclamation, graph transitions, recovery, and global mutation still synchronize.</p>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">One context, one policy</h3>
+            <p>The primary context stores the policy. A later owner requesting another policy for the same device receives an error naming the installed and requested values; multiple model/runtime owners cannot silently mix ordering disciplines.</p>
+          </div>
+        </div>
+
+        <h3 class="font-semibold mt-6 mb-3">Graph lifecycle is a separate axis</h3>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm" style="color: var(--fg-dim);">
+            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Configured mode</th><th class="text-left p-2">Effective execution</th><th class="text-left p-2">Admission</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>profile</code></td><td class="p-2">Stable and maintenance resolve to <code>disabled</code>; experimental resolves to <code>lazy_capture_replay</code>.</td><td class="p-2">Recommended default; the serving profile remains authoritative.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>disabled</code></td><td class="p-2">Bypasses graph-shaped warmup, native capture, and replay.</td><td class="p-2">Every profile.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>warmup_then_eager</code></td><td class="p-2">Runs one graph-shaped eager warmup, never captures, then remains eager.</td><td class="p-2">Experimental only.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lazy_capture_replay</code></td><td class="p-2">Warms eagerly, then lazily captures and replays eligible decode shapes.</td><td class="p-2">Experimental only; retained entries bounded by <code>rocm_graph_cache_entries</code> in 1&ndash;64.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Capture and replay use a dedicated stream without weakening external visibility. A replay records
+          completion on its capture stream, the primary stream waits on that event, and external yield then
+          waits on the primary stream before a token becomes visible. Stable paged metadata is a correctness
+          invariant, not a user switch. Capture or replay failures use synchronized recovery, increment
+          closed-reason fallback counters, and trip the graph runner circuit breaker instead of continuing
+          with uncertain state.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          hipBLASLt workspace ownership follows the same lifecycle. Every fresh capture stream receives a
+          workspace lease before its warm pass. A deferred or failed attempt settles the stream and releases
+          its allocation; a successful graph retains the lease as its last-owned resource, so graph handles
+          and graph-stable tensors are destroyed before the workspace is reclaimed. Retained capture
+          workspaces therefore track the bounded live graph cache instead of accumulating across recapture
+          history. Opaque hipBLASLt algorithm blobs are cached per device and are never shared across ROCm
+          ordinals.
+        </p>
+
+        <h3 class="font-semibold mt-6 mb-3">Synchronization reasons are fixed telemetry dimensions</h3>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          Every host-visible wait is attributed to one of 22 stable lower-snake-case reasons. The snapshot
+          stores device wait count, stream wait count, accumulated host wait nanoseconds, and stream-ordered
+          skip count for each reason. Reading it loads atomics only; it never inserts a barrier or calls the
+          driver. The complete reason set is:
+        </p>
+        <div class="grid md:grid-cols-2 gap-5 mt-4 text-sm" style="color: var(--fg-dim);">
+          <ul class="list-disc pl-5 check-list">
+            <li><code>explicit_device_drain</code>, <code>explicit_stream_drain</code>, <code>tensor_handoff</code>, <code>external_yield</code></li>
+            <li><code>activation_output</code>, <code>elementwise_output</code>, <code>cast_output</code></li>
+            <li><code>concat_input</code>, <code>concat_output</code>, <code>contiguous_output</code>, <code>repeat_heads_output</code></li>
+            <li><code>matmul_output</code>, <code>matmul_cast_boundary</code></li>
+          </ul>
+          <ul class="list-disc pl-5 check-list">
+            <li><code>in_place_mutation</code>, <code>memory_reclaim</code>, <code>graph_boundary</code></li>
+            <li><code>full_attention_handoff</code>, <code>model_handoff</code>, <code>host_readback</code></li>
+            <li><code>allocation_lifetime</code>, <code>error_recovery</code>, <code>global_state_mutation</code></li>
+          </ul>
+        </div>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Wait duration belongs to the boundary where the host discovered outstanding work. It is not a
+          per-kernel profiler and does not prove which earlier operation consumed the time. For example, a
+          large <code>external_yield</code> delta can expose work accumulated earlier on the producer stream.
+          A VRAM-rebalance claim additionally needs allocator reclaim, physical KV resize, memory-tier, or
+          host-pressure evidence. A new graph bucket can instead produce a one-time warmup/capture pause.
+        </p>
+
+        <h3 class="font-semibold mt-6 mb-3">The product surfaces share one authority</h3>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm" style="color: var(--fg-dim);">
+            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Surface</th><th class="text-left p-2">Contract</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /v1/config</code></td><td class="p-2"><code>accelerator_runtime</code> exposes schema/version, serving-profile source, and configured/effective/source values for synchronization, graph mode, and graph-cache capacity.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /health</code></td><td class="p-2"><code>decode_runtime.accelerator_runtime</code>, <code>decode_runtime.rocm_synchronization</code>, and <code>decode_runtime.rocm_graphs</code> combine immutable intent with live wait/skip, cleanup-quarantine, and graph state.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Trusted debug</td><td class="p-2"><code>/v1/debug/model-state</code> repeats top-level <code>accelerator_runtime</code> and <code>rocm_synchronization</code>, including cleanup quarantine; it does not reintroduce raw runtime flags.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /metrics</code></td><td class="p-2">Policy/availability/quarantine gauges plus fixed <code>{reason,scope}</code> wait counts, <code>{reason}</code> wait seconds, and <code>{reason}</code> skipped counts.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">CLI and dashboard</td><td class="p-2"><code>kiln config</code> and the runtime configuration panel show the same effective policy and source attribution.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <pre class="mt-5"><code>kiln_rocm_synchronization_active
+kiln_rocm_synchronization_telemetry_available
+kiln_rocm_cleanup_quarantined
+kiln_rocm_synchronization_policy_info{mode}
+kiln_rocm_synchronizations_total{reason,scope}
+kiln_rocm_synchronization_wait_seconds_total{reason}
+kiln_rocm_synchronization_skipped_total{reason}</code></pre>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          A fatal execution or synchronization failure marks the device cleanup-quarantined for the rest of
+          the process lifetime. The flag is shared across every context for that device ordinal; a later
+          recovery drain may collect evidence but cannot re-enable execution or cleanup. New execution fails closed and Drop
+          retains possibly in-flight streams, events, allocations, graphs, and graph executables until process
+          exit rather than risking use-after-free. Graph code must not fall back to eager execution after a
+          failed recovery. Active ROCm telemetry unavailability is also fail-closed rather than interpreted as
+          a false bit. The central server admission gate observes and permanently latches either condition before
+          adapter, training, import, or other backend mutation work. The live fault makes backend runtime health
+          fail closed and readiness return 503.
+          It appears in health and trusted debug, while
+          <code>kiln_rocm_cleanup_quarantined</code> provides alerting; its value is authoritative only when the
+          telemetry-availability gauge is one. This state is deliberately absent from
+          <code>/v1/config</code>, which describes immutable startup intent.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          The stable product default is <code>legacy_host_barriers</code> with graph mode
+          <code>profile</code>, which resolves to eager <code>disabled</code> execution. Stream-ordered and
+          explicit non-disabled graph modes fail startup outside the experimental profile. Promotion requires
+          local hardware evidence for token/logit parity, concurrency throughput, p50/p95/p99/max inter-token
+          latency, reasoned wait time, graph fallbacks, memory peaks and plateaus, cancellation, and sustained
+          stability. The reversible procedure is in
+          <a href="troubleshooting.html#rocm-token-pauses">ROCm token-pause troubleshooting</a>; the field and
+          environment migration contract is in the
+          <a href="docs/configuration/#accelerator">complete configuration reference</a>.
         </p>
       </article>
 

@@ -108,18 +108,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 14 top-level sections and 86 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 89 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 86 fixed fields:
+credential. Of the 89 fixed fields:
 
-- 78 implement the canonical mechanical environment name;
-- 56 also retain one or more deprecated compatibility spellings (58 aliases
+- 81 implement the canonical mechanical environment name;
+- 58 also retain one or more deprecated compatibility spellings (61 aliases
   total);
 - 8 are config-file-only and have no environment override;
-- the 58 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+- the 61 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 86 fixed fields and both dynamic credential fields.
+The tables below cover all 89 fixed fields and both dynamic credential fields.
 
 ## `[server]`
 
@@ -160,6 +160,94 @@ override it.
 `memory.cuda_graphs = true` does not override the profile: the default `stable`
 profile selects eager-only model-runner options because live graph capture is
 disabled.
+
+## `[accelerator]`
+
+This section owns process-lifetime accelerator execution behavior that must be
+fixed before the primary device context or model runner is created. The
+resolved object uses schema `kiln.accelerator-runtime-policy.v1`. Startup,
+`kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
+dashboard all report the same configured/effective/source values; lower model,
+tensor, and kernel paths do not re-read these public environment names.
+
+| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+|---|---|---|---|---|
+| `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
+| `accelerator.rocm_graph_mode` | string enum; `"profile"` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` (implemented) | `KILN_ROCM_GRAPHS` and `KILN_ROCM_GRAPH_CAPTURE` (deprecated compatibility) | `profile`, `disabled`, `warmup_then_eager`, or `lazy_capture_replay`, case-insensitive. `profile` resolves to `disabled` under stable/maintenance and `lazy_capture_replay` under experimental. The two explicit non-disabled modes require the experimental profile. Restart required. |
+| `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | `KILN_ROCM_GRAPH_CACHE_MAX` (deprecated compatibility) | `1..=64`. Bounds retained native graph entries in every product and embedding constructor; zero or unbounded capacities are rejected. Restart required. |
+
+### ROCm synchronization semantics
+
+`legacy_host_barriers` is the qualified default. It preserves the historical
+device-wide barriers around large hipBLASLt results and BF16/F32 cast
+boundaries, the historical active-stream waits after eager tensor operations,
+and a device-wide external-yield drain before generated progress is published.
+Choosing it is intended to produce the same ordering as the pre-policy runtime,
+with the new reasoned counters added.
+
+`stream_ordered` is an explicit local-qualification mode. It omits only
+barriers whose call site asserts that producer and consumer are FIFO-ordered on
+the same HIP stream. It does not omit host readback, host-buffer lifetime,
+in-place mutation, allocator reclaim, graph transition, error recovery, or
+global-state drains. External yield waits for the primary producer stream
+rather than the whole device. A replayed graph records completion on its
+capture stream and makes the primary stream wait on that event before the
+external-yield stream wait, so replay work is included.
+
+The primary ROCm context stores the immutable policy. A second caller asking
+for a different policy on the same device receives a startup error naming the
+already-installed and requested policies. This prevents two model/runtime
+owners from silently mixing synchronization disciplines.
+
+Synchronization telemetry has 22 fixed reason values. `/health` reports device
+wait count, stream wait count, waited nanoseconds, and skipped count for every
+reason under `decode_runtime.rocm_synchronization`. The same object exposes
+`cleanup_quarantined`: when true, a fatal execution or synchronization failure
+made device state unsafe. The flag is shared by every context for that device
+ordinal and is process-lifetime sticky: a later recovery drain may collect
+diagnostics, but cannot re-enable execution or cleanup. New ROCm execution is
+rejected, possibly in-flight HIP resources are retained instead of being
+destroyed unsafely, backend admission fails closed, and the process must be
+restarted. Active ROCm telemetry becoming unavailable is treated as the same
+fail-closed health condition rather than as a false quarantine value. The
+central server health gate observes and latches this state before adapter,
+training, import, or other backend mutation admission, so those paths cannot
+slip through before the model runner notices the fault. This is live state, so it is
+reported by health and trusted debug rather than `/v1/config`; the latter remains
+the immutable policy authority. `/metrics` exports the same
+fixed dimensions as `kiln_rocm_synchronizations_total`,
+`kiln_rocm_synchronization_wait_seconds_total`, and
+`kiln_rocm_synchronization_skipped_total`, plus policy, availability, and
+`kiln_rocm_cleanup_quarantined` gauges. Treat the quarantine gauge as unknown
+unless `kiln_rocm_synchronization_telemetry_available` is `1`.
+Reading these surfaces loads atomics only; it never synchronizes the device or
+probes the driver.
+
+Stream-ordered mode is not promoted by configuration alone. Qualify legacy and
+stream-ordered runs on the same source tree using token/logit parity,
+throughput at concurrency 1/8/16/32/64, p50/p95/p99/max inter-token latency,
+reasoned synchronization time, and stable memory plateaus before changing the
+default.
+
+### ROCm graph lifecycle
+
+- `disabled` bypasses graph-shaped warmup, capture, and replay.
+- `warmup_then_eager` runs one graph-shaped eager warmup, never captures, and
+  remains eager. It exists for controlled graph-state-machine comparisons.
+- `lazy_capture_replay` warms eagerly and may capture/replay eligible decode
+  shapes while serving. Capture/fallback/replay state remains visible in
+  `/health`; use this only in the experimental profile.
+- `profile` is the recommended default because the serving profile remains the
+  authority: stable and maintenance stay eager, while experimental selects
+  lazy capture/replay.
+
+Graph-stable paged metadata is now a correctness invariant rather than a knob.
+The runtime no longer reads `KILN_ROCM_GRAPH_STABLE_PAGED_METADATA`, graph
+cache/capture flags, matmul synchronization thresholds, or full-attention
+handoff flags inside decode. The three historical graph variables listed in
+the table are parsed once by the typed startup loader. Setting both historical
+graph-mode aliases is rejected even when their booleans happen to agree; use
+the canonical enum to state one unambiguous lifecycle.
 
 ## `[batching]`
 
@@ -1109,8 +1197,10 @@ production training while serving through the hybrid Vulkan backend.
 Kiln currently exposes several complementary, partial views:
 
 - `kiln config --file <path>` performs authoritative parsing and validation,
-  then prints a human-oriented subset of resolved fields.
-- `GET /v1/config` reports runtime diagnostics for serving profile, effective
+  then prints a human-oriented subset of resolved fields, including the ROCm
+  synchronization mode and configured/effective graph policy.
+- `GET /v1/config` reports runtime diagnostics for serving profile, the
+  versioned accelerator runtime policy, effective
   decode width, speculative configuration and availability, VRAM/KV state,
   native-training runtime/weight devices and
   support reason, the versioned implementation/resident-tuple/per-workload
@@ -1136,7 +1226,8 @@ Kiln currently exposes several complementary, partial views:
   `training.checkpoint_segments` is `0`; an optional segment count retained in
   `training.checkpoint_policy` is provenance, not an active execution plan. The
   endpoint is not a serialization of all accepted TOML.
-- `GET /health` and `/v1/health` repeat the resolved boundary policy under
+- `GET /health` and `/v1/health` repeat the accelerator policy and reasoned
+  ROCm synchronization counters under `decode_runtime`, and repeat the resolved boundary policy under
   `training.checkpoint_boundary_policy`; trusted `GET /v1/debug/model-state`
   reports the identical object at the same path. The dashboard reads
   `/v1/config` and renders the same process-lifetime values. None of these
@@ -1156,7 +1247,8 @@ Explicit source tracking (`default`, `config_file`, or `environment`) currently
 exists for `server.serving_profile`, `server.deterministic`,
 `server.stream_stall_grace_ms`, the three server batching/prefill budgets,
 `server.max_decode_batch`, all eight `[batching]` fields, all six
-`[streaming_prefill]` fields, and `memory.reclaim_mode`. Other fields have
+`[streaming_prefill]` fields, all three `[accelerator]` fields, and
+`memory.reclaim_mode`. Other fields have
 resolved values but do not yet carry per-field source metadata.
 
 The `kiln_env_config_hash` binds the serialized effective typed configuration
@@ -1173,7 +1265,7 @@ These are current implementation facts, not recommended architecture:
 
 1. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
    typed object with provenance and backend-derived values.
-2. **Deprecated aliases:** 54 non-canonical spellings across 52 fields remain
+2. **Deprecated aliases:** 61 non-canonical spellings across 58 fields remain
    temporarily for compatibility, including `KILN_DEFAULT_NO_THINK`. Each use
    warns at startup; canonical and compatibility names cannot silently
    disagree.

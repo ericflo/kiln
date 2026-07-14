@@ -36,6 +36,8 @@ struct ModelStateResponse {
     config_hashes: ConfigHashes,
     http: HttpDebugState,
     decode_runtime: DecodeRuntimeConfig,
+    accelerator_runtime: crate::config::ResolvedAcceleratorRuntimePolicy,
+    rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
     streaming_prefill: StreamingPrefillRuntimeConfig,
     training: TrainingDebugState,
     env_flags: BTreeMap<&'static str, EnvFlagState>,
@@ -286,8 +288,9 @@ fn is_truthy(value: &str) -> bool {
 }
 
 async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
+    let rocm_synchronization = state.observe_rocm_runtime_health();
     ModelStateResponse {
-        model: model_debug_state(state),
+        model: model_debug_state(state, &rocm_synchronization),
         adapters: adapter_debug_state(state),
         config_hashes: state.config_hashes.clone(),
         http: HttpDebugState {
@@ -296,6 +299,8 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
             send_buffer_effective_bytes: state.http_send_buffer_preflight_effective_bytes,
         },
         decode_runtime: state.decode_runtime_config,
+        accelerator_runtime: state.accelerator_runtime_policy,
+        rocm_synchronization,
         streaming_prefill: state.streaming_prefill_runtime_config,
         training: TrainingDebugState {
             checkpoint_boundary_policy: state.training_runtime.checkpoint_boundary_policy(),
@@ -307,8 +312,11 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
     }
 }
 
-fn model_debug_state(state: &AppState) -> ModelDebugState {
-    let backend_runtime = match state.backend.as_ref() {
+fn model_debug_state(
+    state: &AppState,
+    rocm_synchronization: &crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
+) -> ModelDebugState {
+    let mut backend_runtime = match state.backend.as_ref() {
         ModelBackend::Mock { .. } => BackendRuntimeDebugState {
             healthy: true,
             quarantined: false,
@@ -327,6 +335,14 @@ fn model_debug_state(state: &AppState) -> ModelDebugState {
             }
         }
     };
+    if let Some(reason) = rocm_synchronization.fail_closed_reason() {
+        backend_runtime.healthy = false;
+        backend_runtime.quarantined = true;
+        backend_runtime.restart_required = true;
+        if backend_runtime.reason.is_none() {
+            backend_runtime.reason = Some(reason);
+        }
+    }
     ModelDebugState {
         path: state
             .model_path
@@ -437,7 +453,6 @@ fn selected_env_flags() -> BTreeMap<&'static str, EnvFlagState> {
         "KILN_DEFAULT_THINKING_ENABLED",
         "KILN_DEFAULT_NO_THINK",
         "KILN_CUDA_GRAPHS",
-        "KILN_ROCM_GRAPHS",
         "KILN_KV_AUTOSCALE",
         "KILN_KV_CACHE_FP8",
         "KILN_PREFIX_CACHE_ENABLED",
@@ -885,7 +900,7 @@ mod tests {
             json["batching_engine"]["configuration"]["prefix_aware_admission"]["enabled"],
             true
         );
-        assert!(json["env_flags"]["KILN_ROCM_GRAPHS"].is_object());
+        assert!(json["env_flags"]["KILN_ROCM_GRAPHS"].is_null());
         assert!(json["env_flags"]["KILN_KV_AUTOSCALE"].is_object());
         assert!(json["env_flags"]["KILN_HTTP_SEND_BUFFER_BYTES"].is_object());
         assert!(json["env_flags"]["KILN_STREAM_STALL_GRACE_MS"].is_object());
@@ -897,6 +912,12 @@ mod tests {
         assert_eq!(json["http"]["send_buffer_effective_bytes"], 4096);
         assert_eq!(json["decode_runtime"]["deterministic"]["enabled"], false);
         assert_eq!(json["decode_runtime"]["max_decode_batch"]["effective"], 8);
+        assert_eq!(
+            json["accelerator_runtime"]["schema_id"],
+            "kiln.accelerator-runtime-policy.v1"
+        );
+        assert_eq!(json["rocm_synchronization"]["active"], false);
+        assert_eq!(json["rocm_synchronization"]["cleanup_quarantined"], false);
         assert_eq!(
             json["streaming_prefill"]["dispatch"]["configured_mode"],
             "auto"

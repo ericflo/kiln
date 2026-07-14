@@ -94,7 +94,7 @@ pub fn rocm_rmsnorm_last_axis(x: &Tensor, weight: &Tensor, eps: f32) -> Result<T
     // out[row, c] for all rows × cols), so skip the zero-fill via uninit.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (weight_base, _) = weight_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();

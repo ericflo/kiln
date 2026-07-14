@@ -22,6 +22,10 @@
       "effective_config": {
         "build": {
           "binary": "kiln",
+          "cargo_jobs": 1,
+          "cargo_memory_scope": "systemd_user_memory_max_no_swap",
+          "cargo_min_available_gib": 15,
+          "cargo_wrapper": "scripts/cargo-bounded.sh",
           "features": "rocm",
           "locked": true,
           "no_default_features": true,
@@ -61,7 +65,7 @@
           "cancellation_prompt_words": 48,
           "cancel_every_waves": 5,
           "max_tokens": 32,
-          "rocm_graph_cache_max": 12,
+          "rocm_graph_cache_entries": 12,
           "memory_growth_limit_bytes": 536870912,
           "minimum_duration_seconds": 1800.0,
           "outlier_absolute_ms": 250,

@@ -90,7 +90,7 @@ pub fn rocm_where_select(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<Tensor
     };
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = t_storage.rocm_stream_raw();
+    let raw_stream = t_storage.rocm_stream_raw()?;
     let (mask_base, _) = mask_storage.device_ptr_raw();
     let (t_base, _) = t_storage.device_ptr_raw();
     let (f_base, _) = f_storage.device_ptr_raw();

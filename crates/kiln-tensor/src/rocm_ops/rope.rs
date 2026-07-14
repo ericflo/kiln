@@ -164,7 +164,7 @@ pub fn rocm_rope(x: &Tensor, cos: &Tensor, sin: &Tensor, rotary_dim: usize) -> R
     // so an uninitialized buffer is safe — no zero-fill needed.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, x_dtype, n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
 
     let (x_base, _) = x_storage.device_ptr_raw();
     let (cos_base, _) = cos_storage.device_ptr_raw();
@@ -325,7 +325,7 @@ pub fn rocm_rope_split_half(
     let out_storage =
         RocmStorage::alloc_uninit_ctx(&ctx, device_index, x_dtype, x.element_count())?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (cos_base, _) = cos_storage.device_ptr_raw();
     let (sin_base, _) = sin_storage.device_ptr_raw();

@@ -345,7 +345,7 @@ const ROLLOUT_GENERATE_EXAMPLES: &str = r#"Examples:
 
 const CONFIG_OVERVIEW: &str = r#"Validate a Kiln TOML config file without starting the server.
 
-Use this before `kiln serve` to catch invalid values, confirm resolved model settings, and preview feature toggles such as prefix cache, CUDA graphs, and speculative decoding.
+Use this before `kiln serve` to catch invalid values, confirm resolved model settings, and preview process-lifetime accelerator, cache, and decoding policies.
 
 By default, `kiln config` checks the built-in defaults plus environment overrides. Pass `--file` to validate a specific TOML file and see the effective settings that `kiln serve --config <file>` would use.
 "#;
@@ -1635,6 +1635,9 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
         Ok((config, checkpoint_boundary_policy))
     }) {
         Ok((config, checkpoint_boundary_policy)) => {
+            let accelerator_runtime = config
+                .accelerator
+                .resolved_policy(config.server.serving_profile);
             println!("{} Configuration is valid", style("✓").green().bold());
             println!();
             println!(
@@ -1663,6 +1666,25 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 "  {} {}",
                 style("CUDA graphs:").dim(),
                 config.memory.cuda_graphs
+            );
+            println!(
+                "  {} {} (source: {})",
+                style("ROCm synchronization:").dim(),
+                accelerator_runtime.rocm_synchronization_mode.effective,
+                accelerator_runtime.rocm_synchronization_mode.source,
+            );
+            println!(
+                "  {} {} -> {} (source: {})",
+                style("ROCm graph mode:").dim(),
+                accelerator_runtime.rocm_graph_mode.configured,
+                accelerator_runtime.rocm_graph_mode.effective,
+                accelerator_runtime.rocm_graph_mode.source,
+            );
+            println!(
+                "  {} {} (source: {})",
+                style("ROCm graph cache:").dim(),
+                accelerator_runtime.rocm_graph_cache_entries.effective,
+                accelerator_runtime.rocm_graph_cache_entries.source,
             );
             println!(
                 "  {} {}",

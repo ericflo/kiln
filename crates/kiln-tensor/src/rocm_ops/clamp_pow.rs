@@ -66,7 +66,7 @@ pub fn rocm_clamp_pow(x: &Tensor, kind: i32, a: f32, b: f32) -> Result<Tensor> {
     // zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * bpe) as u64;

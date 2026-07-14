@@ -95,6 +95,23 @@ pub const DEFAULT_THINKING_BUDGET_TOKENS_ENV: &str = "KILN_DEFAULT_THINKING_BUDG
 /// Compatibility alias for canonical `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS`.
 pub const DEFAULT_THINKING_BUDGET_MS_ENV: &str = "KILN_DEFAULT_THINKING_BUDGET_MS";
 
+/// Compatibility alias for canonical
+/// `KILN_ACCELERATOR_ROCM_GRAPH_MODE`.
+pub const ROCM_GRAPHS_ENV: &str = "KILN_ROCM_GRAPHS";
+/// Compatibility alias for canonical
+/// `KILN_ACCELERATOR_ROCM_GRAPH_MODE`.
+pub const ROCM_GRAPH_CAPTURE_ENV: &str = "KILN_ROCM_GRAPH_CAPTURE";
+/// Compatibility alias for canonical
+/// `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES`.
+pub const ROCM_GRAPH_CACHE_MAX_ENV: &str = "KILN_ROCM_GRAPH_CACHE_MAX";
+/// Stable default number of process-lifetime ROCm graph-cache entries.
+pub const DEFAULT_ROCM_GRAPH_CACHE_ENTRIES: usize = 8;
+pub const ROCM_GRAPH_CACHE_ENTRIES_MIN: usize = 1;
+pub const ROCM_GRAPH_CACHE_ENTRIES_MAX: usize = 64;
+/// Versioned schema identity shared by config, health, and debug diagnostics.
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v1";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 1;
+
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
 const GIB_BYTES_F64: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -1227,6 +1244,371 @@ impl<'de> Deserialize<'de> for ServingProfileSetting {
     }
 }
 
+/// ROCm host/stream synchronization policy selected at process startup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RocmSynchronizationMode {
+    /// Preserve the qualified host-visible barriers used by the existing
+    /// backend while stream-ordered execution is being qualified.
+    #[default]
+    LegacyHostBarriers,
+    /// Use stream dependencies for device work and reserve host waits for
+    /// true external-yield and readback boundaries.
+    StreamOrdered,
+}
+
+impl RocmSynchronizationMode {
+    fn parse(raw: &str, label: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "legacy_host_barriers" => Ok(Self::LegacyHostBarriers),
+            "stream_ordered" => Ok(Self::StreamOrdered),
+            _ => anyhow::bail!(
+                "{label} must be one of legacy_host_barriers or stream_ordered; got {raw:?}"
+            ),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyHostBarriers => "legacy_host_barriers",
+            Self::StreamOrdered => "stream_ordered",
+        }
+    }
+}
+
+impl fmt::Display for RocmSynchronizationMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Source-tracked ROCm synchronization setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RocmSynchronizationModeSetting {
+    mode: RocmSynchronizationMode,
+    source: ConfigValueSource,
+}
+
+impl RocmSynchronizationModeSetting {
+    pub const fn new(mode: RocmSynchronizationMode, source: ConfigValueSource) -> Self {
+        Self { mode, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        Ok(Self::new(
+            RocmSynchronizationMode::parse(raw, name)?,
+            ConfigValueSource::Environment,
+        ))
+    }
+
+    pub const fn mode(self) -> RocmSynchronizationMode {
+        self.mode
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for RocmSynchronizationModeSetting {
+    fn default() -> Self {
+        Self::new(
+            RocmSynchronizationMode::LegacyHostBarriers,
+            ConfigValueSource::Default,
+        )
+    }
+}
+
+impl Serialize for RocmSynchronizationModeSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.mode.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RocmSynchronizationModeSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let mode = RocmSynchronizationMode::parse(&raw, "accelerator.rocm_synchronization_mode")
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self::new(mode, ConfigValueSource::ConfigFile))
+    }
+}
+
+/// Configured ROCm graph lifecycle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RocmGraphMode {
+    /// Derive the effective lifecycle from the immutable serving profile.
+    #[default]
+    Profile,
+    Disabled,
+    /// Run one graph-shaped eager warmup and remain eager without capturing.
+    WarmupThenEager,
+    /// Lazily capture and replay shapes while serving.
+    LazyCaptureReplay,
+}
+
+impl RocmGraphMode {
+    fn parse(raw: &str, label: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "profile" => Ok(Self::Profile),
+            "disabled" => Ok(Self::Disabled),
+            "warmup_then_eager" => Ok(Self::WarmupThenEager),
+            "lazy_capture_replay" => Ok(Self::LazyCaptureReplay),
+            _ => anyhow::bail!(
+                "{label} must be one of profile, disabled, warmup_then_eager, or lazy_capture_replay; got {raw:?}"
+            ),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Profile => "profile",
+            Self::Disabled => "disabled",
+            Self::WarmupThenEager => "warmup_then_eager",
+            Self::LazyCaptureReplay => "lazy_capture_replay",
+        }
+    }
+}
+
+impl fmt::Display for RocmGraphMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Source-tracked ROCm graph lifecycle setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RocmGraphModeSetting {
+    mode: RocmGraphMode,
+    source: ConfigValueSource,
+}
+
+impl RocmGraphModeSetting {
+    pub const fn new(mode: RocmGraphMode, source: ConfigValueSource) -> Self {
+        Self { mode, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let mode = match name {
+            ROCM_GRAPHS_ENV => {
+                if parse_required_bool_env(name, raw)? {
+                    RocmGraphMode::Profile
+                } else {
+                    RocmGraphMode::Disabled
+                }
+            }
+            ROCM_GRAPH_CAPTURE_ENV => {
+                if parse_required_bool_env(name, raw)? {
+                    RocmGraphMode::Profile
+                } else {
+                    RocmGraphMode::WarmupThenEager
+                }
+            }
+            _ => RocmGraphMode::parse(raw, name)?,
+        };
+        Ok(Self::new(mode, ConfigValueSource::Environment))
+    }
+
+    pub const fn mode(self) -> RocmGraphMode {
+        self.mode
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for RocmGraphModeSetting {
+    fn default() -> Self {
+        Self::new(RocmGraphMode::Profile, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for RocmGraphModeSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.mode.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RocmGraphModeSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let mode = RocmGraphMode::parse(&raw, "accelerator.rocm_graph_mode")
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self::new(mode, ConfigValueSource::ConfigFile))
+    }
+}
+
+/// Validated source-tracked ROCm graph-cache capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RocmGraphCacheEntries {
+    entries: usize,
+    source: ConfigValueSource,
+}
+
+impl RocmGraphCacheEntries {
+    pub fn new(entries: usize, source: ConfigValueSource) -> Result<Self> {
+        validate_rocm_graph_cache_entries(entries)?;
+        Ok(Self { entries, source })
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let entries = parse_decimal_env::<usize>(name, raw, "a decimal integer")?;
+        Self::new(entries, ConfigValueSource::Environment)
+            .with_context(|| format!("invalid {name} value {raw:?}"))
+    }
+
+    pub const fn entries(self) -> usize {
+        self.entries
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for RocmGraphCacheEntries {
+    fn default() -> Self {
+        Self {
+            entries: DEFAULT_ROCM_GRAPH_CACHE_ENTRIES,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for RocmGraphCacheEntries {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(self.entries as u64)
+    }
+}
+
+impl<'de> Deserialize<'de> for RocmGraphCacheEntries {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = usize::deserialize(deserializer)?;
+        Self::new(entries, ConfigValueSource::ConfigFile).map_err(serde::de::Error::custom)
+    }
+}
+
+/// One configured/effective accelerator policy leaf and its startup source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ResolvedAcceleratorValue<T> {
+    pub configured: T,
+    pub effective: T,
+    pub source: ConfigValueSource,
+}
+
+/// Versioned process-lifetime accelerator policy for config and health APIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ResolvedAcceleratorRuntimePolicy {
+    pub schema_id: &'static str,
+    pub version: u32,
+    pub serving_profile: ServingProfile,
+    pub serving_profile_source: ConfigValueSource,
+    pub rocm_synchronization_mode: ResolvedAcceleratorValue<RocmSynchronizationMode>,
+    pub rocm_graph_mode: ResolvedAcceleratorValue<RocmGraphMode>,
+    pub rocm_graph_cache_entries: ResolvedAcceleratorValue<usize>,
+}
+
+/// Process-lifetime accelerator policy. Canonical startup overrides use
+/// `KILN_ACCELERATOR_<FIELD>`; historical ROCm spellings are compatibility-only.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AcceleratorRuntimeConfig {
+    pub rocm_synchronization_mode: RocmSynchronizationModeSetting,
+    pub rocm_graph_mode: RocmGraphModeSetting,
+    pub rocm_graph_cache_entries: RocmGraphCacheEntries,
+}
+
+impl AcceleratorRuntimeConfig {
+    /// Resolve all profile-derived values into an immutable runtime/API report.
+    pub const fn resolved_policy(
+        &self,
+        serving_profile: ServingProfileSetting,
+    ) -> ResolvedAcceleratorRuntimePolicy {
+        let configured_graph_mode = self.rocm_graph_mode.mode();
+        let effective_graph_mode = match configured_graph_mode {
+            RocmGraphMode::Profile => match serving_profile.profile() {
+                ServingProfile::Experimental => RocmGraphMode::LazyCaptureReplay,
+                ServingProfile::Stable | ServingProfile::Maintenance => RocmGraphMode::Disabled,
+            },
+            explicit => explicit,
+        };
+        ResolvedAcceleratorRuntimePolicy {
+            schema_id: ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID,
+            version: ACCELERATOR_RUNTIME_POLICY_VERSION,
+            serving_profile: serving_profile.profile(),
+            serving_profile_source: serving_profile.source(),
+            rocm_synchronization_mode: ResolvedAcceleratorValue {
+                configured: self.rocm_synchronization_mode.mode(),
+                effective: self.rocm_synchronization_mode.mode(),
+                source: self.rocm_synchronization_mode.source(),
+            },
+            rocm_graph_mode: ResolvedAcceleratorValue {
+                configured: configured_graph_mode,
+                effective: effective_graph_mode,
+                source: self.rocm_graph_mode.source(),
+            },
+            rocm_graph_cache_entries: ResolvedAcceleratorValue {
+                configured: self.rocm_graph_cache_entries.entries(),
+                effective: self.rocm_graph_cache_entries.entries(),
+                source: self.rocm_graph_cache_entries.source(),
+            },
+        }
+    }
+
+    /// Fail closed when an experimental ROCm behavior is requested under a
+    /// profile that does not permit live accelerator experiments.
+    pub fn validate_for_serving_profile(&self, profile: ServingProfile) -> Result<()> {
+        if self.rocm_synchronization_mode.mode() == RocmSynchronizationMode::StreamOrdered
+            && profile != ServingProfile::Experimental
+        {
+            anyhow::bail!(
+                "accelerator.rocm_synchronization_mode=stream_ordered requires server.serving_profile=experimental; got {profile}"
+            );
+        }
+        if matches!(
+            self.rocm_graph_mode.mode(),
+            RocmGraphMode::WarmupThenEager | RocmGraphMode::LazyCaptureReplay
+        ) && profile != ServingProfile::Experimental
+        {
+            anyhow::bail!(
+                "accelerator.rocm_graph_mode={} requires server.serving_profile=experimental; got {profile}",
+                self.rocm_graph_mode.mode()
+            );
+        }
+        validate_rocm_graph_cache_entries(self.rocm_graph_cache_entries.entries())
+    }
+}
+
+impl Default for AcceleratorRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            rocm_synchronization_mode: RocmSynchronizationModeSetting::default(),
+            rocm_graph_mode: RocmGraphModeSetting::default(),
+            rocm_graph_cache_entries: RocmGraphCacheEntries::default(),
+        }
+    }
+}
+
 /// Validated memory-governor reclaim mode plus startup provenance.
 ///
 /// The memory crate deliberately has no serialization dependency, so the
@@ -1557,6 +1939,7 @@ impl<'de> Deserialize<'de> for PrefillLayerBudget {
 #[serde(default, deny_unknown_fields)]
 pub struct KilnConfig {
     pub server: ServerConfig,
+    pub accelerator: AcceleratorRuntimeConfig,
     pub batching: BatchingConfig,
     pub model: ModelConfig,
     pub memory: MemoryConfig,
@@ -3644,6 +4027,24 @@ impl NormalizedEnvValue for ServingProfileSetting {
     }
 }
 
+impl NormalizedEnvValue for RocmSynchronizationModeSetting {
+    fn normalized_env_value(&self) -> String {
+        self.mode().as_str().to_owned()
+    }
+}
+
+impl NormalizedEnvValue for RocmGraphModeSetting {
+    fn normalized_env_value(&self) -> String {
+        self.mode().as_str().to_owned()
+    }
+}
+
+impl NormalizedEnvValue for RocmGraphCacheEntries {
+    fn normalized_env_value(&self) -> String {
+        self.entries().normalized_env_value()
+    }
+}
+
 impl NormalizedEnvValue for MemoryReclaimModeSetting {
     fn normalized_env_value(&self) -> String {
         self.mode().as_str().to_owned()
@@ -3751,6 +4152,7 @@ struct PublicEnvField {
     section: &'static str,
     field: &'static str,
     supported_aliases: &'static [EnvAlias],
+    reject_multiple_compatibility_aliases: bool,
     apply: ApplyPublicEnvValue,
 }
 
@@ -3798,6 +4200,15 @@ impl PublicEnvField {
                 continue;
             };
             sources.compatibility = true;
+            if self.reject_multiple_compatibility_aliases && !legacy_values.is_empty() {
+                anyhow::bail!(
+                    "conflicting compatibility environment aliases for {}: {} and {} cannot both be set; use {}",
+                    self.field_path(),
+                    legacy_values[0].0,
+                    alias.name,
+                    canonical_name
+                );
+            }
             let value = (self.apply)(config, alias.name, alias.effective_raw(&raw))?;
             tracing::warn!(
                 field = %self.field_path(),
@@ -3887,6 +4298,15 @@ macro_rules! public_env_parser {
     (serving_profile) => {
         ServingProfileSetting::from_named_environment_value
     };
+    (rocm_synchronization_mode) => {
+        RocmSynchronizationModeSetting::from_named_environment_value
+    };
+    (rocm_graph_mode) => {
+        RocmGraphModeSetting::from_named_environment_value
+    };
+    (rocm_graph_cache_entries) => {
+        RocmGraphCacheEntries::from_named_environment_value
+    };
     (memory_reclaim_mode) => {
         MemoryReclaimModeSetting::from_named_environment_value
     };
@@ -3968,11 +4388,26 @@ macro_rules! public_env_parser {
 }
 
 macro_rules! public_env_field {
+    ($kind:ident, $section:ident.$field:ident) => {
+        PublicEnvField {
+            section: stringify!($section),
+            field: stringify!($field),
+            supported_aliases: &[],
+            reject_multiple_compatibility_aliases: false,
+            apply: |config, name, raw| {
+                let value = (public_env_parser!($kind))(name, raw)?;
+                let normalized = value.normalized_env_value();
+                config.$section.$field = value;
+                Ok(normalized)
+            },
+        }
+    };
     ($kind:ident, $section:ident.$field:ident, [$($legacy:expr),+ $(,)?]) => {
         PublicEnvField {
             section: stringify!($section),
             field: stringify!($field),
             supported_aliases: &[$(EnvAlias::value($legacy)),+],
+            reject_multiple_compatibility_aliases: false,
             apply: |config, name, raw| {
                 let value = (public_env_parser!($kind))(name, raw)?;
                 let normalized = value.normalized_env_value();
@@ -3986,6 +4421,7 @@ macro_rules! public_env_field {
             section: stringify!($section),
             field: stringify!($field),
             supported_aliases: &[EnvAlias::value($legacy)],
+            reject_multiple_compatibility_aliases: false,
             apply: |config, name, raw| {
                 let value = (public_env_parser!($kind))(name, raw)?;
                 let normalized = value.normalized_env_value();
@@ -4002,8 +4438,23 @@ macro_rules! public_env_field {
                 EnvAlias::presence_as_false($presence),
                 EnvAlias::value($legacy),
             ],
+            reject_multiple_compatibility_aliases: false,
             apply: |config, name, raw| {
                 let value = parse_public_some_bool(name, raw)?;
+                let normalized = value.normalized_env_value();
+                config.$section.$field = value;
+                Ok(normalized)
+            },
+        }
+    };
+    (reject_multiple_aliases, $kind:ident, $section:ident.$field:ident, [$($legacy:expr),+ $(,)?]) => {
+        PublicEnvField {
+            section: stringify!($section),
+            field: stringify!($field),
+            supported_aliases: &[$(EnvAlias::value($legacy)),+],
+            reject_multiple_compatibility_aliases: true,
+            apply: |config, name, raw| {
+                let value = (public_env_parser!($kind))(name, raw)?;
                 let normalized = value.normalized_env_value();
                 config.$section.$field = value;
                 Ok(normalized)
@@ -4016,6 +4467,21 @@ macro_rules! public_env_field {
 /// and conformance tests all derive from it.
 static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     public_env_field!(serving_profile, server.serving_profile, SERVING_PROFILE_ENV),
+    public_env_field!(
+        rocm_synchronization_mode,
+        accelerator.rocm_synchronization_mode
+    ),
+    public_env_field!(
+        reject_multiple_aliases,
+        rocm_graph_mode,
+        accelerator.rocm_graph_mode,
+        [ROCM_GRAPHS_ENV, ROCM_GRAPH_CAPTURE_ENV]
+    ),
+    public_env_field!(
+        rocm_graph_cache_entries,
+        accelerator.rocm_graph_cache_entries,
+        ROCM_GRAPH_CACHE_MAX_ENV
+    ),
     public_env_field!(deterministic, server.deterministic, DETERMINISTIC_ENV),
     public_env_field!(text, server.host, "KILN_HOST"),
     public_env_field!(u16, server.port, "KILN_PORT"),
@@ -4302,6 +4768,7 @@ impl Default for KilnConfig {
     fn default() -> Self {
         Self {
             server: ServerConfig::default(),
+            accelerator: AcceleratorRuntimeConfig::default(),
             batching: BatchingConfig::default(),
             model: ModelConfig::default(),
             memory: MemoryConfig::default(),
@@ -4734,6 +5201,8 @@ impl KilnConfig {
 
     /// Validate configuration values. Returns an error describing the first invalid value.
     fn validate(&self) -> Result<()> {
+        self.accelerator
+            .validate_for_serving_profile(self.server.serving_profile.profile())?;
         if self.server.host.trim().is_empty() {
             anyhow::bail!("server.host must be non-empty, got {:?}", self.server.host);
         }
@@ -5023,6 +5492,17 @@ fn validate_http_send_buffer_bytes(bytes: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_rocm_graph_cache_entries(entries: usize) -> Result<()> {
+    if !(ROCM_GRAPH_CACHE_ENTRIES_MIN..=ROCM_GRAPH_CACHE_ENTRIES_MAX).contains(&entries) {
+        anyhow::bail!(
+            "accelerator.rocm_graph_cache_entries must be between {} and {} entries, got {entries}",
+            ROCM_GRAPH_CACHE_ENTRIES_MIN,
+            ROCM_GRAPH_CACHE_ENTRIES_MAX
+        );
+    }
+    Ok(())
+}
+
 fn validate_stream_stall_grace_ms(millis: u64) -> Result<()> {
     if !(STREAM_STALL_GRACE_MIN_MS..=STREAM_STALL_GRACE_MAX_MS).contains(&millis) {
         anyhow::bail!(
@@ -5177,6 +5657,9 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     const EXPECTED_PUBLIC_ENV_NAMES: &[&str] = &[
+        "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES",
+        "KILN_ACCELERATOR_ROCM_GRAPH_MODE",
+        "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE",
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES",
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES",
         "KILN_ADAPTERS_MAX_DISK_BYTES",
@@ -5439,6 +5922,25 @@ mod tests {
         assert!(!config.server.chat_config_hash_metadata);
         assert_eq!(config.server.slow_request_warn_secs, 30);
         assert_eq!(config.server.shutdown_timeout_secs, 5);
+        assert_eq!(
+            config.accelerator.rocm_synchronization_mode.mode(),
+            RocmSynchronizationMode::LegacyHostBarriers
+        );
+        assert_eq!(
+            config.accelerator.rocm_graph_mode.mode(),
+            RocmGraphMode::Profile
+        );
+        assert_eq!(
+            config.accelerator.rocm_graph_cache_entries.entries(),
+            DEFAULT_ROCM_GRAPH_CACHE_ENTRIES
+        );
+        for source in [
+            config.accelerator.rocm_synchronization_mode.source(),
+            config.accelerator.rocm_graph_mode.source(),
+            config.accelerator.rocm_graph_cache_entries.source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::Default);
+        }
         assert_eq!(config.batching.mode.mode(), BatchingMode::Auto);
         assert_eq!(config.batching.mode.source(), ConfigValueSource::Default);
         assert!(!config.batching.rowwise_decode.enabled());
@@ -5611,6 +6113,250 @@ mod tests {
     }
 
     #[test]
+    fn accelerator_policy_defaults_resolve_by_serving_profile_and_serialize() {
+        let accelerator = AcceleratorRuntimeConfig::default();
+        for (profile, expected_graph_mode) in [
+            (ServingProfile::Stable, RocmGraphMode::Disabled),
+            (
+                ServingProfile::Experimental,
+                RocmGraphMode::LazyCaptureReplay,
+            ),
+            (ServingProfile::Maintenance, RocmGraphMode::Disabled),
+        ] {
+            let source = if profile == ServingProfile::Experimental {
+                ConfigValueSource::ConfigFile
+            } else {
+                ConfigValueSource::Default
+            };
+            let resolved = accelerator.resolved_policy(ServingProfileSetting::new(profile, source));
+            assert_eq!(resolved.schema_id, ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID);
+            assert_eq!(resolved.version, ACCELERATOR_RUNTIME_POLICY_VERSION);
+            assert_eq!(resolved.serving_profile, profile);
+            assert_eq!(resolved.serving_profile_source, source);
+            assert_eq!(
+                resolved.rocm_synchronization_mode,
+                ResolvedAcceleratorValue {
+                    configured: RocmSynchronizationMode::LegacyHostBarriers,
+                    effective: RocmSynchronizationMode::LegacyHostBarriers,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
+                resolved.rocm_graph_mode,
+                ResolvedAcceleratorValue {
+                    configured: RocmGraphMode::Profile,
+                    effective: expected_graph_mode,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
+                resolved.rocm_graph_cache_entries,
+                ResolvedAcceleratorValue {
+                    configured: DEFAULT_ROCM_GRAPH_CACHE_ENTRIES,
+                    effective: DEFAULT_ROCM_GRAPH_CACHE_ENTRIES,
+                    source: ConfigValueSource::Default,
+                }
+            );
+        }
+
+        let json = serde_json::to_value(accelerator.resolved_policy(ServingProfileSetting::new(
+            ServingProfile::Experimental,
+            ConfigValueSource::Environment,
+        )))
+        .unwrap();
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v1");
+        assert_eq!(json["version"], 1);
+        assert_eq!(json["serving_profile"], "experimental");
+        assert_eq!(json["serving_profile_source"], "environment");
+        assert_eq!(json["rocm_graph_mode"]["configured"], "profile");
+        assert_eq!(json["rocm_graph_mode"]["effective"], "lazy_capture_replay");
+        assert_eq!(json["rocm_graph_mode"]["source"], "default");
+    }
+
+    #[test]
+    fn accelerator_toml_is_strict_source_tracked_bounded_and_profile_gated() {
+        let config: KilnConfig = toml::from_str(
+            r#"
+[server]
+serving_profile = "experimental"
+
+[accelerator]
+rocm_synchronization_mode = "stream_ordered"
+rocm_graph_mode = "warmup_then_eager"
+rocm_graph_cache_entries = 64
+"#,
+        )
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            config.accelerator.rocm_synchronization_mode.mode(),
+            RocmSynchronizationMode::StreamOrdered
+        );
+        assert_eq!(
+            config.accelerator.rocm_graph_mode.mode(),
+            RocmGraphMode::WarmupThenEager
+        );
+        assert_eq!(config.accelerator.rocm_graph_cache_entries.entries(), 64);
+        for source in [
+            config.accelerator.rocm_synchronization_mode.source(),
+            config.accelerator.rocm_graph_mode.source(),
+            config.accelerator.rocm_graph_cache_entries.source(),
+        ] {
+            assert_eq!(source, ConfigValueSource::ConfigFile);
+        }
+
+        for entries in [ROCM_GRAPH_CACHE_ENTRIES_MIN, ROCM_GRAPH_CACHE_ENTRIES_MAX] {
+            let parsed: KilnConfig = toml::from_str(&format!(
+                "[accelerator]\nrocm_graph_cache_entries = {entries}\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                parsed.accelerator.rocm_graph_cache_entries.entries(),
+                entries
+            );
+        }
+
+        for document in [
+            "[accelerator]\nrocm_synchronization_mode = \"eventually\"\n".to_owned(),
+            "[accelerator]\nrocm_synchronization_mode = true\n".to_owned(),
+            "[accelerator]\nrocm_graph_mode = \"automatic\"\n".to_owned(),
+            "[accelerator]\nrocm_graph_mode = false\n".to_owned(),
+            "[accelerator]\nrocm_graph_cache_entries = 0\n".to_owned(),
+            format!(
+                "[accelerator]\nrocm_graph_cache_entries = {}\n",
+                ROCM_GRAPH_CACHE_ENTRIES_MAX + 1
+            ),
+            "[accelerator]\nrocm_graph_cache_entries = \"8\"\n".to_owned(),
+            "[accelerator]\nunknown = true\n".to_owned(),
+        ] {
+            let error = toml::from_str::<KilnConfig>(&document).unwrap_err();
+            let detail = error.to_string();
+            assert!(
+                detail.contains("accelerator")
+                    || detail.contains("invalid type")
+                    || detail.contains("unknown field"),
+                "unexpected error for {document:?}: {error:#}"
+            );
+        }
+
+        for profile in [ServingProfile::Stable, ServingProfile::Maintenance] {
+            for mode in [
+                RocmGraphMode::WarmupThenEager,
+                RocmGraphMode::LazyCaptureReplay,
+            ] {
+                let mut gated = KilnConfig::default();
+                gated.server.serving_profile =
+                    ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
+                gated.accelerator.rocm_graph_mode =
+                    RocmGraphModeSetting::new(mode, ConfigValueSource::ConfigFile);
+                let detail = gated.validate().unwrap_err().to_string();
+                assert!(detail.contains("accelerator.rocm_graph_mode"), "{detail}");
+                assert!(detail.contains("experimental"), "{detail}");
+            }
+
+            let mut gated = KilnConfig::default();
+            gated.server.serving_profile =
+                ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
+            gated.accelerator.rocm_synchronization_mode = RocmSynchronizationModeSetting::new(
+                RocmSynchronizationMode::StreamOrdered,
+                ConfigValueSource::ConfigFile,
+            );
+            let detail = gated.validate().unwrap_err().to_string();
+            assert!(
+                detail.contains("accelerator.rocm_synchronization_mode"),
+                "{detail}"
+            );
+            assert!(detail.contains("experimental"), "{detail}");
+
+            for allowed_mode in [RocmGraphMode::Profile, RocmGraphMode::Disabled] {
+                let mut allowed = KilnConfig::default();
+                allowed.server.serving_profile =
+                    ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
+                allowed.accelerator.rocm_graph_mode =
+                    RocmGraphModeSetting::new(allowed_mode, ConfigValueSource::ConfigFile);
+                allowed.validate().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn accelerator_legacy_graph_env_aliases_are_typed_and_duplicates_fail() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+
+        for (name, raw, expected) in [
+            (ROCM_GRAPHS_ENV, "false", RocmGraphMode::Disabled),
+            (ROCM_GRAPHS_ENV, "true", RocmGraphMode::Profile),
+            (
+                ROCM_GRAPH_CAPTURE_ENV,
+                "false",
+                RocmGraphMode::WarmupThenEager,
+            ),
+            (ROCM_GRAPH_CAPTURE_ENV, "true", RocmGraphMode::Profile),
+        ] {
+            environment.set(name, raw);
+            let mut config = KilnConfig::default();
+            config.apply_env_overrides().unwrap();
+            assert_eq!(config.accelerator.rocm_graph_mode.mode(), expected);
+            assert_eq!(
+                config.accelerator.rocm_graph_mode.source(),
+                ConfigValueSource::Environment
+            );
+            environment.remove(name);
+        }
+
+        environment.set(ROCM_GRAPH_CACHE_MAX_ENV, "64");
+        let mut config = KilnConfig::default();
+        config.apply_env_overrides().unwrap();
+        assert_eq!(config.accelerator.rocm_graph_cache_entries.entries(), 64);
+        assert_eq!(
+            config.accelerator.rocm_graph_cache_entries.source(),
+            ConfigValueSource::Environment
+        );
+        environment.remove(ROCM_GRAPH_CACHE_MAX_ENV);
+
+        environment.set(ROCM_GRAPHS_ENV, "true");
+        environment.set(ROCM_GRAPH_CAPTURE_ENV, "true");
+        let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(detail.contains("accelerator.rocm_graph_mode"), "{detail}");
+        assert!(detail.contains(ROCM_GRAPHS_ENV), "{detail}");
+        assert!(detail.contains(ROCM_GRAPH_CAPTURE_ENV), "{detail}");
+        assert!(
+            detail.contains("KILN_ACCELERATOR_ROCM_GRAPH_MODE"),
+            "{detail}"
+        );
+        environment.remove(ROCM_GRAPHS_ENV);
+        environment.remove(ROCM_GRAPH_CAPTURE_ENV);
+
+        environment.set("KILN_ACCELERATOR_ROCM_GRAPH_MODE", "disabled");
+        environment.set(ROCM_GRAPHS_ENV, "true");
+        let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(detail.contains("accelerator.rocm_graph_mode"), "{detail}");
+        assert!(
+            detail.contains("KILN_ACCELERATOR_ROCM_GRAPH_MODE"),
+            "{detail}"
+        );
+        assert!(detail.contains(ROCM_GRAPHS_ENV), "{detail}");
+        environment.remove("KILN_ACCELERATOR_ROCM_GRAPH_MODE");
+        environment.remove(ROCM_GRAPHS_ENV);
+
+        for (name, invalid) in [
+            (ROCM_GRAPHS_ENV, "maybe"),
+            (ROCM_GRAPH_CAPTURE_ENV, "sometimes"),
+            (ROCM_GRAPH_CACHE_MAX_ENV, "0"),
+        ] {
+            environment.set(name, invalid);
+            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
+            environment.remove(name);
+            let detail = format!("{error:#}");
+            assert!(detail.contains(name), "{name}: {detail}");
+            assert!(detail.contains(invalid), "{name}: {detail}");
+        }
+    }
+
+    #[test]
     fn speculative_draft_geometry_is_validated_against_the_selected_model() {
         let model = kiln_core::config::ModelConfig::qwen3_5_4b();
         let disabled = SpeculativeDecodingConfig {
@@ -5674,7 +6420,7 @@ mod tests {
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 78);
+        assert_eq!(original_len, 81);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -5709,8 +6455,8 @@ mod tests {
             })
             .count();
         assert_eq!(canonical_only_aliases, 22);
-        assert_eq!(compatibility_aliases, 58);
-        assert_eq!(compatibility_alias_fields, 56);
+        assert_eq!(compatibility_aliases, 61);
+        assert_eq!(compatibility_alias_fields, 58);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(
@@ -5743,9 +6489,9 @@ mod tests {
                 .as_object()
                 .unwrap()
                 .len(),
-            14
+            15
         );
-        assert_eq!(serialized_leaves.len(), 86);
+        assert_eq!(serialized_leaves.len(), 89);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 8);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -5788,11 +6534,17 @@ mod tests {
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_seventy_eight_public_fields() {
+    fn public_env_canonical_only_loads_all_eighty_one_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
             ("KILN_SERVER_SERVING_PROFILE", "experimental"),
+            (
+                "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE",
+                "stream_ordered",
+            ),
+            ("KILN_ACCELERATOR_ROCM_GRAPH_MODE", "lazy_capture_replay"),
+            ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES", "13"),
             ("KILN_SERVER_DETERMINISTIC", "true"),
             ("KILN_SERVER_HOST", "127.0.0.2"),
             ("KILN_SERVER_PORT", "9444"),
@@ -5889,6 +6641,15 @@ mod tests {
             config.server.serving_profile.profile(),
             ServingProfile::Experimental
         );
+        assert_eq!(
+            config.accelerator.rocm_synchronization_mode.mode(),
+            RocmSynchronizationMode::StreamOrdered
+        );
+        assert_eq!(
+            config.accelerator.rocm_graph_mode.mode(),
+            RocmGraphMode::LazyCaptureReplay
+        );
+        assert_eq!(config.accelerator.rocm_graph_cache_entries.entries(), 13);
         assert!(config.server.deterministic.enabled());
         assert_eq!(config.server.host, "127.0.0.2");
         assert_eq!(config.server.port, 9444);
@@ -6052,6 +6813,9 @@ mod tests {
 
         for source in [
             config.server.serving_profile.source(),
+            config.accelerator.rocm_synchronization_mode.source(),
+            config.accelerator.rocm_graph_mode.source(),
+            config.accelerator.rocm_graph_cache_entries.source(),
             config.server.deterministic.source(),
             config.server.stream_stall_grace_ms.source(),
             config.server.max_batch_tokens.source(),
@@ -6094,6 +6858,10 @@ mod tests {
         for (name, value) in [
             ("KILN_SERVER_DETERMINISTIC", " true "),
             ("KILN_DETERMINISTIC", "1"),
+            ("KILN_ACCELERATOR_ROCM_GRAPH_MODE", "PROFILE"),
+            (ROCM_GRAPHS_ENV, "true"),
+            ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES", "8"),
+            (ROCM_GRAPH_CACHE_MAX_ENV, "08"),
             ("KILN_SERVER_MAX_DECODE_BATCH", "backend_policy"),
             ("KILN_MAX_DECODE_BATCH", "auto"),
             ("KILN_SERVER_SERVING_PROFILE", "EXPERIMENTAL"),
@@ -6139,6 +6907,11 @@ mod tests {
         let mut config = KilnConfig::default();
         config.apply_env_overrides().unwrap();
         assert!(config.server.deterministic.enabled());
+        assert_eq!(
+            config.accelerator.rocm_graph_mode.mode(),
+            RocmGraphMode::Profile
+        );
+        assert_eq!(config.accelerator.rocm_graph_cache_entries.entries(), 8);
         assert_eq!(config.server.max_decode_batch.limit(), None);
         assert_eq!(config.batching.mode.mode(), BatchingMode::Enabled);
         assert!(config.batching.rowwise_decode.enabled());
@@ -6244,6 +7017,9 @@ mod tests {
         let environment = ScopedConfigEnvironment::isolated();
         for (name, invalid) in [
             ("KILN_SERVER_SERVING_PROFILE", "sometimes"),
+            ("KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE", "eventually"),
+            ("KILN_ACCELERATOR_ROCM_GRAPH_MODE", "automatic"),
+            ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES", "0"),
             ("KILN_SERVER_PORT", "nine-thousand"),
             ("KILN_SERVER_DETERMINISTIC", "maybe"),
             ("KILN_SERVER_DEFAULT_THINKING_BUDGET_MS", "2.5"),
@@ -7346,6 +8122,7 @@ direct_decode_rendezvous_mixed_seq_lens = false
             section: "server",
             field: "host",
             supported_aliases: &CANONICAL_ALIAS,
+            reject_multiple_compatibility_aliases: false,
             apply: count_apply,
         };
 

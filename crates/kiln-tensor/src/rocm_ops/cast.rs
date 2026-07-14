@@ -64,7 +64,7 @@ pub fn rocm_cast(src: &Tensor, target: DType) -> Result<Tensor> {
     // read — allocate uninitialized to skip the zero-fill.
     let dst_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, target, n)?;
 
-    let raw_stream = src_storage.rocm_stream_raw();
+    let raw_stream = src_storage.rocm_stream_raw()?;
     let (src_base, _) = src_storage.device_ptr_raw();
     let (dst_base, _) = dst_storage.device_ptr_raw();
     let src_off = (src.layout().start_offset() * from_bpe) as u64;
@@ -77,7 +77,12 @@ pub fn rocm_cast(src: &Tensor, target: DType) -> Result<Tensor> {
             "rocm_cast: FFI returned status {status}"
         )));
     }
-    crate::rocm_synchronize_compute_stream(device_index).map_err(|e| {
+    crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
+        &ctx,
+        &[src_storage],
+        crate::RocmSyncReason::CastOutput,
+    )
+    .map_err(|e| {
         Error::Msg(format!(
             "rocm_cast: synchronize after async kernel launch: {e}"
         ))

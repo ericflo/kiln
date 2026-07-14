@@ -150,6 +150,15 @@
   const responses = {
     '/v1/config': () => ({
       serving_profile: { profile: 'stable', source: 'default' },
+      accelerator_runtime: {
+        schema_id: 'kiln.accelerator-runtime-policy.v1',
+        version: 1,
+        serving_profile: 'stable',
+        serving_profile_source: 'default',
+        rocm_synchronization_mode: { configured: 'legacy_host_barriers', effective: 'legacy_host_barriers', source: 'default' },
+        rocm_graph_mode: { configured: 'profile', effective: 'disabled', source: 'default' },
+        rocm_graph_cache_entries: { configured: 8, effective: 8, source: 'default' },
+      },
       vram: {
         probe_selector: 'nvidia:0',
         unified: false,

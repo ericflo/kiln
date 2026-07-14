@@ -178,7 +178,7 @@ Organized by subsystem. Every box must be checked for "as first-class as CUDA."
 - [ ] `RocmStorage` implements the full `StorageBackend` trait.
 - [ ] `rocm_allocator.rs` — retype of `cuda_allocator.rs` (Owned/Pool/Frozen +
       cache + reserved/peak accounting + `warm()`).
-- [ ] `active_rocm_stream` + `with_active_rocm_stream` + `ActiveStreamGuard`
+- [ ] `active_rocm_stream` + unsafe graph-only `with_rocm_graph_capture_stream` + `ActiveStreamGuard`
       thread-local.
 - [ ] `capture_alloc` ROCm Borrowed-view path (HIP-graph pointer pinning).
 - [ ] `primary_rocm_context(idx)` accessor + `rocm_is_available()` free fn.

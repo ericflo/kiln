@@ -79,7 +79,20 @@ pub fn rocm_elementwise_binary(a: &Tensor, b: &Tensor, kind: i32) -> Result<Tens
         .downcast_ref::<RocmStorage>()
         .ok_or_else(|| Error::Msg("rocm_elementwise_binary: b must be ROCm".to_string()))?;
 
+    if a_storage.device() != b_storage.device() {
+        return Err(Error::Msg(format!(
+            "rocm_elementwise_binary: device mismatch a={} b={}",
+            a_storage.device(),
+            b_storage.device()
+        )));
+    }
+
     let ctx = a_storage.context();
+    if !Arc::ptr_eq(&ctx, &b_storage.context()) {
+        return Err(Error::Msg(
+            "rocm_elementwise_binary: both inputs must share one ROCm context".to_string(),
+        ));
+    }
     let device_index = match a.device() {
         Device::Rocm(i) => i,
         _ => unreachable!("rocm_elementwise_binary: a must be on a ROCm device"),
@@ -89,7 +102,7 @@ pub fn rocm_elementwise_binary(a: &Tensor, b: &Tensor, kind: i32) -> Result<Tens
     // all n), so the uninit alloc skips the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = a_storage.rocm_stream_raw();
+    let raw_stream = a_storage.rocm_stream_raw()?;
 
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
@@ -110,7 +123,12 @@ pub fn rocm_elementwise_binary(a: &Tensor, b: &Tensor, kind: i32) -> Result<Tens
             "rocm_elementwise_binary: FFI returned status {status}"
         )));
     }
-    crate::rocm_synchronize_compute_stream(device_index).map_err(|e| {
+    crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
+        &ctx,
+        &[a_storage, b_storage],
+        crate::RocmSyncReason::ElementwiseOutput,
+    )
+    .map_err(|e| {
         Error::Msg(format!(
             "rocm_elementwise_binary: synchronize after async kernel launch: {e}"
         ))

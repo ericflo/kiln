@@ -45,7 +45,7 @@ use crate::forward::{
     model_forward_paged_streaming_with_progress_offset_and_policy,
 };
 use crate::metal_graph::MetalGraphRunner;
-use crate::rocm_graph::RocmGraphRunner;
+use crate::rocm_graph::{RocmGraphExecutionPolicy, RocmGraphRunner};
 // (#1082) Native single-submit Vulkan-resident decode entry — only referenced
 // from the `#[cfg(feature = "vulkan")]` single-row fast path below.
 #[cfg(feature = "vulkan")]
@@ -295,8 +295,8 @@ pub struct ModelRunner {
     /// Uses Mutex for interior mutability (graph state changes during &self generation).
     cuda_graph: Mutex<CudaGraphRunner>,
     /// ROCm HIP-graph runner for accelerated decode steps (R.9). Independent of
-    /// `cuda_graph`; active by default on ROCm devices unless
-    /// `KILN_ROCM_GRAPHS=0` is set. Same per-step interior-mutability pattern.
+    /// `cuda_graph`; its immutable policy is installed at construction. Same
+    /// per-step interior-mutability pattern.
     rocm_graph: Mutex<RocmGraphRunner>,
     /// Metal ICB graph runner for accelerated decode steps. Active only on a
     /// Metal device with `KILN_METAL_GRAPHS` set; otherwise eager Metal decode
@@ -338,6 +338,31 @@ pub struct ModelRunner {
     streaming_prefill: StreamingPrefillExecutionPolicy,
     backend_health: BackendHealthHandle,
     memory_runtime: Option<InferenceMemoryRuntime>,
+}
+
+impl Drop for ModelRunner {
+    fn drop(&mut self) {
+        #[cfg(feature = "rocm")]
+        if self.backend_health.snapshot().quarantined
+            && matches!(self.weights.embed_tokens.device(), Device::Rocm(_))
+        {
+            use kiln_tensor::StorageBackend;
+
+            if let Some(storage) = self
+                .weights
+                .embed_tokens
+                .storage()
+                .as_any()
+                .downcast_ref::<kiln_tensor::RocmStorage>()
+            {
+                // Drop runs before struct fields. Bridge the process-wide
+                // backend quarantine into the low-level device quarantine so
+                // weights, graph state, workspaces, and streams retain unknown
+                // in-flight resources instead of freeing them during shutdown.
+                storage.context().quarantine_execution();
+            }
+        }
+    }
 }
 
 /// Process-lifetime memory binding for direct inference consumers.
@@ -485,13 +510,13 @@ impl InferenceMemoryRuntime {
 
 /// Backend graph eligibility resolved before a [`ModelRunner`] is built.
 ///
-/// The server's stable profile sets every field false. Other embedding callers
-/// can continue using [`ModelRunner::new_with_options`] for the historical
-/// CUDA-only option plus backend defaults.
+/// The server's stable profile disables every graph backend. Other embedding
+/// callers can continue using [`ModelRunner::new_with_options`] for the
+/// historical CUDA-only option plus backend defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelRunnerRuntimeOptions {
     pub cuda_graphs: bool,
-    pub rocm_graphs: bool,
+    pub rocm_graph: RocmGraphExecutionPolicy,
     pub metal_graphs: bool,
     /// Exact width required by an owning scheduler. `None` leaves standalone
     /// model consumers on backend/debug defaults.
@@ -505,11 +530,17 @@ impl ModelRunnerRuntimeOptions {
     pub const fn eager_only() -> Self {
         Self {
             cuda_graphs: false,
-            rocm_graphs: false,
+            rocm_graph: RocmGraphExecutionPolicy::disabled(),
             metal_graphs: false,
             max_decode_batch: None,
             streaming_prefill: None,
         }
+    }
+}
+
+impl Default for ModelRunnerRuntimeOptions {
+    fn default() -> Self {
+        Self::eager_only()
     }
 }
 
@@ -2490,6 +2521,10 @@ impl ModelRunner {
     }
 
     /// Create a new ModelRunner with explicit CUDA graph control.
+    ///
+    /// This compatibility constructor does not enable ROCm graphs as a side
+    /// effect of its CUDA flag. ROCm owners must supply a typed policy through
+    /// [`Self::new_with_runtime_options`].
     pub fn new_with_options(
         weights: GpuWeights,
         tokenizer: KilnTokenizer,
@@ -2502,7 +2537,7 @@ impl ModelRunner {
             config,
             ModelRunnerRuntimeOptions {
                 cuda_graphs,
-                rocm_graphs: true,
+                rocm_graph: RocmGraphExecutionPolicy::disabled(),
                 metal_graphs: true,
                 max_decode_batch: None,
                 streaming_prefill: None,
@@ -2511,11 +2546,9 @@ impl ModelRunner {
     }
 
     /// Create a runner with backend graph eligibility resolved by the owning
-    /// product surface. Environment kill switches remain subordinate to these
-    /// booleans; they can disable an eligible runner but cannot enable one the
-    /// server profile prohibited. This compatibility constructor never probes
-    /// or initializes memory governance; direct accelerator consumers should
-    /// use [`Self::new_with_initialized_runtime`].
+    /// product surface. This compatibility constructor never probes or
+    /// initializes memory governance; direct accelerator consumers should use
+    /// [`Self::new_with_initialized_runtime`].
     pub fn new_with_runtime_options(
         weights: GpuWeights,
         tokenizer: KilnTokenizer,
@@ -2544,7 +2577,7 @@ impl ModelRunner {
     ) -> Self {
         let eos_token_ids = tokenizer.eos_token_ids();
         let cuda_graph = CudaGraphRunner::new(&execution_device, options.cuda_graphs);
-        let rocm_graph = RocmGraphRunner::new(&execution_device, options.rocm_graphs);
+        let rocm_graph = RocmGraphRunner::new(&execution_device, options.rocm_graph);
         let metal_graph = MetalGraphRunner::new(&execution_device, options.metal_graphs);
         let training_caps =
             TrainingLossBackend::runtime_training_capabilities(selected_backend.as_ref());
@@ -2635,7 +2668,20 @@ impl ModelRunner {
     }
 
     pub fn ensure_backend_healthy(&self) -> Result<()> {
-        self.backend_health.ensure_healthy()
+        self.backend_health.ensure_healthy()?;
+        #[cfg(feature = "rocm")]
+        if let Device::Rocm(device_index) = self.weights.embed_tokens.device() {
+            if kiln_tensor::rocm_cleanup_quarantined(device_index)
+                .context("query ROCm cleanup quarantine")?
+            {
+                let reason =
+                    "ROCm synchronization recovery failed; execution and cleanup are quarantined"
+                        .to_string();
+                self.backend_health.quarantine(reason.clone());
+                anyhow::bail!(reason);
+            }
+        }
+        Ok(())
     }
 
     /// Prove that all backend work submitted so far has completed before
@@ -2755,7 +2801,9 @@ impl ModelRunner {
             graph.invalidate();
         }
         if let Ok(mut graph) = self.rocm_graph.lock() {
-            graph.invalidate();
+            graph
+                .invalidate()
+                .context("failed to invalidate ROCm graphs after adapter load")?;
         }
         if let Ok(mut graph) = self.metal_graph.lock() {
             graph.invalidate();
@@ -2783,7 +2831,9 @@ impl ModelRunner {
             graph.invalidate();
         }
         if let Ok(mut graph) = self.rocm_graph.lock() {
-            graph.invalidate();
+            graph
+                .invalidate()
+                .context("failed to invalidate ROCm graphs after adapter unload")?;
         }
         if let Ok(mut graph) = self.metal_graph.lock() {
             graph.invalidate();
@@ -2857,7 +2907,9 @@ impl ModelRunner {
             graph.invalidate();
         }
         if let Ok(mut graph) = self.rocm_graph.lock() {
-            graph.invalidate();
+            graph
+                .invalidate()
+                .context("failed to invalidate ROCm graphs after adapter swap")?;
         }
         if let Ok(mut graph) = self.metal_graph.lock() {
             graph.invalidate();
@@ -2987,7 +3039,8 @@ impl ModelRunner {
         self.rocm_graph
             .lock()
             .map_err(|error| anyhow::anyhow!("failed to lock ROCm graph runner: {error}"))?
-            .invalidate();
+            .invalidate()
+            .context("failed to invalidate ROCm graphs for KV pool change")?;
         self.metal_graph
             .lock()
             .map_err(|error| anyhow::anyhow!("failed to lock Metal graph runner: {error}"))?
@@ -6782,7 +6835,7 @@ impl ModelRunner {
 
         // R.9: ROCm HIP-graph decode. On a Rocm device, route the step through
         // the graph runner (capture/replay, with eager fallback). When the
-        // runner is disabled via `KILN_ROCM_GRAPHS=0`, this is skipped entirely
+        // runner is disabled by its typed runtime policy, this is skipped entirely
         // and the eager path below runs unchanged.
         if paged_decode_replay_primitive_enabled(
             self.backend.as_ref(),
@@ -10350,6 +10403,32 @@ mod tests {
         "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
         "KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK",
     ];
+
+    #[test]
+    fn model_runner_runtime_options_default_to_eager_rocm_execution() {
+        let options = ModelRunnerRuntimeOptions::default();
+        assert_eq!(options, ModelRunnerRuntimeOptions::eager_only());
+        assert_eq!(
+            options.rocm_graph,
+            RocmGraphExecutionPolicy::disabled(),
+            "lazy ROCm capture must require an explicit product policy"
+        );
+    }
+
+    #[test]
+    fn cuda_compatibility_constructor_does_not_select_rocm_graphs() {
+        let source = include_str!("generate.rs");
+        let constructor_start = source
+            .find("    pub fn new_with_options(")
+            .expect("compatibility constructor");
+        let constructor_tail = &source[constructor_start..];
+        let constructor_end = constructor_tail
+            .find("    pub fn new_with_runtime_options(")
+            .expect("typed runtime constructor");
+        let constructor = &constructor_tail[..constructor_end];
+        assert!(constructor.contains("rocm_graph: RocmGraphExecutionPolicy::disabled()"));
+        assert!(!constructor.contains("lazy_capture_replay"));
+    }
 
     #[test]
     fn speculative_generation_unavailable_reason_is_stable() {

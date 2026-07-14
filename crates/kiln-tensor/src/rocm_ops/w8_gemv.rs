@@ -209,7 +209,7 @@ pub fn rocm_w8a16_gemv_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result
     };
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::BF16, m * n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -343,7 +343,7 @@ pub fn rocm_w8a16_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resu
     };
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::BF16, m * hidden)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -480,7 +480,7 @@ pub fn rocm_w8a8_gemv_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result<
     let x_scales_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, m)?;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::BF16, m * n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -636,7 +636,7 @@ pub fn rocm_w8a8_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resul
     let x_scales_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, m)?;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::BF16, m * hidden)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -792,7 +792,7 @@ pub fn rocm_w8a16_gemv_argmax_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) ->
     let scores_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, n)?;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::I64, 1)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -994,7 +994,7 @@ pub fn rocm_w8a16_gemv_gumbel_sample_bf16(
     let scores_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, n)?;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::I64, 1)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -1246,7 +1246,7 @@ pub fn rocm_w8a8_gemv_gumbel_sample_bf16(
     let scores_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, n)?;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::I64, 1)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();

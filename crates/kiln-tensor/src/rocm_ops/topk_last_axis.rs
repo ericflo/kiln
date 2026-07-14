@@ -80,7 +80,7 @@ pub fn rocm_topk_last_axis(x: &Tensor, k: usize) -> Result<(Vec<f32>, Vec<u32>)>
     let vals_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::F32, k)?;
     let idx_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::I64, k)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (vals_base, _) = vals_storage.device_ptr_raw();
     let (idx_base, _) = idx_storage.device_ptr_raw();

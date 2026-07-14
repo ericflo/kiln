@@ -222,7 +222,7 @@ pub fn rocm_paged_gather_index(
     let n = b * seqlen_k;
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::U32, n)?;
 
-    let raw_stream = bt_storage.rocm_stream_raw();
+    let raw_stream = bt_storage.rocm_stream_raw()?;
     let (bt_base, _) = bt_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
 
@@ -350,7 +350,7 @@ pub fn rocm_paged_gather_rows(
     let n_out = b * seqlen_k * hk * d;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n_out)?;
 
-    let raw_stream = pool_storage.rocm_stream_raw();
+    let raw_stream = pool_storage.rocm_stream_raw()?;
     let (pool_base, _) = pool_storage.device_ptr_raw();
     let (bt_base, _) = bt_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
@@ -444,7 +444,7 @@ pub fn rocm_gqa_repeat_heads(src: &Tensor, h: usize) -> Result<Tensor> {
     let n_out = b * sk * h * d;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n_out)?;
 
-    let raw_stream = src_storage.rocm_stream_raw();
+    let raw_stream = src_storage.rocm_stream_raw()?;
     let (src_base, _) = src_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let src_off = (src_c.layout().start_offset() * elem_bytes) as u64;
@@ -467,7 +467,12 @@ pub fn rocm_gqa_repeat_heads(src: &Tensor, h: usize) -> Result<Tensor> {
             "rocm_gqa_repeat_heads: FFI returned status {status}"
         )));
     }
-    crate::rocm_synchronize_compute_stream(device_index).map_err(|e| {
+    crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
+        &ctx,
+        &[src_storage],
+        crate::RocmSyncReason::RepeatHeadsOutput,
+    )
+    .map_err(|e| {
         Error::Msg(format!(
             "rocm_gqa_repeat_heads: synchronize after async kernel launch: {e}"
         ))
@@ -536,7 +541,7 @@ pub fn rocm_gqa_repeat_heads_head_major(src: &Tensor, h: usize) -> Result<Tensor
     let n_out = b * h * sk * d;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n_out)?;
 
-    let raw_stream = src_storage.rocm_stream_raw();
+    let raw_stream = src_storage.rocm_stream_raw()?;
     let (src_base, _) = src_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let src_off = (src_c.layout().start_offset() * elem_bytes) as u64;
@@ -559,7 +564,12 @@ pub fn rocm_gqa_repeat_heads_head_major(src: &Tensor, h: usize) -> Result<Tensor
             "rocm_gqa_repeat_heads_head_major: FFI returned status {status}"
         )));
     }
-    crate::rocm_synchronize_compute_stream(device_index).map_err(|e| {
+    crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
+        &ctx,
+        &[src_storage],
+        crate::RocmSyncReason::RepeatHeadsOutput,
+    )
+    .map_err(|e| {
         Error::Msg(format!(
             "rocm_gqa_repeat_heads_head_major: synchronize after async kernel launch: {e}"
         ))
@@ -781,7 +791,7 @@ pub fn rocm_paged_attn_decode_bf16(
                     pool_rows as i64,
                     split_count as i64,
                     scale,
-                    q_storage.rocm_stream_raw(),
+                    q_storage.rocm_stream_raw()?,
                 )
             }
         } else {
@@ -806,7 +816,7 @@ pub fn rocm_paged_attn_decode_bf16(
                     pool_rows as i64,
                     split_count as i64,
                     scale,
-                    q_storage.rocm_stream_raw(),
+                    q_storage.rocm_stream_raw()?,
                 )
             }
         }
@@ -828,7 +838,7 @@ pub fn rocm_paged_attn_decode_bf16(
                 page_block_size as i64,
                 pool_rows as i64,
                 scale,
-                q_storage.rocm_stream_raw(),
+                q_storage.rocm_stream_raw()?,
             )
         }
     } else {
@@ -849,7 +859,7 @@ pub fn rocm_paged_attn_decode_bf16(
                 page_block_size as i64,
                 pool_rows as i64,
                 scale,
-                q_storage.rocm_stream_raw(),
+                q_storage.rocm_stream_raw()?,
             )
         }
     };
@@ -898,7 +908,7 @@ pub fn rocm_build_tail_mask(seqused_k: &Tensor, b: usize, h: usize, sk: usize) -
     let n = b * h * sk;
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::U8, n)?;
 
-    let raw_stream = su_storage.rocm_stream_raw();
+    let raw_stream = su_storage.rocm_stream_raw()?;
     let (su_base, _) = su_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
 

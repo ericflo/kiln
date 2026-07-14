@@ -114,7 +114,7 @@ pub use tensor::{DeviceTransferSupport, Tensor, device_transfer_support};
 pub use tensor_id::TensorId;
 
 #[cfg(feature = "rocm")]
-pub use active_rocm_stream::{active_rocm_stream, with_active_rocm_stream};
+pub use active_rocm_stream::{active_rocm_stream, with_rocm_graph_capture_stream};
 #[cfg(feature = "cuda")]
 pub use active_stream::{active_cuda_stream, with_active_cuda_stream};
 #[cfg(feature = "cuda")]
@@ -157,6 +157,11 @@ pub use fp8::{
     E4M3_MAX, cuda_fp8_dequantize, cuda_fp8_dequantize_direct, cuda_fp8_quantize,
     cuda_fp8_quantize_direct, cuda_fp8_quantize_with_scale,
 };
+#[cfg(feature = "rocm")]
+pub use kiln_hip::{
+    ROCM_SYNC_REASON_COUNT, RocmExecutionPolicy, RocmSyncReason, RocmSyncReasonStats,
+    RocmSyncTelemetrySnapshot, RocmSynchronizationMode,
+};
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;
 #[doc(hidden)]
@@ -184,20 +189,26 @@ pub use rocm_capture_alloc::{
 };
 #[cfg(feature = "rocm")]
 pub use rocm_matmul::{
-    rocm_matmul, rocm_matmul_into, rocm_matmul_lhs_transposed, rocm_matmul_lhs_transposed_to_dtype,
-    rocm_matmul_rhs_transposed, rocm_matmul_rhs_transposed_to_dtype, rocm_matmul_to_dtype,
-    rocm_matmul_with_bias,
+    HipblasLtWorkspaceLease, rocm_blaslt_workspace_lease, rocm_matmul, rocm_matmul_into,
+    rocm_matmul_lhs_transposed, rocm_matmul_lhs_transposed_to_dtype, rocm_matmul_rhs_transposed,
+    rocm_matmul_rhs_transposed_to_dtype, rocm_matmul_to_dtype, rocm_matmul_with_bias,
 };
 #[cfg(feature = "rocm")]
 pub use rocm_ops::*;
 #[cfg(feature = "rocm")]
 pub use rocm_storage::{
-    RocmStorage, host_to_rocm_copy, host_to_rocm_copy_ctx, primary_rocm_context, rocm_contiguous,
-    rocm_htod_count, rocm_is_available, rocm_log_softmax_last_axis, rocm_log_softmax_last_axis_f32,
-    rocm_mem_get_info, rocm_pool_stats, rocm_slice_set_dim0, rocm_softmax_last_axis,
-    rocm_synchronize_compute_stream, rocm_synchronize_default_stream,
-    rocm_synchronize_tensor_stream, rocm_to_host_copy, rocm_trim_pool, rocm_write_host_in_place,
-    rocm_zeros_ctx,
+    RocmStorage, host_to_rocm_copy, host_to_rocm_copy_ctx, primary_rocm_context,
+    primary_rocm_context_with_execution_policy, rocm_cleanup_quarantined, rocm_contiguous,
+    rocm_execution_policy, rocm_htod_count, rocm_is_available, rocm_log_softmax_last_axis,
+    rocm_log_softmax_last_axis_f32, rocm_mem_get_info, rocm_pool_stats, rocm_slice_set_dim0,
+    rocm_softmax_last_axis, rocm_sync_telemetry_snapshot, rocm_synchronize_compute_stream,
+    rocm_synchronize_compute_stream_for, rocm_synchronize_default_stream,
+    rocm_synchronize_device_for, rocm_synchronize_external_yield,
+    rocm_synchronize_external_yield_for_stream,
+    rocm_synchronize_legacy_device_same_stream_dependency, rocm_synchronize_same_stream_dependency,
+    rocm_synchronize_tensor_same_stream_dependency, rocm_synchronize_tensor_stream,
+    rocm_synchronize_tensor_stream_for, rocm_to_host_copy, rocm_trim_pool,
+    rocm_write_host_in_place, rocm_zeros_ctx,
 };
 #[cfg(feature = "vulkan")]
 pub use vulkan_allocator::VulkanAllocator;

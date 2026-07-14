@@ -107,7 +107,16 @@ fn rocm_owner_stream_raw(
     name: &'static str,
 ) -> Result<*mut core::ffi::c_void, RmsNormError> {
     let (storage, _) = kiln_kt_bridge::rocm_storage_and_byte_offset(tensor, tensor.dtype(), name)?;
-    Ok(storage.context().default_stream().hip_stream() as *mut core::ffi::c_void)
+    storage
+        .context()
+        .default_stream()
+        .hip_stream_for_execution()
+        .map(|stream| stream as *mut core::ffi::c_void)
+        .map_err(|error| {
+            RmsNormError::Msg(format!(
+                "kt-rmsnorm bwd: ROCm owner stream acquisition for {name}: {error}"
+            ))
+        })
 }
 
 #[cfg(feature = "rocm")]

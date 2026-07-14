@@ -110,10 +110,10 @@ const generatedDocsPages = [
     terms: [
       'KILN_<SECTION>_<FIELD>',
       'Strict failure behavior',
-      '14 top-level sections and 86 fixed leaf fields',
-      '78 implement the canonical mechanical environment name',
-      '56 also retain one or more deprecated compatibility spellings',
-      '58 aliases total',
+      '15 top-level sections and 89 fixed leaf fields',
+      '81 implement the canonical mechanical environment name',
+      '58 also retain one or more deprecated compatibility spellings',
+      '61 aliases total',
       '8 are config-file-only',
       'KILN_BATCHING_MODE',
       'KILN_BATCHING_ROWWISE_DECODE',
@@ -705,6 +705,7 @@ const expectedArchitectureSections = [
   { label: 'request path and batching', terms: ['request path and batching', 'iteration-level scheduler', 'continuous batching'] },
   { label: 'immutable batching authority', terms: ['BatchingRuntimeConfig', 'None of those paths rereads', 'actor_active', 'direct streaming effectively-greedy', 'worker liveness', 'route availability', 'decode_runtime.batching_configuration', 'decode_runtime.direct_decode_rendezvous'] },
   { label: 'immutable streaming-prefill authority', terms: ['one streaming-prefill authority for inference and training', 'StreamingPrefillRuntimeConfig', 'none of those paths rereads', 'SFT/GRPO/OPD', 'checkpoint planning', 'base tiles / tape tiles / detached full-attention tiles', 'prompt-logprob', 'local teacher', 'MTP alignment', 'inference-contract-v2', 'logit-cache identity', 'CPU/Vulkan', '8192 / 65536 / 65536', 'prefill_runtime.streaming_prefill', 'prompt-length dependent'] },
+  { label: 'immutable ROCm execution policy', terms: ['rocm execution policy, stream ordering, and graph lifecycle', 'kiln.accelerator-runtime-policy.v1', 'legacy_host_barriers', 'stream_ordered', 'one context, one policy', 'warmup_then_eager', 'lazy_capture_replay', 'workspace lease', 'bounded live graph cache', 'algorithm blobs are cached per device', 'fixed telemetry dimensions', 'external_yield', 'memory_reclaim', 'graph_boundary', 'error_recovery', 'cleanup-quarantined', 'active ROCm telemetry unavailability', 'central server admission gate', 'adapter, training, import', 'fails closed', 'kiln_rocm_cleanup_quarantined', 'decode_runtime.rocm_synchronization', 'decode_runtime.rocm_graphs', 'trusted debug', 'kiln_rocm_synchronizations_total', 'stable product default', 'fail startup outside the experimental profile', 'token/logit parity'] },
   { label: 'Gated DeltaNet/GDN hybrid', terms: ['gated deltanet', 'gdn', 'hybrid'] },
   { label: 'paged KV/block manager', terms: ['paged kv', 'block manager'] },
   { label: 'Qwen3.5-4B', terms: ['Qwen3.5-4B'] },
@@ -733,7 +734,7 @@ const expectedArchitectureLinks = [
   { label: 'generated Native SFT profile', href: 'https://ericflo.github.io/kiln/docs/native-sft-profile/#backend-owned-sft-loss-routing' },
 ];
 
-const expectedArchitectureFragments = ['backend-owned-sft-loss-routing'];
+const expectedArchitectureFragments = ['rocm-execution-policy', 'backend-owned-sft-loss-routing'];
 
 const expectedTroubleshootingSections = [
   { label: 'first-run diagnostic framing', terms: ['first-run', 'diagnostic'] },
@@ -741,6 +742,7 @@ const expectedTroubleshootingSections = [
   { label: 'Desktop App first launch', terms: ['desktop app first launch'] },
   { label: 'wrong binary/GPU path', terms: ['wrong binary or gpu path'] },
   { label: 'batching pause diagnosis', terms: ['inference pauses or throughput collapses at concurrency', 'actor_queue_ms', 'rowwise_decode', 'direct rendezvous scope', 'route_available', 'do not label a scheduling pause as vram rebalancing'] },
+  { label: 'ROCm decode-pause attribution and A/B', terms: ['rocm token pauses or irregular decode latency', 'a pause alone is not evidence', 'waited_ns', 'where the host observed unfinished gpu work', 'telemetry_available=false', 'active ROCm telemetry loss is equally fatal', 'inference, adapter, training, and import admission', 'same binary', 'run the arms serially', 'both explicitly disable graphs', 'token or logit parity', 'p50/p95/p99/max inter-token latency', 'legacy_host_barriers remains the qualified default', 'stream_ordered skips only', 'isolate graph lifecycle separately', 'rollback', 'effective graph mode disabled'] },
   { label: 'ROCm streaming-prefill pause/OOM diagnosis', terms: ['rocm long prefill pauses or runs out of memory', 'prefill_runtime.streaming_prefill', 'base/tape tiles of 1024', 'detached/boundary/replay tiles of 8192', 'mode="disabled"', 'multiples of 64', 'do not broadly raise the timeout', 'hosted gpu ci is not hardware evidence'] },
   { label: 'internal tape-scope diagnosis', terms: ['tape switches do not isolate training or inference', 'training.optimizer_support.workloads', 'KILN_USE_TAPE_FORWARD', 'KILN_USE_TAPE_FLASH_ATTN', 'KILN_USE_TAPE_SDPA', 'KILN_USE_TAPE_LORA_ADD', 'four KILN_USE_TAPE_GDN', 'historical tape variable is not evidence that a tape scope exists', 'removed without aliases or replacement fields', 'internal training scope', 'GDN chunkwise recurrence', 'weight-aware embedding lookup', 'Only LoRA A/B are trainable model leaves', 'saved constants', 'must not emit a frozen-weight gradient', 'original full A/B IDs', 'tape-aware reshapes', 'Metal', 'synchronized full-gradient host scan', 'native finite reducer', 'do not bypass the check', 'must not sever the gradient graph', 'portable static evidence, not hardware qualification'] },
   { label: 'model weights not found', terms: ['model weights are not found'] },
@@ -756,8 +758,11 @@ const expectedTroubleshootingProbeExamples = [
   { label: 'models probe', terms: ['/v1/models'] },
   { label: 'minimal chat probe', terms: ['/v1/chat/completions', 'messages', 'max_tokens'] },
   { label: 'batching policy probe', terms: ['/v1/config', "jq '.batching, .decode_runtime.max_decode_batch'"] },
+  { label: 'ROCm execution-policy probe', terms: ["jq '.accelerator_runtime'", '.decode_runtime.rocm_synchronization', '.decode_runtime.rocm_graphs', 'cleanup_quarantined=false', 'kiln_rocm_cleanup_quarantined', 'hard safety fault', 'kiln_rocm_(cleanup_quarantined|synchronization|synchronizations)'] },
   { label: 'streaming-prefill policy probe', terms: ["jq '.streaming_prefill'", "jq '.prefill_runtime.streaming_prefill'"] },
 ];
+
+const expectedTroubleshootingFragments = ['rocm-token-pauses'];
 
 const expectedTroubleshootingLinks = [
   { label: 'Quickstart', href: 'quickstart.html' },
@@ -2929,12 +2934,15 @@ async function runSmoke() {
             href: link.getAttribute('href'),
             text: normalize(link.textContent),
           }));
+          const fragmentIds = Array.from(document.querySelectorAll('[id]'))
+            .map((element) => element.id);
 
           return {
             bodyText,
             headings,
             copyableCodeBlocks,
             links,
+            fragmentIds,
           };
         });
 
@@ -2963,6 +2971,12 @@ async function runSmoke() {
           .map((link) => link.label);
         if (missingLinks.length > 0) {
           fail(`${sitePage.path}: missing troubleshooting next-step links: ${missingLinks.join(', ')}`);
+        }
+
+        const missingFragments = expectedTroubleshootingFragments
+          .filter((fragment) => !troubleshootingResult.fragmentIds.includes(fragment));
+        if (missingFragments.length > 0) {
+          fail(`${sitePage.path}: missing stable troubleshooting fragments: ${missingFragments.join(', ')}`);
         }
       }
     }

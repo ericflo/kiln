@@ -120,7 +120,7 @@ pub fn rocm_cross_entropy_loss(logits: &Tensor, targets: &Tensor) -> Result<Tens
     // Scalar output (1 element at the input dtype); the kernel overwrites it.
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, 1)?;
 
-    let raw_stream = logits_storage.rocm_stream_raw();
+    let raw_stream = logits_storage.rocm_stream_raw()?;
 
     let (logits_base, _) = logits_storage.device_ptr_raw();
     let (targets_base, _) = targets_storage.device_ptr_raw();

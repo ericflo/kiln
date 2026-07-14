@@ -80,7 +80,7 @@ fn rocm_scan_axis_impl(x: &Tensor, axis: usize, kind: i32, label: &str) -> Resul
     // Scan writes every output element, so an uninitialized buffer is fine.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;

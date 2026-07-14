@@ -114,7 +114,7 @@ pub fn rocm_index_select_dim0(src: &Tensor, indices: &Tensor) -> Result<Tensor> 
     // back as zero — accumulation/partial-write output, use zeros_ctx.
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, n_out_elements)?;
 
-    let raw_stream = src_storage.rocm_stream_raw();
+    let raw_stream = src_storage.rocm_stream_raw()?;
     let (src_base, _) = src_storage.device_ptr_raw();
     let (idx_base, _) = idx_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
@@ -229,7 +229,7 @@ pub fn rocm_index_select_axis_n(src: &Tensor, axis: usize, indices: &Tensor) -> 
     // back as zero — accumulation/partial-write output, use zeros_ctx.
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, n_out_elements)?;
 
-    let raw_stream = src_storage.rocm_stream_raw();
+    let raw_stream = src_storage.rocm_stream_raw()?;
     let (src_base, _) = src_storage.device_ptr_raw();
     let (idx_base, _) = idx_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
@@ -366,7 +366,7 @@ pub fn rocm_broadcast_to(src: &Tensor, target_shape: &[usize]) -> Result<Tensor>
     let in_strides_st = rocm_metadata_storage(&in_strides_t, "in_strides")?;
     let out_strides_st = rocm_metadata_storage(&out_strides_t, "out_strides")?;
 
-    let raw_stream = src_storage.rocm_stream_raw();
+    let raw_stream = src_storage.rocm_stream_raw()?;
     let (src_base, _) = src_storage.device_ptr_raw();
     let (dst_base, _) = out_storage.device_ptr_raw();
     let (in_shape_base, _) = in_shape_st.device_ptr_raw();

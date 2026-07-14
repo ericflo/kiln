@@ -333,10 +333,8 @@ impl ExternalYieldBackend for RocmBackend {
         let kiln_tensor::Device::Rocm(device_index) = self.device_kt else {
             anyhow::bail!("ROCm external-yield synchronization requires a ROCm device");
         };
-        // Despite its legacy name this calls hipDeviceSynchronize, so it also
-        // drains hipBLASLt and any other backend-owned auxiliary streams.
-        kiln_tensor::rocm_synchronize_default_stream(device_index)
-            .context("synchronize ROCm device before external yield")
+        kiln_tensor::rocm_synchronize_external_yield(device_index)
+            .context("synchronize ROCm work before external yield")
     }
 }
 

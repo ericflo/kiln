@@ -54,7 +54,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use kiln_hip::{RocmContext, RocmSlice, RocmStream};
+use kiln_hip::{RocmContext, RocmSlice, RocmStream, RocmSyncReason};
 
 use crate::{
     AlgoCache, AlgoCacheStats, AlgoCacheValue, BackendMatmul, Epilogue, MatmulOutcome,
@@ -105,9 +105,10 @@ const EPI_BIAS_GELU: i32 = 6;
 
 const ALGO_BLOB_MAX: usize = 256;
 
-// The raw HIP stream handle threaded into the FFI. `kiln_hip`'s
-// `RocmStream::hip_stream()` yields a `hipStream_t` (`*mut c_void`);
-// on the cuda side this was `cudarc::driver::sys::CUstream`.
+// The raw HIP stream handle threaded into the FFI. `kiln_hip`'s checked
+// `RocmStream::hip_stream_for_execution()` yields a `hipStream_t`
+// (`*mut c_void`); on the CUDA side this was
+// `cudarc::driver::sys::CUstream`.
 type HipStream = *mut core::ffi::c_void;
 
 unsafe extern "C" {
@@ -178,6 +179,12 @@ pub enum FfiError {
     /// `KILN_BLAS_ERR_ALGO_BLOB_TOO_SMALL` — caller's algo-blob-out
     /// buffer was too small.
     AlgoBlobTooSmall,
+    /// The typed ROCm stream refused execution because its context is cleanup
+    /// quarantined or could not be rebound to the calling thread.
+    StreamUnavailable,
+    /// The supplied ROCm context belongs to a different device ordinal than
+    /// the requested hipBLASLt handle.
+    DeviceMismatch,
     /// Unknown / unrecognized error code.
     Unknown(c_int),
 }
@@ -223,6 +230,12 @@ impl std::fmt::Display for FfiError {
             FfiError::InvalidShape => write!(f, "invalid shape (m/n/k must be > 0)"),
             FfiError::AlgoDeserialize => write!(f, "cached algo blob was the wrong size"),
             FfiError::AlgoBlobTooSmall => write!(f, "algo blob output buffer too small"),
+            FfiError::StreamUnavailable => {
+                write!(f, "ROCm stream is unavailable for hipBLASLt execution")
+            }
+            FfiError::DeviceMismatch => {
+                write!(f, "ROCm context device does not match hipBLASLt device")
+            }
             FfiError::Unknown(c) => write!(f, "unknown FFI error code: {c}"),
         }
     }
@@ -240,6 +253,28 @@ impl std::error::Error for FfiError {}
 /// context is held by the inner `Arc`.
 pub struct HipblasLtMatmulHandle {
     inner: Arc<HandleInner>,
+}
+
+/// RAII ownership for a stream-scoped hipBLASLt workspace.
+///
+/// Graph capture creates short-lived streams while probing geometries. Keeping
+/// their workspaces in the process-global matmul handle after the stream or
+/// captured graph is gone would make VRAM retention grow with capture history.
+/// A lease removes the matching workspace after all work on the private stream
+/// completes. Multiple leases for the same stream are reference counted.
+#[must_use = "dropping the lease releases the stream-scoped workspace"]
+pub struct HipblasLtWorkspaceLease {
+    inner: Arc<HandleInner>,
+    rocm_ctx: Arc<RocmContext>,
+    stream: Arc<RocmStream>,
+    stream_key: usize,
+    released: bool,
+}
+
+#[derive(Debug, Default)]
+struct StreamWorkspace {
+    buffer: Option<Arc<RocmSlice>>,
+    leases: usize,
 }
 
 struct HandleInner {
@@ -273,7 +308,7 @@ struct HandleInner {
     /// allocated on and freed by the stream that uses it, so a handle can be
     /// shared across graph-capture or multi-stream callers without reusing one
     /// mutable workspace concurrently on unordered streams.
-    workspace_by_stream: Mutex<HashMap<usize, RocmSlice>>,
+    workspace_by_stream: Mutex<HashMap<usize, StreamWorkspace>>,
 }
 
 // SAFETY: the hipBLASLt context is documented as thread-safe (AMD's
@@ -304,6 +339,16 @@ impl std::fmt::Debug for HipblasLtMatmulHandle {
     }
 }
 
+impl std::fmt::Debug for HipblasLtWorkspaceLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HipblasLtWorkspaceLease")
+            .field("device_index", &self.inner.device_index)
+            .field("stream_key", &self.stream_key)
+            .field("released", &self.released)
+            .finish()
+    }
+}
+
 impl HipblasLtMatmulHandle {
     /// Construct a new handle bound to the kiln-hip `RocmContext` `ctx`.
     /// Callers that already have an `Arc<RocmContext>` (e.g. from the
@@ -323,6 +368,12 @@ impl HipblasLtMatmulHandle {
         algo_cache: Arc<Mutex<AlgoCache>>,
         workspace_max_bytes: Option<u64>,
     ) -> Result<Self, FfiError> {
+        if rocm_ctx.ordinal() != device_index {
+            return Err(FfiError::DeviceMismatch);
+        }
+        rocm_ctx
+            .bind_to_thread()
+            .map_err(|_| FfiError::StreamUnavailable)?;
         let mut raw: *mut KilnHipblasLtCtx = std::ptr::null_mut();
         // SAFETY: out_ctx is a valid pointer to a stack mut pointer;
         // C side writes a freshly-malloc'd ctx into it.
@@ -426,6 +477,46 @@ impl HipblasLtMatmulHandle {
         &self.inner.rocm_ctx
     }
 
+    /// Retain any hipBLASLt workspace allocated on `stream` until the returned
+    /// lease is dropped. Capture callers create the lease before their warm
+    /// pass so every success, fallback, and error path has the same cleanup.
+    pub fn workspace_lease(
+        &self,
+        rocm_ctx: &Arc<RocmContext>,
+        stream: &Arc<RocmStream>,
+    ) -> HipblasLtWorkspaceLease {
+        let stream_key = Arc::as_ptr(stream) as usize;
+        let mut by_stream = self
+            .inner
+            .workspace_by_stream
+            .lock()
+            .expect("workspace map mutex poisoned");
+        let entry = by_stream.entry(stream_key).or_default();
+        entry.leases = entry
+            .leases
+            .checked_add(1)
+            .expect("hipBLASLt workspace lease count overflow");
+        drop(by_stream);
+        HipblasLtWorkspaceLease {
+            inner: Arc::clone(&self.inner),
+            rocm_ctx: Arc::clone(rocm_ctx),
+            stream: Arc::clone(stream),
+            stream_key,
+            released: false,
+        }
+    }
+
+    /// Number of HIP streams currently represented in the workspace map.
+    /// Leased capture streams disappear when their graph or failed attempt is
+    /// released; the long-lived default stream may remain cached.
+    pub fn workspace_stream_count(&self) -> usize {
+        self.inner
+            .workspace_by_stream
+            .lock()
+            .expect("workspace map mutex poisoned")
+            .len()
+    }
+
     /// Clone the handle (cheap — internal `Arc`).
     pub fn share(&self) -> Self {
         HipblasLtMatmulHandle {
@@ -468,6 +559,9 @@ impl HipblasLtMatmulHandle {
         c_ptr: *mut c_void,
         bias_ptr: *const c_void,
     ) -> Result<MatmulOutcome, FfiError> {
+        let raw_stream = stream
+            .hip_stream_for_execution()
+            .map_err(|_| FfiError::StreamUnavailable)?;
         let spec = build_spec(request)?;
 
         // Look up an existing algo for this shape; fall back to
@@ -501,8 +595,8 @@ impl HipblasLtMatmulHandle {
             cached_workspace_bytes,
             self.workspace_pool().max_bytes,
         );
-        let (workspace_ptr_raw, workspace_bytes) =
-            self.ensure_workspace(stream, workspace_request)?;
+        let (workspace, workspace_bytes) = self.ensure_workspace(stream, workspace_request)?;
+        let workspace_ptr_raw = workspace.device_ptr() as *mut c_void;
 
         let mut algo_blob_out = vec![0u8; ALGO_BLOB_MAX];
         let mut algo_blob_out_len: u64 = algo_blob_out.len() as u64;
@@ -512,7 +606,7 @@ impl HipblasLtMatmulHandle {
         let code = unsafe {
             kiln_blas_hipblaslt_matmul(
                 self.inner.ctx.as_ptr(),
-                stream.hip_stream(),
+                raw_stream,
                 &spec,
                 a_ptr,
                 b_ptr,
@@ -534,6 +628,10 @@ impl HipblasLtMatmulHandle {
                 &mut chosen_workspace_bytes,
             )
         };
+        // If a concurrent caller resized this stream's workspace, releasing
+        // our final reference queues its free after the matmul submission on
+        // the same stream.
+        drop(workspace);
         if let Some(e) = FfiError::from_code(code) {
             return Err(e);
         }
@@ -595,19 +693,19 @@ impl HipblasLtMatmulHandle {
     }
 
     /// Ensure the workspace buffer is at least `requested_bytes`
-    /// large (clamped by the pool's `max_bytes`). Returns the raw
-    /// device pointer + the buffer's byte length.
+    /// large (clamped by the pool's `max_bytes`). Returns shared ownership of
+    /// the buffer so a concurrent resize cannot retire it before submission.
     fn ensure_workspace(
         &self,
         stream: &Arc<RocmStream>,
         requested_bytes: u64,
-    ) -> Result<(*mut c_void, u64), FfiError> {
+    ) -> Result<(Arc<RocmSlice>, u64), FfiError> {
         let max_bytes = self.workspace_pool().max_bytes;
         let desired_bytes = std::cmp::min(
             std::cmp::max(requested_bytes, 1024 * 1024), // 1 MiB floor
             max_bytes,
         );
-        let stream_key = stream.hip_stream() as usize;
+        let stream_key = Arc::as_ptr(stream) as usize;
 
         let mut by_stream = self
             .inner
@@ -615,32 +713,147 @@ impl HipblasLtMatmulHandle {
             .lock()
             .expect("workspace map mutex poisoned");
 
-        let need_alloc = match by_stream.get(&stream_key) {
+        let entry = by_stream.entry(stream_key).or_default();
+        let need_alloc = match entry.buffer.as_ref() {
             None => true,
             Some(s) => (s.len() as u64) < desired_bytes,
         };
         if need_alloc {
-            let new_buf = stream
-                .alloc(desired_bytes as usize)
-                .map_err(|_| FfiError::Preference)?;
-            by_stream.insert(stream_key, new_buf);
+            let new_buf = Arc::new(
+                stream
+                    .alloc(desired_bytes as usize)
+                    .map_err(|_| FfiError::Preference)?,
+            );
+            entry.buffer = Some(new_buf);
         }
 
-        let buf_ref = by_stream.get(&stream_key).expect("just initialized");
-        // `RocmSlice::device_ptr()` yields a plain `*mut c_void` (no stream
-        // guard, unlike cudarc's `device_ptr(&stream) -> (ptr, guard)`).
-        let raw_ptr = buf_ref.device_ptr();
-        let byte_len = buf_ref.len() as u64;
-        Ok((raw_ptr as *mut c_void, byte_len))
+        let buffer = Arc::clone(entry.buffer.as_ref().expect("just initialized"));
+        let byte_len = buffer.len() as u64;
+        Ok((buffer, byte_len))
+    }
+}
+
+impl HipblasLtWorkspaceLease {
+    fn workspace_map_for_cleanup(
+        &self,
+    ) -> Option<std::sync::MutexGuard<'_, HashMap<usize, StreamWorkspace>>> {
+        match self.inner.workspace_by_stream.lock() {
+            Ok(workspaces) => Some(workspaces),
+            Err(poisoned) => {
+                self.rocm_ctx.quarantine_execution();
+                drop(poisoned.into_inner());
+                eprintln!(
+                    "HipblasLtWorkspaceLease::drop: workspace map is poisoned; retaining workspace and quarantining ROCm execution"
+                );
+                None
+            }
+        }
+    }
+
+    fn release_inner(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+
+        // A shared lease only releases this owner's reference. The last lease
+        // performs the stream settlement and allocation removal below.
+        {
+            let Some(mut by_stream) = self.workspace_map_for_cleanup() else {
+                return;
+            };
+            let Some(entry) = by_stream.get_mut(&self.stream_key) else {
+                return;
+            };
+            if entry.leases > 1 {
+                entry.leases -= 1;
+                return;
+            }
+        }
+
+        // Workspace pointers may be embedded in a captured graph or referenced
+        // by queued kernels. Never free them until the private stream settles.
+        if let Err(error) = self
+            .rocm_ctx
+            .synchronize_stream_for(&self.stream, RocmSyncReason::AllocationLifetime)
+        {
+            eprintln!(
+                "HipblasLtWorkspaceLease::drop: stream synchronization failed; retaining workspace: {error}"
+            );
+            let Some(mut by_stream) = self.workspace_map_for_cleanup() else {
+                return;
+            };
+            if let Some(entry) = by_stream.get_mut(&self.stream_key) {
+                entry.leases = entry.leases.saturating_sub(1);
+            }
+            return;
+        }
+
+        let workspace = {
+            let Some(mut by_stream) = self.workspace_map_for_cleanup() else {
+                return;
+            };
+            match by_stream.get_mut(&self.stream_key) {
+                Some(entry) if entry.leases > 1 => {
+                    entry.leases -= 1;
+                    None
+                }
+                Some(_) => by_stream
+                    .remove(&self.stream_key)
+                    .and_then(|entry| entry.buffer),
+                None => None,
+            }
+        };
+        drop(workspace);
+
+        // `RocmSlice::drop` uses hipFreeAsync when the allocation came from the
+        // stream-ordered pool. Settle that free before the lease relinquishes
+        // its final stream reference so reclaimed VRAM is deterministic.
+        if let Err(error) = self
+            .rocm_ctx
+            .synchronize_stream_for(&self.stream, RocmSyncReason::MemoryReclaim)
+        {
+            eprintln!(
+                "HipblasLtWorkspaceLease::drop: workspace free synchronization failed: {error}"
+            );
+        }
+    }
+}
+
+impl Drop for HipblasLtWorkspaceLease {
+    fn drop(&mut self) {
+        self.release_inner();
     }
 }
 
 impl Drop for HandleInner {
     fn drop(&mut self) {
+        let retain_until_exit = |this: &mut Self, reason: &str| {
+            let retained_workspaces = std::mem::take(
+                this.workspace_by_stream
+                    .get_mut()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
+            std::mem::forget(retained_workspaces);
+            eprintln!(
+                "HandleInner::drop: {reason}; retaining hipBLASLt context and workspaces until process exit"
+            );
+        };
+        if self.rocm_ctx.cleanup_quarantined() {
+            retain_until_exit(self, "ROCm execution is quarantined");
+            return;
+        }
+        if let Err(error) = self.rocm_ctx.bind_to_thread() {
+            self.rocm_ctx.quarantine_execution();
+            retain_until_exit(self, &format!("device bind failed: {error}"));
+            return;
+        }
         // SAFETY: ctx is non-null and owned. Destroy returns 0 on a
         // null input (handled gracefully) and on success otherwise.
-        unsafe {
-            kiln_blas_hipblaslt_ctx_destroy(self.ctx.as_ptr());
+        let code = unsafe { kiln_blas_hipblaslt_ctx_destroy(self.ctx.as_ptr()) };
+        if code != 0 {
+            self.rocm_ctx.quarantine_execution();
+            retain_until_exit(self, &format!("hipBLASLt context destroy failed ({code})"));
         }
     }
 }

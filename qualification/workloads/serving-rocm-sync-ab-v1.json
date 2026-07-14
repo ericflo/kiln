@@ -1,0 +1,264 @@
+{
+  "schema_version": 1,
+  "workload_id": "serving-rocm-sync-ab-v1",
+  "kind": "performance",
+  "description": "Run one conservative, source-bound ROCm synchronization A/B with exact policy and telemetry attestation.",
+  "determinism": {
+    "seed": 20260713,
+    "seed_delivery": "argv",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "legacy-vs-stream-ordered",
+      "description": "Build once, then run isolated legacy-host-barrier and stream-ordered arms with graphs, KV autoscaling, and reclaim disabled.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "cargo_jobs": 1,
+          "cargo_memory_scope": "systemd_user_memory_max_no_swap",
+          "cargo_min_available_gib": 15,
+          "cargo_wrapper": "scripts/cargo-bounded.sh",
+          "features": "rocm",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "rocm_archs": "gfx1151",
+          "rocm_path": "/opt/rocm"
+        },
+        "comparison": {
+          "arm_order": {
+            "arm_0": "legacy_host_barriers",
+            "arm_1": "stream_ordered"
+          },
+          "build_reuse": "one_source_bound_binary_for_both_arms",
+          "comparison": "same_binary_same_seed_fixed_output",
+          "correctness_probe": {
+            "comparison": "exact_action_tokens_and_selected_logprobs",
+            "max_tokens": 16,
+            "prompt_words": 64,
+            "sampling": "temperature_1_top_k_16_fixed_seed"
+          },
+          "expected_completion_tokens_per_arm": 224,
+          "graph_mode": "disabled",
+          "max_tokens": 32,
+          "overall_timeout_seconds": 600,
+          "pause_gate_ms": 2000,
+          "reason_dimension_count": 22,
+          "request_count_per_arm": 7,
+          "request_timeout_seconds": 90,
+          "stall_evidence_threshold_ms": 250,
+          "telemetry_checkpoints": "startup_post_warmup_after_each_wave_final",
+          "teardown_grace_seconds_per_arm": 60,
+          "warmup_max_tokens": 16,
+          "warmup_prompt_words": 16,
+          "waves": {
+            "single": {
+              "slot_0": 16
+            },
+            "pair": {
+              "slot_0": 32,
+              "slot_1": 96
+            },
+            "four-way": {
+              "slot_0": 16,
+              "slot_1": 64,
+              "slot_2": 192,
+              "slot_3": 384
+            }
+          }
+        },
+        "legacy_host_barriers": {
+          "runtime": {
+            "serving_profile": "experimental",
+            "kv_autoscale_requested": false,
+            "kv_autoscale_enabled": false,
+            "memory_reclaim_requested_mode": "off",
+            "memory_reclaim_mode": "off",
+            "rocm_graphs_requested": false,
+            "rocm_graphs_enabled": false,
+            "rocm_synchronization_mode": "legacy_host_barriers",
+            "rocm_graph_mode": "disabled"
+          },
+          "server": {
+            "chat_performance_metadata_enabled": true,
+            "debug_endpoints_enabled": true,
+            "default_thinking_enabled": false,
+            "http_send_buffer_bytes": 4096,
+            "log_format": "json",
+            "request_timeout_seconds": 180,
+            "stream_stall_grace_ms": 2000,
+            "max_decode_batch": 8,
+            "max_prefill_staging_slots": 4,
+            "max_active_requests": 12,
+            "max_prefill_staging_priority_burst": 4,
+            "max_prefill_tokens_per_cycle": 64,
+            "max_prefill_layers_per_cycle": 4
+          }
+        },
+        "stream_ordered": {
+          "runtime": {
+            "serving_profile": "experimental",
+            "kv_autoscale_requested": false,
+            "kv_autoscale_enabled": false,
+            "memory_reclaim_requested_mode": "off",
+            "memory_reclaim_mode": "off",
+            "rocm_graphs_requested": false,
+            "rocm_graphs_enabled": false,
+            "rocm_synchronization_mode": "stream_ordered",
+            "rocm_graph_mode": "disabled"
+          },
+          "server": {
+            "chat_performance_metadata_enabled": true,
+            "debug_endpoints_enabled": true,
+            "default_thinking_enabled": false,
+            "http_send_buffer_bytes": 4096,
+            "log_format": "json",
+            "request_timeout_seconds": 180,
+            "stream_stall_grace_ms": 2000,
+            "max_decode_batch": 8,
+            "max_prefill_staging_slots": 4,
+            "max_active_requests": 12,
+            "max_prefill_staging_priority_burst": 4,
+            "max_prefill_tokens_per_cycle": 64,
+            "max_prefill_layers_per_cycle": 4
+          }
+        }
+      },
+      "cases": [
+        {
+          "id": "rocm-synchronization-ab",
+          "description": "Run identical fixed-output concurrency waves in both policies and reconcile reasoned health telemetry with Prometheus.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_rocm_sync_ab.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 1200,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "correctness_action_token_count",
+              "correctness_behavior_logprob_mismatch_count",
+              "correctness_non_finite_logprob_count",
+              "correctness_output_mismatch_count",
+              "correctness_token_id_mismatch_count",
+              "execution_failure_count",
+              "legacy_completion_token_count",
+              "legacy_device_fault_count",
+              "legacy_device_wait_count",
+              "legacy_duration_seconds",
+              "legacy_e2e_ms_max",
+              "legacy_e2e_ms_p50",
+              "legacy_e2e_ms_p99",
+              "legacy_external_yield_device_wait_count",
+              "legacy_external_yield_stream_wait_count",
+              "legacy_gpu_memory_peak_bytes",
+              "legacy_graph_activity_count",
+              "legacy_itl_ms_max",
+              "legacy_itl_ms_p50",
+              "legacy_itl_ms_p99",
+              "legacy_memory_sample_count",
+              "legacy_memory_sampler_error_count",
+              "legacy_mutation_event_count",
+              "legacy_output_token_throughput_per_second",
+              "legacy_pause_count",
+              "legacy_request_count",
+              "legacy_request_failure_count",
+              "legacy_skipped_barrier_count",
+              "legacy_stall_count",
+              "legacy_stream_wait_count",
+              "legacy_synchronization_wait_ms",
+              "legacy_ttft_ms_max",
+              "legacy_ttft_ms_p50",
+              "legacy_ttft_ms_p99",
+              "output_contract_mismatch_count",
+              "policy_attestation_failure_count",
+              "prometheus_attestation_failure_count",
+              "shutdown_forced_count",
+              "shutdown_nonzero_count",
+              "snapshot_residue_count",
+              "stream_ordered_completion_token_count",
+              "stream_ordered_device_fault_count",
+              "stream_ordered_device_wait_count",
+              "stream_ordered_duration_seconds",
+              "stream_ordered_e2e_ms_max",
+              "stream_ordered_e2e_ms_p50",
+              "stream_ordered_e2e_ms_p99",
+              "stream_ordered_external_yield_device_wait_count",
+              "stream_ordered_external_yield_stream_wait_count",
+              "stream_ordered_gpu_memory_peak_bytes",
+              "stream_ordered_graph_activity_count",
+              "stream_ordered_itl_ms_max",
+              "stream_ordered_itl_ms_p50",
+              "stream_ordered_itl_ms_p99",
+              "stream_ordered_memory_sample_count",
+              "stream_ordered_memory_sampler_error_count",
+              "stream_ordered_mutation_event_count",
+              "stream_ordered_output_token_throughput_per_second",
+              "stream_ordered_pause_count",
+              "stream_ordered_request_count",
+              "stream_ordered_request_failure_count",
+              "stream_ordered_skipped_barrier_count",
+              "stream_ordered_stall_count",
+              "stream_ordered_stream_wait_count",
+              "stream_ordered_synchronization_wait_ms",
+              "stream_ordered_ttft_ms_max",
+              "stream_ordered_ttft_ms_p50",
+              "stream_ordered_ttft_ms_p99"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "same_environment_performance",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": [
+      {
+        "scope": "result",
+        "result_id": "rocm-synchronization-ab",
+        "metric": "output_contract_mismatch_count",
+        "metric_class": "performance",
+        "unit": "count",
+        "aggregation": "sum",
+        "lower_is_better": true,
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      }
+    ]
+  }
+}

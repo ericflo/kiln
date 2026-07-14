@@ -114,7 +114,7 @@ pub fn rocm_scatter_add_dim0(out: &Tensor, indices: &Tensor, updates: &Tensor) -
         }
     }
 
-    let raw_stream = out_storage.rocm_stream_raw();
+    let raw_stream = out_storage.rocm_stream_raw()?;
     let (upd_base, _) = upd_storage.device_ptr_raw();
     let (idx_base, _) = idx_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();

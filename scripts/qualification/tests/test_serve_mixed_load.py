@@ -37,6 +37,7 @@ def health_fixture(
     rocm_graphs: bool,
     serving_profile: str = "experimental",
     kv_autoscale_requested: bool | None = None,
+    rocm_graphs_requested: bool | None = None,
     memory_reclaim_requested_mode: str = "off",
     memory_reclaim_mode: str = "off",
 ) -> dict:
@@ -44,6 +45,9 @@ def health_fixture(
         kv_autoscale
         if kv_autoscale_requested is None
         else kv_autoscale_requested
+    )
+    rocm_graphs_requested = (
+        rocm_graphs if rocm_graphs_requested is None else rocm_graphs_requested
     )
     graph = {
         "requested": rocm_graphs,
@@ -83,6 +87,27 @@ def health_fixture(
             "max_duration_micros": 0,
         },
     }
+    accelerator_runtime = {
+        "schema_id": "kiln.accelerator-runtime-policy.v1",
+        "version": 1,
+        "serving_profile": serving_profile,
+        "serving_profile_source": "environment",
+        "rocm_synchronization_mode": {
+            "configured": "legacy_host_barriers",
+            "effective": "legacy_host_barriers",
+            "source": "default",
+        },
+        "rocm_graph_mode": {
+            "configured": "profile" if rocm_graphs_requested else "disabled",
+            "effective": "lazy_capture_replay" if rocm_graphs else "disabled",
+            "source": "environment",
+        },
+        "rocm_graph_cache_entries": {
+            "configured": 8,
+            "effective": 8,
+            "source": "default",
+        },
+    }
     return {
         "backend": "model",
         "backend_runtime": {"external_yield_sync": []},
@@ -100,6 +125,7 @@ def health_fixture(
         },
         "http": http_fixture(),
         "decode_runtime": {
+            "accelerator_runtime": accelerator_runtime,
             "rocm_graphs": graph,
             "kv_autoscaler": {
                 "requested": kv_autoscale_requested,
@@ -175,12 +201,40 @@ def debug_fixture(
     *,
     kv_autoscale: bool,
     rocm_graphs: bool,
+    serving_profile: str = "experimental",
+    rocm_graphs_enabled: bool | None = None,
     memory_reclaim_requested_mode: str = "off",
 ) -> dict:
+    rocm_graphs_enabled = (
+        rocm_graphs if rocm_graphs_enabled is None else rocm_graphs_enabled
+    )
     def flag(enabled: bool) -> dict:
         return {"present": not enabled, "value": None if enabled else "0"}
 
     return {
+        "accelerator_runtime": {
+            "schema_id": "kiln.accelerator-runtime-policy.v1",
+            "version": 1,
+            "serving_profile": serving_profile,
+            "serving_profile_source": "environment",
+            "rocm_synchronization_mode": {
+                "configured": "legacy_host_barriers",
+                "effective": "legacy_host_barriers",
+                "source": "default",
+            },
+            "rocm_graph_mode": {
+                "configured": "profile" if rocm_graphs else "disabled",
+                "effective": (
+                    "lazy_capture_replay" if rocm_graphs_enabled else "disabled"
+                ),
+                "source": "environment",
+            },
+            "rocm_graph_cache_entries": {
+                "configured": 8,
+                "effective": 8,
+                "source": "default",
+            },
+        },
         "http": http_fixture(),
         "batching_engine": {
             "backend": "model",
@@ -202,7 +256,6 @@ def debug_fixture(
         },
         "env_flags": {
             "KILN_KV_AUTOSCALE": flag(kv_autoscale),
-            "KILN_ROCM_GRAPHS": flag(rocm_graphs),
             "KILN_MEMORY_RECLAIM_MODE": {
                 "present": True,
                 "value": memory_reclaim_requested_mode,
@@ -443,6 +496,10 @@ class ServeMixedLoadTests(unittest.TestCase):
         ]
         expected_build = {
             "binary": "kiln",
+            "cargo_jobs": 1,
+            "cargo_memory_scope": "systemd_user_memory_max_no_swap",
+            "cargo_min_available_gib": 15,
+            "cargo_wrapper": "scripts/cargo-bounded.sh",
             "features": "rocm",
             "locked": True,
             "no_default_features": True,
@@ -501,9 +558,9 @@ class ServeMixedLoadTests(unittest.TestCase):
                 )
 
         self.assertEqual(
-            serve.source_bound_build_command("/toolchain/bin/cargo"),
+            serve.source_bound_build_command(),
             [
-                "/toolchain/bin/cargo",
+                str(ROOT / "scripts/cargo-bounded.sh"),
                 "build",
                 "--quiet",
                 "--release",
@@ -553,6 +610,38 @@ class ServeMixedLoadTests(unittest.TestCase):
         with self.assertRaisesRegex(serve.QualificationError, "CARGO=.*executable"):
             serve.resolve_cargo_executable(
                 {"CARGO": "/missing/cargo", "HOME": "/missing", "PATH": ""}
+            )
+
+    def test_source_bound_build_environment_forces_bounded_offline_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cargo = Path(temp_dir) / "cargo"
+            cargo.write_text("#!/bin/sh\n")
+            cargo.chmod(0o755)
+            environment = serve.source_bound_build_environment(
+                {
+                    "CARGO": str(cargo),
+                    "HOME": temp_dir,
+                    "PATH": "/usr/bin",
+                    serve.RESULT_ENV: "/tmp/result.json",
+                    serve.VARIANT_ENV: "default",
+                }
+            )
+        self.assertEqual(environment["CARGO"], str(cargo))
+        self.assertEqual(environment["CARGO_NET_OFFLINE"], "true")
+        self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
+        self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
+        self.assertEqual(environment["KILN_ROCM_ARCHS"], serve.BUILD_ROCM_ARCHS)
+
+    def test_source_bound_build_environment_rejects_wrapper_recursion(self) -> None:
+        with self.assertRaisesRegex(serve.QualificationError, "must name the cargo"):
+            serve.source_bound_build_environment(
+                {
+                    "CARGO": str(ROOT / "scripts/cargo-bounded.sh"),
+                    "HOME": str(ROOT),
+                    "PATH": "/usr/bin",
+                    serve.RESULT_ENV: "/tmp/result.json",
+                    serve.VARIANT_ENV: "default",
+                }
             )
 
     def test_sse_parser_handles_fragmentation_crlf_comments_and_multiline_data(self) -> None:
@@ -1056,8 +1145,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                         None if expected["kv_autoscale_requested"] else "0",
                     )
                     self.assertEqual(
-                        env.get("KILN_ROCM_GRAPHS"),
-                        None if expected["rocm_graphs_requested"] else "0",
+                        env[serve.ROCM_GRAPH_MODE_ENV],
+                        "profile"
+                        if expected["rocm_graphs_requested"]
+                        else "disabled",
                     )
 
     def test_server_termination_reports_graceful_and_forced_outcomes(self) -> None:
@@ -1186,6 +1277,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                         rocm_graphs=runtime["rocm_graphs_enabled"],
                         serving_profile=runtime["serving_profile"],
                         kv_autoscale_requested=runtime["kv_autoscale_requested"],
+                        rocm_graphs_requested=runtime["rocm_graphs_requested"],
                         memory_reclaim_requested_mode=runtime[
                             "memory_reclaim_requested_mode"
                         ],
@@ -1194,6 +1286,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     debug_fixture(
                         kv_autoscale=runtime["kv_autoscale_requested"],
                         rocm_graphs=runtime["rocm_graphs_requested"],
+                        serving_profile=runtime["serving_profile"],
+                        rocm_graphs_enabled=runtime["rocm_graphs_enabled"],
                         memory_reclaim_requested_mode=runtime[
                             "memory_reclaim_requested_mode"
                         ],

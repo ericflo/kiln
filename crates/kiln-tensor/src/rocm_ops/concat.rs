@@ -84,6 +84,13 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
                 t.dtype()
             )));
         }
+        if t.device() != inputs[0].device() {
+            return Err(Error::Msg(format!(
+                "rocm_concat: input {i} device {} != input 0 device {}",
+                t.device(),
+                inputs[0].device()
+            )));
+        }
         if !t.is_contiguous() {
             return Err(Error::Msg(format!(
                 "rocm_concat: input {i} must be contiguous"
@@ -134,22 +141,29 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         TensorId::next(),
     )?;
 
-    let raw_stream = first_storage.rocm_stream_raw();
+    let raw_stream = first_storage.rocm_stream_raw()?;
 
     // Collect per-input source pointers (base + start_offset bytes) and
     // per-input axis lengths.
     let mut src_ptrs: Vec<*const core::ffi::c_void> = Vec::with_capacity(inputs.len());
     let mut t_axis_lens: Vec<i64> = Vec::with_capacity(inputs.len());
+    let mut input_storages: Vec<&RocmStorage> = Vec::with_capacity(inputs.len());
     for t in inputs {
         let st = t
             .storage()
             .as_any()
             .downcast_ref::<RocmStorage>()
             .ok_or_else(|| Error::Msg("rocm_concat: input must be ROCm storage".to_string()))?;
+        if !Arc::ptr_eq(&ctx, &st.context()) {
+            return Err(Error::Msg(
+                "rocm_concat: every input must share one ROCm context".to_string(),
+            ));
+        }
         let (base, _) = st.device_ptr_raw();
         let off = (t.layout().start_offset() * bpe) as u64;
         src_ptrs.push((base + off) as *const core::ffi::c_void);
         t_axis_lens.push(t.shape()[axis] as i64);
+        input_storages.push(st);
     }
 
     let dst_ptr = dst_base as *mut core::ffi::c_void;
@@ -176,7 +190,11 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
             .map_err(|e| Error::Msg(format!("rocm_concat: reshape dst rows: {e}")))?;
         let mut row_offset = 0usize;
         for t in inputs {
-            crate::rocm_synchronize_tensor_stream(t).map_err(|e| {
+            crate::rocm_synchronize_tensor_same_stream_dependency(
+                t,
+                crate::RocmSyncReason::ConcatInput,
+            )
+            .map_err(|e| {
                 Error::Msg(format!(
                     "rocm_concat: synchronize input before safe row assembly: {e}"
                 ))
@@ -194,13 +212,16 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
                 })?;
             row_offset += rows;
         }
-        if !crate::rocm_capture_arena_active() {
-            crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
-                Error::Msg(format!(
-                    "rocm_concat: synchronize after safe row assembly: {e:?}"
-                ))
-            })?;
-        }
+        crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
+            &ctx,
+            &input_storages,
+            crate::RocmSyncReason::ConcatOutput,
+        )
+        .map_err(|e| {
+            Error::Msg(format!(
+                "rocm_concat: synchronize after safe row assembly: {e:?}"
+            ))
+        })?;
         return Ok(out);
     }
 
@@ -231,13 +252,16 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
                 "rocm_concat: axis0 contiguous FFI returned status {status}"
             )));
         }
-        if !crate::rocm_capture_arena_active() {
-            crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
-                Error::Msg(format!(
-                    "rocm_concat: synchronize after axis0 contiguous concat: {e:?}"
-                ))
-            })?;
-        }
+        crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
+            &ctx,
+            &input_storages,
+            crate::RocmSyncReason::ConcatOutput,
+        )
+        .map_err(|e| {
+            Error::Msg(format!(
+                "rocm_concat: synchronize after axis0 contiguous concat: {e:?}"
+            ))
+        })?;
         return Ok(out);
     }
 
@@ -257,13 +281,16 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
             "rocm_concat: FFI returned status {status}"
         )));
     }
-    if !crate::rocm_capture_arena_active() {
-        crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
-            Error::Msg(format!(
-                "rocm_concat: synchronize after async kernel launch: {e:?}"
-            ))
-        })?;
-    }
+    crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
+        &ctx,
+        &input_storages,
+        crate::RocmSyncReason::ConcatOutput,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "rocm_concat: synchronize after async kernel launch: {e:?}"
+        ))
+    })?;
 
     Ok(out)
 }

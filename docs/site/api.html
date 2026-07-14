@@ -299,6 +299,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#copy-paste-first-requests">First requests</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#power-user-requests">Power-user requests</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#server-status">Server status</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#accelerator-runtime">ROCm runtime</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-runtime">Streaming prefill</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#generation">Generation</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#thinking-budgets">Thinking budgets</a>
@@ -319,21 +320,21 @@
         <div class="label mb-3">Run and observe</div>
         <h2 id="server-status" class="text-2xl font-semibold mb-4">Server status, metrics, UI, and config</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
-          <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics, including bounded base-weight aggregate and execution-identity summaries, the immutable SFT checkpoint-boundary policy under <code>training.checkpoint_boundary_policy</code>, memory-sampler age/liveness, a separately bounded host-backed tier when present, plus closed ROCm graph fallback reason and latency counters under <code>decode_runtime.rocm_graphs.fallbacks</code>. A real backend without valid execution provenance is not ready.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics, including bounded base-weight aggregate and execution-identity summaries, the immutable SFT checkpoint-boundary policy under <code>training.checkpoint_boundary_policy</code>, memory-sampler age/liveness, a separately bounded host-backed tier when present, closed ROCm graph fallback counters under <code>decode_runtime.rocm_graphs.fallbacks</code>, and reasoned ROCm wait/skip plus cleanup-quarantine state under <code>decode_runtime.rocm_synchronization</code>. A real backend without valid execution provenance is not ready.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/health</code> &mdash; /v1 compatibility alias for the same health and diagnostics response.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, sampler freshness/liveness, training progress, and bounded thinking-budget provenance/outcomes.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, sampler freshness/liveness, fixed-reason ROCm synchronization, training progress, and bounded thinking-budget provenance/outcomes.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/ui</code> &mdash; embedded dashboard for status, adapters, training, and chat.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history with effective thinking-budget provenance and outcomes for the dashboard's request panel.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, typed batching and streaming-prefill intent/backend/effective policy, actor activity, direct-rendezvous worker/route status, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective gradient and SFT boundary-checkpoint policy, the resident optimizer implementation/tuple/per-workload admission contract, memory-budget partitions, and generation defaults.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, the versioned accelerator execution policy, typed batching and streaming-prefill intent/backend/effective policy, actor activity, direct-rendezvous worker/route status, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective gradient and SFT boundary-checkpoint policy, the resident optimizer implementation/tuple/per-workload admission contract, memory-budget partitions, and generation defaults.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest, execution-provenance record, and immutable checkpoint-boundary policy under <code>training.checkpoint_boundary_policy</code>.</div>
         </div>
         <div class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Check runtime configuration</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/config | python3 -m json.tool</code></pre>
           <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-            The response keeps batching and streaming-prefill intent, backend policy, effective execution, startup
+            The response keeps accelerator, batching, and streaming-prefill intent, backend policy, effective execution, startup
             capacity resolution, the current safe memory sample, and the budget derived from effective
             capacity separate. Every <code>*_gib</code> value uses
             1 GiB = 1,073,741,824 bytes and is paired with an exact <code>*_bytes</code> value where the
@@ -341,6 +342,76 @@
             thinking token/time pair before send, marking each dimension as server- or request-owned.
           </p>
           <div class="grid gap-4 mt-4">
+            <section id="accelerator-runtime" class="pt-4" style="border-top: 1px solid var(--line);">
+              <h4 class="font-semibold mb-2"><code>accelerator_runtime</code>: immutable ROCm execution policy</h4>
+              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
+  "accelerator_runtime": {
+    "schema_id": "kiln.accelerator-runtime-policy.v1",
+    "version": 1,
+    "serving_profile": "stable",
+    "serving_profile_source": "default",
+    "rocm_synchronization_mode": {
+      "configured": "legacy_host_barriers",
+      "effective": "legacy_host_barriers",
+      "source": "default"
+    },
+    "rocm_graph_mode": {
+      "configured": "profile",
+      "effective": "disabled",
+      "source": "default"
+    },
+    "rocm_graph_cache_entries": {
+      "configured": 8,
+      "effective": 8,
+      "source": "default"
+    }
+  }
+}</code></pre>
+              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                The server resolves this object before creating the primary ROCm context or model runner.
+                <code>profile</code> graph mode becomes <code>disabled</code> under stable and maintenance,
+                and <code>lazy_capture_replay</code> under experimental. Explicit
+                <code>warmup_then_eager</code> and <code>lazy_capture_replay</code> modes require the
+                experimental profile. Graph-cache capacity is bounded to 1&ndash;64 entries. Stable paged
+                metadata is a correctness invariant rather than a switch.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>legacy_host_barriers</code> preserves the qualified host waits, including a device-wide
+                external-yield drain. <code>stream_ordered</code> requires the experimental profile and skips
+                only explicitly proven same-stream dependency barriers; host readbacks, buffer lifetimes,
+                in-place mutation, reclamation, graph transitions, and error recovery remain synchronized.
+                External yield waits on the primary stream. ROCm graph replay records completion on its capture
+                stream and orders that event into the primary stream first.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Health repeats the policy at <code>decode_runtime.accelerator_runtime</code>. Its sibling
+                <code>decode_runtime.rocm_synchronization</code> reports whether ROCm is active, telemetry
+                availability, cleanup quarantine, total device/stream waits, waited nanoseconds, skipped
+                barriers, and a fixed 22-reason array. <code>cleanup_quarantined=true</code> is a process-lifetime
+                sticky device fault: further execution is rejected, possibly in-flight resources are retained
+                rather than destroyed unsafely, and restart is required. Active ROCm telemetry unavailability is
+                likewise fail-closed instead of being interpreted as a false quarantine value. The shared server
+                admission gate latches either condition before adapter, training, import, or other backend mutation
+                work can begin. The same snapshot makes
+                <code>backend_runtime</code> unhealthy and quarantined, fails the
+                <code>backend_runtime_healthy</code> readiness check, and returns HTTP 503. It is intentionally
+                absent from <code>/v1/config</code> because it is live fault state, not policy. Prometheus exports
+                <code>kiln_rocm_cleanup_quarantined</code>,
+                <code>kiln_rocm_synchronizations_total{reason,scope}</code>,
+                <code>kiln_rocm_synchronization_wait_seconds_total{reason}</code>, and
+                <code>kiln_rocm_synchronization_skipped_total{reason}</code>, plus active, availability, and
+                policy gauges. Interpret the quarantine gauge only when telemetry availability is one. These
+                endpoints load atomics only and never synchronize the accelerator.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Configure the three fields under <code>[accelerator]</code>. Canonical environment names derive
+                mechanically as <code>KILN_ACCELERATOR_&lt;FIELD&gt;</code>. Historical
+                <code>KILN_ROCM_GRAPHS</code>, <code>KILN_ROCM_GRAPH_CAPTURE</code>, and
+                <code>KILN_ROCM_GRAPH_CACHE_MAX</code> are strict deprecated startup aliases, not hot runtime
+                switches. See the <a href="docs/configuration/#accelerator" class="link">complete accelerator configuration contract</a>
+                for mode semantics, validation, local A/B gates, and migration behavior.
+              </p>
+            </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
               <h4 class="font-semibold mb-2"><code>batching</code>: immutable scheduling policy and actor activity</h4>
               <pre class="overflow-x-auto text-xs leading-relaxed"><code>{

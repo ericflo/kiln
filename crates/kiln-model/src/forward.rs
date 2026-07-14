@@ -2457,9 +2457,9 @@ fn weighted_lm_head_prep_disabled() -> bool {
 fn synchronize_for_profile(device: &Device) -> Result<()> {
     // Profiling timing only makes sense after the launching queue has
     // drained — without this the recorded elapsed time captures kernel
-    // enqueue cost rather than execution cost. Call the device-level
-    // synchronize for any async backend (CUDA, Metal); CPU is already
-    // synchronous so the match-and-skip there avoids the extra call.
+    // enqueue cost rather than execution cost. Drain the backend's execution
+    // queue for any async backend; CPU is already synchronous, so the
+    // match-and-skip there avoids the extra call.
     match device {
         Device::Cpu => Ok(()),
         // #1082: CUDA sync is kt-native — drain the device's default stream via
@@ -2468,8 +2468,11 @@ fn synchronize_for_profile(device: &Device) -> Result<()> {
         Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream(*idx)
             .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}")),
         #[cfg(feature = "rocm")]
-        Device::Rocm(idx) => kiln_tensor::rocm_synchronize_compute_stream(*idx)
-            .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}")),
+        Device::Rocm(idx) => kiln_tensor::rocm_synchronize_compute_stream_for(
+            *idx,
+            kiln_tensor::RocmSyncReason::ExplicitStreamDrain,
+        )
+        .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}")),
         // (#1082) Metal: kt-native queue drain. Block until the
         // MetalCompanion's command pool — the queue that actually ran the
         // compute — completes. `wait_until_completed` is the same host-read
@@ -2507,8 +2510,11 @@ fn synchronize_tensor_ready_for_model_handoff(label: &str, tensor: &Tensor) -> R
         Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream(idx)
             .with_context(|| format!("{label}: synchronize CUDA tensor readiness")),
         #[cfg(feature = "rocm")]
-        Device::Rocm(_) => kiln_tensor::rocm_synchronize_tensor_stream(tensor)
-            .with_context(|| format!("{label}: synchronize ROCm tensor readiness")),
+        Device::Rocm(_) => kiln_tensor::rocm_synchronize_tensor_same_stream_dependency(
+            tensor,
+            kiln_tensor::RocmSyncReason::ModelHandoff,
+        )
+        .with_context(|| format!("{label}: order ROCm tensor readiness")),
         #[cfg(feature = "metal")]
         Device::Metal(idx) => kiln_tensor::primary_metal_companion(idx)
             .and_then(|companion| companion.wait_until_completed())
@@ -2526,20 +2532,12 @@ fn synchronize_tensor_ready_for_full_attn_handoff(label: &str, tensor: &Tensor) 
         Device::Rocm(_) => {
             if kiln_tensor::rocm_capture_arena_active() {
                 Ok(())
-            } else if kiln_core::env_flag::env_flag("KILN_ROCM_FULL_ATTN_DEVICE_SYNC", false) {
-                let device_index = match tensor.device() {
-                    Device::Rocm(idx) => idx,
-                    _ => unreachable!("ROCm full-attention handoff saw non-ROCm tensor"),
-                };
-                kiln_tensor::rocm_synchronize_default_stream(device_index).with_context(|| {
-                    format!("{label}: synchronize ROCm full-attention device handoff")
-                })
-            } else if kiln_core::env_flag::env_flag("KILN_ROCM_FULL_ATTN_HANDOFF_SYNC", true) {
-                kiln_tensor::rocm_synchronize_tensor_stream(tensor).with_context(|| {
-                    format!("{label}: synchronize ROCm full-attention stream handoff")
-                })
             } else {
-                Ok(())
+                kiln_tensor::rocm_synchronize_tensor_same_stream_dependency(
+                    tensor,
+                    kiln_tensor::RocmSyncReason::FullAttentionHandoff,
+                )
+                .with_context(|| format!("{label}: order ROCm full-attention handoff"))
             }
         }
         _ => synchronize_tensor_ready_for_model_handoff(label, tensor),

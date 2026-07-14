@@ -99,6 +99,7 @@ class WorkloadTests(unittest.TestCase):
             "serving-rocm-graph-correctness-v1.json",
             "serving-rocm-development-soak-v1.json",
             "serving-rocm-memory-pressure-v1.json",
+            "serving-rocm-sync-ab-v1.json",
         ):
             with self.subTest(name=name):
                 path = ROOT / "qualification/workloads" / name

@@ -1028,7 +1028,10 @@ fn bench_latency_paged(
     let backend_capabilities = BackendCapabilityQueries::backend_capabilities(backend.as_ref());
     let greedy_token_decode_enabled = backend_capabilities.decode.linear_argmax.is_native()
         || backend_capabilities.decode_batcher.use_greedy_token_decode;
-    let mut rocm_graph = kiln_model::rocm_graph::RocmGraphRunner::new(&device_kt, true);
+    let mut rocm_graph = kiln_model::rocm_graph::RocmGraphRunner::new(
+        &device_kt,
+        kiln_model::RocmGraphExecutionPolicy::lazy_capture_replay(),
+    );
     // This runner is scoped to exactly one benchmark generation, so a fixed
     // concrete owner is unique for its entire lifetime.
     let rocm_graph_row_id = 1_u64;
@@ -3231,7 +3234,7 @@ fn main() -> Result<()> {
         model_config.clone(),
         ModelRunnerRuntimeOptions {
             cuda_graphs: false,
-            rocm_graphs: true,
+            rocm_graph: kiln_model::RocmGraphExecutionPolicy::lazy_capture_replay(),
             metal_graphs: true,
             max_decode_batch: None,
             streaming_prefill: Some(streaming_prefill),

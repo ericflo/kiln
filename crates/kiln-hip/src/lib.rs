@@ -7,8 +7,9 @@
 //! are mechanical retypes of the candle-free `cuda_*.rs` files.
 //!
 //! Design mirrors `kiln-tensor/src/cuda_stream_priority.rs`: own the raw HIP
-//! handle, implement `Drop`, expose an FFI accessor (`hip_stream()`), and carry
-//! `unsafe impl Send + Sync` with the same justification cudarc uses.
+//! handle, implement `Drop`, expose a checked FFI accessor
+//! (`hip_stream_for_execution()`), and carry `unsafe impl Send + Sync` with the
+//! same justification cudarc uses.
 //!
 //! The crate compiles on hosts with no ROCm toolchain (the FFI block has no
 //! `#[link]`; `build.rs` links `amdhip64` only when ROCm is present). Calling a
@@ -17,14 +18,59 @@
 
 pub mod sys;
 
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt;
 use std::os::raw::{c_int, c_uint, c_void};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 /// Result alias for HIP calls.
 pub type Result<T> = std::result::Result<T, HipError>;
+
+static CLEANUP_QUARANTINE_DROP_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
+
+fn device_cleanup_quarantine(ordinal: c_int) -> Arc<AtomicBool> {
+    static QUARANTINES: OnceLock<Mutex<HashMap<c_int, Arc<AtomicBool>>>> = OnceLock::new();
+    let mut quarantines = QUARANTINES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(
+        quarantines
+            .entry(ordinal)
+            .or_insert_with(|| Arc::new(AtomicBool::new(false))),
+    )
+}
+
+fn warn_cleanup_quarantine(resource: &str) {
+    if !CLEANUP_QUARANTINE_DROP_WARNING_EMITTED.swap(true, Ordering::AcqRel) {
+        eprintln!(
+            "{resource}: ROCm cleanup quarantined after a fatal execution or cleanup failure; retaining possibly in-flight HIP resources until process exit"
+        );
+    }
+}
+
+fn bind_device_for_cleanup(
+    ordinal: c_int,
+    cleanup_quarantined: &AtomicBool,
+    resource: &str,
+) -> bool {
+    if cleanup_quarantined.load(Ordering::Acquire) {
+        warn_cleanup_quarantine(resource);
+        return false;
+    }
+    let rc = unsafe { sys::hipSetDevice(ordinal) };
+    if rc != sys::HIP_SUCCESS {
+        cleanup_quarantined.store(true, Ordering::Release);
+        eprintln!("{resource}: hipSetDevice failed during cleanup (hipError {rc})");
+        warn_cleanup_quarantine(resource);
+        return false;
+    }
+    true
+}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -131,6 +177,266 @@ pub fn is_available() -> bool {
 // Context
 // ---------------------------------------------------------------------------
 
+/// Host synchronization discipline for work queued through a [`RocmContext`].
+///
+/// The legacy mode preserves kiln's historical host barriers exactly. The
+/// stream-ordered mode only removes barriers that a caller explicitly marks as
+/// same-stream dependencies; explicit drains, host readbacks, allocation
+/// lifetime boundaries, graph transitions, and memory reclamation still wait.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RocmSynchronizationMode {
+    /// Preserve the historical device/stream synchronization behavior.
+    #[default]
+    LegacyHostBarriers,
+    /// Trust FIFO ordering for explicitly proven same-stream dependencies.
+    StreamOrdered,
+}
+
+/// Immutable execution policy installed when a [`RocmContext`] is created.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RocmExecutionPolicy {
+    /// Synchronization discipline for steady-state ROCm execution.
+    pub synchronization_mode: RocmSynchronizationMode,
+}
+
+impl RocmExecutionPolicy {
+    /// Construct a policy with the requested synchronization discipline.
+    pub const fn new(synchronization_mode: RocmSynchronizationMode) -> Self {
+        Self {
+            synchronization_mode,
+        }
+    }
+}
+
+/// Fixed-cardinality reasons for a host-visible ROCm synchronization boundary.
+///
+/// These values are stable metric dimensions. Add a variant for a genuinely
+/// new boundary class rather than recording free-form operation names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RocmSyncReason {
+    /// A caller explicitly requested a device-wide drain.
+    ExplicitDeviceDrain,
+    /// A caller explicitly requested an active-stream drain.
+    ExplicitStreamDrain,
+    /// A tensor is crossing into a consumer with an external stream contract.
+    TensorHandoff,
+    /// Generated output is about to become visible outside the backend.
+    ExternalYield,
+    /// An eager activation result is consumed on the same stream.
+    ActivationOutput,
+    /// An eager elementwise result is consumed on the same stream.
+    ElementwiseOutput,
+    /// An eager cast result is consumed on the same stream.
+    CastOutput,
+    /// A concat input is handed to same-stream assembly.
+    ConcatInput,
+    /// A concat result is consumed on the same stream.
+    ConcatOutput,
+    /// A contiguous-copy result is consumed on the same stream.
+    ContiguousOutput,
+    /// A repeated-head result is consumed on the same stream.
+    RepeatHeadsOutput,
+    /// A GEMM result is consumed on the same stream.
+    MatmulOutput,
+    /// A GEMM FP32-output fallback crosses its cast boundary.
+    MatmulCastBoundary,
+    /// An in-place mutation must be complete before returning to its caller.
+    InPlaceMutation,
+    /// Device work must drain before releasing pooled memory.
+    MemoryReclaim,
+    /// Graph capture, instantiation, or replay crosses a host boundary.
+    GraphBoundary,
+    /// Full attention crosses into a consumer stream or implementation.
+    FullAttentionHandoff,
+    /// A model-level tensor crosses into a consumer stream or implementation.
+    ModelHandoff,
+    /// A device result is about to be read by the host.
+    HostReadback,
+    /// Work must complete before an allocation or borrowed owner can expire.
+    AllocationLifetime,
+    /// Synchronization is required to contain or diagnose an execution error.
+    ErrorRecovery,
+    /// Synchronization protects a process- or device-global state transition.
+    GlobalStateMutation,
+}
+
+impl RocmSyncReason {
+    /// Every synchronization reason in stable metric order.
+    pub const ALL: [Self; ROCM_SYNC_REASON_COUNT] = [
+        Self::ExplicitDeviceDrain,
+        Self::ExplicitStreamDrain,
+        Self::TensorHandoff,
+        Self::ExternalYield,
+        Self::ActivationOutput,
+        Self::ElementwiseOutput,
+        Self::CastOutput,
+        Self::ConcatInput,
+        Self::ConcatOutput,
+        Self::ContiguousOutput,
+        Self::RepeatHeadsOutput,
+        Self::MatmulOutput,
+        Self::MatmulCastBoundary,
+        Self::InPlaceMutation,
+        Self::MemoryReclaim,
+        Self::GraphBoundary,
+        Self::FullAttentionHandoff,
+        Self::ModelHandoff,
+        Self::HostReadback,
+        Self::AllocationLifetime,
+        Self::ErrorRecovery,
+        Self::GlobalStateMutation,
+    ];
+
+    /// Stable lower-snake-case metric label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitDeviceDrain => "explicit_device_drain",
+            Self::ExplicitStreamDrain => "explicit_stream_drain",
+            Self::TensorHandoff => "tensor_handoff",
+            Self::ExternalYield => "external_yield",
+            Self::ActivationOutput => "activation_output",
+            Self::ElementwiseOutput => "elementwise_output",
+            Self::CastOutput => "cast_output",
+            Self::ConcatInput => "concat_input",
+            Self::ConcatOutput => "concat_output",
+            Self::ContiguousOutput => "contiguous_output",
+            Self::RepeatHeadsOutput => "repeat_heads_output",
+            Self::MatmulOutput => "matmul_output",
+            Self::MatmulCastBoundary => "matmul_cast_boundary",
+            Self::InPlaceMutation => "in_place_mutation",
+            Self::MemoryReclaim => "memory_reclaim",
+            Self::GraphBoundary => "graph_boundary",
+            Self::FullAttentionHandoff => "full_attention_handoff",
+            Self::ModelHandoff => "model_handoff",
+            Self::HostReadback => "host_readback",
+            Self::AllocationLifetime => "allocation_lifetime",
+            Self::ErrorRecovery => "error_recovery",
+            Self::GlobalStateMutation => "global_state_mutation",
+        }
+    }
+
+    #[inline]
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Number of fixed ROCm synchronization-reason metric dimensions.
+pub const ROCM_SYNC_REASON_COUNT: usize = 22;
+
+/// Atomic synchronization counters for one fixed [`RocmSyncReason`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RocmSyncReasonStats {
+    /// Stable reason dimension.
+    pub reason: RocmSyncReason,
+    /// Completed or failed device-wide wait attempts.
+    pub device_wait_count: u64,
+    /// Completed or failed stream wait attempts.
+    pub stream_wait_count: u64,
+    /// Host wall-clock nanoseconds spent in all wait attempts.
+    pub waited_ns: u64,
+    /// Barriers omitted because stream-ordered execution proved them redundant.
+    pub skipped_count: u64,
+}
+
+/// Point-in-time synchronization telemetry for one [`RocmContext`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RocmSyncTelemetrySnapshot {
+    /// Per-reason counters in [`RocmSyncReason::ALL`] order.
+    pub reasons: [RocmSyncReasonStats; ROCM_SYNC_REASON_COUNT],
+    /// A fatal execution or synchronization failure quarantined this device.
+    /// The quarantine is process-lifetime sticky: new execution is rejected and
+    /// Drop implementations retain possibly in-flight HIP resources rather than
+    /// risking use-after-free. Restart the process to recover the device.
+    pub cleanup_quarantined: bool,
+}
+
+impl RocmSyncTelemetrySnapshot {
+    /// Total host wait attempts across every reason and wait scope.
+    pub fn total_wait_count(&self) -> u64 {
+        self.reasons.iter().fold(0u64, |total, stats| {
+            total
+                .saturating_add(stats.device_wait_count)
+                .saturating_add(stats.stream_wait_count)
+        })
+    }
+
+    /// Total host wall-clock nanoseconds spent waiting across every reason.
+    pub fn total_waited_ns(&self) -> u64 {
+        self.reasons
+            .iter()
+            .fold(0u64, |total, stats| total.saturating_add(stats.waited_ns))
+    }
+
+    /// Total same-stream barriers omitted by the execution policy.
+    pub fn total_skipped_count(&self) -> u64 {
+        self.reasons.iter().fold(0u64, |total, stats| {
+            total.saturating_add(stats.skipped_count)
+        })
+    }
+}
+
+#[derive(Debug)]
+struct RocmSyncTelemetry {
+    device_wait_counts: [AtomicU64; ROCM_SYNC_REASON_COUNT],
+    stream_wait_counts: [AtomicU64; ROCM_SYNC_REASON_COUNT],
+    waited_ns: [AtomicU64; ROCM_SYNC_REASON_COUNT],
+    skipped_counts: [AtomicU64; ROCM_SYNC_REASON_COUNT],
+}
+
+impl Default for RocmSyncTelemetry {
+    fn default() -> Self {
+        Self {
+            device_wait_counts: std::array::from_fn(|_| AtomicU64::new(0)),
+            stream_wait_counts: std::array::from_fn(|_| AtomicU64::new(0)),
+            waited_ns: std::array::from_fn(|_| AtomicU64::new(0)),
+            skipped_counts: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RocmSyncScope {
+    Device,
+    Stream,
+}
+
+impl RocmSyncTelemetry {
+    fn saturating_add(counter: &AtomicU64, value: u64) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(value))
+        });
+    }
+
+    fn record_wait(&self, reason: RocmSyncReason, scope: RocmSyncScope, waited_ns: u64) {
+        let index = reason.index();
+        let counter = match scope {
+            RocmSyncScope::Device => &self.device_wait_counts[index],
+            RocmSyncScope::Stream => &self.stream_wait_counts[index],
+        };
+        Self::saturating_add(counter, 1);
+        Self::saturating_add(&self.waited_ns[index], waited_ns);
+    }
+
+    fn record_skipped(&self, reason: RocmSyncReason) {
+        Self::saturating_add(&self.skipped_counts[reason.index()], 1);
+    }
+
+    fn snapshot(&self) -> RocmSyncTelemetrySnapshot {
+        RocmSyncTelemetrySnapshot {
+            reasons: std::array::from_fn(|index| RocmSyncReasonStats {
+                reason: RocmSyncReason::ALL[index],
+                device_wait_count: self.device_wait_counts[index].load(Ordering::Relaxed),
+                stream_wait_count: self.stream_wait_counts[index].load(Ordering::Relaxed),
+                waited_ns: self.waited_ns[index].load(Ordering::Relaxed),
+                skipped_count: self.skipped_counts[index].load(Ordering::Relaxed),
+            }),
+            cleanup_quarantined: false,
+        }
+    }
+}
+
 /// A HIP device handle + its default stream. The runtime-API analog of
 /// `cudarc::driver::CudaContext`.
 ///
@@ -142,6 +448,9 @@ pub fn is_available() -> bool {
 pub struct RocmContext {
     ordinal: c_int,
     default_stream: Arc<RocmStream>,
+    execution_policy: RocmExecutionPolicy,
+    sync_telemetry: Arc<RocmSyncTelemetry>,
+    cleanup_quarantined: Arc<AtomicBool>,
 }
 
 // SAFETY: the ordinal is a plain int; the default stream is itself Send+Sync
@@ -156,6 +465,17 @@ impl RocmContext {
     /// present and the ordinal is in range, then creating a non-blocking
     /// default stream.
     pub fn new(ordinal: usize) -> Result<Arc<Self>> {
+        Self::new_with_execution_policy(ordinal, RocmExecutionPolicy::default())
+    }
+
+    /// Create a context with an immutable steady-state execution policy.
+    ///
+    /// The policy is copied into the context before any stream is exposed, so
+    /// every tensor and backend sharing the context observes one discipline.
+    pub fn new_with_execution_policy(
+        ordinal: usize,
+        execution_policy: RocmExecutionPolicy,
+    ) -> Result<Arc<Self>> {
         let ordinal = ordinal as c_int;
         let count = device_count()?;
         if ordinal < 0 || ordinal >= count {
@@ -163,6 +483,20 @@ impl RocmContext {
                 code: -1,
                 api: "RocmContext::new",
                 message: format!("device ordinal {ordinal} out of range (count={count})"),
+            });
+        }
+        // HIP's runtime context is device-global within this process. Every
+        // RocmContext for one ordinal must therefore share one sticky quarantine;
+        // otherwise a second context could execute or free resources after a
+        // device-wide settlement failure in the first.
+        let cleanup_quarantined = device_cleanup_quarantine(ordinal);
+        if cleanup_quarantined.load(Ordering::Acquire) {
+            return Err(HipError {
+                code: -1,
+                api: "RocmContext::new",
+                message: format!(
+                    "ROCm device {ordinal} is quarantined after a fatal execution failure; restart the process"
+                ),
             });
         }
         check(unsafe { sys::hipSetDevice(ordinal) }, "hipSetDevice")?;
@@ -187,10 +521,19 @@ impl RocmContext {
                 )
             };
         }
-        let default_stream = RocmStream::create(ordinal, None)?;
+        let sync_telemetry = Arc::new(RocmSyncTelemetry::default());
+        let default_stream = RocmStream::create(
+            ordinal,
+            None,
+            Arc::clone(&sync_telemetry),
+            Arc::clone(&cleanup_quarantined),
+        )?;
         Ok(Arc::new(RocmContext {
             ordinal,
             default_stream,
+            execution_policy,
+            sync_telemetry,
+            cleanup_quarantined,
         }))
     }
 
@@ -202,12 +545,208 @@ impl RocmContext {
     /// Bind this device to the calling thread (`hipSetDevice`). Cheap; called
     /// before driver work, mirroring cudarc's `bind_to_thread`.
     pub fn bind_to_thread(&self) -> Result<()> {
+        self.ensure_execution_available("RocmContext::bind_to_thread")?;
         check(unsafe { sys::hipSetDevice(self.ordinal) }, "hipSetDevice")
+    }
+
+    /// Whether a fatal failure made further execution and resource cleanup
+    /// unsafe for this device. This state is shared by every context for the
+    /// same ordinal and remains set until process restart.
+    pub fn cleanup_quarantined(&self) -> bool {
+        self.cleanup_quarantined.load(Ordering::Acquire)
+    }
+
+    /// Reject new execution after a fatal failure. A narrowly scoped
+    /// [`Self::synchronize_device_for`] call with `ErrorRecovery` may still try
+    /// to settle physical work for diagnosis, but never clears the quarantine.
+    pub fn ensure_execution_available(&self, api: &'static str) -> Result<()> {
+        if self.cleanup_quarantined() {
+            return Err(HipError {
+                code: -1,
+                api,
+                message: "ROCm context cleanup is quarantined after synchronization failure"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Permanently quarantine execution and cleanup for this device until the
+    /// process restarts. Higher layers use this when logical model state cannot
+    /// be proven valid even if the HIP device itself synchronized successfully.
+    pub fn quarantine_execution(&self) {
+        self.cleanup_quarantined.store(true, Ordering::Release);
     }
 
     /// The context's default (non-blocking) stream.
     pub fn default_stream(&self) -> Arc<RocmStream> {
         self.default_stream.clone()
+    }
+
+    /// Immutable steady-state execution policy for this context.
+    pub const fn execution_policy(&self) -> RocmExecutionPolicy {
+        self.execution_policy
+    }
+
+    /// Point-in-time fixed-cardinality synchronization telemetry.
+    pub fn sync_telemetry_snapshot(&self) -> RocmSyncTelemetrySnapshot {
+        let mut snapshot = self.sync_telemetry.snapshot();
+        snapshot.cleanup_quarantined = self.cleanup_quarantined.load(Ordering::Acquire);
+        snapshot
+    }
+
+    fn timed_synchronize(
+        &self,
+        reason: RocmSyncReason,
+        scope: RocmSyncScope,
+        synchronize: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let result = synchronize();
+        let waited_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.sync_telemetry.record_wait(reason, scope, waited_ns);
+        if result.is_err() {
+            self.cleanup_quarantined.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    /// Always perform and account for a device-wide synchronization.
+    ///
+    /// Use this for true global boundaries such as reclamation and global-state
+    /// mutation. Same-stream steady-state dependencies must use
+    /// [`Self::synchronize_same_stream_dependency`] instead.
+    pub fn synchronize_device_for(&self, reason: RocmSyncReason) -> Result<()> {
+        if reason != RocmSyncReason::ErrorRecovery {
+            self.ensure_execution_available("RocmContext::synchronize_device_for")?;
+        }
+        self.timed_synchronize(reason, RocmSyncScope::Device, || {
+            // Recovery synchronization must remain available while cleanup is
+            // quarantined, so bind directly instead of calling the guarded
+            // public `bind_to_thread` entry point.
+            check(unsafe { sys::hipSetDevice(self.ordinal) }, "hipSetDevice")?;
+            check(
+                unsafe { sys::hipDeviceSynchronize() },
+                "hipDeviceSynchronize",
+            )
+        })
+    }
+
+    /// Always perform and account for a synchronization on `stream`.
+    pub fn synchronize_stream_for(
+        &self,
+        stream: &RocmStream,
+        reason: RocmSyncReason,
+    ) -> Result<()> {
+        if stream.ordinal != self.ordinal {
+            return Err(HipError {
+                code: -1,
+                api: "RocmContext::synchronize_stream_for",
+                message: format!(
+                    "context belongs to device {} but stream belongs to device {}",
+                    self.ordinal, stream.ordinal
+                ),
+            });
+        }
+        self.timed_synchronize(reason, RocmSyncScope::Stream, || stream.synchronize())
+    }
+
+    /// Order a producer and consumer already known to use the same stream.
+    ///
+    /// Legacy mode performs the historical host wait. Stream-ordered mode
+    /// records a skipped barrier and relies on the stream's FIFO dependency.
+    pub fn synchronize_same_stream_dependency(
+        &self,
+        stream: &RocmStream,
+        reason: RocmSyncReason,
+    ) -> Result<()> {
+        self.ensure_execution_available("RocmContext::synchronize_same_stream_dependency")?;
+        match self.execution_policy.synchronization_mode {
+            RocmSynchronizationMode::LegacyHostBarriers => {
+                self.synchronize_stream_for(stream, reason)
+            }
+            RocmSynchronizationMode::StreamOrdered => {
+                if stream.ordinal != self.ordinal {
+                    return Err(HipError {
+                        code: -1,
+                        api: "RocmContext::synchronize_same_stream_dependency",
+                        message: format!(
+                            "context belongs to device {} but stream belongs to device {}",
+                            self.ordinal, stream.ordinal
+                        ),
+                    });
+                }
+                self.sync_telemetry.record_skipped(reason);
+                Ok(())
+            }
+        }
+    }
+
+    /// Preserve a historical device-wide barrier in legacy mode while allowing
+    /// stream-ordered mode to omit it for a proven same-stream dependency.
+    ///
+    /// This is intentionally narrower than [`Self::synchronize_device_for`]. It
+    /// exists for compatibility barriers around libraries such as hipBLASLt
+    /// that were historically device-wide even though their producer and
+    /// consumer are submitted to the same explicit stream.
+    pub fn synchronize_legacy_device_same_stream_dependency(
+        &self,
+        stream: &RocmStream,
+        reason: RocmSyncReason,
+    ) -> Result<()> {
+        self.ensure_execution_available(
+            "RocmContext::synchronize_legacy_device_same_stream_dependency",
+        )?;
+        if stream.ordinal != self.ordinal {
+            return Err(HipError {
+                code: -1,
+                api: "RocmContext::synchronize_legacy_device_same_stream_dependency",
+                message: format!(
+                    "context belongs to device {} but stream belongs to device {}",
+                    self.ordinal, stream.ordinal
+                ),
+            });
+        }
+        match self.execution_policy.synchronization_mode {
+            RocmSynchronizationMode::LegacyHostBarriers => self.synchronize_device_for(reason),
+            RocmSynchronizationMode::StreamOrdered => {
+                self.sync_telemetry.record_skipped(reason);
+                Ok(())
+            }
+        }
+    }
+
+    /// Synchronize work before exposing generated output outside the backend.
+    ///
+    /// Legacy mode preserves the historical device-wide drain. Stream-ordered
+    /// mode drains the context's default stream; graph replay records an event
+    /// from its capture stream into this stream before reaching the yield.
+    pub fn synchronize_external_yield(&self) -> Result<()> {
+        self.synchronize_external_yield_for(&self.default_stream)
+    }
+
+    /// Synchronize the actual producer stream before publishing progress.
+    /// Callers that dispatch through a private stream use this form after the
+    /// active-stream scope has ended.
+    pub fn synchronize_external_yield_for(&self, producer_stream: &RocmStream) -> Result<()> {
+        if producer_stream.ordinal != self.ordinal {
+            return Err(HipError {
+                code: -1,
+                api: "RocmContext::synchronize_external_yield_for",
+                message: format!(
+                    "context belongs to device {} but producer stream belongs to device {}",
+                    self.ordinal, producer_stream.ordinal
+                ),
+            });
+        }
+        match self.execution_policy.synchronization_mode {
+            RocmSynchronizationMode::LegacyHostBarriers => {
+                self.synchronize_device_for(RocmSyncReason::ExternalYield)
+            }
+            RocmSynchronizationMode::StreamOrdered => {
+                self.synchronize_stream_for(producer_stream, RocmSyncReason::ExternalYield)
+            }
+        }
     }
 
     /// Return pooled-but-unused VRAM to the OS, keeping at least
@@ -231,10 +770,7 @@ impl RocmContext {
             return Ok(0);
         }
         // Drain in-flight work so freed pages aren't yanked from under a kernel.
-        check(
-            unsafe { sys::hipDeviceSynchronize() },
-            "hipDeviceSynchronize",
-        )?;
+        self.synchronize_device_for(RocmSyncReason::MemoryReclaim)?;
         let mut pool: *mut c_void = ptr::null_mut();
         check(
             unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, self.ordinal) },
@@ -320,7 +856,12 @@ impl RocmContext {
     /// Create a fresh non-blocking stream bound to this device.
     pub fn new_stream(&self) -> Result<Arc<RocmStream>> {
         self.bind_to_thread()?;
-        RocmStream::create(self.ordinal, None)
+        RocmStream::create(
+            self.ordinal,
+            None,
+            Arc::clone(&self.sync_telemetry),
+            Arc::clone(&self.cleanup_quarantined),
+        )
     }
 
     /// Create a non-blocking stream at an explicit scheduling priority. Lower
@@ -328,22 +869,23 @@ impl RocmContext {
     /// [`stream_priority_range`].
     pub fn new_stream_with_priority(&self, priority: i32) -> Result<Arc<RocmStream>> {
         self.bind_to_thread()?;
-        RocmStream::create(self.ordinal, Some(priority))
+        RocmStream::create(
+            self.ordinal,
+            Some(priority),
+            Arc::clone(&self.sync_telemetry),
+            Arc::clone(&self.cleanup_quarantined),
+        )
     }
 
     /// Create a reusable ordering-only event on this device.
     pub fn new_event(&self) -> Result<Arc<RocmEvent>> {
         self.bind_to_thread()?;
-        RocmEvent::create(self.ordinal)
+        RocmEvent::create(self.ordinal, Arc::clone(&self.cleanup_quarantined))
     }
 
     /// Block until all work on the device completes (`hipDeviceSynchronize`).
     pub fn synchronize(&self) -> Result<()> {
-        self.bind_to_thread()?;
-        check(
-            unsafe { sys::hipDeviceSynchronize() },
-            "hipDeviceSynchronize",
-        )
+        self.synchronize_device_for(RocmSyncReason::ExplicitDeviceDrain)
     }
 }
 
@@ -372,6 +914,8 @@ pub fn stream_priority_range() -> Result<(i32, i32)> {
 pub struct RocmStream {
     handle: sys::hipStream_t,
     ordinal: c_int,
+    sync_telemetry: Arc<RocmSyncTelemetry>,
+    cleanup_quarantined: Arc<AtomicBool>,
 }
 
 /// RAII owner of a reusable HIP event configured for ordering only.
@@ -379,6 +923,7 @@ pub struct RocmStream {
 pub struct RocmEvent {
     handle: sys::hipEvent_t,
     ordinal: c_int,
+    cleanup_quarantined: Arc<AtomicBool>,
 }
 
 // SAFETY: a hipEvent_t is an opaque runtime handle bound to one device. HIP
@@ -388,14 +933,18 @@ unsafe impl Send for RocmEvent {}
 unsafe impl Sync for RocmEvent {}
 
 impl RocmEvent {
-    fn create(ordinal: c_int) -> Result<Arc<Self>> {
+    fn create(ordinal: c_int, cleanup_quarantined: Arc<AtomicBool>) -> Result<Arc<Self>> {
         check(unsafe { sys::hipSetDevice(ordinal) }, "hipSetDevice")?;
         let mut handle: sys::hipEvent_t = ptr::null_mut();
         check(
             unsafe { sys::hipEventCreateWithFlags(&mut handle, sys::HIP_EVENT_DISABLE_TIMING) },
             "hipEventCreateWithFlags",
         )?;
-        Ok(Arc::new(Self { handle, ordinal }))
+        Ok(Arc::new(Self {
+            handle,
+            ordinal,
+            cleanup_quarantined,
+        }))
     }
 
     fn ensure_same_device(&self, stream: &RocmStream) -> Result<()> {
@@ -422,7 +971,12 @@ unsafe impl Sync for RocmStream {}
 impl RocmStream {
     /// Create a non-blocking stream bound to `ordinal`, optionally at a given
     /// priority. Internal — callers go through `RocmContext`.
-    fn create(ordinal: c_int, priority: Option<i32>) -> Result<Arc<Self>> {
+    fn create(
+        ordinal: c_int,
+        priority: Option<i32>,
+        sync_telemetry: Arc<RocmSyncTelemetry>,
+        cleanup_quarantined: Arc<AtomicBool>,
+    ) -> Result<Arc<Self>> {
         check(unsafe { sys::hipSetDevice(ordinal) }, "hipSetDevice")?;
         let mut handle: sys::hipStream_t = ptr::null_mut();
         match priority {
@@ -441,14 +995,30 @@ impl RocmStream {
                 "hipStreamCreateWithPriority",
             )?,
         }
-        Ok(Arc::new(RocmStream { handle, ordinal }))
+        Ok(Arc::new(RocmStream {
+            handle,
+            ordinal,
+            sync_telemetry,
+            cleanup_quarantined,
+        }))
     }
 
-    /// The raw `hipStream_t`. Do not destroy it — the `RocmStream` owns it.
-    /// Safe to pass to kernel-launch FFI while `self` is alive (matches
-    /// `CudaStream::cu_stream()`).
-    pub fn hip_stream(&self) -> sys::hipStream_t {
+    /// The raw `hipStream_t` for crate-internal identity checks and tests.
+    /// External launch code must use [`Self::hip_stream_for_execution`].
+    pub(crate) fn hip_stream(&self) -> sys::hipStream_t {
         self.handle
+    }
+
+    /// Acquire the raw HIP stream handle for an external kernel launch.
+    ///
+    /// Unlike [`Self::hip_stream`], this is a fallible execution boundary: it
+    /// rejects a cleanup-quarantined context and binds the stream's device to
+    /// the calling thread immediately before the caller crosses FFI. Kernel
+    /// launchers outside `kiln-hip` must use this accessor so a failed recovery
+    /// cannot be bypassed by retaining an otherwise-valid raw handle.
+    pub fn hip_stream_for_execution(&self) -> Result<sys::hipStream_t> {
+        self.bind()?;
+        Ok(self.handle)
     }
 
     /// The device ordinal this stream is bound to.
@@ -458,6 +1028,14 @@ impl RocmStream {
 
     #[inline]
     fn bind(&self) -> Result<()> {
+        if self.cleanup_quarantined.load(Ordering::Acquire) {
+            return Err(HipError {
+                code: -1,
+                api: "RocmStream::bind",
+                message: "ROCm stream cleanup is quarantined after synchronization failure"
+                    .to_string(),
+            });
+        }
         check(unsafe { sys::hipSetDevice(self.ordinal) }, "hipSetDevice")
     }
 
@@ -468,6 +1046,18 @@ impl RocmStream {
             unsafe { sys::hipStreamSynchronize(self.handle) },
             "hipStreamSynchronize",
         )
+    }
+
+    fn synchronize_for(&self, reason: RocmSyncReason) -> Result<()> {
+        let started = Instant::now();
+        let result = self.synchronize();
+        let waited_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.sync_telemetry
+            .record_wait(reason, RocmSyncScope::Stream, waited_ns);
+        if result.is_err() {
+            self.cleanup_quarantined.store(true, Ordering::Release);
+        }
+        result
     }
 
     /// Record `event` after all work currently queued on this stream.
@@ -565,7 +1155,7 @@ impl RocmStream {
             },
             "hipMemcpyHtoDAsync",
         )?;
-        self.synchronize()
+        self.synchronize_for(RocmSyncReason::AllocationLifetime)
     }
 
     /// Async H2D copy into a caller-supplied raw device pointer, WITHOUT a
@@ -649,7 +1239,7 @@ impl RocmStream {
             },
             "hipMemcpyDtoHAsync",
         )?;
-        self.synchronize()?;
+        self.synchronize_for(RocmSyncReason::HostReadback)?;
         Ok(out)
     }
 
@@ -683,7 +1273,7 @@ impl RocmStream {
             },
             "hipMemcpyDtoHAsync",
         )?;
-        self.synchronize()?;
+        self.synchronize_for(RocmSyncReason::HostReadback)?;
         Ok(out)
     }
 
@@ -740,12 +1330,16 @@ impl Drop for RocmStream {
         if self.handle.is_null() {
             return;
         }
-        // Bind the device before the driver call (mirrors cudarc's Drop).
-        let _ = unsafe { sys::hipSetDevice(self.ordinal) };
+        if !bind_device_for_cleanup(self.ordinal, &self.cleanup_quarantined, "RocmStream::drop") {
+            self.handle = ptr::null_mut();
+            return;
+        }
         // SAFETY: handle was created by hipStreamCreate* and not yet destroyed.
         let rc = unsafe { sys::hipStreamDestroy(self.handle) };
         if rc != sys::HIP_SUCCESS {
+            self.cleanup_quarantined.store(true, Ordering::Release);
             eprintln!("RocmStream::drop: hipStreamDestroy failed (hipError {rc})");
+            warn_cleanup_quarantine("RocmStream::drop");
         }
         self.handle = ptr::null_mut();
     }
@@ -756,10 +1350,15 @@ impl Drop for RocmEvent {
         if self.handle.is_null() {
             return;
         }
-        let _ = unsafe { sys::hipSetDevice(self.ordinal) };
+        if !bind_device_for_cleanup(self.ordinal, &self.cleanup_quarantined, "RocmEvent::drop") {
+            self.handle = ptr::null_mut();
+            return;
+        }
         let rc = unsafe { sys::hipEventDestroy(self.handle) };
         if rc != sys::HIP_SUCCESS {
+            self.cleanup_quarantined.store(true, Ordering::Release);
             eprintln!("RocmEvent::drop: hipEventDestroy failed (hipError {rc})");
+            warn_cleanup_quarantine("RocmEvent::drop");
         }
         self.handle = ptr::null_mut();
     }
@@ -823,7 +1422,14 @@ impl Drop for RocmSlice {
         if self.ptr.is_null() {
             return;
         }
-        let _ = unsafe { sys::hipSetDevice(self.stream.ordinal) };
+        if !bind_device_for_cleanup(
+            self.stream.ordinal,
+            &self.stream.cleanup_quarantined,
+            "RocmSlice::drop",
+        ) {
+            self.ptr = ptr::null_mut();
+            return;
+        }
         // SAFETY: ptr was produced by hipMallocAsync/hipMalloc on self.stream
         // and not yet freed. Free with the matching API.
         let rc = if self.async_alloc {
@@ -832,7 +1438,11 @@ impl Drop for RocmSlice {
             unsafe { sys::hipFree(self.ptr) }
         };
         if rc != sys::HIP_SUCCESS {
+            self.stream
+                .cleanup_quarantined
+                .store(true, Ordering::Release);
             eprintln!("RocmSlice::drop: hipFree failed (hipError {rc})");
+            warn_cleanup_quarantine("RocmSlice::drop");
         }
         self.ptr = ptr::null_mut();
     }
@@ -846,6 +1456,8 @@ impl Drop for RocmSlice {
 #[derive(Debug)]
 pub struct RocmGraph {
     graph: sys::hipGraph_t,
+    ordinal: c_int,
+    cleanup_quarantined: Arc<AtomicBool>,
 }
 
 unsafe impl Send for RocmGraph {}
@@ -855,6 +1467,8 @@ unsafe impl Sync for RocmGraph {}
 #[derive(Debug)]
 pub struct RocmGraphExec {
     exec: sys::hipGraphExec_t,
+    ordinal: c_int,
+    cleanup_quarantined: Arc<AtomicBool>,
 }
 
 unsafe impl Send for RocmGraphExec {}
@@ -881,7 +1495,11 @@ impl RocmStream {
             unsafe { sys::hipStreamEndCapture(self.handle, &mut graph) },
             "hipStreamEndCapture",
         )?;
-        Ok(RocmGraph { graph })
+        Ok(RocmGraph {
+            graph,
+            ordinal: self.ordinal,
+            cleanup_quarantined: Arc::clone(&self.cleanup_quarantined),
+        })
     }
 
     /// Whether a capture is currently active on this stream.
@@ -905,19 +1523,42 @@ impl RocmGraph {
     /// alloc nodes — `AUTO_FREE_ON_LAUNCH` (the CUDA discipline) has nothing to
     /// free and was rejected with `hipErrorInvalidValue` on gfx1151 / ROCm 7.2.4.
     pub fn instantiate(&self) -> Result<RocmGraphExec> {
+        if self.cleanup_quarantined.load(Ordering::Acquire) {
+            return Err(HipError {
+                code: -1,
+                api: "RocmGraph::instantiate",
+                message: "ROCm device is quarantined after a fatal execution failure; restart the process"
+                    .to_string(),
+            });
+        }
+        check(unsafe { sys::hipSetDevice(self.ordinal) }, "hipSetDevice")?;
         let mut exec: sys::hipGraphExec_t = ptr::null_mut();
         check(
             unsafe { sys::hipGraphInstantiateWithFlags(&mut exec, self.graph, 0) },
             "hipGraphInstantiateWithFlags",
         )?;
-        Ok(RocmGraphExec { exec })
+        Ok(RocmGraphExec {
+            exec,
+            ordinal: self.ordinal,
+            cleanup_quarantined: Arc::clone(&self.cleanup_quarantined),
+        })
     }
 }
 
 impl Drop for RocmGraph {
     fn drop(&mut self) {
         if !self.graph.is_null() {
-            let _ = unsafe { sys::hipGraphDestroy(self.graph) };
+            if !bind_device_for_cleanup(self.ordinal, &self.cleanup_quarantined, "RocmGraph::drop")
+            {
+                self.graph = ptr::null_mut();
+                return;
+            }
+            let rc = unsafe { sys::hipGraphDestroy(self.graph) };
+            if rc != sys::HIP_SUCCESS {
+                self.cleanup_quarantined.store(true, Ordering::Release);
+                eprintln!("RocmGraph::drop: hipGraphDestroy failed (hipError {rc})");
+                warn_cleanup_quarantine("RocmGraph::drop");
+            }
             self.graph = ptr::null_mut();
         }
     }
@@ -926,6 +1567,16 @@ impl Drop for RocmGraph {
 impl RocmGraphExec {
     /// Launch the executable graph on `stream`.
     pub fn launch(&self, stream: &RocmStream) -> Result<()> {
+        if self.ordinal != stream.ordinal {
+            return Err(HipError {
+                code: -1,
+                api: "RocmGraphExec::launch",
+                message: format!(
+                    "graph executable belongs to device {} but stream belongs to device {}",
+                    self.ordinal, stream.ordinal
+                ),
+            });
+        }
         stream.bind()?;
         check(
             unsafe { sys::hipGraphLaunch(self.exec, stream.handle) },
@@ -937,7 +1588,20 @@ impl RocmGraphExec {
 impl Drop for RocmGraphExec {
     fn drop(&mut self) {
         if !self.exec.is_null() {
-            let _ = unsafe { sys::hipGraphExecDestroy(self.exec) };
+            if !bind_device_for_cleanup(
+                self.ordinal,
+                &self.cleanup_quarantined,
+                "RocmGraphExec::drop",
+            ) {
+                self.exec = ptr::null_mut();
+                return;
+            }
+            let rc = unsafe { sys::hipGraphExecDestroy(self.exec) };
+            if rc != sys::HIP_SUCCESS {
+                self.cleanup_quarantined.store(true, Ordering::Release);
+                eprintln!("RocmGraphExec::drop: hipGraphExecDestroy failed (hipError {rc})");
+                warn_cleanup_quarantine("RocmGraphExec::drop");
+            }
             self.exec = ptr::null_mut();
         }
     }
@@ -951,6 +1615,34 @@ impl Drop for RocmGraphExec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_policy_defaults_to_legacy_host_barriers() {
+        assert_eq!(
+            RocmExecutionPolicy::default().synchronization_mode,
+            RocmSynchronizationMode::LegacyHostBarriers
+        );
+    }
+
+    #[test]
+    fn sync_reason_metrics_are_fixed_and_accounted() {
+        let mut labels = std::collections::HashSet::new();
+        for reason in RocmSyncReason::ALL {
+            assert!(
+                labels.insert(reason.as_str()),
+                "duplicate sync reason label"
+            );
+        }
+        assert_eq!(labels.len(), ROCM_SYNC_REASON_COUNT);
+
+        let telemetry = RocmSyncTelemetry::default();
+        telemetry.record_wait(RocmSyncReason::ExternalYield, RocmSyncScope::Stream, 17);
+        telemetry.record_skipped(RocmSyncReason::ActivationOutput);
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.total_wait_count(), 1);
+        assert_eq!(snapshot.total_waited_ns(), 17);
+        assert_eq!(snapshot.total_skipped_count(), 1);
+    }
 
     fn try_ctx() -> Option<Arc<RocmContext>> {
         if !is_available() {
@@ -997,11 +1689,27 @@ mod tests {
     fn htod_dtoh_roundtrip() {
         let Some(ctx) = try_ctx() else { return };
         let stream = ctx.default_stream();
+        let before = ctx.sync_telemetry_snapshot();
         let src: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
         let mut dev = stream.alloc(src.len()).expect("alloc");
         stream.memcpy_htod(&mut dev, &src).expect("htod");
         let back = stream.memcpy_dtoh(&dev).expect("dtoh");
         assert_eq!(src, back, "H2D->D2H must round-trip the bytes exactly");
+        let after = ctx.sync_telemetry_snapshot();
+        let allocation_lifetime = RocmSyncReason::AllocationLifetime.index();
+        let host_readback = RocmSyncReason::HostReadback.index();
+        assert_eq!(
+            after.reasons[allocation_lifetime].stream_wait_count,
+            before.reasons[allocation_lifetime]
+                .stream_wait_count
+                .saturating_add(1)
+        );
+        assert_eq!(
+            after.reasons[host_readback].stream_wait_count,
+            before.reasons[host_readback]
+                .stream_wait_count
+                .saturating_add(1)
+        );
     }
 
     #[test]

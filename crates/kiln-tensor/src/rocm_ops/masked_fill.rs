@@ -85,7 +85,7 @@ pub fn rocm_masked_fill(x: &Tensor, mask: &Tensor, fill_value: f32) -> Result<Te
     // masked-fill writes every output element, so skip the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (mask_base, _) = mask_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
@@ -168,7 +168,7 @@ pub fn rocm_causal_mask_fill(x: &Tensor, sq: usize, sk: usize, fill_value: f32) 
     };
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw();
+    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;

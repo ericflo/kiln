@@ -17,9 +17,10 @@
 //! (`LmHeadMode::HiddenOnly`); `final_norm` + lm_head run EAGERLY off the graph
 //! (`lm_head_from_hidden_eager`) because the lm_head GEMV is not replay-safe.
 //!
-//! Enabled by default on Rocm devices; set `KILN_ROCM_GRAPHS=0` to force eager
-//! decode. `KILN_ROCM_GRAPH_CAPTURE=0` is a narrower capture opt-out. Capture
-//! or replay failures trip a runner-local circuit breaker and fall back to eager.
+//! Graph execution is selected once, when the model runner is constructed. It
+//! is deliberately eager by default; callers must explicitly request lazy
+//! capture/replay through [`RocmGraphExecutionPolicy`]. Capture or replay
+//! failures trip a runner-local circuit breaker and fall back to eager.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -49,6 +50,134 @@ use std::collections::HashMap;
 #[cfg(feature = "rocm")]
 use kiln_tensor::Backend;
 use kiln_tensor::{Device, Tensor};
+
+/// Runtime behavior for the ROCm decode graph state machine.
+///
+/// The modes describe observable execution, rather than exposing independent
+/// booleans that can form contradictory configurations.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RocmGraphExecutionMode {
+    /// Bypass graph warmup, capture, and replay.
+    #[default]
+    Disabled,
+    /// Run one graph-shaped eager warmup, then remain eager.
+    WarmupThenEager,
+    /// Warm up eagerly, then lazily capture and replay eligible decode shapes.
+    LazyCaptureReplay,
+}
+
+impl RocmGraphExecutionMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::WarmupThenEager => "warmup_then_eager",
+            Self::LazyCaptureReplay => "lazy_capture_replay",
+        }
+    }
+}
+
+impl std::fmt::Display for RocmGraphExecutionMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Immutable ROCm decode graph policy installed with a model runner.
+///
+/// The default is intentionally eager. Product surfaces that expose
+/// experimental graph execution must select [`Self::lazy_capture_replay`]
+/// explicitly, which keeps stable and compatibility callers from enabling
+/// native capture as a side effect of process environment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RocmGraphExecutionPolicy {
+    mode: RocmGraphExecutionMode,
+    max_cached_graphs: usize,
+    force_eager_decode: bool,
+}
+
+impl RocmGraphExecutionPolicy {
+    pub const DEFAULT_MAX_CACHED_GRAPHS: usize = 8;
+    pub const MAX_CACHED_GRAPHS: usize = 64;
+
+    /// Fully eager execution with no graph-shaped warmup.
+    pub const fn disabled() -> Self {
+        Self {
+            mode: RocmGraphExecutionMode::Disabled,
+            max_cached_graphs: Self::DEFAULT_MAX_CACHED_GRAPHS,
+            force_eager_decode: false,
+        }
+    }
+
+    /// Graph-shaped warmup followed by eager steady-state decode.
+    pub const fn warmup_then_eager() -> Self {
+        Self {
+            mode: RocmGraphExecutionMode::WarmupThenEager,
+            max_cached_graphs: Self::DEFAULT_MAX_CACHED_GRAPHS,
+            force_eager_decode: false,
+        }
+    }
+
+    /// Lazy native capture/replay with the default bounded graph cache.
+    pub const fn lazy_capture_replay() -> Self {
+        Self {
+            mode: RocmGraphExecutionMode::LazyCaptureReplay,
+            max_cached_graphs: Self::DEFAULT_MAX_CACHED_GRAPHS,
+            force_eager_decode: false,
+        }
+    }
+
+    /// Build a policy from typed product configuration.
+    pub fn try_new(
+        mode: RocmGraphExecutionMode,
+        max_cached_graphs: usize,
+        force_eager_decode: bool,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            max_cached_graphs > 0,
+            "ROCm graph cache capacity must be greater than zero"
+        );
+        anyhow::ensure!(
+            max_cached_graphs <= Self::MAX_CACHED_GRAPHS,
+            "ROCm graph cache capacity must not exceed {}",
+            Self::MAX_CACHED_GRAPHS
+        );
+        Ok(Self {
+            mode,
+            max_cached_graphs,
+            force_eager_decode,
+        })
+    }
+
+    pub const fn mode(self) -> RocmGraphExecutionMode {
+        self.mode
+    }
+
+    pub const fn max_cached_graphs(self) -> usize {
+        self.max_cached_graphs
+    }
+
+    pub const fn force_eager_decode(self) -> bool {
+        self.force_eager_decode
+    }
+
+    /// Qualification-only override that preserves the configured graph mode
+    /// while routing decode through eager execution for an A/B run.
+    pub const fn with_force_eager_decode(mut self, force_eager_decode: bool) -> Self {
+        self.force_eager_decode = force_eager_decode;
+        self
+    }
+
+    pub fn with_max_cached_graphs(self, max_cached_graphs: usize) -> Result<Self> {
+        Self::try_new(self.mode, max_cached_graphs, self.force_eager_decode)
+    }
+}
+
+impl Default for RocmGraphExecutionPolicy {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
 
 #[cfg(all(test, feature = "rocm"))]
 static ROCM_TEST_NATIVE_REPLAY_LAUNCHES: std::sync::atomic::AtomicU64 =
@@ -105,66 +234,75 @@ fn graph_tensor_bytes<'a>(tensors: impl IntoIterator<Item = &'a Tensor>) -> u64 
 }
 
 #[cfg(feature = "rocm")]
-fn synchronize_after_rocm_graph_capture_failure(device: &Device) {
+fn quarantine_rocm_tensor_context(tensor: &Tensor) {
+    if let Some(storage) = tensor
+        .storage()
+        .as_any()
+        .downcast_ref::<kiln_tensor::RocmStorage>()
+    {
+        storage.context().quarantine_execution();
+    }
+}
+
+#[cfg(feature = "rocm")]
+fn fail_closed_after_rocm_warmup<T>(weights: &GpuWeights, error: anyhow::Error) -> Result<T> {
+    quarantine_rocm_tensor_context(&weights.embed_tokens);
+    let settlement = weights
+        .embed_tokens
+        .device()
+        .index()
+        .ok_or_else(|| anyhow::anyhow!("ROCm graph warmup lost its device ordinal"))
+        .and_then(|device_index| {
+            kiln_tensor::rocm_synchronize_device_for(
+                device_index,
+                kiln_tensor::RocmSyncReason::ErrorRecovery,
+            )
+            .map_err(|sync_error| anyhow::anyhow!("{sync_error}"))
+        });
+    match settlement {
+        Ok(()) => Err(error).context(
+            "ROCm graph-shaped warmup failed after state may have advanced; execution is quarantined until process restart",
+        ),
+        Err(sync_error) => Err(error).context(format!(
+            "ROCm graph-shaped warmup failed and device settlement also failed ({sync_error:#}); execution and cleanup are quarantined until process restart"
+        )),
+    }
+}
+
+#[cfg(feature = "rocm")]
+fn synchronize_after_rocm_graph_capture_failure(device: &Device) -> Result<()> {
     let Some(device_idx) = device.index() else {
-        return;
+        return Ok(());
     };
-    if let Err(error) = attributed_rocm_graph_synchronize(
+    attributed_rocm_graph_synchronize(
         "failure_recovery_default_stream",
         "rocm_graph_capture_failure_recovery",
         0,
         "unknown_in_flight_device_work",
         || {
-            kiln_tensor::rocm_synchronize_default_stream(device_idx)
-                .map_err(|error| anyhow::anyhow!("{error}"))
+            kiln_tensor::rocm_synchronize_device_for(
+                device_idx,
+                kiln_tensor::RocmSyncReason::ErrorRecovery,
+            )
+            .map_err(|error| anyhow::anyhow!("{error}"))
         },
-    ) {
-        tracing::warn!("post-capfail default-stream sync failed: {error:#}");
-    }
-}
-
-/// Whether ROCm HIP-graph decode is requested via `KILN_ROCM_GRAPHS` (default
-/// ON). This is the primary runtime gate; `KILN_ROCM_GRAPH_CAPTURE` is the
-/// narrower capture opt-out described below.
-fn rocm_graphs_env_on() -> bool {
-    std::env::var("KILN_ROCM_GRAPHS")
-        .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "off" | "OFF"))
-        .unwrap_or(true)
-}
-
-/// Whether to ATTEMPT capture/replay (vs. eager past warmup). Default ON
-/// whenever the runner is enabled — mirrors CUDA, where the single
-/// `KILN_CUDA_GRAPHS` flag turns on capture directly (no separate sub-flag).
-///
-/// This is only ever consulted AFTER the runner is confirmed enabled. Capture
-/// is fully working: the paged-KV slot write is on-device
-/// (`index_copy.cu` scatter with a DEVICE slot index), the freeze-pointer arena
-/// keeps every activation pointer stable across capture→replay, and the warm
-/// pass's host-round-trip detector condemns only geometries with a PERSISTENT
-/// host copy (cold shape-cache fills are retried, see `CAPTURE_RETRY_LIMIT`).
-/// With stable paged metadata (default on) one graph is captured per
-/// `max_seqlen_k` bucket and replayed for every step in it; captured-graph
-/// greedy decode is byte-identical to eager and never slower (gfx1151,
-/// validated across bucket-crossing long gen + concurrency, zero failures).
-/// Set `KILN_ROCM_GRAPH_CAPTURE=0` to opt OUT (eager past warmup) — e.g. to
-/// A/B the launch-overhead win or isolate a capture regression.
-#[cfg(feature = "rocm")]
-fn rocm_graph_capture_supported() -> bool {
-    std::env::var("KILN_ROCM_GRAPH_CAPTURE")
-        .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "off" | "OFF"))
-        .unwrap_or(true)
+    )
+    .context("ROCm graph capture failure recovery could not settle the device")?;
+    anyhow::ensure!(
+        !kiln_tensor::rocm_cleanup_quarantined(device_idx)
+            .context("query ROCm quarantine after graph capture recovery")?,
+        "ROCm graph capture failure left execution quarantined; restart the process"
+    );
+    Ok(())
 }
 
 /// Cache key for a captured bs=1 decode graph. Mirrors `CudaGraphKey`: with
-/// stable paged metadata (default on) the block table / seq_len are refreshed
-/// in place each replay, so they don't enter the key — only the FA2-bucketed
-/// K/V geometry does.
+/// stable paged metadata the block table / seq_len are refreshed in place each
+/// replay, so they don't enter the key — only the FA2-bucketed K/V geometry
+/// does. Stable metadata is a graph correctness invariant, not a runtime knob.
 #[cfg(feature = "rocm")]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RocmGraphKey {
-    stable_metadata: bool,
-    seq_len: usize,
-    block_table: Vec<u32>,
     max_seqlen_k: usize,
     max_blocks_per_seq: usize,
 }
@@ -176,8 +314,7 @@ impl RocmGraphKey {
         attention_len.div_ceil(kblock_n) * kblock_n
     }
 
-    fn new(block_table: &BlockTable, paged_cache: &PagedKvCacheKt, seq_len: usize) -> Self {
-        let stable_metadata = Self::stable_paged_metadata_enabled();
+    fn new(paged_cache: &PagedKvCacheKt, seq_len: usize) -> Self {
         let attention_len = seq_len + 1;
         // Match eager's exact FA2 split geometry. A coarser graph bucket changes
         // the number of split-K partials and can perturb BF16 reductions even
@@ -187,25 +324,9 @@ impl RocmGraphKey {
         let pages_per_chunk = kblock_n / paged_cache.block_size();
         let max_blocks_per_seq = (max_seqlen_k / kblock_n) * pages_per_chunk;
         Self {
-            stable_metadata,
-            seq_len: if stable_metadata { 0 } else { seq_len },
-            block_table: if stable_metadata {
-                Vec::new()
-            } else {
-                block_table.blocks.clone()
-            },
             max_seqlen_k,
             max_blocks_per_seq,
         }
-    }
-
-    /// Default ON. The graph-stable block-table buffer is refreshed in place per
-    /// replay, so it reads the CURRENT table and never races block recycling.
-    /// Opt out with `KILN_ROCM_GRAPH_STABLE_PAGED_METADATA=0`.
-    fn stable_paged_metadata_enabled() -> bool {
-        std::env::var("KILN_ROCM_GRAPH_STABLE_PAGED_METADATA")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on" | "ON"))
-            .unwrap_or(true)
     }
 }
 
@@ -251,6 +372,91 @@ struct RocmGraphSlotState {
     linear_state: LinearAttentionState,
 }
 
+/// Ensures every failed capture attempt settles device work before any
+/// pointer-bearing graph buffers leave scope. A failed recovery marks the HIP
+/// context cleanup-quarantined, so low-level owners retain their handles and
+/// allocations until process exit instead of freeing uncertain live memory.
+#[cfg(feature = "rocm")]
+struct RocmCaptureFailureGuard {
+    context: std::sync::Arc<kiln_hip::RocmContext>,
+    graph: Option<kiln_hip::RocmGraph>,
+    exec: Option<kiln_hip::RocmGraphExec>,
+    armed: bool,
+}
+
+#[cfg(feature = "rocm")]
+impl RocmCaptureFailureGuard {
+    fn new(context: std::sync::Arc<kiln_hip::RocmContext>) -> Self {
+        Self {
+            context,
+            graph: None,
+            exec: None,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn settle_before_rollback(&mut self) -> Result<()> {
+        let result = self
+            .context
+            .synchronize_device_for(kiln_tensor::RocmSyncReason::ErrorRecovery)
+            .map_err(|error| anyhow::anyhow!("{error}"));
+        if result.is_err() {
+            // The low-level synchronization path has already set the shared,
+            // process-lifetime device quarantine. Do not retry from Drop: a
+            // later successful drain must not make incomplete logical rollback
+            // look recoverable.
+            self.context.quarantine_execution();
+            self.disarm();
+        }
+        result
+    }
+
+    fn complete_rollback(&mut self, rollback: Result<()>) -> Result<()> {
+        match rollback {
+            Ok(()) => {
+                self.disarm();
+                Ok(())
+            }
+            Err(error) => {
+                // Physical quiescence is insufficient when recurrent model
+                // state could not be restored. Fail closed for the device.
+                self.context.quarantine_execution();
+                self.disarm();
+                Err(error)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "rocm")]
+impl Drop for RocmCaptureFailureGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let result = self
+            .context
+            .synchronize_device_for(kiln_tensor::RocmSyncReason::ErrorRecovery);
+        // Any armed Drop means the caller did not acknowledge a completed
+        // logical rollback. Keep the device quarantined even if this last-chance
+        // physical drain succeeds.
+        self.context.quarantine_execution();
+        match result {
+            Ok(()) => tracing::error!(
+                "ROCm capture exited without completed logical rollback; execution is quarantined"
+            ),
+            Err(error) => tracing::error!(
+                error = %error,
+                "ROCm capture failure recovery could not settle the device; execution and cleanup are quarantined"
+            ),
+        }
+    }
+}
+
 /// A captured HIP graph ready for replay, plus every graph-stable buffer whose
 /// device pointer the graph baked in. Mirrors `CapturedDecodeGraph`.
 #[cfg(feature = "rocm")]
@@ -267,6 +473,9 @@ struct CapturedDecodeGraphRocm {
     /// The non-default capture stream the graph launches on. Replay completion
     /// is ordered into `default_stream` without blocking the host.
     capture_stream: std::sync::Arc<kiln_hip::RocmStream>,
+    /// Exact context whose cleanup quarantine is shared by every retained HIP
+    /// resource in this graph.
+    context: std::sync::Arc<kiln_hip::RocmContext>,
     /// The kt default stream that receives refreshed inputs and consumes the
     /// graph-stable hidden output.
     default_stream: std::sync::Arc<kiln_hip::RocmStream>,
@@ -295,6 +504,9 @@ struct CapturedDecodeGraphRocm {
     /// Shared graph-layer replay contract state captured alongside the native
     /// HIP graph. The production replay path validates this before launching.
     replay_state: ReplayState,
+    /// Declared last so native graph handles and graph-stable tensors are
+    /// destroyed before the capture stream's hipBLASLt workspace is reclaimed.
+    _blaslt_workspace_lease: kiln_tensor::HipblasLtWorkspaceLease,
 }
 
 #[cfg(feature = "rocm")]
@@ -338,22 +550,30 @@ impl ReplayPlan for RocmDecodeReplayPlan<'_> {
         self.validate_inputs(inputs)?;
         #[cfg(test)]
         ROCM_TEST_NATIVE_REPLAY_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.captured
-            .exec
-            .launch(&self.captured.capture_stream)
-            .map_err(|e| CaptureError::Backend(format!("ROCm graph launch: {e}")))?;
-        self.captured
+        if let Err(error) = self.captured.exec.launch(&self.captured.capture_stream) {
+            self.captured.context.quarantine_execution();
+            return Err(CaptureError::Backend(format!("ROCm graph launch: {error}")));
+        }
+        if let Err(error) = self
+            .captured
             .capture_stream
             .record_event(&self.captured.replay_complete_event)
-            .map_err(|e| {
-                CaptureError::Backend(format!("record ROCm graph replay completion: {e}"))
-            })?;
-        self.captured
+        {
+            self.captured.context.quarantine_execution();
+            return Err(CaptureError::Backend(format!(
+                "record ROCm graph replay completion: {error}"
+            )));
+        }
+        if let Err(error) = self
+            .captured
             .default_stream
             .wait_event(&self.captured.replay_complete_event)
-            .map_err(|e| {
-                CaptureError::Backend(format!("order ROCm graph replay output handoff: {e}"))
-            })?;
+        {
+            self.captured.context.quarantine_execution();
+            return Err(CaptureError::Backend(format!(
+                "order ROCm graph replay output handoff: {error}"
+            )));
+        }
         Ok(ReplayOutputs::new(inputs.resources.to_vec(), 1))
     }
 
@@ -522,10 +742,10 @@ impl RocmGraphCounters {
 /// are live gauges and may decrease when state is released or invalidated.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RocmGraphStats {
-    /// The ROCm device and primary `KILN_ROCM_GRAPHS` gate requested the graph
-    /// runner when it was constructed. This remains true after a circuit break.
+    /// The ROCm device and typed policy requested the graph runner when it was
+    /// constructed. This remains true after a circuit break.
     pub requested: bool,
-    /// The narrower `KILN_ROCM_GRAPH_CAPTURE` gate requested native capture.
+    /// The typed policy requested lazy native capture/replay.
     pub capture_requested: bool,
     /// The runner is still armed. Capture or replay failures set this false.
     pub enabled: bool,
@@ -574,6 +794,7 @@ pub struct RocmGraphStats {
 /// Runs decode steps through captured HIP graphs when enabled, falling back to
 /// eager execution otherwise. ROCm analog of `CudaGraphRunner`.
 pub struct RocmGraphRunner {
+    policy: RocmGraphExecutionPolicy,
     requested: bool,
     capture_requested: bool,
     enabled: bool,
@@ -618,25 +839,24 @@ pub struct RocmGraphRunner {
 }
 
 impl RocmGraphRunner {
-    /// Construct a runner for `device`. Enabled only when `enabled`, the device
-    /// is `Device::Rocm`, and `KILN_ROCM_GRAPHS` is not set to an off value.
-    pub fn new(device: &Device, enabled: bool) -> Self {
+    /// Construct a runner for `device` with an already-resolved policy.
+    pub fn new(device: &Device, policy: RocmGraphExecutionPolicy) -> Self {
         let is_rocm = matches!(device, Device::Rocm(_));
-        let requested = enabled && is_rocm && rocm_graphs_env_on();
+        let requested = is_rocm && policy.mode() != RocmGraphExecutionMode::Disabled;
         #[cfg(feature = "rocm")]
-        let capture_requested = requested && rocm_graph_capture_supported();
+        let capture_requested =
+            requested && policy.mode() == RocmGraphExecutionMode::LazyCaptureReplay;
         #[cfg(not(feature = "rocm"))]
         let capture_requested = false;
         if requested && capture_requested {
             tracing::info!("ROCm HIP graphs enabled for decode");
         } else if requested {
-            tracing::info!(
-                "ROCm graph runner requested but native capture disabled by KILN_ROCM_GRAPH_CAPTURE; using eager decode after warmup"
-            );
-        } else if enabled && is_rocm {
-            tracing::debug!("ROCm device present but ROCm graphs disabled — using eager decode");
+            tracing::info!("ROCm graph runner configured for graph-shaped warmup and eager decode");
+        } else if is_rocm {
+            tracing::debug!("ROCm graphs disabled; using eager decode");
         }
         Self {
+            policy,
             requested,
             capture_requested,
             enabled: requested,
@@ -730,18 +950,63 @@ impl RocmGraphRunner {
 
     /// Invalidate any captured graphs (LoRA swap changes weight pointers) and
     /// force a fresh warmup.
-    pub fn invalidate(&mut self) {
+    pub fn invalidate(&mut self) -> Result<()> {
         self.adapter_generation += 1;
         self.warmup_done = false;
         #[cfg(feature = "rocm")]
         {
-            self.captured.clear();
+            let released = self.release_captured_after_device_settlement("adapter_invalidation");
             self.graph_slots.clear();
             self.decode_row_slots.clear();
             self.non_capture_safe.clear();
             self.capture_retry.clear();
             self.cache_full_warned = false;
             self.decode_timelines.clear();
+            anyhow::ensure!(
+                released,
+                "ROCm graph invalidation could not settle device work; cleanup is quarantined"
+            );
+        }
+        Ok(())
+    }
+
+    /// Settle all device work before releasing pointer-bearing graph state.
+    /// If settlement fails, the context enters cleanup quarantine and the map
+    /// is deliberately leaked so no later owner can free uncertain live memory.
+    #[cfg(feature = "rocm")]
+    fn release_captured_after_device_settlement(&mut self, boundary: &'static str) -> bool {
+        let Some(context) = self
+            .captured
+            .values()
+            .next()
+            .map(|captured| captured.context.clone())
+        else {
+            return true;
+        };
+        match context.synchronize_device_for(kiln_tensor::RocmSyncReason::ErrorRecovery) {
+            Ok(()) if !context.cleanup_quarantined() => {
+                self.captured.clear();
+                true
+            }
+            result => {
+                let retained = std::mem::take(&mut self.captured);
+                let retained_graphs = retained.len();
+                std::mem::forget(retained);
+                match result {
+                    Ok(()) => tracing::error!(
+                        boundary,
+                        retained_graphs,
+                        "ROCm graph state retained until process exit because execution is quarantined"
+                    ),
+                    Err(error) => tracing::error!(
+                        boundary,
+                        retained_graphs,
+                        error = %error,
+                        "ROCm graph state retained until process exit because device settlement failed"
+                    ),
+                }
+                false
+            }
         }
     }
 
@@ -851,6 +1116,23 @@ impl RocmGraphRunner {
     }
 
     #[cfg(feature = "rocm")]
+    fn restore_linear_state_after_execution(
+        rocm_context: &kiln_hip::RocmContext,
+        state: &mut LinearAttentionState,
+        snapshot: &LinearAttentionState,
+        operation: &'static str,
+    ) -> Result<()> {
+        let result = Self::restore_linear_state_in_place(state, snapshot, operation);
+        if result.is_err() {
+            // A completed HIP wait proves physical quiescence, not validity of
+            // recurrent model state. Failed rollback must prevent all future
+            // dispatch on this device.
+            rocm_context.quarantine_execution();
+        }
+        result
+    }
+
+    #[cfg(feature = "rocm")]
     fn bind_decode_row_to_slot(
         &mut self,
         row_id: u64,
@@ -928,12 +1210,8 @@ impl RocmGraphRunner {
     }
 
     #[cfg(feature = "rocm")]
-    fn max_cached_graphs() -> usize {
-        std::env::var("KILN_ROCM_GRAPH_CACHE_MAX")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(8)
+    fn max_cached_graphs(&self) -> usize {
+        self.policy.max_cached_graphs()
     }
 
     #[cfg(feature = "rocm")]
@@ -1022,7 +1300,7 @@ impl RocmGraphRunner {
         lora: Option<&LoraWeights>,
         graph_row_id: u64,
     ) -> Result<Tensor> {
-        if !self.enabled || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
+        if !self.enabled || self.policy.force_eager_decode() {
             return Self::eager_forward(
                 backend,
                 token_id,
@@ -1051,8 +1329,7 @@ impl RocmGraphRunner {
             // buffer) to prime the allocator pools before the first capture.
             if !self.warmup_done {
                 self.warmup_done = true;
-                tracing::info!("ROCm graph runner: warmup decode step (KILN_ROCM_GRAPHS active)");
-                let warmup_started = std::time::Instant::now();
+                tracing::info!("ROCm graph runner: graph-shaped warmup decode step");
                 match Self::eager_forward_with_position_buffer(
                     backend,
                     token_id,
@@ -1066,34 +1343,17 @@ impl RocmGraphRunner {
                 ) {
                     Ok(logits) => return Ok(logits),
                     Err(e) => {
-                        tracing::warn!(
-                            "ROCm graph-shaped warmup failed: {e:#}, plain eager decode"
+                        self.enabled = false;
+                        tracing::error!(
+                            "ROCm graph-shaped warmup failed: {e:#}; quarantining instead of retrying partially advanced state"
                         );
-                        return self.run_eager_fallback(
-                            RocmGraphFallbackReason::WarmupForwardFailure,
-                            seq_len,
-                            warmup_started.elapsed(),
-                            || {
-                                Self::eager_forward(
-                                    backend,
-                                    token_id,
-                                    weights,
-                                    config,
-                                    paged_cache,
-                                    block_table,
-                                    seq_len,
-                                    linear_state,
-                                    lora,
-                                )
-                            },
-                        );
+                        return fail_closed_after_rocm_warmup(weights, e);
                     }
                 }
             }
 
-            // Native capture defaults on with the primary graph runner. The
-            // narrower KILN_ROCM_GRAPH_CAPTURE=0 opt-out keeps the graph-shaped
-            // warmup but uses eager steady-state decode.
+            // Warmup-only policy keeps the graph-shaped first step but uses
+            // eager steady-state decode.
             if !self.capture_requested {
                 return Self::eager_forward(
                     backend,
@@ -1109,7 +1369,7 @@ impl RocmGraphRunner {
             }
 
             Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
-            let requested_key = RocmGraphKey::new(block_table, paged_cache, seq_len);
+            let requested_key = RocmGraphKey::new(paged_cache, seq_len);
             let owner = self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)?;
             self.prepare_owner_decode(owner, graph_row_id, block_table, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
@@ -1155,7 +1415,11 @@ impl RocmGraphRunner {
                                 "ROCm graph replay failed: {e:#}; disabling ROCm HIP graphs for this runner and falling back to eager"
                             );
                             self.enabled = false;
-                            self.captured.clear();
+                            if !self.release_captured_after_device_settlement("replay_failure") {
+                                return Err(e).context(
+                                    "ROCm graph replay failed and recovery settlement failed; cleanup is quarantined",
+                                );
+                            }
                             return self.run_eager_fallback(
                                 RocmGraphFallbackReason::ReplayFailure,
                                 seq_len,
@@ -1177,11 +1441,16 @@ impl RocmGraphRunner {
                         }
                     }
                 } else {
-                    self.captured.clear();
+                    anyhow::ensure!(
+                        self.release_captured_after_device_settlement(
+                            "adapter_generation_mismatch",
+                        ),
+                        "ROCm graph adapter-generation recovery failed; cleanup is quarantined"
+                    );
                 }
             }
 
-            if self.captured.len() >= Self::max_cached_graphs() {
+            if self.captured.len() >= self.max_cached_graphs() {
                 if !self.cache_full_warned {
                     self.cache_full_warned = true;
                     tracing::warn!(
@@ -1257,11 +1526,10 @@ impl RocmGraphRunner {
                 Err(e) => {
                     tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
                     self.enabled = false;
-                    // A failed capture can leave pending default-stream work.
-                    // Drain it before eager fallback rather than cascading into
-                    // a second failure. Capture-stream failures trip the runner
-                    // circuit breaker and are settled at external yield.
-                    synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device());
+                    // A failed capture can leave pending work. Eager fallback
+                    // is permitted only after recovery proves device quiescence.
+                    synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device())
+                        .with_context(|| format!("capture failed before recovery: {e:#}"))?;
                     return self.run_eager_fallback(
                         RocmGraphFallbackReason::CaptureFailure,
                         seq_len,
@@ -1318,7 +1586,7 @@ impl RocmGraphRunner {
         lora: Option<&LoraWeights>,
         graph_row_id: u64,
     ) -> Result<Tensor> {
-        if !self.enabled || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
+        if !self.enabled || self.policy.force_eager_decode() {
             return Self::eager_forward_hidden(
                 backend,
                 token_id,
@@ -1336,8 +1604,7 @@ impl RocmGraphRunner {
         {
             if !self.warmup_done {
                 self.warmup_done = true;
-                tracing::info!("ROCm graph runner: warmup decode step (KILN_ROCM_GRAPHS active)");
-                let warmup_started = std::time::Instant::now();
+                tracing::info!("ROCm graph runner: graph-shaped warmup decode step");
                 match Self::eager_forward_hidden_with_position_buffer(
                     backend,
                     token_id,
@@ -1351,27 +1618,11 @@ impl RocmGraphRunner {
                 ) {
                     Ok(hidden) => return Ok(hidden),
                     Err(e) => {
-                        tracing::warn!(
-                            "ROCm graph-shaped warmup failed: {e:#}, plain eager decode"
+                        self.enabled = false;
+                        tracing::error!(
+                            "ROCm graph-shaped warmup failed: {e:#}; quarantining instead of retrying partially advanced state"
                         );
-                        return self.run_eager_fallback(
-                            RocmGraphFallbackReason::WarmupForwardFailure,
-                            seq_len,
-                            warmup_started.elapsed(),
-                            || {
-                                Self::eager_forward_hidden(
-                                    backend,
-                                    token_id,
-                                    weights,
-                                    config,
-                                    paged_cache,
-                                    block_table,
-                                    seq_len,
-                                    linear_state,
-                                    lora,
-                                )
-                            },
-                        );
+                        return fail_closed_after_rocm_warmup(weights, e);
                     }
                 }
             }
@@ -1391,7 +1642,7 @@ impl RocmGraphRunner {
             }
 
             Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
-            let requested_key = RocmGraphKey::new(block_table, paged_cache, seq_len);
+            let requested_key = RocmGraphKey::new(paged_cache, seq_len);
             let owner = self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)?;
             self.prepare_owner_decode(owner, graph_row_id, block_table, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
@@ -1432,7 +1683,11 @@ impl RocmGraphRunner {
                                 "ROCm graph replay failed: {e:#}; disabling ROCm HIP graphs for this runner and falling back to eager"
                             );
                             self.enabled = false;
-                            self.captured.clear();
+                            if !self.release_captured_after_device_settlement("replay_failure") {
+                                return Err(e).context(
+                                    "ROCm graph replay failed and recovery settlement failed; cleanup is quarantined",
+                                );
+                            }
                             return self.run_eager_fallback(
                                 RocmGraphFallbackReason::ReplayFailure,
                                 seq_len,
@@ -1454,11 +1709,16 @@ impl RocmGraphRunner {
                         }
                     }
                 } else {
-                    self.captured.clear();
+                    anyhow::ensure!(
+                        self.release_captured_after_device_settlement(
+                            "adapter_generation_mismatch",
+                        ),
+                        "ROCm graph adapter-generation recovery failed; cleanup is quarantined"
+                    );
                 }
             }
 
-            if self.captured.len() >= Self::max_cached_graphs() {
+            if self.captured.len() >= self.max_cached_graphs() {
                 if !self.cache_full_warned {
                     self.cache_full_warned = true;
                     tracing::warn!(
@@ -1547,7 +1807,8 @@ impl RocmGraphRunner {
                 Err(e) => {
                     tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
                     self.enabled = false;
-                    synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device());
+                    synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device())
+                        .with_context(|| format!("capture failed before recovery: {e:#}"))?;
                     return self.run_eager_fallback(
                         RocmGraphFallbackReason::CaptureFailure,
                         seq_len,
@@ -1608,7 +1869,7 @@ impl RocmGraphRunner {
         lora: Option<&LoraWeights>,
         graph_row_id: u64,
     ) -> Result<u32> {
-        if !self.enabled || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
+        if !self.enabled || self.policy.force_eager_decode() {
             return Self::eager_forward_greedy(
                 backend,
                 token_id,
@@ -1626,8 +1887,7 @@ impl RocmGraphRunner {
         {
             if !self.warmup_done {
                 self.warmup_done = true;
-                tracing::info!("ROCm graph runner: warmup decode step (KILN_ROCM_GRAPHS active)");
-                let warmup_started = std::time::Instant::now();
+                tracing::info!("ROCm graph runner: graph-shaped warmup decode step");
                 match Self::eager_forward_greedy_with_position_buffer(
                     backend,
                     token_id,
@@ -1641,27 +1901,11 @@ impl RocmGraphRunner {
                 ) {
                     Ok(token) => return Ok(token),
                     Err(e) => {
-                        tracing::warn!(
-                            "ROCm graph-shaped warmup failed: {e:#}, plain eager decode"
+                        self.enabled = false;
+                        tracing::error!(
+                            "ROCm graph-shaped warmup failed: {e:#}; quarantining instead of retrying partially advanced state"
                         );
-                        return self.run_eager_fallback(
-                            RocmGraphFallbackReason::WarmupForwardFailure,
-                            seq_len,
-                            warmup_started.elapsed(),
-                            || {
-                                Self::eager_forward_greedy(
-                                    backend,
-                                    token_id,
-                                    weights,
-                                    config,
-                                    paged_cache,
-                                    block_table,
-                                    seq_len,
-                                    linear_state,
-                                    lora,
-                                )
-                            },
-                        );
+                        return fail_closed_after_rocm_warmup(weights, e);
                     }
                 }
             }
@@ -1681,7 +1925,7 @@ impl RocmGraphRunner {
             }
 
             Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
-            let requested_key = RocmGraphKey::new(block_table, paged_cache, seq_len);
+            let requested_key = RocmGraphKey::new(paged_cache, seq_len);
             let owner = self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)?;
             self.prepare_owner_decode(owner, graph_row_id, block_table, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
@@ -1724,7 +1968,11 @@ impl RocmGraphRunner {
                                 "ROCm graph replay failed: {e:#}; disabling ROCm HIP graphs for this runner and falling back to eager"
                             );
                             self.enabled = false;
-                            self.captured.clear();
+                            if !self.release_captured_after_device_settlement("replay_failure") {
+                                return Err(e).context(
+                                    "ROCm graph replay failed and recovery settlement failed; cleanup is quarantined",
+                                );
+                            }
                             return self.run_eager_fallback(
                                 RocmGraphFallbackReason::ReplayFailure,
                                 seq_len,
@@ -1746,11 +1994,16 @@ impl RocmGraphRunner {
                         }
                     }
                 } else {
-                    self.captured.clear();
+                    anyhow::ensure!(
+                        self.release_captured_after_device_settlement(
+                            "adapter_generation_mismatch",
+                        ),
+                        "ROCm graph adapter-generation recovery failed; cleanup is quarantined"
+                    );
                 }
             }
 
-            if self.captured.len() >= Self::max_cached_graphs() {
+            if self.captured.len() >= self.max_cached_graphs() {
                 if !self.cache_full_warned {
                     self.cache_full_warned = true;
                     tracing::warn!(
@@ -1819,7 +2072,8 @@ impl RocmGraphRunner {
                 Err(e) => {
                     tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
                     self.enabled = false;
-                    synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device());
+                    synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device())
+                        .with_context(|| format!("capture failed before recovery: {e:#}"))?;
                     return self.run_eager_fallback(
                         RocmGraphFallbackReason::CaptureFailure,
                         seq_len,
@@ -2066,10 +2320,22 @@ impl RocmGraphRunner {
         block_table: &BlockTable,
         seq_len: usize,
     ) -> Result<Tensor> {
+        let context = self
+            .captured
+            .get(key)
+            .map(|captured| captured.context.clone())
+            .ok_or_else(|| anyhow::anyhow!("replay: key vanished"))?;
         let hidden =
             self.replay_hidden(key, token_id, weights, paged_cache, block_table, seq_len)?;
-        crate::forward::lm_head_from_hidden_eager(backend, &hidden, weights, config)
-            .context("eager lm_head on replayed hidden")
+        match crate::forward::lm_head_from_hidden_eager(backend, &hidden, weights, config) {
+            Ok(logits) => Ok(logits),
+            Err(error) => {
+                // The graph has already advanced recurrent state. Retrying the
+                // whole step eagerly would advance it twice.
+                context.quarantine_execution();
+                Err(error).context("eager lm_head on replayed hidden")
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2084,10 +2350,20 @@ impl RocmGraphRunner {
         block_table: &BlockTable,
         seq_len: usize,
     ) -> Result<u32> {
+        let context = self
+            .captured
+            .get(key)
+            .map(|captured| captured.context.clone())
+            .ok_or_else(|| anyhow::anyhow!("replay: key vanished"))?;
         let hidden =
             self.replay_hidden(key, token_id, weights, paged_cache, block_table, seq_len)?;
-        crate::forward::lm_head_argmax_from_hidden_eager(backend, &hidden, weights, config)
-            .context("eager lm_head argmax on replayed hidden")
+        match crate::forward::lm_head_argmax_from_hidden_eager(backend, &hidden, weights, config) {
+            Ok(token) => Ok(token),
+            Err(error) => {
+                context.quarantine_execution();
+                Err(error).context("eager lm_head argmax on replayed hidden")
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2187,13 +2463,7 @@ impl RocmGraphRunner {
         let replay_key = ReplayKey::new(
             Backend::Rocm,
             "paged_decode_graph_outputs",
-            vec![
-                key.seq_len,
-                key.block_table.len(),
-                key.max_seqlen_k,
-                key.max_blocks_per_seq,
-                usize::from(key.stable_metadata),
-            ],
+            vec![key.max_seqlen_k, key.max_blocks_per_seq],
             Some(output_hidden.dtype()),
             1,
             true,
@@ -2489,8 +2759,15 @@ impl RocmGraphRunner {
             lora,
         )? {
             RocmCaptureStep::CapturedHidden(hidden) => {
-                crate::forward::lm_head_from_hidden_eager(backend, &hidden, weights, config)
-                    .context("eager lm_head on captured hidden (first launch)")
+                match crate::forward::lm_head_from_hidden_eager(backend, &hidden, weights, config) {
+                    Ok(logits) => Ok(logits),
+                    Err(error) => {
+                        // The first graph launch already advanced recurrent
+                        // state. A whole-step eager retry would advance it twice.
+                        quarantine_rocm_tensor_context(&hidden);
+                        Err(error).context("eager lm_head on captured hidden (first launch)")
+                    }
+                }
             }
             RocmCaptureStep::FallbackEager(reason) => {
                 self.run_eager_fallback(reason, seq_len, capture_started.elapsed(), || {
@@ -2540,8 +2817,15 @@ impl RocmGraphRunner {
             lora,
         )? {
             RocmCaptureStep::CapturedHidden(hidden) => {
-                crate::forward::lm_head_argmax_from_hidden_eager(backend, &hidden, weights, config)
-                    .context("eager lm_head argmax on captured hidden (first launch)")
+                match crate::forward::lm_head_argmax_from_hidden_eager(
+                    backend, &hidden, weights, config,
+                ) {
+                    Ok(token) => Ok(token),
+                    Err(error) => {
+                        quarantine_rocm_tensor_context(&hidden);
+                        Err(error).context("eager lm_head argmax on captured hidden (first launch)")
+                    }
+                }
             }
             RocmCaptureStep::FallbackEager(reason) => {
                 self.run_eager_fallback(reason, seq_len, capture_started.elapsed(), || {
@@ -2620,12 +2904,17 @@ impl RocmGraphRunner {
         };
 
         // Capture on a FRESH non-default stream (mirror the CUDA discipline; the
-        // with_active_rocm_stream scope routes every kt op onto it).
+        // graph-capture stream scope routes every kt op onto it).
         let context = kiln_tensor::primary_rocm_context(device_idx)
             .context("ROCm graph capture: primary_rocm_context for capture stream")?;
         let stream = context
             .new_stream()
             .map_err(|e| anyhow::anyhow!("ROCm graph capture: create capture stream: {e}"))?;
+        // Acquire before the warm pass so success, fallback, and failure paths
+        // all release any workspace allocated for this fresh private stream.
+        let blaslt_workspace_lease =
+            kiln_tensor::rocm_blaslt_workspace_lease(device_idx, &context, &stream)
+                .context("ROCm graph capture: lease hipBLASLt workspace")?;
         let default_stream = context.default_stream();
         let replay_inputs_ready_event = context
             .new_event()
@@ -2640,31 +2929,22 @@ impl RocmGraphRunner {
         let output_hidden = Self::new_output_hidden(config, device, dtype)?;
         let rotary_cos_buffer = Self::new_rotary_cos_buffer(config, device, seq_len)?;
         let rotary_sin_buffer = Self::new_rotary_sin_buffer(config, device, seq_len)?;
-        let key = RocmGraphKey::new(block_table, paged_cache, seq_len);
-        let (block_table_buffer, seqused_k_buffer, kv_slot_buffer) = if key.stable_metadata {
-            (
-                Some(Self::new_block_table_buffer(
-                    block_table,
-                    paged_cache,
-                    key.max_seqlen_k,
-                    device,
-                )?),
-                Some(Self::new_seqused_k_buffer(device, seq_len + 1)?),
-                Some(Self::new_kv_slot_buffer(
-                    block_table,
-                    paged_cache,
-                    seq_len,
-                    device,
-                )?),
-            )
-        } else {
-            (None, None, None)
-        };
-        let (paged_decode_outputs, paged_decode_lse) = if key.stable_metadata {
-            Self::new_paged_decode_outputs(config, device, dtype)?
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        let key = RocmGraphKey::new(paged_cache, seq_len);
+        let block_table_buffer = Some(Self::new_block_table_buffer(
+            block_table,
+            paged_cache,
+            key.max_seqlen_k,
+            device,
+        )?);
+        let seqused_k_buffer = Some(Self::new_seqused_k_buffer(device, seq_len + 1)?);
+        let kv_slot_buffer = Some(Self::new_kv_slot_buffer(
+            block_table,
+            paged_cache,
+            seq_len,
+            device,
+        )?);
+        let (paged_decode_outputs, paged_decode_lse) =
+            Self::new_paged_decode_outputs(config, device, dtype)?;
         let graph_inputs = match (
             block_table_buffer.as_ref(),
             seqused_k_buffer.as_ref(),
@@ -2727,7 +3007,11 @@ impl RocmGraphRunner {
             stable_graph_io_bytes,
             "stable_graph_io",
             || {
-                kiln_tensor::rocm_synchronize_default_stream(device_idx)
+                context
+                    .synchronize_stream_for(
+                        &default_stream,
+                        kiln_tensor::RocmSyncReason::GraphBoundary,
+                    )
                     .map_err(|error| anyhow::anyhow!("{error}"))
             },
         )?;
@@ -2742,25 +3026,29 @@ impl RocmGraphRunner {
         // BEFORE begin_capture, leaving the device clean.
         let htod_before = kiln_tensor::rocm_htod_count();
         let warm_result = kiln_tensor::with_rocm_capture_arena(arena.clone(), || {
-            kiln_tensor::with_active_rocm_stream(stream.clone(), || {
-                let hidden = model_forward_paged_hidden_with_graph_inputs(
-                    backend,
-                    &[token_id],
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    seq_len,
-                    Some(linear_state),
-                    lora,
-                    &token_buffer,
-                    &position_buffer,
-                    graph_inputs.as_ref(),
-                )?;
-                kiln_tensor::rocm_slice_set_dim0(&output_hidden, &hidden, 0)
-                    .context("freeze-pointers warm pass: copy hidden into stable output")?;
-                Ok::<(), anyhow::Error>(())
-            })
+            // SAFETY: the default input stream was drained above; the warm pass
+            // is settled on `stream` before any buffer can leave this scope.
+            unsafe {
+                kiln_tensor::with_rocm_graph_capture_stream(stream.clone(), || {
+                    let hidden = model_forward_paged_hidden_with_graph_inputs(
+                        backend,
+                        &[token_id],
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        Some(linear_state),
+                        lora,
+                        &token_buffer,
+                        &position_buffer,
+                        graph_inputs.as_ref(),
+                    )?;
+                    kiln_tensor::rocm_slice_set_dim0(&output_hidden, &hidden, 0)
+                        .context("freeze-pointers warm pass: copy hidden into stable output")?;
+                    Ok::<(), anyhow::Error>(())
+                })
+            }
         });
         let warm_sync_result = attributed_rocm_graph_synchronize(
             "capture_stream_warmup_completion",
@@ -2768,8 +3056,8 @@ impl RocmGraphRunner {
             stable_graph_io_bytes,
             "stable_graph_io",
             || {
-                stream
-                    .synchronize()
+                context
+                    .synchronize_stream_for(&stream, kiln_tensor::RocmSyncReason::GraphBoundary)
                     .map_err(|error| anyhow::anyhow!("{error}"))
             },
         );
@@ -2779,7 +3067,8 @@ impl RocmGraphRunner {
                 return Err(sync_err)
                     .context("capture stream synchronization failed after warm-forward failure");
             }
-            Self::restore_linear_state_in_place(
+            Self::restore_linear_state_after_execution(
+                &context,
                 linear_state,
                 &gdn_snapshot,
                 "restore graph-slot GDN state after warm-forward failure",
@@ -2798,7 +3087,8 @@ impl RocmGraphRunner {
         }
         // Restore values without replacing the graph slot's tensor handles.
         // Captured graphs retain these exact addresses across request reuse.
-        Self::restore_linear_state_in_place(
+        Self::restore_linear_state_after_execution(
+            &context,
             linear_state,
             &gdn_snapshot,
             "restore graph-slot GDN state after warm pass",
@@ -2848,6 +3138,10 @@ impl RocmGraphRunner {
         let capture_snapshot = linear_state
             .snapshot()
             .context("snapshot GDN recurrent state before capture pass")?;
+        // Declared after every pointer-bearing capture buffer so its Drop runs
+        // first on every error path. Graph/exec handles are moved into the
+        // guard as soon as they are created for the same ordering guarantee.
+        let mut capture_failure_guard = RocmCaptureFailureGuard::new(context.clone());
 
         // Capture establishment makes a host-side success/rollback decision,
         // so these one-time waits remain explicit and attributed.
@@ -2857,7 +3151,11 @@ impl RocmGraphRunner {
             stable_graph_io_bytes,
             "stable_graph_io",
             || {
-                kiln_tensor::rocm_synchronize_default_stream(device_idx)
+                context
+                    .synchronize_stream_for(
+                        &default_stream,
+                        kiln_tensor::RocmSyncReason::GraphBoundary,
+                    )
                     .map_err(|error| anyhow::anyhow!("{error}"))
             },
         )?;
@@ -2867,8 +3165,8 @@ impl RocmGraphRunner {
             stable_graph_io_bytes,
             "stable_graph_io",
             || {
-                stream
-                    .synchronize()
+                context
+                    .synchronize_stream_for(&stream, kiln_tensor::RocmSyncReason::GraphBoundary)
                     .map_err(|error| anyhow::anyhow!("{error}"))
             },
         )?;
@@ -2879,33 +3177,40 @@ impl RocmGraphRunner {
             .begin_capture()
             .map_err(|e| anyhow::anyhow!("begin_capture: {e}"))?;
         let capture_result = kiln_tensor::with_rocm_capture_arena(arena.clone(), || {
-            kiln_tensor::with_active_rocm_stream(stream.clone(), || {
-                let hidden = model_forward_paged_hidden_with_graph_inputs(
-                    backend,
-                    &[token_id],
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    seq_len,
-                    Some(linear_state),
-                    lora,
-                    &token_buffer,
-                    &position_buffer,
-                    graph_inputs.as_ref(),
-                )?;
-                kiln_tensor::rocm_slice_set_dim0(&output_hidden, &hidden, 0)
-                    .context("ROCm graph: copy kt hidden into stable output_hidden")?;
-                Ok::<(), anyhow::Error>(())
-            })
+            // SAFETY: both streams were drained immediately above. Replay uses
+            // explicit input-ready and completion events for later launches.
+            unsafe {
+                kiln_tensor::with_rocm_graph_capture_stream(stream.clone(), || {
+                    let hidden = model_forward_paged_hidden_with_graph_inputs(
+                        backend,
+                        &[token_id],
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        Some(linear_state),
+                        lora,
+                        &token_buffer,
+                        &position_buffer,
+                        graph_inputs.as_ref(),
+                    )?;
+                    kiln_tensor::rocm_slice_set_dim0(&output_hidden, &hidden, 0)
+                        .context("ROCm graph: copy kt hidden into stable output_hidden")?;
+                    Ok::<(), anyhow::Error>(())
+                })
+            }
         });
         let graph_result = stream.end_capture();
         if let Err(err) = capture_result {
-            Self::restore_linear_state_in_place(
+            capture_failure_guard
+                .settle_before_rollback()
+                .context("settle device before capture-forward rollback")?;
+            capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
                 linear_state,
                 &capture_snapshot,
                 "restore graph-slot GDN state after capture-forward failure",
-            )?;
+            ))?;
             return Err(err).context("forward pass failed during graph capture");
         }
         drop(graph_inputs);
@@ -2913,25 +3218,38 @@ impl RocmGraphRunner {
         let graph = match graph_result {
             Ok(graph) => graph,
             Err(err) => {
-                Self::restore_linear_state_in_place(
+                capture_failure_guard
+                    .settle_before_rollback()
+                    .context("settle device before end-capture rollback")?;
+                capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
                     linear_state,
                     &capture_snapshot,
                     "restore graph-slot GDN state after end-capture failure",
-                )?;
+                ))?;
                 return Err(anyhow::anyhow!("end_capture failed: {err}"));
             }
         };
-        let exec = match graph.instantiate() {
+        capture_failure_guard.graph = Some(graph);
+        let exec = match capture_failure_guard
+            .graph
+            .as_ref()
+            .expect("captured graph installed in failure guard")
+            .instantiate()
+        {
             Ok(exec) => exec,
             Err(err) => {
-                Self::restore_linear_state_in_place(
+                capture_failure_guard
+                    .settle_before_rollback()
+                    .context("settle device before graph-instantiation rollback")?;
+                capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
                     linear_state,
                     &capture_snapshot,
                     "restore graph-slot GDN state after graph-instantiation failure",
-                )?;
+                ))?;
                 return Err(anyhow::anyhow!("instantiate captured graph: {err}"));
             }
         };
+        capture_failure_guard.exec = Some(exec);
         tracing::info!(
             "ROCm HIP graph captured for decode ({} layers)",
             config.num_layers
@@ -2939,12 +3257,20 @@ impl RocmGraphRunner {
 
         // Stream capture only RECORDED the forward; launch once now to actually
         // compute this step + advance state, then sync so output_hidden is valid.
-        if let Err(err) = exec.launch(&stream) {
-            Self::restore_linear_state_in_place(
+        if let Err(err) = capture_failure_guard
+            .exec
+            .as_ref()
+            .expect("captured graph exec installed in failure guard")
+            .launch(&stream)
+        {
+            capture_failure_guard
+                .settle_before_rollback()
+                .context("settle device before first-launch rollback")?;
+            capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
                 linear_state,
                 &capture_snapshot,
                 "restore graph-slot GDN state after first-launch failure",
-            )?;
+            ))?;
             return Err(anyhow::anyhow!(
                 "execute captured decode graph (first run): {err}"
             ));
@@ -2955,11 +3281,19 @@ impl RocmGraphRunner {
             stable_graph_io_bytes,
             "stable_graph_io",
             || {
-                stream
-                    .synchronize()
+                context
+                    .synchronize_stream_for(&stream, kiln_tensor::RocmSyncReason::GraphBoundary)
                     .map_err(|error| anyhow::anyhow!("{error}"))
             },
         ) {
+            capture_failure_guard
+                .settle_before_rollback()
+                .context("settle device after first-launch stream wait failed")?;
+            capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
+                linear_state,
+                &capture_snapshot,
+                "restore graph-slot GDN state after first-launch synchronization failure",
+            ))?;
             return Err(anyhow::anyhow!(
                 "sync after first captured-graph launch: {err}"
             ));
@@ -2982,6 +3316,15 @@ impl RocmGraphRunner {
             &paged_decode_lse,
             &gdn_decode_outputs,
         );
+        let graph = capture_failure_guard
+            .graph
+            .take()
+            .expect("successful capture retains source graph");
+        let exec = capture_failure_guard
+            .exec
+            .take()
+            .expect("successful capture retains graph exec");
+        capture_failure_guard.disarm();
         self.captured.insert(
             RocmGraphCacheKey::new(owner, key),
             CapturedDecodeGraphRocm {
@@ -2989,6 +3332,7 @@ impl RocmGraphRunner {
                 exec,
                 output_hidden,
                 capture_stream: stream,
+                context,
                 default_stream,
                 replay_inputs_ready_event,
                 replay_complete_event,
@@ -3007,6 +3351,7 @@ impl RocmGraphRunner {
                 _gdn_decode_outputs: gdn_decode_outputs,
                 _capture_arena_buffers: arena_buffers,
                 replay_state,
+                _blaslt_workspace_lease: blaslt_workspace_lease,
             },
         );
         Ok(RocmCaptureStep::CapturedHidden(captured_hidden))
@@ -3210,8 +3555,110 @@ mod tests {
     }
 
     #[test]
+    fn graph_policy_defaults_are_eager_and_cache_capacity_is_validated() {
+        let default_policy = RocmGraphExecutionPolicy::default();
+        assert_eq!(default_policy, RocmGraphExecutionPolicy::disabled());
+        assert_eq!(default_policy.mode(), RocmGraphExecutionMode::Disabled);
+        assert_eq!(default_policy.mode().as_str(), "disabled");
+        assert_eq!(
+            default_policy.max_cached_graphs(),
+            RocmGraphExecutionPolicy::DEFAULT_MAX_CACHED_GRAPHS
+        );
+        assert!(!default_policy.force_eager_decode());
+
+        let lazy =
+            RocmGraphExecutionPolicy::try_new(RocmGraphExecutionMode::LazyCaptureReplay, 16, true)
+                .expect("nonzero graph cache capacity");
+        assert_eq!(lazy.mode(), RocmGraphExecutionMode::LazyCaptureReplay);
+        assert_eq!(lazy.max_cached_graphs(), 16);
+        assert!(lazy.force_eager_decode());
+
+        assert!(
+            RocmGraphExecutionPolicy::try_new(RocmGraphExecutionMode::WarmupThenEager, 0, false,)
+                .is_err(),
+            "zero-capacity graph caches must fail during config resolution"
+        );
+        assert!(
+            RocmGraphExecutionPolicy::try_new(
+                RocmGraphExecutionMode::LazyCaptureReplay,
+                RocmGraphExecutionPolicy::MAX_CACHED_GRAPHS,
+                false,
+            )
+            .is_ok(),
+            "the documented upper bound must be accepted"
+        );
+        assert!(
+            RocmGraphExecutionPolicy::try_new(
+                RocmGraphExecutionMode::LazyCaptureReplay,
+                RocmGraphExecutionPolicy::MAX_CACHED_GRAPHS + 1,
+                false,
+            )
+            .is_err(),
+            "embedding callers cannot construct an unbounded graph cache"
+        );
+    }
+
+    #[test]
+    fn graph_runtime_has_no_process_environment_policy_reads() {
+        let source = include_str!("rocm_graph.rs");
+        let runtime_source = source
+            .split_once("#[cfg(test)]\nmod tests")
+            .map(|(runtime, _)| runtime)
+            .expect("ROCm graph unit-test boundary");
+        let direct_env_read = ["std", "env", "var"].join("::");
+        assert!(!runtime_source.contains(&direct_env_read));
+        for key in [
+            ["KILN", "ROCM", "GRAPHS"].join("_"),
+            ["KILN", "ROCM", "GRAPH", "CAPTURE"].join("_"),
+            ["KILN", "ROCM", "GRAPH", "STABLE", "PAGED", "METADATA"].join("_"),
+            ["KILN", "ROCM", "GRAPH", "CACHE", "MAX"].join("_"),
+            ["KILN", "FORCE", "EAGER", "DECODE"].join("_"),
+        ] {
+            assert!(
+                !runtime_source.contains(&key),
+                "ROCm graph runtime must receive {key} through typed policy"
+            );
+        }
+    }
+
+    #[test]
+    fn runner_derives_requested_state_from_typed_mode() {
+        let device = Device::Rocm(0);
+
+        let disabled = RocmGraphRunner::new(&device, RocmGraphExecutionPolicy::disabled()).stats();
+        assert!(!disabled.requested);
+        assert!(!disabled.capture_requested);
+        assert!(!disabled.enabled);
+
+        let warmup =
+            RocmGraphRunner::new(&device, RocmGraphExecutionPolicy::warmup_then_eager()).stats();
+        assert!(warmup.requested);
+        assert!(!warmup.capture_requested);
+        assert!(warmup.enabled);
+        assert!(!warmup.capture_enabled);
+
+        let lazy =
+            RocmGraphRunner::new(&device, RocmGraphExecutionPolicy::lazy_capture_replay()).stats();
+        assert!(lazy.requested);
+        #[cfg(feature = "rocm")]
+        {
+            assert!(lazy.capture_requested);
+            assert!(lazy.capture_enabled);
+        }
+        #[cfg(not(feature = "rocm"))]
+        {
+            assert!(!lazy.capture_requested);
+            assert!(!lazy.capture_enabled);
+        }
+        assert!(lazy.enabled);
+    }
+
+    #[test]
     fn disabled_off_device() {
-        let mut r = RocmGraphRunner::new(&Device::Cpu, true);
+        let mut r = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
         r.release_decode_row(7);
         assert!(!r.is_enabled());
         assert_eq!(
@@ -3232,7 +3679,10 @@ mod tests {
         let target = RocmGraphOwner::Slot(7);
         let survivor = RocmGraphOwner::Slot(8);
         let second_survivor = RocmGraphOwner::Slot(9);
-        let mut runner = RocmGraphRunner::new(&Device::Cpu, true);
+        let mut runner = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
         for (owner, row_id) in [(target, 7), (survivor, 8), (second_survivor, 9)] {
             runner.graph_slots.insert(
                 owner,
@@ -3277,7 +3727,10 @@ mod tests {
     #[cfg(feature = "rocm")]
     #[test]
     fn recycled_block_continuity_never_crosses_graph_slots() {
-        let mut runner = RocmGraphRunner::new(&Device::Cpu, true);
+        let mut runner = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
         let recycled_table = BlockTable { blocks: vec![11] };
         let first = RocmGraphOwner::Slot(41);
         let second = RocmGraphOwner::Slot(42);
@@ -3307,13 +3760,13 @@ mod tests {
         }
 
         let key = RocmGraphKey {
-            stable_metadata: true,
-            seq_len: 0,
-            block_table: Vec::new(),
             max_seqlen_k: 512,
             max_blocks_per_seq: 8,
         };
-        let mut runner = RocmGraphRunner::new(&Device::Cpu, true);
+        let mut runner = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
         let mut first = state([1.0, 2.0], [3.0, 4.0]);
         let owner = runner
             .bind_decode_row_to_slot(1001, &key, &mut first)
@@ -3388,7 +3841,8 @@ mod tests {
             LinearAttentionState::new_for_inference(&config, &device).expect("graph state");
         let mut eager_state =
             LinearAttentionState::new_for_inference(&config, &device).expect("eager state");
-        let mut graph_runner = RocmGraphRunner::new(&device, true);
+        let mut graph_runner =
+            RocmGraphRunner::new(&device, RocmGraphExecutionPolicy::lazy_capture_replay());
 
         for seq_len in 1..=4 {
             let token_id = (seq_len % config.vocab_size) as u32;
@@ -3474,7 +3928,8 @@ mod tests {
             LinearAttentionState::new_for_inference(&config, &device).expect("graph state");
         let mut eager_state =
             LinearAttentionState::new_for_inference(&config, &device).expect("eager state");
-        let mut graph_runner = RocmGraphRunner::new(&device, true);
+        let mut graph_runner =
+            RocmGraphRunner::new(&device, RocmGraphExecutionPolicy::lazy_capture_replay());
         assert!(graph_runner.stats().capture_enabled);
 
         let mut assert_hidden_step = |runner: &mut RocmGraphRunner, row_id: u64, seq_len: usize| {
@@ -3593,7 +4048,9 @@ mod tests {
         // Adapter swaps invalidate pointer-bearing graph state before the next
         // request quantum. The fixture keeps weights numerically unchanged so
         // eager equality remains an exact oracle for lifecycle behavior.
-        graph_runner.invalidate();
+        graph_runner
+            .invalidate()
+            .expect("settle graphs before adapter-boundary invalidation");
         assert_eq!(graph_runner.stats().captured_graph_count, 0);
         for seq_len in 73..=78 {
             assert_hidden_step(&mut graph_runner, PREFIX_OWNER, seq_len);
@@ -3715,7 +4172,8 @@ mod tests {
         };
         let mut graph_state =
             LinearAttentionState::new_for_inference(&config, &device).expect("graph linear state");
-        let mut graph_runner = RocmGraphRunner::new(&device, true);
+        let mut graph_runner =
+            RocmGraphRunner::new(&device, RocmGraphExecutionPolicy::lazy_capture_replay());
         assert!(graph_runner.stats().capture_enabled);
 
         let row_id = 77;
@@ -3827,13 +4285,16 @@ mod tests {
 
     #[test]
     fn invalidate_bumps_generation_and_resets_warmup() {
-        let mut r = RocmGraphRunner::new(&Device::Cpu, true);
+        let mut r = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
         r.warmup_done = true;
         r.counters
             .record_capture_outcome(RocmGraphCaptureOutcome::Succeeded);
         r.counters.record_replay_outcome(false);
         let gen0 = r.adapter_generation;
-        r.invalidate();
+        r.invalidate().expect("CPU runner invalidation");
         assert_eq!(r.adapter_generation, gen0 + 1);
         assert!(!r.warmup_done);
         let stats = r.stats();

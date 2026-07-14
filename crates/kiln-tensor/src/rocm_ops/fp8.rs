@@ -80,7 +80,7 @@ pub fn rocm_fp8_quantize_with_scale(src: &Tensor, scale: f32) -> Result<Tensor> 
     // and keeps the capture-arena hook (allocates from the arena under capture).
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::U8, n)?;
 
-    let raw_stream = src_storage.rocm_stream_raw();
+    let raw_stream = src_storage.rocm_stream_raw()?;
     let (src_base, _) = src_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let per = src_dtype.size_in_bytes();
@@ -223,7 +223,7 @@ pub fn rocm_fp8_dequantize(src: &Tensor, scale: f32, target_dtype: DType) -> Res
     let n = src.element_count();
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, target_dtype, n)?;
 
-    let raw_stream = src_storage.rocm_stream_raw();
+    let raw_stream = src_storage.rocm_stream_raw()?;
     let (src_base, _) = src_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let src_off = src.layout().start_offset() as u64; // U8: 1 byte per element

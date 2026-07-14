@@ -84,7 +84,7 @@ pub fn rocm_compare(a: &Tensor, b: &Tensor, kind: i32) -> Result<Tensor> {
     // (out[i] = cmp(a[i], b[i]) ? 1 : 0 for all n), so skip the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::U8, n)?;
 
-    let raw_stream = a_storage.rocm_stream_raw();
+    let raw_stream = a_storage.rocm_stream_raw()?;
 
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
