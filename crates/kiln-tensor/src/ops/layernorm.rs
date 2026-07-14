@@ -18,7 +18,6 @@
 
 use std::sync::Arc;
 
-#[cfg(any(feature = "cuda", feature = "rocm"))]
 use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 #[derive(Debug, Clone, Copy)]
