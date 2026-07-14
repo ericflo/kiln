@@ -92,8 +92,14 @@ changes before treating 4-6 aggregate minutes as the established baseline.
 On Linux qualification hosts, run ad hoc Cargo verification through
 `scripts/cargo-bounded.sh`. The wrapper serializes build work, preflights
 available memory, preserves a host-memory reserve, and places the compiler and
-linker process tree in one memory-capped, no-swap systemd scope. Qualification workloads must not
-overlap a separate Cargo build; build first, then run the device workload.
+linker process tree in one memory-capped, no-swap systemd scope. Source-bound
+qualification cases run inside a bubblewrap PID namespace, which cannot attach
+its namespaced Cargo PID to the host user manager as a scope. Those declared
+builds use the wrapper's transient-service mode instead: the service has the
+same aggregate memory/no-swap cgroup, a private network, a hard runtime limit,
+and control-group teardown, while the device runtime remains in the original
+network/PID-isolated case. Qualification workloads must not overlap a separate
+Cargo build; build first, then run the device workload.
 
 ```bash
 scripts/cargo-bounded.sh check --locked -p kiln-server --lib

@@ -22,6 +22,7 @@ VARIANT_ID = "real-rocm-graph-fault-corpus"
 RESULT_ENV = mixed.RESULT_ENV
 VARIANT_ENV = mixed.VARIANT_ENV
 TIMEOUT_SECONDS = 1200
+SERVICE_RUNTIME_MAX_SECONDS = TIMEOUT_SECONDS - 60
 TESTS = (
     "shape_dependent_attention_is_cached_as_typed_eager_fallback",
     "graph_parity_across_buckets_prefix_cancellation_and_adapter_boundary",
@@ -36,8 +37,11 @@ class FailureContainmentError(RuntimeError):
 EFFECTIVE_CONFIG: dict[str, Any] = {
     "build": {
         "cargo_jobs": mixed.BUILD_CARGO_JOBS,
+        "cargo_execution_mode": mixed.BUILD_CARGO_EXECUTION_MODE,
         "cargo_memory_scope": mixed.BUILD_CARGO_MEMORY_SCOPE,
         "cargo_min_available_gib": mixed.BUILD_CARGO_MIN_AVAILABLE_GIB,
+        "cargo_private_network": mixed.BUILD_CARGO_PRIVATE_NETWORK,
+        "cargo_service_runtime_max_seconds": SERVICE_RUNTIME_MAX_SECONDS,
         "cargo_wrapper": mixed.BUILD_CARGO_WRAPPER,
         "features": mixed.BUILD_FEATURES,
         "locked": True,
@@ -47,6 +51,7 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
         "rocm_archs": mixed.BUILD_ROCM_ARCHS,
         "rocm_path": mixed.BUILD_ROCM_PATH,
         "test_threads": 1,
+        "timeout_seconds": TIMEOUT_SECONDS,
     },
     "runtime": {
         "qualification_opt_in": True,
@@ -93,6 +98,9 @@ def command() -> list[str]:
 
 def test_environment(source: dict[str, str]) -> dict[str, str]:
     environment = mixed.source_bound_build_environment(source)
+    environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"] = str(
+        SERVICE_RUNTIME_MAX_SECONDS
+    )
     environment["KILN_QUALIFICATION"] = "1"
     return environment
 

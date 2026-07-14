@@ -51,12 +51,21 @@ and offline build through `scripts/cargo-bounded.sh` with one job and a 15 GiB
 `MemAvailable` floor. ROCm alone receives `ROCM_PATH` and
 `KILN_ROCM_ARCHS`; the Vulkan build strips ambient ROCm toolchain variables and
 uses only the `vulkan` feature. The wrapper refuses overlapping
-Cargo/rustc processes and runs the complete compiler/linker tree in a transient
-systemd user scope with an aggregate `MemoryMax`, host reserve, and zero swap.
-The committed effective build config records the wrapper, job count, floor, and
-scope policy; bounded stderr records the machine-specific available/reserve/
-limit values. Do not lower the floor or bypass the wrapper to obtain a receipt.
-Let the machine recover memory and rerun from the same clean commit.
+Cargo/rustc processes. Because the case retains bubblewrap PID isolation, the
+offline build runs as a transient systemd user service rather than attempting
+to attach the namespaced Cargo PID to a host scope. The service has an
+aggregate `MemoryMax`, host reserve, zero swap, `PrivateNetwork=yes`,
+control-group kill, and a hard runtime cap. The ordinary ROCm build service is
+capped at 300 seconds with a 360-second caller timeout; Vulkan uses 840 and 900
+seconds respectively, and the real-ROCm fault corpus uses 1140 and 1200. This
+60-second ordering ensures systemd can stop and collect the complete cgroup
+before an outer qualification timeout can kill the wrapper. The measured server
+still runs inside the case's separate network and PID namespaces. The committed
+effective build config records the wrapper, job count, floor, execution mode,
+private-network requirement, both deadlines, and memory policy; bounded stderr
+records the machine-specific available/reserve/limit values. Do not lower the
+floor or bypass the wrapper to obtain a receipt. Let the machine recover memory
+and rerun from the same clean commit.
 
 Batching qualification must bind the complete typed startup policy, not only a
 legacy actor environment switch. A serving workload that exercises the actor

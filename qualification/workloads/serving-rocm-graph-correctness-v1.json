@@ -23,8 +23,12 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
-          "cargo_memory_scope": "systemd_user_memory_max_no_swap",
+          "cargo_execution_mode": "transient-service",
+          "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
           "cargo_min_available_gib": 15,
+          "cargo_private_network": true,
+          "cargo_service_runtime_max_seconds": 300,
+          "timeout_seconds": 360,
           "cargo_wrapper": "scripts/cargo-bounded.sh",
           "features": "rocm",
           "locked": true,

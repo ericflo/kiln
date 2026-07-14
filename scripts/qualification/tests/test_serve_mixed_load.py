@@ -650,8 +650,11 @@ class ServeMixedLoadTests(unittest.TestCase):
         expected_build = {
             "binary": "kiln",
             "cargo_jobs": 1,
-            "cargo_memory_scope": "systemd_user_memory_max_no_swap",
+            "cargo_execution_mode": "transient-service",
+            "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
             "cargo_min_available_gib": 15,
+            "cargo_private_network": True,
+            "cargo_service_runtime_max_seconds": 300,
             "cargo_wrapper": "scripts/cargo-bounded.sh",
             "features": "rocm",
             "locked": True,
@@ -659,6 +662,7 @@ class ServeMixedLoadTests(unittest.TestCase):
             "offline": True,
             "package": "kiln-server",
             "profile": "release",
+            "timeout_seconds": 360,
             "rocm_archs": "gfx1151",
             "rocm_path": "/opt/rocm",
         }
@@ -799,8 +803,11 @@ class ServeMixedLoadTests(unittest.TestCase):
             )
         self.assertEqual(environment["CARGO"], str(cargo))
         self.assertEqual(environment["CARGO_NET_OFFLINE"], "true")
+        self.assertEqual(environment["KILN_CARGO_EXECUTION_MODE"], "transient-service")
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
         self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
+        self.assertEqual(environment["KILN_CARGO_PRIVATE_NETWORK"], "1")
+        self.assertEqual(environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "300")
         self.assertEqual(environment["KILN_ROCM_ARCHS"], serve.BUILD_ROCM_ARCHS)
 
     def test_vulkan_source_build_is_bounded_without_rocm_environment(self) -> None:
@@ -823,6 +830,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(environment["CARGO_NET_OFFLINE"], "true")
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
         self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
+        self.assertEqual(environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "840")
         self.assertNotIn("ROCM_PATH", environment)
         self.assertNotIn("KILN_ROCM_ARCHS", environment)
         self.assertEqual(
@@ -830,8 +838,11 @@ class ServeMixedLoadTests(unittest.TestCase):
             {
                 "binary": "kiln",
                 "cargo_jobs": 1,
-                "cargo_memory_scope": "systemd_user_memory_max_no_swap",
+                "cargo_execution_mode": "transient-service",
+                "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
                 "cargo_min_available_gib": 15,
+                "cargo_private_network": True,
+                "cargo_service_runtime_max_seconds": 840,
                 "cargo_wrapper": "scripts/cargo-bounded.sh",
                 "features": "vulkan",
                 "locked": True,
@@ -839,8 +850,19 @@ class ServeMixedLoadTests(unittest.TestCase):
                 "offline": True,
                 "package": "kiln-server",
                 "profile": "release",
+                "timeout_seconds": 900,
             },
         )
+
+    def test_source_build_timeout_reserves_service_teardown_window(self) -> None:
+        spec = serve.SourceBuildSpec(
+            backend="test",
+            features="test",
+            cargo_service_runtime_max_seconds=300,
+            timeout_seconds=359,
+        )
+        with self.assertRaisesRegex(serve.QualificationError, "at least 60 seconds"):
+            serve.build_binary(1.0e18, spec)
 
     def test_vulkan_server_environment_cannot_inherit_rocm_toolchain(self) -> None:
         with mock.patch.dict(

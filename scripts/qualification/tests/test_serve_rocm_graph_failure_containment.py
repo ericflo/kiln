@@ -62,6 +62,9 @@ class ServeRocmGraphFailureContainmentTests(unittest.TestCase):
         self.assertEqual(environment["KILN_QUALIFICATION"], "1")
         self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
+        self.assertEqual(
+            environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "1140"
+        )
         self.assertEqual(environment["KILN_ROCM_ARCHS"], "gfx1151")
 
     def test_output_parser_requires_exact_passing_names(self) -> None:

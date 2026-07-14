@@ -42,7 +42,11 @@ BUILD_ROCM_ARCHS = "gfx1151"
 BUILD_CARGO_WRAPPER = "scripts/cargo-bounded.sh"
 BUILD_CARGO_JOBS = 1
 BUILD_CARGO_MIN_AVAILABLE_GIB = 15
-BUILD_CARGO_MEMORY_SCOPE = "systemd_user_memory_max_no_swap"
+BUILD_CARGO_MEMORY_SCOPE = "systemd_user_transient_service_memory_max_no_swap"
+BUILD_CARGO_EXECUTION_MODE = "transient-service"
+BUILD_CARGO_PRIVATE_NETWORK = True
+BUILD_CARGO_SERVICE_RUNTIME_MAX_SECONDS = 300
+BUILD_TIMEOUT_SECONDS = 360.0
 STARTUP_TIMEOUT_SECONDS = 240.0
 REQUEST_TIMEOUT_SECONDS = 120.0
 OVERALL_TIMEOUT_SECONDS = 420.0
@@ -97,14 +101,21 @@ class SourceBuildSpec:
     cargo_jobs: int = BUILD_CARGO_JOBS
     cargo_min_available_gib: int = BUILD_CARGO_MIN_AVAILABLE_GIB
     cargo_memory_scope: str = BUILD_CARGO_MEMORY_SCOPE
+    cargo_execution_mode: str = BUILD_CARGO_EXECUTION_MODE
+    cargo_private_network: bool = BUILD_CARGO_PRIVATE_NETWORK
+    cargo_service_runtime_max_seconds: int = BUILD_CARGO_SERVICE_RUNTIME_MAX_SECONDS
+    timeout_seconds: float = BUILD_TIMEOUT_SECONDS
     environment: tuple[tuple[str, str], ...] = ()
 
     def effective_config(self) -> dict[str, Any]:
         config: dict[str, Any] = {
             "binary": self.binary,
             "cargo_jobs": self.cargo_jobs,
+            "cargo_execution_mode": self.cargo_execution_mode,
             "cargo_memory_scope": self.cargo_memory_scope,
             "cargo_min_available_gib": self.cargo_min_available_gib,
+            "cargo_private_network": self.cargo_private_network,
+            "cargo_service_runtime_max_seconds": self.cargo_service_runtime_max_seconds,
             "cargo_wrapper": self.cargo_wrapper,
             "features": self.features,
             "locked": True,
@@ -112,6 +123,7 @@ class SourceBuildSpec:
             "offline": True,
             "package": self.package,
             "profile": self.profile,
+            "timeout_seconds": int(self.timeout_seconds),
         }
         config.update(dict(self.environment))
         return config
@@ -128,6 +140,8 @@ ROCM_BUILD_SPEC = SourceBuildSpec(
 VULKAN_BUILD_SPEC = SourceBuildSpec(
     backend="Vulkan",
     features="vulkan",
+    cargo_service_runtime_max_seconds=840,
+    timeout_seconds=900.0,
 )
 
 
@@ -1829,8 +1843,13 @@ def source_bound_build_environment(
     environment.update(
         {
             "CARGO_NET_OFFLINE": "true",
+            "KILN_CARGO_EXECUTION_MODE": spec.cargo_execution_mode,
             "KILN_CARGO_JOBS": str(spec.cargo_jobs),
             "KILN_CARGO_MIN_AVAILABLE_GIB": str(spec.cargo_min_available_gib),
+            "KILN_CARGO_PRIVATE_NETWORK": "1" if spec.cargo_private_network else "0",
+            "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": str(
+                spec.cargo_service_runtime_max_seconds
+            ),
         }
     )
     for key, value in spec.environment:
@@ -1856,9 +1875,19 @@ def build_binary(
     absolute_deadline: float,
     spec: SourceBuildSpec = ROCM_BUILD_SPEC,
     *,
-    build_timeout_seconds: float = STARTUP_TIMEOUT_SECONDS,
+    build_timeout_seconds: float | None = None,
 ) -> tuple[Path, str, float]:
     started = time.monotonic()
+    process_timeout_seconds = (
+        spec.timeout_seconds
+        if build_timeout_seconds is None
+        else build_timeout_seconds
+    )
+    if process_timeout_seconds < spec.cargo_service_runtime_max_seconds + 60:
+        raise QualificationError(
+            "source-build process timeout must reserve at least 60 seconds "
+            "after the transient-service runtime limit"
+        )
     environment = source_bound_build_environment(dict(os.environ), spec)
     command = source_bound_build_command(spec)
     completed = subprocess.run(
@@ -1870,7 +1899,7 @@ def build_binary(
         timeout=remaining_until(
             absolute_deadline,
             f"source-bound {spec.backend} build",
-            build_timeout_seconds,
+            process_timeout_seconds,
         ),
         check=False,
     )

@@ -8,9 +8,9 @@ usage() {
 Usage: scripts/cargo-bounded.sh <cargo-subcommand> [args...]
 
 Runs Cargo with one build job after checking Linux MemAvailable. A transient
-systemd scope places Cargo and every compiler/linker child under one aggregate
-memory ceiling with swap disabled. It also refuses to overlap another Cargo or
-rustc process.
+systemd scope, or a transient service for PID-namespaced callers, places Cargo
+and every compiler/linker child under one aggregate memory ceiling with swap
+disabled. It also refuses to overlap another Cargo or rustc process.
 
 Overrides:
   CARGO                           Cargo executable/name (default: PATH, then ~/.cargo/bin/cargo)
@@ -18,6 +18,10 @@ Overrides:
   KILN_CARGO_MIN_AVAILABLE_GIB    Preflight floor (default: 2/3 host RAM, min 8)
   KILN_CARGO_HOST_RESERVE_GIB     Memory kept outside each child (default: 1/4 host RAM, min 4)
   KILN_CARGO_MAX_MEMORY_GIB       Explicit aggregate ceiling (default: available minus reserve)
+  KILN_CARGO_EXECUTION_MODE       scope (default) or transient-service
+  KILN_CARGO_PRIVATE_NETWORK      1 requires a private network in transient-service mode
+  KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS
+                                  Hard transient-service deadline (default: 3600)
 EOF
 }
 
@@ -27,12 +31,22 @@ if [[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     exit 2
 fi
 
+execution_mode="${KILN_CARGO_EXECUTION_MODE:-scope}"
+if [[ "$execution_mode" != "scope" && "$execution_mode" != "transient-service" ]]; then
+    echo "error: KILN_CARGO_EXECUTION_MODE must be scope or transient-service, got '$execution_mode'" >&2
+    exit 2
+fi
+
 for tool in awk ps systemd-run; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "error: required tool '$tool' is not available" >&2
         exit 2
     fi
 done
+if [[ "$execution_mode" == "transient-service" ]] && ! command -v systemctl >/dev/null 2>&1; then
+    echo "error: required tool 'systemctl' is not available" >&2
+    exit 2
+fi
 
 cargo_executable="${CARGO:-}"
 if [[ -n "$cargo_executable" ]]; then
@@ -122,12 +136,73 @@ fi
 
 export CARGO_BUILD_JOBS="$jobs"
 
-echo "bounded-cargo: jobs=$jobs available=${available_gib}GiB reserve=${reserve_gib}GiB aggregate_limit=${limit_gib}GiB swap_limit=0" >&2
-exec systemd-run \
+private_network="${KILN_CARGO_PRIVATE_NETWORK:-0}"
+if [[ "$private_network" != "0" && "$private_network" != "1" ]]; then
+    echo "error: KILN_CARGO_PRIVATE_NETWORK must be 0 or 1, got '$private_network'" >&2
+    exit 2
+fi
+if [[ "$execution_mode" == "scope" && "$private_network" != "0" ]]; then
+    echo "error: KILN_CARGO_PRIVATE_NETWORK=1 requires transient-service mode" >&2
+    exit 2
+fi
+service_runtime_max_seconds="${KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS:-3600}"
+if [[ ! "$service_runtime_max_seconds" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS must be a positive decimal integer, got '$service_runtime_max_seconds'" >&2
+    exit 2
+fi
+
+echo "bounded-cargo: mode=$execution_mode jobs=$jobs available=${available_gib}GiB reserve=${reserve_gib}GiB aggregate_limit=${limit_gib}GiB swap_limit=0 private_network=$private_network" >&2
+if [[ "$execution_mode" == "scope" ]]; then
+    exec systemd-run \
+        --user \
+        --scope \
+        --quiet \
+        -p "MemoryMax=${limit_gib}G" \
+        -p MemorySwapMax=0 \
+        -p OOMPolicy=kill \
+        "$cargo_executable" "$@"
+fi
+
+# A process in a bubblewrap PID namespace cannot be attached to the host user
+# manager as a scope. Qualification uses a transient service instead: Cargo is
+# still in one bounded cgroup, while PrivateNetwork independently preserves the
+# offline build boundary. The explicit unit and EXIT trap make a normal timeout
+# stop the complete compiler/linker tree; RuntimeMaxSec bounds hard-kill cases.
+read -r service_uuid < /proc/sys/kernel/random/uuid
+service_unit="kiln-cargo-bounded-${service_uuid//-/}.service"
+cleanup_service() {
+    systemctl --user stop "$service_unit" >/dev/null 2>&1 || true
+}
+trap cleanup_service EXIT
+
+environment_args=()
+while IFS= read -r name; do
+    if [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        environment_args+=("--setenv=$name")
+    fi
+done < <(compgen -e)
+
+private_network_property="PrivateNetwork=no"
+if [[ "$private_network" == "1" ]]; then
+    private_network_property="PrivateNetwork=yes"
+fi
+
+systemd-run \
     --user \
-    --scope \
+    --wait \
+    --collect \
+    --pipe \
     --quiet \
+    --same-dir \
+    --unit "$service_unit" \
+    "${environment_args[@]}" \
+    -p Type=exec \
     -p "MemoryMax=${limit_gib}G" \
     -p MemorySwapMax=0 \
     -p OOMPolicy=kill \
+    -p KillMode=control-group \
+    -p SendSIGKILL=yes \
+    -p TimeoutStopSec=15s \
+    -p "RuntimeMaxSec=${service_runtime_max_seconds}s" \
+    -p "$private_network_property" \
     "$cargo_executable" "$@"
