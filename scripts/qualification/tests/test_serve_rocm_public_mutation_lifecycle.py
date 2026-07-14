@@ -253,18 +253,100 @@ class ServeRocmPublicMutationLifecycleTests(unittest.TestCase):
                 lifecycle, "run_maintenance_arm", return_value=maintenance
             ) as maintenance_arm,
         ):
-            metrics, details = lifecycle.execute(
-                Path("/model"), Path("/adapter"), 17
-            )
+            evidence = lifecycle.RunEvidence()
+            lifecycle.execute(Path("/model"), Path("/adapter"), 17, evidence)
 
         build.assert_called_once()
         self.assertIs(adapter_arm.call_args.args[0], binary)
         self.assertIs(maintenance_arm.call_args.args[0], binary)
-        self.assertEqual(adapter_arm.call_args.args[-1], maintenance_arm.call_args.args[-1])
+        self.assertEqual(adapter_arm.call_args.args[-2], maintenance_arm.call_args.args[-2])
+        self.assertIs(adapter_arm.call_args.args[-1], evidence)
+        self.assertIs(maintenance_arm.call_args.args[-1], evidence)
+        metrics = lifecycle.metric_records(evidence.values)
+        details = evidence.serialized_details()
         by_name = {record["name"]: record["value"] for record in metrics}
         self.assertEqual(by_name["binary_build_count"], 1)
         self.assertEqual(by_name["forced_resize_actual_blocks"], 1)
         self.assertEqual(json.loads(details)["kiln_binary"], digest)
+
+    def test_partial_failure_metrics_do_not_invent_build_request_or_shutdown(self) -> None:
+        evidence = lifecycle.RunEvidence()
+        evidence.add_metric("binary_build_count")
+        evidence.set_metric("adapter_weights_bytes", 128)
+        evidence.set_metric("adapter_load_count", 1)
+        evidence.set_metric("adapter_load_ms", 2.5)
+        evidence.add_metric("adapter_revision_header_mismatch_count")
+        evidence.arms_started.append("adapter")
+
+        by_name = {
+            record["name"]: record["value"]
+            for record in lifecycle.metric_records(evidence.values)
+        }
+        self.assertEqual(by_name["binary_build_count"], 1)
+        self.assertEqual(by_name["adapter_load_count"], 1)
+        self.assertEqual(by_name["adapter_revision_header_mismatch_count"], 1)
+        self.assertEqual(by_name["request_failure_count"], 0)
+        self.assertEqual(by_name["dirty_shutdown_count"], 0)
+        self.assertEqual(
+            json.loads(evidence.serialized_details("synthetic failure"))["arms_started"],
+            ["adapter"],
+        )
+
+    def test_main_serializes_partial_failure_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = root / "model"
+            adapter = root / "adapter"
+            result_path = root / "result.json"
+            model.mkdir()
+            adapter.mkdir()
+
+            def fail(
+                _model: Path,
+                _adapter: Path,
+                _seed: int,
+                evidence: lifecycle.RunEvidence,
+            ) -> None:
+                evidence.add_metric("binary_build_count")
+                evidence.set_metric("adapter_load_count", 1)
+                evidence.add_metric("adapter_revision_header_mismatch_count")
+                evidence.arms_started.append("adapter")
+                raise lifecycle.LifecycleError("synthetic mismatch")
+
+            with (
+                mock.patch.dict(
+                    lifecycle.os.environ,
+                    {
+                        lifecycle.RESULT_ENV: str(result_path),
+                        lifecycle.VARIANT_ENV: lifecycle.VARIANT_ID,
+                    },
+                ),
+                mock.patch.object(lifecycle, "execute", side_effect=fail),
+            ):
+                exit_code = lifecycle.main(
+                    [
+                        "--model-path",
+                        str(model),
+                        "--adapter-path",
+                        str(adapter),
+                        "--seed",
+                        "17",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 1)
+            result = json.loads(result_path.read_text())
+            by_name = {
+                record["name"]: record["value"] for record in result["metrics"]
+            }
+            self.assertEqual(by_name["binary_build_count"], 1)
+            self.assertEqual(by_name["adapter_load_count"], 1)
+            self.assertEqual(by_name["adapter_revision_header_mismatch_count"], 1)
+            self.assertEqual(by_name["request_failure_count"], 0)
+            self.assertEqual(by_name["dirty_shutdown_count"], 0)
+            details = json.loads(result["details"])
+            self.assertEqual(details["arms_started"], ["adapter"])
+            self.assertIn("synthetic mismatch", details["error"])
 
 
 if __name__ == "__main__":

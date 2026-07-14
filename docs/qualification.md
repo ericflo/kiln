@@ -513,8 +513,11 @@ autoscaling and reclaim off and lazy ROCm graph execution on. It requires real
 capture and replay before measuring the lifecycle. A deterministic base request
 must return `x-kiln-loaded-adapter: base` and revision `base`. Public
 `POST /v1/adapters/load` must return one 64-hex content revision; health,
-trusted debug state, `GET /v1/adapters`, and the next chat response headers must
-all publish that same name/revision. The driver then calls the public unload
+trusted debug state, and `GET /v1/adapters` must all publish that same
+name/revision. The adapter inference request explicitly sends
+`"adapter": "qualification-adapter"`; its response headers must bind that exact
+name/revision. Base probes explicitly send `"adapter": null`. The driver then
+calls the public unload
 endpoint, requires every surface and response header to return to base, and
 compares canonical streamed semantic deltas from identical pre-load and
 post-unload base requests exactly. Dynamic IDs and creation timestamps are the
@@ -542,6 +545,15 @@ and target blocks, released bytes, coordination wait, mutation duration, and
 all failure counters. This gate proves one controlled lifecycle at one source
 revision; it does not replace concurrent mixed-load stress, the graduated
 concurrency gate, or the long soak.
+
+Command-result evidence is accumulated at each completed boundary rather than
+synthesized only after both arms pass. A failed result therefore retains any
+completed binary build, copied adapter identity, public load or unload,
+semantic-output hash, graph invalidation, physical resize, rejection, and
+transition already observed. `arms_started` and `arms_completed` distinguish an
+unstarted arm from a partial one. Request failures count actual HTTP/stream
+failures only; dirty shutdown and snapshot residue derive from teardown rather
+than being invented for every failed case.
 
 The stable serving run also attests the default 64-token prompt-work ceiling
 (`server.max_prefill_tokens_per_cycle`), the default four-layer yield ceiling
