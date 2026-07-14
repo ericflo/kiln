@@ -668,7 +668,6 @@ fn validate_teacher_spec_static(spec: &TeacherSpec) -> Result<(), String> {
         if let Some(credential_id) = spec.credential_id.as_deref() {
             crate::config::validate_teacher_credential_id(credential_id)?;
         }
-        validate_remote_registration_exposure(spec)?;
     } else if spec.provider.is_some() || spec.url.is_some() || spec.credential_id.is_some() {
         return Err(
             "`provider`, `url`, and `credential_id` are only valid on kind=remote teachers"
@@ -678,8 +677,11 @@ fn validate_teacher_spec_static(spec: &TeacherSpec) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_remote_registration_exposure(spec: &TeacherSpec) -> Result<(), String> {
-    if remote_registration_exposure_denied(spec, crate::api::terminal::bind_host_is_loopback()) {
+fn validate_remote_registration_exposure(
+    spec: &TeacherSpec,
+    kiln_is_loopback: bool,
+) -> Result<(), String> {
+    if remote_registration_exposure_denied(spec, kiln_is_loopback) {
         return Err(
             "credential-free loopback teachers are disabled while Kiln is network-bound; configure an exact-origin credential_id or bind Kiln to loopback"
                 .to_string(),
@@ -701,6 +703,11 @@ fn validate_teacher_spec_for_registration(
 ) -> Result<(), ApiError> {
     validate_teacher_spec_static(spec).map_err(ApiError::teacher_registration_invalid)?;
     if matches!(spec.kind, TeacherKind::Remote) {
+        validate_remote_registration_exposure(
+            spec,
+            crate::config::host_is_loopback(&state.operational_runtime.bind_host),
+        )
+        .map_err(ApiError::teacher_registration_invalid)?;
         let url = spec.url.as_deref().ok_or_else(|| {
             ApiError::teacher_registration_invalid("remote teacher requires a url")
         })?;
