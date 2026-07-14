@@ -58,7 +58,8 @@ pub fn rocm_activation_unary(x: &Tensor, kind: i32) -> Result<Tensor> {
     // so the uninit alloc skips the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -69,10 +70,12 @@ pub fn rocm_activation_unary(x: &Tensor, kind: i32) -> Result<Tensor> {
         kiln_activation_unary_async(x_ptr, out_ptr, n as i64, kind, dtype_tag, raw_stream)
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_activation_unary: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
     crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
         &ctx,
         &[x_storage],

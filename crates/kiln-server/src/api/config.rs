@@ -21,6 +21,15 @@ fn gib(bytes: u64) -> f64 {
 struct ConfigResponse {
     serving_profile: ServingProfileDiagnostics,
     accelerator_runtime: ResolvedAcceleratorRuntimePolicy,
+    /// Nonblocking full graph-cache snapshot governed by the resolved policy.
+    rocm_graphs: Option<kiln_model::RocmGraphStats>,
+    rocm_graphs_unavailable_reason:
+        Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
+    /// Phase/transient telemetry independent of the model and graph-runner
+    /// locks, including in-progress work.
+    rocm_graph_telemetry: Option<kiln_model::RocmGraphLiveTelemetry>,
+    rocm_graph_telemetry_unavailable_reason:
+        Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
     decode_runtime: DecodeRuntimeConfig,
     batching: BatchingConfigResponse,
     streaming_prefill: StreamingPrefillRuntimeConfig,
@@ -323,10 +332,16 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         };
 
     let b = &state.memory_budget;
+    let rocm_graph_observation = crate::rocm_graph_observability::observe_rocm_graphs(&state);
 
     Json(ConfigResponse {
         serving_profile: state.serving_profile.diagnostics(),
         accelerator_runtime: state.accelerator_runtime_policy,
+        rocm_graphs: rocm_graph_observation.stats,
+        rocm_graphs_unavailable_reason: rocm_graph_observation.stats_unavailable_reason,
+        rocm_graph_telemetry: rocm_graph_observation.telemetry,
+        rocm_graph_telemetry_unavailable_reason: rocm_graph_observation
+            .telemetry_unavailable_reason,
         decode_runtime: state.decode_runtime_config,
         batching: BatchingConfigResponse {
             configuration: state.batching_runtime_config,
@@ -795,9 +810,23 @@ mod tests {
         assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v1"
+            "kiln.accelerator-runtime-policy.v2"
         );
-        assert_eq!(json["accelerator_runtime"]["version"], 1);
+        assert_eq!(json["accelerator_runtime"]["version"], 2);
+        assert_eq!(
+            json["accelerator_runtime"]["rocm_graph_cache_max_bytes"]["effective"],
+            crate::config::DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES
+        );
+        assert!(json["rocm_graphs"].is_null());
+        assert_eq!(
+            json["rocm_graphs_unavailable_reason"],
+            "backend_without_graph_runner"
+        );
+        assert!(json["rocm_graph_telemetry"].is_null());
+        assert_eq!(
+            json["rocm_graph_telemetry_unavailable_reason"],
+            "backend_without_graph_runner"
+        );
         assert_eq!(
             json["accelerator_runtime"]["rocm_synchronization_mode"]["effective"],
             "legacy_host_barriers"

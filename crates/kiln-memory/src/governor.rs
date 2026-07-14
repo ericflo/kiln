@@ -1330,6 +1330,55 @@ impl<'a> Reservation<'a> {
         self.governor
             .try_reserve_cached_with_credit(bytes, self.represented_bytes)
     }
+
+    /// Publish a completed physical allocation into the cached snapshot before
+    /// releasing this soft reservation. This closes the interval where a stale
+    /// pre-allocation sample could otherwise re-authorize the same headroom.
+    ///
+    /// A sampler may already have observed the allocation; subtracting again is
+    /// deliberately conservative until its next probe replaces the snapshot.
+    pub fn commit_allocated(mut self) {
+        let governor = self.governor;
+        {
+            // An older probe may already have measured the pre-allocation free
+            // value without publishing it. Serialize behind that publication,
+            // then apply the debit; any later probe starts after the physical
+            // allocation completed and may safely replace this adjustment.
+            let _probe = governor
+                .probe_lock
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            // Snapshot readers acquire `state` before observing the reservation
+            // generation. Preserve that lock order to avoid reader/writer cycles.
+            let mut state = governor
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let _update = ReservationUpdateGuard::new(governor);
+            state.cached.free_bytes = state.cached.free_bytes.saturating_sub(self.bytes);
+            state.cached.used_bytes = state
+                .cached
+                .total_bytes
+                .saturating_sub(state.cached.free_bytes);
+            governor
+                .soft_reserved
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
+                    reserved.checked_sub(self.represented_bytes)
+                })
+                .expect("memory governor soft-reservation counter underflow");
+            if self.overflowed {
+                governor
+                    .soft_reservation_overflow_debts
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |debts| {
+                        debts.checked_sub(1)
+                    })
+                    .expect("memory governor overflow-debt guard count underflow");
+            }
+            self.represented_bytes = 0;
+            self.overflowed = false;
+        }
+        governor.notify_change();
+    }
 }
 
 impl Drop for Reservation<'_> {
@@ -1394,6 +1443,98 @@ mod tests {
 
     fn gov(total: u64, free: u64) -> MemoryGovernor {
         MemoryGovernor::with_source(Box::new(Fixed::new(total, free)), GovernorConfig::default())
+    }
+
+    #[test]
+    fn committed_allocation_transfers_soft_debt_into_cached_usage() {
+        let governor = gov(24 * GB, 10 * GB);
+        let reservation = governor
+            .try_reserve_cached(2 * GB)
+            .expect("checked allocation reservation");
+        assert_eq!(governor.soft_reserved_bytes(), 2 * GB);
+        reservation.commit_allocated();
+
+        let snapshot = governor.cached_snapshot();
+        assert_eq!(snapshot.free_bytes, 8 * GB);
+        assert_eq!(snapshot.used_bytes, 16 * GB);
+        assert_eq!(governor.soft_reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn committed_allocation_debit_follows_an_in_flight_stale_probe() {
+        struct StaleBlockingProbe {
+            calls: AtomicU64,
+            measured: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+            release: std::sync::Arc<(std::sync::Mutex<bool>, Condvar)>,
+        }
+
+        impl MemorySource for StaleBlockingProbe {
+            fn probe(&self) -> MemorySnapshot {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return snap(24 * GB, 10 * GB);
+                }
+                let stale = snap(24 * GB, 10 * GB);
+                if let Some(measured) = self.measured.lock().unwrap().take() {
+                    let _ = measured.send(());
+                }
+                let (released, wake) = &*self.release;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+                stale
+            }
+        }
+
+        let (measured_tx, measured_rx) = std::sync::mpsc::channel();
+        let release = std::sync::Arc::new((std::sync::Mutex::new(false), Condvar::new()));
+        let governor = std::sync::Arc::new(MemoryGovernor::with_source(
+            Box::new(StaleBlockingProbe {
+                calls: AtomicU64::new(0),
+                measured: std::sync::Mutex::new(Some(measured_tx)),
+                release: release.clone(),
+            }),
+            GovernorConfig::default(),
+        ));
+        let reservation = governor
+            .try_reserve_cached(2 * GB)
+            .expect("checked allocation reservation");
+
+        std::thread::scope(|scope| {
+            let refresh = {
+                let governor = governor.clone();
+                scope.spawn(move || governor.refresh())
+            };
+            measured_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("stale probe did not reach the publication race");
+
+            let (commit_started_tx, commit_started_rx) = std::sync::mpsc::channel();
+            let (commit_done_tx, commit_done_rx) = std::sync::mpsc::channel();
+            let commit = scope.spawn(move || {
+                commit_started_tx.send(()).unwrap();
+                reservation.commit_allocated();
+                commit_done_tx.send(()).unwrap();
+            });
+            commit_started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("commit thread did not start");
+            assert!(commit_done_rx.try_recv().is_err());
+
+            let (released, wake) = &*release;
+            *released.lock().unwrap() = true;
+            wake.notify_all();
+            assert_eq!(refresh.join().unwrap().free_bytes, 10 * GB);
+            commit.join().unwrap();
+            commit_done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("commit remained blocked after stale publication");
+        });
+
+        let snapshot = governor.cached_snapshot();
+        assert_eq!(snapshot.free_bytes, 8 * GB);
+        assert_eq!(snapshot.used_bytes, 16 * GB);
+        assert_eq!(governor.soft_reserved_bytes(), 0);
     }
 
     #[test]

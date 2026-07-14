@@ -120,7 +120,8 @@ pub fn rocm_cross_entropy_loss(logits: &Tensor, targets: &Tensor) -> Result<Tens
     // Scalar output (1 element at the input dtype); the kernel overwrites it.
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, 1)?;
 
-    let raw_stream = logits_storage.rocm_stream_raw()?;
+    let stream_submission = logits_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
 
     let (logits_base, _) = logits_storage.device_ptr_raw();
     let (targets_base, _) = targets_storage.device_ptr_raw();
@@ -151,10 +152,12 @@ pub fn rocm_cross_entropy_loss(logits: &Tensor, targets: &Tensor) -> Result<Tens
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_cross_entropy_loss: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     // Read back the row-error flag to surface validation failures. This forces
     // a sync via the D2H copy but is the only way to surface a Result-level

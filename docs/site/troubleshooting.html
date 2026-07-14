@@ -464,9 +464,9 @@ curl -s http://localhost:8420/metrics \
           <div>
             <div class="label mb-2">Attribute before tuning</div>
             <ul class="list-disc pl-5">
-              <li>Capture <code>GET /v1/config</code> at <code>accelerator_runtime</code> so configured, effective, and source values are part of the result.</li>
+              <li>Capture <code>GET /v1/config</code> at top-level <code>accelerator_runtime</code>, <code>rocm_graphs</code>, <code>rocm_graphs_unavailable_reason</code>, <code>rocm_graph_telemetry</code>, and <code>rocm_graph_telemetry_unavailable_reason</code> so immutable policy, full cache state, and the independent phase channel are all part of the result. A null value means unavailable data, not zero activity.</li>
               <li>Compare health <code>decode_runtime.rocm_synchronization</code> before and after the request. Rising wait time in <code>external_yield</code>, eager-output, matmul, or handoff reasons supports a synchronization-boundary hypothesis.</li>
-              <li>Inspect <code>decode_runtime.rocm_graphs</code>. New capture attempts, deferrals, successes, or fallback duration around a new shape support a graph-lifecycle hypothesis.</li>
+              <li>Inspect <code>decode_runtime.rocm_graphs</code>. Check full <code>state</code>/<code>unavailable_reason</code> separately from <code>phase_telemetry_available</code>/<code>phase_telemetry_unavailable_reason</code>. A live <code>current_phase</code>, phase latency growth, transient candidate bytes, new capture attempts, deferrals, admissions, pre/post admission decisions, evictions, retained-byte changes, or fallback duration around a new shape support a graph-lifecycle hypothesis.</li>
               <li>Require matching allocator reclaim, physical KV resize, primary/host-backed memory movement, or host pressure before calling the event VRAM rebalancing.</li>
             </ul>
           </div>
@@ -478,20 +478,32 @@ curl -s http://localhost:8420/metrics \
 
         <h3 class="font-semibold mt-6 mb-3">Record the immutable policy and reasoned telemetry</h3>
         <pre><code>curl -s http://localhost:8420/v1/config \
-  | jq '.accelerator_runtime'
+  | jq '.accelerator_runtime,
+        {rocm_graphs, rocm_graphs_unavailable_reason,
+         rocm_graph_telemetry, rocm_graph_telemetry_unavailable_reason}'
+# Record rocm_graph_cache_max_bytes configured/effective/source from that object.
 curl -s http://localhost:8420/health \
   | jq '.decode_runtime.accelerator_runtime,
         .decode_runtime.rocm_synchronization,
         .decode_runtime.rocm_graphs'
 curl -s http://localhost:8420/v1/debug/model-state \
-  | jq '.accelerator_runtime, .rocm_synchronization'
+  | jq '.accelerator_runtime, .rocm_synchronization,
+        {rocm_graphs, rocm_graphs_unavailable_reason,
+         rocm_graph_telemetry, rocm_graph_telemetry_unavailable_reason}'
 curl -s http://localhost:8420/metrics \
   | grep -E 'kiln_rocm_(cleanup_quarantined|synchronization|synchronizations)'
+curl -s http://localhost:8420/metrics \
+  | grep '^kiln_rocm_graph_'
 # Require cleanup_quarantined=false and kiln_rocm_cleanup_quarantined 0.
-# Any other value or missing telemetry is a hard safety fault.</code></pre>
+# Require kiln_rocm_graph_telemetry_available 1 before reading full cache families.
+# When it is 0, read kiln_rocm_graph_snapshot_unavailable{reason}.
+# Require kiln_rocm_graph_phase_telemetry_available 1 for current/completed phase evidence.
+# When it is 0, read kiln_rocm_graph_phase_telemetry_unavailable{reason}.
+# Any quarantine or missing safety telemetry is a hard safety fault;
+# graph unavailability invalidates the arm.</code></pre>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Trusted debug must already be enabled; do not expose it merely to collect this comparison. The
-          synchronization snapshot is a fixed 22-reason atomic read and does not wait on the device or probe
+          synchronization snapshot is a fixed 23-reason atomic read and does not wait on the device or probe
           the driver. Prometheus separates device and stream wait counts by <code>{reason,scope}</code>, host
           wait seconds by <code>{reason}</code>, and barriers deliberately skipped by stream-ordered policy.
           <code>telemetry_available=false</code> invalidates the synchronization comparison instead of implying
@@ -504,6 +516,30 @@ curl -s http://localhost:8420/metrics \
           once either condition is observed. The runtime rejects new
           execution and retains possibly in-flight HIP resources until process exit rather than destroying them
           without proof of quiescence.
+        </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Full graph-cache observation does not wait for the runner locks. Require
+          <code>kiln_rocm_graph_telemetry_available 1</code> before interpreting cache, counter, or fallback
+          families. A zero availability value explains why those families are absent from that scrape; it does
+          not mean the cache is empty. Read the one-hot
+          <code>kiln_rocm_graph_snapshot_unavailable{reason}</code> family rather than guessing. The same condition
+          appears as null <code>rocm_graphs</code> plus <code>rocm_graphs_unavailable_reason</code> in config and
+          trusted debug. Health reports <code>state="busy"</code> only for <code>model_runner_busy</code> or
+          <code>graph_runner_busy</code>; it reports <code>state="unavailable"</code> for
+          <code>backend_without_graph_runner</code>, <code>model_runner_lock_poisoned</code>, or
+          <code>graph_runner_lock_poisoned</code>. Do not ascribe every null to lock contention. The independent
+          phase handle lives outside both runner locks, so it remains readable for every real backend through
+          model-runner or graph-runner contention and poison. Require
+          <code>kiln_rocm_graph_phase_telemetry_available 1</code>, then use
+          <code>kiln_rocm_graph_current_phase</code>, its elapsed-seconds gauge, and fixed phase duration families
+          to identify a headroom, warm, reservation, native-capture/publication, or cleanup pause while it is
+          occurring. <code>native_capture</code> includes the settled first launch, defensive cache
+          admission/publication, and blocking committed governor debit; <code>rejected_candidate_cleanup</code>
+          begins only when an unretained candidate enters destruction and settlement. When
+          phase availability is zero, inspect
+          <code>kiln_rocm_graph_phase_telemetry_unavailable{reason}</code>; currently only
+          <code>backend_without_graph_runner</code> can be active there, though the family uses the same closed
+          five-reason schema. The two availability gauges govern only their own metric families.
         </p>
 
         <h3 class="font-semibold mt-6 mb-3">Run a controlled legacy versus stream-ordered A/B</h3>
@@ -521,6 +557,7 @@ serving_profile = "experimental"
 rocm_synchronization_mode = "legacy_host_barriers"
 rocm_graph_mode = "disabled"
 rocm_graph_cache_entries = 8
+rocm_graph_cache_max_bytes = 1073741824
 
 # rocm-stream-ordered.toml: identical except this field
 # rocm_synchronization_mode = "stream_ordered"
@@ -553,7 +590,7 @@ kiln serve --config rocm-stream-ordered.toml</code></pre>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>profile</code></td><td class="p-2">Resolves to disabled under stable/maintenance and lazy capture/replay under experimental.</td><td class="p-2">Recommended default.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>disabled</code></td><td class="p-2">No graph-shaped warmup, capture, or replay.</td><td class="p-2">Valid in every profile.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>warmup_then_eager</code></td><td class="p-2">One graph-shaped eager warmup, then eager decode without capture.</td><td class="p-2">Experimental only.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lazy_capture_replay</code></td><td class="p-2">Eager warmup followed by lazy capture/replay for eligible decode shapes; cache bounded to 1&ndash;64 entries.</td><td class="p-2">Experimental only.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lazy_capture_replay</code></td><td class="p-2">Eager warmup followed by lazy capture/replay for eligible decode shapes; independently bounded to 1&ndash;64 entries and 64 MiB&ndash;16 GiB retained requested allocation bytes.</td><td class="p-2">Experimental only.</td></tr>
             </tbody>
           </table>
         </div>
@@ -566,13 +603,188 @@ kiln serve --config rocm-stream-ordered.toml</code></pre>
           ordering contract.
         </p>
 
+        <h3 class="font-semibold mt-6 mb-3">Run graph lifecycle and byte-budget A/Bs separately</h3>
+        <p class="mb-4 leading-relaxed" style="color: var(--fg-dim);">
+          Start with graph-shaped eager versus native capture. Keep synchronization mode, both cache limits,
+          model, corpus, request order, seed, sampling, concurrency, warmup, and memory configuration identical;
+          change only <code>rocm_graph_mode</code>. The byte budget is an exact integer byte count, defaults to
+          1 GiB, accepts 64 MiB through 16 GiB, and has canonical environment name
+          <code>KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES</code>.
+        </p>
+        <pre><code># rocm-graph-eager.toml
+[server]
+serving_profile = "experimental"
+
+[accelerator]
+rocm_synchronization_mode = "legacy_host_barriers"
+rocm_graph_mode = "warmup_then_eager"
+rocm_graph_cache_entries = 8
+rocm_graph_cache_max_bytes = 1073741824
+
+# rocm-graph-capture.toml: identical except this field
+# rocm_graph_mode = "lazy_capture_replay"
+
+kiln config --file rocm-graph-eager.toml
+kiln serve --config rocm-graph-eager.toml
+# Stop the first server, then repeat with rocm-graph-capture.toml.</code></pre>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          After the capture arm passes parity and stability, a separate conservative budget-pressure arm may
+          lower only <code>rocm_graph_cache_max_bytes</code>, for example to the 64 MiB minimum
+          (<code>67108864</code>). That arm tests rejection, idle-owner eviction, and eager fallback; it is not a
+          throughput target. Never raise the byte limit merely because a pause occurred. First require matching
+          byte-budget rejections or evictions, accounting completeness, and sufficient live memory headroom.
+          Entry/known-byte saturation should reclaim eligible idle owners before candidate allocation. After the
+          settled warm pass, exact accounting, matching-device pressure, and atomic governor reservation should
+          reject an inadmissible candidate before native capture. A defensive post-capture rejection is still
+          possible if concurrent state changes. A candidate-alone byte or incomplete-accounting result makes that
+          geometry non-capture-safe for the runner lifetime. Aggregate budget suppression clears only after owner
+          or budget relief; reservation denial retries only after matching-device cached headroom is sufficient.
+          Later matches take the typed eager fallback without another full warm/allocation pass. A
+          <code>memory_governor_selector_mismatch</code> fails closed and is a configuration/topology fault, not
+          evidence that the graph cache byte limit is too low.
+        </p>
+
+        <h3 class="font-semibold mt-6 mb-3">Capture exact graph memory diagnostics</h3>
+        <pre><code>curl -s http://localhost:8420/v1/config \
+  | jq '{policy: (.accelerator_runtime
+                   | {schema_id, version, rocm_graph_mode,
+                      rocm_graph_cache_entries, rocm_graph_cache_max_bytes}),
+         live_graphs: .rocm_graphs,
+         live_graphs_reason: .rocm_graphs_unavailable_reason,
+         live_phase: .rocm_graph_telemetry,
+         live_phase_reason: .rocm_graph_telemetry_unavailable_reason}'
+curl -s http://localhost:8420/health \
+  | jq '.decode_runtime.rocm_graphs
+        | {max_cached_graphs, max_retained_bytes,
+           captured_graph_count, active_graph_slot_count, idle_graph_slot_count,
+           cache_admission_successes, cache_evictions, cache_evicted_bytes,
+           budget_evictions, pressure_evictions,
+           invalidation_evictions, recovery_evictions,
+           entry_capacity_rejections, byte_budget_rejections,
+           accounting_incomplete_rejections,
+           pre_capture_entry_capacity_skips, pre_capture_byte_budget_skips,
+           pre_capture_accounting_incomplete_skips,
+           pre_capture_memory_reservation_denied_skips,
+           memory_governor_selector_mismatch_skips,
+           retained_stable_io_bytes, retained_capture_arena_bytes,
+           retained_blaslt_workspace_bytes, retained_slot_state_bytes,
+           retained_bytes, peak_retained_bytes,
+           last_transient_candidate_bytes, peak_transient_candidate_bytes,
+           opaque_native_object_count, retained_bytes_accounting_complete,
+           quarantined_retained_bytes, current_phase,
+           current_phase_elapsed_micros, pre_candidate_headroom_phase,
+           candidate_warm_phase, pre_native_reservation_phase,
+           native_capture_phase, rejected_candidate_cleanup_phase, fallbacks}'
+curl -s http://localhost:8420/v1/debug/model-state \
+  | jq '{rocm_graphs, rocm_graphs_unavailable_reason,
+         rocm_graph_telemetry, rocm_graph_telemetry_unavailable_reason}'
+  # trusted debug must already be enabled
+curl -s http://localhost:8420/metrics \
+  | grep '^kiln_rocm_graph_'</code></pre>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Require <code>captured_graph_count &lt;= max_cached_graphs</code> and
+          <code>retained_bytes_accounting_complete=true</code> for every retained cache admission. Exact
+          admission must not publish a candidate whose projected <code>retained_bytes</code> exceeds
+          <code>max_retained_bytes</code>. A later arbitrary snapshot can still include required active graphless
+          slot state; the runner must count and preserve that continuity state, block new capture when it consumes
+          the budget, and never fabricate a lower total. Also require
+          <code>peak_retained_bytes &gt;= retained_bytes</code>. The current total deduplicates physical allocations
+          by device and allocation identity across stable I/O, capture arenas, private-stream hipBLASLt
+          workspaces, and every runner-owned recurrent/conv owner slot. The four category fields attribute those
+          requested bytes; shared slot allocations are counted once even when an owner has multiple graphs, and
+          active graphless slots remain in <code>retained_slot_state_bytes</code>.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          The warm Record pass must allocate the candidate before its exact size exists. Treat
+          <code>last_transient_candidate_bytes</code> and <code>peak_transient_candidate_bytes</code> as that
+          residual exposure, not as retained cache bytes. For every phase require
+          <code>slow &lt;= calls</code>, <code>max_duration_micros &lt;= total_duration_micros</code>, and all duration
+          fields zero when <code>calls</code> is zero. A rising <code>current_phase_elapsed_micros</code> while the
+          full graph snapshot is busy is direct phase attribution, not telemetry loss. The five completed phase
+          totals do not overlap. A successful full <code>rocm_graphs</code> response includes point-in-time copies
+          of completed phase and transient fields, but the separate <code>rocm_graph_telemetry</code> object and
+          health&rsquo;s phase fields are authoritative while full statistics are unavailable.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          For Prometheus, first require <code>kiln_rocm_graph_telemetry_available 1</code>. Compare
+          <code>kiln_rocm_graph_retained_bytes{kind="total"}</code> with
+          <code>kiln_rocm_graph_retained_byte_limit</code>, and require
+          <code>kiln_rocm_graph_retained_byte_accounting_complete 1</code>. Attribute cache movement with
+          <code>kiln_rocm_graph_cache_admissions_total</code>,
+          <code>kiln_rocm_graph_cache_evictions_total</code>,
+          <code>kiln_rocm_graph_cache_evicted_bytes_total</code>,
+          <code>kiln_rocm_graph_cache_evictions_by_cause_total{cause="budget|pressure|invalidation|recovery"}</code>,
+          <code>kiln_rocm_graph_cache_admission_rejections_total{reason="entry_capacity|byte_budget|accounting_incomplete"}</code>,
+          and <code>kiln_rocm_graph_pre_capture_skips_total{reason="entry_capacity|byte_budget|accounting_incomplete|memory_reservation_denied|memory_governor_selector_mismatch"}</code>.
+          Capture behavior is split between <code>kiln_rocm_graph_capture_attempts_total</code>,
+          <code>kiln_rocm_graph_capture_outcomes_total{outcome="success|deferred|failure"}</code>,
+          <code>kiln_rocm_graph_replay_attempts_total</code>, and
+          <code>kiln_rocm_graph_replay_outcomes_total{outcome="success|failure"}</code>.
+          <code>kiln_rocm_graph_fallbacks_total{reason}</code> supplies the closed fallback reason; no request,
+          shape, allocation, or configured-byte value is used as a label.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Independently require <code>kiln_rocm_graph_phase_telemetry_available 1</code>. The phase label is exactly
+          <code>pre_candidate_headroom</code>, <code>candidate_warm</code>,
+          <code>pre_native_reservation</code>, <code>native_capture</code>, or
+          <code>rejected_candidate_cleanup</code>. Compare calls, slow calls, total seconds, and maximum seconds;
+          inspect <code>kiln_rocm_graph_current_phase{phase}</code> plus
+          <code>kiln_rocm_graph_current_phase_elapsed_seconds</code> during the pause and
+          <code>kiln_rocm_graph_transient_candidate_bytes{kind="last|peak"}</code> after measurement.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Do not equate capture success with cache retention. A
+          <code>kiln_rocm_graph_capture_outcomes_total{outcome="success"}</code> increment means native
+          instantiation and first launch succeeded, even if exact post-capture admission then safely rejected the
+          candidate. <code>kiln_rocm_graph_cache_admissions_total</code> counts only the retained/replayable
+          subset. Attribute their delta with entry/byte/accounting post-capture rejection counters and the corresponding
+          closed fallback reason; it is not a capture failure.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          <code>opaque_native_object_count</code> is a separate count of graph, executable, stream, and two event
+          handles per retained entry. HIP does not expose their driver byte sizes, and allocator-pool slack is
+          also outside <code>retained_bytes</code>. Compare the graph snapshot with live driver/governor memory;
+          do not treat the byte-accounting total as whole-process VRAM residency.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Ordinary entry or byte pressure evicts deterministic least-recently-used idle owners as whole units;
+          it never chooses an owner assigned to a live decode row. Moderate pressure permits retained replay but
+          blocks cache growth. Tight pressure evicts all eligible idle owners,
+          permits an already-retained active-owner replay, and sends a miss to eager without capture. Critical or
+          unavailable pressure settles and removes every graph, preserves active recurrent slot state, and uses
+          eager execution only after cleanup proves safe. Rising <code>budget_evictions</code>,
+          <code>pressure_evictions</code>, <code>graph_cache_byte_budget</code>, or
+          <code>tight_memory_pressure</code> can therefore be expected evidence in the corresponding diagnostic
+          arm; parity loss, unbounded plateaus, or cleanup quarantine are never expected.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Every eviction and rejected post-capture candidate follows pre-drop settlement, resource drop, then
+          post-drop settlement. If the first settlement fails during cached eviction, the cache map remains
+          intact. A safely settled and destroyed rejected candidate continues through its typed eager fallback.
+          Only a rejected candidate whose pre-drop settlement fails falls into cleanup quarantine and retains
+          possibly in-flight low-level handles until exit. Likewise, if a destructor, async free, or final
+          settlement fails, <code>quarantined_retained_bytes</code> records the affected logical bytes and execution
+          becomes cleanup-quarantined. Stop immediately: no eager retry is permitted, no successful reclaimed-byte
+          event may be inferred, and the process must restart.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Diagnose native capture failure separately from rejected-candidate cleanup. A recoverable failure drains
+          under synchronization reason <code>capture_rollback</code> while admission is still open and then restores
+          logical recurrent state; only success of both proofs permits the <code>capture_failure</code> eager
+          continuation. A failed settlement, failed logical rollback, or armed/unclassified guard exit publishes
+          sticky STOP, uses <code>error_recovery</code> only for a post-STOP diagnostic drain, and requires restart
+          even if that later drain succeeds. Treat quarantine as failure evidence, never as a normal fallback.
+        </p>
+
         <h3 class="font-semibold mt-6 mb-3">Rollback</h3>
         <pre><code>[server]
 serving_profile = "stable"
 
 [accelerator]
 rocm_synchronization_mode = "legacy_host_barriers"
-rocm_graph_mode = "profile"</code></pre>
+rocm_graph_mode = "profile"
+rocm_graph_cache_entries = 8
+rocm_graph_cache_max_bytes = 1073741824</code></pre>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Validate, restart, and require effective graph mode <code>disabled</code>. Removing the explicit
           <code>[accelerator]</code> section produces the same stable defaults. Stable startup rejects

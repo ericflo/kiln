@@ -90,7 +90,8 @@ pub fn rocm_binary_minmax(a: &Tensor, b: &Tensor, kind: i32) -> Result<Tensor> {
     // all n), so the uninit alloc skips the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = a_storage.rocm_stream_raw()?;
+    let stream_submission = a_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
 
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
@@ -107,10 +108,12 @@ pub fn rocm_binary_minmax(a: &Tensor, b: &Tensor, kind: i32) -> Result<Tensor> {
         kiln_binary_minmax_async(a_ptr, b_ptr, out_ptr, n as i64, kind, dtype_tag, raw_stream)
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_binary_minmax: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(

@@ -76,7 +76,8 @@ pub fn rocm_diagonal_extract(x: &Tensor) -> Result<Tensor> {
     // The kernel writes all `n` output elements, so skip the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * bpe) as u64;
@@ -85,10 +86,12 @@ pub fn rocm_diagonal_extract(x: &Tensor) -> Result<Tensor> {
 
     let status = unsafe { kiln_diagonal_extract_async(x_ptr, out_ptr, n as i64, tag, raw_stream) };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_diagonal_extract: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(vec![n]), TensorId::next())
@@ -129,7 +132,8 @@ pub fn rocm_diag_build(v: &Tensor) -> Result<Tensor> {
     // The kernel only writes the n diagonal entries — pre-zero the rest.
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, n * n)?;
 
-    let raw_stream = v_storage.rocm_stream_raw()?;
+    let stream_submission = v_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (v_base, _) = v_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let v_off = (v.layout().start_offset() * bpe) as u64;
@@ -138,10 +142,12 @@ pub fn rocm_diag_build(v: &Tensor) -> Result<Tensor> {
 
     let status = unsafe { kiln_diag_build_async(v_ptr, out_ptr, n as i64, tag, raw_stream) };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_diag_build: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(

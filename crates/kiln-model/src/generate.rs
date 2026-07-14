@@ -45,7 +45,10 @@ use crate::forward::{
     model_forward_paged_streaming_with_progress_offset_and_policy,
 };
 use crate::metal_graph::MetalGraphRunner;
-use crate::rocm_graph::{RocmGraphExecutionPolicy, RocmGraphRunner};
+use crate::rocm_graph::{
+    RocmGraphExecutionPolicy, RocmGraphLiveTelemetry, RocmGraphRunner, RocmGraphStatsUnavailable,
+    RocmGraphTelemetryHandle,
+};
 // (#1082) Native single-submit Vulkan-resident decode entry — only referenced
 // from the `#[cfg(feature = "vulkan")]` single-row fast path below.
 #[cfg(feature = "vulkan")]
@@ -298,6 +301,9 @@ pub struct ModelRunner {
     /// `cuda_graph`; its immutable policy is installed at construction. Same
     /// per-step interior-mutability pattern.
     rocm_graph: Mutex<RocmGraphRunner>,
+    /// Capture-phase telemetry deliberately lives outside `rocm_graph`, so a
+    /// slow native capture cannot make health reporting look unavailable.
+    rocm_graph_telemetry: RocmGraphTelemetryHandle,
     /// Metal ICB graph runner for accelerated decode steps. Active only on a
     /// Metal device with `KILN_METAL_GRAPHS` set; otherwise eager Metal decode
     /// is preserved.
@@ -2578,6 +2584,7 @@ impl ModelRunner {
         let eos_token_ids = tokenizer.eos_token_ids();
         let cuda_graph = CudaGraphRunner::new(&execution_device, options.cuda_graphs);
         let rocm_graph = RocmGraphRunner::new(&execution_device, options.rocm_graph);
+        let rocm_graph_telemetry = rocm_graph.telemetry_handle();
         let metal_graph = MetalGraphRunner::new(&execution_device, options.metal_graphs);
         let training_caps =
             TrainingLossBackend::runtime_training_capabilities(selected_backend.as_ref());
@@ -2611,6 +2618,7 @@ impl ModelRunner {
             active_lora: None,
             cuda_graph: Mutex::new(cuda_graph),
             rocm_graph: Mutex::new(rocm_graph),
+            rocm_graph_telemetry,
             metal_graph: Mutex::new(metal_graph),
             packed_weight_registry: OnceLock::new(),
             decode_buffers: OnceLock::new(),
@@ -3019,12 +3027,27 @@ impl ModelRunner {
 
     /// Snapshot ROCm graph configuration, circuit-breaker state, and execution
     /// counters. Counters are lifetime-monotonic for this model runner.
-    pub fn rocm_graph_stats(&self) -> Result<crate::rocm_graph::RocmGraphStats> {
-        Ok(self
-            .rocm_graph
-            .try_lock()
-            .map_err(|e| anyhow::anyhow!("ROCm graph runner snapshot unavailable: {e}"))?
-            .stats())
+    pub fn rocm_graph_stats(
+        &self,
+    ) -> std::result::Result<crate::rocm_graph::RocmGraphStats, RocmGraphStatsUnavailable> {
+        match self.rocm_graph.try_lock() {
+            Ok(runner) => Ok(runner.stats()),
+            Err(std::sync::TryLockError::WouldBlock) => Err(RocmGraphStatsUnavailable::Busy),
+            Err(std::sync::TryLockError::Poisoned(_)) => Err(RocmGraphStatsUnavailable::Poisoned),
+        }
+    }
+
+    /// Snapshot the currently active capture phase without acquiring the model's
+    /// graph-runner lock. This remains responsive during long driver calls.
+    pub fn rocm_graph_live_telemetry(&self) -> RocmGraphLiveTelemetry {
+        self.rocm_graph_telemetry.snapshot()
+    }
+
+    /// Clone the graph telemetry channel for ownership outside a surrounding
+    /// `ModelRunner` lock. Server health paths use this to remain responsive
+    /// while inference holds the runner for mutation.
+    pub fn rocm_graph_telemetry_handle(&self) -> RocmGraphTelemetryHandle {
+        self.rocm_graph_telemetry.clone()
     }
 
     /// Destroy every decode graph before a paged-KV pool replacement can free

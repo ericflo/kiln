@@ -1,4 +1,8 @@
-//! CPU-only source contract for fail-closed ROCm raw-stream acquisition.
+//! Small source-level guard for the public ROCm submission boundary.
+//!
+//! Gate behavior and status classification are tested directly in `kiln-hip`.
+//! These checks only protect the cross-crate API shape and prevent the removed
+//! copyable raw-stream escape hatches from returning.
 
 use std::path::{Path, PathBuf};
 
@@ -16,17 +20,6 @@ fn read(path: &str) -> String {
         .unwrap_or_else(|error| panic!("read {path}: {error}"))
 }
 
-fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
-    let start = source
-        .find(start_marker)
-        .unwrap_or_else(|| panic!("missing start marker: {start_marker}"));
-    let rest = &source[start..];
-    let end = rest
-        .find(end_marker)
-        .unwrap_or_else(|| panic!("missing end marker: {end_marker}"));
-    &rest[..end]
-}
-
 fn visit_rs_files(dir: &Path, visit: &mut impl FnMut(&Path, &str)) {
     for entry in std::fs::read_dir(dir).expect("read source directory") {
         let entry = entry.expect("read source entry");
@@ -42,115 +35,107 @@ fn visit_rs_files(dir: &Path, visit: &mut impl FnMut(&Path, &str)) {
 }
 
 #[test]
-fn storage_and_bridge_acquire_rocm_streams_fallibly() {
+fn public_rocm_stream_access_is_submission_scoped() {
     let hip = read("crates/kiln-hip/src/lib.rs");
     let storage = read("crates/kiln-tensor/src/rocm_storage.rs");
     let bridge = read("crates/kiln-kt-bridge/src/lib.rs");
 
-    assert!(hip.contains("pub fn hip_stream_for_execution(&self) -> Result<sys::hipStream_t>"));
-    assert!(hip.contains("self.bind()?;\n        Ok(self.handle)"));
-    assert!(storage.contains("pub fn rocm_stream_raw(&self) -> Result<*mut core::ffi::c_void>"));
-    assert!(storage.contains("ensure_execution_available(\"RocmStorage::rocm_stream_raw\")"));
-    assert!(storage.contains(".hip_stream_for_execution()"));
-    assert!(bridge.contains("st.rocm_stream_raw().map_err(|error|"));
-    assert!(!bridge.contains("Ok(st.rocm_stream_raw())"));
+    assert!(hip.contains("pub struct RocmStreamSubmission"));
+    assert!(hip.contains("impl Drop for RocmStreamSubmission"));
+    assert!(
+        storage.contains("pub fn rocm_stream_submission(&self) -> Result<RocmStreamSubmission>")
+    );
+    assert!(bridge.contains("pub enum DeviceStreamSubmission"));
 }
 
 #[test]
-fn tensor_rocm_ffi_launches_propagate_stream_acquisition_failures() {
-    let src = workspace_root().join("crates/kiln-tensor/src");
-    let mut acquisitions = 0usize;
-    visit_rs_files(&src, &mut |path, source| {
-        for (offset, _) in source.match_indices(".rocm_stream_raw()") {
-            acquisitions += 1;
-            let suffix = &source[offset + ".rocm_stream_raw()".len()..];
-            assert!(
-                suffix.starts_with('?') || suffix.starts_with(".map_err"),
-                "{} has an unpropagated ROCm raw-stream acquisition",
-                path.display()
-            );
+fn removed_rocm_raw_stream_escape_hatches_stay_removed() {
+    let crates = workspace_root().join("crates");
+    for entry in std::fs::read_dir(crates).expect("read crates directory") {
+        let src = entry.expect("read crate entry").path().join("src");
+        if !src.is_dir() {
+            continue;
         }
-    });
-    assert!(
-        acquisitions >= 50,
-        "expected the shared guard to cover the full kt ROCm kernel surface"
-    );
+        visit_rs_files(&src, &mut |path, source| {
+            for removed in [
+                "hip_stream_for_execution",
+                "fn hip_stream(&self)",
+                ".rocm_stream_raw()",
+                "device_stream_raw_of",
+                "rocm_stream_raw_of",
+            ] {
+                assert!(
+                    !source.contains(removed),
+                    "{} retains removed raw-stream API {removed}",
+                    path.display()
+                );
+            }
+        });
+    }
 }
 
 #[test]
-fn external_rocm_launchers_do_not_use_the_infallible_raw_accessor() {
-    let rocblas = read("crates/kiln-rocblas/src/hipblaslt_handle.rs");
-    let rmsnorm = read("crates/kiln-rmsnorm-kernel/src/kt_api.rs");
-
-    assert!(rocblas.contains(".hip_stream_for_execution()"));
-    assert!(rocblas.contains("FfiError::StreamUnavailable"));
-    assert!(!rocblas.contains("stream.hip_stream(),"));
-
-    assert!(rmsnorm.contains(".hip_stream_for_execution()"));
-    assert!(!rmsnorm.contains("default_stream().hip_stream()"));
-}
-
-#[test]
-fn hipblaslt_submitters_hold_workspace_ownership_across_ffi() {
-    let rocblas = read("crates/kiln-rocblas/src/hipblaslt_handle.rs");
-
-    assert!(rocblas.contains("buffer: Option<Arc<RocmSlice>>"));
-    assert!(rocblas.contains(") -> Result<(Arc<RocmSlice>, u64), FfiError>"));
-    assert!(rocblas.contains("let buffer = Arc::clone(entry.buffer.as_ref()"));
-    assert!(rocblas.contains("let (workspace, workspace_bytes) = self.ensure_workspace("));
-    assert!(rocblas.contains("let workspace_ptr_raw = workspace.device_ptr() as *mut c_void;"));
-    let submit = source_between(
-        &rocblas,
-        "let code = unsafe {\n            kiln_blas_hipblaslt_matmul(",
-        "if let Some(e) = FfiError::from_code(code)",
-    );
-    assert!(submit.contains("drop(workspace);"));
-}
-
-#[test]
-fn quarantine_is_device_wide_sticky_and_teardown_is_fail_closed() {
+fn synchronized_host_copies_hold_one_admission_through_settlement() {
     let hip = read("crates/kiln-hip/src/lib.rs");
-    let rocblas = read("crates/kiln-rocblas/src/hipblaslt_handle.rs");
-    let model = read("crates/kiln-model/src/generate.rs");
 
-    for required in [
-        "fn device_cleanup_quarantine(",
-        "static QUARANTINES: OnceLock<Mutex<HashMap<c_int, Arc<AtomicBool>>>>",
-        "pub fn quarantine_execution(&self)",
-        "fn bind_device_for_cleanup(",
-        "cleanup_quarantined.store(true, Ordering::Release)",
-        "restart the process",
+    for (method, next_method) in [
+        (
+            "pub fn memcpy_htod(",
+            "pub unsafe fn memcpy_htod_raw_async(",
+        ),
+        ("pub fn memcpy_dtoh(", "pub unsafe fn memcpy_dtoh_raw("),
+        ("pub unsafe fn memcpy_dtoh_raw(", "pub fn memcpy_dtod("),
     ] {
+        let start = hip
+            .find(method)
+            .unwrap_or_else(|| panic!("missing {method}"));
+        let end = hip[start..]
+            .find(next_method)
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("missing boundary {next_method} after {method}"));
+        let implementation = &hip[start..end];
+
         assert!(
-            hip.contains(required),
-            "missing sticky quarantine contract: {required}"
+            implementation.contains("RocmAdmittedHostTransfer::new"),
+            "{method} must own host memory with its admission permit"
+        );
+        assert!(
+            implementation.contains("synchronize_admitted_for(transfer.permit()"),
+            "{method} must settle under the enqueue admission"
+        );
+        assert!(
+            !implementation.contains("drop(submission)"),
+            "{method} must not expose an enqueue-to-wait admission gap"
+        );
+        assert!(
+            !implementation.contains("self.synchronize_for("),
+            "{method} must not reacquire admission for settlement"
         );
     }
-    assert!(
-        !hip.contains("cleanup_quarantined.store(false"),
-        "recovery must never clear the process-lifetime device quarantine"
-    );
-    for resource in [
-        "RocmStream::drop",
-        "RocmEvent::drop",
-        "RocmSlice::drop",
-        "RocmGraph::drop",
-        "RocmGraphExec::drop",
-    ] {
-        assert!(
-            hip.contains(resource),
-            "missing fail-closed destructor for {resource}"
-        );
-    }
-    assert!(rocblas.contains("pub fn new_ctx("));
-    assert!(rocblas.contains("if rocm_ctx.ordinal() != device_index"));
-    assert!(rocblas.contains("fn workspace_map_for_cleanup("));
-    assert!(rocblas.contains("self.rocm_ctx.quarantine_execution();"));
-    assert!(rocblas.contains("retaining hipBLASLt context and workspaces until process exit"));
 
-    assert!(model.contains("impl Drop for ModelRunner"));
-    assert!(model.contains("self.backend_health.snapshot().quarantined"));
-    assert!(model.contains("storage.context().quarantine_execution();"));
+    assert!(hip.contains("impl<T> Drop for RocmAdmittedHostTransfer<T>"));
+    assert!(hip.contains("std::mem::forget(host)"));
+}
+
+#[test]
+fn raw_pageable_htod_uses_the_explicit_synchronous_source_contract() {
+    let hip = read("crates/kiln-hip/src/lib.rs");
+    let sys = read("crates/kiln-hip/src/sys.rs");
+    let start = hip
+        .find("pub unsafe fn memcpy_htod_raw_async(")
+        .expect("raw H2D helper");
+    let end = hip[start..]
+        .find("pub unsafe fn memset_zero_async(")
+        .map(|offset| start + offset)
+        .expect("next raw stream helper");
+    let implementation = &hip[start..end];
+
+    assert!(implementation.contains("sys::hipMemcpyAsync("));
+    assert!(implementation.contains("sys::HIP_MEMCPY_HOST_TO_DEVICE"));
+    assert!(!implementation.contains("sys::hipMemcpyHtoDAsync("));
+    assert!(sys.contains("pub type hipMemcpyKind = c_uint;"));
+    assert!(sys.contains("pub const HIP_MEMCPY_HOST_TO_DEVICE: hipMemcpyKind = 1;"));
+    assert!(sys.contains("pub fn hipMemcpyAsync("));
 }
 
 #[test]
@@ -174,5 +159,48 @@ fn graph_failures_cannot_retry_partially_advanced_state() {
         "first-capture LM-head failures must quarantine before outer fallback logic"
     );
     assert!(graph.contains("fn complete_rollback(&mut self, rollback: Result<()>)"));
-    assert!(graph.contains("Ok(()) if !context.cleanup_quarantined()"));
+
+    let settle_start = graph
+        .find("fn settle_before_rollback(&mut self)")
+        .expect("capture failure settlement helper");
+    let settle_end = graph[settle_start..]
+        .find("fn complete_rollback(&mut self")
+        .map(|offset| settle_start + offset)
+        .expect("capture rollback completion helper");
+    let settle = &graph[settle_start..settle_end];
+    assert!(
+        settle.contains("RocmSyncReason::CaptureRollback")
+            && settle.contains("record_settlement(result.is_ok())")
+            && !settle.contains("RocmSyncReason::ErrorRecovery"),
+        "acknowledged capture rollback must drain with the admission gate open"
+    );
+
+    let drop_start = graph
+        .find("impl Drop for RocmCaptureFailureGuard")
+        .expect("capture failure guard Drop");
+    let drop_end = graph[drop_start..]
+        .find("struct RocmAllocationKey")
+        .map(|offset| drop_start + offset)
+        .expect("next graph type");
+    let unclassified_drop = &graph[drop_start..drop_end];
+    assert!(
+        unclassified_drop
+            .find("quarantine_execution()")
+            .expect("STOP publication")
+            < unclassified_drop
+                .find("RocmSyncReason::ErrorRecovery")
+                .expect("fatal recovery drain"),
+        "unclassified capture exit must publish STOP before ErrorRecovery"
+    );
+
+    let recoverable_start = graph
+        .find("fn synchronize_after_rocm_graph_capture_failure")
+        .expect("recoverable capture drain helper");
+    let recoverable_end = graph[recoverable_start..]
+        .find("struct RocmGraphKey")
+        .map(|offset| recoverable_start + offset)
+        .expect("next graph helper");
+    let recoverable = &graph[recoverable_start..recoverable_end];
+    assert!(recoverable.contains("RocmSyncReason::CaptureRollback"));
+    assert!(!recoverable.contains("RocmSyncReason::ErrorRecovery"));
 }

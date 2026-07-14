@@ -105,10 +105,9 @@ const EPI_BIAS_GELU: i32 = 6;
 
 const ALGO_BLOB_MAX: usize = 256;
 
-// The raw HIP stream handle threaded into the FFI. `kiln_hip`'s checked
-// `RocmStream::hip_stream_for_execution()` yields a `hipStream_t`
-// (`*mut c_void`); on the CUDA side this was
-// `cudarc::driver::sys::CUstream`.
+// The raw HIP stream handle threaded into the FFI. `kiln_hip` only exposes it
+// through a live `RocmStreamSubmission`, which closes the quarantine-to-launch
+// race; on the CUDA side this was `cudarc::driver::sys::CUstream`.
 type HipStream = *mut core::ffi::c_void;
 
 unsafe extern "C" {
@@ -158,8 +157,8 @@ pub enum FfiError {
     /// the heuristic's workspace requirement exceeded the caller's
     /// budget.
     Preference,
-    /// `KILN_BLAS_ERR_HEURISTIC` — `hipblasLtMatmulAlgoGetHeuristic`
-    /// returned zero algos or a non-success status.
+    /// `KILN_BLAS_ERR_HEURISTIC` — heuristic selection declined and the actual
+    /// implicit-algorithm `hipblasLtMatmul` dispatch then failed.
     Heuristic,
     /// `KILN_BLAS_ERR_MATMUL` — `hipblasLtMatmul` returned a non-
     /// success status during the actual call.
@@ -179,6 +178,15 @@ pub enum FfiError {
     /// `KILN_BLAS_ERR_ALGO_BLOB_TOO_SMALL` — caller's algo-blob-out
     /// buffer was too small.
     AlgoBlobTooSmall,
+    /// The owning hipBLASLt context could not be destroyed and was retained for
+    /// process-lifetime fail-closed cleanup.
+    CtxDestroy,
+    /// A native hipBLASLt context/descriptor/preference could not be destroyed.
+    /// Its handle is retained or unreachable until process exit.
+    ResourceCleanup,
+    /// Context creation returned an ambiguous partial or success-without-handle
+    /// publication result.
+    CtxCreatePartial,
     /// The typed ROCm stream refused execution because its context is cleanup
     /// quarantined or could not be rebound to the calling thread.
     StreamUnavailable,
@@ -205,8 +213,27 @@ impl FfiError {
             -10 => Some(FfiError::InvalidShape),
             -11 => Some(FfiError::AlgoDeserialize),
             -12 => Some(FfiError::AlgoBlobTooSmall),
+            -13 => Some(FfiError::CtxDestroy),
+            -14 => Some(FfiError::ResourceCleanup),
+            -15 => Some(FfiError::CtxCreatePartial),
             other => Some(FfiError::Unknown(other)),
         }
+    }
+
+    /// Whether this code represents attempted execution, ambiguous resource
+    /// publication/cleanup, or an unknown result that cannot be proven local.
+    /// Clean descriptor, shape, dtype, cache-blob, and workspace declines occur
+    /// before dispatch and remain safe for a higher-level fallback.
+    fn is_fatal_execution(self) -> bool {
+        matches!(
+            self,
+            FfiError::Heuristic
+                | FfiError::Matmul
+                | FfiError::CtxDestroy
+                | FfiError::ResourceCleanup
+                | FfiError::CtxCreatePartial
+                | FfiError::Unknown(_)
+        )
     }
 }
 
@@ -220,7 +247,9 @@ impl std::fmt::Display for FfiError {
             FfiError::Preference => {
                 write!(f, "hipblasLt preference failed or workspace too small")
             }
-            FfiError::Heuristic => write!(f, "hipblasLtMatmulAlgoGetHeuristic returned no algos"),
+            FfiError::Heuristic => {
+                write!(f, "implicit hipBLASLt matmul fallback failed")
+            }
             FfiError::Matmul => write!(f, "hipblasLtMatmul kernel call failed"),
             FfiError::UnsupportedDType => write!(f, "unsupported dtype (need BF16/F16/F32)"),
             FfiError::UnsupportedEpilogue => write!(
@@ -230,6 +259,13 @@ impl std::fmt::Display for FfiError {
             FfiError::InvalidShape => write!(f, "invalid shape (m/n/k must be > 0)"),
             FfiError::AlgoDeserialize => write!(f, "cached algo blob was the wrong size"),
             FfiError::AlgoBlobTooSmall => write!(f, "algo blob output buffer too small"),
+            FfiError::CtxDestroy => write!(f, "hipBLASLt context destroy failed"),
+            FfiError::ResourceCleanup => {
+                write!(f, "hipBLASLt native resource cleanup failed")
+            }
+            FfiError::CtxCreatePartial => {
+                write!(f, "hipBLASLt context creation published ambiguous state")
+            }
             FfiError::StreamUnavailable => {
                 write!(f, "ROCm stream is unavailable for hipBLASLt execution")
             }
@@ -269,6 +305,16 @@ pub struct HipblasLtWorkspaceLease {
     stream: Arc<RocmStream>,
     stream_key: usize,
     released: bool,
+}
+
+/// Lock-only snapshot of the device allocation retained by one workspace
+/// lease. `allocation_id` is an opaque identity for deduplicating accounting;
+/// callers must never dereference it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HipblasLtWorkspaceStats {
+    pub allocation_id: usize,
+    pub retained_bytes: u64,
+    pub max_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -371,17 +417,26 @@ impl HipblasLtMatmulHandle {
         if rocm_ctx.ordinal() != device_index {
             return Err(FfiError::DeviceMismatch);
         }
-        rocm_ctx
-            .bind_to_thread()
-            .map_err(|_| FfiError::StreamUnavailable)?;
         let mut raw: *mut KilnHipblasLtCtx = std::ptr::null_mut();
+        let submission = rocm_ctx
+            .execution_submission("hipBLASLt context create")
+            .map_err(|_| FfiError::StreamUnavailable)?;
         // SAFETY: out_ctx is a valid pointer to a stack mut pointer;
         // C side writes a freshly-malloc'd ctx into it.
         let code = unsafe { kiln_blas_hipblaslt_ctx_create(&mut raw) };
         if let Some(e) = FfiError::from_code(code) {
+            if !raw.is_null() || e.is_fatal_execution() {
+                submission.quarantine();
+            } else {
+                submission.complete();
+            }
             return Err(e);
         }
-        let ctx = NonNull::new(raw).ok_or(FfiError::CtxCreate)?;
+        let Some(ctx) = NonNull::new(raw) else {
+            submission.quarantine();
+            return Err(FfiError::CtxCreate);
+        };
+        submission.complete();
 
         let pool = match workspace_max_bytes {
             Some(b) => WorkspacePool::with_cap(b),
@@ -559,9 +614,6 @@ impl HipblasLtMatmulHandle {
         c_ptr: *mut c_void,
         bias_ptr: *const c_void,
     ) -> Result<MatmulOutcome, FfiError> {
-        let raw_stream = stream
-            .hip_stream_for_execution()
-            .map_err(|_| FfiError::StreamUnavailable)?;
         let spec = build_spec(request)?;
 
         // Look up an existing algo for this shape; fall back to
@@ -603,6 +655,13 @@ impl HipblasLtMatmulHandle {
         let mut chosen_algo_id: i32 = -1;
         let mut chosen_workspace_bytes: u64 = 0;
 
+        // Acquire only after fallible cache/workspace preparation so the
+        // admission interval covers the physical FFI call, not arbitrary host
+        // work that can delay quarantine settlement.
+        let stream_submission = stream
+            .execution_submission("hipBLASLt matmul")
+            .map_err(|_| FfiError::StreamUnavailable)?;
+        let raw_stream = stream_submission.raw_stream();
         let code = unsafe {
             kiln_blas_hipblaslt_matmul(
                 self.inner.ctx.as_ptr(),
@@ -628,13 +687,20 @@ impl HipblasLtMatmulHandle {
                 &mut chosen_workspace_bytes,
             )
         };
+        if let Some(e) = FfiError::from_code(code) {
+            if e.is_fatal_execution() {
+                stream_submission.quarantine();
+            } else {
+                stream_submission.complete();
+            }
+            drop(workspace);
+            return Err(e);
+        }
+        stream_submission.complete();
         // If a concurrent caller resized this stream's workspace, releasing
         // our final reference queues its free after the matmul submission on
         // the same stream.
         drop(workspace);
-        if let Some(e) = FfiError::from_code(code) {
-            return Err(e);
-        }
 
         algo_blob_out.truncate(algo_blob_out_len as usize);
 
@@ -734,6 +800,37 @@ impl HipblasLtMatmulHandle {
 }
 
 impl HipblasLtWorkspaceLease {
+    /// Snapshot this lease's current workspace without synchronizing a stream or
+    /// calling the HIP runtime. Graph capture calls this after its warm pass,
+    /// when the private stream's workspace has reached its retained size.
+    pub fn stats(&self) -> Result<HipblasLtWorkspaceStats, FfiError> {
+        let (allocation_id, retained_bytes) = match self.inner.workspace_by_stream.lock() {
+            Ok(by_stream) => by_stream
+                .get(&self.stream_key)
+                .and_then(|entry| entry.buffer.as_ref())
+                .map(|buffer| (buffer.device_ptr_usize(), buffer.len() as u64))
+                .unwrap_or_default(),
+            Err(poisoned) => {
+                self.rocm_ctx.quarantine_execution();
+                drop(poisoned.into_inner());
+                return Err(FfiError::StreamUnavailable);
+            }
+        };
+        let max_bytes = match self.inner.workspace_pool.lock() {
+            Ok(pool) => pool.max_bytes,
+            Err(poisoned) => {
+                self.rocm_ctx.quarantine_execution();
+                drop(poisoned.into_inner());
+                return Err(FfiError::StreamUnavailable);
+            }
+        };
+        Ok(HipblasLtWorkspaceStats {
+            allocation_id,
+            retained_bytes,
+            max_bytes,
+        })
+    }
+
     fn workspace_map_for_cleanup(
         &self,
     ) -> Option<std::sync::MutexGuard<'_, HashMap<usize, StreamWorkspace>>> {
@@ -843,17 +940,25 @@ impl Drop for HandleInner {
             retain_until_exit(self, "ROCm execution is quarantined");
             return;
         }
-        if let Err(error) = self.rocm_ctx.bind_to_thread() {
-            self.rocm_ctx.quarantine_execution();
-            retain_until_exit(self, &format!("device bind failed: {error}"));
-            return;
-        }
-        // SAFETY: ctx is non-null and owned. Destroy returns 0 on a
-        // null input (handled gracefully) and on success otherwise.
+        let submission = match self
+            .rocm_ctx
+            .execution_submission("hipBLASLt context destroy")
+        {
+            Ok(submission) => submission,
+            Err(error) => {
+                retain_until_exit(self, &format!("execution admission failed: {error}"));
+                return;
+            }
+        };
+        // SAFETY: ctx is non-null and owned. On failure the C wrapper retains
+        // both the wrapper and hipBLASLt handle for fail-closed process-lifetime
+        // quarantine; on success it destroys both.
         let code = unsafe { kiln_blas_hipblaslt_ctx_destroy(self.ctx.as_ptr()) };
         if code != 0 {
-            self.rocm_ctx.quarantine_execution();
+            submission.quarantine();
             retain_until_exit(self, &format!("hipBLASLt context destroy failed ({code})"));
+        } else {
+            submission.complete();
         }
     }
 }
@@ -973,9 +1078,34 @@ mod tests {
         assert_eq!(FfiError::from_code(-1), Some(FfiError::CtxCreate));
         assert_eq!(FfiError::from_code(-7), Some(FfiError::Matmul));
         assert_eq!(FfiError::from_code(-10), Some(FfiError::InvalidShape));
+        assert_eq!(FfiError::from_code(-13), Some(FfiError::CtxDestroy));
+        assert_eq!(FfiError::from_code(-14), Some(FfiError::ResourceCleanup));
+        assert_eq!(FfiError::from_code(-15), Some(FfiError::CtxCreatePartial));
         match FfiError::from_code(-99) {
             Some(FfiError::Unknown(-99)) => {}
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ffi_fatality_separates_fallbacks_from_execution_or_cleanup_failure() {
+        for error in [
+            FfiError::Heuristic,
+            FfiError::Matmul,
+            FfiError::CtxDestroy,
+            FfiError::ResourceCleanup,
+            FfiError::CtxCreatePartial,
+            FfiError::Unknown(-99),
+        ] {
+            assert!(error.is_fatal_execution(), "{error:?} must quarantine");
+        }
+        for error in [
+            FfiError::CtxCreate,
+            FfiError::DescCreate,
+            FfiError::Preference,
+            FfiError::InvalidShape,
+        ] {
+            assert!(!error.is_fatal_execution(), "{error:?} is pre-dispatch");
         }
     }
 

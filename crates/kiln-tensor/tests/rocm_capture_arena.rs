@@ -81,6 +81,15 @@ fn freeze_pointers_and_replay_memset() {
         3,
         "3 distinct buffers recorded"
     );
+    let retained_ptrs: Vec<_> = arena
+        .borrow()
+        .retained_buffers()
+        .map(|storage| storage.device_ptr_raw().0)
+        .collect();
+    assert_eq!(
+        retained_ptrs, recorded,
+        "read-only retained-buffer inspection must expose the recorded allocations"
+    );
 
     // Dirty the first frozen buffer with a non-zero sentinel (writes through the
     // stable pointer). On replay the arena's captured memset must re-zero it.

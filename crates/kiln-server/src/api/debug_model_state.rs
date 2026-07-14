@@ -38,6 +38,12 @@ struct ModelStateResponse {
     decode_runtime: DecodeRuntimeConfig,
     accelerator_runtime: crate::config::ResolvedAcceleratorRuntimePolicy,
     rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
+    rocm_graphs: Option<kiln_model::RocmGraphStats>,
+    rocm_graphs_unavailable_reason:
+        Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
+    rocm_graph_telemetry: Option<kiln_model::RocmGraphLiveTelemetry>,
+    rocm_graph_telemetry_unavailable_reason:
+        Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
     streaming_prefill: StreamingPrefillRuntimeConfig,
     training: TrainingDebugState,
     env_flags: BTreeMap<&'static str, EnvFlagState>,
@@ -289,6 +295,7 @@ fn is_truthy(value: &str) -> bool {
 
 async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
     let rocm_synchronization = state.observe_rocm_runtime_health();
+    let rocm_graph_observation = crate::rocm_graph_observability::observe_rocm_graphs(state);
     ModelStateResponse {
         model: model_debug_state(state, &rocm_synchronization),
         adapters: adapter_debug_state(state),
@@ -301,6 +308,11 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
         decode_runtime: state.decode_runtime_config,
         accelerator_runtime: state.accelerator_runtime_policy,
         rocm_synchronization,
+        rocm_graphs: rocm_graph_observation.stats,
+        rocm_graphs_unavailable_reason: rocm_graph_observation.stats_unavailable_reason,
+        rocm_graph_telemetry: rocm_graph_observation.telemetry,
+        rocm_graph_telemetry_unavailable_reason: rocm_graph_observation
+            .telemetry_unavailable_reason,
         streaming_prefill: state.streaming_prefill_runtime_config,
         training: TrainingDebugState {
             checkpoint_boundary_policy: state.training_runtime.checkpoint_boundary_policy(),
@@ -914,10 +926,15 @@ mod tests {
         assert_eq!(json["decode_runtime"]["max_decode_batch"]["effective"], 8);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v1"
+            "kiln.accelerator-runtime-policy.v2"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["rocm_graph_cache_max_bytes"]["effective"],
+            crate::config::DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES
         );
         assert_eq!(json["rocm_synchronization"]["active"], false);
         assert_eq!(json["rocm_synchronization"]["cleanup_quarantined"], false);
+        assert!(json["rocm_graphs"].is_null());
         assert_eq!(
             json["streaming_prefill"]["dispatch"]["configured_mode"],
             "auto"

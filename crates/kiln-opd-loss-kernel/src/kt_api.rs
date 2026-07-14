@@ -1243,7 +1243,7 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
 // `build.rs` compiles `csrc/opd_topk_kl.cu` with hipcc for the `rocm` feature
 // (emitting the same `kiln_opd_topk_kl_bwd_*` symbols), and the body routes
 // through the backend-neutral kt-bridge seam (`device_input_ptr` /
-// `device_output_ptr` / `alloc_device_tensor_like` / `device_stream_raw_of`),
+// `device_output_ptr` / `alloc_device_tensor_like` / `device_stream_submission_of`),
 // which dispatches to either the CUDA or ROCm helper by the tensor's backend.
 // CUDA behavior is unchanged.
 #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -1366,7 +1366,7 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
     active_metadata: Option<&OpdActiveMetadata>,
 ) -> Result<KtTensor, OpdLossError> {
     use kiln_kt_bridge::{
-        alloc_device_tensor_like, device_input_ptr, device_output_ptr, device_stream_raw_of,
+        alloc_device_tensor_like, device_input_ptr, device_output_ptr, device_stream_submission_of,
     };
     use kiln_tensor::Backend;
     #[cfg(feature = "rocm")]
@@ -1585,7 +1585,17 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
         None => 0,
     };
     let d_ptr = device_output_ptr(&d_hidden_2d);
-    let raw_stream = device_stream_raw_of(hidden, "stream")?;
+    let dispatch_f32 = match dtype {
+        KtDType::F32 => true,
+        KtDType::BF16 => false,
+        other => {
+            return Err(OpdLossError::msg(format!(
+                "kt-opd-loss bwd: unreachable dtype {other:?}",
+            )));
+        }
+    };
+    let stream_submission = device_stream_submission_of(hidden, "stream")?;
+    let raw_stream = stream_submission.raw_stream();
 
     // -- 6. Dispatch the FFI --------------------------------------------
     //
@@ -1594,8 +1604,8 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
     // `alloc_device_tensor_like`, so the kernel's writes land in a clean
     // F32/BF16 tile of the expected size.
     let status = unsafe {
-        match dtype {
-            KtDType::F32 => crate::phase_b::kiln_opd_topk_kl_bwd_f32(
+        if dispatch_f32 {
+            crate::phase_b::kiln_opd_topk_kl_bwd_f32(
                 h_ptr as *const _,
                 head_ptr as *const _,
                 i_ptr as *const _,
@@ -1610,8 +1620,9 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
                 top_k as i32,
                 output_mode_i32,
                 raw_stream,
-            ),
-            KtDType::BF16 => crate::phase_b::kiln_opd_topk_kl_bwd_bf16(
+            )
+        } else {
+            crate::phase_b::kiln_opd_topk_kl_bwd_bf16(
                 h_ptr as *const _,
                 head_ptr as *const _,
                 i_ptr as *const _,
@@ -1626,19 +1637,16 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
                 top_k as i32,
                 output_mode_i32,
                 raw_stream,
-            ),
-            other => {
-                return Err(OpdLossError::msg(format!(
-                    "kt-opd-loss bwd: unreachable dtype {other:?}",
-                )));
-            }
+            )
         }
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(OpdLossError::msg(format!(
             "kt-opd-loss bwd: kiln_opd_topk_kl_bwd_* returned status {status}",
         )));
     }
+    stream_submission.complete();
 
     // -- 7. Unsqueeze full `[T, H]` gradient to `[1, T, H]`. ------------
     let d_hidden_3d = d_hidden_2d.reshape(vec![1, seq_len, hidden_size])?;

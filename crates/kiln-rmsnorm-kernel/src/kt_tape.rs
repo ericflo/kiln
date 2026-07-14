@@ -192,13 +192,14 @@ fn cast_hidden_f32_to_bf16(grad_weight: &KtTensor, hidden: usize) -> KtResult<Kt
     // `Device::Cuda` tensors to the same CUDA helpers (behavior-identical) and
     // `Device::Rocm` tensors to the ROCm ones.
     let grad_weight_ptr = kiln_kt_bridge::device_output_ptr(grad_weight);
-    let raw_stream = kiln_kt_bridge::device_stream_raw_of(grad_weight, "grad_weight")
-        .map_err(|e| kiln_tensor::Error::Msg(format!("rmsnorm kt-tape bwd: stream: {e}")))?;
     let dst = kiln_kt_bridge::alloc_device_tensor_like(grad_weight, KtDType::BF16, vec![hidden])
         .map_err(|e| {
             kiln_tensor::Error::Msg(format!("rmsnorm kt-tape bwd: alloc grad_w BF16: {e}"))
         })?;
     let dst_ptr = kiln_kt_bridge::device_output_ptr(&dst);
+    let stream_submission = kiln_kt_bridge::device_stream_submission_of(grad_weight, "grad_weight")
+        .map_err(|e| kiln_tensor::Error::Msg(format!("rmsnorm kt-tape bwd: stream: {e}")))?;
+    let raw_stream = stream_submission.raw_stream();
 
     // SAFETY: `grad_weight_ptr` points to an F32 buffer of exactly `hidden`
     // populated elements.
@@ -214,8 +215,10 @@ fn cast_hidden_f32_to_bf16(grad_weight: &KtTensor, hidden: usize) -> KtResult<Kt
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         bail!("rmsnorm kt-tape bwd: kiln_f32_to_bf16 failed (status {status})");
     }
+    stream_submission.complete();
     Ok(dst)
 }
 

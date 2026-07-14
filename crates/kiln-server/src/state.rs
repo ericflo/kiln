@@ -2352,6 +2352,7 @@ pub enum ModelBackend {
     /// Real model weights loaded via ModelRunner with paged KV cache.
     Real {
         runner: Arc<std::sync::RwLock<ModelRunner>>,
+        rocm_graph_telemetry: kiln_model::RocmGraphTelemetryHandle,
         backend_health: BackendHealthHandle,
         block_manager: Arc<std::sync::Mutex<BlockManager>>,
         paged_cache: Arc<PagedKvCacheKt>,
@@ -4053,6 +4054,7 @@ impl AppState {
         );
 
         let model_weight_device = runner.weights.embed_tokens.device();
+        let rocm_graph_telemetry = runner.rocm_graph_telemetry_handle();
         let runner = Arc::new(std::sync::RwLock::new(runner));
         let backend_health = runner.read().unwrap().backend_health_handle();
         let block_manager = Arc::new(std::sync::Mutex::new(block_manager));
@@ -4390,6 +4392,7 @@ impl AppState {
             execution_provenance,
             backend: Arc::new(ModelBackend::Real {
                 runner,
+                rocm_graph_telemetry,
                 backend_health,
                 block_manager,
                 paged_cache,

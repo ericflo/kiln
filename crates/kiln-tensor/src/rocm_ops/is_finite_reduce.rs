@@ -108,7 +108,8 @@ pub fn rocm_is_finite(src: &Tensor) -> Result<bool> {
     // into it on the first non-finite hit.
     let flag_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::U32, 1)?;
 
-    let raw_stream = contig_storage.rocm_stream_raw()?;
+    let stream_submission = contig_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
 
     // `rocm_contiguous` produces start_offset == 0, so no byte-offset math.
     let (x_base, _) = contig_storage.device_ptr_raw();
@@ -120,10 +121,12 @@ pub fn rocm_is_finite(src: &Tensor) -> Result<bool> {
     let status =
         unsafe { kiln_is_finite_storage_async(x_ptr, flag_ptr, n_elements, dtype_tag, raw_stream) };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_is_finite: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     // Read the 4-byte flag back. `memcpy_dtoh` synchronizes against the launch
     // on the same stream.

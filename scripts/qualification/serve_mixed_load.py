@@ -238,6 +238,28 @@ PROFILE_POLICIES: dict[str, dict[str, bool | str]] = {
     },
 }
 
+GRAPH_PHASE_NAMES = (
+    "pre_candidate_headroom",
+    "candidate_warm",
+    "pre_native_reservation",
+    "native_capture",
+    "rejected_candidate_cleanup",
+)
+GRAPH_HEALTH_METADATA_FIELDS = (
+    "state",
+    "unavailable_reason",
+    "phase_telemetry_available",
+    "phase_telemetry_unavailable_reason",
+    "current_phase",
+    "current_phase_elapsed_micros",
+)
+GRAPH_LIVE_TELEMETRY_FIELDS = (
+    "current_phase",
+    "current_phase_elapsed_micros",
+    *(f"{phase_name}_phase" for phase_name in GRAPH_PHASE_NAMES),
+    "last_transient_candidate_bytes",
+    "peak_transient_candidate_bytes",
+)
 
 METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "attributed_itl_outlier_count": ("count", "sum", True),
@@ -329,6 +351,32 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "unexplained_itl_outlier_count": ("count", "sum", True),
     "zero_token_response_count": ("count", "sum", True),
 }
+for _phase_name in GRAPH_PHASE_NAMES:
+    METRIC_DEFINITIONS[f"graph_{_phase_name}_call_count"] = (
+        "count",
+        "sum",
+        False,
+    )
+    METRIC_DEFINITIONS[f"graph_{_phase_name}_slow_count"] = (
+        "count",
+        "sum",
+        True,
+    )
+    METRIC_DEFINITIONS[f"graph_{_phase_name}_duration_ms_total"] = (
+        "ms",
+        "sum",
+        True,
+    )
+    METRIC_DEFINITIONS[f"graph_{_phase_name}_duration_ms_max_end"] = (
+        "ms",
+        "max",
+        True,
+    )
+METRIC_DEFINITIONS["graph_transient_candidate_bytes_peak_end"] = (
+    "bytes",
+    "max",
+    True,
+)
 
 GRAPH_MONOTONIC_FIELDS = (
     "capture_attempts",
@@ -343,6 +391,24 @@ GRAPH_MONOTONIC_FIELDS = (
     "decode_owner_graph_release_count",
     "graph_slot_create_count",
     "graph_slot_reuse_count",
+    "cache_admission_successes",
+    "cache_evictions",
+    "cache_evicted_bytes",
+    "budget_evictions",
+    "pressure_evictions",
+    "invalidation_evictions",
+    "recovery_evictions",
+    "entry_capacity_rejections",
+    "byte_budget_rejections",
+    "accounting_incomplete_rejections",
+    "pre_capture_entry_capacity_skips",
+    "pre_capture_byte_budget_skips",
+    "pre_capture_accounting_incomplete_skips",
+    "pre_capture_memory_reservation_denied_skips",
+    "memory_governor_selector_mismatch_skips",
+    "peak_retained_bytes",
+    "peak_transient_candidate_bytes",
+    "quarantined_retained_bytes",
 )
 GRAPH_GAUGE_FIELDS = (
     "captured_graph_count",
@@ -350,14 +416,32 @@ GRAPH_GAUGE_FIELDS = (
     "active_graph_slot_count",
     "idle_graph_slot_count",
     "tracked_decode_owner_count",
+    "retained_stable_io_bytes",
+    "retained_capture_arena_bytes",
+    "retained_blaslt_workspace_bytes",
+    "retained_slot_state_bytes",
+    "retained_bytes",
+    "last_transient_candidate_bytes",
+    "opaque_native_object_count",
+)
+GRAPH_PHASE_FIELDS = (
+    "calls",
+    "slow",
+    "total_duration_micros",
+    "max_duration_micros",
 )
 GRAPH_FALLBACK_REASON_FIELDS = (
-    "warmup_forward_failure",
     "cold_cache_host_round_trip",
     "persistent_host_round_trip",
     "shape_dependent_attention",
     "graph_cache_capacity",
+    "graph_cache_byte_budget",
+    "graph_accounting_incomplete",
+    "moderate_memory_pressure",
+    "tight_memory_pressure",
     "critical_memory_pressure",
+    "memory_reservation_denied",
+    "memory_governor_selector_mismatch",
     "capture_failure",
     "replay_failure",
 )
@@ -1785,12 +1869,13 @@ def accelerator_policy_attestation_failures(
     graphs_enabled: bool,
     synchronization_mode: str = "legacy_host_barriers",
     graph_cache_entries: int = 8,
+    graph_cache_max_bytes: int = 1 << 30,
 ) -> list[str]:
     if not isinstance(value, dict):
         return [f"{label}.accelerator_runtime is missing"]
     expected = {
-        "schema_id": "kiln.accelerator-runtime-policy.v1",
-        "version": 1,
+        "schema_id": "kiln.accelerator-runtime-policy.v2",
+        "version": 2,
         "serving_profile": serving_profile,
         "serving_profile_source": "environment",
         "rocm_synchronization_mode": {
@@ -1812,6 +1897,11 @@ def accelerator_policy_attestation_failures(
             "effective": graph_cache_entries,
             "source": "environment" if graph_cache_entries != 8 else "default",
         },
+        "rocm_graph_cache_max_bytes": {
+            "configured": graph_cache_max_bytes,
+            "effective": graph_cache_max_bytes,
+            "source": "environment" if graph_cache_max_bytes != 1 << 30 else "default",
+        },
     }
     return [
         f"{label}.accelerator_runtime.{field}={value.get(field)!r}, expected {expected_value!r}"
@@ -1826,6 +1916,7 @@ def attest_runtime(
     debug: dict[str, Any],
     *,
     rocm_graph_cache_entries: int = 8,
+    rocm_graph_cache_max_bytes: int = 1 << 30,
 ) -> list[str]:
     expected = VARIANT_CONFIGS[variant]["runtime"]
     failures: list[str] = []
@@ -1885,6 +1976,7 @@ def attest_runtime(
             graphs_requested=expected["rocm_graphs_requested"],
             graphs_enabled=expected["rocm_graphs_enabled"],
             graph_cache_entries=rocm_graph_cache_entries,
+            graph_cache_max_bytes=rocm_graph_cache_max_bytes,
         )
     )
     failures.extend(
@@ -1895,6 +1987,7 @@ def attest_runtime(
             graphs_requested=expected["rocm_graphs_requested"],
             graphs_enabled=expected["rocm_graphs_enabled"],
             graph_cache_entries=rocm_graph_cache_entries,
+            graph_cache_max_bytes=rocm_graph_cache_max_bytes,
         )
     )
     graph = runtime.get("rocm_graphs")
@@ -1902,6 +1995,47 @@ def attest_runtime(
     if not isinstance(graph, dict):
         failures.append("ROCm graph runtime state is missing")
     else:
+        debug_graph = debug.get("rocm_graphs")
+        if not isinstance(debug_graph, dict):
+            failures.append("debug ROCm graph runtime state is missing")
+        else:
+            comparable_health_graph = {
+                field: value
+                for field, value in graph.items()
+                if field not in GRAPH_HEALTH_METADATA_FIELDS
+            }
+            if comparable_health_graph != debug_graph:
+                failures.append(
+                    "health and debug ROCm graph runtime snapshots disagree exactly"
+                )
+        if graph.get("unavailable_reason") is not None:
+            failures.append(
+                "available health ROCm graph snapshot carries an unavailable reason"
+            )
+        if debug.get("rocm_graphs_unavailable_reason") is not None:
+            failures.append(
+                "available debug ROCm graph snapshot carries an unavailable reason"
+            )
+        if graph.get("phase_telemetry_available") is not True:
+            failures.append("health ROCm graph phase telemetry is unavailable")
+        if graph.get("phase_telemetry_unavailable_reason") is not None:
+            failures.append(
+                "available health ROCm graph phase telemetry carries an unavailable reason"
+            )
+        debug_telemetry = debug.get("rocm_graph_telemetry")
+        expected_telemetry = {
+            field: graph.get(field) for field in GRAPH_LIVE_TELEMETRY_FIELDS
+        }
+        if not isinstance(debug_telemetry, dict):
+            failures.append("debug ROCm graph phase telemetry is missing")
+        elif debug_telemetry != expected_telemetry:
+            failures.append(
+                "health and debug ROCm graph phase telemetry snapshots disagree exactly"
+            )
+        if debug.get("rocm_graph_telemetry_unavailable_reason") is not None:
+            failures.append(
+                "available debug ROCm graph phase telemetry carries an unavailable reason"
+            )
         for field in ("requested", "capture_requested", "enabled", "capture_enabled"):
             if graph.get(field) is not expected_graphs:
                 failures.append(
@@ -1912,6 +2046,54 @@ def attest_runtime(
             failures.append(
                 f"ROCm graph state={graph.get('state')!r}, expected {expected_state!r}"
             )
+        for field, expected_value in (
+            ("max_cached_graphs", rocm_graph_cache_entries),
+            ("max_retained_bytes", rocm_graph_cache_max_bytes),
+        ):
+            if graph.get(field) != expected_value:
+                failures.append(
+                    f"ROCm graph {field}={graph.get(field)!r}, expected {expected_value}"
+                )
+        for field in (
+            "captured_graph_count",
+            "retained_stable_io_bytes",
+            "retained_capture_arena_bytes",
+            "retained_blaslt_workspace_bytes",
+            "retained_slot_state_bytes",
+            "retained_bytes",
+            "peak_retained_bytes",
+            "opaque_native_object_count",
+            "quarantined_retained_bytes",
+            "cache_admission_successes",
+            "cache_evictions",
+            "cache_evicted_bytes",
+            "budget_evictions",
+            "pressure_evictions",
+            "invalidation_evictions",
+            "recovery_evictions",
+            "entry_capacity_rejections",
+            "byte_budget_rejections",
+            "accounting_incomplete_rejections",
+            "pre_capture_entry_capacity_skips",
+            "pre_capture_byte_budget_skips",
+            "pre_capture_accounting_incomplete_skips",
+        ):
+            value = graph.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                failures.append(f"ROCm graph {field} must be a nonnegative integer")
+        retained_bytes = graph.get("retained_bytes")
+        if isinstance(retained_bytes, int) and retained_bytes > rocm_graph_cache_max_bytes:
+            failures.append("ROCm graph retained bytes exceed the configured byte budget")
+        captured_graph_count = graph.get("captured_graph_count")
+        if (
+            isinstance(captured_graph_count, int)
+            and captured_graph_count > rocm_graph_cache_entries
+        ):
+            failures.append("ROCm graph entry count exceeds the configured entry limit")
+        if graph.get("retained_bytes_accounting_complete") is not True:
+            failures.append("ROCm graph retained-byte accounting is incomplete")
+        if graph.get("quarantined_retained_bytes") != 0:
+            failures.append("ROCm graph reports quarantined retained bytes")
     autoscaler = runtime.get("kv_autoscaler")
     expected_autoscaler = expected["kv_autoscale_enabled"]
     if not isinstance(autoscaler, dict):
@@ -2169,6 +2351,30 @@ def graph_snapshot(health: dict[str, Any]) -> dict[str, int]:
     graph = runtime.get("rocm_graphs")
     if not isinstance(graph, dict):
         raise QualificationError("health.decode_runtime.rocm_graphs is missing")
+    if graph.get("unavailable_reason") is not None:
+        raise QualificationError("available ROCm graph snapshot carries an unavailable reason")
+    if graph.get("phase_telemetry_available") is not True:
+        raise QualificationError("ROCm graph phase telemetry is unavailable")
+    if graph.get("phase_telemetry_unavailable_reason") is not None:
+        raise QualificationError(
+            "available ROCm graph phase telemetry carries an unavailable reason"
+        )
+    current_phase = graph.get("current_phase")
+    if current_phase is not None and current_phase not in GRAPH_PHASE_NAMES:
+        raise QualificationError(
+            f"ROCm graph current phase is outside the closed set: {current_phase!r}"
+        )
+    current_phase_elapsed = graph.get("current_phase_elapsed_micros")
+    if (
+        isinstance(current_phase_elapsed, bool)
+        or not isinstance(current_phase_elapsed, int)
+        or current_phase_elapsed < 0
+    ):
+        raise QualificationError(
+            "ROCm graph current phase elapsed time must be a nonnegative integer"
+        )
+    if current_phase is None and current_phase_elapsed != 0:
+        raise QualificationError("idle ROCm graph phase carries nonzero elapsed time")
     snapshot: dict[str, int] = {}
     for field in (*GRAPH_MONOTONIC_FIELDS, *GRAPH_GAUGE_FIELDS):
         value = graph.get(field)
@@ -2197,6 +2403,75 @@ def graph_snapshot(health: dict[str, Any]) -> dict[str, int]:
         raise QualificationError("ROCm graph active and idle slots do not sum to total")
     if snapshot["tracked_decode_owner_count"] > snapshot["active_graph_slot_count"]:
         raise QualificationError("ROCm graph timelines exceed active graph slots")
+    if snapshot["cache_evictions"] != (
+        snapshot["budget_evictions"]
+        + snapshot["pressure_evictions"]
+        + snapshot["invalidation_evictions"]
+        + snapshot["recovery_evictions"]
+    ):
+        raise QualificationError("ROCm graph eviction causes do not sum to total")
+    post_capture_rejections = (
+        snapshot["entry_capacity_rejections"]
+        + snapshot["byte_budget_rejections"]
+        + snapshot["accounting_incomplete_rejections"]
+    )
+    if snapshot["capture_successes"] != (
+        snapshot["cache_admission_successes"] + post_capture_rejections
+    ):
+        raise QualificationError(
+            "ROCm graph capture successes do not reconcile with admissions and post-capture rejections"
+        )
+    if snapshot["cache_admission_successes"] != (
+        snapshot["cache_evictions"] + snapshot["captured_graph_count"]
+    ):
+        raise QualificationError(
+            "ROCm graph cache admissions do not reconcile with evictions and live entries"
+        )
+    if snapshot["opaque_native_object_count"] != snapshot["captured_graph_count"] * 5:
+        raise QualificationError("ROCm graph opaque-object count is not five per live entry")
+    if snapshot["peak_retained_bytes"] < snapshot["retained_bytes"]:
+        raise QualificationError("ROCm graph peak retained bytes are below the current total")
+    if snapshot["peak_transient_candidate_bytes"] < snapshot["last_transient_candidate_bytes"]:
+        raise QualificationError(
+            "ROCm graph peak transient candidate bytes are below the last measurement"
+        )
+    if snapshot["retained_bytes"] != (
+        snapshot["retained_stable_io_bytes"]
+        + snapshot["retained_capture_arena_bytes"]
+        + snapshot["retained_blaslt_workspace_bytes"]
+        + snapshot["retained_slot_state_bytes"]
+    ):
+        raise QualificationError("ROCm graph retained-byte categories do not sum to total")
+    for phase_name in GRAPH_PHASE_NAMES:
+        phase = graph.get(f"{phase_name}_phase")
+        if not isinstance(phase, dict):
+            raise QualificationError(
+                f"health.decode_runtime.rocm_graphs.{phase_name}_phase is missing"
+            )
+        for field in GRAPH_PHASE_FIELDS:
+            value = phase.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise QualificationError(
+                    f"ROCm graph phase {phase_name}.{field} must be a nonnegative integer, "
+                    f"got {value!r}"
+                )
+            snapshot[f"phase_{phase_name}_{field}"] = value
+        if phase["slow"] > phase["calls"]:
+            raise QualificationError(
+                f"ROCm graph phase {phase_name} slow count exceeds calls"
+            )
+        if phase["max_duration_micros"] > phase["total_duration_micros"]:
+            raise QualificationError(
+                f"ROCm graph phase {phase_name} max duration exceeds total duration"
+            )
+        if phase["calls"] == 0 and (
+            phase["slow"] != 0
+            or phase["total_duration_micros"] != 0
+            or phase["max_duration_micros"] != 0
+        ):
+            raise QualificationError(
+                f"zero-call ROCm graph phase {phase_name} carries nonzero telemetry"
+            )
     fallbacks = graph.get("fallbacks")
     if not isinstance(fallbacks, dict):
         raise QualificationError("health.decode_runtime.rocm_graphs.fallbacks is missing")
@@ -2315,17 +2590,28 @@ def read_stable_health(
 ) -> dict[str, Any]:
     deadline = min(time.monotonic() + 10.0, absolute_deadline)
     last_state: Any = None
+    last_phase: Any = None
+    last_phase_elapsed_micros: Any = None
+    last_unavailable_reason: Any = None
     while time.monotonic() < deadline:
         health = json_request(port, "GET", "/health")
         graph = ((health.get("decode_runtime") or {}).get("rocm_graphs") or {})
         last_state = graph.get("state") if isinstance(graph, dict) else None
+        if isinstance(graph, dict):
+            last_phase = graph.get("current_phase")
+            last_phase_elapsed_micros = graph.get("current_phase_elapsed_micros")
+            last_unavailable_reason = graph.get("unavailable_reason")
         if last_state != "busy":
             graph_snapshot(health)
             batching_snapshot(health)
             external_yield_sync_snapshot(health)
             return health
         time.sleep(0.05)
-    raise TimeoutError(f"{label} could not obtain stable graph health; last state={last_state!r}")
+    raise TimeoutError(
+        f"{label} could not obtain stable graph health; last state={last_state!r}, "
+        f"reason={last_unavailable_reason!r}, current phase={last_phase!r}, "
+        f"phase elapsed micros={last_phase_elapsed_micros!r}"
+    )
 
 
 def attest_runtime_execution(
@@ -2728,6 +3014,24 @@ def metric_values(
     }
     values.update(external_yield_sync)
     values.update(pressure_peer_timing_values(pressure_peer, pressure_window))
+    for phase_name in GRAPH_PHASE_NAMES:
+        values[f"graph_{phase_name}_call_count"] = counter_delta(
+            graph_start, graph_end, f"phase_{phase_name}_calls"
+        )
+        values[f"graph_{phase_name}_slow_count"] = counter_delta(
+            graph_start, graph_end, f"phase_{phase_name}_slow"
+        )
+        values[f"graph_{phase_name}_duration_ms_total"] = counter_delta(
+            graph_start,
+            graph_end,
+            f"phase_{phase_name}_total_duration_micros",
+        ) / 1_000.0
+        values[f"graph_{phase_name}_duration_ms_max_end"] = (
+            graph_end[f"phase_{phase_name}_max_duration_micros"] / 1_000.0
+        )
+    values["graph_transient_candidate_bytes_peak_end"] = graph_end[
+        "peak_transient_candidate_bytes"
+    ]
     return values
 
 
@@ -2937,8 +3241,11 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             health_measurement_start = read_stable_health(
                 port, overall_deadline, "post-warmup graph snapshot"
             )
+            debug_measurement_start = json_request(
+                port, "GET", "/v1/debug/model-state"
+            )
             warmup_attestation = attest_runtime(
-                variant, health_measurement_start, debug_start
+                variant, health_measurement_start, debug_measurement_start
             )
             if warmup_attestation:
                 raise QualificationError(

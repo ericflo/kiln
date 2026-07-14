@@ -331,7 +331,9 @@ fn rocm_wmma_qk16_bf16_tile_matches_cpu_dot() {
     let a_ptr = kiln_kt_bridge::rocm_input_device_ptr(&a, DType::BF16, "wmma_a").expect("a ptr");
     let b_ptr = kiln_kt_bridge::rocm_input_device_ptr(&b, DType::BF16, "wmma_b").expect("b ptr");
     let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(&out);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&a, "wmma_a").expect("stream");
+    let stream_submission =
+        kiln_kt_bridge::rocm_stream_submission_of(&a, "wmma_a").expect("stream");
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_rocm_flash_wmma_qk16_bf16(
             a_ptr as *const _,
@@ -340,6 +342,11 @@ fn rocm_wmma_qk16_bf16_tile_matches_cpu_dot() {
             stream,
         )
     };
+    if status > 0 {
+        stream_submission.quarantine();
+        panic!("wmma qk16 execution failed with status {status}");
+    }
+    stream_submission.complete();
     if status == -30 {
         eprintln!("ROCm device does not report gfx11 WMMA support; skipping qk16 tile test");
         return;

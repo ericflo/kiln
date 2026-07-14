@@ -74,7 +74,8 @@ pub fn rocm_dropout(x: &Tensor, p: f32, seed: u64) -> Result<(Tensor, Tensor)> {
     let y_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
     let mask_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::U8, n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (x_base, _) = x_storage.device_ptr_raw();
     let (y_base, _) = y_storage.device_ptr_raw();
     let (mask_base, _) = mask_storage.device_ptr_raw();
@@ -90,10 +91,12 @@ pub fn rocm_dropout(x: &Tensor, p: f32, seed: u64) -> Result<(Tensor, Tensor)> {
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_dropout: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let y_arc: crate::Storage = Arc::new(y_storage);
     let mask_arc: crate::Storage = Arc::new(mask_storage);

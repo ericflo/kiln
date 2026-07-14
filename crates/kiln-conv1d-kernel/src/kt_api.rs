@@ -112,7 +112,8 @@ pub fn causal_conv1d_update_kt(
     let out = kiln_kt_bridge::alloc_device_tensor_like(x, KtDType::F32, vec![batch, channels, 1])?;
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = kiln_kt_bridge::device_stream_raw_of(x, "x")?;
+    let stream_submission = kiln_kt_bridge::device_stream_submission_of(x, "x")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_causal_conv1d_update_bf16_f32(
@@ -128,10 +129,12 @@ pub fn causal_conv1d_update_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Conv1dError::Msg(format!(
             "kt-conv1d: update FFI status {status}"
         )));
     }
+    stream_submission.complete();
     Ok(out)
 }
 
@@ -210,7 +213,8 @@ pub fn causal_conv1d_prefill_kt(
         kiln_kt_bridge::alloc_device_tensor_like(x, KtDType::F32, vec![batch, channels, seq_len])?;
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = kiln_kt_bridge::device_stream_raw_of(x, "x")?;
+    let stream_submission = kiln_kt_bridge::device_stream_submission_of(x, "x")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_causal_conv1d_prefill_bf16_f32(
@@ -227,10 +231,12 @@ pub fn causal_conv1d_prefill_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Conv1dError::Msg(format!(
             "kt-conv1d: prefill FFI status {status}"
         )));
     }
+    stream_submission.complete();
     Ok(out)
 }
 

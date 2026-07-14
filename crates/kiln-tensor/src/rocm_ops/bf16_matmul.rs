@@ -89,7 +89,8 @@ pub fn rocm_bf16_matmul_bf16_out(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 
     let ctx = a_storage.context();
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::BF16, m * n)?;
-    let stream = a_storage.rocm_stream_raw()?;
+    let stream_submission = a_storage.rocm_stream_submission()?;
+    let stream = stream_submission.raw_stream();
     let bpe = DType::BF16.size_in_bytes();
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
@@ -104,8 +105,10 @@ pub fn rocm_bf16_matmul_bf16_out(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!("{OP}: FFI returned status {status}")));
     }
+    stream_submission.complete();
     crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
         &ctx,
         &[a_storage, b_storage],

@@ -209,7 +209,6 @@ pub fn rocm_w8a16_gemv_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result
     };
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::BF16, m * n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -222,16 +221,20 @@ pub fn rocm_w8a16_gemv_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result
         as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_w8a16_gemv_bf16_async(
             x_ptr, w_ptr, s_ptr, out_ptr, m as i64, n as i64, k as i64, raw_stream,
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_w8a16_gemv_bf16: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let mut out_shape = x_shape[..x_shape.len() - 1].to_vec();
     out_shape.push(n);
@@ -343,7 +346,6 @@ pub fn rocm_w8a16_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resu
     };
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::BF16, m * hidden)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -356,6 +358,8 @@ pub fn rocm_w8a16_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resu
         as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_w8a16_swiglu_bf16_async(
             x_ptr,
@@ -369,10 +373,12 @@ pub fn rocm_w8a16_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resu
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_w8a16_swiglu_bf16: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let mut out_shape = x_shape[..x_shape.len() - 1].to_vec();
     out_shape.push(hidden);
@@ -480,7 +486,8 @@ pub fn rocm_w8a8_gemv_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result<
     let x_scales_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, m)?;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::BF16, m * n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -501,11 +508,15 @@ pub fn rocm_w8a8_gemv_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result<
         kiln_w8a8_quantize_bf16_async(x_ptr, x_q_ptr, x_scales_ptr, m as i64, k as i64, raw_stream)
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_w8a8_gemv_bf16: quantize FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_w8a8_gemv_bf16_async(
             x_q_ptr,
@@ -520,10 +531,12 @@ pub fn rocm_w8a8_gemv_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result<
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_w8a8_gemv_bf16: gemv FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let mut out_shape = x_shape[..x_shape.len() - 1].to_vec();
     out_shape.push(n);
@@ -636,7 +649,8 @@ pub fn rocm_w8a8_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resul
     let x_scales_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, m)?;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::BF16, m * hidden)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -657,11 +671,15 @@ pub fn rocm_w8a8_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resul
         kiln_w8a8_quantize_bf16_async(x_ptr, x_q_ptr, x_scales_ptr, m as i64, k as i64, raw_stream)
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_w8a8_swiglu_bf16: quantize FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_w8a8_swiglu_bf16_async(
             x_q_ptr,
@@ -676,10 +694,12 @@ pub fn rocm_w8a8_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resul
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_w8a8_swiglu_bf16: swiglu FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let mut out_shape = x_shape[..x_shape.len() - 1].to_vec();
     out_shape.push(hidden);
@@ -792,7 +812,6 @@ pub fn rocm_w8a16_gemv_argmax_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) ->
     let scores_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, n)?;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::I64, 1)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -807,16 +826,20 @@ pub fn rocm_w8a16_gemv_argmax_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) ->
     let scores_ptr = scores_base as *mut core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_w8a16_gemv_argmax_bf16_async(
             x_ptr, w_ptr, s_ptr, scores_ptr, out_ptr, n as i64, k as i64, raw_stream,
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_w8a16_gemv_argmax_bf16: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(vec![1]), TensorId::next())
@@ -994,7 +1017,6 @@ pub fn rocm_w8a16_gemv_gumbel_sample_bf16(
     let scores_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, n)?;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::I64, 1)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -1042,6 +1064,8 @@ pub fn rocm_w8a16_gemv_gumbel_sample_bf16(
         core::ptr::null()
     };
 
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_w8a16_gemv_gumbel_sample_bf16_async(
             x_ptr,
@@ -1063,10 +1087,12 @@ pub fn rocm_w8a16_gemv_gumbel_sample_bf16(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_w8a16_gemv_gumbel_sample_bf16: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(vec![1]), TensorId::next())
@@ -1246,7 +1272,6 @@ pub fn rocm_w8a8_gemv_gumbel_sample_bf16(
     let scores_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, n)?;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::I64, 1)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
     let (x_base, _) = x_storage.device_ptr_raw();
     let (w_base, _) = w_storage.device_ptr_raw();
     let (s_base, _) = s_storage.device_ptr_raw();
@@ -1298,15 +1323,21 @@ pub fn rocm_w8a8_gemv_gumbel_sample_bf16(
         core::ptr::null()
     };
 
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_w8a8_quantize_bf16_async(x_ptr, x_q_ptr, x_scales_ptr, 1, k as i64, raw_stream)
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_w8a8_gemv_gumbel_sample_bf16: quantize FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_w8a8_gemv_gumbel_sample_bf16_async(
             x_q_ptr,
@@ -1329,10 +1360,12 @@ pub fn rocm_w8a8_gemv_gumbel_sample_bf16(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_w8a8_gemv_gumbel_sample_bf16: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(vec![1]), TensorId::next())

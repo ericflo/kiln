@@ -114,6 +114,7 @@ pub fn model_rocm_graph_policy(
     kiln_model::RocmGraphExecutionPolicy::try_new(
         mode,
         policy.rocm_graph_cache_entries.effective,
+        policy.rocm_graph_cache_max_bytes.effective,
         false,
     )
     .context("invalid resolved ROCm graph execution policy")
@@ -236,6 +237,12 @@ mod tests {
         assert_eq!(
             model_rocm_graph_policy(experimental).unwrap().mode(),
             kiln_model::RocmGraphExecutionMode::LazyCaptureReplay
+        );
+        assert_eq!(
+            model_rocm_graph_policy(experimental)
+                .unwrap()
+                .max_retained_bytes(),
+            crate::config::DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES
         );
     }
 

@@ -1,15 +1,14 @@
 //! `kiln-hip` — bounded, safe Rust bindings to the AMD ROCm/HIP runtime.
 //!
 //! This is the **cudarc analog** for kiln's ROCm backend (Phase R.1). It mirrors
-//! the exact ~8-symbol surface the CUDA substrate uses
-//! (`CudaContext`/`CudaStream`/`CudaSlice`/`DevicePtr` + a few `result`/`sys`
-//! free functions) so that `rocm_storage.rs` / `rocm_allocator.rs` (Phase R.3)
-//! are mechanical retypes of the candle-free `cuda_*.rs` files.
+//! the bounded context/stream/allocation/graph surface the CUDA substrate uses
+//! so `rocm_storage.rs` and the allocator layers can share the same ownership
+//! model without exposing unchecked runtime handles.
 //!
 //! Design mirrors `kiln-tensor/src/cuda_stream_priority.rs`: own the raw HIP
-//! handle, implement `Drop`, expose a checked FFI accessor
-//! (`hip_stream_for_execution()`), and carry `unsafe impl Send + Sync` with the
-//! same justification cudarc uses.
+//! handle, implement `Drop`, expose raw streams only through an owning
+//! submission token, and carry `unsafe impl Send + Sync` with the same
+//! justification cudarc uses.
 //!
 //! The crate compiles on hosts with no ROCm toolchain (the FFI block has no
 //! `#[link]`; `build.rs` links `amdhip64` only when ROCm is present). Calling a
@@ -21,27 +20,260 @@ pub mod sys;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt;
+use std::marker::PhantomData;
 use std::os::raw::{c_int, c_uint, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Result alias for HIP calls.
 pub type Result<T> = std::result::Result<T, HipError>;
 
 static CLEANUP_QUARANTINE_DROP_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
-fn device_cleanup_quarantine(ordinal: c_int) -> Arc<AtomicBool> {
-    static QUARANTINES: OnceLock<Mutex<HashMap<c_int, Arc<AtomicBool>>>> = OnceLock::new();
-    let mut quarantines = QUARANTINES
+const EXECUTION_GATE_STOPPED: usize = 1usize << (usize::BITS - 1);
+const EXECUTION_GATE_FINAL: usize = 1usize << (usize::BITS - 2);
+const EXECUTION_GATE_ACTIVE_MASK: usize = EXECUTION_GATE_FINAL - 1;
+const EXECUTION_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Per-device admission gate shared by every context and resource in the
+/// process. The high bits stop admission and mark final quarantine; the low
+/// bits count host threads currently crossing a HIP FFI boundary.
+#[derive(Debug)]
+struct RocmExecutionGate {
+    state: AtomicUsize,
+    settled_lock: Mutex<()>,
+    settled: Condvar,
+    recovery_lock: Mutex<()>,
+}
+
+impl Default for RocmExecutionGate {
+    fn default() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+            settled_lock: Mutex::new(()),
+            settled: Condvar::new(),
+            recovery_lock: Mutex::new(()),
+        }
+    }
+}
+
+impl RocmExecutionGate {
+    fn try_acquire(self: &Arc<Self>, api: &'static str) -> Result<RocmExecutionPermit> {
+        let mut observed = self.state.load(Ordering::Acquire);
+        loop {
+            if observed & EXECUTION_GATE_STOPPED != 0 {
+                return Err(HipError {
+                    code: -1,
+                    api,
+                    message: "ROCm device is quarantined after a fatal execution failure; restart the process"
+                        .to_string(),
+                });
+            }
+            let active = observed & EXECUTION_GATE_ACTIVE_MASK;
+            if active == EXECUTION_GATE_ACTIVE_MASK {
+                return Err(HipError {
+                    code: -1,
+                    api,
+                    message: "ROCm execution admission counter overflow".to_string(),
+                });
+            }
+            match self.state.compare_exchange_weak(
+                observed,
+                observed + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(RocmExecutionPermit {
+                        gate: Arc::clone(self),
+                        active: true,
+                        _not_send: PhantomData,
+                    });
+                }
+                Err(actual) => observed = actual,
+            }
+        }
+    }
+
+    fn request_quarantine(&self) {
+        let previous = self
+            .state
+            .fetch_or(EXECUTION_GATE_STOPPED, Ordering::AcqRel);
+        if previous & EXECUTION_GATE_ACTIVE_MASK == 0 {
+            self.mark_final();
+        }
+    }
+
+    fn mark_final(&self) {
+        // Serialize the predicate transition with waiter enrollment. Without
+        // this lock a waiter could observe !FINAL, lose the notification just
+        // before wait_timeout, and sleep until the full recovery deadline.
+        let _settled = self
+            .settled_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.state.fetch_or(EXECUTION_GATE_FINAL, Ordering::Release);
+        self.settled.notify_all();
+    }
+
+    fn release(&self) {
+        let previous = self.state.fetch_sub(1, Ordering::AcqRel);
+        debug_assert_ne!(previous & EXECUTION_GATE_ACTIVE_MASK, 0);
+        if previous & EXECUTION_GATE_STOPPED != 0 && previous & EXECUTION_GATE_ACTIVE_MASK == 1 {
+            self.mark_final();
+        }
+    }
+
+    fn execution_stopped(&self) -> bool {
+        self.state.load(Ordering::Acquire) & EXECUTION_GATE_STOPPED != 0
+    }
+
+    fn require_stopped_for_error_recovery(&self) -> Result<()> {
+        if self.execution_stopped() {
+            return Ok(());
+        }
+        Err(HipError {
+            code: -1,
+            api: "RocmContext::synchronize_device_for(ErrorRecovery)",
+            message: "ErrorRecovery requires execution quarantine to be published before the drain; use CaptureRollback for recoverable gate-open settlement"
+                .to_string(),
+        })
+    }
+
+    fn wait_until_final_for(&self, timeout: Duration) -> bool {
+        if self.state.load(Ordering::Acquire) & EXECUTION_GATE_FINAL != 0 {
+            return true;
+        }
+        let started = Instant::now();
+        let mut settled = self
+            .settled_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while self.state.load(Ordering::Acquire) & EXECUTION_GATE_FINAL == 0 {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, wait_result) = self
+                .settled
+                .wait_timeout(settled, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            settled = next;
+            if wait_result.timed_out()
+                && self.state.load(Ordering::Acquire) & EXECUTION_GATE_FINAL == 0
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Admission token for exactly one host-side HIP submission. It is deliberately
+/// not `Send`: `hipSetDevice` binds the acquiring host thread.
+#[derive(Debug)]
+struct RocmExecutionPermit {
+    gate: Arc<RocmExecutionGate>,
+    active: bool,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl RocmExecutionPermit {
+    fn quarantine(&self) {
+        self.gate.request_quarantine();
+    }
+}
+
+impl Drop for RocmExecutionPermit {
+    fn drop(&mut self) {
+        if self.active {
+            // A Rust unwind can bypass the status-classification statement
+            // immediately following an FFI call. Conservatively publish STOP
+            // before releasing this admission; normal non-panicking internal
+            // calls remain lightweight, while public submissions additionally
+            // require explicit complete/quarantine on every path.
+            if std::thread::panicking() {
+                self.gate.request_quarantine();
+            }
+            self.active = false;
+            self.gate.release();
+        }
+    }
+}
+
+/// Owns host memory for the complete lifetime of an admitted async copy and its
+/// mandatory settlement wait. If control exits before settlement is classified,
+/// the host allocation is retained for process lifetime and execution is
+/// quarantined rather than risking a driver use-after-free.
+struct RocmAdmittedHostTransfer<T> {
+    permit: RocmExecutionPermit,
+    host: Option<T>,
+    classified: bool,
+}
+
+impl<T> RocmAdmittedHostTransfer<T> {
+    fn new(permit: RocmExecutionPermit, host: T) -> Self {
+        Self {
+            permit,
+            host: Some(host),
+            classified: false,
+        }
+    }
+
+    fn permit(&self) -> &RocmExecutionPermit {
+        &self.permit
+    }
+
+    fn host(&self) -> &T {
+        self.host.as_ref().expect("host transfer buffer is live")
+    }
+
+    fn host_mut(&mut self) -> &mut T {
+        self.host.as_mut().expect("host transfer buffer is live")
+    }
+
+    /// Finish a classified settlement. Host memory is returned only when the
+    /// stream wait proved that HIP no longer owns it; otherwise it is leaked.
+    fn finish(mut self, host_memory_settled: bool) -> Option<T> {
+        let host = self.host.take();
+        self.classified = true;
+        if host_memory_settled {
+            host
+        } else {
+            self.permit.quarantine();
+            if let Some(host) = host {
+                std::mem::forget(host);
+            }
+            None
+        }
+    }
+}
+
+impl<T> Drop for RocmAdmittedHostTransfer<T> {
+    fn drop(&mut self) {
+        if self.classified {
+            return;
+        }
+        self.permit.quarantine();
+        if let Some(host) = self.host.take() {
+            std::mem::forget(host);
+        }
+    }
+}
+
+fn device_execution_gate(ordinal: c_int) -> Arc<RocmExecutionGate> {
+    static GATES: OnceLock<Mutex<HashMap<c_int, Arc<RocmExecutionGate>>>> = OnceLock::new();
+    let mut gates = GATES
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     Arc::clone(
-        quarantines
+        gates
             .entry(ordinal)
-            .or_insert_with(|| Arc::new(AtomicBool::new(false))),
+            .or_insert_with(|| Arc::new(RocmExecutionGate::default())),
     )
 }
 
@@ -55,21 +287,133 @@ fn warn_cleanup_quarantine(resource: &str) {
 
 fn bind_device_for_cleanup(
     ordinal: c_int,
-    cleanup_quarantined: &AtomicBool,
+    execution_gate: &Arc<RocmExecutionGate>,
     resource: &str,
-) -> bool {
-    if cleanup_quarantined.load(Ordering::Acquire) {
-        warn_cleanup_quarantine(resource);
-        return false;
-    }
+) -> Option<RocmExecutionPermit> {
+    let permit = match execution_gate.try_acquire("ROCm cleanup") {
+        Ok(permit) => permit,
+        Err(_) => {
+            warn_cleanup_quarantine(resource);
+            return None;
+        }
+    };
     let rc = unsafe { sys::hipSetDevice(ordinal) };
     if rc != sys::HIP_SUCCESS {
-        cleanup_quarantined.store(true, Ordering::Release);
+        permit.quarantine();
         eprintln!("{resource}: hipSetDevice failed during cleanup (hipError {rc})");
         warn_cleanup_quarantine(resource);
-        return false;
+        return None;
     }
-    true
+    Some(permit)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HipCallFailureClass {
+    PureQuery,
+    OptionalConfiguration,
+    PostDrainPoolMaintenance,
+    CaptureState,
+    ExecutionMutation,
+}
+
+impl HipCallFailureClass {
+    const fn quarantines(self) -> bool {
+        matches!(self, Self::CaptureState | Self::ExecutionMutation)
+    }
+}
+
+fn check_call_status(
+    permit: &RocmExecutionPermit,
+    code: sys::hipError_t,
+    api: &'static str,
+    class: HipCallFailureClass,
+) -> Result<()> {
+    // Publish STOP from the direct return code before querying an error string
+    // or clearing HIP's sticky slot. The permit remains active through all
+    // classification work, but no concurrent caller may enter after this point.
+    if code != sys::HIP_SUCCESS && class.quarantines() {
+        permit.quarantine();
+    }
+    check(code, api)
+}
+
+/// Check a device-affecting call whose failure can mean an earlier async fault
+/// or uncertain partial mutation.
+fn check_execution_mutation(
+    permit: &RocmExecutionPermit,
+    code: sys::hipError_t,
+    api: &'static str,
+) -> Result<()> {
+    check_call_status(permit, code, api, HipCallFailureClass::ExecutionMutation)
+}
+
+fn host_transfer_result(
+    enqueue: Result<()>,
+    settlement: Result<()>,
+    api: &'static str,
+) -> Result<()> {
+    match (enqueue, settlement) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(enqueue_error), Err(settlement_error)) => Err(HipError {
+            code: settlement_error.code,
+            api,
+            message: format!(
+                "async copy enqueue failed ({enqueue_error}); stream settlement also failed \
+                 ({settlement_error})"
+            ),
+        }),
+    }
+}
+
+fn clean_no_publication_error(code: sys::hipError_t) -> bool {
+    matches!(
+        code,
+        sys::HIP_ERROR_INVALID_VALUE | sys::HIP_ERROR_OUT_OF_MEMORY | sys::HIP_ERROR_NOT_SUPPORTED
+    )
+}
+
+fn resource_creation_status_is_fatal(code: sys::hipError_t, handle_is_null: bool) -> bool {
+    if code == sys::HIP_SUCCESS {
+        return handle_is_null;
+    }
+    !handle_is_null || !clean_no_publication_error(code)
+}
+
+fn async_allocation_fallback_allowed(code: sys::hipError_t, pointer_is_null: bool) -> bool {
+    pointer_is_null
+        && matches!(
+            code,
+            sys::HIP_ERROR_INVALID_VALUE | sys::HIP_ERROR_NOT_SUPPORTED
+        )
+}
+
+/// Resource creation may fail recoverably only when the runtime published no
+/// handle and returned a documented local/OOM/unsupported code. A non-null
+/// handle paired with failure is an ambiguous partial publication and poisons
+/// execution so cleanup cannot race it.
+fn check_resource_creation(
+    permit: &RocmExecutionPermit,
+    code: sys::hipError_t,
+    handle_is_null: bool,
+    api: &'static str,
+) -> Result<()> {
+    if code == sys::HIP_SUCCESS {
+        if resource_creation_status_is_fatal(code, handle_is_null) {
+            permit.quarantine();
+            return Err(HipError {
+                code: -1,
+                api,
+                message: "HIP reported successful resource creation without publishing a handle"
+                    .to_string(),
+            });
+        }
+        return Ok(());
+    }
+    if resource_creation_status_is_fatal(code, handle_is_null) {
+        permit.quarantine();
+    }
+    check(code, api)
 }
 
 // ---------------------------------------------------------------------------
@@ -255,10 +599,13 @@ pub enum RocmSyncReason {
     HostReadback,
     /// Work must complete before an allocation or borrowed owner can expire.
     AllocationLifetime,
-    /// Synchronization is required to contain or diagnose an execution error.
+    /// A permanently quarantined device is drained for diagnosis/containment.
     ErrorRecovery,
     /// Synchronization protects a process- or device-global state transition.
     GlobalStateMutation,
+    /// A failed graph capture is physically drained before a proven logical
+    /// rollback while execution admission remains recoverable.
+    CaptureRollback,
 }
 
 impl RocmSyncReason {
@@ -286,6 +633,7 @@ impl RocmSyncReason {
         Self::AllocationLifetime,
         Self::ErrorRecovery,
         Self::GlobalStateMutation,
+        Self::CaptureRollback,
     ];
 
     /// Stable lower-snake-case metric label.
@@ -313,6 +661,7 @@ impl RocmSyncReason {
             Self::AllocationLifetime => "allocation_lifetime",
             Self::ErrorRecovery => "error_recovery",
             Self::GlobalStateMutation => "global_state_mutation",
+            Self::CaptureRollback => "capture_rollback",
         }
     }
 
@@ -323,7 +672,7 @@ impl RocmSyncReason {
 }
 
 /// Number of fixed ROCm synchronization-reason metric dimensions.
-pub const ROCM_SYNC_REASON_COUNT: usize = 22;
+pub const ROCM_SYNC_REASON_COUNT: usize = 23;
 
 /// Atomic synchronization counters for one fixed [`RocmSyncReason`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -437,6 +786,44 @@ impl RocmSyncTelemetry {
     }
 }
 
+/// Admission token for one device-level HIP FFI call.
+///
+/// The token is host-thread affine because acquisition binds the device with
+/// `hipSetDevice`. Keep it alive until the corresponding FFI call returns, then
+/// consume it with [`Self::complete`] or [`Self::quarantine`]. Dropping an
+/// unclassified token permanently quarantines the device, including during a
+/// panic unwind.
+#[derive(Debug)]
+#[must_use = "consume the ROCm submission with complete() or quarantine() after the HIP FFI call"]
+pub struct RocmDeviceSubmission {
+    permit: RocmExecutionPermit,
+    settled: bool,
+}
+
+impl RocmDeviceSubmission {
+    /// Complete a successful or explicitly nonfatal device FFI call. Consuming
+    /// the token makes the end of the admission interval visible in review.
+    pub fn complete(mut self) {
+        self.settled = true;
+    }
+
+    /// Stop all future execution admission for this device. This is nonblocking
+    /// and consumes this token so a subsequent `ErrorRecovery` drain cannot
+    /// deadlock waiting for the caller's own admission to settle.
+    pub fn quarantine(mut self) {
+        self.permit.quarantine();
+        self.settled = true;
+    }
+}
+
+impl Drop for RocmDeviceSubmission {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.permit.quarantine();
+        }
+    }
+}
+
 /// A HIP device handle + its default stream. The runtime-API analog of
 /// `cudarc::driver::CudaContext`.
 ///
@@ -450,7 +837,7 @@ pub struct RocmContext {
     default_stream: Arc<RocmStream>,
     execution_policy: RocmExecutionPolicy,
     sync_telemetry: Arc<RocmSyncTelemetry>,
-    cleanup_quarantined: Arc<AtomicBool>,
+    execution_gate: Arc<RocmExecutionGate>,
 }
 
 // SAFETY: the ordinal is a plain int; the default stream is itself Send+Sync
@@ -489,8 +876,8 @@ impl RocmContext {
         // RocmContext for one ordinal must therefore share one sticky quarantine;
         // otherwise a second context could execute or free resources after a
         // device-wide settlement failure in the first.
-        let cleanup_quarantined = device_cleanup_quarantine(ordinal);
-        if cleanup_quarantined.load(Ordering::Acquire) {
+        let execution_gate = device_execution_gate(ordinal);
+        if execution_gate.execution_stopped() {
             return Err(HipError {
                 code: -1,
                 api: "RocmContext::new",
@@ -499,7 +886,15 @@ impl RocmContext {
                 ),
             });
         }
-        check(unsafe { sys::hipSetDevice(ordinal) }, "hipSetDevice")?;
+        let initialization = execution_gate.try_acquire("RocmContext::new")?;
+        if let Err(error) = check_call_status(
+            &initialization,
+            unsafe { sys::hipSetDevice(ordinal) },
+            "hipSetDevice",
+            HipCallFailureClass::ExecutionMutation,
+        ) {
+            return Err(error);
+        }
         // Pin the stream-ordered allocator's pool to NEVER release freed memory
         // back to the OS (hipMemPoolAttrReleaseThreshold = u64::MAX). The default
         // threshold (0) makes hipMallocAsync hand freed pages back aggressively;
@@ -509,31 +904,46 @@ impl RocmContext {
         // alloc latency. Best-effort: ignore if the runtime lacks mempools.
         const HIP_MEM_POOL_ATTR_RELEASE_THRESHOLD: c_uint = 4;
         let mut pool: *mut c_void = ptr::null_mut();
-        if unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, ordinal) } == sys::HIP_SUCCESS
-            && !pool.is_null()
-        {
+        let pool_code = unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, ordinal) };
+        if pool_code == sys::HIP_SUCCESS && !pool.is_null() {
             let mut threshold: u64 = u64::MAX;
-            let _ = unsafe {
+            let set_code = unsafe {
                 sys::hipMemPoolSetAttribute(
                     pool,
                     HIP_MEM_POOL_ATTR_RELEASE_THRESHOLD,
                     &mut threshold as *mut u64 as *mut c_void,
                 )
             };
+            if set_code != sys::HIP_SUCCESS {
+                let _ = check_call_status(
+                    &initialization,
+                    set_code,
+                    "hipMemPoolSetAttribute(release threshold)",
+                    HipCallFailureClass::OptionalConfiguration,
+                );
+            }
+        } else if pool_code != sys::HIP_SUCCESS {
+            let _ = check_call_status(
+                &initialization,
+                pool_code,
+                "hipDeviceGetDefaultMemPool",
+                HipCallFailureClass::PureQuery,
+            );
         }
         let sync_telemetry = Arc::new(RocmSyncTelemetry::default());
+        drop(initialization);
         let default_stream = RocmStream::create(
             ordinal,
             None,
             Arc::clone(&sync_telemetry),
-            Arc::clone(&cleanup_quarantined),
+            Arc::clone(&execution_gate),
         )?;
         Ok(Arc::new(RocmContext {
             ordinal,
             default_stream,
             execution_policy,
             sync_telemetry,
-            cleanup_quarantined,
+            execution_gate,
         }))
     }
 
@@ -545,20 +955,22 @@ impl RocmContext {
     /// Bind this device to the calling thread (`hipSetDevice`). Cheap; called
     /// before driver work, mirroring cudarc's `bind_to_thread`.
     pub fn bind_to_thread(&self) -> Result<()> {
-        self.ensure_execution_available("RocmContext::bind_to_thread")?;
-        check(unsafe { sys::hipSetDevice(self.ordinal) }, "hipSetDevice")
+        let _permit = self.execution_permit("RocmContext::bind_to_thread")?;
+        Ok(())
     }
 
     /// Whether a fatal failure made further execution and resource cleanup
     /// unsafe for this device. This state is shared by every context for the
     /// same ordinal and remains set until process restart.
     pub fn cleanup_quarantined(&self) -> bool {
-        self.cleanup_quarantined.load(Ordering::Acquire)
+        self.execution_gate.execution_stopped()
     }
 
     /// Reject new execution after a fatal failure. A narrowly scoped
     /// [`Self::synchronize_device_for`] call with `ErrorRecovery` may still try
     /// to settle physical work for diagnosis, but never clears the quarantine.
+    /// This is validation only and does not reserve admission; code about to
+    /// call HIP must acquire [`Self::execution_submission`] instead.
     pub fn ensure_execution_available(&self, api: &'static str) -> Result<()> {
         if self.cleanup_quarantined() {
             return Err(HipError {
@@ -575,7 +987,31 @@ impl RocmContext {
     /// process restarts. Higher layers use this when logical model state cannot
     /// be proven valid even if the HIP device itself synchronized successfully.
     pub fn quarantine_execution(&self) {
-        self.cleanup_quarantined.store(true, Ordering::Release);
+        self.execution_gate.request_quarantine();
+    }
+
+    /// Acquire admission for one device-level HIP FFI call and bind this
+    /// context's device to the current host thread. The token must remain alive
+    /// until that FFI call returns.
+    pub fn execution_submission(&self, api: &'static str) -> Result<RocmDeviceSubmission> {
+        let permit = self.execution_permit(api)?;
+        Ok(RocmDeviceSubmission {
+            permit,
+            settled: false,
+        })
+    }
+
+    fn execution_permit(&self, api: &'static str) -> Result<RocmExecutionPermit> {
+        let permit = self.execution_gate.try_acquire(api)?;
+        if let Err(error) = check_call_status(
+            &permit,
+            unsafe { sys::hipSetDevice(self.ordinal) },
+            "hipSetDevice",
+            HipCallFailureClass::ExecutionMutation,
+        ) {
+            return Err(error);
+        }
+        Ok(permit)
     }
 
     /// The context's default (non-blocking) stream.
@@ -591,7 +1027,7 @@ impl RocmContext {
     /// Point-in-time fixed-cardinality synchronization telemetry.
     pub fn sync_telemetry_snapshot(&self) -> RocmSyncTelemetrySnapshot {
         let mut snapshot = self.sync_telemetry.snapshot();
-        snapshot.cleanup_quarantined = self.cleanup_quarantined.load(Ordering::Acquire);
+        snapshot.cleanup_quarantined = self.execution_gate.execution_stopped();
         snapshot
     }
 
@@ -606,7 +1042,7 @@ impl RocmContext {
         let waited_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         self.sync_telemetry.record_wait(reason, scope, waited_ns);
         if result.is_err() {
-            self.cleanup_quarantined.store(true, Ordering::Release);
+            self.execution_gate.request_quarantine();
         }
         result
     }
@@ -615,19 +1051,48 @@ impl RocmContext {
     ///
     /// Use this for true global boundaries such as reclamation and global-state
     /// mutation. Same-stream steady-state dependencies must use
-    /// [`Self::synchronize_same_stream_dependency`] instead.
+    /// [`Self::synchronize_same_stream_dependency`] instead. `ErrorRecovery`
+    /// requires quarantine to have been published first, then waits until every
+    /// pre-quarantine submission token has been dropped. Use `CaptureRollback`
+    /// for a recoverable capture drain that deliberately leaves admission open.
+    /// Public token quarantine methods consume their token to make the fatal
+    /// ordering explicit.
     pub fn synchronize_device_for(&self, reason: RocmSyncReason) -> Result<()> {
-        if reason != RocmSyncReason::ErrorRecovery {
-            self.ensure_execution_available("RocmContext::synchronize_device_for")?;
+        if reason == RocmSyncReason::ErrorRecovery {
+            self.execution_gate.require_stopped_for_error_recovery()?;
+            return self.timed_synchronize(reason, RocmSyncScope::Device, || {
+                if !self
+                    .execution_gate
+                    .wait_until_final_for(EXECUTION_SETTLEMENT_TIMEOUT)
+                {
+                    return Err(HipError {
+                        code: -1,
+                        api: "RocmContext::synchronize_device_for(ErrorRecovery)",
+                        message: format!(
+                            "timed out after {} ms waiting for admitted HIP calls to return; execution remains quarantined",
+                            EXECUTION_SETTLEMENT_TIMEOUT.as_millis()
+                        ),
+                    });
+                }
+                let _recovery = self
+                    .execution_gate
+                    .recovery_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                check(unsafe { sys::hipSetDevice(self.ordinal) }, "hipSetDevice")?;
+                check(
+                    unsafe { sys::hipDeviceSynchronize() },
+                    "hipDeviceSynchronize",
+                )
+            });
         }
+        let submission = self.execution_permit("RocmContext::synchronize_device_for")?;
         self.timed_synchronize(reason, RocmSyncScope::Device, || {
-            // Recovery synchronization must remain available while cleanup is
-            // quarantined, so bind directly instead of calling the guarded
-            // public `bind_to_thread` entry point.
-            check(unsafe { sys::hipSetDevice(self.ordinal) }, "hipSetDevice")?;
-            check(
+            check_call_status(
+                &submission,
                 unsafe { sys::hipDeviceSynchronize() },
                 "hipDeviceSynchronize",
+                HipCallFailureClass::ExecutionMutation,
             )
         })
     }
@@ -760,7 +1225,6 @@ impl RocmContext {
     /// reduction in pool-reserved bytes. A pool with no spare bytes returns
     /// without synchronizing the device.
     pub fn trim_pool(&self, min_keep_bytes: usize) -> Result<u64> {
-        self.bind_to_thread()?;
         let (reserved_before, used_before) = self.pool_stats()?;
         let spare_before = reserved_before.saturating_sub(used_before);
         let requested_release = reserved_before
@@ -771,10 +1235,13 @@ impl RocmContext {
         }
         // Drain in-flight work so freed pages aren't yanked from under a kernel.
         self.synchronize_device_for(RocmSyncReason::MemoryReclaim)?;
+        let submission = self.execution_permit("RocmContext::trim_pool")?;
         let mut pool: *mut c_void = ptr::null_mut();
-        check(
+        check_call_status(
+            &submission,
             unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, self.ordinal) },
             "hipDeviceGetDefaultMemPool",
+            HipCallFailureClass::PureQuery,
         )?;
         if pool.is_null() {
             return Ok(0);
@@ -785,10 +1252,16 @@ impl RocmContext {
                 api: "RocmContext::trim_pool",
                 message: "pool byte count does not fit usize".to_string(),
             })?;
-        check(
+        // The device is already drained and trim only releases currently
+        // unused pool pages. A rejected or partial trim leaves live allocation
+        // ownership unchanged, so surface the error without quarantining.
+        check_call_status(
+            &submission,
             unsafe { sys::hipMemPoolTrimTo(pool, effective_min_keep) },
             "hipMemPoolTrimTo",
+            HipCallFailureClass::PostDrainPoolMaintenance,
         )?;
+        drop(submission);
         let (reserved_after, _) = self.pool_stats()?;
         Ok(reserved_before.saturating_sub(reserved_after))
     }
@@ -805,18 +1278,27 @@ impl RocmContext {
     /// footprint": a reuse leaves `reserved` flat; a leak grows it. Returns
     /// `(0,0)` if the runtime lacks mempools.
     pub fn pool_stats(&self) -> Result<(u64, u64)> {
-        self.bind_to_thread()?;
+        let _submission = self.execution_permit("RocmContext::pool_stats")?;
         const HIP_MEM_POOL_ATTR_RESERVED_MEM_CURRENT: c_uint = 5;
         const HIP_MEM_POOL_ATTR_USED_MEM_CURRENT: c_uint = 7;
         let mut pool: *mut c_void = ptr::null_mut();
-        if unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, self.ordinal) } != sys::HIP_SUCCESS
-            || pool.is_null()
-        {
+        let pool_code = unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, self.ordinal) };
+        if pool_code != sys::HIP_SUCCESS {
+            let _ = check_call_status(
+                &_submission,
+                pool_code,
+                "hipDeviceGetDefaultMemPool",
+                HipCallFailureClass::PureQuery,
+            );
+            return Ok((0, 0));
+        }
+        if pool.is_null() {
             return Ok((0, 0));
         }
         let mut reserved: u64 = 0;
         let mut used: u64 = 0;
-        check(
+        check_call_status(
+            &_submission,
             unsafe {
                 sys::hipMemPoolGetAttribute(
                     pool,
@@ -825,8 +1307,10 @@ impl RocmContext {
                 )
             },
             "hipMemPoolGetAttribute(reserved)",
+            HipCallFailureClass::PureQuery,
         )?;
-        check(
+        check_call_status(
+            &_submission,
             unsafe {
                 sys::hipMemPoolGetAttribute(
                     pool,
@@ -835,6 +1319,7 @@ impl RocmContext {
                 )
             },
             "hipMemPoolGetAttribute(used)",
+            HipCallFailureClass::PureQuery,
         )?;
         Ok((reserved, used))
     }
@@ -843,24 +1328,25 @@ impl RocmContext {
     /// GPU this is the driver's own view; on a unified APU it reflects the GTT
     /// budget and is best cross-checked against the OS-level `kiln-memory` probe.
     pub fn mem_get_info(&self) -> Result<(usize, usize)> {
-        self.bind_to_thread()?;
+        let _submission = self.execution_permit("RocmContext::mem_get_info")?;
         let mut free: usize = 0;
         let mut total: usize = 0;
-        check(
+        check_call_status(
+            &_submission,
             unsafe { sys::hipMemGetInfo(&mut free, &mut total) },
             "hipMemGetInfo",
+            HipCallFailureClass::PureQuery,
         )?;
         Ok((free, total))
     }
 
     /// Create a fresh non-blocking stream bound to this device.
     pub fn new_stream(&self) -> Result<Arc<RocmStream>> {
-        self.bind_to_thread()?;
         RocmStream::create(
             self.ordinal,
             None,
             Arc::clone(&self.sync_telemetry),
-            Arc::clone(&self.cleanup_quarantined),
+            Arc::clone(&self.execution_gate),
         )
     }
 
@@ -868,19 +1354,17 @@ impl RocmContext {
     /// integer = higher priority (HIP follows the CUDA convention). See
     /// [`stream_priority_range`].
     pub fn new_stream_with_priority(&self, priority: i32) -> Result<Arc<RocmStream>> {
-        self.bind_to_thread()?;
         RocmStream::create(
             self.ordinal,
             Some(priority),
             Arc::clone(&self.sync_telemetry),
-            Arc::clone(&self.cleanup_quarantined),
+            Arc::clone(&self.execution_gate),
         )
     }
 
     /// Create a reusable ordering-only event on this device.
     pub fn new_event(&self) -> Result<Arc<RocmEvent>> {
-        self.bind_to_thread()?;
-        RocmEvent::create(self.ordinal, Arc::clone(&self.cleanup_quarantined))
+        RocmEvent::create(self.ordinal, Arc::clone(&self.execution_gate))
     }
 
     /// Block until all work on the device completes (`hipDeviceSynchronize`).
@@ -908,22 +1392,76 @@ pub fn stream_priority_range() -> Result<(i32, i32)> {
 // ---------------------------------------------------------------------------
 
 /// RAII owner of a HIP stream. The runtime-API analog of
-/// `cudarc::driver::CudaStream`; `hip_stream()` matches `cu_stream()` so kernel
-/// launch FFI accepts it unchanged.
+/// `cudarc::driver::CudaStream`; raw access is submission-scoped so a copied
+/// handle cannot race process-lifetime execution quarantine.
 #[derive(Debug)]
 pub struct RocmStream {
     handle: sys::hipStream_t,
     ordinal: c_int,
     sync_telemetry: Arc<RocmSyncTelemetry>,
-    cleanup_quarantined: Arc<AtomicBool>,
+    execution_gate: Arc<RocmExecutionGate>,
 }
+
+/// Opaque, non-executable identity for comparing live ROCm streams.
+///
+/// Unlike a raw `hipStream_t`, this value cannot be passed to an FFI call and
+/// therefore does not require execution admission. It is only meaningful while
+/// the compared stream owners remain alive.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RocmStreamId(usize);
 
 /// RAII owner of a reusable HIP event configured for ordering only.
 #[derive(Debug)]
 pub struct RocmEvent {
     handle: sys::hipEvent_t,
     ordinal: c_int,
-    cleanup_quarantined: Arc<AtomicBool>,
+    execution_gate: Arc<RocmExecutionGate>,
+}
+
+/// Admission token carrying the raw stream for exactly one external FFI call.
+/// The owned stream reference prevents destruction while the caller submits.
+/// After the call returns, consume the token with [`Self::complete`] or
+/// [`Self::quarantine`]. Dropping an unclassified token permanently quarantines
+/// the device, including during a panic unwind.
+#[derive(Debug)]
+#[must_use = "consume the ROCm stream submission with complete() or quarantine() after the FFI call"]
+pub struct RocmStreamSubmission {
+    stream: Arc<RocmStream>,
+    permit: RocmExecutionPermit,
+    settled: bool,
+}
+
+impl RocmStreamSubmission {
+    /// Raw `hipStream_t` for the immediate FFI call protected by this token.
+    pub fn raw_stream(&self) -> sys::hipStream_t {
+        self.stream.handle
+    }
+
+    /// Complete a successful or explicitly nonfatal external FFI call.
+    pub fn complete(mut self) {
+        self.settled = true;
+    }
+
+    /// Permanently stop new submissions after the protected FFI call reports a
+    /// fatal error. Consuming the token settles this caller's admission before
+    /// it can enter recovery; no later call can acquire a token.
+    pub fn quarantine(mut self) {
+        self.permit.quarantine();
+        self.settled = true;
+    }
+
+    /// Device ordinal of the protected stream.
+    pub fn ordinal(&self) -> usize {
+        self.stream.ordinal()
+    }
+}
+
+impl Drop for RocmStreamSubmission {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.permit.quarantine();
+        }
+    }
 }
 
 // SAFETY: a hipEvent_t is an opaque runtime handle bound to one device. HIP
@@ -933,17 +1471,24 @@ unsafe impl Send for RocmEvent {}
 unsafe impl Sync for RocmEvent {}
 
 impl RocmEvent {
-    fn create(ordinal: c_int, cleanup_quarantined: Arc<AtomicBool>) -> Result<Arc<Self>> {
-        check(unsafe { sys::hipSetDevice(ordinal) }, "hipSetDevice")?;
+    fn create(ordinal: c_int, execution_gate: Arc<RocmExecutionGate>) -> Result<Arc<Self>> {
+        let permit = execution_gate.try_acquire("RocmEvent::create")?;
+        if let Err(error) = check_call_status(
+            &permit,
+            unsafe { sys::hipSetDevice(ordinal) },
+            "hipSetDevice",
+            HipCallFailureClass::ExecutionMutation,
+        ) {
+            return Err(error);
+        }
         let mut handle: sys::hipEvent_t = ptr::null_mut();
-        check(
-            unsafe { sys::hipEventCreateWithFlags(&mut handle, sys::HIP_EVENT_DISABLE_TIMING) },
-            "hipEventCreateWithFlags",
-        )?;
+        let code =
+            unsafe { sys::hipEventCreateWithFlags(&mut handle, sys::HIP_EVENT_DISABLE_TIMING) };
+        check_resource_creation(&permit, code, handle.is_null(), "hipEventCreateWithFlags")?;
         Ok(Arc::new(Self {
             handle,
             ordinal,
-            cleanup_quarantined,
+            execution_gate,
         }))
     }
 
@@ -975,16 +1520,24 @@ impl RocmStream {
         ordinal: c_int,
         priority: Option<i32>,
         sync_telemetry: Arc<RocmSyncTelemetry>,
-        cleanup_quarantined: Arc<AtomicBool>,
+        execution_gate: Arc<RocmExecutionGate>,
     ) -> Result<Arc<Self>> {
-        check(unsafe { sys::hipSetDevice(ordinal) }, "hipSetDevice")?;
+        let permit = execution_gate.try_acquire("RocmStream::create")?;
+        if let Err(error) = check_call_status(
+            &permit,
+            unsafe { sys::hipSetDevice(ordinal) },
+            "hipSetDevice",
+            HipCallFailureClass::ExecutionMutation,
+        ) {
+            return Err(error);
+        }
         let mut handle: sys::hipStream_t = ptr::null_mut();
-        match priority {
-            None => check(
+        let (code, api) = match priority {
+            None => (
                 unsafe { sys::hipStreamCreateWithFlags(&mut handle, sys::HIP_STREAM_NON_BLOCKING) },
                 "hipStreamCreateWithFlags",
-            )?,
-            Some(p) => check(
+            ),
+            Some(p) => (
                 unsafe {
                     sys::hipStreamCreateWithPriority(
                         &mut handle,
@@ -993,32 +1546,30 @@ impl RocmStream {
                     )
                 },
                 "hipStreamCreateWithPriority",
-            )?,
-        }
+            ),
+        };
+        check_resource_creation(&permit, code, handle.is_null(), api)?;
         Ok(Arc::new(RocmStream {
             handle,
             ordinal,
             sync_telemetry,
-            cleanup_quarantined,
+            execution_gate,
         }))
     }
 
-    /// The raw `hipStream_t` for crate-internal identity checks and tests.
-    /// External launch code must use [`Self::hip_stream_for_execution`].
-    pub(crate) fn hip_stream(&self) -> sys::hipStream_t {
-        self.handle
-    }
-
-    /// Acquire the raw HIP stream handle for an external kernel launch.
-    ///
-    /// Unlike [`Self::hip_stream`], this is a fallible execution boundary: it
-    /// rejects a cleanup-quarantined context and binds the stream's device to
-    /// the calling thread immediately before the caller crosses FFI. Kernel
-    /// launchers outside `kiln-hip` must use this accessor so a failed recovery
-    /// cannot be bypassed by retaining an otherwise-valid raw handle.
-    pub fn hip_stream_for_execution(&self) -> Result<sys::hipStream_t> {
-        self.bind()?;
-        Ok(self.handle)
+    /// Acquire a typed admission token for one external kernel launch.
+    /// Returning a token instead of a copyable raw handle closes the
+    /// check-to-FFI quarantine race.
+    pub fn execution_submission(
+        self: &Arc<Self>,
+        api: &'static str,
+    ) -> Result<RocmStreamSubmission> {
+        let permit = self.execution_permit(api)?;
+        Ok(RocmStreamSubmission {
+            stream: Arc::clone(self),
+            permit,
+            settled: false,
+        })
     }
 
     /// The device ordinal this stream is bound to.
@@ -1026,36 +1577,61 @@ impl RocmStream {
         self.ordinal as usize
     }
 
+    /// Stable identity for this live stream wrapper. This does not bind a
+    /// device or grant permission to submit work.
+    pub fn id(&self) -> RocmStreamId {
+        RocmStreamId(self as *const Self as usize)
+    }
+
     #[inline]
-    fn bind(&self) -> Result<()> {
-        if self.cleanup_quarantined.load(Ordering::Acquire) {
-            return Err(HipError {
-                code: -1,
-                api: "RocmStream::bind",
-                message: "ROCm stream cleanup is quarantined after synchronization failure"
-                    .to_string(),
-            });
+    fn execution_permit(&self, api: &'static str) -> Result<RocmExecutionPermit> {
+        let permit = self.execution_gate.try_acquire(api)?;
+        if let Err(error) = check_call_status(
+            &permit,
+            unsafe { sys::hipSetDevice(self.ordinal) },
+            "hipSetDevice",
+            HipCallFailureClass::ExecutionMutation,
+        ) {
+            return Err(error);
         }
-        check(unsafe { sys::hipSetDevice(self.ordinal) }, "hipSetDevice")
+        Ok(permit)
     }
 
     /// Block until all work queued on this stream completes.
     pub fn synchronize(&self) -> Result<()> {
-        self.bind()?;
-        check(
+        let submission = self.execution_permit("RocmStream::synchronize")?;
+        check_call_status(
+            &submission,
             unsafe { sys::hipStreamSynchronize(self.handle) },
             "hipStreamSynchronize",
+            HipCallFailureClass::ExecutionMutation,
         )
     }
 
     fn synchronize_for(&self, reason: RocmSyncReason) -> Result<()> {
+        let submission = self.execution_permit("RocmStream::synchronize_for")?;
+        self.synchronize_admitted_for(&submission, reason)
+    }
+
+    /// Settle a stream while retaining an admission acquired before the async
+    /// operation. A concurrent STOP cannot open a gap between enqueue and wait.
+    fn synchronize_admitted_for(
+        &self,
+        submission: &RocmExecutionPermit,
+        reason: RocmSyncReason,
+    ) -> Result<()> {
         let started = Instant::now();
-        let result = self.synchronize();
+        let result = check_call_status(
+            submission,
+            unsafe { sys::hipStreamSynchronize(self.handle) },
+            "hipStreamSynchronize",
+            HipCallFailureClass::ExecutionMutation,
+        );
         let waited_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         self.sync_telemetry
             .record_wait(reason, RocmSyncScope::Stream, waited_ns);
         if result.is_err() {
-            self.cleanup_quarantined.store(true, Ordering::Release);
+            self.execution_gate.request_quarantine();
         }
         result
     }
@@ -1063,10 +1639,12 @@ impl RocmStream {
     /// Record `event` after all work currently queued on this stream.
     pub fn record_event(&self, event: &RocmEvent) -> Result<()> {
         event.ensure_same_device(self)?;
-        self.bind()?;
-        check(
+        let submission = self.execution_permit("RocmStream::record_event")?;
+        check_call_status(
+            &submission,
             unsafe { sys::hipEventRecord(event.handle, self.handle) },
             "hipEventRecord",
+            HipCallFailureClass::ExecutionMutation,
         )
     }
 
@@ -1074,10 +1652,12 @@ impl RocmStream {
     /// blocking the host thread.
     pub fn wait_event(&self, event: &RocmEvent) -> Result<()> {
         event.ensure_same_device(self)?;
-        self.bind()?;
-        check(
+        let submission = self.execution_permit("RocmStream::wait_event")?;
+        check_call_status(
+            &submission,
             unsafe { sys::hipStreamWaitEvent(self.handle, event.handle, 0) },
             "hipStreamWaitEvent",
+            HipCallFailureClass::ExecutionMutation,
         )
     }
 
@@ -1087,9 +1667,10 @@ impl RocmStream {
     pub fn alloc_zeros(self: &Arc<Self>, len: usize) -> Result<RocmSlice> {
         let slice = self.alloc(len)?;
         if len > 0 {
-            self.bind()?;
+            let submission = self.execution_permit("RocmStream::alloc_zeros")?;
             // SAFETY: slice.ptr is a valid device allocation of `len` bytes.
-            check(
+            check_execution_mutation(
+                &submission,
                 unsafe { sys::hipMemsetD8Async(slice.ptr, 0, len, self.handle) },
                 "hipMemsetD8Async",
             )?;
@@ -1099,7 +1680,7 @@ impl RocmStream {
 
     /// Allocate `len` (uninitialized) bytes on the device. See [`Self::alloc_zeros`].
     pub fn alloc(self: &Arc<Self>, len: usize) -> Result<RocmSlice> {
-        self.bind()?;
+        let submission = self.execution_permit("RocmStream::alloc")?;
         // A zero-length allocation is legal and yields a null/!owned slice.
         if len == 0 {
             return Ok(RocmSlice {
@@ -1111,14 +1692,27 @@ impl RocmStream {
         }
         let mut ptr: *mut c_void = ptr::null_mut();
         // Prefer the stream-ordered allocator (needed for HIP-graph capture in
-        // R.9); fall back to plain hipMalloc if the runtime/arch rejects it.
+        // R.9). Invalid-value/not-supported with no published pointer is the
+        // documented capability fallback. OOM is returned unchanged for the
+        // allocation governor; ambiguous failures quarantine execution.
         let async_rc = unsafe { sys::hipMallocAsync(&mut ptr, len, self.handle) };
-        let async_alloc = if async_rc == sys::HIP_SUCCESS {
-            true
-        } else {
-            ptr = ptr::null_mut();
-            check(unsafe { sys::hipMalloc(&mut ptr, len) }, "hipMalloc")?;
-            false
+        let async_alloc = match async_rc {
+            sys::HIP_SUCCESS => {
+                check_resource_creation(&submission, async_rc, ptr.is_null(), "hipMallocAsync")?;
+                true
+            }
+            code if async_allocation_fallback_allowed(code, ptr.is_null()) => {
+                // Clear HIP's thread-local sticky slot before trying the
+                // documented synchronous capability fallback.
+                let _ = check(async_rc, "hipMallocAsync(capability fallback)");
+                let sync_rc = unsafe { sys::hipMalloc(&mut ptr, len) };
+                check_resource_creation(&submission, sync_rc, ptr.is_null(), "hipMalloc")?;
+                false
+            }
+            _ => {
+                check_resource_creation(&submission, async_rc, ptr.is_null(), "hipMallocAsync")?;
+                unreachable!("failed hipMallocAsync cannot pass creation classification")
+            }
         };
         Ok(RocmSlice {
             ptr,
@@ -1141,21 +1735,31 @@ impl RocmStream {
         if src.is_empty() {
             return Ok(());
         }
-        self.bind()?;
+        // Own staging memory until the wait is classified. Borrowing `src`
+        // directly would make a failed wait or unwind return control while HIP
+        // could still dereference caller-owned memory.
+        let staging = src.to_vec();
+        let submission = self.execution_permit("RocmStream::memcpy_htod")?;
+        let transfer = RocmAdmittedHostTransfer::new(submission, staging);
         // SAFETY: dst.ptr is a valid device allocation of dst.len bytes; src is
         // a valid host buffer of the same length. We synchronize before return.
-        check(
+        let enqueue = check_execution_mutation(
+            transfer.permit(),
             unsafe {
                 sys::hipMemcpyHtoDAsync(
                     dst.ptr,
-                    src.as_ptr() as *mut c_void,
-                    src.len(),
+                    transfer.host().as_ptr() as *mut c_void,
+                    transfer.host().len(),
                     self.handle,
                 )
             },
             "hipMemcpyHtoDAsync",
-        )?;
-        self.synchronize_for(RocmSyncReason::AllocationLifetime)
+        );
+        let settlement =
+            self.synchronize_admitted_for(transfer.permit(), RocmSyncReason::AllocationLifetime);
+        let host_memory_settled = settlement.is_ok();
+        let _staging = transfer.finish(host_memory_settled);
+        host_transfer_result(enqueue, settlement, "RocmStream::memcpy_htod")
     }
 
     /// Async H2D copy into a caller-supplied raw device pointer, WITHOUT a
@@ -1165,26 +1769,38 @@ impl RocmStream {
     /// (no realloc). The copy is queued on this stream and is ordered before
     /// any subsequent launch on the same stream.
     ///
-    /// Unlike [`Self::memcpy_htod`], this does NOT synchronize — the caller is
-    /// responsible for (a) keeping `src` alive until the copy completes and
-    /// (b) synchronizing (this stream, or the launch's stream after an event)
-    /// before the host or another stream reads the destination.
+    /// Unlike [`Self::memcpy_htod`], this does NOT add a trailing stream wait.
+    /// It deliberately uses generic `hipMemcpyAsync`: ROCm's runtime contract
+    /// says an unpinned host source is consumed synchronously before that call
+    /// returns. That makes fresh pageable staging buffers safe without adding a
+    /// graph-replay barrier. A pinned or registered `src` can remain async and
+    /// must stay alive until the stream completes.
     ///
     /// # Safety
     /// `dst` must point to at least `src.len()` bytes of a live device
-    /// allocation reachable from this stream's device.
+    /// allocation reachable from this stream's device. If `src` is pinned or
+    /// registered host memory, it must remain live until the stream completes.
     pub unsafe fn memcpy_htod_raw_async(&self, dst: *mut c_void, src: &[u8]) -> Result<()> {
         if src.is_empty() {
             return Ok(());
         }
-        self.bind()?;
+        let submission = self.execution_permit("RocmStream::memcpy_htod_raw_async")?;
         // SAFETY: caller guarantees `dst` addresses >= src.len() live device
-        // bytes; `src` is a valid host slice of the same length.
-        check(
+        // bytes; `src` is a valid host slice of the same length. The generic
+        // API's installed-header contract explicitly makes unpinned host
+        // copies synchronous with respect to this borrow.
+        check_execution_mutation(
+            &submission,
             unsafe {
-                sys::hipMemcpyHtoDAsync(dst, src.as_ptr() as *mut c_void, src.len(), self.handle)
+                sys::hipMemcpyAsync(
+                    dst,
+                    src.as_ptr() as *const c_void,
+                    src.len(),
+                    sys::HIP_MEMCPY_HOST_TO_DEVICE,
+                    self.handle,
+                )
             },
-            "hipMemcpyHtoDAsync",
+            "hipMemcpyAsync(HostToDevice)",
         )
     }
 
@@ -1201,9 +1817,10 @@ impl RocmStream {
         if len == 0 {
             return Ok(());
         }
-        self.bind()?;
+        let submission = self.execution_permit("RocmStream::memset_zero_async")?;
         // SAFETY: caller guarantees `dst` addresses >= len live device bytes.
-        check(
+        check_execution_mutation(
+            &submission,
             unsafe { sys::hipMemsetD8Async(dst, 0, len, self.handle) },
             "hipMemsetD8Async",
         )
@@ -1221,26 +1838,28 @@ impl RocmStream {
     /// Copy a device slice back to a freshly allocated host `Vec`, synchronizing
     /// before returning.
     pub fn memcpy_dtoh(&self, src: &RocmSlice) -> Result<Vec<u8>> {
-        let mut out = vec![0u8; src.len];
+        let out = vec![0u8; src.len];
         if src.len == 0 {
             return Ok(out);
         }
-        self.bind()?;
+        let submission = self.execution_permit("RocmStream::memcpy_dtoh")?;
+        let mut transfer = RocmAdmittedHostTransfer::new(submission, out);
+        let out_ptr = transfer.host_mut().as_mut_ptr();
         // SAFETY: src.ptr is a valid device allocation of src.len bytes; out is
         // a host buffer of the same length. Synchronized before return.
-        check(
+        let enqueue = check_execution_mutation(
+            transfer.permit(),
             unsafe {
-                sys::hipMemcpyDtoHAsync(
-                    out.as_mut_ptr() as *mut c_void,
-                    src.ptr,
-                    src.len,
-                    self.handle,
-                )
+                sys::hipMemcpyDtoHAsync(out_ptr as *mut c_void, src.ptr, src.len, self.handle)
             },
             "hipMemcpyDtoHAsync",
-        )?;
-        self.synchronize_for(RocmSyncReason::HostReadback)?;
-        Ok(out)
+        );
+        let settlement =
+            self.synchronize_admitted_for(transfer.permit(), RocmSyncReason::HostReadback);
+        let host_memory_settled = settlement.is_ok();
+        let out = transfer.finish(host_memory_settled);
+        host_transfer_result(enqueue, settlement, "RocmStream::memcpy_dtoh")?;
+        Ok(out.expect("successful host transfer settlement returns its buffer"))
     }
 
     /// Copy a caller-supplied device byte range back to a fresh host `Vec`,
@@ -1253,28 +1872,35 @@ impl RocmStream {
     /// reachable from this stream's device. The allocation must remain live
     /// until this method returns.
     pub unsafe fn memcpy_dtoh_raw(&self, src: *const c_void, len: usize) -> Result<Vec<u8>> {
-        let mut out = vec![0u8; len];
+        let out = vec![0u8; len];
         if len == 0 {
             return Ok(out);
         }
-        self.bind()?;
+        let submission = self.execution_permit("RocmStream::memcpy_dtoh_raw")?;
+        let mut transfer = RocmAdmittedHostTransfer::new(submission, out);
+        let out_ptr = transfer.host_mut().as_mut_ptr();
         // SAFETY: the caller guarantees `src` addresses at least `len` live
         // device bytes; `out` owns exactly `len` writable host bytes. The
         // stream synchronization below completes the copy before either
         // pointer can become invalid.
-        check(
+        let enqueue = check_execution_mutation(
+            transfer.permit(),
             unsafe {
                 sys::hipMemcpyDtoHAsync(
-                    out.as_mut_ptr() as *mut c_void,
+                    out_ptr as *mut c_void,
                     src as *mut c_void,
                     len,
                     self.handle,
                 )
             },
             "hipMemcpyDtoHAsync",
-        )?;
-        self.synchronize_for(RocmSyncReason::HostReadback)?;
-        Ok(out)
+        );
+        let settlement =
+            self.synchronize_admitted_for(transfer.permit(), RocmSyncReason::HostReadback);
+        let host_memory_settled = settlement.is_ok();
+        let out = transfer.finish(host_memory_settled);
+        host_transfer_result(enqueue, settlement, "RocmStream::memcpy_dtoh_raw")?;
+        Ok(out.expect("successful host transfer settlement returns its buffer"))
     }
 
     /// Device-to-device copy on this stream (async; caller orders via the
@@ -1290,9 +1916,10 @@ impl RocmStream {
         if src.len == 0 {
             return Ok(());
         }
-        self.bind()?;
+        let submission = self.execution_permit("RocmStream::memcpy_dtod")?;
         // SAFETY: both are valid device allocations of equal length.
-        check(
+        check_execution_mutation(
+            &submission,
             unsafe { sys::hipMemcpyDtoDAsync(dst.ptr, src.ptr, src.len, self.handle) },
             "hipMemcpyDtoDAsync",
         )
@@ -1315,10 +1942,11 @@ impl RocmStream {
         if len == 0 {
             return Ok(());
         }
-        self.bind()?;
+        let submission = self.execution_permit("RocmStream::memcpy_dtod_raw_async")?;
         // SAFETY: caller guarantees both raw pointers address >= len live
         // device bytes on this stream's device.
-        check(
+        check_execution_mutation(
+            &submission,
             unsafe { sys::hipMemcpyDtoDAsync(dst, src as *mut c_void, len, self.handle) },
             "hipMemcpyDtoDAsync",
         )
@@ -1330,14 +1958,16 @@ impl Drop for RocmStream {
         if self.handle.is_null() {
             return;
         }
-        if !bind_device_for_cleanup(self.ordinal, &self.cleanup_quarantined, "RocmStream::drop") {
+        let Some(submission) =
+            bind_device_for_cleanup(self.ordinal, &self.execution_gate, "RocmStream::drop")
+        else {
             self.handle = ptr::null_mut();
             return;
-        }
+        };
         // SAFETY: handle was created by hipStreamCreate* and not yet destroyed.
         let rc = unsafe { sys::hipStreamDestroy(self.handle) };
         if rc != sys::HIP_SUCCESS {
-            self.cleanup_quarantined.store(true, Ordering::Release);
+            submission.quarantine();
             eprintln!("RocmStream::drop: hipStreamDestroy failed (hipError {rc})");
             warn_cleanup_quarantine("RocmStream::drop");
         }
@@ -1350,13 +1980,15 @@ impl Drop for RocmEvent {
         if self.handle.is_null() {
             return;
         }
-        if !bind_device_for_cleanup(self.ordinal, &self.cleanup_quarantined, "RocmEvent::drop") {
+        let Some(submission) =
+            bind_device_for_cleanup(self.ordinal, &self.execution_gate, "RocmEvent::drop")
+        else {
             self.handle = ptr::null_mut();
             return;
-        }
+        };
         let rc = unsafe { sys::hipEventDestroy(self.handle) };
         if rc != sys::HIP_SUCCESS {
-            self.cleanup_quarantined.store(true, Ordering::Release);
+            submission.quarantine();
             eprintln!("RocmEvent::drop: hipEventDestroy failed (hipError {rc})");
             warn_cleanup_quarantine("RocmEvent::drop");
         }
@@ -1422,14 +2054,14 @@ impl Drop for RocmSlice {
         if self.ptr.is_null() {
             return;
         }
-        if !bind_device_for_cleanup(
+        let Some(submission) = bind_device_for_cleanup(
             self.stream.ordinal,
-            &self.stream.cleanup_quarantined,
+            &self.stream.execution_gate,
             "RocmSlice::drop",
-        ) {
+        ) else {
             self.ptr = ptr::null_mut();
             return;
-        }
+        };
         // SAFETY: ptr was produced by hipMallocAsync/hipMalloc on self.stream
         // and not yet freed. Free with the matching API.
         let rc = if self.async_alloc {
@@ -1438,9 +2070,7 @@ impl Drop for RocmSlice {
             unsafe { sys::hipFree(self.ptr) }
         };
         if rc != sys::HIP_SUCCESS {
-            self.stream
-                .cleanup_quarantined
-                .store(true, Ordering::Release);
+            submission.quarantine();
             eprintln!("RocmSlice::drop: hipFree failed (hipError {rc})");
             warn_cleanup_quarantine("RocmSlice::drop");
         }
@@ -1457,7 +2087,7 @@ impl Drop for RocmSlice {
 pub struct RocmGraph {
     graph: sys::hipGraph_t,
     ordinal: c_int,
-    cleanup_quarantined: Arc<AtomicBool>,
+    execution_gate: Arc<RocmExecutionGate>,
 }
 
 unsafe impl Send for RocmGraph {}
@@ -1468,7 +2098,7 @@ unsafe impl Sync for RocmGraph {}
 pub struct RocmGraphExec {
     exec: sys::hipGraphExec_t,
     ordinal: c_int,
-    cleanup_quarantined: Arc<AtomicBool>,
+    execution_gate: Arc<RocmExecutionGate>,
 }
 
 unsafe impl Send for RocmGraphExec {}
@@ -1478,37 +2108,53 @@ impl RocmStream {
     /// Begin capturing work issued on this stream into a graph
     /// (`hipStreamBeginCapture`, relaxed mode — matches the CUDA path).
     pub fn begin_capture(&self) -> Result<()> {
-        self.bind()?;
-        check(
+        let submission = self.execution_permit("RocmStream::begin_capture")?;
+        check_call_status(
+            &submission,
             unsafe {
                 sys::hipStreamBeginCapture(self.handle, sys::HIP_STREAM_CAPTURE_MODE_RELAXED)
             },
             "hipStreamBeginCapture",
+            HipCallFailureClass::ExecutionMutation,
         )
     }
 
     /// End capture and return the resulting graph (`hipStreamEndCapture`).
     pub fn end_capture(&self) -> Result<RocmGraph> {
-        self.bind()?;
+        let submission = self.execution_permit("RocmStream::end_capture")?;
         let mut graph: sys::hipGraph_t = ptr::null_mut();
-        check(
-            unsafe { sys::hipStreamEndCapture(self.handle, &mut graph) },
+        let code = unsafe { sys::hipStreamEndCapture(self.handle, &mut graph) };
+        if code == sys::HIP_SUCCESS && graph.is_null() {
+            submission.quarantine();
+            return Err(HipError {
+                code: -1,
+                api: "hipStreamEndCapture",
+                message: "HIP reported successful graph capture without publishing a graph"
+                    .to_string(),
+            });
+        }
+        check_call_status(
+            &submission,
+            code,
             "hipStreamEndCapture",
+            HipCallFailureClass::ExecutionMutation,
         )?;
         Ok(RocmGraph {
             graph,
             ordinal: self.ordinal,
-            cleanup_quarantined: Arc::clone(&self.cleanup_quarantined),
+            execution_gate: Arc::clone(&self.execution_gate),
         })
     }
 
     /// Whether a capture is currently active on this stream.
     pub fn is_capturing(&self) -> Result<bool> {
-        self.bind()?;
+        let submission = self.execution_permit("RocmStream::is_capturing")?;
         let mut status: c_uint = 0;
-        check(
+        check_call_status(
+            &submission,
             unsafe { sys::hipStreamIsCapturing(self.handle, &mut status) },
             "hipStreamIsCapturing",
+            HipCallFailureClass::CaptureState,
         )?;
         Ok(status == sys::HIP_STREAM_CAPTURE_STATUS_ACTIVE)
     }
@@ -1523,24 +2169,27 @@ impl RocmGraph {
     /// alloc nodes — `AUTO_FREE_ON_LAUNCH` (the CUDA discipline) has nothing to
     /// free and was rejected with `hipErrorInvalidValue` on gfx1151 / ROCm 7.2.4.
     pub fn instantiate(&self) -> Result<RocmGraphExec> {
-        if self.cleanup_quarantined.load(Ordering::Acquire) {
-            return Err(HipError {
-                code: -1,
-                api: "RocmGraph::instantiate",
-                message: "ROCm device is quarantined after a fatal execution failure; restart the process"
-                    .to_string(),
-            });
+        let submission = self.execution_gate.try_acquire("RocmGraph::instantiate")?;
+        if let Err(error) = check_call_status(
+            &submission,
+            unsafe { sys::hipSetDevice(self.ordinal) },
+            "hipSetDevice",
+            HipCallFailureClass::ExecutionMutation,
+        ) {
+            return Err(error);
         }
-        check(unsafe { sys::hipSetDevice(self.ordinal) }, "hipSetDevice")?;
         let mut exec: sys::hipGraphExec_t = ptr::null_mut();
-        check(
-            unsafe { sys::hipGraphInstantiateWithFlags(&mut exec, self.graph, 0) },
+        let code = unsafe { sys::hipGraphInstantiateWithFlags(&mut exec, self.graph, 0) };
+        check_resource_creation(
+            &submission,
+            code,
+            exec.is_null(),
             "hipGraphInstantiateWithFlags",
         )?;
         Ok(RocmGraphExec {
             exec,
             ordinal: self.ordinal,
-            cleanup_quarantined: Arc::clone(&self.cleanup_quarantined),
+            execution_gate: Arc::clone(&self.execution_gate),
         })
     }
 }
@@ -1548,14 +2197,15 @@ impl RocmGraph {
 impl Drop for RocmGraph {
     fn drop(&mut self) {
         if !self.graph.is_null() {
-            if !bind_device_for_cleanup(self.ordinal, &self.cleanup_quarantined, "RocmGraph::drop")
-            {
+            let Some(submission) =
+                bind_device_for_cleanup(self.ordinal, &self.execution_gate, "RocmGraph::drop")
+            else {
                 self.graph = ptr::null_mut();
                 return;
-            }
+            };
             let rc = unsafe { sys::hipGraphDestroy(self.graph) };
             if rc != sys::HIP_SUCCESS {
-                self.cleanup_quarantined.store(true, Ordering::Release);
+                submission.quarantine();
                 eprintln!("RocmGraph::drop: hipGraphDestroy failed (hipError {rc})");
                 warn_cleanup_quarantine("RocmGraph::drop");
             }
@@ -1577,10 +2227,12 @@ impl RocmGraphExec {
                 ),
             });
         }
-        stream.bind()?;
-        check(
+        let submission = stream.execution_permit("RocmGraphExec::launch")?;
+        check_call_status(
+            &submission,
             unsafe { sys::hipGraphLaunch(self.exec, stream.handle) },
             "hipGraphLaunch",
+            HipCallFailureClass::ExecutionMutation,
         )
     }
 }
@@ -1588,17 +2240,15 @@ impl RocmGraphExec {
 impl Drop for RocmGraphExec {
     fn drop(&mut self) {
         if !self.exec.is_null() {
-            if !bind_device_for_cleanup(
-                self.ordinal,
-                &self.cleanup_quarantined,
-                "RocmGraphExec::drop",
-            ) {
+            let Some(submission) =
+                bind_device_for_cleanup(self.ordinal, &self.execution_gate, "RocmGraphExec::drop")
+            else {
                 self.exec = ptr::null_mut();
                 return;
-            }
+            };
             let rc = unsafe { sys::hipGraphExecDestroy(self.exec) };
             if rc != sys::HIP_SUCCESS {
-                self.cleanup_quarantined.store(true, Ordering::Release);
+                submission.quarantine();
                 eprintln!("RocmGraphExec::drop: hipGraphExecDestroy failed (hipError {rc})");
                 warn_cleanup_quarantine("RocmGraphExec::drop");
             }
@@ -1608,13 +2258,385 @@ impl Drop for RocmGraphExec {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — run only where a real HIP device is present; skip otherwise (mirrors
-// the cuda_stream_priority.rs `try_ctx` pattern).
+// CPU-only policy/concurrency tests run everywhere. Device integration tests
+// use the `try_ctx` skip pattern when no real HIP device is present.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Barrier;
+    use std::time::Duration;
+
+    fn gate_state(gate: &RocmExecutionGate) -> (bool, bool, usize) {
+        let state = gate.state.load(Ordering::Acquire);
+        (
+            state & EXECUTION_GATE_STOPPED != 0,
+            state & EXECUTION_GATE_FINAL != 0,
+            state & EXECUTION_GATE_ACTIVE_MASK,
+        )
+    }
+
+    #[test]
+    fn execution_gate_quarantine_waits_for_admitted_call() {
+        let gate = Arc::new(RocmExecutionGate::default());
+        let permit = gate
+            .try_acquire("execution_gate_quarantine_waits_for_admitted_call")
+            .expect("initial admission");
+
+        gate.request_quarantine();
+        assert_eq!(gate_state(&gate), (true, false, 1));
+        assert!(
+            gate.try_acquire("post-quarantine admission").is_err(),
+            "the stop transition must reject every later admission"
+        );
+
+        drop(permit);
+        assert_eq!(gate_state(&gate), (true, true, 0));
+    }
+
+    #[test]
+    fn execution_gate_linearizes_concurrent_quarantine() {
+        let gate = Arc::new(RocmExecutionGate::default());
+        let entered_ffi = Arc::new(Barrier::new(2));
+        let leave_ffi = Arc::new(Barrier::new(2));
+        let worker = {
+            let gate = Arc::clone(&gate);
+            let entered_ffi = Arc::clone(&entered_ffi);
+            let leave_ffi = Arc::clone(&leave_ffi);
+            std::thread::spawn(move || {
+                let permit = gate
+                    .try_acquire("simulated admitted HIP call")
+                    .expect("worker admission");
+                entered_ffi.wait();
+                leave_ffi.wait();
+                drop(permit);
+            })
+        };
+
+        entered_ffi.wait();
+        gate.request_quarantine();
+        assert_eq!(gate_state(&gate), (true, false, 1));
+        assert!(gate.try_acquire("racing later HIP call").is_err());
+
+        leave_ffi.wait();
+        worker.join().expect("worker must return normally");
+        assert_eq!(gate_state(&gate), (true, true, 0));
+    }
+
+    #[test]
+    fn execution_gate_waiter_unblocks_only_after_final_settlement() {
+        let gate = Arc::new(RocmExecutionGate::default());
+        let permit = gate.try_acquire("held HIP call").expect("admission");
+        gate.request_quarantine();
+
+        let waiter_ready = Arc::new(Barrier::new(2));
+        let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+        let waiter = {
+            let gate = Arc::clone(&gate);
+            let waiter_ready = Arc::clone(&waiter_ready);
+            std::thread::spawn(move || {
+                waiter_ready.wait();
+                assert!(gate.wait_until_final_for(Duration::from_secs(1)));
+                settled_tx.send(()).expect("settlement receiver alive");
+            })
+        };
+        waiter_ready.wait();
+        assert!(settled_rx.try_recv().is_err());
+
+        drop(permit);
+        settled_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("last permit must wake recovery waiters");
+        waiter.join().expect("waiter must return normally");
+    }
+
+    #[test]
+    fn execution_gate_settlement_wait_is_bounded_and_fail_closed() {
+        let gate = Arc::new(RocmExecutionGate::default());
+        let permit = gate.try_acquire("hung HIP call").expect("admission");
+        gate.request_quarantine();
+
+        assert!(!gate.wait_until_final_for(Duration::from_millis(10)));
+        assert_eq!(gate_state(&gate), (true, false, 1));
+        assert!(gate.try_acquire("post-timeout admission").is_err());
+
+        drop(permit);
+        assert!(gate.wait_until_final_for(Duration::ZERO));
+        assert_eq!(gate_state(&gate), (true, true, 0));
+    }
+
+    #[test]
+    fn unclassified_public_submission_drop_is_fail_closed() {
+        let gate = Arc::new(RocmExecutionGate::default());
+        let submission = RocmDeviceSubmission {
+            permit: gate
+                .try_acquire("unclassified public FFI")
+                .expect("admission"),
+            settled: false,
+        };
+
+        drop(submission);
+
+        assert_eq!(gate_state(&gate), (true, true, 0));
+        assert!(
+            gate.try_acquire("submission after unclassified drop")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_public_submission_completion_keeps_admission_open() {
+        let gate = Arc::new(RocmExecutionGate::default());
+        RocmDeviceSubmission {
+            permit: gate
+                .try_acquire("successful public FFI")
+                .expect("admission"),
+            settled: false,
+        }
+        .complete();
+
+        assert_eq!(gate_state(&gate), (false, false, 0));
+        assert!(gate.try_acquire("submission after completion").is_ok());
+    }
+
+    #[test]
+    fn concurrent_stop_waits_for_admitted_host_transfer_lifetime() {
+        struct DropProbe(Arc<AtomicBool>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let gate = Arc::new(RocmExecutionGate::default());
+        let host_dropped = Arc::new(AtomicBool::new(false));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (settle_tx, settle_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let gate = Arc::clone(&gate);
+            let host_dropped = Arc::clone(&host_dropped);
+            std::thread::spawn(move || {
+                let permit = gate.try_acquire("simulated async host transfer").unwrap();
+                let transfer =
+                    RocmAdmittedHostTransfer::new(permit, DropProbe(host_dropped.clone()));
+                entered_tx.send(()).unwrap();
+                settle_rx.recv().unwrap();
+                assert!(!host_dropped.load(Ordering::Acquire));
+                let host = transfer
+                    .finish(true)
+                    .expect("successful settlement releases host memory");
+                drop(host);
+            })
+        };
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("host transfer did not acquire admission");
+        gate.request_quarantine();
+        assert_eq!(gate_state(&gate), (true, false, 1));
+        assert!(!host_dropped.load(Ordering::Acquire));
+        settle_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(host_dropped.load(Ordering::Acquire));
+        assert_eq!(gate_state(&gate), (true, true, 0));
+    }
+
+    #[test]
+    fn failed_or_unwound_host_transfer_retains_host_memory() {
+        struct DropProbe(Arc<AtomicBool>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let failed_gate = Arc::new(RocmExecutionGate::default());
+        let failed_drop = Arc::new(AtomicBool::new(false));
+        let failed = RocmAdmittedHostTransfer::new(
+            failed_gate.try_acquire("failed host transfer").unwrap(),
+            DropProbe(failed_drop.clone()),
+        );
+        assert!(failed.finish(false).is_none());
+        assert!(!failed_drop.load(Ordering::Acquire));
+        assert_eq!(gate_state(&failed_gate), (true, true, 0));
+
+        let unwind_gate = Arc::new(RocmExecutionGate::default());
+        let unwind_drop = Arc::new(AtomicBool::new(false));
+        let unwind = std::panic::catch_unwind({
+            let unwind_gate = Arc::clone(&unwind_gate);
+            let unwind_drop = Arc::clone(&unwind_drop);
+            move || {
+                let _transfer = RocmAdmittedHostTransfer::new(
+                    unwind_gate.try_acquire("unwound host transfer").unwrap(),
+                    DropProbe(unwind_drop),
+                );
+                panic!("simulated unwind before host-transfer settlement");
+            }
+        });
+        assert!(unwind.is_err());
+        assert!(!unwind_drop.load(Ordering::Acquire));
+        assert_eq!(gate_state(&unwind_gate), (true, true, 0));
+    }
+
+    #[test]
+    fn public_submission_unwind_publishes_sticky_stop() {
+        let gate = Arc::new(RocmExecutionGate::default());
+        let result = std::panic::catch_unwind({
+            let gate = Arc::clone(&gate);
+            move || {
+                let _submission = RocmDeviceSubmission {
+                    permit: gate.try_acquire("panicking public FFI").expect("admission"),
+                    settled: false,
+                };
+                panic!("simulated panic after external FFI");
+            }
+        });
+
+        assert!(result.is_err());
+        assert_eq!(gate_state(&gate), (true, true, 0));
+        assert!(gate.try_acquire("submission after unwind").is_err());
+    }
+
+    #[test]
+    fn public_stream_submission_unwind_publishes_sticky_stop() {
+        let gate = Arc::new(RocmExecutionGate::default());
+        let stream = Arc::new(RocmStream {
+            handle: ptr::null_mut(),
+            ordinal: 1_000_000_003,
+            sync_telemetry: Arc::new(RocmSyncTelemetry::default()),
+            execution_gate: Arc::clone(&gate),
+        });
+        let result = std::panic::catch_unwind({
+            let gate = Arc::clone(&gate);
+            let stream = Arc::clone(&stream);
+            move || {
+                let _submission = RocmStreamSubmission {
+                    stream,
+                    permit: gate.try_acquire("panicking stream FFI").expect("admission"),
+                    settled: false,
+                };
+                panic!("simulated panic after external stream FFI");
+            }
+        });
+
+        assert!(result.is_err());
+        assert_eq!(gate_state(&gate), (true, true, 0));
+        assert!(gate.try_acquire("stream submission after unwind").is_err());
+        // This synthetic stream has no HIP handle and exists only to exercise
+        // the token's unwind behavior without touching the runtime.
+        std::mem::forget(stream);
+    }
+
+    #[test]
+    fn error_recovery_requires_a_preexisting_stop_transition() {
+        let gate = RocmExecutionGate::default();
+        let error = gate
+            .require_stopped_for_error_recovery()
+            .expect_err("gate-open ErrorRecovery must be rejected");
+        assert!(error.message.contains("use CaptureRollback"));
+
+        gate.request_quarantine();
+        gate.require_stopped_for_error_recovery()
+            .expect("STOPped gate admits the bounded recovery drain");
+    }
+
+    #[test]
+    fn internal_execution_permit_unwind_is_fail_closed() {
+        let gate = Arc::new(RocmExecutionGate::default());
+        let result = std::panic::catch_unwind({
+            let gate = Arc::clone(&gate);
+            move || {
+                let _permit = gate
+                    .try_acquire("panicking HIP wrapper")
+                    .expect("admission");
+                panic!("simulated wrapper panic");
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(gate_state(&gate), (true, true, 0));
+        assert!(gate.try_acquire("admission after unwind").is_err());
+    }
+
+    #[test]
+    fn execution_gates_are_isolated_by_device() {
+        const FIRST_TEST_ORDINAL: c_int = 1_000_000_001;
+        const SECOND_TEST_ORDINAL: c_int = 1_000_000_002;
+        let first = device_execution_gate(FIRST_TEST_ORDINAL);
+        let same_device = device_execution_gate(FIRST_TEST_ORDINAL);
+        let second = device_execution_gate(SECOND_TEST_ORDINAL);
+        assert!(Arc::ptr_eq(&first, &same_device));
+        assert!(!Arc::ptr_eq(&first, &second));
+        first.request_quarantine();
+
+        assert!(same_device.try_acquire("stopped device").is_err());
+        assert!(second.try_acquire("independent device").is_ok());
+        assert_eq!(gate_state(&first), (true, true, 0));
+        assert_eq!(gate_state(&second), (false, false, 0));
+    }
+
+    #[test]
+    fn resource_creation_policy_preserves_clean_no_publication_failures() {
+        for code in [
+            sys::HIP_ERROR_INVALID_VALUE,
+            sys::HIP_ERROR_OUT_OF_MEMORY,
+            sys::HIP_ERROR_NOT_SUPPORTED,
+        ] {
+            assert!(!resource_creation_status_is_fatal(code, true));
+            assert!(
+                resource_creation_status_is_fatal(code, false),
+                "an error with a published handle is ambiguous"
+            );
+        }
+
+        assert!(!resource_creation_status_is_fatal(sys::HIP_SUCCESS, false));
+        assert!(resource_creation_status_is_fatal(sys::HIP_SUCCESS, true));
+        assert!(resource_creation_status_is_fatal(
+            sys::HIP_ERROR_PRIOR_LAUNCH_FAILURE,
+            true
+        ));
+    }
+
+    #[test]
+    fn async_allocation_fallback_is_capability_only() {
+        assert!(async_allocation_fallback_allowed(
+            sys::HIP_ERROR_INVALID_VALUE,
+            true
+        ));
+        assert!(async_allocation_fallback_allowed(
+            sys::HIP_ERROR_NOT_SUPPORTED,
+            true
+        ));
+        assert!(!async_allocation_fallback_allowed(
+            sys::HIP_ERROR_OUT_OF_MEMORY,
+            true
+        ));
+        assert!(!async_allocation_fallback_allowed(
+            sys::HIP_ERROR_PRIOR_LAUNCH_FAILURE,
+            true
+        ));
+        assert!(!async_allocation_fallback_allowed(
+            sys::HIP_ERROR_NOT_SUPPORTED,
+            false
+        ));
+    }
+
+    #[test]
+    fn call_failure_policy_distinguishes_queries_from_unknown_device_state() {
+        for class in [
+            HipCallFailureClass::PureQuery,
+            HipCallFailureClass::OptionalConfiguration,
+            HipCallFailureClass::PostDrainPoolMaintenance,
+        ] {
+            assert!(!class.quarantines(), "{class:?} must remain recoverable");
+        }
+        for class in [
+            HipCallFailureClass::CaptureState,
+            HipCallFailureClass::ExecutionMutation,
+        ] {
+            assert!(class.quarantines(), "{class:?} must quarantine");
+        }
+    }
 
     #[test]
     fn execution_policy_defaults_to_legacy_host_barriers() {
@@ -1634,6 +2656,7 @@ mod tests {
             );
         }
         assert_eq!(labels.len(), ROCM_SYNC_REASON_COUNT);
+        assert_eq!(RocmSyncReason::CaptureRollback.as_str(), "capture_rollback");
 
         let telemetry = RocmSyncTelemetry::default();
         telemetry.record_wait(RocmSyncReason::ExternalYield, RocmSyncScope::Stream, 17);
@@ -1774,7 +2797,15 @@ mod tests {
         let lo = ctx
             .new_stream_with_priority(least)
             .expect("low-priority stream");
-        assert!(!hi.hip_stream().is_null());
-        assert!(!lo.hip_stream().is_null());
+        let hi_submission = hi
+            .execution_submission("new_stream_with_priority_creates(high)")
+            .expect("high-priority stream admission");
+        let lo_submission = lo
+            .execution_submission("new_stream_with_priority_creates(low)")
+            .expect("low-priority stream admission");
+        assert!(!hi_submission.raw_stream().is_null());
+        assert!(!lo_submission.raw_stream().is_null());
+        hi_submission.complete();
+        lo_submission.complete();
     }
 }

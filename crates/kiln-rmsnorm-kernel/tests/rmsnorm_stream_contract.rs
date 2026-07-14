@@ -14,7 +14,10 @@ fn function_body(name: &str, next_name: &str) -> &'static str {
 
 #[test]
 fn backward_preserves_rocm_context_and_orders_only_cross_stream_inputs() {
-    let allocator = function_body("fn alloc_rmsnorm_backward_like(", "fn device_stream_raw(");
+    let allocator = function_body(
+        "fn alloc_rmsnorm_backward_like(",
+        "fn device_stream_submission(",
+    );
     assert!(allocator.contains("rocm_storage_and_byte_offset"));
     assert!(allocator.contains("alloc_rocm_tensor(storage, dtype, shape)"));
 
@@ -22,12 +25,12 @@ fn backward_preserves_rocm_context_and_orders_only_cross_stream_inputs() {
         "fn synchronize_rocm_rmsnorm_backward_inputs(",
         "/// `fused_rmsnorm`",
     );
-    assert!(handoff.contains("rocm_owner_stream_raw(tensor, name)"));
+    assert!(handoff.contains("rocm_owner_stream_identity(tensor, name)"));
     assert!(handoff.contains("input_owner_stream != output_owner_stream"));
     assert!(
         handoff.find("if capture_active").expect("capture check")
             < handoff
-                .find("device_stream_raw_of(tensor, name)")
+                .find("rocm_active_stream_identity(tensor, name)")
                 .expect("active stream lookup")
     );
     assert!(handoff.contains("if input_stream == launch_stream"));

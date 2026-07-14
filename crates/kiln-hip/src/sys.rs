@@ -1,7 +1,7 @@
 //! Raw FFI declarations for the subset of the HIP runtime API that kiln's
 //! ROCm backend uses. Hand-written (not bindgen) so the crate compiles with no
-//! ROCm headers present — the cudarc analog, scoped to the ~8-symbol surface
-//! the CUDA substrate actually touches (alloc / memcpy / stream / graph).
+//! ROCm headers present. The surface is limited to device queries, allocation,
+//! copy, stream/event ordering, and graph lifecycle calls.
 //!
 //! Grounding: `hip/hip_runtime_api.h` (ROCm 6.x/7.x). HIP's runtime API mirrors
 //! the CUDA runtime API one-for-one; device pointers are plain `void*`, streams
@@ -21,6 +21,19 @@ pub type hipError_t = c_int;
 
 /// `hipSuccess` — the only success code.
 pub const HIP_SUCCESS: hipError_t = 0;
+/// `hipErrorInvalidValue` — local argument/context validation failed.
+pub const HIP_ERROR_INVALID_VALUE: hipError_t = 1;
+/// `hipErrorOutOfMemory` — recoverable device allocation exhaustion.
+pub const HIP_ERROR_OUT_OF_MEMORY: hipError_t = 2;
+/// `hipErrorPriorLaunchFailure` — a previous asynchronous launch failed.
+pub const HIP_ERROR_PRIOR_LAUNCH_FAILURE: hipError_t = 53;
+/// `hipErrorNotSupported` — the requested runtime API is unavailable.
+pub const HIP_ERROR_NOT_SUPPORTED: hipError_t = 801;
+
+/// HIP runtime copy direction. The C enum is passed as a 32-bit value.
+pub type hipMemcpyKind = c_uint;
+/// `hipMemcpyHostToDevice`.
+pub const HIP_MEMCPY_HOST_TO_DEVICE: hipMemcpyKind = 1;
 
 /// Opaque stream handle (`hipStream_t == ihipStream_t*`).
 pub type hipStream_t = *mut c_void;
@@ -92,6 +105,13 @@ unsafe extern "C" {
     // Free/total device memory (the device-API counterpart to the OS-level
     // sysfs probe). Useful for a discrete-GPU cross-check.
     pub fn hipMemGetInfo(free: *mut usize, total: *mut usize) -> hipError_t;
+    pub fn hipMemcpyAsync(
+        dst: *mut c_void,
+        src: *const c_void,
+        size_bytes: usize,
+        kind: hipMemcpyKind,
+        stream: hipStream_t,
+    ) -> hipError_t;
     pub fn hipMemcpyHtoDAsync(
         dst: *mut c_void,
         src: *mut c_void,

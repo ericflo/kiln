@@ -45,10 +45,10 @@ use kiln_graph::{
     ReplayResourceStability, ReplayState, ResidentResourceRef,
 };
 #[cfg(feature = "rocm")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[cfg(feature = "rocm")]
-use kiln_tensor::Backend;
+use kiln_tensor::{Backend, StorageBackend};
 use kiln_tensor::{Device, Tensor};
 
 /// Runtime behavior for the ROCm decode graph state machine.
@@ -93,18 +93,23 @@ impl std::fmt::Display for RocmGraphExecutionMode {
 pub struct RocmGraphExecutionPolicy {
     mode: RocmGraphExecutionMode,
     max_cached_graphs: usize,
+    max_retained_bytes: u64,
     force_eager_decode: bool,
 }
 
 impl RocmGraphExecutionPolicy {
     pub const DEFAULT_MAX_CACHED_GRAPHS: usize = 8;
     pub const MAX_CACHED_GRAPHS: usize = 64;
+    pub const DEFAULT_MAX_RETAINED_BYTES: u64 = 1 << 30;
+    pub const MIN_MAX_RETAINED_BYTES: u64 = 64 << 20;
+    pub const MAX_MAX_RETAINED_BYTES: u64 = 16 << 30;
 
     /// Fully eager execution with no graph-shaped warmup.
     pub const fn disabled() -> Self {
         Self {
             mode: RocmGraphExecutionMode::Disabled,
             max_cached_graphs: Self::DEFAULT_MAX_CACHED_GRAPHS,
+            max_retained_bytes: Self::DEFAULT_MAX_RETAINED_BYTES,
             force_eager_decode: false,
         }
     }
@@ -114,6 +119,7 @@ impl RocmGraphExecutionPolicy {
         Self {
             mode: RocmGraphExecutionMode::WarmupThenEager,
             max_cached_graphs: Self::DEFAULT_MAX_CACHED_GRAPHS,
+            max_retained_bytes: Self::DEFAULT_MAX_RETAINED_BYTES,
             force_eager_decode: false,
         }
     }
@@ -123,6 +129,7 @@ impl RocmGraphExecutionPolicy {
         Self {
             mode: RocmGraphExecutionMode::LazyCaptureReplay,
             max_cached_graphs: Self::DEFAULT_MAX_CACHED_GRAPHS,
+            max_retained_bytes: Self::DEFAULT_MAX_RETAINED_BYTES,
             force_eager_decode: false,
         }
     }
@@ -131,6 +138,7 @@ impl RocmGraphExecutionPolicy {
     pub fn try_new(
         mode: RocmGraphExecutionMode,
         max_cached_graphs: usize,
+        max_retained_bytes: u64,
         force_eager_decode: bool,
     ) -> Result<Self> {
         anyhow::ensure!(
@@ -142,9 +150,20 @@ impl RocmGraphExecutionPolicy {
             "ROCm graph cache capacity must not exceed {}",
             Self::MAX_CACHED_GRAPHS
         );
+        anyhow::ensure!(
+            max_retained_bytes >= Self::MIN_MAX_RETAINED_BYTES,
+            "ROCm graph retained-byte budget must be at least {} bytes",
+            Self::MIN_MAX_RETAINED_BYTES
+        );
+        anyhow::ensure!(
+            max_retained_bytes <= Self::MAX_MAX_RETAINED_BYTES,
+            "ROCm graph retained-byte budget must not exceed {} bytes",
+            Self::MAX_MAX_RETAINED_BYTES
+        );
         Ok(Self {
             mode,
             max_cached_graphs,
+            max_retained_bytes,
             force_eager_decode,
         })
     }
@@ -155,6 +174,10 @@ impl RocmGraphExecutionPolicy {
 
     pub const fn max_cached_graphs(self) -> usize {
         self.max_cached_graphs
+    }
+
+    pub const fn max_retained_bytes(self) -> u64 {
+        self.max_retained_bytes
     }
 
     pub const fn force_eager_decode(self) -> bool {
@@ -169,7 +192,21 @@ impl RocmGraphExecutionPolicy {
     }
 
     pub fn with_max_cached_graphs(self, max_cached_graphs: usize) -> Result<Self> {
-        Self::try_new(self.mode, max_cached_graphs, self.force_eager_decode)
+        Self::try_new(
+            self.mode,
+            max_cached_graphs,
+            self.max_retained_bytes,
+            self.force_eager_decode,
+        )
+    }
+
+    pub fn with_max_retained_bytes(self, max_retained_bytes: u64) -> Result<Self> {
+        Self::try_new(
+            self.mode,
+            self.max_cached_graphs,
+            max_retained_bytes,
+            self.force_eager_decode,
+        )
     }
 }
 
@@ -282,7 +319,7 @@ fn synchronize_after_rocm_graph_capture_failure(device: &Device) -> Result<()> {
         || {
             kiln_tensor::rocm_synchronize_device_for(
                 device_idx,
-                kiln_tensor::RocmSyncReason::ErrorRecovery,
+                kiln_tensor::RocmSyncReason::CaptureRollback,
             )
             .map_err(|error| anyhow::anyhow!("{error}"))
         },
@@ -337,6 +374,13 @@ enum RocmGraphOwner {
 }
 
 #[cfg(feature = "rocm")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RocmGraphBindOutcome {
+    Bound(RocmGraphOwner),
+    Fallback(RocmGraphFallbackReason),
+}
+
+#[cfg(feature = "rocm")]
 impl RocmGraphOwner {
     fn slot_id(self) -> u64 {
         match self {
@@ -370,18 +414,83 @@ struct RocmGraphOwnerTimeline {
 struct RocmGraphSlotState {
     assigned_row: Option<u64>,
     linear_state: LinearAttentionState,
+    allocations: Vec<RocmAllocationRecord>,
+    accounting_complete: bool,
+}
+
+#[cfg(feature = "rocm")]
+#[derive(Clone, Copy)]
+struct RocmGraphCandidateSlot<'a> {
+    owner: RocmGraphOwner,
+    allocations: &'a [RocmAllocationRecord],
+    accounting_complete: bool,
 }
 
 /// Ensures every failed capture attempt settles device work before any
 /// pointer-bearing graph buffers leave scope. A failed recovery marks the HIP
 /// context cleanup-quarantined, so low-level owners retain their handles and
 /// allocations until process exit instead of freeing uncertain live memory.
+#[cfg(any(feature = "rocm", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RocmCaptureGateAction {
+    KeepOpen,
+    PublishStop,
+}
+
+#[cfg(any(feature = "rocm", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RocmCaptureRollbackState {
+    armed: bool,
+    physically_settled: bool,
+}
+
+#[cfg(any(feature = "rocm", test))]
+impl RocmCaptureRollbackState {
+    const fn new() -> Self {
+        Self {
+            armed: true,
+            physically_settled: false,
+        }
+    }
+
+    fn record_settlement(&mut self, succeeded: bool) -> RocmCaptureGateAction {
+        if succeeded {
+            self.physically_settled = true;
+            RocmCaptureGateAction::KeepOpen
+        } else {
+            self.armed = false;
+            RocmCaptureGateAction::PublishStop
+        }
+    }
+
+    fn record_logical_rollback(&mut self, succeeded: bool) -> RocmCaptureGateAction {
+        self.armed = false;
+        if succeeded && self.physically_settled {
+            RocmCaptureGateAction::KeepOpen
+        } else {
+            RocmCaptureGateAction::PublishStop
+        }
+    }
+
+    fn disarm_after_success(&mut self) {
+        self.armed = false;
+    }
+
+    const fn exit_action(self) -> RocmCaptureGateAction {
+        if self.armed {
+            RocmCaptureGateAction::PublishStop
+        } else {
+            RocmCaptureGateAction::KeepOpen
+        }
+    }
+}
+
 #[cfg(feature = "rocm")]
 struct RocmCaptureFailureGuard {
     context: std::sync::Arc<kiln_hip::RocmContext>,
     graph: Option<kiln_hip::RocmGraph>,
     exec: Option<kiln_hip::RocmGraphExec>,
-    armed: bool,
+    rollback: RocmCaptureRollbackState,
 }
 
 #[cfg(feature = "rocm")]
@@ -391,60 +500,59 @@ impl RocmCaptureFailureGuard {
             context,
             graph: None,
             exec: None,
-            armed: true,
+            rollback: RocmCaptureRollbackState::new(),
         }
     }
 
     fn disarm(&mut self) {
-        self.armed = false;
+        self.rollback.disarm_after_success();
     }
 
     fn settle_before_rollback(&mut self) -> Result<()> {
+        // This is the explicitly recoverable path: settle physical capture work
+        // while admission remains open. STOP is published only if settlement
+        // itself fails or logical state cannot subsequently be restored.
         let result = self
             .context
-            .synchronize_device_for(kiln_tensor::RocmSyncReason::ErrorRecovery)
+            .synchronize_device_for(kiln_tensor::RocmSyncReason::CaptureRollback)
             .map_err(|error| anyhow::anyhow!("{error}"));
-        if result.is_err() {
+        if self.rollback.record_settlement(result.is_ok()) == RocmCaptureGateAction::PublishStop {
             // The low-level synchronization path has already set the shared,
             // process-lifetime device quarantine. Do not retry from Drop: a
             // later successful drain must not make incomplete logical rollback
             // look recoverable.
             self.context.quarantine_execution();
-            self.disarm();
         }
         result
     }
 
     fn complete_rollback(&mut self, rollback: Result<()>) -> Result<()> {
-        match rollback {
-            Ok(()) => {
-                self.disarm();
-                Ok(())
-            }
-            Err(error) => {
-                // Physical quiescence is insufficient when recurrent model
-                // state could not be restored. Fail closed for the device.
-                self.context.quarantine_execution();
-                self.disarm();
-                Err(error)
-            }
+        if self.rollback.record_logical_rollback(rollback.is_ok())
+            == RocmCaptureGateAction::PublishStop
+        {
+            // Physical quiescence is insufficient when recurrent model state
+            // could not be restored (or settlement was not acknowledged).
+            self.context.quarantine_execution();
         }
+        rollback
     }
 }
 
 #[cfg(feature = "rocm")]
 impl Drop for RocmCaptureFailureGuard {
     fn drop(&mut self) {
-        if !self.armed {
+        if self.rollback.exit_action() == RocmCaptureGateAction::KeepOpen {
             return;
         }
+        // An armed Drop has already lost the caller's logical rollback result.
+        // Publish STOP before the last-chance drain so no new work can race it.
+        self.context.quarantine_execution();
         let result = self
             .context
             .synchronize_device_for(kiln_tensor::RocmSyncReason::ErrorRecovery);
         // Any armed Drop means the caller did not acknowledge a completed
         // logical rollback. Keep the device quarantined even if this last-chance
         // physical drain succeeds.
-        self.context.quarantine_execution();
         match result {
             Ok(()) => tracing::error!(
                 "ROCm capture exited without completed logical rollback; execution is quarantined"
@@ -457,10 +565,159 @@ impl Drop for RocmCaptureFailureGuard {
     }
 }
 
+#[cfg(feature = "rocm")]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct RocmAllocationKey {
+    device_index: usize,
+    allocation_id: u64,
+}
+
+#[cfg(feature = "rocm")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RocmAllocationRecord {
+    key: RocmAllocationKey,
+    bytes: u64,
+}
+
+#[cfg(feature = "rocm")]
+#[derive(Clone, Debug, Default)]
+struct RocmGraphEntryAccounting {
+    stable_io: Vec<RocmAllocationRecord>,
+    capture_arena: Vec<RocmAllocationRecord>,
+    blaslt_workspace: Option<RocmAllocationRecord>,
+}
+
+#[cfg(feature = "rocm")]
+impl RocmGraphEntryAccounting {
+    /// Exact deduplicated bytes owned by this transient/cached graph entry.
+    /// Persistent recurrent slot allocations are intentionally excluded.
+    fn retained_bytes_excluding_slot(&self) -> u64 {
+        let mut seen = HashSet::new();
+        let mut bytes = 0;
+        for allocation in self
+            .stable_io
+            .iter()
+            .chain(self.capture_arena.iter())
+            .copied()
+            .chain(self.blaslt_workspace)
+        {
+            RocmGraphMemoryAccounting::add_record(&mut bytes, &mut seen, allocation);
+        }
+        bytes
+    }
+}
+
+#[cfg(feature = "rocm")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RocmGraphMemoryAccounting {
+    stable_io_bytes: u64,
+    capture_arena_bytes: u64,
+    blaslt_workspace_bytes: u64,
+    slot_state_bytes: u64,
+    retained_bytes: u64,
+    opaque_native_object_count: usize,
+    complete: bool,
+}
+
+#[cfg(feature = "rocm")]
+impl RocmGraphMemoryAccounting {
+    fn add_record(
+        total: &mut u64,
+        seen: &mut HashSet<RocmAllocationKey>,
+        record: RocmAllocationRecord,
+    ) {
+        if record.bytes > 0 && seen.insert(record.key) {
+            *total = total.saturating_add(record.bytes);
+        }
+    }
+
+    fn finish(&mut self) {
+        self.retained_bytes = self
+            .stable_io_bytes
+            .saturating_add(self.capture_arena_bytes)
+            .saturating_add(self.blaslt_workspace_bytes)
+            .saturating_add(self.slot_state_bytes);
+    }
+}
+
+#[cfg(feature = "rocm")]
+fn rocm_tensor_allocation(tensor: &Tensor) -> Option<RocmAllocationRecord> {
+    let storage = tensor
+        .storage()
+        .as_any()
+        .downcast_ref::<kiln_tensor::RocmStorage>()?;
+    let device_index = match storage.device() {
+        Device::Rocm(device_index) => device_index,
+        _ => return None,
+    };
+    let (allocation_id, bytes) = storage.device_ptr_raw();
+    Some(RocmAllocationRecord {
+        key: RocmAllocationKey {
+            device_index,
+            allocation_id,
+        },
+        bytes: bytes as u64,
+    })
+}
+
+#[cfg(feature = "rocm")]
+fn unique_rocm_tensor_allocations<'a>(
+    tensors: impl IntoIterator<Item = &'a Tensor>,
+) -> Result<Vec<RocmAllocationRecord>> {
+    let (allocations, complete) = inspect_rocm_tensor_allocations(tensors);
+    anyhow::ensure!(
+        complete,
+        "ROCm graph accounting encountered non-ROCm tensor storage"
+    );
+    Ok(allocations)
+}
+
+#[cfg(feature = "rocm")]
+fn inspect_rocm_tensor_allocations<'a>(
+    tensors: impl IntoIterator<Item = &'a Tensor>,
+) -> (Vec<RocmAllocationRecord>, bool) {
+    let mut seen = HashSet::new();
+    let mut allocations = Vec::new();
+    let mut complete = true;
+    for tensor in tensors {
+        match rocm_tensor_allocation(tensor) {
+            Some(allocation) if seen.insert(allocation.key) => allocations.push(allocation),
+            Some(_) => {}
+            None => complete = false,
+        }
+    }
+    (allocations, complete)
+}
+
+#[cfg(feature = "rocm")]
+fn unique_rocm_storage_allocations<'a>(
+    device_index: usize,
+    storages: impl IntoIterator<Item = &'a std::sync::Arc<kiln_tensor::RocmStorage>>,
+) -> Vec<RocmAllocationRecord> {
+    let mut seen = HashSet::new();
+    let mut allocations = Vec::new();
+    for storage in storages {
+        let (allocation_id, bytes) = storage.device_ptr_raw();
+        let allocation = RocmAllocationRecord {
+            key: RocmAllocationKey {
+                device_index,
+                allocation_id,
+            },
+            bytes: bytes as u64,
+        };
+        if seen.insert(allocation.key) {
+            allocations.push(allocation);
+        }
+    }
+    allocations
+}
+
 /// A captured HIP graph ready for replay, plus every graph-stable buffer whose
 /// device pointer the graph baked in. Mirrors `CapturedDecodeGraph`.
 #[cfg(feature = "rocm")]
 struct CapturedDecodeGraphRocm {
+    accounting: RocmGraphEntryAccounting,
+    last_used_tick: u64,
     /// The source graph — retained because dropping it `hipGraphDestroy`s the
     /// handle; the exec is launched, the graph is kept alive alongside it.
     _graph: kiln_hip::RocmGraph,
@@ -587,7 +844,31 @@ impl ReplayPlan for RocmDecodeReplayPlan<'_> {
 #[cfg(feature = "rocm")]
 enum RocmCaptureStep {
     CapturedHidden(Tensor),
-    FallbackEager(RocmGraphFallbackReason),
+    CapturedHiddenUncached(Tensor),
+    FallbackEager {
+        reason: RocmGraphFallbackReason,
+        cleanup_timer: Option<RocmGraphPhaseTimer>,
+    },
+}
+
+#[cfg(feature = "rocm")]
+impl RocmCaptureStep {
+    fn fallback(reason: RocmGraphFallbackReason) -> Self {
+        Self::FallbackEager {
+            reason,
+            cleanup_timer: None,
+        }
+    }
+
+    fn fallback_after_candidate(
+        reason: RocmGraphFallbackReason,
+        telemetry: &RocmGraphTelemetryHandle,
+    ) -> Self {
+        Self::FallbackEager {
+            reason,
+            cleanup_timer: Some(telemetry.timer(RocmGraphPhase::RejectedCandidateCleanup)),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -603,24 +884,103 @@ struct RocmGraphCounters {
     decode_owner_graph_release_count: u64,
     graph_slot_create_count: u64,
     graph_slot_reuse_count: u64,
+    cache_admission_successes: u64,
+    cache_evictions: u64,
+    cache_evicted_bytes: u64,
+    budget_evictions: u64,
+    pressure_evictions: u64,
+    invalidation_evictions: u64,
+    recovery_evictions: u64,
+    entry_capacity_rejections: u64,
+    byte_budget_rejections: u64,
+    accounting_incomplete_rejections: u64,
+    pre_capture_entry_capacity_skips: u64,
+    pre_capture_byte_budget_skips: u64,
+    pre_capture_accounting_incomplete_skips: u64,
+    pre_capture_memory_reservation_denied_skips: u64,
+    memory_governor_selector_mismatch_skips: u64,
+    quarantined_retained_bytes: u64,
     fallbacks: RocmGraphFallbackStats,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RocmGraphCaptureOutcome {
-    Succeeded,
+    SucceededRetained,
+    SucceededUncached,
     Deferred,
     Failed,
 }
 
+#[cfg(feature = "rocm")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RocmGraphEvictionReason {
+    Budget,
+    Pressure,
+    Invalidation,
+    Recovery,
+}
+
+#[cfg(feature = "rocm")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RocmGraphAdmissionRejection {
+    EntryCapacity,
+    ByteBudget,
+    CandidateByteBudget,
+    AccountingIncomplete,
+}
+
+#[cfg(feature = "rocm")]
+#[derive(Debug, Default, Eq, PartialEq)]
+struct RocmGraphAdmissionPlan {
+    evict_owners: Vec<RocmGraphOwner>,
+}
+
+#[cfg(feature = "rocm")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RocmGraphPressureDecision {
+    Normal,
+    ReplayOnly(RocmGraphFallbackReason),
+    EagerOnly(RocmGraphFallbackReason),
+}
+
+#[cfg(feature = "rocm")]
+fn non_evicting_pressure_decision(
+    pressure: kiln_memory::MemoryPressure,
+) -> Option<RocmGraphPressureDecision> {
+    match pressure {
+        kiln_memory::MemoryPressure::Comfortable => Some(RocmGraphPressureDecision::Normal),
+        kiln_memory::MemoryPressure::Moderate => Some(RocmGraphPressureDecision::ReplayOnly(
+            RocmGraphFallbackReason::ModerateMemoryPressure,
+        )),
+        kiln_memory::MemoryPressure::Tight | kiln_memory::MemoryPressure::Critical => None,
+    }
+}
+
+fn memory_governor_selector_matches(
+    expected: kiln_memory::VramProbeSelector,
+    configured: kiln_memory::VramProbeSelector,
+) -> bool {
+    expected == configured
+}
+
+#[cfg(feature = "rocm")]
+fn sort_idle_owner_lru(records: &mut [(u64, u64, RocmGraphOwner)]) {
+    records.sort_unstable_by_key(|(last_used, slot_id, _)| (*last_used, *slot_id));
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RocmGraphFallbackReason {
-    WarmupForwardFailure,
     ColdCacheHostRoundTrip,
     PersistentHostRoundTrip,
     ShapeDependentAttention,
     GraphCacheCapacity,
+    GraphCacheByteBudget,
+    GraphAccountingIncomplete,
+    ModerateMemoryPressure,
+    TightMemoryPressure,
     CriticalMemoryPressure,
+    MemoryReservationDenied,
+    MemoryGovernorSelectorMismatch,
     CaptureFailure,
     ReplayFailure,
 }
@@ -628,12 +988,17 @@ enum RocmGraphFallbackReason {
 impl RocmGraphFallbackReason {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::WarmupForwardFailure => "warmup_forward_failure",
             Self::ColdCacheHostRoundTrip => "cold_cache_host_round_trip",
             Self::PersistentHostRoundTrip => "persistent_host_round_trip",
             Self::ShapeDependentAttention => "shape_dependent_attention",
             Self::GraphCacheCapacity => "graph_cache_capacity",
+            Self::GraphCacheByteBudget => "graph_cache_byte_budget",
+            Self::GraphAccountingIncomplete => "graph_accounting_incomplete",
+            Self::ModerateMemoryPressure => "moderate_memory_pressure",
+            Self::TightMemoryPressure => "tight_memory_pressure",
             Self::CriticalMemoryPressure => "critical_memory_pressure",
+            Self::MemoryReservationDenied => "memory_reservation_denied",
+            Self::MemoryGovernorSelectorMismatch => "memory_governor_selector_mismatch",
             Self::CaptureFailure => "capture_failure",
             Self::ReplayFailure => "replay_failure",
         }
@@ -644,12 +1009,17 @@ impl RocmGraphFallbackReason {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct RocmGraphFallbackStats {
     pub total: u64,
-    pub warmup_forward_failure: u64,
     pub cold_cache_host_round_trip: u64,
     pub persistent_host_round_trip: u64,
     pub shape_dependent_attention: u64,
     pub graph_cache_capacity: u64,
+    pub graph_cache_byte_budget: u64,
+    pub graph_accounting_incomplete: u64,
+    pub moderate_memory_pressure: u64,
+    pub tight_memory_pressure: u64,
     pub critical_memory_pressure: u64,
+    pub memory_reservation_denied: u64,
+    pub memory_governor_selector_mismatch: u64,
     pub capture_failure: u64,
     pub replay_failure: u64,
     pub slow: u64,
@@ -663,14 +1033,23 @@ impl RocmGraphFallbackStats {
     fn record(&mut self, reason: RocmGraphFallbackReason, duration: std::time::Duration) -> u64 {
         self.total = self.total.saturating_add(1);
         let reason_count = match reason {
-            RocmGraphFallbackReason::WarmupForwardFailure => &mut self.warmup_forward_failure,
             RocmGraphFallbackReason::ColdCacheHostRoundTrip => &mut self.cold_cache_host_round_trip,
             RocmGraphFallbackReason::PersistentHostRoundTrip => {
                 &mut self.persistent_host_round_trip
             }
             RocmGraphFallbackReason::ShapeDependentAttention => &mut self.shape_dependent_attention,
             RocmGraphFallbackReason::GraphCacheCapacity => &mut self.graph_cache_capacity,
+            RocmGraphFallbackReason::GraphCacheByteBudget => &mut self.graph_cache_byte_budget,
+            RocmGraphFallbackReason::GraphAccountingIncomplete => {
+                &mut self.graph_accounting_incomplete
+            }
+            RocmGraphFallbackReason::ModerateMemoryPressure => &mut self.moderate_memory_pressure,
+            RocmGraphFallbackReason::TightMemoryPressure => &mut self.tight_memory_pressure,
             RocmGraphFallbackReason::CriticalMemoryPressure => &mut self.critical_memory_pressure,
+            RocmGraphFallbackReason::MemoryReservationDenied => &mut self.memory_reservation_denied,
+            RocmGraphFallbackReason::MemoryGovernorSelectorMismatch => {
+                &mut self.memory_governor_selector_mismatch
+            }
             RocmGraphFallbackReason::CaptureFailure => &mut self.capture_failure,
             RocmGraphFallbackReason::ReplayFailure => &mut self.replay_failure,
         };
@@ -686,11 +1065,183 @@ impl RocmGraphFallbackStats {
     }
 }
 
+/// Bounded latency telemetry for one fixed ROCm graph-capture phase.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct RocmGraphPhaseStats {
+    pub calls: u64,
+    /// Calls whose phase duration was at least 100 milliseconds.
+    pub slow: u64,
+    pub total_duration_micros: u64,
+    pub max_duration_micros: u64,
+}
+
+impl RocmGraphPhaseStats {
+    const SLOW_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
+
+    fn record(&mut self, duration: std::time::Duration) {
+        self.calls = self.calls.saturating_add(1);
+        let duration_micros = duration.as_micros().min(u64::MAX as u128) as u64;
+        self.total_duration_micros = self.total_duration_micros.saturating_add(duration_micros);
+        self.max_duration_micros = self.max_duration_micros.max(duration_micros);
+        if duration >= Self::SLOW_DURATION {
+            self.slow = self.slow.saturating_add(1);
+        }
+    }
+}
+
+/// Closed capture-phase labels for graph-runner-lock-independent observability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RocmGraphPhase {
+    PreCandidateHeadroom,
+    CandidateWarm,
+    PreNativeReservation,
+    NativeCapture,
+    RejectedCandidateCleanup,
+}
+
+/// Snapshot available through [`RocmGraphTelemetryHandle`] without locking the
+/// graph runner. The active phase elapsed time is derived from a monotonic clock.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct RocmGraphLiveTelemetry {
+    pub current_phase: Option<RocmGraphPhase>,
+    pub current_phase_elapsed_micros: u64,
+    pub pre_candidate_headroom_phase: RocmGraphPhaseStats,
+    pub candidate_warm_phase: RocmGraphPhaseStats,
+    pub pre_native_reservation_phase: RocmGraphPhaseStats,
+    pub native_capture_phase: RocmGraphPhaseStats,
+    pub rejected_candidate_cleanup_phase: RocmGraphPhaseStats,
+    pub last_transient_candidate_bytes: u64,
+    pub peak_transient_candidate_bytes: u64,
+}
+
+/// Closed reasons why a full graph-runner snapshot could not be acquired.
+///
+/// Live phase telemetry remains available through
+/// [`RocmGraphTelemetryHandle`] while the runner is busy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RocmGraphStatsUnavailable {
+    Busy,
+    Poisoned,
+}
+
+impl std::fmt::Display for RocmGraphStatsUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => formatter.write_str("ROCm graph runner is busy"),
+            Self::Poisoned => formatter.write_str("ROCm graph runner lock is poisoned"),
+        }
+    }
+}
+
+impl std::error::Error for RocmGraphStatsUnavailable {}
+
+#[derive(Clone, Copy, Debug)]
+struct RocmGraphActivePhase {
+    phase: RocmGraphPhase,
+    generation: u64,
+    started: std::time::Instant,
+}
+
+#[derive(Debug, Default)]
+struct RocmGraphTelemetryState {
+    completed: RocmGraphLiveTelemetry,
+    active: Option<RocmGraphActivePhase>,
+    next_generation: u64,
+}
+
+/// Cloneable telemetry channel independent of the graph-runner mutex.
+#[derive(Clone, Debug, Default)]
+pub struct RocmGraphTelemetryHandle(std::sync::Arc<std::sync::Mutex<RocmGraphTelemetryState>>);
+
+impl RocmGraphTelemetryHandle {
+    fn timer(&self, phase: RocmGraphPhase) -> RocmGraphPhaseTimer {
+        let started = std::time::Instant::now();
+        let generation = {
+            let mut telemetry = self.0.lock().unwrap_or_else(|error| error.into_inner());
+            telemetry.next_generation = telemetry.next_generation.checked_add(1).unwrap_or(1);
+            let generation = telemetry.next_generation;
+            telemetry.active = Some(RocmGraphActivePhase {
+                phase,
+                generation,
+                started,
+            });
+            generation
+        };
+        RocmGraphPhaseTimer {
+            telemetry: self.clone(),
+            phase,
+            generation,
+            started,
+        }
+    }
+
+    fn record_transient_candidate_bytes(&self, bytes: u64) {
+        let mut telemetry = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        telemetry.completed.last_transient_candidate_bytes = bytes;
+        telemetry.completed.peak_transient_candidate_bytes = telemetry
+            .completed
+            .peak_transient_candidate_bytes
+            .max(bytes);
+    }
+
+    pub fn snapshot(&self) -> RocmGraphLiveTelemetry {
+        let telemetry = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        let mut snapshot = telemetry.completed;
+        if let Some(active) = telemetry.active {
+            snapshot.current_phase = Some(active.phase);
+            snapshot.current_phase_elapsed_micros =
+                active.started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        }
+        snapshot
+    }
+}
+
+struct RocmGraphPhaseTimer {
+    telemetry: RocmGraphTelemetryHandle,
+    phase: RocmGraphPhase,
+    generation: u64,
+    started: std::time::Instant,
+}
+
+impl Drop for RocmGraphPhaseTimer {
+    fn drop(&mut self) {
+        let duration = self.started.elapsed();
+        let mut telemetry = self
+            .telemetry
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        phase_stats_mut(&mut telemetry.completed, self.phase).record(duration);
+        if telemetry
+            .active
+            .is_some_and(|active| active.generation == self.generation)
+        {
+            telemetry.active = None;
+        }
+    }
+}
+
+fn phase_stats_mut(
+    telemetry: &mut RocmGraphLiveTelemetry,
+    phase: RocmGraphPhase,
+) -> &mut RocmGraphPhaseStats {
+    match phase {
+        RocmGraphPhase::PreCandidateHeadroom => &mut telemetry.pre_candidate_headroom_phase,
+        RocmGraphPhase::CandidateWarm => &mut telemetry.candidate_warm_phase,
+        RocmGraphPhase::PreNativeReservation => &mut telemetry.pre_native_reservation_phase,
+        RocmGraphPhase::NativeCapture => &mut telemetry.native_capture_phase,
+        RocmGraphPhase::RejectedCandidateCleanup => &mut telemetry.rejected_candidate_cleanup_phase,
+    }
+}
+
 impl RocmGraphCounters {
     fn record_capture_outcome(&mut self, outcome: RocmGraphCaptureOutcome) {
         self.capture_attempts = self.capture_attempts.saturating_add(1);
         match outcome {
-            RocmGraphCaptureOutcome::Succeeded => {
+            RocmGraphCaptureOutcome::SucceededRetained
+            | RocmGraphCaptureOutcome::SucceededUncached => {
                 self.capture_successes = self.capture_successes.saturating_add(1);
             }
             RocmGraphCaptureOutcome::Deferred => {
@@ -726,6 +1277,73 @@ impl RocmGraphCounters {
         self.graph_slot_reuse_count = self.graph_slot_reuse_count.saturating_add(1);
     }
 
+    fn record_cache_admission(&mut self) {
+        self.cache_admission_successes = self.cache_admission_successes.saturating_add(1);
+    }
+
+    #[cfg(feature = "rocm")]
+    fn record_cache_rejection(&mut self, rejection: RocmGraphAdmissionRejection) {
+        match rejection {
+            RocmGraphAdmissionRejection::EntryCapacity => {
+                self.entry_capacity_rejections = self.entry_capacity_rejections.saturating_add(1);
+            }
+            RocmGraphAdmissionRejection::ByteBudget
+            | RocmGraphAdmissionRejection::CandidateByteBudget => {
+                self.byte_budget_rejections = self.byte_budget_rejections.saturating_add(1);
+            }
+            RocmGraphAdmissionRejection::AccountingIncomplete => {
+                self.accounting_incomplete_rejections =
+                    self.accounting_incomplete_rejections.saturating_add(1);
+            }
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    fn record_pre_capture_skip(&mut self, rejection: RocmGraphAdmissionRejection) {
+        match rejection {
+            RocmGraphAdmissionRejection::EntryCapacity => {
+                self.pre_capture_entry_capacity_skips =
+                    self.pre_capture_entry_capacity_skips.saturating_add(1);
+            }
+            RocmGraphAdmissionRejection::ByteBudget
+            | RocmGraphAdmissionRejection::CandidateByteBudget => {
+                self.pre_capture_byte_budget_skips =
+                    self.pre_capture_byte_budget_skips.saturating_add(1);
+            }
+            RocmGraphAdmissionRejection::AccountingIncomplete => {
+                self.pre_capture_accounting_incomplete_skips = self
+                    .pre_capture_accounting_incomplete_skips
+                    .saturating_add(1);
+            }
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    fn record_cache_eviction(
+        &mut self,
+        graphs: usize,
+        bytes: u64,
+        reason: RocmGraphEvictionReason,
+    ) {
+        self.cache_evictions = self.cache_evictions.saturating_add(graphs as u64);
+        self.cache_evicted_bytes = self.cache_evicted_bytes.saturating_add(bytes);
+        match reason {
+            RocmGraphEvictionReason::Budget => {
+                self.budget_evictions = self.budget_evictions.saturating_add(graphs as u64);
+            }
+            RocmGraphEvictionReason::Pressure => {
+                self.pressure_evictions = self.pressure_evictions.saturating_add(graphs as u64);
+            }
+            RocmGraphEvictionReason::Invalidation => {
+                self.invalidation_evictions =
+                    self.invalidation_evictions.saturating_add(graphs as u64);
+            }
+            RocmGraphEvictionReason::Recovery => {
+                self.recovery_evictions = self.recovery_evictions.saturating_add(graphs as u64);
+            }
+        }
+    }
+
     fn record_fallback(
         &mut self,
         reason: RocmGraphFallbackReason,
@@ -740,7 +1358,7 @@ impl RocmGraphCounters {
 /// The attempt/success/failure fields are monotonic for the lifetime of the
 /// runner, including across adapter invalidations. The graph and owner counts
 /// are live gauges and may decrease when state is released or invalidated.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct RocmGraphStats {
     /// The ROCm device and typed policy requested the graph runner when it was
     /// constructed. This remains true after a circuit break.
@@ -751,9 +1369,19 @@ pub struct RocmGraphStats {
     pub enabled: bool,
     /// Native capture is both requested and currently armed.
     pub capture_enabled: bool,
-    /// Calls that reached the native capture state machine.
+    /// Configured maximum number of retained native graphs.
+    pub max_cached_graphs: usize,
+    /// Configured maximum requested physical bytes retained by graph-owned
+    /// buffers. Opaque HIP graph objects and allocator-pool slack are excluded.
+    pub max_retained_bytes: u64,
+    /// Calls that entered the capture state machine, including pre-native
+    /// deferrals after a settled warm Record pass.
     pub capture_attempts: u64,
-    /// Graphs successfully instantiated, launched once, and retained.
+    /// Native graphs successfully instantiated and launched once. This includes
+    /// exact post-capture cache rejections; `cache_admission_successes` counts
+    /// the subset retained for replay. After successful rejected-candidate
+    /// cleanup, this equals admissions plus the three post-capture rejection
+    /// counters below.
     pub capture_successes: u64,
     /// Attempts deferred before native capture, such as cold-cache warm passes.
     pub capture_deferrals: u64,
@@ -777,6 +1405,44 @@ pub struct RocmGraphStats {
     pub graph_slot_create_count: u64,
     /// Finished slots rebound to a later logical decode row.
     pub graph_slot_reuse_count: u64,
+    /// Successful insertions into the bounded graph cache.
+    pub cache_admission_successes: u64,
+    /// Native graph entries evicted after safe device settlement.
+    pub cache_evictions: u64,
+    /// Requested physical device bytes released by successful evictions.
+    pub cache_evicted_bytes: u64,
+    /// Entries evicted to satisfy the entry or retained-byte budget.
+    pub budget_evictions: u64,
+    /// Entries evicted in response to Tight or Critical memory pressure.
+    pub pressure_evictions: u64,
+    /// Entries evicted by explicit adapter-generation invalidation.
+    pub invalidation_evictions: u64,
+    /// Entries evicted while recovering from replay/capture state mismatch.
+    pub recovery_evictions: u64,
+    /// Candidates rejected because no inactive-owner eviction plan could satisfy
+    /// the entry cap.
+    pub entry_capacity_rejections: u64,
+    /// Candidates rejected because they alone exceeded the retained-byte cap or
+    /// no inactive-owner eviction plan could satisfy it.
+    pub byte_budget_rejections: u64,
+    /// Successfully captured candidates rejected because exact allocation
+    /// accounting could not be completed.
+    pub accounting_incomplete_rejections: u64,
+    /// Capture state-machine calls skipped before native capture at the entry
+    /// cap. These are deliberately separate from post-capture rejections.
+    pub pre_capture_entry_capacity_skips: u64,
+    /// Capture state-machine calls skipped before native capture at the byte
+    /// cap, including persistent-slot publication denials.
+    pub pre_capture_byte_budget_skips: u64,
+    /// Capture state-machine calls skipped before native capture because exact
+    /// allocation accounting was incomplete.
+    pub pre_capture_accounting_incomplete_skips: u64,
+    /// Capture attempts abandoned because the process-wide governor could not
+    /// atomically reserve the measured transient candidate bytes.
+    pub pre_capture_memory_reservation_denied_skips: u64,
+    /// Decode steps kept eager because the process-wide governor observes a
+    /// different accelerator than this graph runner.
+    pub memory_governor_selector_mismatch_skips: u64,
     /// Graphs currently retained in the live cache.
     pub captured_graph_count: usize,
     /// Persistent recurrent-state slots currently retained.
@@ -787,6 +1453,47 @@ pub struct RocmGraphStats {
     pub idle_graph_slot_count: usize,
     /// Decode owners whose continuity timeline is currently retained.
     pub tracked_decode_owner_count: usize,
+    /// Exact requested physical bytes held by graph-stable direct tensors.
+    pub retained_stable_io_bytes: u64,
+    /// Exact requested physical bytes held by freeze-pointer capture arenas.
+    pub retained_capture_arena_bytes: u64,
+    /// Exact requested physical bytes held by leased private-stream workspaces.
+    pub retained_blaslt_workspace_bytes: u64,
+    /// Exact requested physical bytes held by every runner-owned recurrent/conv
+    /// owner slot, including active slots whose native graphs were evicted.
+    pub retained_slot_state_bytes: u64,
+    /// Deduplicated sum of all graph-owned requested physical bytes.
+    pub retained_bytes: u64,
+    /// Highest `retained_bytes` observed after slot creation or cache admission.
+    pub peak_retained_bytes: u64,
+    /// Native graph/exec/stream/event objects whose driver allocation size is not
+    /// queryable through the current HIP API surface.
+    pub opaque_native_object_count: usize,
+    /// Whether every retained tensor could be mapped to ROCm allocation metadata.
+    pub retained_bytes_accounting_complete: bool,
+    /// Logical bytes whose destruction or post-drop settlement failed after the
+    /// process-lifetime device quarantine became sticky.
+    pub quarantined_retained_bytes: u64,
+    /// Initial pressure reconciliation and settled eviction before allocating a
+    /// warm candidate.
+    pub pre_candidate_headroom_phase: RocmGraphPhaseStats,
+    /// Candidate stream/buffer allocation plus the settled warm Record forward.
+    pub candidate_warm_phase: RocmGraphPhaseStats,
+    /// Exact accounting, governor reservation, and settled idle-owner eviction
+    /// immediately before native capture.
+    pub pre_native_reservation_phase: RocmGraphPhaseStats,
+    /// Stream capture, graph instantiation, the settled first native launch,
+    /// defensive cache admission, and committed governor publication.
+    pub native_capture_phase: RocmGraphPhaseStats,
+    /// Settled destruction of successfully captured but unretained candidates.
+    pub rejected_candidate_cleanup_phase: RocmGraphPhaseStats,
+    /// Exact deduplicated requested bytes in queryable tensor, arena, and
+    /// workspace allocations for the most recently measured transient graph
+    /// candidate. This excludes the already runner-owned recurrent slot and
+    /// opaque stream/event/native-graph objects.
+    pub last_transient_candidate_bytes: u64,
+    /// High-water mark of `last_transient_candidate_bytes` for this runner.
+    pub peak_transient_candidate_bytes: u64,
     /// Closed-reason eager fallback counts and latency.
     pub fallbacks: RocmGraphFallbackStats,
 }
@@ -799,6 +1506,9 @@ pub struct RocmGraphRunner {
     capture_requested: bool,
     enabled: bool,
     counters: RocmGraphCounters,
+    phase_telemetry: RocmGraphTelemetryHandle,
+    memory_probe_selector: kiln_memory::VramProbeSelector,
+    peak_retained_bytes: u64,
     adapter_generation: u64,
     warmup_done: bool,
     #[cfg(feature = "rocm")]
@@ -810,12 +1520,38 @@ pub struct RocmGraphRunner {
     graph_slots: HashMap<RocmGraphOwner, RocmGraphSlotState>,
     #[cfg(feature = "rocm")]
     decode_row_slots: HashMap<u64, RocmGraphOwner>,
+    /// Logical rows denied a new persistent slot by the hard retained-byte cap.
+    /// Entries live until `release_decode_row` so decode cannot retry the same
+    /// expensive graph setup on every token.
+    #[cfg(feature = "rocm")]
+    graph_ineligible_rows: HashMap<u64, RocmGraphFallbackReason>,
     #[cfg(feature = "rocm")]
     next_graph_slot_id: u64,
+    #[cfg(feature = "rocm")]
+    next_access_tick: u64,
+    /// Changes whenever graph-cache or persistent-slot ownership changes.
+    #[cfg(feature = "rocm")]
+    ownership_generation: u64,
+    /// Advances only when retained bytes or protected-owner constraints are
+    /// relaxed. Aggregate budget suppression keys off this generation; binds
+    /// and admissions consume headroom and therefore do not reopen capture.
+    #[cfg(feature = "rocm")]
+    budget_relief_generation: u64,
+    #[cfg(feature = "rocm")]
+    budget_rejection_generation: HashMap<RocmGraphKey, u64>,
+    #[cfg(feature = "rocm")]
+    budget_rejection_generation_wide: Option<u64>,
+    /// Measured transient bytes from governor-denied candidates. Matching
+    /// geometries skip the warm pass until published headroom can fit one retry.
+    #[cfg(feature = "rocm")]
+    reservation_denied_bytes: HashMap<RocmGraphKey, u64>,
+    #[cfg(feature = "rocm")]
+    reservation_denied_wide_bytes: Option<u64>,
     /// Geometries whose decode forward is not capture-safe and the typed eager
     /// fallback reason to reuse on subsequent steps. This includes persistent
-    /// host round-trips and attention paths whose tensor shapes depend on the
-    /// current sequence length.
+    /// host round-trips, attention paths whose tensor shapes depend on the
+    /// current sequence length, and candidates that cannot fit the byte budget
+    /// even when every other owner is excluded.
     #[cfg(feature = "rocm")]
     non_capture_safe: std::collections::HashMap<RocmGraphKey, RocmGraphFallbackReason>,
     /// Per-geometry count of consecutive capture attempts whose warm pass did a
@@ -861,6 +1597,9 @@ impl RocmGraphRunner {
             capture_requested,
             enabled: requested,
             counters: RocmGraphCounters::default(),
+            phase_telemetry: RocmGraphTelemetryHandle::default(),
+            memory_probe_selector: device.memory_probe_selector(),
+            peak_retained_bytes: 0,
             adapter_generation: 0,
             warmup_done: false,
             #[cfg(feature = "rocm")]
@@ -870,7 +1609,23 @@ impl RocmGraphRunner {
             #[cfg(feature = "rocm")]
             decode_row_slots: HashMap::new(),
             #[cfg(feature = "rocm")]
+            graph_ineligible_rows: HashMap::new(),
+            #[cfg(feature = "rocm")]
             next_graph_slot_id: 1,
+            #[cfg(feature = "rocm")]
+            next_access_tick: 1,
+            #[cfg(feature = "rocm")]
+            ownership_generation: 1,
+            #[cfg(feature = "rocm")]
+            budget_relief_generation: 1,
+            #[cfg(feature = "rocm")]
+            budget_rejection_generation: HashMap::new(),
+            #[cfg(feature = "rocm")]
+            budget_rejection_generation_wide: None,
+            #[cfg(feature = "rocm")]
+            reservation_denied_bytes: HashMap::new(),
+            #[cfg(feature = "rocm")]
+            reservation_denied_wide_bytes: None,
             #[cfg(feature = "rocm")]
             non_capture_safe: std::collections::HashMap::new(),
             #[cfg(feature = "rocm")]
@@ -889,10 +1644,22 @@ impl RocmGraphRunner {
     /// distinct caches warming across a step or two.
     #[cfg(feature = "rocm")]
     const CAPTURE_RETRY_LIMIT: u32 = 3;
+    /// Transient aggregate-budget denial history is independent of the live
+    /// graph-entry cap: a long context can visit many exact attention buckets
+    /// under one unchanged owner set. At saturation, capture fails closed for
+    /// that ownership generation instead of cycling old denials.
+    #[cfg(feature = "rocm")]
+    const MAX_BUDGET_REJECTION_GEOMETRIES: usize = 256;
 
     /// Whether captured-graph decode is active.
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Clone the capture telemetry channel, which is independent of the graph
+    /// runner lock. Owners should keep it beside, rather than behind, that lock.
+    pub fn telemetry_handle(&self) -> RocmGraphTelemetryHandle {
+        self.phase_telemetry.clone()
     }
 
     /// Return configuration, circuit-breaker state, and lifetime execution
@@ -918,12 +1685,45 @@ impl RocmGraphRunner {
             .count();
         #[cfg(not(feature = "rocm"))]
         let active_graph_slot_count = 0;
+        #[cfg(feature = "rocm")]
+        let memory = self.memory_accounting(&HashSet::new(), None);
+        let phase_telemetry = self.phase_telemetry.snapshot();
+        #[cfg(not(feature = "rocm"))]
+        let (
+            retained_stable_io_bytes,
+            retained_capture_arena_bytes,
+            retained_blaslt_workspace_bytes,
+            retained_slot_state_bytes,
+            retained_bytes,
+            opaque_native_object_count,
+            retained_bytes_accounting_complete,
+        ) = (0, 0, 0, 0, 0, 0, true);
+        #[cfg(feature = "rocm")]
+        let (
+            retained_stable_io_bytes,
+            retained_capture_arena_bytes,
+            retained_blaslt_workspace_bytes,
+            retained_slot_state_bytes,
+            retained_bytes,
+            opaque_native_object_count,
+            retained_bytes_accounting_complete,
+        ) = (
+            memory.stable_io_bytes,
+            memory.capture_arena_bytes,
+            memory.blaslt_workspace_bytes,
+            memory.slot_state_bytes,
+            memory.retained_bytes,
+            memory.opaque_native_object_count,
+            memory.complete,
+        );
 
         RocmGraphStats {
             requested: self.requested,
             capture_requested: self.capture_requested,
             enabled: self.enabled,
             capture_enabled: self.capture_requested && self.enabled,
+            max_cached_graphs: self.policy.max_cached_graphs(),
+            max_retained_bytes: self.policy.max_retained_bytes(),
             capture_attempts: self.counters.capture_attempts,
             capture_successes: self.counters.capture_successes,
             capture_deferrals: self.counters.capture_deferrals,
@@ -939,11 +1739,48 @@ impl RocmGraphRunner {
             decode_owner_graph_release_count: self.counters.decode_owner_graph_release_count,
             graph_slot_create_count: self.counters.graph_slot_create_count,
             graph_slot_reuse_count: self.counters.graph_slot_reuse_count,
+            cache_admission_successes: self.counters.cache_admission_successes,
+            cache_evictions: self.counters.cache_evictions,
+            cache_evicted_bytes: self.counters.cache_evicted_bytes,
+            budget_evictions: self.counters.budget_evictions,
+            pressure_evictions: self.counters.pressure_evictions,
+            invalidation_evictions: self.counters.invalidation_evictions,
+            recovery_evictions: self.counters.recovery_evictions,
+            entry_capacity_rejections: self.counters.entry_capacity_rejections,
+            byte_budget_rejections: self.counters.byte_budget_rejections,
+            accounting_incomplete_rejections: self.counters.accounting_incomplete_rejections,
+            pre_capture_entry_capacity_skips: self.counters.pre_capture_entry_capacity_skips,
+            pre_capture_byte_budget_skips: self.counters.pre_capture_byte_budget_skips,
+            pre_capture_accounting_incomplete_skips: self
+                .counters
+                .pre_capture_accounting_incomplete_skips,
+            pre_capture_memory_reservation_denied_skips: self
+                .counters
+                .pre_capture_memory_reservation_denied_skips,
+            memory_governor_selector_mismatch_skips: self
+                .counters
+                .memory_governor_selector_mismatch_skips,
             captured_graph_count,
             graph_slot_count,
             active_graph_slot_count,
             idle_graph_slot_count: graph_slot_count.saturating_sub(active_graph_slot_count),
             tracked_decode_owner_count,
+            retained_stable_io_bytes,
+            retained_capture_arena_bytes,
+            retained_blaslt_workspace_bytes,
+            retained_slot_state_bytes,
+            retained_bytes,
+            peak_retained_bytes: self.peak_retained_bytes.max(retained_bytes),
+            opaque_native_object_count,
+            retained_bytes_accounting_complete,
+            quarantined_retained_bytes: self.counters.quarantined_retained_bytes,
+            pre_candidate_headroom_phase: phase_telemetry.pre_candidate_headroom_phase,
+            candidate_warm_phase: phase_telemetry.candidate_warm_phase,
+            pre_native_reservation_phase: phase_telemetry.pre_native_reservation_phase,
+            native_capture_phase: phase_telemetry.native_capture_phase,
+            rejected_candidate_cleanup_phase: phase_telemetry.rejected_candidate_cleanup_phase,
+            last_transient_candidate_bytes: phase_telemetry.last_transient_candidate_bytes,
+            peak_transient_candidate_bytes: phase_telemetry.peak_transient_candidate_bytes,
             fallbacks: self.counters.fallbacks,
         }
     }
@@ -955,59 +1792,38 @@ impl RocmGraphRunner {
         self.warmup_done = false;
         #[cfg(feature = "rocm")]
         {
-            let released = self.release_captured_after_device_settlement("adapter_invalidation");
-            self.graph_slots.clear();
+            let owners: HashSet<_> = self
+                .graph_owners()
+                .into_iter()
+                .chain(self.graph_slots.keys().copied())
+                .collect();
+            self.evict_graph_owners(
+                &owners,
+                "adapter_invalidation",
+                RocmGraphEvictionReason::Invalidation,
+                true,
+            )?;
+            self.record_budget_relief();
             self.decode_row_slots.clear();
+            self.graph_ineligible_rows.clear();
             self.non_capture_safe.clear();
             self.capture_retry.clear();
+            self.reservation_denied_bytes.clear();
+            self.reservation_denied_wide_bytes = None;
             self.cache_full_warned = false;
             self.decode_timelines.clear();
-            anyhow::ensure!(
-                released,
-                "ROCm graph invalidation could not settle device work; cleanup is quarantined"
-            );
         }
         Ok(())
     }
 
-    /// Settle all device work before releasing pointer-bearing graph state.
-    /// If settlement fails, the context enters cleanup quarantine and the map
-    /// is deliberately leaked so no later owner can free uncertain live memory.
+    /// Settle all device work before and after releasing pointer-bearing graph
+    /// state. Failed settlement leaves the sticky low-level quarantine in charge
+    /// of retaining any uncertain resources until process restart.
     #[cfg(feature = "rocm")]
-    fn release_captured_after_device_settlement(&mut self, boundary: &'static str) -> bool {
-        let Some(context) = self
-            .captured
-            .values()
-            .next()
-            .map(|captured| captured.context.clone())
-        else {
-            return true;
-        };
-        match context.synchronize_device_for(kiln_tensor::RocmSyncReason::ErrorRecovery) {
-            Ok(()) if !context.cleanup_quarantined() => {
-                self.captured.clear();
-                true
-            }
-            result => {
-                let retained = std::mem::take(&mut self.captured);
-                let retained_graphs = retained.len();
-                std::mem::forget(retained);
-                match result {
-                    Ok(()) => tracing::error!(
-                        boundary,
-                        retained_graphs,
-                        "ROCm graph state retained until process exit because execution is quarantined"
-                    ),
-                    Err(error) => tracing::error!(
-                        boundary,
-                        retained_graphs,
-                        error = %error,
-                        "ROCm graph state retained until process exit because device settlement failed"
-                    ),
-                }
-                false
-            }
-        }
+    fn release_captured_after_device_settlement(&mut self, boundary: &'static str) -> Result<()> {
+        let owners = self.graph_owners();
+        self.evict_graph_owners(&owners, boundary, RocmGraphEvictionReason::Recovery, false)?;
+        Ok(())
     }
 
     /// Return a finished logical decode row's graph slot to the bounded reuse
@@ -1017,6 +1833,7 @@ impl RocmGraphRunner {
     pub fn release_decode_row(&mut self, row_id: u64) {
         #[cfg(feature = "rocm")]
         {
+            self.graph_ineligible_rows.remove(&row_id);
             let Some(owner) = self.decode_row_slots.remove(&row_id) else {
                 return;
             };
@@ -1031,6 +1848,7 @@ impl RocmGraphRunner {
             } else if let Some(slot) = self.graph_slots.get_mut(&owner) {
                 slot.assigned_row = None;
             }
+            self.record_budget_relief();
             self.counters.record_decode_owner_release(0);
             tracing::debug!(
                 event = "rocm_graph_decode_owner_released",
@@ -1133,12 +1951,74 @@ impl RocmGraphRunner {
     }
 
     #[cfg(feature = "rocm")]
+    fn publish_new_graph_slot(
+        &mut self,
+        row_id: u64,
+        owner: RocmGraphOwner,
+        linear_state: LinearAttentionState,
+        allocations: Vec<RocmAllocationRecord>,
+        accounting_complete: bool,
+    ) -> std::result::Result<(), RocmGraphFallbackReason> {
+        let candidate_slot = RocmGraphCandidateSlot {
+            owner,
+            allocations: &allocations,
+            accounting_complete,
+        };
+        let projected = self.memory_accounting_with_retained_slots(
+            &HashSet::new(),
+            None,
+            &HashSet::new(),
+            Some(candidate_slot),
+        );
+        if !projected.complete || projected.retained_bytes > self.max_retained_bytes() {
+            let (rejection, reason) = if !projected.complete {
+                (
+                    RocmGraphAdmissionRejection::AccountingIncomplete,
+                    RocmGraphFallbackReason::GraphAccountingIncomplete,
+                )
+            } else {
+                (
+                    RocmGraphAdmissionRejection::ByteBudget,
+                    RocmGraphFallbackReason::GraphCacheByteBudget,
+                )
+            };
+            self.graph_ineligible_rows.insert(row_id, reason);
+            self.counters.record_pre_capture_skip(rejection);
+            tracing::warn!(
+                row_id,
+                graph_slot_id = owner.slot_id(),
+                projected_retained_bytes = projected.retained_bytes,
+                max_retained_bytes = self.max_retained_bytes(),
+                accounting_complete = projected.complete,
+                "ROCm graph slot rejected by the hard retained-byte budget"
+            );
+            return Err(reason);
+        }
+
+        self.graph_slots.insert(
+            owner,
+            RocmGraphSlotState {
+                assigned_row: None,
+                linear_state,
+                allocations,
+                accounting_complete,
+            },
+        );
+        self.peak_retained_bytes = self.peak_retained_bytes.max(projected.retained_bytes);
+        self.counters.record_graph_slot_create();
+        Ok(())
+    }
+
+    #[cfg(feature = "rocm")]
     fn bind_decode_row_to_slot(
         &mut self,
         row_id: u64,
         requested_key: &RocmGraphKey,
         linear_state: &mut LinearAttentionState,
-    ) -> Result<RocmGraphOwner> {
+    ) -> Result<RocmGraphBindOutcome> {
+        if let Some(reason) = self.graph_ineligible_rows.get(&row_id).copied() {
+            return Ok(RocmGraphBindOutcome::Fallback(reason));
+        }
         let existing = self.decode_row_slots.get(&row_id).copied();
         let owner = if let Some(owner) = existing {
             owner
@@ -1166,14 +2046,21 @@ impl RocmGraphRunner {
             } else {
                 let owner = RocmGraphOwner::Slot(self.next_graph_slot_id);
                 self.next_graph_slot_id = self.next_graph_slot_id.saturating_add(1);
-                self.graph_slots.insert(
-                    owner,
-                    RocmGraphSlotState {
-                        assigned_row: None,
-                        linear_state: Self::clone_linear_state_handles(linear_state),
-                    },
+                let (allocations, accounting_complete) = inspect_rocm_tensor_allocations(
+                    linear_state
+                        .recurrent_states
+                        .iter()
+                        .chain(linear_state.conv_states.iter()),
                 );
-                self.counters.record_graph_slot_create();
+                if let Err(reason) = self.publish_new_graph_slot(
+                    row_id,
+                    owner,
+                    Self::clone_linear_state_handles(linear_state),
+                    allocations,
+                    accounting_complete,
+                ) {
+                    return Ok(RocmGraphBindOutcome::Fallback(reason));
+                }
                 owner
             };
             self.decode_row_slots.insert(row_id, owner);
@@ -1182,6 +2069,7 @@ impl RocmGraphRunner {
                 .get_mut(&owner)
                 .expect("new or idle ROCm graph slot must exist")
                 .assigned_row = Some(row_id);
+            self.record_ownership_mutation();
             owner
         };
 
@@ -1206,12 +2094,916 @@ impl RocmGraphRunner {
                 .conv_states
                 .clone_from(&slot.linear_state.conv_states);
         }
-        Ok(owner)
+        Ok(RocmGraphBindOutcome::Bound(owner))
     }
 
     #[cfg(feature = "rocm")]
     fn max_cached_graphs(&self) -> usize {
         self.policy.max_cached_graphs()
+    }
+
+    #[cfg(feature = "rocm")]
+    fn max_retained_bytes(&self) -> u64 {
+        self.policy.max_retained_bytes()
+    }
+
+    #[cfg(feature = "rocm")]
+    fn matching_memory_governor(&self) -> bool {
+        memory_governor_selector_matches(
+            self.memory_probe_selector,
+            kiln_memory::MemoryGovernor::global_configuration().selector,
+        )
+    }
+
+    #[cfg(feature = "rocm")]
+    fn next_access_tick(&mut self) -> u64 {
+        let tick = self.next_access_tick;
+        self.next_access_tick = self.next_access_tick.saturating_add(1);
+        tick
+    }
+
+    #[cfg(feature = "rocm")]
+    fn record_ownership_mutation(&mut self) {
+        self.ownership_generation = self.ownership_generation.checked_add(1).unwrap_or(1);
+    }
+
+    #[cfg(feature = "rocm")]
+    fn record_budget_relief(&mut self) {
+        self.record_ownership_mutation();
+        self.budget_relief_generation = self.budget_relief_generation.checked_add(1).unwrap_or(1);
+        self.budget_rejection_generation.clear();
+        self.budget_rejection_generation_wide = None;
+    }
+
+    #[cfg(feature = "rocm")]
+    fn budget_capture_suppressed(&self, key: &RocmGraphKey) -> bool {
+        self.budget_rejection_generation_wide == Some(self.budget_relief_generation)
+            || self.budget_rejection_generation.get(key) == Some(&self.budget_relief_generation)
+    }
+
+    #[cfg(feature = "rocm")]
+    fn remember_reservation_denial(&mut self, key: &RocmGraphKey, required_bytes: u64) {
+        if let Some(wide) = self.reservation_denied_wide_bytes.as_mut() {
+            *wide = (*wide).max(required_bytes);
+            return;
+        }
+        if let Some(existing) = self.reservation_denied_bytes.get_mut(key) {
+            *existing = (*existing).max(required_bytes);
+            return;
+        }
+        if self.reservation_denied_bytes.len() >= Self::MAX_BUDGET_REJECTION_GEOMETRIES {
+            let wide = self
+                .reservation_denied_bytes
+                .values()
+                .copied()
+                .fold(required_bytes, u64::max);
+            self.reservation_denied_bytes.clear();
+            self.reservation_denied_wide_bytes = Some(wide);
+            return;
+        }
+        self.reservation_denied_bytes
+            .insert(key.clone(), required_bytes);
+    }
+
+    #[cfg(feature = "rocm")]
+    fn reservation_retry_suppressed_with_available(
+        &mut self,
+        key: &RocmGraphKey,
+        available_bytes: Option<u64>,
+    ) -> bool {
+        let required_bytes = self
+            .reservation_denied_bytes
+            .get(key)
+            .copied()
+            .or(self.reservation_denied_wide_bytes);
+        let Some(required_bytes) = required_bytes else {
+            return false;
+        };
+        if available_bytes.is_some_and(|available| available >= required_bytes) {
+            self.reservation_denied_bytes.remove(key);
+            self.reservation_denied_wide_bytes = None;
+            false
+        } else {
+            true
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    fn reservation_retry_suppressed(
+        &mut self,
+        key: &RocmGraphKey,
+    ) -> Option<RocmGraphFallbackReason> {
+        if !self.reservation_denied_bytes.contains_key(key)
+            && self.reservation_denied_wide_bytes.is_none()
+        {
+            return None;
+        }
+        if !self.matching_memory_governor() {
+            self.counters.memory_governor_selector_mismatch_skips = self
+                .counters
+                .memory_governor_selector_mismatch_skips
+                .saturating_add(1);
+            return Some(RocmGraphFallbackReason::MemoryGovernorSelectorMismatch);
+        }
+        let available = kiln_memory::MemoryGovernor::try_global_cached_available_bytes();
+        if self.reservation_retry_suppressed_with_available(key, available) {
+            self.counters.pre_capture_memory_reservation_denied_skips = self
+                .counters
+                .pre_capture_memory_reservation_denied_skips
+                .saturating_add(1);
+            Some(RocmGraphFallbackReason::MemoryReservationDenied)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    fn touch_captured_graph(&mut self, key: &RocmGraphCacheKey) {
+        let tick = self.next_access_tick();
+        if let Some(captured) = self.captured.get_mut(key) {
+            captured.last_used_tick = tick;
+        }
+    }
+
+    /// Derive exact requested physical bytes from live allocation metadata. This
+    /// never synchronizes a stream or calls the HIP runtime.
+    #[cfg(feature = "rocm")]
+    fn memory_accounting(
+        &self,
+        excluded_owners: &HashSet<RocmGraphOwner>,
+        candidate: Option<(&RocmGraphCacheKey, &RocmGraphEntryAccounting)>,
+    ) -> RocmGraphMemoryAccounting {
+        self.memory_accounting_with_retained_slots(
+            excluded_owners,
+            candidate,
+            &HashSet::new(),
+            None,
+        )
+    }
+
+    #[cfg(feature = "rocm")]
+    fn memory_accounting_with_retained_slots(
+        &self,
+        excluded_owners: &HashSet<RocmGraphOwner>,
+        candidate: Option<(&RocmGraphCacheKey, &RocmGraphEntryAccounting)>,
+        retained_slot_owners: &HashSet<RocmGraphOwner>,
+        candidate_slot: Option<RocmGraphCandidateSlot<'_>>,
+    ) -> RocmGraphMemoryAccounting {
+        const OPAQUE_NATIVE_OBJECTS_PER_GRAPH: usize = 5; // graph, exec, stream, two events
+
+        let included = || {
+            self.captured
+                .iter()
+                .filter(|(key, _)| !excluded_owners.contains(&key.owner))
+                .map(|(key, captured)| (key, &captured.accounting))
+                .chain(candidate.into_iter())
+        };
+        let mut accounting = RocmGraphMemoryAccounting {
+            complete: true,
+            ..RocmGraphMemoryAccounting::default()
+        };
+        let mut seen = HashSet::new();
+
+        for (_, entry) in included() {
+            for allocation in &entry.stable_io {
+                RocmGraphMemoryAccounting::add_record(
+                    &mut accounting.stable_io_bytes,
+                    &mut seen,
+                    *allocation,
+                );
+            }
+        }
+        for (_, entry) in included() {
+            for allocation in &entry.capture_arena {
+                RocmGraphMemoryAccounting::add_record(
+                    &mut accounting.capture_arena_bytes,
+                    &mut seen,
+                    *allocation,
+                );
+            }
+        }
+        for (_, entry) in included() {
+            if let Some(allocation) = entry.blaslt_workspace {
+                RocmGraphMemoryAccounting::add_record(
+                    &mut accounting.blaslt_workspace_bytes,
+                    &mut seen,
+                    allocation,
+                );
+            }
+        }
+
+        let represented_owners: HashSet<_> = self
+            .graph_slots
+            .keys()
+            .filter(|owner| !excluded_owners.contains(*owner))
+            .copied()
+            .chain(included().map(|(key, _)| key.owner))
+            .chain(retained_slot_owners.iter().copied())
+            .chain(candidate_slot.map(|slot| slot.owner))
+            .collect();
+        for owner in represented_owners {
+            if let Some(slot) = candidate_slot.filter(|slot| slot.owner == owner) {
+                accounting.complete &= slot.accounting_complete;
+                for allocation in slot.allocations {
+                    RocmGraphMemoryAccounting::add_record(
+                        &mut accounting.slot_state_bytes,
+                        &mut seen,
+                        *allocation,
+                    );
+                }
+                continue;
+            }
+            let Some(slot) = self.graph_slots.get(&owner) else {
+                accounting.complete = false;
+                continue;
+            };
+            accounting.complete &= slot.accounting_complete;
+            for allocation in &slot.allocations {
+                RocmGraphMemoryAccounting::add_record(
+                    &mut accounting.slot_state_bytes,
+                    &mut seen,
+                    *allocation,
+                );
+            }
+        }
+
+        accounting.opaque_native_object_count = included()
+            .count()
+            .saturating_mul(OPAQUE_NATIVE_OBJECTS_PER_GRAPH);
+        accounting.finish();
+        accounting
+    }
+
+    #[cfg(feature = "rocm")]
+    fn idle_owner_lru(&self, protected_owner: RocmGraphOwner) -> Vec<RocmGraphOwner> {
+        let mut owners: Vec<_> = self
+            .graph_slots
+            .iter()
+            .filter(|(owner, slot)| {
+                **owner != protected_owner
+                    && slot.assigned_row.is_none()
+                    && self.captured.keys().any(|key| key.owner == **owner)
+            })
+            .map(|(owner, _)| {
+                let last_used = self
+                    .captured
+                    .iter()
+                    .filter(|(key, _)| key.owner == *owner)
+                    .map(|(_, captured)| captured.last_used_tick)
+                    .max()
+                    .unwrap_or(0);
+                (last_used, owner.slot_id(), *owner)
+            })
+            .collect();
+        sort_idle_owner_lru(&mut owners);
+        owners.into_iter().map(|(_, _, owner)| owner).collect()
+    }
+
+    #[cfg(feature = "rocm")]
+    fn retained_entry_count_excluding(&self, excluded: &HashSet<RocmGraphOwner>) -> usize {
+        self.captured
+            .keys()
+            .filter(|key| !excluded.contains(&key.owner))
+            .count()
+    }
+
+    /// Plan all ordinary cache evictions before mutating ownership. Only idle
+    /// owners are candidates, and an owner is evicted as a unit so its slot-state
+    /// allocation is actually reclaimable.
+    #[cfg(feature = "rocm")]
+    fn plan_candidate_admission(
+        &self,
+        key: &RocmGraphCacheKey,
+        candidate: &RocmGraphEntryAccounting,
+    ) -> std::result::Result<RocmGraphAdmissionPlan, RocmGraphAdmissionRejection> {
+        if self.captured.contains_key(key) {
+            return Err(RocmGraphAdmissionRejection::EntryCapacity);
+        }
+
+        let all_existing_owners: HashSet<_> = self
+            .graph_slots
+            .keys()
+            .copied()
+            .chain(self.captured.keys().map(|key| key.owner))
+            .collect();
+        let candidate_alone = self.memory_accounting(&all_existing_owners, Some((key, candidate)));
+        if !candidate_alone.complete {
+            return Err(RocmGraphAdmissionRejection::AccountingIncomplete);
+        }
+        if candidate_alone.retained_bytes > self.max_retained_bytes() {
+            return Err(RocmGraphAdmissionRejection::CandidateByteBudget);
+        }
+
+        let mut excluded = HashSet::new();
+        let mut plan = RocmGraphAdmissionPlan::default();
+        let mut victims = self.idle_owner_lru(key.owner).into_iter();
+        loop {
+            let entry_count = self
+                .retained_entry_count_excluding(&excluded)
+                .saturating_add(1);
+            let projected = self.memory_accounting(&excluded, Some((key, candidate)));
+            if entry_count <= self.max_cached_graphs()
+                && projected.complete
+                && projected.retained_bytes <= self.max_retained_bytes()
+            {
+                return Ok(plan);
+            }
+
+            let rejection = if !projected.complete {
+                RocmGraphAdmissionRejection::AccountingIncomplete
+            } else if entry_count > self.max_cached_graphs() {
+                RocmGraphAdmissionRejection::EntryCapacity
+            } else {
+                RocmGraphAdmissionRejection::ByteBudget
+            };
+            let Some(owner) = victims.next() else {
+                return Err(rejection);
+            };
+            excluded.insert(owner);
+            plan.evict_owners.push(owner);
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    const fn admission_fallback_reason(
+        rejection: RocmGraphAdmissionRejection,
+    ) -> RocmGraphFallbackReason {
+        match rejection {
+            RocmGraphAdmissionRejection::EntryCapacity => {
+                RocmGraphFallbackReason::GraphCacheCapacity
+            }
+            RocmGraphAdmissionRejection::ByteBudget
+            | RocmGraphAdmissionRejection::CandidateByteBudget => {
+                RocmGraphFallbackReason::GraphCacheByteBudget
+            }
+            RocmGraphAdmissionRejection::AccountingIncomplete => {
+                RocmGraphFallbackReason::GraphAccountingIncomplete
+            }
+        }
+    }
+
+    /// Reserve both cache-entry and exact retained-byte headroom after the warm
+    /// Record pass but before native stream capture. Any idle-owner evictions
+    /// are fully settled here, so capture never creates a transient N+1 entry or
+    /// a candidate that is already known to be unretainable.
+    #[cfg(feature = "rocm")]
+    fn reserve_capture_candidate(
+        &mut self,
+        key: &RocmGraphCacheKey,
+        accounting: &RocmGraphEntryAccounting,
+    ) -> Result<Option<RocmGraphFallbackReason>> {
+        let plan = match self.plan_candidate_admission(key, accounting) {
+            Ok(plan) => plan,
+            Err(rejection) => {
+                self.counters.record_pre_capture_skip(rejection);
+                self.apply_capture_rejection_suppression(key, rejection);
+                return Ok(Some(Self::admission_fallback_reason(rejection)));
+            }
+        };
+
+        if !plan.evict_owners.is_empty() {
+            let owners = plan.evict_owners.into_iter().collect();
+            self.evict_graph_owners(
+                &owners,
+                "pre_capture_budget_reservation",
+                RocmGraphEvictionReason::Budget,
+                true,
+            )?;
+        }
+
+        let projected = self.memory_accounting(&HashSet::new(), Some((key, accounting)));
+        let rejection = if !projected.complete {
+            Some(RocmGraphAdmissionRejection::AccountingIncomplete)
+        } else if self.captured.len().saturating_add(1) > self.max_cached_graphs() {
+            Some(RocmGraphAdmissionRejection::EntryCapacity)
+        } else if projected.retained_bytes > self.max_retained_bytes() {
+            Some(RocmGraphAdmissionRejection::ByteBudget)
+        } else {
+            None
+        };
+        if let Some(rejection) = rejection {
+            self.counters.record_pre_capture_skip(rejection);
+            self.apply_capture_rejection_suppression(key, rejection);
+            return Ok(Some(Self::admission_fallback_reason(rejection)));
+        }
+        Ok(None)
+    }
+
+    /// Reclaim deterministic idle owners before allocating a warm candidate
+    /// when either retained limit has no headroom. Candidate working memory is
+    /// necessarily allocated by the Record pass before its exact size is
+    /// knowable; this phase prevents that transient from also overlapping an
+    /// already entry- or byte-saturated cache.
+    #[cfg(feature = "rocm")]
+    fn reserve_capture_entry_capacity(
+        &mut self,
+        protected_owner: RocmGraphOwner,
+    ) -> Result<Option<RocmGraphFallbackReason>> {
+        let current = self.memory_accounting(&HashSet::new(), None);
+        let entry_saturated = self.captured.len() >= self.max_cached_graphs();
+        let byte_saturated = current.retained_bytes >= self.max_retained_bytes();
+        if current.complete && !entry_saturated && !byte_saturated {
+            return Ok(None);
+        }
+
+        let mut projected_entries = self.captured.len();
+        let mut victims = Vec::new();
+        let mut excluded = HashSet::new();
+        let mut projected = current;
+        for owner in self.idle_owner_lru(protected_owner) {
+            projected_entries = projected_entries.saturating_sub(
+                self.captured
+                    .keys()
+                    .filter(|key| key.owner == owner)
+                    .count(),
+            );
+            victims.push(owner);
+            excluded.insert(owner);
+            projected = self.memory_accounting(&excluded, None);
+            if projected_entries < self.max_cached_graphs()
+                && projected.complete
+                && projected.retained_bytes < self.max_retained_bytes()
+            {
+                break;
+            }
+        }
+        let rejection = if !projected.complete {
+            Some(RocmGraphAdmissionRejection::AccountingIncomplete)
+        } else if projected_entries >= self.max_cached_graphs() {
+            Some(RocmGraphAdmissionRejection::EntryCapacity)
+        } else if projected.retained_bytes >= self.max_retained_bytes() {
+            Some(RocmGraphAdmissionRejection::ByteBudget)
+        } else {
+            None
+        };
+        if let Some(rejection) = rejection {
+            self.counters.record_pre_capture_skip(rejection);
+            return Ok(Some(Self::admission_fallback_reason(rejection)));
+        }
+
+        self.evict_graph_owners(
+            &victims.into_iter().collect(),
+            "pre_capture_entry_reservation",
+            RocmGraphEvictionReason::Budget,
+            true,
+        )?;
+        Ok(None)
+    }
+
+    #[cfg(feature = "rocm")]
+    fn pre_capture_rejection(
+        &mut self,
+        protected_owner: RocmGraphOwner,
+    ) -> Option<RocmGraphFallbackReason> {
+        let current = self.memory_accounting(&HashSet::new(), None);
+        if self.captured.len() < self.max_cached_graphs()
+            && current.complete
+            && current.retained_bytes < self.max_retained_bytes()
+        {
+            return None;
+        }
+        if !self.idle_owner_lru(protected_owner).is_empty() {
+            return None;
+        }
+        let (rejection, reason) = if !current.complete {
+            (
+                RocmGraphAdmissionRejection::AccountingIncomplete,
+                RocmGraphFallbackReason::GraphAccountingIncomplete,
+            )
+        } else if self.captured.len() >= self.max_cached_graphs() {
+            (
+                RocmGraphAdmissionRejection::EntryCapacity,
+                RocmGraphFallbackReason::GraphCacheCapacity,
+            )
+        } else {
+            (
+                RocmGraphAdmissionRejection::ByteBudget,
+                RocmGraphFallbackReason::GraphCacheByteBudget,
+            )
+        };
+        self.counters.record_pre_capture_skip(rejection);
+        Some(reason)
+    }
+
+    #[cfg(feature = "rocm")]
+    fn graph_owners(&self) -> HashSet<RocmGraphOwner> {
+        self.captured.keys().map(|key| key.owner).collect()
+    }
+
+    /// Drop selected graph owners as one settled transaction. Pre-drop
+    /// settlement protects pointer lifetimes; the post-drop settlement completes
+    /// async frees. Destructor-triggered quarantine is checked before any caller
+    /// can dispatch fallback work.
+    #[cfg(feature = "rocm")]
+    fn evict_graph_owners(
+        &mut self,
+        owners: &HashSet<RocmGraphOwner>,
+        boundary: &'static str,
+        reason: RocmGraphEvictionReason,
+        remove_selected_slots: bool,
+    ) -> Result<RocmGraphMemoryAccounting> {
+        let keys: Vec<_> = self
+            .captured
+            .keys()
+            .filter(|key| owners.contains(&key.owner))
+            .cloned()
+            .collect();
+        let prospective_selected_slots: HashSet<_> = owners
+            .iter()
+            .copied()
+            .filter(|owner| {
+                let idle = self
+                    .graph_slots
+                    .get(owner)
+                    .is_some_and(|slot| slot.assigned_row.is_none());
+                remove_selected_slots || idle
+            })
+            .collect();
+        let retained_slot_owners: HashSet<_> = owners
+            .difference(&prospective_selected_slots)
+            .copied()
+            .collect();
+        let context = keys
+            .first()
+            .and_then(|key| self.captured.get(key))
+            .map(|captured| captured.context.clone())
+            .or_else(|| {
+                prospective_selected_slots.iter().find_map(|owner| {
+                    self.graph_slots.get(owner).and_then(|slot| {
+                        slot.linear_state
+                            .recurrent_states
+                            .iter()
+                            .chain(slot.linear_state.conv_states.iter())
+                            .find_map(|tensor| {
+                                tensor
+                                    .storage()
+                                    .as_any()
+                                    .downcast_ref::<kiln_tensor::RocmStorage>()
+                                    .map(kiln_tensor::RocmStorage::context)
+                            })
+                    })
+                })
+            });
+        let before = self.memory_accounting(&HashSet::new(), None);
+        let after =
+            self.memory_accounting_with_retained_slots(owners, None, &retained_slot_owners, None);
+        let released = RocmGraphMemoryAccounting {
+            stable_io_bytes: before.stable_io_bytes.saturating_sub(after.stable_io_bytes),
+            capture_arena_bytes: before
+                .capture_arena_bytes
+                .saturating_sub(after.capture_arena_bytes),
+            blaslt_workspace_bytes: before
+                .blaslt_workspace_bytes
+                .saturating_sub(after.blaslt_workspace_bytes),
+            slot_state_bytes: before
+                .slot_state_bytes
+                .saturating_sub(after.slot_state_bytes),
+            retained_bytes: before.retained_bytes.saturating_sub(after.retained_bytes),
+            opaque_native_object_count: keys.len().saturating_mul(5),
+            complete: before.complete && after.complete,
+        };
+
+        if let Some(context) = context.as_ref() {
+            context
+                .synchronize_device_for(kiln_tensor::RocmSyncReason::MemoryReclaim)
+                .with_context(|| format!("{boundary}: settle ROCm device before graph eviction"))?;
+            anyhow::ensure!(
+                !context.cleanup_quarantined(),
+                "{boundary}: ROCm execution is quarantined before graph eviction"
+            );
+        }
+
+        let mut removed_graphs = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some(captured) = self.captured.remove(&key) {
+                removed_graphs.push(captured);
+            }
+        }
+        let mut removed_slots = Vec::new();
+        let selected_slots: Vec<_> = prospective_selected_slots
+            .into_iter()
+            .filter(|owner| !self.captured.keys().any(|key| key.owner == *owner))
+            .collect();
+        for owner in &selected_slots {
+            if let Some(slot) = self.graph_slots.remove(owner) {
+                removed_slots.push(slot);
+            }
+            self.decode_timelines.remove(owner);
+        }
+        if remove_selected_slots {
+            self.decode_row_slots
+                .retain(|_, owner| !selected_slots.contains(owner));
+        }
+
+        let removed_graph_count = removed_graphs.len();
+        let removed_slot_count = removed_slots.len();
+        drop(removed_graphs);
+        drop(removed_slots);
+        if removed_graph_count > 0 || removed_slot_count > 0 {
+            self.record_budget_relief();
+        }
+
+        let Some(context) = context else {
+            self.counters.record_cache_eviction(
+                removed_graph_count,
+                released.retained_bytes,
+                reason,
+            );
+            return Ok(released);
+        };
+        if context.cleanup_quarantined() {
+            self.counters.quarantined_retained_bytes = self
+                .counters
+                .quarantined_retained_bytes
+                .saturating_add(released.retained_bytes);
+            anyhow::bail!(
+                "{boundary}: ROCm graph destructor quarantined execution; restart the process"
+            );
+        }
+        if let Err(error) =
+            context.synchronize_device_for(kiln_tensor::RocmSyncReason::MemoryReclaim)
+        {
+            self.counters.quarantined_retained_bytes = self
+                .counters
+                .quarantined_retained_bytes
+                .saturating_add(released.retained_bytes);
+            return Err(anyhow::anyhow!(error))
+                .with_context(|| format!("{boundary}: settle ROCm device after graph eviction"));
+        }
+        if context.cleanup_quarantined() {
+            self.counters.quarantined_retained_bytes = self
+                .counters
+                .quarantined_retained_bytes
+                .saturating_add(released.retained_bytes);
+            anyhow::bail!(
+                "{boundary}: ROCm graph post-drop settlement quarantined execution; restart the process"
+            );
+        }
+
+        self.counters
+            .record_cache_eviction(removed_graph_count, released.retained_bytes, reason);
+        self.cache_full_warned = false;
+        Ok(released)
+    }
+
+    #[cfg(feature = "rocm")]
+    fn release_uncached_candidate(
+        &mut self,
+        candidate: CapturedDecodeGraphRocm,
+        boundary: &'static str,
+    ) -> Result<()> {
+        let _cleanup_timer = self
+            .phase_telemetry
+            .timer(RocmGraphPhase::RejectedCandidateCleanup);
+        let candidate = std::mem::ManuallyDrop::new(candidate);
+        let context = candidate.context.clone();
+        let mut seen = HashSet::new();
+        let mut retained_bytes = 0u64;
+        for allocation in candidate
+            .accounting
+            .stable_io
+            .iter()
+            .chain(candidate.accounting.capture_arena.iter())
+            .copied()
+            .chain(candidate.accounting.blaslt_workspace)
+        {
+            RocmGraphMemoryAccounting::add_record(&mut retained_bytes, &mut seen, allocation);
+        }
+        if let Err(error) =
+            context.synchronize_device_for(kiln_tensor::RocmSyncReason::MemoryReclaim)
+        {
+            self.counters.quarantined_retained_bytes = self
+                .counters
+                .quarantined_retained_bytes
+                .saturating_add(retained_bytes);
+            return Err(anyhow::anyhow!(error))
+                .with_context(|| format!("{boundary}: settle uncached ROCm graph before drop"));
+        }
+        if context.cleanup_quarantined() {
+            self.counters.quarantined_retained_bytes = self
+                .counters
+                .quarantined_retained_bytes
+                .saturating_add(retained_bytes);
+            anyhow::bail!("{boundary}: ROCm execution is quarantined before candidate drop");
+        }
+        let candidate = std::mem::ManuallyDrop::into_inner(candidate);
+        drop(candidate);
+        if context.cleanup_quarantined() {
+            self.counters.quarantined_retained_bytes = self
+                .counters
+                .quarantined_retained_bytes
+                .saturating_add(retained_bytes);
+            anyhow::bail!("{boundary}: uncached ROCm graph drop quarantined execution");
+        }
+        if let Err(error) =
+            context.synchronize_device_for(kiln_tensor::RocmSyncReason::MemoryReclaim)
+        {
+            self.counters.quarantined_retained_bytes = self
+                .counters
+                .quarantined_retained_bytes
+                .saturating_add(retained_bytes);
+            return Err(anyhow::anyhow!(error))
+                .with_context(|| format!("{boundary}: settle uncached ROCm graph frees"));
+        }
+        if context.cleanup_quarantined() {
+            self.counters.quarantined_retained_bytes = self
+                .counters
+                .quarantined_retained_bytes
+                .saturating_add(retained_bytes);
+            anyhow::bail!("{boundary}: uncached ROCm graph cleanup quarantined execution");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "rocm")]
+    fn record_post_capture_rejection(
+        &mut self,
+        key: &RocmGraphCacheKey,
+        rejection: RocmGraphAdmissionRejection,
+    ) -> bool {
+        self.counters.record_cache_rejection(rejection);
+        self.apply_capture_rejection_suppression(key, rejection)
+    }
+
+    #[cfg(feature = "rocm")]
+    fn apply_capture_rejection_suppression(
+        &mut self,
+        key: &RocmGraphCacheKey,
+        rejection: RocmGraphAdmissionRejection,
+    ) -> bool {
+        let future_captures_suppressed = match rejection {
+            RocmGraphAdmissionRejection::CandidateByteBudget => {
+                self.non_capture_safe.insert(
+                    key.graph.clone(),
+                    RocmGraphFallbackReason::GraphCacheByteBudget,
+                );
+                true
+            }
+            RocmGraphAdmissionRejection::ByteBudget => {
+                if self.budget_rejection_generation_wide == Some(self.budget_relief_generation) {
+                    return true;
+                }
+                if !self.budget_rejection_generation.contains_key(&key.graph)
+                    && self.budget_rejection_generation.len()
+                        >= Self::MAX_BUDGET_REJECTION_GEOMETRIES
+                {
+                    self.budget_rejection_generation.clear();
+                    self.budget_rejection_generation_wide = Some(self.budget_relief_generation);
+                    return true;
+                }
+                self.budget_rejection_generation
+                    .insert(key.graph.clone(), self.budget_relief_generation);
+                true
+            }
+            RocmGraphAdmissionRejection::AccountingIncomplete => {
+                self.non_capture_safe.insert(
+                    key.graph.clone(),
+                    RocmGraphFallbackReason::GraphAccountingIncomplete,
+                );
+                true
+            }
+            RocmGraphAdmissionRejection::EntryCapacity => false,
+        };
+        future_captures_suppressed
+    }
+
+    #[cfg(feature = "rocm")]
+    fn admit_captured_graph(
+        &mut self,
+        key: RocmGraphCacheKey,
+        mut candidate: CapturedDecodeGraphRocm,
+        native_capture_timer: &mut Option<RocmGraphPhaseTimer>,
+    ) -> Result<bool> {
+        let plan = match self.plan_candidate_admission(&key, &candidate.accounting) {
+            Ok(plan) => plan,
+            Err(rejection) => {
+                drop(native_capture_timer.take());
+                self.release_uncached_candidate(candidate, "cache_admission_rejection")?;
+                let future_captures_suppressed =
+                    self.record_post_capture_rejection(&key, rejection);
+                tracing::warn!(
+                    rejection = ?rejection,
+                    candidate_owner = key.owner.slot_id(),
+                    future_captures_suppressed,
+                    "ROCm graph captured successfully but was not retained by the bounded cache"
+                );
+                return Ok(false);
+            }
+        };
+
+        if !plan.evict_owners.is_empty() {
+            let owners: HashSet<_> = plan.evict_owners.into_iter().collect();
+            if let Err(eviction_error) = self.evict_graph_owners(
+                &owners,
+                "cache_budget_eviction",
+                RocmGraphEvictionReason::Budget,
+                true,
+            ) {
+                drop(native_capture_timer.take());
+                return match self.release_uncached_candidate(
+                    candidate,
+                    "cache_budget_eviction_candidate_cleanup",
+                ) {
+                    Ok(()) => Err(eviction_error),
+                    Err(cleanup_error) => Err(cleanup_error).with_context(|| {
+                        format!(
+                            "cache budget eviction failed before candidate cleanup: {eviction_error:#}"
+                        )
+                    }),
+                };
+            }
+        }
+        let projected =
+            self.memory_accounting(&HashSet::new(), Some((&key, &candidate.accounting)));
+        if !projected.complete
+            || self.captured.len().saturating_add(1) > self.max_cached_graphs()
+            || projected.retained_bytes > self.max_retained_bytes()
+        {
+            let rejection = if !projected.complete {
+                RocmGraphAdmissionRejection::AccountingIncomplete
+            } else if self.captured.len().saturating_add(1) > self.max_cached_graphs() {
+                RocmGraphAdmissionRejection::EntryCapacity
+            } else {
+                RocmGraphAdmissionRejection::ByteBudget
+            };
+            drop(native_capture_timer.take());
+            self.release_uncached_candidate(candidate, "cache_admission_recheck")?;
+            self.record_post_capture_rejection(&key, rejection);
+            tracing::warn!(
+                rejection = ?rejection,
+                candidate_owner = key.owner.slot_id(),
+                "ROCm graph admission recheck rejected a captured candidate"
+            );
+            return Ok(false);
+        }
+        candidate.last_used_tick = self.next_access_tick();
+        if self.captured.contains_key(&key) {
+            drop(native_capture_timer.take());
+            self.release_uncached_candidate(candidate, "cache_admission_key_collision")?;
+            self.counters
+                .record_cache_rejection(RocmGraphAdmissionRejection::EntryCapacity);
+            return Ok(false);
+        }
+        self.captured.insert(key, candidate);
+        self.record_ownership_mutation();
+        self.counters.record_cache_admission();
+        let retained = self.memory_accounting(&HashSet::new(), None).retained_bytes;
+        self.peak_retained_bytes = self.peak_retained_bytes.max(retained);
+        Ok(true)
+    }
+
+    #[cfg(feature = "rocm")]
+    fn reconcile_memory_pressure(
+        &mut self,
+        protected_owner: RocmGraphOwner,
+    ) -> Result<RocmGraphPressureDecision> {
+        if !self.matching_memory_governor() {
+            self.counters.memory_governor_selector_mismatch_skips = self
+                .counters
+                .memory_governor_selector_mismatch_skips
+                .saturating_add(1);
+            return Ok(RocmGraphPressureDecision::EagerOnly(
+                RocmGraphFallbackReason::MemoryGovernorSelectorMismatch,
+            ));
+        }
+        let pressure = kiln_memory::MemoryGovernor::try_global_cached_pressure()
+            .unwrap_or(kiln_memory::MemoryPressure::Critical);
+        if let Some(decision) = non_evicting_pressure_decision(pressure) {
+            return Ok(decision);
+        }
+        match pressure {
+            kiln_memory::MemoryPressure::Tight => {
+                let owners: HashSet<_> = self.idle_owner_lru(protected_owner).into_iter().collect();
+                if !owners.is_empty() {
+                    self.evict_graph_owners(
+                        &owners,
+                        "tight_memory_pressure",
+                        RocmGraphEvictionReason::Pressure,
+                        true,
+                    )?;
+                }
+                Ok(RocmGraphPressureDecision::ReplayOnly(
+                    RocmGraphFallbackReason::TightMemoryPressure,
+                ))
+            }
+            kiln_memory::MemoryPressure::Critical => {
+                let owners = self.graph_owners();
+                if !owners.is_empty() {
+                    self.evict_graph_owners(
+                        &owners,
+                        "critical_memory_pressure",
+                        RocmGraphEvictionReason::Pressure,
+                        false,
+                    )?;
+                }
+                Ok(RocmGraphPressureDecision::EagerOnly(
+                    RocmGraphFallbackReason::CriticalMemoryPressure,
+                ))
+            }
+            kiln_memory::MemoryPressure::Comfortable | kiln_memory::MemoryPressure::Moderate => {
+                unreachable!("non-evicting pressure decisions returned above")
+            }
+        }
     }
 
     #[cfg(feature = "rocm")]
@@ -1370,9 +3162,48 @@ impl RocmGraphRunner {
 
             Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
             let requested_key = RocmGraphKey::new(paged_cache, seq_len);
-            let owner = self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)?;
+            let owner =
+                match self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)? {
+                    RocmGraphBindOutcome::Bound(owner) => owner,
+                    RocmGraphBindOutcome::Fallback(reason) => {
+                        return self.run_eager_fallback(
+                            reason,
+                            seq_len,
+                            std::time::Duration::ZERO,
+                            || {
+                                Self::eager_forward(
+                                    backend,
+                                    token_id,
+                                    weights,
+                                    config,
+                                    paged_cache,
+                                    block_table,
+                                    seq_len,
+                                    linear_state,
+                                    lora,
+                                )
+                            },
+                        );
+                    }
+                };
             self.prepare_owner_decode(owner, graph_row_id, block_table, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
+            let pressure_decision = self.reconcile_memory_pressure(owner)?;
+            if let RocmGraphPressureDecision::EagerOnly(reason) = pressure_decision {
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
+            }
 
             // Geometry previously found non-capture-safe: skip the warm pass +
             // capture attempt and reuse its typed eager-fallback reason.
@@ -1393,8 +3224,12 @@ impl RocmGraphRunner {
             }
 
             // Replay if we have a valid captured graph for this geometry.
-            if let Some(captured) = self.captured.get(&cache_key) {
-                if captured.adapter_gen == self.adapter_generation {
+            if let Some(adapter_gen) = self
+                .captured
+                .get(&cache_key)
+                .map(|captured| captured.adapter_gen)
+            {
+                if adapter_gen == self.adapter_generation {
                     let replay_started = std::time::Instant::now();
                     match self.replay(
                         &cache_key,
@@ -1407,19 +3242,21 @@ impl RocmGraphRunner {
                         seq_len,
                     ) {
                         Ok(logits) => {
+                            self.touch_captured_graph(&cache_key);
                             tracing::trace!(seq_len, "ROCm graph: replayed captured decode graph");
                             return Ok(logits);
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "ROCm graph replay failed: {e:#}; disabling ROCm HIP graphs for this runner and falling back to eager"
+                                "ROCm graph replay failed: {e:#}; disabling ROCm HIP graphs for this runner; if execution was attempted, the device is quarantined and restart is required"
                             );
                             self.enabled = false;
-                            if !self.release_captured_after_device_settlement("replay_failure") {
-                                return Err(e).context(
-                                    "ROCm graph replay failed and recovery settlement failed; cleanup is quarantined",
-                                );
-                            }
+                            self.release_captured_after_device_settlement("replay_failure")
+                                .with_context(|| {
+                                    format!(
+                                        "ROCm graph replay failed ({e:#}) and containment failed; the device is quarantined and restart is required"
+                                    )
+                                })?;
                             return self.run_eager_fallback(
                                 RocmGraphFallbackReason::ReplayFailure,
                                 seq_len,
@@ -1441,71 +3278,76 @@ impl RocmGraphRunner {
                         }
                     }
                 } else {
-                    anyhow::ensure!(
-                        self.release_captured_after_device_settlement(
-                            "adapter_generation_mismatch",
-                        ),
-                        "ROCm graph adapter-generation recovery failed; cleanup is quarantined"
-                    );
+                    self.release_captured_after_device_settlement("adapter_generation_mismatch")
+                        .context(
+                            "ROCm graph adapter-generation recovery failed; cleanup is quarantined",
+                        )?;
                 }
             }
 
-            if self.captured.len() >= self.max_cached_graphs() {
+            if let RocmGraphPressureDecision::ReplayOnly(reason) = pressure_decision {
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
+            }
+
+            if self.budget_capture_suppressed(&requested_key) {
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::GraphCacheByteBudget,
+                    seq_len,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
+                );
+            }
+
+            if let Some(reason) = self.pre_capture_rejection(owner) {
                 if !self.cache_full_warned {
                     self.cache_full_warned = true;
+                    let memory = self.memory_accounting(&HashSet::new(), None);
                     tracing::warn!(
                         cached = self.captured.len(),
-                        "ROCm graph capture skipped: paged metadata shape cache full"
+                        retained_bytes = memory.retained_bytes,
+                        max_cached_graphs = self.max_cached_graphs(),
+                        max_retained_bytes = self.max_retained_bytes(),
+                        reason = reason.as_str(),
+                        "ROCm graph capture skipped: bounded cache has no idle-owner eviction path"
                     );
                 }
-                return self.run_eager_fallback(
-                    RocmGraphFallbackReason::GraphCacheCapacity,
-                    seq_len,
-                    std::time::Duration::ZERO,
-                    || {
-                        Self::eager_forward(
-                            backend,
-                            token_id,
-                            weights,
-                            config,
-                            paged_cache,
-                            block_table,
-                            seq_len,
-                            linear_state,
-                            lora,
-                        )
-                    },
-                );
-            }
-
-            // Memory-pressure guard: capturing a new graph mints freeze-pointer
-            // arena + per-layer output buffers (a few MB). Under Critical memory
-            // pressure (a coexisting job / training run has the VRAM), skip the
-            // capture and run eager rather than risk the allocation tipping the
-            // box into OOM — the governor sees all-process usage, so this respects
-            // whatever else is on the GPU. Decode stays correct either way.
-            if kiln_memory::MemoryGovernor::try_global_cached_pressure()
-                .unwrap_or(kiln_memory::MemoryPressure::Critical)
-                == kiln_memory::MemoryPressure::Critical
-            {
-                return self.run_eager_fallback(
-                    RocmGraphFallbackReason::CriticalMemoryPressure,
-                    seq_len,
-                    std::time::Duration::ZERO,
-                    || {
-                        Self::eager_forward(
-                            backend,
-                            token_id,
-                            weights,
-                            config,
-                            paged_cache,
-                            block_table,
-                            seq_len,
-                            linear_state,
-                            lora,
-                        )
-                    },
-                );
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
             }
 
             // Capture.
@@ -1524,7 +3366,10 @@ impl RocmGraphRunner {
             ) {
                 Ok(logits) => return Ok(logits),
                 Err(e) => {
-                    tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
+                    tracing::warn!(
+                        "ROCm graph capture failed: {e:#}; disabling HIP graphs and attempting \
+                         containment (a quarantined device requires process restart)"
+                    );
                     self.enabled = false;
                     // A failed capture can leave pending work. Eager fallback
                     // is permitted only after recovery proves device quiescence.
@@ -1643,9 +3488,48 @@ impl RocmGraphRunner {
 
             Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
             let requested_key = RocmGraphKey::new(paged_cache, seq_len);
-            let owner = self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)?;
+            let owner =
+                match self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)? {
+                    RocmGraphBindOutcome::Bound(owner) => owner,
+                    RocmGraphBindOutcome::Fallback(reason) => {
+                        return self.run_eager_fallback(
+                            reason,
+                            seq_len,
+                            std::time::Duration::ZERO,
+                            || {
+                                Self::eager_forward_hidden(
+                                    backend,
+                                    token_id,
+                                    weights,
+                                    config,
+                                    paged_cache,
+                                    block_table,
+                                    seq_len,
+                                    linear_state,
+                                    lora,
+                                )
+                            },
+                        );
+                    }
+                };
             self.prepare_owner_decode(owner, graph_row_id, block_table, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
+            let pressure_decision = self.reconcile_memory_pressure(owner)?;
+            if let RocmGraphPressureDecision::EagerOnly(reason) = pressure_decision {
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward_hidden(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
+            }
 
             if let Some(reason) = self.non_capture_safe.get(&requested_key).copied() {
                 return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
@@ -1663,8 +3547,12 @@ impl RocmGraphRunner {
                 });
             }
 
-            if let Some(captured) = self.captured.get(&cache_key) {
-                if captured.adapter_gen == self.adapter_generation {
+            if let Some(adapter_gen) = self
+                .captured
+                .get(&cache_key)
+                .map(|captured| captured.adapter_gen)
+            {
+                if adapter_gen == self.adapter_generation {
                     let replay_started = std::time::Instant::now();
                     match self.replay_hidden(
                         &cache_key,
@@ -1675,19 +3563,21 @@ impl RocmGraphRunner {
                         seq_len,
                     ) {
                         Ok(hidden) => {
+                            self.touch_captured_graph(&cache_key);
                             tracing::trace!(seq_len, "ROCm graph: replayed captured decode graph");
                             return Ok(hidden);
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "ROCm graph replay failed: {e:#}; disabling ROCm HIP graphs for this runner and falling back to eager"
+                                "ROCm graph replay failed: {e:#}; disabling ROCm HIP graphs for this runner; if execution was attempted, the device is quarantined and restart is required"
                             );
                             self.enabled = false;
-                            if !self.release_captured_after_device_settlement("replay_failure") {
-                                return Err(e).context(
-                                    "ROCm graph replay failed and recovery settlement failed; cleanup is quarantined",
-                                );
-                            }
+                            self.release_captured_after_device_settlement("replay_failure")
+                                .with_context(|| {
+                                    format!(
+                                        "ROCm graph replay failed ({e:#}) and containment failed; the device is quarantined and restart is required"
+                                    )
+                                })?;
                             return self.run_eager_fallback(
                                 RocmGraphFallbackReason::ReplayFailure,
                                 seq_len,
@@ -1709,65 +3599,76 @@ impl RocmGraphRunner {
                         }
                     }
                 } else {
-                    anyhow::ensure!(
-                        self.release_captured_after_device_settlement(
-                            "adapter_generation_mismatch",
-                        ),
-                        "ROCm graph adapter-generation recovery failed; cleanup is quarantined"
-                    );
+                    self.release_captured_after_device_settlement("adapter_generation_mismatch")
+                        .context(
+                            "ROCm graph adapter-generation recovery failed; cleanup is quarantined",
+                        )?;
                 }
             }
 
-            if self.captured.len() >= self.max_cached_graphs() {
+            if let RocmGraphPressureDecision::ReplayOnly(reason) = pressure_decision {
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward_hidden(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
+            }
+
+            if self.budget_capture_suppressed(&requested_key) {
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::GraphCacheByteBudget,
+                    seq_len,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward_hidden(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
+                );
+            }
+
+            if let Some(reason) = self.pre_capture_rejection(owner) {
                 if !self.cache_full_warned {
                     self.cache_full_warned = true;
+                    let memory = self.memory_accounting(&HashSet::new(), None);
                     tracing::warn!(
                         cached = self.captured.len(),
-                        "ROCm graph capture skipped: paged metadata shape cache full"
+                        retained_bytes = memory.retained_bytes,
+                        max_cached_graphs = self.max_cached_graphs(),
+                        max_retained_bytes = self.max_retained_bytes(),
+                        reason = reason.as_str(),
+                        "ROCm graph capture skipped: bounded cache has no idle-owner eviction path"
                     );
                 }
-                return self.run_eager_fallback(
-                    RocmGraphFallbackReason::GraphCacheCapacity,
-                    seq_len,
-                    std::time::Duration::ZERO,
-                    || {
-                        Self::eager_forward_hidden(
-                            backend,
-                            token_id,
-                            weights,
-                            config,
-                            paged_cache,
-                            block_table,
-                            seq_len,
-                            linear_state,
-                            lora,
-                        )
-                    },
-                );
-            }
-
-            if kiln_memory::MemoryGovernor::try_global_cached_pressure()
-                .unwrap_or(kiln_memory::MemoryPressure::Critical)
-                == kiln_memory::MemoryPressure::Critical
-            {
-                return self.run_eager_fallback(
-                    RocmGraphFallbackReason::CriticalMemoryPressure,
-                    seq_len,
-                    std::time::Duration::ZERO,
-                    || {
-                        Self::eager_forward_hidden(
-                            backend,
-                            token_id,
-                            weights,
-                            config,
-                            paged_cache,
-                            block_table,
-                            seq_len,
-                            linear_state,
-                            lora,
-                        )
-                    },
-                );
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward_hidden(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
             }
 
             let capture_started = std::time::Instant::now();
@@ -1783,8 +3684,9 @@ impl RocmGraphRunner {
                 linear_state,
                 lora,
             ) {
-                Ok(RocmCaptureStep::CapturedHidden(hidden)) => return Ok(hidden),
-                Ok(RocmCaptureStep::FallbackEager(reason)) => {
+                Ok(RocmCaptureStep::CapturedHidden(hidden))
+                | Ok(RocmCaptureStep::CapturedHiddenUncached(hidden)) => return Ok(hidden),
+                Ok(RocmCaptureStep::FallbackEager { reason, .. }) => {
                     return self.run_eager_fallback(
                         reason,
                         seq_len,
@@ -1805,7 +3707,10 @@ impl RocmGraphRunner {
                     );
                 }
                 Err(e) => {
-                    tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
+                    tracing::warn!(
+                        "ROCm graph capture failed: {e:#}; disabling HIP graphs and attempting \
+                         containment (a quarantined device requires process restart)"
+                    );
                     self.enabled = false;
                     synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device())
                         .with_context(|| format!("capture failed before recovery: {e:#}"))?;
@@ -1926,9 +3831,48 @@ impl RocmGraphRunner {
 
             Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
             let requested_key = RocmGraphKey::new(paged_cache, seq_len);
-            let owner = self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)?;
+            let owner =
+                match self.bind_decode_row_to_slot(graph_row_id, &requested_key, linear_state)? {
+                    RocmGraphBindOutcome::Bound(owner) => owner,
+                    RocmGraphBindOutcome::Fallback(reason) => {
+                        return self.run_eager_fallback(
+                            reason,
+                            seq_len,
+                            std::time::Duration::ZERO,
+                            || {
+                                Self::eager_forward_greedy(
+                                    backend,
+                                    token_id,
+                                    weights,
+                                    config,
+                                    paged_cache,
+                                    block_table,
+                                    seq_len,
+                                    linear_state,
+                                    lora,
+                                )
+                            },
+                        );
+                    }
+                };
             self.prepare_owner_decode(owner, graph_row_id, block_table, seq_len);
             let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
+            let pressure_decision = self.reconcile_memory_pressure(owner)?;
+            if let RocmGraphPressureDecision::EagerOnly(reason) = pressure_decision {
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward_greedy(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
+            }
 
             if let Some(reason) = self.non_capture_safe.get(&requested_key).copied() {
                 return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
@@ -1946,8 +3890,12 @@ impl RocmGraphRunner {
                 });
             }
 
-            if let Some(captured) = self.captured.get(&cache_key) {
-                if captured.adapter_gen == self.adapter_generation {
+            if let Some(adapter_gen) = self
+                .captured
+                .get(&cache_key)
+                .map(|captured| captured.adapter_gen)
+            {
+                if adapter_gen == self.adapter_generation {
                     let replay_started = std::time::Instant::now();
                     match self.replay_greedy(
                         &cache_key,
@@ -1960,19 +3908,21 @@ impl RocmGraphRunner {
                         seq_len,
                     ) {
                         Ok(token) => {
+                            self.touch_captured_graph(&cache_key);
                             tracing::trace!(seq_len, "ROCm graph: replayed captured decode graph");
                             return Ok(token);
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "ROCm graph replay failed: {e:#}; disabling ROCm HIP graphs for this runner and falling back to eager"
+                                "ROCm graph replay failed: {e:#}; disabling ROCm HIP graphs for this runner; if execution was attempted, the device is quarantined and restart is required"
                             );
                             self.enabled = false;
-                            if !self.release_captured_after_device_settlement("replay_failure") {
-                                return Err(e).context(
-                                    "ROCm graph replay failed and recovery settlement failed; cleanup is quarantined",
-                                );
-                            }
+                            self.release_captured_after_device_settlement("replay_failure")
+                                .with_context(|| {
+                                    format!(
+                                        "ROCm graph replay failed ({e:#}) and containment failed; the device is quarantined and restart is required"
+                                    )
+                                })?;
                             return self.run_eager_fallback(
                                 RocmGraphFallbackReason::ReplayFailure,
                                 seq_len,
@@ -1994,65 +3944,76 @@ impl RocmGraphRunner {
                         }
                     }
                 } else {
-                    anyhow::ensure!(
-                        self.release_captured_after_device_settlement(
-                            "adapter_generation_mismatch",
-                        ),
-                        "ROCm graph adapter-generation recovery failed; cleanup is quarantined"
-                    );
+                    self.release_captured_after_device_settlement("adapter_generation_mismatch")
+                        .context(
+                            "ROCm graph adapter-generation recovery failed; cleanup is quarantined",
+                        )?;
                 }
             }
 
-            if self.captured.len() >= self.max_cached_graphs() {
+            if let RocmGraphPressureDecision::ReplayOnly(reason) = pressure_decision {
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward_greedy(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
+            }
+
+            if self.budget_capture_suppressed(&requested_key) {
+                return self.run_eager_fallback(
+                    RocmGraphFallbackReason::GraphCacheByteBudget,
+                    seq_len,
+                    std::time::Duration::ZERO,
+                    || {
+                        Self::eager_forward_greedy(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
+                        )
+                    },
+                );
+            }
+
+            if let Some(reason) = self.pre_capture_rejection(owner) {
                 if !self.cache_full_warned {
                     self.cache_full_warned = true;
+                    let memory = self.memory_accounting(&HashSet::new(), None);
                     tracing::warn!(
                         cached = self.captured.len(),
-                        "ROCm graph capture skipped: paged metadata shape cache full"
+                        retained_bytes = memory.retained_bytes,
+                        max_cached_graphs = self.max_cached_graphs(),
+                        max_retained_bytes = self.max_retained_bytes(),
+                        reason = reason.as_str(),
+                        "ROCm graph capture skipped: bounded cache has no idle-owner eviction path"
                     );
                 }
-                return self.run_eager_fallback(
-                    RocmGraphFallbackReason::GraphCacheCapacity,
-                    seq_len,
-                    std::time::Duration::ZERO,
-                    || {
-                        Self::eager_forward_greedy(
-                            backend,
-                            token_id,
-                            weights,
-                            config,
-                            paged_cache,
-                            block_table,
-                            seq_len,
-                            linear_state,
-                            lora,
-                        )
-                    },
-                );
-            }
-
-            if kiln_memory::MemoryGovernor::try_global_cached_pressure()
-                .unwrap_or(kiln_memory::MemoryPressure::Critical)
-                == kiln_memory::MemoryPressure::Critical
-            {
-                return self.run_eager_fallback(
-                    RocmGraphFallbackReason::CriticalMemoryPressure,
-                    seq_len,
-                    std::time::Duration::ZERO,
-                    || {
-                        Self::eager_forward_greedy(
-                            backend,
-                            token_id,
-                            weights,
-                            config,
-                            paged_cache,
-                            block_table,
-                            seq_len,
-                            linear_state,
-                            lora,
-                        )
-                    },
-                );
+                return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
+                    Self::eager_forward_greedy(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    )
+                });
             }
 
             let capture_started = std::time::Instant::now();
@@ -2070,7 +4031,10 @@ impl RocmGraphRunner {
             ) {
                 Ok(token) => return Ok(token),
                 Err(e) => {
-                    tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
+                    tracing::warn!(
+                        "ROCm graph capture failed: {e:#}; disabling HIP graphs and attempting \
+                         containment (a quarantined device requires process restart)"
+                    );
                     self.enabled = false;
                     synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device())
                         .with_context(|| format!("capture failed before recovery: {e:#}"))?;
@@ -2297,6 +4261,31 @@ impl RocmGraphRunner {
     fn new_position_buffer(device: Device, position: usize) -> Result<Tensor> {
         Tensor::from_vec_on(device, vec![position as f32], vec![1])
             .context("create ROCm graph position buffer")
+    }
+}
+
+#[cfg(feature = "rocm")]
+impl Drop for RocmGraphRunner {
+    fn drop(&mut self) {
+        let owners: HashSet<_> = self
+            .graph_owners()
+            .into_iter()
+            .chain(self.graph_slots.keys().copied())
+            .collect();
+        if owners.is_empty() {
+            return;
+        }
+        if let Err(error) = self.evict_graph_owners(
+            &owners,
+            "runner_drop",
+            RocmGraphEvictionReason::Recovery,
+            true,
+        ) {
+            tracing::error!(
+                error = %format!("{error:#}"),
+                "ROCm graph runner drop could not settle retained resources; cleanup quarantine remains authoritative"
+            );
+        }
     }
 }
 
@@ -2758,7 +4747,8 @@ impl RocmGraphRunner {
             linear_state,
             lora,
         )? {
-            RocmCaptureStep::CapturedHidden(hidden) => {
+            RocmCaptureStep::CapturedHidden(hidden)
+            | RocmCaptureStep::CapturedHiddenUncached(hidden) => {
                 match crate::forward::lm_head_from_hidden_eager(backend, &hidden, weights, config) {
                     Ok(logits) => Ok(logits),
                     Err(error) => {
@@ -2769,7 +4759,7 @@ impl RocmGraphRunner {
                     }
                 }
             }
-            RocmCaptureStep::FallbackEager(reason) => {
+            RocmCaptureStep::FallbackEager { reason, .. } => {
                 self.run_eager_fallback(reason, seq_len, capture_started.elapsed(), || {
                     Self::eager_forward(
                         backend,
@@ -2816,7 +4806,8 @@ impl RocmGraphRunner {
             linear_state,
             lora,
         )? {
-            RocmCaptureStep::CapturedHidden(hidden) => {
+            RocmCaptureStep::CapturedHidden(hidden)
+            | RocmCaptureStep::CapturedHiddenUncached(hidden) => {
                 match crate::forward::lm_head_argmax_from_hidden_eager(
                     backend, &hidden, weights, config,
                 ) {
@@ -2827,7 +4818,7 @@ impl RocmGraphRunner {
                     }
                 }
             }
-            RocmCaptureStep::FallbackEager(reason) => {
+            RocmCaptureStep::FallbackEager { reason, .. } => {
                 self.run_eager_fallback(reason, seq_len, capture_started.elapsed(), || {
                     Self::eager_forward_greedy(
                         backend,
@@ -2861,7 +4852,7 @@ impl RocmGraphRunner {
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
     ) -> Result<RocmCaptureStep> {
-        let result = self.try_capture_hidden_inner(
+        let mut result = self.try_capture_hidden_inner(
             backend,
             owner,
             token_id,
@@ -2873,9 +4864,15 @@ impl RocmGraphRunner {
             linear_state,
             lora,
         );
+        if let Ok(RocmCaptureStep::FallbackEager { cleanup_timer, .. }) = &mut result {
+            drop(cleanup_timer.take());
+        }
         let outcome = match &result {
-            Ok(RocmCaptureStep::CapturedHidden(_)) => RocmGraphCaptureOutcome::Succeeded,
-            Ok(RocmCaptureStep::FallbackEager(_)) => RocmGraphCaptureOutcome::Deferred,
+            Ok(RocmCaptureStep::CapturedHidden(_)) => RocmGraphCaptureOutcome::SucceededRetained,
+            Ok(RocmCaptureStep::CapturedHiddenUncached(_)) => {
+                RocmGraphCaptureOutcome::SucceededUncached
+            }
+            Ok(RocmCaptureStep::FallbackEager { .. }) => RocmGraphCaptureOutcome::Deferred,
             Err(_) => RocmGraphCaptureOutcome::Failed,
         };
         self.counters.record_capture_outcome(outcome);
@@ -2902,6 +4899,30 @@ impl RocmGraphRunner {
             Device::Rocm(i) => i,
             _ => anyhow::bail!("ROCm graphs require a Rocm device"),
         };
+        let key = RocmGraphKey::new(paged_cache, seq_len);
+        let pre_candidate_headroom_timer = self
+            .phase_telemetry
+            .timer(RocmGraphPhase::PreCandidateHeadroom);
+
+        // Pressure may have changed since the decode entry point checked it.
+        // Only Comfortable permits fresh candidate allocations; Moderate keeps
+        // replay available but stops cache growth, and tighter states use their
+        // normal settled eviction/fallback policy.
+        match self.reconcile_memory_pressure(owner)? {
+            RocmGraphPressureDecision::Normal => {}
+            RocmGraphPressureDecision::ReplayOnly(reason)
+            | RocmGraphPressureDecision::EagerOnly(reason) => {
+                return Ok(RocmCaptureStep::fallback(reason));
+            }
+        }
+        if let Some(reason) = self.reservation_retry_suppressed(&key) {
+            return Ok(RocmCaptureStep::fallback(reason));
+        }
+        if let Some(reason) = self.reserve_capture_entry_capacity(owner)? {
+            return Ok(RocmCaptureStep::fallback(reason));
+        }
+        drop(pre_candidate_headroom_timer);
+        let candidate_warm_timer = self.phase_telemetry.timer(RocmGraphPhase::CandidateWarm);
 
         // Capture on a FRESH non-default stream (mirror the CUDA discipline; the
         // graph-capture stream scope routes every kt op onto it).
@@ -2929,7 +4950,6 @@ impl RocmGraphRunner {
         let output_hidden = Self::new_output_hidden(config, device, dtype)?;
         let rotary_cos_buffer = Self::new_rotary_cos_buffer(config, device, seq_len)?;
         let rotary_sin_buffer = Self::new_rotary_sin_buffer(config, device, seq_len)?;
-        let key = RocmGraphKey::new(paged_cache, seq_len);
         let block_table_buffer = Some(Self::new_block_table_buffer(
             block_table,
             paged_cache,
@@ -3015,7 +5035,9 @@ impl RocmGraphRunner {
                     .map_err(|error| anyhow::anyhow!("{error}"))
             },
         )?;
-        // Snapshot the host→device copy count across the warm forward. Any
+        // Observe host→device copies issued by this thread to this device
+        // across the warm forward. A process-global delta is unsafe here:
+        // unrelated inference on another thread or device can advance it. Any
         // host_to_rocm_copy issued by the forward (e.g. a GDN-gates/softplus or
         // KV-write FALLBACK path that allocates a device tensor from host) does a
         // hipStreamSynchronize, which is ILLEGAL inside begin_capture and ABORTS
@@ -3024,32 +5046,35 @@ impl RocmGraphRunner {
         // forward OUTSIDE capture, so if it did a host round-trip the captured
         // pass would too: skip capture for this geometry and fall back to eager
         // BEFORE begin_capture, leaving the device clean.
-        let htod_before = kiln_tensor::rocm_htod_count();
-        let warm_result = kiln_tensor::with_rocm_capture_arena(arena.clone(), || {
-            // SAFETY: the default input stream was drained above; the warm pass
-            // is settled on `stream` before any buffer can leave this scope.
-            unsafe {
-                kiln_tensor::with_rocm_graph_capture_stream(stream.clone(), || {
-                    let hidden = model_forward_paged_hidden_with_graph_inputs(
-                        backend,
-                        &[token_id],
-                        weights,
-                        config,
-                        paged_cache,
-                        block_table,
-                        seq_len,
-                        Some(linear_state),
-                        lora,
-                        &token_buffer,
-                        &position_buffer,
-                        graph_inputs.as_ref(),
-                    )?;
-                    kiln_tensor::rocm_slice_set_dim0(&output_hidden, &hidden, 0)
-                        .context("freeze-pointers warm pass: copy hidden into stable output")?;
-                    Ok::<(), anyhow::Error>(())
+        let (warm_result, warm_htod_count) =
+            kiln_tensor::with_rocm_htod_observer(device_idx, || {
+                kiln_tensor::with_rocm_capture_arena(arena.clone(), || {
+                    // SAFETY: the default input stream was drained above; the warm pass
+                    // is settled on `stream` before any buffer can leave this scope.
+                    unsafe {
+                        kiln_tensor::with_rocm_graph_capture_stream(stream.clone(), || {
+                            let hidden = model_forward_paged_hidden_with_graph_inputs(
+                                backend,
+                                &[token_id],
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                Some(linear_state),
+                                lora,
+                                &token_buffer,
+                                &position_buffer,
+                                graph_inputs.as_ref(),
+                            )?;
+                            kiln_tensor::rocm_slice_set_dim0(&output_hidden, &hidden, 0).context(
+                                "freeze-pointers warm pass: copy hidden into stable output",
+                            )?;
+                            Ok::<(), anyhow::Error>(())
+                        })
+                    }
                 })
-            }
-        });
+            });
         let warm_sync_result = attributed_rocm_graph_synchronize(
             "capture_stream_warmup_completion",
             "rocm_graph_capture_warmup",
@@ -3076,8 +5101,10 @@ impl RocmGraphRunner {
             if crate::forward::is_rocm_graph_shape_dependent_attention(&err) {
                 self.non_capture_safe
                     .insert(key, RocmGraphFallbackReason::ShapeDependentAttention);
-                return Ok(RocmCaptureStep::FallbackEager(
+                drop(candidate_warm_timer);
+                return Ok(RocmCaptureStep::fallback_after_candidate(
                     RocmGraphFallbackReason::ShapeDependentAttention,
+                    &self.phase_telemetry,
                 ));
             }
             return Err(err).context("freeze-pointers warm (Record) pass failed");
@@ -3093,8 +5120,63 @@ impl RocmGraphRunner {
             &gdn_snapshot,
             "restore graph-slot GDN state after warm pass",
         )?;
-        let htod_after = kiln_tensor::rocm_htod_count();
-        if htod_after > htod_before {
+        drop(gdn_snapshot);
+        drop(candidate_warm_timer);
+        let pre_native_reservation_timer = self
+            .phase_telemetry
+            .timer(RocmGraphPhase::PreNativeReservation);
+
+        // The Record pass is the first point where every transient candidate
+        // allocation has an exact physical identity, including candidates that
+        // are about to defer because their warm forward performed a host copy.
+        let reserved_stable_io = unique_rocm_tensor_allocations(
+            [
+                &token_buffer,
+                &position_buffer,
+                &output_hidden,
+                &rotary_cos_buffer,
+                &rotary_sin_buffer,
+            ]
+            .into_iter()
+            .chain(
+                [
+                    block_table_buffer.as_ref(),
+                    seqused_k_buffer.as_ref(),
+                    kv_slot_buffer.as_ref(),
+                ]
+                .into_iter()
+                .flatten(),
+            )
+            .chain(paged_decode_outputs.iter())
+            .chain(paged_decode_lse.iter())
+            .chain(gdn_decode_outputs.iter()),
+        )
+        .context("measure ROCm graph-stable direct allocations")?;
+        let reserved_capture_arena = {
+            let arena = arena.borrow();
+            unique_rocm_storage_allocations(device_idx, arena.retained_buffers())
+        };
+        let reserved_workspace_stats = blaslt_workspace_lease
+            .stats()
+            .map_err(|error| anyhow::anyhow!(error))
+            .context("measure ROCm graph private-stream hipBLASLt workspace")?;
+        let reserved_blaslt_workspace =
+            (reserved_workspace_stats.retained_bytes > 0).then_some(RocmAllocationRecord {
+                key: RocmAllocationKey {
+                    device_index: device_idx,
+                    allocation_id: reserved_workspace_stats.allocation_id as u64,
+                },
+                bytes: reserved_workspace_stats.retained_bytes,
+            });
+        let reserved_accounting = RocmGraphEntryAccounting {
+            stable_io: reserved_stable_io,
+            capture_arena: reserved_capture_arena,
+            blaslt_workspace: reserved_blaslt_workspace,
+        };
+        let transient_candidate_bytes = reserved_accounting.retained_bytes_excluding_slot();
+        self.phase_telemetry
+            .record_transient_candidate_bytes(transient_candidate_bytes);
+        if warm_htod_count > 0 {
             // The warm forward did a host round-trip. This is EITHER a one-time
             // cold-cache fill (shape-keyed broadcast/gqa-expand gather indices
             // upload once per `max_seqlen_k` bucket, then every step + replay in
@@ -3110,7 +5192,7 @@ impl RocmGraphRunner {
             *attempts += 1;
             let fallback_reason = if *attempts >= Self::CAPTURE_RETRY_LIMIT {
                 tracing::debug!(
-                    htod = htod_after - htod_before,
+                    htod = warm_htod_count,
                     attempts = *attempts,
                     "ROCm graph: geometry not capture-safe (persistent host round-trip); \
                      caching skip + running eager"
@@ -3123,17 +5205,77 @@ impl RocmGraphRunner {
                 RocmGraphFallbackReason::PersistentHostRoundTrip
             } else {
                 tracing::debug!(
-                    htod = htod_after - htod_before,
+                    htod = warm_htod_count,
                     attempts = *attempts,
                     "ROCm graph: warm pass did a host round-trip (likely cold cache fill); \
                      running eager, will retry capture next step"
                 );
                 RocmGraphFallbackReason::ColdCacheHostRoundTrip
             };
-            return Ok(RocmCaptureStep::FallbackEager(fallback_reason));
+            drop(pre_native_reservation_timer);
+            return Ok(RocmCaptureStep::fallback_after_candidate(
+                fallback_reason,
+                &self.phase_telemetry,
+            ));
         }
         // Capture-safe: clear any retry bookkeeping for this geometry.
         self.capture_retry.remove(&key);
+
+        match self.reconcile_memory_pressure(owner)? {
+            RocmGraphPressureDecision::Normal => {}
+            RocmGraphPressureDecision::ReplayOnly(reason)
+            | RocmGraphPressureDecision::EagerOnly(reason) => {
+                drop(pre_native_reservation_timer);
+                return Ok(RocmCaptureStep::fallback_after_candidate(
+                    reason,
+                    &self.phase_telemetry,
+                ));
+            }
+        }
+
+        // Reserve retained-cache headroom now, before `begin_capture`. The warm
+        // buffers are already physical, so the governor reservation below is a
+        // conservative concurrent-planner debt until this attempt publishes or
+        // drops them; it can double-count a concurrently refreshed snapshot.
+        if !self.matching_memory_governor() {
+            self.counters.memory_governor_selector_mismatch_skips = self
+                .counters
+                .memory_governor_selector_mismatch_skips
+                .saturating_add(1);
+            drop(pre_native_reservation_timer);
+            return Ok(RocmCaptureStep::fallback_after_candidate(
+                RocmGraphFallbackReason::MemoryGovernorSelectorMismatch,
+                &self.phase_telemetry,
+            ));
+        }
+        let Some(governor_candidate_reservation) =
+            kiln_memory::MemoryGovernor::try_global_cached_reserve(transient_candidate_bytes)
+        else {
+            self.remember_reservation_denial(&key, transient_candidate_bytes);
+            self.counters.pre_capture_memory_reservation_denied_skips = self
+                .counters
+                .pre_capture_memory_reservation_denied_skips
+                .saturating_add(1);
+            drop(pre_native_reservation_timer);
+            return Ok(RocmCaptureStep::fallback_after_candidate(
+                RocmGraphFallbackReason::MemoryReservationDenied,
+                &self.phase_telemetry,
+            ));
+        };
+        self.reservation_denied_bytes.remove(&key);
+        self.reservation_denied_wide_bytes = None;
+        let cache_key = RocmGraphCacheKey::new(owner, key.clone());
+        if let Some(reason) = self.reserve_capture_candidate(&cache_key, &reserved_accounting)? {
+            drop(pre_native_reservation_timer);
+            return Ok(RocmCaptureStep::fallback_after_candidate(
+                reason,
+                &self.phase_telemetry,
+            ));
+        }
+        drop(pre_native_reservation_timer);
+
+        let mut native_capture_timer =
+            Some(self.phase_telemetry.timer(RocmGraphPhase::NativeCapture));
         arena.borrow_mut().begin_replay();
         let capture_snapshot = linear_state
             .snapshot()
@@ -3298,10 +5440,31 @@ impl RocmGraphRunner {
                 "sync after first captured-graph launch: {err}"
             ));
         }
-
         let captured_hidden = output_hidden.clone();
         let max_seqlen_k = key.max_seqlen_k;
         let arena_buffers = arena.borrow_mut().take_retained();
+        let workspace_stats = blaslt_workspace_lease
+            .stats()
+            .map_err(|error| anyhow::anyhow!(error))
+            .context("account ROCm graph private-stream hipBLASLt workspace")?;
+        let blaslt_workspace =
+            (workspace_stats.retained_bytes > 0).then_some(RocmAllocationRecord {
+                key: RocmAllocationKey {
+                    device_index: device_idx,
+                    allocation_id: workspace_stats.allocation_id as u64,
+                },
+                bytes: workspace_stats.retained_bytes,
+            });
+        let RocmGraphEntryAccounting {
+            stable_io,
+            capture_arena,
+            blaslt_workspace: _,
+        } = reserved_accounting;
+        let accounting = RocmGraphEntryAccounting {
+            stable_io,
+            capture_arena,
+            blaslt_workspace,
+        };
         let replay_state = Self::replay_state_for_capture(
             &key,
             &output_hidden,
@@ -3325,36 +5488,45 @@ impl RocmGraphRunner {
             .take()
             .expect("successful capture retains graph exec");
         capture_failure_guard.disarm();
-        self.captured.insert(
-            RocmGraphCacheKey::new(owner, key),
-            CapturedDecodeGraphRocm {
-                _graph: graph,
-                exec,
-                output_hidden,
-                capture_stream: stream,
-                context,
-                default_stream,
-                replay_inputs_ready_event,
-                replay_complete_event,
-                adapter_gen: self.adapter_generation,
-                kv_pool_identity: paged_cache.pool_identity(),
-                token_buffer,
-                position_buffer,
-                block_table_buffer,
-                seqused_k_buffer,
-                kv_slot_buffer,
-                rotary_cos_buffer,
-                rotary_sin_buffer,
-                _paged_decode_outputs: paged_decode_outputs,
-                _paged_decode_lse: paged_decode_lse,
-                max_seqlen_k,
-                _gdn_decode_outputs: gdn_decode_outputs,
-                _capture_arena_buffers: arena_buffers,
-                replay_state,
-                _blaslt_workspace_lease: blaslt_workspace_lease,
-            },
-        );
-        Ok(RocmCaptureStep::CapturedHidden(captured_hidden))
+        let candidate = CapturedDecodeGraphRocm {
+            accounting,
+            last_used_tick: 0,
+            _graph: graph,
+            exec,
+            output_hidden,
+            capture_stream: stream,
+            context,
+            default_stream,
+            replay_inputs_ready_event,
+            replay_complete_event,
+            adapter_gen: self.adapter_generation,
+            kv_pool_identity: paged_cache.pool_identity(),
+            token_buffer,
+            position_buffer,
+            block_table_buffer,
+            seqused_k_buffer,
+            kv_slot_buffer,
+            rotary_cos_buffer,
+            rotary_sin_buffer,
+            _paged_decode_outputs: paged_decode_outputs,
+            _paged_decode_lse: paged_decode_lse,
+            max_seqlen_k,
+            _gdn_decode_outputs: gdn_decode_outputs,
+            _capture_arena_buffers: arena_buffers,
+            replay_state,
+            _blaslt_workspace_lease: blaslt_workspace_lease,
+        };
+        let retained =
+            self.admit_captured_graph(cache_key, candidate, &mut native_capture_timer)?;
+        if retained {
+            governor_candidate_reservation.commit_allocated();
+        }
+        drop(native_capture_timer.take());
+        Ok(if retained {
+            RocmCaptureStep::CapturedHidden(captured_hidden)
+        } else {
+            RocmCaptureStep::CapturedHiddenUncached(captured_hidden)
+        })
     }
 
     fn new_token_buffer(device: Device, token_id: u32) -> Result<Tensor> {
@@ -3367,6 +5539,45 @@ impl RocmGraphRunner {
 mod tests {
     use super::*;
 
+    #[test]
+    fn successful_capture_rollback_keeps_execution_gate_open() {
+        let mut state = RocmCaptureRollbackState::new();
+        assert_eq!(
+            state.record_settlement(true),
+            RocmCaptureGateAction::KeepOpen
+        );
+        assert_eq!(
+            state.record_logical_rollback(true),
+            RocmCaptureGateAction::KeepOpen
+        );
+        assert_eq!(state.exit_action(), RocmCaptureGateAction::KeepOpen);
+    }
+
+    #[test]
+    fn failed_or_unclassified_capture_rollback_publishes_sticky_stop() {
+        let mut logical_failure = RocmCaptureRollbackState::new();
+        assert_eq!(
+            logical_failure.record_settlement(true),
+            RocmCaptureGateAction::KeepOpen
+        );
+        assert_eq!(
+            logical_failure.record_logical_rollback(false),
+            RocmCaptureGateAction::PublishStop
+        );
+
+        let mut settlement_failure = RocmCaptureRollbackState::new();
+        assert_eq!(
+            settlement_failure.record_settlement(false),
+            RocmCaptureGateAction::PublishStop
+        );
+
+        let unclassified_exit = RocmCaptureRollbackState::new();
+        assert_eq!(
+            unclassified_exit.exit_action(),
+            RocmCaptureGateAction::PublishStop
+        );
+    }
+
     #[cfg(feature = "rocm")]
     #[test]
     fn graph_attention_geometry_matches_exact_fa2_splits() {
@@ -3376,6 +5587,66 @@ mod tests {
             assert_eq!(RocmGraphKey::exact_max_seqlen_k(attention_len), expected);
         }
         assert_eq!(RocmGraphKey::exact_max_seqlen_k(2395), 2432);
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn retained_byte_accounting_deduplicates_physical_allocations_across_categories() {
+        let first = RocmAllocationRecord {
+            key: RocmAllocationKey {
+                device_index: 0,
+                allocation_id: 17,
+            },
+            bytes: 64,
+        };
+        let second = RocmAllocationRecord {
+            key: RocmAllocationKey {
+                device_index: 0,
+                allocation_id: 18,
+            },
+            bytes: 128,
+        };
+        let mut seen = HashSet::new();
+        let mut accounting = RocmGraphMemoryAccounting {
+            complete: true,
+            ..RocmGraphMemoryAccounting::default()
+        };
+
+        RocmGraphMemoryAccounting::add_record(&mut accounting.stable_io_bytes, &mut seen, first);
+        RocmGraphMemoryAccounting::add_record(
+            &mut accounting.capture_arena_bytes,
+            &mut seen,
+            first,
+        );
+        RocmGraphMemoryAccounting::add_record(
+            &mut accounting.capture_arena_bytes,
+            &mut seen,
+            second,
+        );
+        accounting.finish();
+
+        assert_eq!(accounting.stable_io_bytes, 64);
+        assert_eq!(accounting.capture_arena_bytes, 128);
+        assert_eq!(accounting.retained_bytes, 192);
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn idle_owner_lru_is_deterministic_by_access_then_slot() {
+        let mut records = [
+            (7, 2, RocmGraphOwner::Slot(2)),
+            (3, 9, RocmGraphOwner::Slot(9)),
+            (3, 4, RocmGraphOwner::Slot(4)),
+        ];
+        sort_idle_owner_lru(&mut records);
+        assert_eq!(
+            records.map(|(_, _, owner)| owner),
+            [
+                RocmGraphOwner::Slot(4),
+                RocmGraphOwner::Slot(9),
+                RocmGraphOwner::Slot(2),
+            ]
+        );
     }
 
     #[test]
@@ -3555,7 +5826,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_policy_defaults_are_eager_and_cache_capacity_is_validated() {
+    fn graph_policy_defaults_are_eager_and_cache_bounds_are_validated() {
         let default_policy = RocmGraphExecutionPolicy::default();
         assert_eq!(default_policy, RocmGraphExecutionPolicy::disabled());
         assert_eq!(default_policy.mode(), RocmGraphExecutionMode::Disabled);
@@ -3564,24 +5835,42 @@ mod tests {
             default_policy.max_cached_graphs(),
             RocmGraphExecutionPolicy::DEFAULT_MAX_CACHED_GRAPHS
         );
+        assert_eq!(
+            default_policy.max_retained_bytes(),
+            RocmGraphExecutionPolicy::DEFAULT_MAX_RETAINED_BYTES
+        );
         assert!(!default_policy.force_eager_decode());
 
-        let lazy =
-            RocmGraphExecutionPolicy::try_new(RocmGraphExecutionMode::LazyCaptureReplay, 16, true)
-                .expect("nonzero graph cache capacity");
+        let lazy = RocmGraphExecutionPolicy::try_new(
+            RocmGraphExecutionMode::LazyCaptureReplay,
+            16,
+            RocmGraphExecutionPolicy::MIN_MAX_RETAINED_BYTES,
+            true,
+        )
+        .expect("bounded graph cache policy");
         assert_eq!(lazy.mode(), RocmGraphExecutionMode::LazyCaptureReplay);
         assert_eq!(lazy.max_cached_graphs(), 16);
+        assert_eq!(
+            lazy.max_retained_bytes(),
+            RocmGraphExecutionPolicy::MIN_MAX_RETAINED_BYTES
+        );
         assert!(lazy.force_eager_decode());
 
         assert!(
-            RocmGraphExecutionPolicy::try_new(RocmGraphExecutionMode::WarmupThenEager, 0, false,)
-                .is_err(),
+            RocmGraphExecutionPolicy::try_new(
+                RocmGraphExecutionMode::WarmupThenEager,
+                0,
+                RocmGraphExecutionPolicy::DEFAULT_MAX_RETAINED_BYTES,
+                false,
+            )
+            .is_err(),
             "zero-capacity graph caches must fail during config resolution"
         );
         assert!(
             RocmGraphExecutionPolicy::try_new(
                 RocmGraphExecutionMode::LazyCaptureReplay,
                 RocmGraphExecutionPolicy::MAX_CACHED_GRAPHS,
+                RocmGraphExecutionPolicy::DEFAULT_MAX_RETAINED_BYTES,
                 false,
             )
             .is_ok(),
@@ -3591,10 +5880,41 @@ mod tests {
             RocmGraphExecutionPolicy::try_new(
                 RocmGraphExecutionMode::LazyCaptureReplay,
                 RocmGraphExecutionPolicy::MAX_CACHED_GRAPHS + 1,
+                RocmGraphExecutionPolicy::DEFAULT_MAX_RETAINED_BYTES,
                 false,
             )
             .is_err(),
             "embedding callers cannot construct an unbounded graph cache"
+        );
+        assert!(
+            RocmGraphExecutionPolicy::try_new(
+                RocmGraphExecutionMode::LazyCaptureReplay,
+                1,
+                RocmGraphExecutionPolicy::MIN_MAX_RETAINED_BYTES - 1,
+                false,
+            )
+            .is_err(),
+            "retained-byte budgets below the documented floor must fail"
+        );
+        assert!(
+            RocmGraphExecutionPolicy::try_new(
+                RocmGraphExecutionMode::LazyCaptureReplay,
+                1,
+                RocmGraphExecutionPolicy::MAX_MAX_RETAINED_BYTES,
+                false,
+            )
+            .is_ok(),
+            "the documented retained-byte ceiling must be accepted"
+        );
+        assert!(
+            RocmGraphExecutionPolicy::try_new(
+                RocmGraphExecutionMode::LazyCaptureReplay,
+                1,
+                RocmGraphExecutionPolicy::MAX_MAX_RETAINED_BYTES + 1,
+                false,
+            )
+            .is_err(),
+            "retained-byte budgets above the documented ceiling must fail"
         );
     }
 
@@ -3668,6 +5988,9 @@ mod tests {
                 capture_requested: false,
                 enabled: false,
                 capture_enabled: false,
+                max_cached_graphs: RocmGraphExecutionPolicy::DEFAULT_MAX_CACHED_GRAPHS,
+                max_retained_bytes: RocmGraphExecutionPolicy::DEFAULT_MAX_RETAINED_BYTES,
+                retained_bytes_accounting_complete: true,
                 ..RocmGraphStats::default()
             }
         );
@@ -3692,6 +6015,8 @@ mod tests {
                         recurrent_states: Vec::new(),
                         conv_states: Vec::new(),
                     },
+                    allocations: Vec::new(),
+                    accounting_complete: true,
                 },
             );
             runner.decode_row_slots.insert(row_id, owner);
@@ -3722,6 +6047,387 @@ mod tests {
         assert_eq!(stats.tracked_decode_owner_count, 2);
         assert_eq!(stats.decode_owner_release_count, 1);
         assert_eq!(stats.decode_owner_graph_release_count, 0);
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn active_graphless_slot_stays_in_stats_and_budget_after_graph_eviction() {
+        let owner = RocmGraphOwner::Slot(41);
+        let budget = RocmGraphExecutionPolicy::MIN_MAX_RETAINED_BYTES;
+        let policy = RocmGraphExecutionPolicy::lazy_capture_replay()
+            .with_max_retained_bytes(budget)
+            .expect("minimum retained-byte budget");
+        let mut runner = RocmGraphRunner::new(&Device::Cpu, policy);
+        runner.graph_slots.insert(
+            owner,
+            RocmGraphSlotState {
+                assigned_row: Some(9),
+                linear_state: LinearAttentionState {
+                    recurrent_states: Vec::new(),
+                    conv_states: Vec::new(),
+                },
+                allocations: vec![RocmAllocationRecord {
+                    key: RocmAllocationKey {
+                        device_index: 0,
+                        allocation_id: 99,
+                    },
+                    bytes: budget,
+                }],
+                accounting_complete: true,
+            },
+        );
+        runner.decode_row_slots.insert(9, owner);
+
+        let before = runner.stats();
+        assert_eq!(before.captured_graph_count, 0);
+        assert_eq!(before.active_graph_slot_count, 1);
+        assert_eq!(before.retained_slot_state_bytes, budget);
+        assert_eq!(before.retained_bytes, budget);
+        assert!(before.peak_retained_bytes >= before.retained_bytes);
+        assert!(before.retained_bytes_accounting_complete);
+
+        let owners = HashSet::from([owner]);
+        let released = runner
+            .evict_graph_owners(
+                &owners,
+                "active_slot_accounting_test",
+                RocmGraphEvictionReason::Pressure,
+                false,
+            )
+            .expect("graph-only eviction projection");
+        assert_eq!(released.retained_bytes, 0);
+
+        let after = runner.stats();
+        assert_eq!(after.active_graph_slot_count, 1);
+        assert_eq!(after.retained_slot_state_bytes, budget);
+        assert_eq!(after.retained_bytes, budget);
+        assert!(after.peak_retained_bytes >= after.retained_bytes);
+        assert_eq!(
+            runner.pre_capture_rejection(owner),
+            Some(RocmGraphFallbackReason::GraphCacheByteBudget)
+        );
+        assert_eq!(runner.counters.byte_budget_rejections, 0);
+        assert_eq!(runner.counters.pre_capture_byte_budget_skips, 1);
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn oversized_slot_is_memoized_until_row_release_without_reopening_budget_generation() {
+        let budget = RocmGraphExecutionPolicy::MIN_MAX_RETAINED_BYTES;
+        let policy = RocmGraphExecutionPolicy::lazy_capture_replay()
+            .with_max_retained_bytes(budget)
+            .expect("minimum retained-byte budget");
+        let mut runner = RocmGraphRunner::new(&Device::Cpu, policy);
+        let row_id = 71;
+        let declined_owner = RocmGraphOwner::Slot(99);
+        let empty_state = LinearAttentionState {
+            recurrent_states: Vec::new(),
+            conv_states: Vec::new(),
+        };
+        let reason = runner
+            .publish_new_graph_slot(
+                row_id,
+                declined_owner,
+                empty_state,
+                vec![RocmAllocationRecord {
+                    key: RocmAllocationKey {
+                        device_index: 0,
+                        allocation_id: 7001,
+                    },
+                    bytes: budget + 1,
+                }],
+                true,
+            )
+            .expect_err("oversized slot must be declined before publication");
+        assert_eq!(reason, RocmGraphFallbackReason::GraphCacheByteBudget);
+        assert!(!runner.graph_slots.contains_key(&declined_owner));
+        assert!(!runner.decode_row_slots.contains_key(&row_id));
+        assert_eq!(runner.counters.pre_capture_byte_budget_skips, 1);
+
+        let key = RocmGraphKey {
+            max_seqlen_k: 512,
+            max_blocks_per_seq: 8,
+        };
+        let mut retry_state = LinearAttentionState {
+            recurrent_states: Vec::new(),
+            conv_states: Vec::new(),
+        };
+        assert_eq!(
+            runner
+                .bind_decode_row_to_slot(row_id, &key, &mut retry_state)
+                .expect("memoized bind"),
+            RocmGraphBindOutcome::Fallback(RocmGraphFallbackReason::GraphCacheByteBudget)
+        );
+        assert_eq!(runner.counters.pre_capture_byte_budget_skips, 1);
+
+        let relief_generation = runner.budget_relief_generation;
+        runner.release_decode_row(row_id);
+        assert!(!runner.graph_ineligible_rows.contains_key(&row_id));
+        assert_eq!(runner.budget_relief_generation, relief_generation);
+        assert!(matches!(
+            runner
+                .bind_decode_row_to_slot(row_id, &key, &mut retry_state)
+                .expect("released row id can retry"),
+            RocmGraphBindOutcome::Bound(_)
+        ));
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn incomplete_slot_accounting_has_distinct_typed_skip() {
+        let mut runner = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
+        let row_id = 81;
+        let owner = RocmGraphOwner::Slot(101);
+        let reason = runner
+            .publish_new_graph_slot(
+                row_id,
+                owner,
+                LinearAttentionState {
+                    recurrent_states: Vec::new(),
+                    conv_states: Vec::new(),
+                },
+                Vec::new(),
+                false,
+            )
+            .expect_err("incomplete accounting must fail closed");
+        assert_eq!(reason, RocmGraphFallbackReason::GraphAccountingIncomplete);
+        assert_eq!(
+            runner.graph_ineligible_rows.get(&row_id),
+            Some(&RocmGraphFallbackReason::GraphAccountingIncomplete)
+        );
+        assert_eq!(runner.counters.accounting_incomplete_rejections, 0);
+        assert_eq!(runner.counters.pre_capture_accounting_incomplete_skips, 1);
+        assert!(!runner.graph_slots.contains_key(&owner));
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn candidate_alone_byte_rejection_suppresses_repeat_capture_for_geometry() {
+        let mut runner = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
+        let graph = RocmGraphKey {
+            max_seqlen_k: 512,
+            max_blocks_per_seq: 8,
+        };
+        let key = RocmGraphCacheKey::new(RocmGraphOwner::Slot(7), graph.clone());
+
+        assert!(
+            runner.record_post_capture_rejection(
+                &key,
+                RocmGraphAdmissionRejection::CandidateByteBudget,
+            )
+        );
+        assert_eq!(
+            runner.non_capture_safe.get(&graph),
+            Some(&RocmGraphFallbackReason::GraphCacheByteBudget)
+        );
+        assert_eq!(runner.counters.byte_budget_rejections, 1);
+        assert_eq!(runner.counters.entry_capacity_rejections, 0);
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn exact_pre_native_plan_deduplicates_candidate_and_owner_slot() {
+        let budget = RocmGraphExecutionPolicy::MIN_MAX_RETAINED_BYTES;
+        let policy = RocmGraphExecutionPolicy::lazy_capture_replay()
+            .with_max_retained_bytes(budget)
+            .expect("minimum retained-byte budget");
+        let mut runner = RocmGraphRunner::new(&Device::Cpu, policy);
+        let owner = RocmGraphOwner::Slot(12);
+        let shared = RocmAllocationRecord {
+            key: RocmAllocationKey {
+                device_index: 0,
+                allocation_id: 1200,
+            },
+            bytes: budget / 2,
+        };
+        runner.graph_slots.insert(
+            owner,
+            RocmGraphSlotState {
+                assigned_row: Some(12),
+                linear_state: LinearAttentionState {
+                    recurrent_states: Vec::new(),
+                    conv_states: Vec::new(),
+                },
+                allocations: vec![shared],
+                accounting_complete: true,
+            },
+        );
+        let key = RocmGraphCacheKey::new(
+            owner,
+            RocmGraphKey {
+                max_seqlen_k: 512,
+                max_blocks_per_seq: 8,
+            },
+        );
+        let candidate = RocmGraphEntryAccounting {
+            stable_io: vec![shared],
+            capture_arena: vec![RocmAllocationRecord {
+                key: RocmAllocationKey {
+                    device_index: 0,
+                    allocation_id: 1201,
+                },
+                bytes: budget / 2,
+            }],
+            blaslt_workspace: None,
+        };
+        assert_eq!(candidate.retained_bytes_excluding_slot(), budget);
+        assert_eq!(
+            runner
+                .plan_candidate_admission(&key, &candidate)
+                .expect("deduplicated candidate fits exactly"),
+            RocmGraphAdmissionPlan::default()
+        );
+
+        let oversized = RocmGraphEntryAccounting {
+            stable_io: vec![RocmAllocationRecord {
+                key: RocmAllocationKey {
+                    device_index: 0,
+                    allocation_id: 1202,
+                },
+                bytes: budget + 1,
+            }],
+            ..RocmGraphEntryAccounting::default()
+        };
+        assert_eq!(
+            runner.plan_candidate_admission(&key, &oversized),
+            Err(RocmGraphAdmissionRejection::CandidateByteBudget)
+        );
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn aggregate_byte_rejection_retries_only_after_owner_release() {
+        let owner = RocmGraphOwner::Slot(17);
+        let row_id = 23;
+        let mut runner = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
+        runner.graph_slots.insert(
+            owner,
+            RocmGraphSlotState {
+                assigned_row: Some(row_id),
+                linear_state: LinearAttentionState {
+                    recurrent_states: Vec::new(),
+                    conv_states: Vec::new(),
+                },
+                allocations: Vec::new(),
+                accounting_complete: true,
+            },
+        );
+        runner.decode_row_slots.insert(row_id, owner);
+        let graph = RocmGraphKey {
+            max_seqlen_k: 1024,
+            max_blocks_per_seq: 16,
+        };
+        let key = RocmGraphCacheKey::new(owner, graph.clone());
+        let rejected_generation = runner.budget_relief_generation;
+
+        assert!(
+            runner.record_post_capture_rejection(&key, RocmGraphAdmissionRejection::ByteBudget)
+        );
+        assert!(runner.budget_capture_suppressed(&graph));
+        assert!(runner.budget_capture_suppressed(&graph));
+        assert_eq!(runner.budget_relief_generation, rejected_generation);
+
+        // New binds/admissions consume headroom and must not reopen a geometry
+        // denied under the same retained-owner constraints.
+        runner.record_ownership_mutation();
+        assert_eq!(runner.budget_relief_generation, rejected_generation);
+        assert!(runner.budget_capture_suppressed(&graph));
+
+        runner.release_decode_row(row_id);
+        assert_ne!(runner.budget_relief_generation, rejected_generation);
+        assert!(!runner.budget_capture_suppressed(&graph));
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn aggregate_budget_suppression_does_not_cycle_at_cache_entry_cap() {
+        let policy = RocmGraphExecutionPolicy::lazy_capture_replay()
+            .with_max_cached_graphs(1)
+            .expect("one-entry cache policy");
+        let mut runner = RocmGraphRunner::new(&Device::Cpu, policy);
+        let owner = RocmGraphOwner::Slot(5);
+        let mut rejected = Vec::new();
+
+        for bucket in 0..2 {
+            let graph = RocmGraphKey {
+                max_seqlen_k: 512 + bucket,
+                max_blocks_per_seq: 8,
+            };
+            let key = RocmGraphCacheKey::new(owner, graph.clone());
+            assert!(
+                runner.record_post_capture_rejection(&key, RocmGraphAdmissionRejection::ByteBudget)
+            );
+            rejected.push(graph);
+        }
+        assert!(runner.budget_rejection_generation.len() > runner.max_cached_graphs());
+        assert!(
+            rejected
+                .iter()
+                .all(|graph| runner.budget_capture_suppressed(graph))
+        );
+
+        for bucket in 2..=RocmGraphRunner::MAX_BUDGET_REJECTION_GEOMETRIES {
+            let graph = RocmGraphKey {
+                max_seqlen_k: 512 + bucket,
+                max_blocks_per_seq: 8,
+            };
+            let key = RocmGraphCacheKey::new(owner, graph);
+            assert!(
+                runner.record_post_capture_rejection(&key, RocmGraphAdmissionRejection::ByteBudget)
+            );
+        }
+        assert_eq!(
+            runner.budget_rejection_generation_wide,
+            Some(runner.budget_relief_generation)
+        );
+        let unseen = RocmGraphKey {
+            max_seqlen_k: usize::MAX,
+            max_blocks_per_seq: usize::MAX,
+        };
+        assert!(runner.budget_capture_suppressed(&unseen));
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn governor_denial_skips_rewarm_until_measured_headroom_returns() {
+        let mut runner = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
+        let graph = RocmGraphKey {
+            max_seqlen_k: 2048,
+            max_blocks_per_seq: 32,
+        };
+        runner.remember_reservation_denial(&graph, 4096);
+        assert!(runner.reservation_retry_suppressed_with_available(&graph, Some(1024)));
+        assert!(runner.reservation_retry_suppressed_with_available(&graph, Some(4095)));
+        assert!(runner.reservation_denied_bytes.contains_key(&graph));
+        assert!(!runner.reservation_retry_suppressed_with_available(&graph, Some(4096)));
+        assert!(!runner.reservation_denied_bytes.contains_key(&graph));
+
+        for bucket in 0..=RocmGraphRunner::MAX_BUDGET_REJECTION_GEOMETRIES {
+            runner.remember_reservation_denial(
+                &RocmGraphKey {
+                    max_seqlen_k: bucket,
+                    max_blocks_per_seq: 1,
+                },
+                bucket as u64 + 1,
+            );
+        }
+        assert!(runner.reservation_denied_bytes.is_empty());
+        assert_eq!(
+            runner.reservation_denied_wide_bytes,
+            Some(RocmGraphRunner::MAX_BUDGET_REJECTION_GEOMETRIES as u64 + 1)
+        );
     }
 
     #[cfg(feature = "rocm")]
@@ -3768,9 +6474,15 @@ mod tests {
             RocmGraphExecutionPolicy::lazy_capture_replay(),
         );
         let mut first = state([1.0, 2.0], [3.0, 4.0]);
-        let owner = runner
+        let owner = match runner
             .bind_decode_row_to_slot(1001, &key, &mut first)
-            .expect("bind first row");
+            .expect("bind first row")
+        {
+            RocmGraphBindOutcome::Bound(owner) => owner,
+            RocmGraphBindOutcome::Fallback(reason) => {
+                panic!("unexpected first-row graph fallback: {reason:?}")
+            }
+        };
         assert!(RocmGraphRunner::linear_state_handles_match(
             &runner.graph_slots[&owner].linear_state,
             &first
@@ -3779,9 +6491,15 @@ mod tests {
         runner.decode_row_slots.remove(&1001);
         runner.graph_slots.get_mut(&owner).unwrap().assigned_row = None;
         let mut second = state([11.0, 12.0], [13.0, 14.0]);
-        let rebound = runner
+        let rebound = match runner
             .bind_decode_row_to_slot(1002, &key, &mut second)
-            .expect("reuse slot for second row");
+            .expect("reuse slot for second row")
+        {
+            RocmGraphBindOutcome::Bound(owner) => owner,
+            RocmGraphBindOutcome::Fallback(reason) => {
+                panic!("unexpected reused-row graph fallback: {reason:?}")
+            }
+        };
         assert_eq!(rebound, owner);
         assert!(RocmGraphRunner::linear_state_handles_match(
             &runner.graph_slots[&owner].linear_state,
@@ -4291,7 +7009,7 @@ mod tests {
         );
         r.warmup_done = true;
         r.counters
-            .record_capture_outcome(RocmGraphCaptureOutcome::Succeeded);
+            .record_capture_outcome(RocmGraphCaptureOutcome::SucceededRetained);
         r.counters.record_replay_outcome(false);
         let gen0 = r.adapter_generation;
         r.invalidate().expect("CPU runner invalidation");
@@ -4314,7 +7032,8 @@ mod tests {
         let mut counters = RocmGraphCounters::default();
         counters.record_capture_outcome(RocmGraphCaptureOutcome::Failed);
         counters.record_capture_outcome(RocmGraphCaptureOutcome::Deferred);
-        counters.record_capture_outcome(RocmGraphCaptureOutcome::Succeeded);
+        counters.record_capture_outcome(RocmGraphCaptureOutcome::SucceededRetained);
+        counters.record_capture_outcome(RocmGraphCaptureOutcome::SucceededUncached);
         counters.record_replay_outcome(true);
         counters.record_replay_outcome(false);
         counters.record_decode_owner_release(2);
@@ -4332,8 +7051,8 @@ mod tests {
             std::time::Duration::from_millis(10),
         );
 
-        assert_eq!(counters.capture_attempts, 3);
-        assert_eq!(counters.capture_successes, 1);
+        assert_eq!(counters.capture_attempts, 4);
+        assert_eq!(counters.capture_successes, 2);
         assert_eq!(counters.capture_deferrals, 1);
         assert_eq!(counters.capture_failures, 1);
         assert_eq!(counters.replay_attempts, 2);
@@ -4349,15 +7068,120 @@ mod tests {
         assert_eq!(counters.fallbacks.max_duration_micros, 120_000);
     }
 
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn capture_admission_and_eviction_counters_reconcile_by_closed_cause() {
+        let mut counters = RocmGraphCounters::default();
+        counters.record_capture_outcome(RocmGraphCaptureOutcome::SucceededRetained);
+        counters.record_cache_admission();
+        for rejection in [
+            RocmGraphAdmissionRejection::EntryCapacity,
+            RocmGraphAdmissionRejection::CandidateByteBudget,
+            RocmGraphAdmissionRejection::AccountingIncomplete,
+        ] {
+            counters.record_capture_outcome(RocmGraphCaptureOutcome::SucceededUncached);
+            counters.record_cache_rejection(rejection);
+        }
+        assert_eq!(
+            counters.capture_successes,
+            counters
+                .cache_admission_successes
+                .saturating_add(counters.entry_capacity_rejections)
+                .saturating_add(counters.byte_budget_rejections)
+                .saturating_add(counters.accounting_incomplete_rejections)
+        );
+        assert_eq!(counters.pre_capture_entry_capacity_skips, 0);
+        assert_eq!(counters.pre_capture_byte_budget_skips, 0);
+        assert_eq!(counters.pre_capture_accounting_incomplete_skips, 0);
+        assert_eq!(counters.pre_capture_memory_reservation_denied_skips, 0);
+        assert_eq!(counters.memory_governor_selector_mismatch_skips, 0);
+
+        for (graphs, reason) in [
+            (1, RocmGraphEvictionReason::Budget),
+            (2, RocmGraphEvictionReason::Pressure),
+            (3, RocmGraphEvictionReason::Invalidation),
+            (4, RocmGraphEvictionReason::Recovery),
+        ] {
+            counters.record_cache_eviction(graphs, graphs as u64 * 1024, reason);
+        }
+        assert_eq!(
+            counters.cache_evictions,
+            counters
+                .budget_evictions
+                .saturating_add(counters.pressure_evictions)
+                .saturating_add(counters.invalidation_evictions)
+                .saturating_add(counters.recovery_evictions)
+        );
+    }
+
+    #[test]
+    fn fixed_phase_telemetry_is_bounded_and_tracks_transient_high_water() {
+        let telemetry = RocmGraphTelemetryHandle::default();
+        let idle = telemetry.snapshot();
+        assert_eq!(idle.current_phase, None);
+        assert_eq!(idle.current_phase_elapsed_micros, 0);
+
+        let older = telemetry.timer(RocmGraphPhase::CandidateWarm);
+        let first_elapsed = telemetry.snapshot().current_phase_elapsed_micros;
+        let second_elapsed = telemetry.snapshot().current_phase_elapsed_micros;
+        assert!(second_elapsed >= first_elapsed);
+        let newer = telemetry.timer(RocmGraphPhase::NativeCapture);
+        drop(older);
+        let while_newer = telemetry.snapshot();
+        assert_eq!(
+            while_newer.current_phase,
+            Some(RocmGraphPhase::NativeCapture)
+        );
+        assert_eq!(
+            serde_json::to_value(while_newer).expect("serialize live telemetry")["current_phase"],
+            "native_capture"
+        );
+        drop(newer);
+        let idle_again = telemetry.snapshot();
+        assert_eq!(idle_again.current_phase, None);
+        assert_eq!(idle_again.current_phase_elapsed_micros, 0);
+
+        for phase in [
+            RocmGraphPhase::PreCandidateHeadroom,
+            RocmGraphPhase::PreNativeReservation,
+            RocmGraphPhase::RejectedCandidateCleanup,
+        ] {
+            let _timer = telemetry.timer(phase);
+        }
+        telemetry.record_transient_candidate_bytes(4096);
+        telemetry.record_transient_candidate_bytes(1024);
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.candidate_warm_phase.calls, 1);
+        assert_eq!(snapshot.pre_candidate_headroom_phase.calls, 1);
+        assert_eq!(snapshot.pre_native_reservation_phase.calls, 1);
+        assert_eq!(snapshot.native_capture_phase.calls, 1);
+        assert_eq!(snapshot.rejected_candidate_cleanup_phase.calls, 1);
+        assert_eq!(snapshot.last_transient_candidate_bytes, 1024);
+        assert_eq!(snapshot.peak_transient_candidate_bytes, 4096);
+
+        let mut phase = RocmGraphPhaseStats::default();
+        phase.record(std::time::Duration::from_millis(50));
+        phase.record(std::time::Duration::from_millis(120));
+        assert_eq!(phase.calls, 2);
+        assert_eq!(phase.slow, 1);
+        assert_eq!(phase.total_duration_micros, 170_000);
+        assert_eq!(phase.max_duration_micros, 120_000);
+    }
+
     #[test]
     fn fallback_reason_labels_are_closed_and_distinct() {
         let labels = [
-            RocmGraphFallbackReason::WarmupForwardFailure,
             RocmGraphFallbackReason::ColdCacheHostRoundTrip,
             RocmGraphFallbackReason::PersistentHostRoundTrip,
             RocmGraphFallbackReason::ShapeDependentAttention,
             RocmGraphFallbackReason::GraphCacheCapacity,
+            RocmGraphFallbackReason::GraphCacheByteBudget,
+            RocmGraphFallbackReason::GraphAccountingIncomplete,
+            RocmGraphFallbackReason::ModerateMemoryPressure,
+            RocmGraphFallbackReason::TightMemoryPressure,
             RocmGraphFallbackReason::CriticalMemoryPressure,
+            RocmGraphFallbackReason::MemoryReservationDenied,
+            RocmGraphFallbackReason::MemoryGovernorSelectorMismatch,
             RocmGraphFallbackReason::CaptureFailure,
             RocmGraphFallbackReason::ReplayFailure,
         ]
@@ -4366,5 +7190,46 @@ mod tests {
         distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), labels.len());
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn moderate_pressure_stops_capture_growth_without_requesting_eviction() {
+        assert_eq!(
+            non_evicting_pressure_decision(kiln_memory::MemoryPressure::Comfortable),
+            Some(RocmGraphPressureDecision::Normal)
+        );
+        assert_eq!(
+            non_evicting_pressure_decision(kiln_memory::MemoryPressure::Moderate),
+            Some(RocmGraphPressureDecision::ReplayOnly(
+                RocmGraphFallbackReason::ModerateMemoryPressure
+            ))
+        );
+        assert_eq!(
+            non_evicting_pressure_decision(kiln_memory::MemoryPressure::Tight),
+            None
+        );
+        assert_eq!(
+            non_evicting_pressure_decision(kiln_memory::MemoryPressure::Critical),
+            None
+        );
+    }
+
+    #[test]
+    fn graph_governor_selector_must_match_the_active_device() {
+        use kiln_memory::VramProbeSelector;
+
+        assert!(memory_governor_selector_matches(
+            VramProbeSelector::Nvidia(0),
+            VramProbeSelector::Nvidia(0)
+        ));
+        assert!(!memory_governor_selector_matches(
+            VramProbeSelector::Nvidia(0),
+            VramProbeSelector::Nvidia(1)
+        ));
+        assert!(!memory_governor_selector_matches(
+            VramProbeSelector::Nvidia(0),
+            VramProbeSelector::Auto
+        ));
     }
 }

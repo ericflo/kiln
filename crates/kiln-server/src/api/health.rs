@@ -403,6 +403,12 @@ struct RocmGraphInfo {
     enabled: Option<bool>,
     capture_enabled: Option<bool>,
     state: &'static str,
+    unavailable_reason: Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
+    phase_telemetry_available: bool,
+    phase_telemetry_unavailable_reason:
+        Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
+    current_phase: Option<kiln_model::RocmGraphPhase>,
+    current_phase_elapsed_micros: Option<u64>,
     capture_attempts: Option<u64>,
     capture_successes: Option<u64>,
     capture_deferrals: Option<u64>,
@@ -415,26 +421,70 @@ struct RocmGraphInfo {
     decode_owner_graph_release_count: Option<u64>,
     graph_slot_create_count: Option<u64>,
     graph_slot_reuse_count: Option<u64>,
+    cache_admission_successes: Option<u64>,
+    cache_evictions: Option<u64>,
+    cache_evicted_bytes: Option<u64>,
+    budget_evictions: Option<u64>,
+    pressure_evictions: Option<u64>,
+    invalidation_evictions: Option<u64>,
+    recovery_evictions: Option<u64>,
+    entry_capacity_rejections: Option<u64>,
+    byte_budget_rejections: Option<u64>,
+    accounting_incomplete_rejections: Option<u64>,
+    pre_capture_entry_capacity_skips: Option<u64>,
+    pre_capture_byte_budget_skips: Option<u64>,
+    pre_capture_accounting_incomplete_skips: Option<u64>,
+    pre_capture_memory_reservation_denied_skips: Option<u64>,
+    memory_governor_selector_mismatch_skips: Option<u64>,
+    max_cached_graphs: Option<usize>,
+    max_retained_bytes: Option<u64>,
     captured_graph_count: Option<usize>,
     graph_slot_count: Option<usize>,
     active_graph_slot_count: Option<usize>,
     idle_graph_slot_count: Option<usize>,
     tracked_decode_owner_count: Option<usize>,
+    retained_stable_io_bytes: Option<u64>,
+    retained_capture_arena_bytes: Option<u64>,
+    retained_blaslt_workspace_bytes: Option<u64>,
+    retained_slot_state_bytes: Option<u64>,
+    retained_bytes: Option<u64>,
+    peak_retained_bytes: Option<u64>,
+    opaque_native_object_count: Option<usize>,
+    retained_bytes_accounting_complete: Option<bool>,
+    quarantined_retained_bytes: Option<u64>,
+    pre_candidate_headroom_phase: Option<kiln_model::RocmGraphPhaseStats>,
+    candidate_warm_phase: Option<kiln_model::RocmGraphPhaseStats>,
+    pre_native_reservation_phase: Option<kiln_model::RocmGraphPhaseStats>,
+    native_capture_phase: Option<kiln_model::RocmGraphPhaseStats>,
+    rejected_candidate_cleanup_phase: Option<kiln_model::RocmGraphPhaseStats>,
+    last_transient_candidate_bytes: Option<u64>,
+    peak_transient_candidate_bytes: Option<u64>,
     fallbacks: Option<kiln_model::RocmGraphFallbackStats>,
 }
 
-fn rocm_graph_info(stats: Option<kiln_model::RocmGraphStats>) -> RocmGraphInfo {
+fn rocm_graph_info(
+    observation: crate::rocm_graph_observability::RocmGraphObservation,
+) -> RocmGraphInfo {
+    let stats = observation.stats;
+    let telemetry = observation.telemetry;
     let enabled = stats.map(|snapshot| snapshot.enabled);
     RocmGraphInfo {
         requested: stats.map(|snapshot| snapshot.requested),
         capture_requested: stats.map(|snapshot| snapshot.capture_requested),
         enabled,
         capture_enabled: stats.map(|snapshot| snapshot.capture_enabled),
-        state: match enabled {
-            Some(true) => "enabled",
-            Some(false) => "disabled",
-            None => "busy",
+        state: match (enabled, observation.stats_unavailable_reason) {
+            (Some(true), _) => "enabled",
+            (Some(false), _) => "disabled",
+            (None, Some(reason)) if reason.is_busy() => "busy",
+            (None, _) => "unavailable",
         },
+        unavailable_reason: observation.stats_unavailable_reason,
+        phase_telemetry_available: telemetry.is_some(),
+        phase_telemetry_unavailable_reason: observation.telemetry_unavailable_reason,
+        current_phase: telemetry.and_then(|snapshot| snapshot.current_phase),
+        current_phase_elapsed_micros: telemetry
+            .map(|snapshot| snapshot.current_phase_elapsed_micros),
         capture_attempts: stats.map(|snapshot| snapshot.capture_attempts),
         capture_successes: stats.map(|snapshot| snapshot.capture_successes),
         capture_deferrals: stats.map(|snapshot| snapshot.capture_deferrals),
@@ -448,11 +498,56 @@ fn rocm_graph_info(stats: Option<kiln_model::RocmGraphStats>) -> RocmGraphInfo {
             .map(|snapshot| snapshot.decode_owner_graph_release_count),
         graph_slot_create_count: stats.map(|snapshot| snapshot.graph_slot_create_count),
         graph_slot_reuse_count: stats.map(|snapshot| snapshot.graph_slot_reuse_count),
+        cache_admission_successes: stats.map(|snapshot| snapshot.cache_admission_successes),
+        cache_evictions: stats.map(|snapshot| snapshot.cache_evictions),
+        cache_evicted_bytes: stats.map(|snapshot| snapshot.cache_evicted_bytes),
+        budget_evictions: stats.map(|snapshot| snapshot.budget_evictions),
+        pressure_evictions: stats.map(|snapshot| snapshot.pressure_evictions),
+        invalidation_evictions: stats.map(|snapshot| snapshot.invalidation_evictions),
+        recovery_evictions: stats.map(|snapshot| snapshot.recovery_evictions),
+        entry_capacity_rejections: stats.map(|snapshot| snapshot.entry_capacity_rejections),
+        byte_budget_rejections: stats.map(|snapshot| snapshot.byte_budget_rejections),
+        accounting_incomplete_rejections: stats
+            .map(|snapshot| snapshot.accounting_incomplete_rejections),
+        pre_capture_entry_capacity_skips: stats
+            .map(|snapshot| snapshot.pre_capture_entry_capacity_skips),
+        pre_capture_byte_budget_skips: stats.map(|snapshot| snapshot.pre_capture_byte_budget_skips),
+        pre_capture_accounting_incomplete_skips: stats
+            .map(|snapshot| snapshot.pre_capture_accounting_incomplete_skips),
+        pre_capture_memory_reservation_denied_skips: stats
+            .map(|snapshot| snapshot.pre_capture_memory_reservation_denied_skips),
+        memory_governor_selector_mismatch_skips: stats
+            .map(|snapshot| snapshot.memory_governor_selector_mismatch_skips),
+        max_cached_graphs: stats.map(|snapshot| snapshot.max_cached_graphs),
+        max_retained_bytes: stats.map(|snapshot| snapshot.max_retained_bytes),
         captured_graph_count: stats.map(|snapshot| snapshot.captured_graph_count),
         graph_slot_count: stats.map(|snapshot| snapshot.graph_slot_count),
         active_graph_slot_count: stats.map(|snapshot| snapshot.active_graph_slot_count),
         idle_graph_slot_count: stats.map(|snapshot| snapshot.idle_graph_slot_count),
         tracked_decode_owner_count: stats.map(|snapshot| snapshot.tracked_decode_owner_count),
+        retained_stable_io_bytes: stats.map(|snapshot| snapshot.retained_stable_io_bytes),
+        retained_capture_arena_bytes: stats.map(|snapshot| snapshot.retained_capture_arena_bytes),
+        retained_blaslt_workspace_bytes: stats
+            .map(|snapshot| snapshot.retained_blaslt_workspace_bytes),
+        retained_slot_state_bytes: stats.map(|snapshot| snapshot.retained_slot_state_bytes),
+        retained_bytes: stats.map(|snapshot| snapshot.retained_bytes),
+        peak_retained_bytes: stats.map(|snapshot| snapshot.peak_retained_bytes),
+        opaque_native_object_count: stats.map(|snapshot| snapshot.opaque_native_object_count),
+        retained_bytes_accounting_complete: stats
+            .map(|snapshot| snapshot.retained_bytes_accounting_complete),
+        quarantined_retained_bytes: stats.map(|snapshot| snapshot.quarantined_retained_bytes),
+        pre_candidate_headroom_phase: telemetry
+            .map(|snapshot| snapshot.pre_candidate_headroom_phase),
+        candidate_warm_phase: telemetry.map(|snapshot| snapshot.candidate_warm_phase),
+        pre_native_reservation_phase: telemetry
+            .map(|snapshot| snapshot.pre_native_reservation_phase),
+        native_capture_phase: telemetry.map(|snapshot| snapshot.native_capture_phase),
+        rejected_candidate_cleanup_phase: telemetry
+            .map(|snapshot| snapshot.rejected_candidate_cleanup_phase),
+        last_transient_candidate_bytes: telemetry
+            .map(|snapshot| snapshot.last_transient_candidate_bytes),
+        peak_transient_candidate_bytes: telemetry
+            .map(|snapshot| snapshot.peak_transient_candidate_bytes),
         fallbacks: stats.map(|snapshot| snapshot.fallbacks),
     }
 }
@@ -564,6 +659,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let execution_provenance_ready =
         execution_provenance_ready(real_backend, state.execution_provenance.as_deref());
     let rocm_synchronization = state.observe_rocm_runtime_health();
+    let rocm_graph_observation = crate::rocm_graph_observability::observe_rocm_graphs(&state);
 
     // Adapter info
     let active_adapter = state.active_adapter_name.read().unwrap().clone();
@@ -615,7 +711,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 None,
                 None,
                 graph_info(Some(false)),
-                rocm_graph_info(Some(kiln_model::RocmGraphStats::default())),
+                rocm_graph_info(rocm_graph_observation),
                 graph_info(Some(false)),
                 true,
             )
@@ -659,15 +755,13 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 Some(engine) => Some(BatchingEngineInfo::from(engine.cached_snapshot())),
                 None => None,
             };
-            let (cuda_graph_enabled, rocm_graph_stats, metal_graph_enabled) =
-                match runner.try_read() {
-                    Ok(runner) => (
-                        runner.cuda_graph_enabled().ok(),
-                        runner.rocm_graph_stats().ok(),
-                        runner.metal_graph_enabled().ok(),
-                    ),
-                    Err(_) => (None, None, None),
-                };
+            let (cuda_graph_enabled, metal_graph_enabled) = match runner.try_read() {
+                Ok(runner) => (
+                    runner.cuda_graph_enabled().ok(),
+                    runner.metal_graph_enabled().ok(),
+                ),
+                Err(_) => (None, None),
+            };
             (
                 "model",
                 backend_runtime,
@@ -676,7 +770,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 decode_batcher,
                 batching_engine,
                 graph_info(cuda_graph_enabled),
-                rocm_graph_info(rocm_graph_stats),
+                rocm_graph_info(rocm_graph_observation),
                 graph_info(metal_graph_enabled),
                 true,
             )
@@ -1224,14 +1318,14 @@ mod tests {
 
     #[test]
     fn rocm_graph_health_preserves_runtime_snapshot() {
-        let info = rocm_graph_info(Some(kiln_model::RocmGraphStats {
+        let stats = kiln_model::RocmGraphStats {
             requested: true,
             capture_requested: true,
             enabled: false,
             capture_enabled: false,
-            capture_attempts: 4,
-            capture_successes: 2,
-            capture_deferrals: 1,
+            capture_attempts: 12,
+            capture_successes: 8,
+            capture_deferrals: 3,
             capture_failures: 1,
             replay_attempts: 9,
             replay_successes: 8,
@@ -1241,26 +1335,106 @@ mod tests {
             decode_owner_graph_release_count: 4,
             graph_slot_create_count: 2,
             graph_slot_reuse_count: 7,
+            cache_admission_successes: 6,
+            cache_evictions: 4,
+            cache_evicted_bytes: 384 * 1024 * 1024,
+            budget_evictions: 2,
+            pressure_evictions: 1,
+            invalidation_evictions: 1,
+            recovery_evictions: 0,
+            entry_capacity_rejections: 1,
+            byte_budget_rejections: 1,
+            accounting_incomplete_rejections: 0,
+            pre_capture_entry_capacity_skips: 2,
+            pre_capture_byte_budget_skips: 3,
+            pre_capture_accounting_incomplete_skips: 1,
+            pre_capture_memory_reservation_denied_skips: 4,
+            memory_governor_selector_mismatch_skips: 2,
+            max_cached_graphs: 8,
+            max_retained_bytes: 1024 * 1024 * 1024,
             captured_graph_count: 2,
             graph_slot_count: 2,
             active_graph_slot_count: 1,
             idle_graph_slot_count: 1,
             tracked_decode_owner_count: 1,
+            retained_stable_io_bytes: 32 * 1024 * 1024,
+            retained_capture_arena_bytes: 128 * 1024 * 1024,
+            retained_blaslt_workspace_bytes: 64 * 1024 * 1024,
+            retained_slot_state_bytes: 16 * 1024 * 1024,
+            retained_bytes: 240 * 1024 * 1024,
+            peak_retained_bytes: 512 * 1024 * 1024,
+            opaque_native_object_count: 10,
+            retained_bytes_accounting_complete: true,
+            quarantined_retained_bytes: 0,
+            pre_candidate_headroom_phase: kiln_model::RocmGraphPhaseStats {
+                calls: 14,
+                slow: 1,
+                total_duration_micros: 225_000,
+                max_duration_micros: 125_000,
+            },
+            candidate_warm_phase: kiln_model::RocmGraphPhaseStats {
+                calls: 12,
+                slow: 2,
+                total_duration_micros: 500_000,
+                max_duration_micros: 150_000,
+            },
+            pre_native_reservation_phase: kiln_model::RocmGraphPhaseStats {
+                calls: 9,
+                slow: 1,
+                total_duration_micros: 175_000,
+                max_duration_micros: 110_000,
+            },
+            native_capture_phase: kiln_model::RocmGraphPhaseStats {
+                calls: 8,
+                slow: 1,
+                total_duration_micros: 325_000,
+                max_duration_micros: 180_000,
+            },
+            rejected_candidate_cleanup_phase: kiln_model::RocmGraphPhaseStats {
+                calls: 2,
+                slow: 0,
+                total_duration_micros: 25_000,
+                max_duration_micros: 15_000,
+            },
+            last_transient_candidate_bytes: 96 * 1024 * 1024,
+            peak_transient_candidate_bytes: 160 * 1024 * 1024,
             fallbacks: kiln_model::RocmGraphFallbackStats {
-                total: 8,
-                warmup_forward_failure: 1,
+                total: 16,
                 cold_cache_host_round_trip: 1,
                 persistent_host_round_trip: 1,
                 shape_dependent_attention: 1,
                 graph_cache_capacity: 1,
+                graph_cache_byte_budget: 2,
+                graph_accounting_incomplete: 1,
+                moderate_memory_pressure: 1,
+                tight_memory_pressure: 3,
                 critical_memory_pressure: 1,
+                memory_reservation_denied: 1,
+                memory_governor_selector_mismatch: 1,
                 capture_failure: 1,
                 replay_failure: 1,
                 slow: 2,
                 total_duration_micros: 123_000,
                 max_duration_micros: 101_000,
             },
-        }));
+        };
+        let telemetry = kiln_model::RocmGraphLiveTelemetry {
+            current_phase: Some(kiln_model::RocmGraphPhase::NativeCapture),
+            current_phase_elapsed_micros: 42_000,
+            pre_candidate_headroom_phase: stats.pre_candidate_headroom_phase,
+            candidate_warm_phase: stats.candidate_warm_phase,
+            pre_native_reservation_phase: stats.pre_native_reservation_phase,
+            native_capture_phase: stats.native_capture_phase,
+            rejected_candidate_cleanup_phase: stats.rejected_candidate_cleanup_phase,
+            last_transient_candidate_bytes: stats.last_transient_candidate_bytes,
+            peak_transient_candidate_bytes: stats.peak_transient_candidate_bytes,
+        };
+        let info = rocm_graph_info(crate::rocm_graph_observability::RocmGraphObservation {
+            stats: Some(stats),
+            stats_unavailable_reason: None,
+            telemetry: Some(telemetry),
+            telemetry_unavailable_reason: None,
+        });
         let json = serde_json::to_value(info).unwrap();
 
         assert_eq!(json["requested"], true);
@@ -1268,9 +1442,13 @@ mod tests {
         assert_eq!(json["enabled"], false);
         assert_eq!(json["capture_enabled"], false);
         assert_eq!(json["state"], "disabled");
-        assert_eq!(json["capture_attempts"], 4);
-        assert_eq!(json["capture_successes"], 2);
-        assert_eq!(json["capture_deferrals"], 1);
+        assert_eq!(json["unavailable_reason"], serde_json::Value::Null);
+        assert_eq!(json["phase_telemetry_available"], true);
+        assert_eq!(json["current_phase"], "native_capture");
+        assert_eq!(json["current_phase_elapsed_micros"], 42_000);
+        assert_eq!(json["capture_attempts"], 12);
+        assert_eq!(json["capture_successes"], 8);
+        assert_eq!(json["capture_deferrals"], 3);
         assert_eq!(json["capture_failures"], 1);
         assert_eq!(json["replay_attempts"], 9);
         assert_eq!(json["replay_successes"], 8);
@@ -1280,17 +1458,114 @@ mod tests {
         assert_eq!(json["decode_owner_graph_release_count"], 4);
         assert_eq!(json["graph_slot_create_count"], 2);
         assert_eq!(json["graph_slot_reuse_count"], 7);
+        assert_eq!(json["cache_admission_successes"], 6);
+        assert_eq!(json["cache_evictions"], 4);
+        assert_eq!(json["cache_evicted_bytes"], 384 * 1024 * 1024);
+        assert_eq!(json["budget_evictions"], 2);
+        assert_eq!(json["pressure_evictions"], 1);
+        assert_eq!(json["invalidation_evictions"], 1);
+        assert_eq!(json["recovery_evictions"], 0);
+        assert_eq!(json["entry_capacity_rejections"], 1);
+        assert_eq!(json["byte_budget_rejections"], 1);
+        assert_eq!(json["accounting_incomplete_rejections"], 0);
+        assert_eq!(json["pre_capture_entry_capacity_skips"], 2);
+        assert_eq!(json["pre_capture_byte_budget_skips"], 3);
+        assert_eq!(json["pre_capture_accounting_incomplete_skips"], 1);
+        assert_eq!(json["pre_capture_memory_reservation_denied_skips"], 4);
+        assert_eq!(json["memory_governor_selector_mismatch_skips"], 2);
+        assert_eq!(json["max_cached_graphs"], 8);
+        assert_eq!(json["max_retained_bytes"], 1024 * 1024 * 1024);
         assert_eq!(json["captured_graph_count"], 2);
         assert_eq!(json["graph_slot_count"], 2);
         assert_eq!(json["active_graph_slot_count"], 1);
         assert_eq!(json["idle_graph_slot_count"], 1);
         assert_eq!(json["tracked_decode_owner_count"], 1);
-        assert_eq!(json["fallbacks"]["total"], 8);
+        assert_eq!(json["retained_stable_io_bytes"], 32 * 1024 * 1024);
+        assert_eq!(json["retained_capture_arena_bytes"], 128 * 1024 * 1024);
+        assert_eq!(json["retained_blaslt_workspace_bytes"], 64 * 1024 * 1024);
+        assert_eq!(json["retained_slot_state_bytes"], 16 * 1024 * 1024);
+        assert_eq!(json["retained_bytes"], 240 * 1024 * 1024);
+        assert_eq!(json["peak_retained_bytes"], 512 * 1024 * 1024);
+        assert_eq!(json["opaque_native_object_count"], 10);
+        assert_eq!(json["retained_bytes_accounting_complete"], true);
+        assert_eq!(json["quarantined_retained_bytes"], 0);
+        assert_eq!(json["pre_candidate_headroom_phase"]["calls"], 14);
+        assert_eq!(json["candidate_warm_phase"]["calls"], 12);
+        assert_eq!(json["candidate_warm_phase"]["slow"], 2);
+        assert_eq!(
+            json["candidate_warm_phase"]["total_duration_micros"],
+            500_000
+        );
+        assert_eq!(
+            json["pre_native_reservation_phase"]["max_duration_micros"],
+            110_000
+        );
+        assert_eq!(json["native_capture_phase"]["calls"], 8);
+        assert_eq!(json["rejected_candidate_cleanup_phase"]["calls"], 2);
+        assert_eq!(json["last_transient_candidate_bytes"], 96 * 1024 * 1024);
+        assert_eq!(json["peak_transient_candidate_bytes"], 160 * 1024 * 1024);
+        assert_eq!(json["fallbacks"]["total"], 16);
         assert_eq!(json["fallbacks"]["shape_dependent_attention"], 1);
+        assert_eq!(json["fallbacks"]["graph_cache_byte_budget"], 2);
+        assert_eq!(json["fallbacks"]["graph_accounting_incomplete"], 1);
+        assert_eq!(json["fallbacks"]["moderate_memory_pressure"], 1);
+        assert_eq!(json["fallbacks"]["tight_memory_pressure"], 3);
+        assert_eq!(json["fallbacks"]["memory_reservation_denied"], 1);
+        assert_eq!(json["fallbacks"]["memory_governor_selector_mismatch"], 1);
         assert_eq!(json["fallbacks"]["replay_failure"], 1);
         assert_eq!(json["fallbacks"]["slow"], 2);
         assert_eq!(json["fallbacks"]["total_duration_micros"], 123_000);
         assert_eq!(json["fallbacks"]["max_duration_micros"], 101_000);
+    }
+
+    #[test]
+    fn rocm_graph_health_does_not_call_missing_or_poisoned_runners_busy() {
+        for (reason, expected_state) in [
+            (
+                crate::rocm_graph_observability::RocmGraphUnavailableReason::BackendWithoutGraphRunner,
+                "unavailable",
+            ),
+            (
+                crate::rocm_graph_observability::RocmGraphUnavailableReason::GraphRunnerLockPoisoned,
+                "unavailable",
+            ),
+            (
+                crate::rocm_graph_observability::RocmGraphUnavailableReason::GraphRunnerBusy,
+                "busy",
+            ),
+        ] {
+            let backend_missing = reason
+                == crate::rocm_graph_observability::RocmGraphUnavailableReason::BackendWithoutGraphRunner;
+            let telemetry = (!backend_missing).then_some(kiln_model::RocmGraphLiveTelemetry {
+                current_phase: Some(kiln_model::RocmGraphPhase::NativeCapture),
+                current_phase_elapsed_micros: 17_000,
+                ..kiln_model::RocmGraphLiveTelemetry::default()
+            });
+            let info = rocm_graph_info(crate::rocm_graph_observability::RocmGraphObservation {
+                stats: None,
+                stats_unavailable_reason: Some(reason),
+                telemetry,
+                telemetry_unavailable_reason: backend_missing.then_some(reason),
+            });
+            let json = serde_json::to_value(info).unwrap();
+            assert_eq!(json["state"], expected_state);
+            assert_eq!(json["unavailable_reason"], serde_json::to_value(reason).unwrap());
+            assert_eq!(json["phase_telemetry_available"], !backend_missing);
+            if backend_missing {
+                assert_eq!(
+                    json["phase_telemetry_unavailable_reason"],
+                    serde_json::to_value(reason).unwrap()
+                );
+                assert_eq!(json["current_phase"], serde_json::Value::Null);
+            } else {
+                assert_eq!(
+                    json["phase_telemetry_unavailable_reason"],
+                    serde_json::Value::Null
+                );
+                assert_eq!(json["current_phase"], "native_capture");
+                assert_eq!(json["current_phase_elapsed_micros"], 17_000);
+            }
+        }
     }
 
     #[test]
@@ -1561,7 +1836,11 @@ mod tests {
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v1"
+            "kiln.accelerator-runtime-policy.v2"
+        );
+        assert_eq!(
+            json["decode_runtime"]["accelerator_runtime"]["rocm_graph_cache_max_bytes"]["effective"],
+            crate::config::DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["rocm_synchronization_mode"]["effective"],
@@ -1615,53 +1894,32 @@ mod tests {
             json["decode_runtime"]["direct_decode_rendezvous"]["route_available"],
             false
         );
-        for backend in ["cuda_graphs", "rocm_graphs", "metal_graphs"] {
+        for backend in ["cuda_graphs", "metal_graphs"] {
             assert_eq!(json["decode_runtime"][backend]["enabled"], false);
             assert_eq!(json["decode_runtime"][backend]["state"], "disabled");
         }
         let rocm_graphs = &json["decode_runtime"]["rocm_graphs"];
-        assert_eq!(rocm_graphs["requested"], false);
-        assert_eq!(rocm_graphs["capture_requested"], false);
-        assert_eq!(rocm_graphs["capture_enabled"], false);
-        for counter in [
-            "capture_attempts",
-            "capture_successes",
-            "capture_deferrals",
-            "capture_failures",
-            "replay_attempts",
-            "replay_successes",
-            "replay_failures",
-            "failures",
-            "decode_owner_release_count",
-            "decode_owner_graph_release_count",
-            "graph_slot_create_count",
-            "graph_slot_reuse_count",
-            "captured_graph_count",
-            "graph_slot_count",
-            "active_graph_slot_count",
-            "idle_graph_slot_count",
-            "tracked_decode_owner_count",
-        ] {
-            assert_eq!(rocm_graphs[counter], 0, "unexpected {counter}");
-        }
-        for counter in [
-            "total",
-            "warmup_forward_failure",
-            "cold_cache_host_round_trip",
-            "persistent_host_round_trip",
-            "shape_dependent_attention",
-            "graph_cache_capacity",
-            "critical_memory_pressure",
-            "capture_failure",
-            "replay_failure",
-            "slow",
-            "total_duration_micros",
-            "max_duration_micros",
-        ] {
-            assert_eq!(
-                rocm_graphs["fallbacks"][counter], 0,
-                "unexpected fallback {counter}"
-            );
+        assert_eq!(rocm_graphs["state"], "unavailable");
+        assert_eq!(
+            rocm_graphs["unavailable_reason"],
+            "backend_without_graph_runner"
+        );
+        assert_eq!(rocm_graphs["phase_telemetry_available"], false);
+        assert_eq!(
+            rocm_graphs["phase_telemetry_unavailable_reason"],
+            "backend_without_graph_runner"
+        );
+        for (field, value) in rocm_graphs.as_object().expect("ROCm graph health object") {
+            if ![
+                "state",
+                "unavailable_reason",
+                "phase_telemetry_available",
+                "phase_telemetry_unavailable_reason",
+            ]
+            .contains(&field.as_str())
+            {
+                assert!(value.is_null(), "unavailable field {field} must be null");
+            }
         }
         assert_eq!(json["decode_runtime"]["kv_autoscaler"]["enabled"], false);
         assert_eq!(

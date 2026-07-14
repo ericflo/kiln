@@ -97,7 +97,9 @@ pub use loader::{
 pub use lora_loader::LoraWeights;
 pub use paged_kv_cache_kt::{KvPoolIdentity, PagedKvCacheKt};
 pub use rocm_graph::{
-    RocmGraphExecutionMode, RocmGraphExecutionPolicy, RocmGraphFallbackStats, RocmGraphStats,
+    RocmGraphExecutionMode, RocmGraphExecutionPolicy, RocmGraphFallbackStats,
+    RocmGraphLiveTelemetry, RocmGraphPhase, RocmGraphPhaseStats, RocmGraphStats,
+    RocmGraphStatsUnavailable, RocmGraphTelemetryHandle,
 };
 pub use speculative::SpeculativeConfig;
 pub use weights::{ModelSnapshotCleanup, ModelWeights};

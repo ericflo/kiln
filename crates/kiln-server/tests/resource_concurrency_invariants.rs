@@ -25,6 +25,31 @@ fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> 
 }
 
 #[test]
+fn rocm_gfx11_capability_queries_propagate_runtime_failures() {
+    let flash = read("crates/kiln-flash-attn/csrc/rocm_flash_api.cpp");
+    let query = source_between(
+        &flash,
+        "int query_current_device_gfx11_wmma(bool* supported)",
+        "__device__ __forceinline__ __bf16 kiln_to_native_bf16",
+    );
+
+    assert!(query.contains("*supported = false;"));
+    assert!(query.contains("hipGetDevice(&device)"));
+    assert!(query.contains("hipGetDeviceProperties(&props, device)"));
+    assert_eq!(query.matches("return static_cast<int>(err);").count(), 2);
+    assert!(!flash.contains("current_device_supports_gfx11_wmma"));
+    assert_eq!(
+        flash
+            .matches("query_current_device_gfx11_wmma(&supports_gfx11_wmma)")
+            .count(),
+        7,
+        "every gfx11-gated dispatch must use the tri-state query"
+    );
+    assert_eq!(flash.matches("if(device_query_status != 0)").count(), 7);
+    assert_eq!(flash.matches("return device_query_status;").count(), 7);
+}
+
+#[test]
 fn request_lineage_surfaces_claim_integrity_not_output_replay() {
     let replay = read("crates/kiln-train/src/replay.rs");
     let cli = read("crates/kiln-train/src/bin/kiln-replay.rs");
@@ -1281,7 +1306,6 @@ fn rocm_graph_replay_failure_is_a_circuit_breaker() {
     for required in [
         "release_captured_after_device_settlement(\"replay_failure\")",
         "context.quarantine_execution();",
-        "std::mem::forget(retained);",
         "execution is quarantined",
     ] {
         assert!(
@@ -1290,8 +1314,12 @@ fn rocm_graph_replay_failure_is_a_circuit_breaker() {
         );
     }
     assert!(
-        rocm_graph.contains("Ok(()) if !context.cleanup_quarantined()"),
-        "captured graph state may be destroyed only after settlement without a sticky device quarantine"
+        !rocm_graph.contains("self.captured.clear()"),
+        "captured graph state must not bypass the settled eviction transaction"
+    );
+    assert!(
+        !rocm_graph.contains("if !self.release_captured_after_device_settlement"),
+        "fallible graph settlement must propagate its error instead of using a stale bool path"
     );
 }
 
@@ -1305,7 +1333,7 @@ fn rocm_graph_warm_pass_prewarms_capture_stream() {
     );
     let warm_pass = source_between(
         capture,
-        "let htod_before = kiln_tensor::rocm_htod_count();",
+        "let (warm_result, warm_htod_count) =",
         "if let Err(err) = warm_result",
     );
 
@@ -1317,8 +1345,9 @@ fn rocm_graph_warm_pass_prewarms_capture_stream() {
         "ROCm graph capture must attribute and drain default-stream input fills before warming the capture stream"
     );
     assert!(
-        warm_pass.contains("kiln_tensor::with_rocm_graph_capture_stream(stream.clone(), ||"),
-        "ROCm graph warm pass must run on the same stream that will be captured, so hipBLASLt per-stream workspace is preallocated before begin_capture"
+        warm_pass.contains("kiln_tensor::with_rocm_htod_observer(device_idx, ||")
+            && warm_pass.contains("kiln_tensor::with_rocm_graph_capture_stream(stream.clone(), ||"),
+        "ROCm graph warm pass must observe copies only on its thread/device and run on the same stream that will be captured"
     );
     assert!(
         capture.contains("\"capture_stream_warmup_completion\"")
@@ -1504,6 +1533,26 @@ fn hip_runtime_errors_are_cleared_at_wrapper_boundary() {
             && !rocm_graph.contains("*linear_state = capture_snapshot;"),
         "ROCm graph capture rollback must never replace persistent graph-slot tensor handles"
     );
+    let recoverable_rollback = source_between(
+        &rocm_graph,
+        "fn settle_before_rollback(&mut self)",
+        "fn complete_rollback(&mut self",
+    );
+    assert!(
+        recoverable_rollback.contains("RocmSyncReason::CaptureRollback")
+            && !recoverable_rollback.contains("RocmSyncReason::ErrorRecovery"),
+        "acknowledged capture rollback must settle with the admission gate open"
+    );
+    let unclassified_exit = source_between(
+        &rocm_graph,
+        "impl Drop for RocmCaptureFailureGuard",
+        "struct RocmAllocationKey",
+    );
+    assert!(
+        unclassified_exit.contains("quarantine_execution()")
+            && unclassified_exit.contains("RocmSyncReason::ErrorRecovery"),
+        "an unclassified capture exit must publish STOP before fatal recovery"
+    );
     for required in [
         "restore graph-slot GDN state after warm-forward failure",
         "restore graph-slot GDN state after warm pass",
@@ -1518,7 +1567,7 @@ fn hip_runtime_errors_are_cleared_at_wrapper_boundary() {
     ] {
         assert!(
             rocm_graph.contains(required),
-            "ROCm graph capture failures must restore decode state before eager fallback: {required}"
+            "ROCm graph capture failures must restore decode state before recovery or any safe eager fallback: {required}"
         );
     }
 }
@@ -1665,4 +1714,32 @@ fn central_backend_admission_latches_live_rocm_health_failures() {
     assert!(reason.contains("if !self.active"));
     assert!(reason.contains("!self.telemetry_available || self.telemetry_error.is_some()"));
     assert!(reason.contains("self.cleanup_quarantined"));
+}
+
+#[test]
+fn rocm_graph_phase_telemetry_bypasses_the_outer_runner_lock() {
+    let state = read("crates/kiln-server/src/state.rs");
+    assert!(
+        state.contains("rocm_graph_telemetry: kiln_model::RocmGraphTelemetryHandle"),
+        "the real backend must retain graph phase telemetry outside the model-runner lock"
+    );
+
+    let observability = read("crates/kiln-server/src/rocm_graph_observability.rs");
+    let snapshot = observability
+        .find("let telemetry = Some(rocm_graph_telemetry.snapshot());")
+        .expect("lock-independent graph telemetry snapshot");
+    let outer_try_read = observability
+        .find("match runner.try_read()")
+        .expect("nonblocking model-runner observation");
+    assert!(
+        snapshot < outer_try_read,
+        "phase telemetry must be sampled before attempting the contended outer runner lock"
+    );
+    let outer_busy = source_between(
+        &observability,
+        "Err(std::sync::TryLockError::WouldBlock) => RocmGraphObservation {",
+        "Err(std::sync::TryLockError::Poisoned(_)) => RocmGraphObservation {",
+    );
+    assert!(outer_busy.contains("telemetry,"));
+    assert!(outer_busy.contains("telemetry_unavailable_reason: None"));
 }

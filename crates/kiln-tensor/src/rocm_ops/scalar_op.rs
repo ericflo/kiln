@@ -64,7 +64,8 @@ pub fn rocm_scalar_op(x: &Tensor, kind: i32, c: f32) -> Result<Tensor> {
     // the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * bpe) as u64;
@@ -74,10 +75,12 @@ pub fn rocm_scalar_op(x: &Tensor, kind: i32, c: f32) -> Result<Tensor> {
     let status =
         unsafe { kiln_scalar_op_async(x_ptr, out_ptr, n as i64, kind, dtype_tag, c, raw_stream) };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_scalar_op: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(

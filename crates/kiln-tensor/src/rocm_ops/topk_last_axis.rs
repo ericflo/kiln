@@ -80,7 +80,8 @@ pub fn rocm_topk_last_axis(x: &Tensor, k: usize) -> Result<(Vec<f32>, Vec<u32>)>
     let vals_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::F32, k)?;
     let idx_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::I64, k)?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (x_base, _) = x_storage.device_ptr_raw();
     let (vals_base, _) = vals_storage.device_ptr_raw();
     let (idx_base, _) = idx_storage.device_ptr_raw();
@@ -102,10 +103,12 @@ pub fn rocm_topk_last_axis(x: &Tensor, k: usize) -> Result<(Vec<f32>, Vec<u32>)>
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_topk_last_axis: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     // Small D2H: only k f32 values + k i64 indices cross the bus, via the
     // tensors' `to_vec1` (the same readback primitive the host-sort uses).

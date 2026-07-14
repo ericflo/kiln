@@ -108,9 +108,13 @@ pub const ROCM_GRAPH_CACHE_MAX_ENV: &str = "KILN_ROCM_GRAPH_CACHE_MAX";
 pub const DEFAULT_ROCM_GRAPH_CACHE_ENTRIES: usize = 8;
 pub const ROCM_GRAPH_CACHE_ENTRIES_MIN: usize = 1;
 pub const ROCM_GRAPH_CACHE_ENTRIES_MAX: usize = 64;
+/// Stable retained-device-byte budget for the experimental ROCm graph cache.
+pub const DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+pub const ROCM_GRAPH_CACHE_MAX_BYTES_MIN: u64 = 64 * 1024 * 1024;
+pub const ROCM_GRAPH_CACHE_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024 * 1024;
 /// Versioned schema identity shared by config, health, and debug diagnostics.
-pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v1";
-pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 1;
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v2";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 2;
 
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
@@ -1508,6 +1512,62 @@ impl<'de> Deserialize<'de> for RocmGraphCacheEntries {
     }
 }
 
+/// Validated source-tracked retained-device-byte budget for ROCm graphs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RocmGraphCacheMaxBytes {
+    bytes: u64,
+    source: ConfigValueSource,
+}
+
+impl RocmGraphCacheMaxBytes {
+    pub fn new(bytes: u64, source: ConfigValueSource) -> Result<Self> {
+        validate_rocm_graph_cache_max_bytes(bytes)?;
+        Ok(Self { bytes, source })
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let bytes = parse_decimal_env::<u64>(name, raw, "a decimal integer byte count")?;
+        Self::new(bytes, ConfigValueSource::Environment)
+            .with_context(|| format!("invalid {name} value {raw:?}"))
+    }
+
+    pub const fn bytes(self) -> u64 {
+        self.bytes
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for RocmGraphCacheMaxBytes {
+    fn default() -> Self {
+        Self {
+            bytes: DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for RocmGraphCacheMaxBytes {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(self.bytes)
+    }
+}
+
+impl<'de> Deserialize<'de> for RocmGraphCacheMaxBytes {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = u64::deserialize(deserializer)?;
+        Self::new(bytes, ConfigValueSource::ConfigFile).map_err(serde::de::Error::custom)
+    }
+}
+
 /// One configured/effective accelerator policy leaf and its startup source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ResolvedAcceleratorValue<T> {
@@ -1526,6 +1586,7 @@ pub struct ResolvedAcceleratorRuntimePolicy {
     pub rocm_synchronization_mode: ResolvedAcceleratorValue<RocmSynchronizationMode>,
     pub rocm_graph_mode: ResolvedAcceleratorValue<RocmGraphMode>,
     pub rocm_graph_cache_entries: ResolvedAcceleratorValue<usize>,
+    pub rocm_graph_cache_max_bytes: ResolvedAcceleratorValue<u64>,
 }
 
 /// Process-lifetime accelerator policy. Canonical startup overrides use
@@ -1536,6 +1597,7 @@ pub struct AcceleratorRuntimeConfig {
     pub rocm_synchronization_mode: RocmSynchronizationModeSetting,
     pub rocm_graph_mode: RocmGraphModeSetting,
     pub rocm_graph_cache_entries: RocmGraphCacheEntries,
+    pub rocm_graph_cache_max_bytes: RocmGraphCacheMaxBytes,
 }
 
 impl AcceleratorRuntimeConfig {
@@ -1572,6 +1634,11 @@ impl AcceleratorRuntimeConfig {
                 effective: self.rocm_graph_cache_entries.entries(),
                 source: self.rocm_graph_cache_entries.source(),
             },
+            rocm_graph_cache_max_bytes: ResolvedAcceleratorValue {
+                configured: self.rocm_graph_cache_max_bytes.bytes(),
+                effective: self.rocm_graph_cache_max_bytes.bytes(),
+                source: self.rocm_graph_cache_max_bytes.source(),
+            },
         }
     }
 
@@ -1595,7 +1662,8 @@ impl AcceleratorRuntimeConfig {
                 self.rocm_graph_mode.mode()
             );
         }
-        validate_rocm_graph_cache_entries(self.rocm_graph_cache_entries.entries())
+        validate_rocm_graph_cache_entries(self.rocm_graph_cache_entries.entries())?;
+        validate_rocm_graph_cache_max_bytes(self.rocm_graph_cache_max_bytes.bytes())
     }
 }
 
@@ -1605,6 +1673,7 @@ impl Default for AcceleratorRuntimeConfig {
             rocm_synchronization_mode: RocmSynchronizationModeSetting::default(),
             rocm_graph_mode: RocmGraphModeSetting::default(),
             rocm_graph_cache_entries: RocmGraphCacheEntries::default(),
+            rocm_graph_cache_max_bytes: RocmGraphCacheMaxBytes::default(),
         }
     }
 }
@@ -4045,6 +4114,12 @@ impl NormalizedEnvValue for RocmGraphCacheEntries {
     }
 }
 
+impl NormalizedEnvValue for RocmGraphCacheMaxBytes {
+    fn normalized_env_value(&self) -> String {
+        self.bytes().normalized_env_value()
+    }
+}
+
 impl NormalizedEnvValue for MemoryReclaimModeSetting {
     fn normalized_env_value(&self) -> String {
         self.mode().as_str().to_owned()
@@ -4307,6 +4382,9 @@ macro_rules! public_env_parser {
     (rocm_graph_cache_entries) => {
         RocmGraphCacheEntries::from_named_environment_value
     };
+    (rocm_graph_cache_max_bytes) => {
+        RocmGraphCacheMaxBytes::from_named_environment_value
+    };
     (memory_reclaim_mode) => {
         MemoryReclaimModeSetting::from_named_environment_value
     };
@@ -4481,6 +4559,10 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         rocm_graph_cache_entries,
         accelerator.rocm_graph_cache_entries,
         ROCM_GRAPH_CACHE_MAX_ENV
+    ),
+    public_env_field!(
+        rocm_graph_cache_max_bytes,
+        accelerator.rocm_graph_cache_max_bytes
     ),
     public_env_field!(deterministic, server.deterministic, DETERMINISTIC_ENV),
     public_env_field!(text, server.host, "KILN_HOST"),
@@ -5503,6 +5585,17 @@ fn validate_rocm_graph_cache_entries(entries: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_rocm_graph_cache_max_bytes(bytes: u64) -> Result<()> {
+    if !(ROCM_GRAPH_CACHE_MAX_BYTES_MIN..=ROCM_GRAPH_CACHE_MAX_BYTES_MAX).contains(&bytes) {
+        anyhow::bail!(
+            "accelerator.rocm_graph_cache_max_bytes must be between {} and {} bytes, got {bytes}",
+            ROCM_GRAPH_CACHE_MAX_BYTES_MIN,
+            ROCM_GRAPH_CACHE_MAX_BYTES_MAX
+        );
+    }
+    Ok(())
+}
+
 fn validate_stream_stall_grace_ms(millis: u64) -> Result<()> {
     if !(STREAM_STALL_GRACE_MIN_MS..=STREAM_STALL_GRACE_MAX_MS).contains(&millis) {
         anyhow::bail!(
@@ -5658,6 +5751,7 @@ mod tests {
 
     const EXPECTED_PUBLIC_ENV_NAMES: &[&str] = &[
         "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES",
+        "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES",
         "KILN_ACCELERATOR_ROCM_GRAPH_MODE",
         "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE",
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES",
@@ -5934,10 +6028,15 @@ mod tests {
             config.accelerator.rocm_graph_cache_entries.entries(),
             DEFAULT_ROCM_GRAPH_CACHE_ENTRIES
         );
+        assert_eq!(
+            config.accelerator.rocm_graph_cache_max_bytes.bytes(),
+            DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES
+        );
         for source in [
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_graph_mode.source(),
             config.accelerator.rocm_graph_cache_entries.source(),
+            config.accelerator.rocm_graph_cache_max_bytes.source(),
         ] {
             assert_eq!(source, ConfigValueSource::Default);
         }
@@ -6157,6 +6256,14 @@ mod tests {
                     source: ConfigValueSource::Default,
                 }
             );
+            assert_eq!(
+                resolved.rocm_graph_cache_max_bytes,
+                ResolvedAcceleratorValue {
+                    configured: DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES,
+                    effective: DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES,
+                    source: ConfigValueSource::Default,
+                }
+            );
         }
 
         let json = serde_json::to_value(accelerator.resolved_policy(ServingProfileSetting::new(
@@ -6164,8 +6271,8 @@ mod tests {
             ConfigValueSource::Environment,
         )))
         .unwrap();
-        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v1");
-        assert_eq!(json["version"], 1);
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v2");
+        assert_eq!(json["version"], 2);
         assert_eq!(json["serving_profile"], "experimental");
         assert_eq!(json["serving_profile_source"], "environment");
         assert_eq!(json["rocm_graph_mode"]["configured"], "profile");
@@ -6184,6 +6291,7 @@ serving_profile = "experimental"
 rocm_synchronization_mode = "stream_ordered"
 rocm_graph_mode = "warmup_then_eager"
 rocm_graph_cache_entries = 64
+rocm_graph_cache_max_bytes = 17179869184
 "#,
         )
         .unwrap();
@@ -6197,10 +6305,15 @@ rocm_graph_cache_entries = 64
             RocmGraphMode::WarmupThenEager
         );
         assert_eq!(config.accelerator.rocm_graph_cache_entries.entries(), 64);
+        assert_eq!(
+            config.accelerator.rocm_graph_cache_max_bytes.bytes(),
+            ROCM_GRAPH_CACHE_MAX_BYTES_MAX
+        );
         for source in [
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_graph_mode.source(),
             config.accelerator.rocm_graph_cache_entries.source(),
+            config.accelerator.rocm_graph_cache_max_bytes.source(),
         ] {
             assert_eq!(source, ConfigValueSource::ConfigFile);
         }
@@ -6216,6 +6329,17 @@ rocm_graph_cache_entries = 64
             );
         }
 
+        for bytes in [
+            ROCM_GRAPH_CACHE_MAX_BYTES_MIN,
+            ROCM_GRAPH_CACHE_MAX_BYTES_MAX,
+        ] {
+            let parsed: KilnConfig = toml::from_str(&format!(
+                "[accelerator]\nrocm_graph_cache_max_bytes = {bytes}\n"
+            ))
+            .unwrap();
+            assert_eq!(parsed.accelerator.rocm_graph_cache_max_bytes.bytes(), bytes);
+        }
+
         for document in [
             "[accelerator]\nrocm_synchronization_mode = \"eventually\"\n".to_owned(),
             "[accelerator]\nrocm_synchronization_mode = true\n".to_owned(),
@@ -6227,6 +6351,15 @@ rocm_graph_cache_entries = 64
                 ROCM_GRAPH_CACHE_ENTRIES_MAX + 1
             ),
             "[accelerator]\nrocm_graph_cache_entries = \"8\"\n".to_owned(),
+            format!(
+                "[accelerator]\nrocm_graph_cache_max_bytes = {}\n",
+                ROCM_GRAPH_CACHE_MAX_BYTES_MIN - 1
+            ),
+            format!(
+                "[accelerator]\nrocm_graph_cache_max_bytes = {}\n",
+                ROCM_GRAPH_CACHE_MAX_BYTES_MAX + 1
+            ),
+            "[accelerator]\nrocm_graph_cache_max_bytes = \"1073741824\"\n".to_owned(),
             "[accelerator]\nunknown = true\n".to_owned(),
         ] {
             let error = toml::from_str::<KilnConfig>(&document).unwrap_err();
@@ -6420,7 +6553,7 @@ rocm_graph_cache_entries = 64
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 81);
+        assert_eq!(original_len, 82);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -6491,7 +6624,7 @@ rocm_graph_cache_entries = 64
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 89);
+        assert_eq!(serialized_leaves.len(), 90);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 8);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -6534,7 +6667,7 @@ rocm_graph_cache_entries = 64
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_eighty_one_public_fields() {
+    fn public_env_canonical_only_loads_all_eighty_two_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
@@ -6545,6 +6678,7 @@ rocm_graph_cache_entries = 64
             ),
             ("KILN_ACCELERATOR_ROCM_GRAPH_MODE", "lazy_capture_replay"),
             ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES", "13"),
+            ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES", "536870912"),
             ("KILN_SERVER_DETERMINISTIC", "true"),
             ("KILN_SERVER_HOST", "127.0.0.2"),
             ("KILN_SERVER_PORT", "9444"),
@@ -6650,6 +6784,10 @@ rocm_graph_cache_entries = 64
             RocmGraphMode::LazyCaptureReplay
         );
         assert_eq!(config.accelerator.rocm_graph_cache_entries.entries(), 13);
+        assert_eq!(
+            config.accelerator.rocm_graph_cache_max_bytes.bytes(),
+            536_870_912
+        );
         assert!(config.server.deterministic.enabled());
         assert_eq!(config.server.host, "127.0.0.2");
         assert_eq!(config.server.port, 9444);
@@ -6816,6 +6954,7 @@ rocm_graph_cache_entries = 64
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_graph_mode.source(),
             config.accelerator.rocm_graph_cache_entries.source(),
+            config.accelerator.rocm_graph_cache_max_bytes.source(),
             config.server.deterministic.source(),
             config.server.stream_stall_grace_ms.source(),
             config.server.max_batch_tokens.source(),
@@ -6862,6 +7001,7 @@ rocm_graph_cache_entries = 64
             (ROCM_GRAPHS_ENV, "true"),
             ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES", "8"),
             (ROCM_GRAPH_CACHE_MAX_ENV, "08"),
+            ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES", "1073741824"),
             ("KILN_SERVER_MAX_DECODE_BATCH", "backend_policy"),
             ("KILN_MAX_DECODE_BATCH", "auto"),
             ("KILN_SERVER_SERVING_PROFILE", "EXPERIMENTAL"),
@@ -6912,6 +7052,10 @@ rocm_graph_cache_entries = 64
             RocmGraphMode::Profile
         );
         assert_eq!(config.accelerator.rocm_graph_cache_entries.entries(), 8);
+        assert_eq!(
+            config.accelerator.rocm_graph_cache_max_bytes.bytes(),
+            DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES
+        );
         assert_eq!(config.server.max_decode_batch.limit(), None);
         assert_eq!(config.batching.mode.mode(), BatchingMode::Enabled);
         assert!(config.batching.rowwise_decode.enabled());
@@ -7020,6 +7164,7 @@ rocm_graph_cache_entries = 64
             ("KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE", "eventually"),
             ("KILN_ACCELERATOR_ROCM_GRAPH_MODE", "automatic"),
             ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES", "0"),
+            ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES", "67108863"),
             ("KILN_SERVER_PORT", "nine-thousand"),
             ("KILN_SERVER_DETERMINISTIC", "maybe"),
             ("KILN_SERVER_DEFAULT_THINKING_BUDGET_MS", "2.5"),

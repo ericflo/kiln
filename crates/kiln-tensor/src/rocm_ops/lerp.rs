@@ -80,7 +80,8 @@ pub fn rocm_lerp(a: &Tensor, b: &Tensor, weight: f32) -> Result<Tensor> {
     // so allocate uninitialized and skip the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = a_storage.rocm_stream_raw()?;
+    let stream_submission = a_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
 
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
@@ -99,10 +100,12 @@ pub fn rocm_lerp(a: &Tensor, b: &Tensor, weight: f32) -> Result<Tensor> {
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_lerp: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(

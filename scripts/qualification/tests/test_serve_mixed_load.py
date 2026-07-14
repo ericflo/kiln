@@ -55,6 +55,11 @@ def health_fixture(
         "enabled": rocm_graphs,
         "capture_enabled": rocm_graphs,
         "state": "enabled" if rocm_graphs else "disabled",
+        "unavailable_reason": None,
+        "phase_telemetry_available": True,
+        "phase_telemetry_unavailable_reason": None,
+        "current_phase": None,
+        "current_phase_elapsed_micros": 0,
         "capture_attempts": 0,
         "capture_successes": 0,
         "capture_deferrals": 0,
@@ -67,19 +72,82 @@ def health_fixture(
         "decode_owner_graph_release_count": 0,
         "graph_slot_create_count": 0,
         "graph_slot_reuse_count": 0,
+        "cache_admission_successes": 0,
+        "cache_evictions": 0,
+        "cache_evicted_bytes": 0,
+        "budget_evictions": 0,
+        "pressure_evictions": 0,
+        "invalidation_evictions": 0,
+        "recovery_evictions": 0,
+        "entry_capacity_rejections": 0,
+        "byte_budget_rejections": 0,
+        "accounting_incomplete_rejections": 0,
+        "pre_capture_entry_capacity_skips": 0,
+        "pre_capture_byte_budget_skips": 0,
+        "pre_capture_accounting_incomplete_skips": 0,
+        "pre_capture_memory_reservation_denied_skips": 0,
+        "memory_governor_selector_mismatch_skips": 0,
+        "max_cached_graphs": 8,
+        "max_retained_bytes": 1 << 30,
         "captured_graph_count": 0,
         "graph_slot_count": 0,
         "active_graph_slot_count": 0,
         "idle_graph_slot_count": 0,
         "tracked_decode_owner_count": 0,
+        "retained_stable_io_bytes": 0,
+        "retained_capture_arena_bytes": 0,
+        "retained_blaslt_workspace_bytes": 0,
+        "retained_slot_state_bytes": 0,
+        "retained_bytes": 0,
+        "peak_retained_bytes": 0,
+        "last_transient_candidate_bytes": 0,
+        "peak_transient_candidate_bytes": 0,
+        "opaque_native_object_count": 0,
+        "retained_bytes_accounting_complete": True,
+        "quarantined_retained_bytes": 0,
+        "pre_candidate_headroom_phase": {
+            "calls": 0,
+            "slow": 0,
+            "total_duration_micros": 0,
+            "max_duration_micros": 0,
+        },
+        "candidate_warm_phase": {
+            "calls": 0,
+            "slow": 0,
+            "total_duration_micros": 0,
+            "max_duration_micros": 0,
+        },
+        "pre_native_reservation_phase": {
+            "calls": 0,
+            "slow": 0,
+            "total_duration_micros": 0,
+            "max_duration_micros": 0,
+        },
+        "native_capture_phase": {
+            "calls": 0,
+            "slow": 0,
+            "total_duration_micros": 0,
+            "max_duration_micros": 0,
+        },
+        "rejected_candidate_cleanup_phase": {
+            "calls": 0,
+            "slow": 0,
+            "total_duration_micros": 0,
+            "max_duration_micros": 0,
+        },
         "fallbacks": {
             "total": 0,
-            "warmup_forward_failure": 0,
             "cold_cache_host_round_trip": 0,
             "persistent_host_round_trip": 0,
             "shape_dependent_attention": 0,
             "graph_cache_capacity": 0,
+            "graph_cache_byte_budget": 0,
+            "graph_accounting_incomplete": 0,
+            "moderate_memory_pressure": 0,
+            "tight_memory_pressure": 0,
             "critical_memory_pressure": 0,
+            "memory_reservation_denied": 0,
+            "memory_governor_selector_mismatch": 0,
             "capture_failure": 0,
             "replay_failure": 0,
             "slow": 0,
@@ -88,8 +156,8 @@ def health_fixture(
         },
     }
     accelerator_runtime = {
-        "schema_id": "kiln.accelerator-runtime-policy.v1",
-        "version": 1,
+        "schema_id": "kiln.accelerator-runtime-policy.v2",
+        "version": 2,
         "serving_profile": serving_profile,
         "serving_profile_source": "environment",
         "rocm_synchronization_mode": {
@@ -105,6 +173,11 @@ def health_fixture(
         "rocm_graph_cache_entries": {
             "configured": 8,
             "effective": 8,
+            "source": "default",
+        },
+        "rocm_graph_cache_max_bytes": {
+            "configured": 1 << 30,
+            "effective": 1 << 30,
             "source": "default",
         },
     }
@@ -211,10 +284,37 @@ def debug_fixture(
     def flag(enabled: bool) -> dict:
         return {"present": not enabled, "value": None if enabled else "0"}
 
+    health_graph = health_fixture(
+        kv_autoscale=kv_autoscale,
+        rocm_graphs=rocm_graphs_enabled,
+        serving_profile=serving_profile,
+        rocm_graphs_requested=rocm_graphs,
+        memory_reclaim_requested_mode=memory_reclaim_requested_mode,
+    )["decode_runtime"]["rocm_graphs"]
+    health_only_fields = {
+        "state",
+        "unavailable_reason",
+        "phase_telemetry_available",
+        "phase_telemetry_unavailable_reason",
+        "current_phase",
+        "current_phase_elapsed_micros",
+    }
+    telemetry_fields = {
+        "current_phase",
+        "current_phase_elapsed_micros",
+        "pre_candidate_headroom_phase",
+        "candidate_warm_phase",
+        "pre_native_reservation_phase",
+        "native_capture_phase",
+        "rejected_candidate_cleanup_phase",
+        "last_transient_candidate_bytes",
+        "peak_transient_candidate_bytes",
+    }
+
     return {
         "accelerator_runtime": {
-            "schema_id": "kiln.accelerator-runtime-policy.v1",
-            "version": 1,
+            "schema_id": "kiln.accelerator-runtime-policy.v2",
+            "version": 2,
             "serving_profile": serving_profile,
             "serving_profile_source": "environment",
             "rocm_synchronization_mode": {
@@ -234,7 +334,22 @@ def debug_fixture(
                 "effective": 8,
                 "source": "default",
             },
+            "rocm_graph_cache_max_bytes": {
+                "configured": 1 << 30,
+                "effective": 1 << 30,
+                "source": "default",
+            },
         },
+        "rocm_graphs": {
+            field: value
+            for field, value in health_graph.items()
+            if field not in health_only_fields
+        },
+        "rocm_graphs_unavailable_reason": None,
+        "rocm_graph_telemetry": {
+            field: value for field, value in health_graph.items() if field in telemetry_fields
+        },
+        "rocm_graph_telemetry_unavailable_reason": None,
         "http": http_fixture(),
         "batching_engine": {
             "backend": "model",
@@ -1299,6 +1414,12 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         health = health_fixture(kv_autoscale=True, rocm_graphs=True)
         debug = debug_fixture(kv_autoscale=True, rocm_graphs=True)
         health["decode_runtime"]["rocm_graphs"]["enabled"] = False
+        health["decode_runtime"]["rocm_graphs"]["captured_graph_count"] = 9
+        health["decode_runtime"]["rocm_graphs"]["retained_bytes"] = (1 << 30) + 1
+        health["decode_runtime"]["rocm_graphs"][
+            "retained_bytes_accounting_complete"
+        ] = False
+        health["decode_runtime"]["rocm_graphs"]["quarantined_retained_bytes"] = 4096
         debug["env_flags"]["KILN_KV_AUTOSCALE"] = {"present": True, "value": "1"}
         debug["http"]["send_buffer_effective_bytes"] *= 2
         debug["http"]["send_buffer_kernel_readback_bytes"] *= 2
@@ -1310,6 +1431,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         debug["env_flags"]["KILN_STREAM_STALL_GRACE_MS"]["value"] = "10"
         failures = serve.attest_runtime("default", health, debug)
         self.assertTrue(any("ROCm graph enabled" in failure for failure in failures))
+        self.assertTrue(any("entry count exceeds" in failure for failure in failures))
+        self.assertTrue(any("retained bytes exceed" in failure for failure in failures))
+        self.assertTrue(any("accounting is incomplete" in failure for failure in failures))
+        self.assertTrue(any("quarantined retained bytes" in failure for failure in failures))
         self.assertTrue(any("must remain absent" in failure for failure in failures))
         self.assertTrue(any("disagree exactly" in failure for failure in failures))
         self.assertTrue(any("grace source" in failure for failure in failures))
@@ -1364,10 +1489,32 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "capture_deferrals": 1,
                 "replay_attempts": 1,
                 "replay_successes": 1,
+                "cache_admission_successes": 1,
                 "captured_graph_count": 1,
+                "opaque_native_object_count": 5,
                 "graph_slot_create_count": 1,
                 "graph_slot_count": 1,
                 "idle_graph_slot_count": 1,
+                "last_transient_candidate_bytes": 100_000_000,
+                "peak_transient_candidate_bytes": 123_000_000,
+                "candidate_warm_phase": {
+                    "calls": 2,
+                    "slow": 1,
+                    "total_duration_micros": 150_000,
+                    "max_duration_micros": 120_000,
+                },
+                "pre_native_reservation_phase": {
+                    "calls": 1,
+                    "slow": 0,
+                    "total_duration_micros": 20_000,
+                    "max_duration_micros": 20_000,
+                },
+                "native_capture_phase": {
+                    "calls": 1,
+                    "slow": 1,
+                    "total_duration_micros": 130_000,
+                    "max_duration_micros": 130_000,
+                },
             }
         )
         after = json.loads(json.dumps(warmup))
@@ -1386,7 +1533,16 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             serve.attest_runtime_execution("graphs-off", graphs_off, graphs_off), []
         )
         graphs_off["decode_runtime"]["rocm_graphs"].update(
-            {"capture_attempts": 1, "capture_successes": 1}
+            {
+                "capture_attempts": 1,
+                "capture_successes": 1,
+                "cache_admission_successes": 1,
+                "captured_graph_count": 1,
+                "opaque_native_object_count": 5,
+                "graph_slot_create_count": 1,
+                "graph_slot_count": 1,
+                "idle_graph_slot_count": 1,
+            }
         )
         failures = serve.attest_runtime_execution("graphs-off", graphs_off, graphs_off)
         self.assertTrue(any("capture_attempts=1" in failure for failure in failures))
@@ -1685,10 +1841,38 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "capture_deferrals": 1,
                 "replay_attempts": 8,
                 "replay_successes": 8,
+                "pre_candidate_headroom_phase": {
+                    "calls": 2,
+                    "slow": 0,
+                    "total_duration_micros": 40_000,
+                    "max_duration_micros": 25_000,
+                },
+                "cache_admission_successes": 1,
                 "captured_graph_count": 1,
+                "opaque_native_object_count": 5,
                 "graph_slot_create_count": 1,
                 "graph_slot_count": 1,
                 "idle_graph_slot_count": 1,
+                "last_transient_candidate_bytes": 100_000_000,
+                "peak_transient_candidate_bytes": 123_000_000,
+                "candidate_warm_phase": {
+                    "calls": 2,
+                    "slow": 1,
+                    "total_duration_micros": 150_000,
+                    "max_duration_micros": 120_000,
+                },
+                "pre_native_reservation_phase": {
+                    "calls": 1,
+                    "slow": 0,
+                    "total_duration_micros": 20_000,
+                    "max_duration_micros": 20_000,
+                },
+                "native_capture_phase": {
+                    "calls": 1,
+                    "slow": 1,
+                    "total_duration_micros": 130_000,
+                    "max_duration_micros": 130_000,
+                },
             }
         )
         end_batching = end["decode_runtime"]["batching_engine"]
@@ -1802,6 +1986,16 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["graph_measured_capture_deferral_count"], 1)
         self.assertEqual(values["graph_measured_replay_success_count"], 8)
         self.assertEqual(values["graph_measured_live_count_end"], 1)
+        self.assertEqual(values["graph_candidate_warm_call_count"], 2)
+        self.assertEqual(values["graph_candidate_warm_slow_count"], 1)
+        self.assertEqual(values["graph_candidate_warm_duration_ms_total"], 150.0)
+        self.assertEqual(values["graph_candidate_warm_duration_ms_max_end"], 120.0)
+        self.assertEqual(values["graph_pre_native_reservation_call_count"], 1)
+        self.assertEqual(values["graph_pre_candidate_headroom_call_count"], 2)
+        self.assertEqual(values["graph_pre_candidate_headroom_duration_ms_total"], 40.0)
+        self.assertEqual(values["graph_native_capture_slow_count"], 1)
+        self.assertEqual(values["graph_rejected_candidate_cleanup_call_count"], 0)
+        self.assertEqual(values["graph_transient_candidate_bytes_peak_end"], 123_000_000)
         self.assertEqual(values["length_terminated_request_count"], 1)
         self.assertEqual(values["external_yield_sync_call_count"], 5)
         self.assertEqual(values["external_yield_sync_failure_count"], 0)

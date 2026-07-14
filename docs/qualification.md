@@ -256,20 +256,57 @@ unexplained ITL outlier fails the stable arm.
 
 Experimental ROCm graph runs expose a closed fallback contract at
 `/health.decode_runtime.rocm_graphs.fallbacks`. It reports the total and the
-eight reason counts (`warmup_forward_failure`, `cold_cache_host_round_trip`,
+thirteen reason counts (`cold_cache_host_round_trip`,
 `persistent_host_round_trip`, `shape_dependent_attention`, `graph_cache_capacity`,
-`critical_memory_pressure`, `capture_failure`, and `replay_failure`) plus slow,
-total-duration, and maximum-duration counters. The first occurrence of each
+`graph_cache_byte_budget`, `graph_accounting_incomplete`,
+`moderate_memory_pressure`, `tight_memory_pressure`, `critical_memory_pressure`,
+`memory_reservation_denied`, `memory_governor_selector_mismatch`,
+`capture_failure`, and `replay_failure`) plus slow, total-duration, and
+maximum-duration counters. The first occurrence of each
 reason, every fallback lasting at least 100 ms, and every failed eager fallback
 also emits `event=rocm_graph_fallback` with attempt, eager, and total duration.
 Qualification validates the health invariants and attributes these events to
 the exact ITL window; unknown reason strings do not receive graph attribution.
+The mixed-load receipt also records call, slow-call, cumulative duration, and
+maximum duration for pre-candidate headroom, candidate warm, pre-native
+reservation, native capture, and rejected-candidate cleanup, plus peak exact
+transient-candidate bytes. These values remain distinct from retained graph
+bytes and make one-time or repeated graph setup pauses comparable across runs.
+Native capture timing includes the settled first launch, defensive cache
+admission/publication, and blocking committed governor debit; rejected cleanup
+starts only when an unretained candidate enters destruction and settlement.
+The driver treats the full cache snapshot and phase telemetry independent of
+the model and graph-runner locks as separate authorities. Config and trusted
+debug must report
+`rocm_graphs`/`rocm_graphs_unavailable_reason` independently from
+`rocm_graph_telemetry`/`rocm_graph_telemetry_unavailable_reason`; health
+flattens them under `decode_runtime.rocm_graphs` with separate `state`,
+`unavailable_reason`, `phase_telemetry_available`, and
+`phase_telemetry_unavailable_reason` fields. Missing data must use exactly one
+of `backend_without_graph_runner`, `model_runner_busy`,
+`model_runner_lock_poisoned`, `graph_runner_busy`, or
+`graph_runner_lock_poisoned`, never fabricated zeroes. Prometheus exposes the
+same distinction with `kiln_rocm_graph_telemetry_available`,
+`kiln_rocm_graph_snapshot_unavailable{reason}`,
+`kiln_rocm_graph_phase_telemetry_available`, and
+`kiln_rocm_graph_phase_telemetry_unavailable{reason}`. The phase handle lives
+outside both runner locks, so it remains available for every real backend while
+model-runner or graph-runner contention/poison blocks the full snapshot;
+currently only a backend without a graph runner makes the phase channel null.
 The same health object exposes retained graph and reusable-slot gauges plus
 lifetime slot-create/reuse counters. A logical decode row borrows one slot;
 request drain removes its continuity timeline and returns the slot to an idle
 pool without destroying native graphs or their graph-stable recurrent buffers.
 Adapter invalidation destroys native graphs before their buffers. Graceful
 server shutdown closes and joins the decode worker before accelerator teardown.
+
+A native capture failure is eligible for the `capture_failure` eager fallback
+only when `capture_rollback` first settles physical work with execution
+admission open and logical recurrent-state rollback also succeeds. Failure of
+either proof, or any armed/unclassified capture guard leaving scope, must
+publish sticky STOP, use `error_recovery` only for a post-STOP diagnostic drain,
+reject the eager continuation, and require process restart. Qualification must
+never classify that quarantine as an expected fallback.
 
 The stable serving run also attests the default 64-token prompt-work ceiling
 (`server.max_prefill_tokens_per_cycle`), the default four-layer yield ceiling
@@ -366,7 +403,7 @@ the measured A/B window.
 At startup, after warmup, and after the measured wave, the driver requires the
 resolved policy from both `/v1/config.accelerator_runtime` and
 `/health.decode_runtime.accelerator_runtime` to match the arm exactly. It also
-requires `/health.decode_runtime.rocm_synchronization` to expose all 22 fixed
+requires `/health.decode_runtime.rocm_synchronization` to expose all 23 fixed
 reason dimensions, internally consistent aggregate counts, no telemetry error,
 `cleanup_quarantined=false`, and monotonically increasing counters. Every health
 reason/count/duration is
@@ -404,7 +441,8 @@ then proceed to the existing mixed-load workload with the promising policy.
 New qualification drivers use the mechanically derived
 `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE`,
 `KILN_ACCELERATOR_ROCM_GRAPH_MODE`, and
-`KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` names. The shorter graph variables
+`KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES`, and
+`KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` names. The shorter graph variables
 remain deployment compatibility aliases and are not new evidence vocabulary.
 
 ### ROCm Development Soak

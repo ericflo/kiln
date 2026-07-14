@@ -453,6 +453,477 @@ impl Metrics {
                 ),
             );
         }
+        out.push_str("# HELP kiln_rocm_graph_telemetry_available Whether a nonblocking ROCm graph-runner snapshot was available.\n");
+        out.push_str("# TYPE kiln_rocm_graph_telemetry_available gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rocm_graph_telemetry_available {}",
+                u8::from(gauges.rocm_graph.is_some())
+            ),
+        );
+        out.push_str("# HELP kiln_rocm_graph_snapshot_unavailable Whether the full graph snapshot is unavailable for a closed reason.\n");
+        out.push_str("# TYPE kiln_rocm_graph_snapshot_unavailable gauge\n");
+        for reason in crate::rocm_graph_observability::RocmGraphUnavailableReason::ALL {
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_snapshot_unavailable{{reason=\"{}\"}} {}",
+                    reason.as_str(),
+                    u8::from(gauges.rocm_graph_unavailable_reason == Some(reason))
+                ),
+            );
+        }
+        out.push_str("# HELP kiln_rocm_graph_phase_telemetry_available Whether ROCm graph phase telemetry independent of the model and graph-runner locks was available.\n");
+        out.push_str("# TYPE kiln_rocm_graph_phase_telemetry_available gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rocm_graph_phase_telemetry_available {}",
+                u8::from(gauges.rocm_graph_telemetry.is_some())
+            ),
+        );
+        out.push_str("# HELP kiln_rocm_graph_phase_telemetry_unavailable Whether graph phase telemetry independent of the model and graph-runner locks is unavailable for a closed reason.\n");
+        out.push_str("# TYPE kiln_rocm_graph_phase_telemetry_unavailable gauge\n");
+        for reason in crate::rocm_graph_observability::RocmGraphUnavailableReason::ALL {
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_phase_telemetry_unavailable{{reason=\"{}\"}} {}",
+                    reason.as_str(),
+                    u8::from(gauges.rocm_graph_telemetry_unavailable_reason == Some(reason))
+                ),
+            );
+        }
+        if let Some(telemetry) = gauges.rocm_graph_telemetry {
+            let graph_phases = [
+                (
+                    "pre_candidate_headroom",
+                    kiln_model::RocmGraphPhase::PreCandidateHeadroom,
+                    telemetry.pre_candidate_headroom_phase,
+                ),
+                (
+                    "candidate_warm",
+                    kiln_model::RocmGraphPhase::CandidateWarm,
+                    telemetry.candidate_warm_phase,
+                ),
+                (
+                    "pre_native_reservation",
+                    kiln_model::RocmGraphPhase::PreNativeReservation,
+                    telemetry.pre_native_reservation_phase,
+                ),
+                (
+                    "native_capture",
+                    kiln_model::RocmGraphPhase::NativeCapture,
+                    telemetry.native_capture_phase,
+                ),
+                (
+                    "rejected_candidate_cleanup",
+                    kiln_model::RocmGraphPhase::RejectedCandidateCleanup,
+                    telemetry.rejected_candidate_cleanup_phase,
+                ),
+            ];
+            out.push_str("# HELP kiln_rocm_graph_current_phase Current ROCm graph candidate lifecycle phase as a closed one-hot gauge.\n");
+            out.push_str("# TYPE kiln_rocm_graph_current_phase gauge\n");
+            for (phase, phase_kind, _) in graph_phases {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_current_phase{{phase=\"{phase}\"}} {}",
+                        u8::from(telemetry.current_phase == Some(phase_kind))
+                    ),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_current_phase_elapsed_seconds Monotonic elapsed time in the active ROCm graph phase, or zero while idle.\n");
+            out.push_str("# TYPE kiln_rocm_graph_current_phase_elapsed_seconds gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_current_phase_elapsed_seconds {:.6}",
+                    telemetry.current_phase_elapsed_micros as f64 / 1_000_000.0
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_transient_candidate_bytes Exact requested physical bytes in the last and largest measured pre-admission graph candidate.\n");
+            out.push_str("# TYPE kiln_rocm_graph_transient_candidate_bytes gauge\n");
+            for (kind, bytes) in [
+                ("last", telemetry.last_transient_candidate_bytes),
+                ("peak", telemetry.peak_transient_candidate_bytes),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_transient_candidate_bytes{{kind=\"{kind}\"}} {bytes}"
+                    ),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_phase_calls_total ROCm graph candidate lifecycle calls by fixed phase.\n");
+            out.push_str("# TYPE kiln_rocm_graph_phase_calls_total counter\n");
+            out.push_str("# HELP kiln_rocm_graph_phase_slow_total ROCm graph candidate phase calls taking at least 100 ms.\n");
+            out.push_str("# TYPE kiln_rocm_graph_phase_slow_total counter\n");
+            out.push_str("# HELP kiln_rocm_graph_phase_duration_seconds_total Accumulated ROCm graph candidate phase duration.\n");
+            out.push_str("# TYPE kiln_rocm_graph_phase_duration_seconds_total counter\n");
+            out.push_str("# HELP kiln_rocm_graph_phase_duration_seconds_max Longest observed ROCm graph candidate phase duration.\n");
+            out.push_str("# TYPE kiln_rocm_graph_phase_duration_seconds_max gauge\n");
+            for (phase, _, stats) in graph_phases {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_phase_calls_total{{phase=\"{phase}\"}} {}",
+                        stats.calls
+                    ),
+                );
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_phase_slow_total{{phase=\"{phase}\"}} {}",
+                        stats.slow
+                    ),
+                );
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_phase_duration_seconds_total{{phase=\"{phase}\"}} {:.6}",
+                        stats.total_duration_micros as f64 / 1_000_000.0
+                    ),
+                );
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_phase_duration_seconds_max{{phase=\"{phase}\"}} {:.6}",
+                        stats.max_duration_micros as f64 / 1_000_000.0
+                    ),
+                );
+            }
+        }
+        if let Some(graph) = gauges.rocm_graph {
+            out.push_str(
+                "# HELP kiln_rocm_graph_state ROCm graph policy and circuit-breaker state.\n",
+            );
+            out.push_str("# TYPE kiln_rocm_graph_state gauge\n");
+            for (name, value) in [
+                ("requested", graph.requested),
+                ("capture_requested", graph.capture_requested),
+                ("enabled", graph.enabled),
+                ("capture_enabled", graph.capture_enabled),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_state{{kind=\"{name}\"}} {}",
+                        u8::from(value)
+                    ),
+                );
+            }
+            out.push_str(
+                "# HELP kiln_rocm_graph_cache_entries Native graphs currently retained.\n",
+            );
+            out.push_str("# TYPE kiln_rocm_graph_cache_entries gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_cache_entries {}",
+                    graph.captured_graph_count
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_cache_entry_limit Configured maximum retained native graphs.\n");
+            out.push_str("# TYPE kiln_rocm_graph_cache_entry_limit gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_cache_entry_limit {}",
+                    graph.max_cached_graphs
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_slots Persistent ROCm graph owner slots by live assignment state.\n");
+            out.push_str("# TYPE kiln_rocm_graph_slots gauge\n");
+            for (state, count) in [
+                ("total", graph.graph_slot_count),
+                ("active", graph.active_graph_slot_count),
+                ("idle", graph.idle_graph_slot_count),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!("kiln_rocm_graph_slots{{state=\"{state}\"}} {count}"),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_tracked_decode_owners Decode continuity timelines currently retained by the ROCm graph runner.\n");
+            out.push_str("# TYPE kiln_rocm_graph_tracked_decode_owners gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_tracked_decode_owners {}",
+                    graph.tracked_decode_owner_count
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_owner_lifecycle_total ROCm graph owner and persistent-slot lifecycle events.\n");
+            out.push_str("# TYPE kiln_rocm_graph_owner_lifecycle_total counter\n");
+            for (event, count) in [
+                ("decode_release", graph.decode_owner_release_count),
+                ("graph_release", graph.decode_owner_graph_release_count),
+                ("slot_create", graph.graph_slot_create_count),
+                ("slot_reuse", graph.graph_slot_reuse_count),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!("kiln_rocm_graph_owner_lifecycle_total{{event=\"{event}\"}} {count}"),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_retained_bytes Deduplicated requested physical bytes retained by ROCm graph resources.\n");
+            out.push_str("# TYPE kiln_rocm_graph_retained_bytes gauge\n");
+            for (kind, bytes) in [
+                ("stable_io", graph.retained_stable_io_bytes),
+                ("capture_arena", graph.retained_capture_arena_bytes),
+                ("blaslt_workspace", graph.retained_blaslt_workspace_bytes),
+                ("slot_state", graph.retained_slot_state_bytes),
+                ("total", graph.retained_bytes),
+                ("peak", graph.peak_retained_bytes),
+                ("quarantined", graph.quarantined_retained_bytes),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!("kiln_rocm_graph_retained_bytes{{kind=\"{kind}\"}} {bytes}"),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_retained_byte_limit Configured requested-physical-byte limit for retained ROCm graph resources.\n");
+            out.push_str("# TYPE kiln_rocm_graph_retained_byte_limit gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_retained_byte_limit {}",
+                    graph.max_retained_bytes
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_retained_byte_accounting_complete Whether every retained tensor mapped to exact ROCm allocation metadata.\n");
+            out.push_str("# TYPE kiln_rocm_graph_retained_byte_accounting_complete gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_retained_byte_accounting_complete {}",
+                    u8::from(graph.retained_bytes_accounting_complete)
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_opaque_native_objects HIP graph, executable, stream, and event objects whose driver bytes are not queryable.\n");
+            out.push_str("# TYPE kiln_rocm_graph_opaque_native_objects gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_opaque_native_objects {}",
+                    graph.opaque_native_object_count
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_cache_admissions_total Successful admissions into the bounded ROCm graph cache.\n");
+            out.push_str("# TYPE kiln_rocm_graph_cache_admissions_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_cache_admissions_total {}",
+                    graph.cache_admission_successes
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_cache_evictions_total Native graph entries released after safe device settlement.\n");
+            out.push_str("# TYPE kiln_rocm_graph_cache_evictions_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_cache_evictions_total {}",
+                    graph.cache_evictions
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_cache_evicted_bytes_total Requested physical bytes released by successful graph-cache evictions.\n");
+            out.push_str("# TYPE kiln_rocm_graph_cache_evicted_bytes_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_cache_evicted_bytes_total {}",
+                    graph.cache_evicted_bytes
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_cache_evictions_by_cause_total Graph-cache evictions by the closed ownership-removal cause.\n");
+            out.push_str("# TYPE kiln_rocm_graph_cache_evictions_by_cause_total counter\n");
+            for (cause, count) in [
+                ("budget", graph.budget_evictions),
+                ("pressure", graph.pressure_evictions),
+                ("invalidation", graph.invalidation_evictions),
+                ("recovery", graph.recovery_evictions),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_cache_evictions_by_cause_total{{cause=\"{cause}\"}} {count}"
+                    ),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_cache_admission_rejections_total Successfully launched candidate graphs rejected by exact post-capture admission.\n");
+            out.push_str("# TYPE kiln_rocm_graph_cache_admission_rejections_total counter\n");
+            for (reason, count) in [
+                ("entry_capacity", graph.entry_capacity_rejections),
+                ("byte_budget", graph.byte_budget_rejections),
+                (
+                    "accounting_incomplete",
+                    graph.accounting_incomplete_rejections,
+                ),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_cache_admission_rejections_total{{reason=\"{reason}\"}} {count}"
+                    ),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_pre_capture_skips_total Candidate captures skipped before native capture by the closed policy, accounting, capacity, or memory-governor reason.\n");
+            out.push_str("# TYPE kiln_rocm_graph_pre_capture_skips_total counter\n");
+            for (reason, count) in [
+                ("entry_capacity", graph.pre_capture_entry_capacity_skips),
+                ("byte_budget", graph.pre_capture_byte_budget_skips),
+                (
+                    "accounting_incomplete",
+                    graph.pre_capture_accounting_incomplete_skips,
+                ),
+                (
+                    "memory_reservation_denied",
+                    graph.pre_capture_memory_reservation_denied_skips,
+                ),
+                (
+                    "memory_governor_selector_mismatch",
+                    graph.memory_governor_selector_mismatch_skips,
+                ),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_pre_capture_skips_total{{reason=\"{reason}\"}} {count}"
+                    ),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_capture_attempts_total ROCm graph capture state-machine attempts, including candidates deferred before native capture.\n");
+            out.push_str("# TYPE kiln_rocm_graph_capture_attempts_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_capture_attempts_total {}",
+                    graph.capture_attempts
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_capture_outcomes_total ROCm graph capture state-machine outcomes, including pre-native deferrals.\n");
+            out.push_str("# TYPE kiln_rocm_graph_capture_outcomes_total counter\n");
+            for (outcome, count) in [
+                ("success", graph.capture_successes),
+                ("deferred", graph.capture_deferrals),
+                ("failure", graph.capture_failures),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_capture_outcomes_total{{outcome=\"{outcome}\"}} {count}"
+                    ),
+                );
+            }
+            out.push_str(
+                "# HELP kiln_rocm_graph_replay_attempts_total Native ROCm graph replay attempts.\n",
+            );
+            out.push_str("# TYPE kiln_rocm_graph_replay_attempts_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_replay_attempts_total {}",
+                    graph.replay_attempts
+                ),
+            );
+            out.push_str(
+                "# HELP kiln_rocm_graph_replay_outcomes_total Native ROCm graph replay outcomes.\n",
+            );
+            out.push_str("# TYPE kiln_rocm_graph_replay_outcomes_total counter\n");
+            for (outcome, count) in [
+                ("success", graph.replay_successes),
+                ("failure", graph.replay_failures),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_replay_outcomes_total{{outcome=\"{outcome}\"}} {count}"
+                    ),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_fallbacks_total Eager ROCm graph fallbacks by closed reason.\n");
+            out.push_str("# TYPE kiln_rocm_graph_fallbacks_total counter\n");
+            for (reason, count) in [
+                (
+                    "cold_cache_host_round_trip",
+                    graph.fallbacks.cold_cache_host_round_trip,
+                ),
+                (
+                    "persistent_host_round_trip",
+                    graph.fallbacks.persistent_host_round_trip,
+                ),
+                (
+                    "shape_dependent_attention",
+                    graph.fallbacks.shape_dependent_attention,
+                ),
+                ("graph_cache_capacity", graph.fallbacks.graph_cache_capacity),
+                (
+                    "graph_cache_byte_budget",
+                    graph.fallbacks.graph_cache_byte_budget,
+                ),
+                (
+                    "graph_accounting_incomplete",
+                    graph.fallbacks.graph_accounting_incomplete,
+                ),
+                (
+                    "moderate_memory_pressure",
+                    graph.fallbacks.moderate_memory_pressure,
+                ),
+                (
+                    "tight_memory_pressure",
+                    graph.fallbacks.tight_memory_pressure,
+                ),
+                (
+                    "critical_memory_pressure",
+                    graph.fallbacks.critical_memory_pressure,
+                ),
+                (
+                    "memory_reservation_denied",
+                    graph.fallbacks.memory_reservation_denied,
+                ),
+                (
+                    "memory_governor_selector_mismatch",
+                    graph.fallbacks.memory_governor_selector_mismatch,
+                ),
+                ("capture_failure", graph.fallbacks.capture_failure),
+                ("replay_failure", graph.fallbacks.replay_failure),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!("kiln_rocm_graph_fallbacks_total{{reason=\"{reason}\"}} {count}"),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_fallback_slow_total Eager ROCm graph fallbacks whose complete fallback path took at least 100 ms.\n");
+            out.push_str("# TYPE kiln_rocm_graph_fallback_slow_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_fallback_slow_total {}",
+                    graph.fallbacks.slow
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_fallback_duration_seconds_total Accumulated end-to-end eager ROCm graph fallback duration.\n");
+            out.push_str("# TYPE kiln_rocm_graph_fallback_duration_seconds_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_fallback_duration_seconds_total {:.6}",
+                    graph.fallbacks.total_duration_micros as f64 / 1_000_000.0
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_fallback_duration_seconds_max Longest observed end-to-end eager ROCm graph fallback duration.\n");
+            out.push_str("# TYPE kiln_rocm_graph_fallback_duration_seconds_max gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_fallback_duration_seconds_max {:.6}",
+                    graph.fallbacks.max_duration_micros as f64 / 1_000_000.0
+                ),
+            );
+        }
         prom_counter(
             &mut out,
             "kiln_requests_total",
@@ -1969,6 +2440,12 @@ pub struct SnapshotGauges {
     pub external_yield_sync: Vec<ExternalYieldSyncStats>,
     pub rocm_synchronization_mode: &'static str,
     pub rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
+    pub rocm_graph: Option<kiln_model::RocmGraphStats>,
+    pub(crate) rocm_graph_unavailable_reason:
+        Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
+    pub rocm_graph_telemetry: Option<kiln_model::RocmGraphLiveTelemetry>,
+    pub(crate) rocm_graph_telemetry_unavailable_reason:
+        Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
     pub scheduler_waiting: usize,
     pub scheduler_running: usize,
     pub blocks_used: usize,
@@ -2265,6 +2742,138 @@ mod tests {
                     skipped_count: 7,
                 }],
             },
+            rocm_graph: Some(kiln_model::RocmGraphStats {
+                requested: true,
+                capture_requested: true,
+                enabled: true,
+                capture_enabled: true,
+                max_cached_graphs: 8,
+                max_retained_bytes: 1_073_741_824,
+                capture_attempts: 8,
+                capture_successes: 6,
+                capture_deferrals: 1,
+                capture_failures: 1,
+                replay_attempts: 11,
+                replay_successes: 10,
+                replay_failures: 1,
+                failures: 2,
+                decode_owner_release_count: 3,
+                decode_owner_graph_release_count: 2,
+                graph_slot_create_count: 4,
+                graph_slot_reuse_count: 5,
+                cache_admission_successes: 4,
+                cache_evictions: 2,
+                cache_evicted_bytes: 201_326_592,
+                budget_evictions: 1,
+                pressure_evictions: 1,
+                invalidation_evictions: 0,
+                recovery_evictions: 0,
+                entry_capacity_rejections: 1,
+                byte_budget_rejections: 1,
+                accounting_incomplete_rejections: 0,
+                pre_capture_entry_capacity_skips: 2,
+                pre_capture_byte_budget_skips: 3,
+                pre_capture_accounting_incomplete_skips: 1,
+                pre_capture_memory_reservation_denied_skips: 4,
+                memory_governor_selector_mismatch_skips: 2,
+                captured_graph_count: 2,
+                graph_slot_count: 3,
+                active_graph_slot_count: 2,
+                idle_graph_slot_count: 1,
+                tracked_decode_owner_count: 2,
+                retained_stable_io_bytes: 33_554_432,
+                retained_capture_arena_bytes: 134_217_728,
+                retained_blaslt_workspace_bytes: 67_108_864,
+                retained_slot_state_bytes: 16_777_216,
+                retained_bytes: 251_658_240,
+                peak_retained_bytes: 536_870_912,
+                opaque_native_object_count: 10,
+                retained_bytes_accounting_complete: true,
+                pre_candidate_headroom_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 10,
+                    slow: 1,
+                    total_duration_micros: 225_000,
+                    max_duration_micros: 125_000,
+                },
+                candidate_warm_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 8,
+                    slow: 2,
+                    total_duration_micros: 450_000,
+                    max_duration_micros: 250_000,
+                },
+                pre_native_reservation_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 6,
+                    slow: 1,
+                    total_duration_micros: 175_000,
+                    max_duration_micros: 125_000,
+                },
+                native_capture_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 6,
+                    slow: 1,
+                    total_duration_micros: 325_000,
+                    max_duration_micros: 200_000,
+                },
+                rejected_candidate_cleanup_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 2,
+                    slow: 0,
+                    total_duration_micros: 35_000,
+                    max_duration_micros: 20_000,
+                },
+                last_transient_candidate_bytes: 100_663_296,
+                peak_transient_candidate_bytes: 167_772_160,
+                fallbacks: kiln_model::RocmGraphFallbackStats {
+                    total: 9,
+                    graph_cache_byte_budget: 2,
+                    graph_accounting_incomplete: 1,
+                    moderate_memory_pressure: 1,
+                    tight_memory_pressure: 3,
+                    memory_reservation_denied: 1,
+                    memory_governor_selector_mismatch: 1,
+                    slow: 2,
+                    total_duration_micros: 425_000,
+                    max_duration_micros: 275_000,
+                    ..kiln_model::RocmGraphFallbackStats::default()
+                },
+                ..kiln_model::RocmGraphStats::default()
+            }),
+            rocm_graph_unavailable_reason: None,
+            rocm_graph_telemetry: Some(kiln_model::RocmGraphLiveTelemetry {
+                current_phase: Some(kiln_model::RocmGraphPhase::CandidateWarm),
+                current_phase_elapsed_micros: 80_000,
+                pre_candidate_headroom_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 10,
+                    slow: 1,
+                    total_duration_micros: 225_000,
+                    max_duration_micros: 125_000,
+                },
+                candidate_warm_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 8,
+                    slow: 2,
+                    total_duration_micros: 450_000,
+                    max_duration_micros: 250_000,
+                },
+                pre_native_reservation_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 6,
+                    slow: 1,
+                    total_duration_micros: 175_000,
+                    max_duration_micros: 125_000,
+                },
+                native_capture_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 6,
+                    slow: 1,
+                    total_duration_micros: 325_000,
+                    max_duration_micros: 200_000,
+                },
+                rejected_candidate_cleanup_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 2,
+                    slow: 0,
+                    total_duration_micros: 35_000,
+                    max_duration_micros: 20_000,
+                },
+                last_transient_candidate_bytes: 100_663_296,
+                peak_transient_candidate_bytes: 167_772_160,
+            }),
+            rocm_graph_telemetry_unavailable_reason: None,
             scheduler_waiting: 3,
             scheduler_running: 1,
             blocks_used: 10,
@@ -2436,6 +3045,93 @@ mod tests {
         assert!(
             output.contains("kiln_rocm_synchronization_skipped_total{reason=\"external_yield\"} 7")
         );
+        assert!(output.contains("kiln_rocm_graph_telemetry_available 1"));
+        assert!(
+            output.contains("kiln_rocm_graph_snapshot_unavailable{reason=\"model_runner_busy\"} 0")
+        );
+        assert!(output.contains("kiln_rocm_graph_phase_telemetry_available 1"));
+        assert!(output.contains(
+            "kiln_rocm_graph_phase_telemetry_unavailable{reason=\"backend_without_graph_runner\"} 0"
+        ));
+        assert!(output.contains("kiln_rocm_graph_current_phase{phase=\"candidate_warm\"} 1"));
+        assert!(output.contains("kiln_rocm_graph_current_phase{phase=\"native_capture\"} 0"));
+        assert!(output.contains("kiln_rocm_graph_current_phase_elapsed_seconds 0.080000"));
+        assert!(output.contains("kiln_rocm_graph_state{kind=\"capture_enabled\"} 1"));
+        assert!(output.contains("kiln_rocm_graph_cache_entries 2"));
+        assert!(output.contains("kiln_rocm_graph_cache_entry_limit 8"));
+        assert!(output.contains("kiln_rocm_graph_retained_bytes{kind=\"total\"} 251658240"));
+        assert!(output.contains("kiln_rocm_graph_retained_byte_limit 1073741824"));
+        assert!(output.contains("kiln_rocm_graph_retained_byte_accounting_complete 1"));
+        assert!(output.contains("kiln_rocm_graph_slots{state=\"active\"} 2"));
+        assert!(output.contains("kiln_rocm_graph_tracked_decode_owners 2"));
+        assert!(output.contains("kiln_rocm_graph_owner_lifecycle_total{event=\"slot_reuse\"} 5"));
+        assert!(output.contains("kiln_rocm_graph_opaque_native_objects 10"));
+        assert!(
+            output.contains("kiln_rocm_graph_transient_candidate_bytes{kind=\"last\"} 100663296")
+        );
+        assert!(
+            output.contains("kiln_rocm_graph_transient_candidate_bytes{kind=\"peak\"} 167772160")
+        );
+        assert!(
+            output
+                .contains("kiln_rocm_graph_phase_calls_total{phase=\"pre_candidate_headroom\"} 10")
+        );
+        assert!(output.contains("kiln_rocm_graph_phase_calls_total{phase=\"candidate_warm\"} 8"));
+        assert!(
+            output.contains("kiln_rocm_graph_phase_slow_total{phase=\"pre_native_reservation\"} 1")
+        );
+        assert!(output.contains(
+            "kiln_rocm_graph_phase_duration_seconds_total{phase=\"native_capture\"} 0.325000"
+        ));
+        assert!(output.contains(
+            "kiln_rocm_graph_phase_duration_seconds_max{phase=\"rejected_candidate_cleanup\"} 0.020000"
+        ));
+        assert!(output.contains("kiln_rocm_graph_cache_admissions_total 4"));
+        assert!(output.contains("kiln_rocm_graph_cache_evictions_total 2"));
+        assert!(output.contains("kiln_rocm_graph_cache_evicted_bytes_total 201326592"));
+        assert!(
+            output.contains("kiln_rocm_graph_cache_evictions_by_cause_total{cause=\"budget\"} 1")
+        );
+        assert!(
+            output.contains("kiln_rocm_graph_cache_evictions_by_cause_total{cause=\"recovery\"} 0")
+        );
+        assert!(output.contains(
+            "kiln_rocm_graph_cache_admission_rejections_total{reason=\"byte_budget\"} 1"
+        ));
+        assert!(output.contains(
+            "kiln_rocm_graph_pre_capture_skips_total{reason=\"accounting_incomplete\"} 1"
+        ));
+        assert!(output.contains(
+            "kiln_rocm_graph_pre_capture_skips_total{reason=\"memory_reservation_denied\"} 4"
+        ));
+        assert!(output.contains(
+            "kiln_rocm_graph_pre_capture_skips_total{reason=\"memory_governor_selector_mismatch\"} 2"
+        ));
+        assert!(output.contains("kiln_rocm_graph_capture_attempts_total 8"));
+        assert!(output.contains("kiln_rocm_graph_capture_outcomes_total{outcome=\"deferred\"} 1"));
+        assert!(output.contains("kiln_rocm_graph_replay_attempts_total 11"));
+        assert!(
+            output
+                .contains("kiln_rocm_graph_fallbacks_total{reason=\"graph_cache_byte_budget\"} 2")
+        );
+        assert!(
+            output.contains("kiln_rocm_graph_fallbacks_total{reason=\"tight_memory_pressure\"} 3")
+        );
+        assert!(
+            output
+                .contains("kiln_rocm_graph_fallbacks_total{reason=\"moderate_memory_pressure\"} 1")
+        );
+        assert!(
+            output.contains(
+                "kiln_rocm_graph_fallbacks_total{reason=\"memory_reservation_denied\"} 1"
+            )
+        );
+        assert!(output.contains(
+            "kiln_rocm_graph_fallbacks_total{reason=\"memory_governor_selector_mismatch\"} 1"
+        ));
+        assert!(output.contains("kiln_rocm_graph_fallback_slow_total 2"));
+        assert!(output.contains("kiln_rocm_graph_fallback_duration_seconds_total 0.425000"));
+        assert!(output.contains("kiln_rocm_graph_fallback_duration_seconds_max 0.275000"));
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"hit\"} 7"));
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"miss\"} 3"));
         assert!(output.contains("kiln_prefix_cache_hit_tokens_total 112"));
@@ -2593,13 +3289,17 @@ mod tests {
     #[test]
     fn test_base_adapter_rendering() {
         let m = Metrics::new();
-        let gauges = SnapshotGauges {
+        let mut gauges = SnapshotGauges {
             memory_governor: CachedMemoryGovernorObservation::default(),
             backend_quarantined: false,
             external_yield_sync: Vec::new(),
             rocm_synchronization_mode: "legacy_host_barriers",
             rocm_synchronization:
                 crate::accelerator_runtime::RocmSynchronizationRuntimeStats::default(),
+            rocm_graph: Some(kiln_model::RocmGraphStats::default()),
+            rocm_graph_unavailable_reason: None,
+            rocm_graph_telemetry: Some(kiln_model::RocmGraphLiveTelemetry::default()),
+            rocm_graph_telemetry_unavailable_reason: None,
             scheduler_waiting: 0,
             scheduler_running: 0,
             blocks_used: 0,
@@ -2627,5 +3327,46 @@ mod tests {
         };
         let output = m.render(&gauges);
         assert!(output.contains("kiln_active_adapter{name=\"base\"} 1"));
+
+        gauges.rocm_graph = None;
+        gauges.rocm_graph_unavailable_reason =
+            Some(crate::rocm_graph_observability::RocmGraphUnavailableReason::ModelRunnerBusy);
+        gauges.rocm_graph_telemetry = Some(kiln_model::RocmGraphLiveTelemetry {
+            current_phase: Some(kiln_model::RocmGraphPhase::NativeCapture),
+            current_phase_elapsed_micros: 125_000,
+            ..kiln_model::RocmGraphLiveTelemetry::default()
+        });
+        let full_snapshot_busy = m.render(&gauges);
+        assert!(full_snapshot_busy.contains("kiln_rocm_graph_telemetry_available 0"));
+        assert!(full_snapshot_busy.contains("kiln_rocm_graph_phase_telemetry_available 1"));
+        assert!(
+            full_snapshot_busy
+                .contains("kiln_rocm_graph_snapshot_unavailable{reason=\"model_runner_busy\"} 1")
+        );
+        assert!(
+            full_snapshot_busy
+                .contains("kiln_rocm_graph_current_phase{phase=\"native_capture\"} 1")
+        );
+        assert!(
+            full_snapshot_busy.contains("kiln_rocm_graph_current_phase_elapsed_seconds 0.125000")
+        );
+        assert!(!full_snapshot_busy.contains("kiln_rocm_graph_cache_entries "));
+
+        gauges.rocm_graph_telemetry = None;
+        gauges.rocm_graph_telemetry_unavailable_reason = Some(
+            crate::rocm_graph_observability::RocmGraphUnavailableReason::BackendWithoutGraphRunner,
+        );
+        let unavailable = m.render(&gauges);
+        assert!(unavailable.contains("kiln_rocm_graph_telemetry_available 0"));
+        assert!(unavailable.contains("kiln_rocm_graph_phase_telemetry_available 0"));
+        assert!(
+            unavailable
+                .contains("kiln_rocm_graph_snapshot_unavailable{reason=\"model_runner_busy\"} 1")
+        );
+        assert!(unavailable.contains(
+            "kiln_rocm_graph_phase_telemetry_unavailable{reason=\"backend_without_graph_runner\"} 1"
+        ));
+        assert!(!unavailable.contains("kiln_rocm_graph_cache_entries "));
+        assert!(!unavailable.contains("kiln_rocm_graph_current_phase{"));
     }
 }

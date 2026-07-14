@@ -88,6 +88,9 @@ constexpr int KILN_BLAS_ERR_UNSUPPORTED_EPILOGUE = -9;
 constexpr int KILN_BLAS_ERR_INVALID_SHAPE = -10;
 constexpr int KILN_BLAS_ERR_ALGO_DESERIALIZE = -11;
 constexpr int KILN_BLAS_ERR_ALGO_BLOB_TOO_SMALL = -12;
+constexpr int KILN_BLAS_ERR_CTX_DESTROY = -13;
+constexpr int KILN_BLAS_ERR_RESOURCE_CLEANUP = -14;
+constexpr int KILN_BLAS_ERR_CTX_CREATE_PARTIAL = -15;
 
 // ----------------------------------------------------------------------
 // Opaque context. One per (device, owning Rust handle).
@@ -95,7 +98,6 @@ constexpr int KILN_BLAS_ERR_ALGO_BLOB_TOO_SMALL = -12;
 
 struct KilnHipblasLtCtx {
     hipblasLtHandle_t lt;
-    int device_index;
 };
 
 // ----------------------------------------------------------------------
@@ -247,12 +249,25 @@ extern "C" int kiln_blas_hipblaslt_ctx_create(KilnHipblasLtCtx** out_ctx) {
     *out_ctx = nullptr;
     KilnHipblasLtCtx* ctx = new (std::nothrow) KilnHipblasLtCtx{};
     if (ctx == nullptr) return KILN_BLAS_ERR_CTX_CREATE;
-    if (hipblasLtCreate(&ctx->lt) != HIPBLAS_STATUS_SUCCESS) {
+    const hipblasStatus_t create_status = hipblasLtCreate(&ctx->lt);
+    if (create_status != HIPBLAS_STATUS_SUCCESS) {
+        if (ctx->lt != nullptr) {
+            // Creation failed after publishing a handle. Even when destroy
+            // succeeds this is an ambiguous partial-publication result and the
+            // Rust boundary must stop future execution admission.
+            if (hipblasLtDestroy(ctx->lt) != HIPBLAS_STATUS_SUCCESS) {
+                *out_ctx = ctx;
+                return KILN_BLAS_ERR_RESOURCE_CLEANUP;
+            }
+            delete ctx;
+            return KILN_BLAS_ERR_CTX_CREATE_PARTIAL;
+        }
         delete ctx;
         return KILN_BLAS_ERR_CTX_CREATE;
     }
-    if (hipGetDevice(&ctx->device_index) != hipSuccess) {
-        ctx->device_index = 0;
+    if (ctx->lt == nullptr) {
+        delete ctx;
+        return KILN_BLAS_ERR_CTX_CREATE_PARTIAL;
     }
     *out_ctx = ctx;
     return KILN_BLAS_OK;
@@ -260,7 +275,11 @@ extern "C" int kiln_blas_hipblaslt_ctx_create(KilnHipblasLtCtx** out_ctx) {
 
 extern "C" int kiln_blas_hipblaslt_ctx_destroy(KilnHipblasLtCtx* ctx) {
     if (ctx == nullptr) return KILN_BLAS_OK;
-    hipblasLtDestroy(ctx->lt);
+    if (hipblasLtDestroy(ctx->lt) != HIPBLAS_STATUS_SUCCESS) {
+        // Preserve the wrapper and handle so Rust can intentionally retain the
+        // failed resource after quarantining device cleanup.
+        return KILN_BLAS_ERR_CTX_DESTROY;
+    }
     delete ctx;
     return KILN_BLAS_OK;
 }
@@ -306,14 +325,25 @@ extern "C" int kiln_blas_hipblaslt_matmul(
     // Build the matmul descriptor. HIPBLAS_COMPUTE_32F + HIP_R_32F
     // scale type works for all our dtypes (BF16/F16/F32 IO).
     hipblasLtMatmulDesc_t matmul_desc = nullptr;
-    if (hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F)
-        != HIPBLAS_STATUS_SUCCESS) {
-        return KILN_BLAS_ERR_DESC_CREATE;
-    }
-
     int ret = KILN_BLAS_OK;
     hipblasLtMatrixLayout_t a_desc = nullptr, b_desc = nullptr, c_desc = nullptr;
     hipblasLtMatmulPreference_t pref = nullptr;
+    hipblasOperation_t op_a = spec->a_transposed ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+    hipblasOperation_t op_b = spec->b_transposed ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+    int64_t b_rows = spec->b_transposed ? spec->k : spec->n;
+    int64_t b_cols = spec->b_transposed ? spec->n : spec->k;
+    int64_t b_ld = b_rows;
+    int64_t a_rows = spec->a_transposed ? spec->m : spec->k;
+    int64_t a_cols = spec->a_transposed ? spec->k : spec->m;
+    int64_t a_ld = a_rows;
+    int64_t c_rows = spec->n;
+    int64_t c_cols = spec->m;
+    int64_t c_ld = c_rows;
+    if (hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F)
+        != HIPBLAS_STATUS_SUCCESS) {
+        ret = KILN_BLAS_ERR_DESC_CREATE;
+        goto cleanup;
+    }
 
     // Row-major in/out — convert to the equivalent column-major form
     // by swapping operands: C[m, n] = A[m, k] @ B[k, n] (row-major)
@@ -324,28 +354,35 @@ extern "C" int kiln_blas_hipblaslt_matmul(
     // Transposes apply *in row-major space*: a_transposed=true means
     // A was passed as [k, m] in row-major, but we view it as [m, k]
     // logically; in column-major that's [m, k] (so we use OP_T).
-    hipblasOperation_t op_a = spec->a_transposed ? HIPBLAS_OP_T : HIPBLAS_OP_N;
-    hipblasOperation_t op_b = spec->b_transposed ? HIPBLAS_OP_T : HIPBLAS_OP_N;
     // The "primary operand" in our column-major view is B (because
     // we swapped). hipBLASLt's TRANSA / TRANSB attributes refer to its
     // first / second arguments, which after the swap are B / A.
-    hipblasLtMatmulDescSetAttribute(matmul_desc, HIPBLASLT_MATMUL_DESC_TRANSA,
-                                    &op_b, sizeof(op_b));
-    hipblasLtMatmulDescSetAttribute(matmul_desc, HIPBLASLT_MATMUL_DESC_TRANSB,
-                                    &op_a, sizeof(op_a));
+    if (hipblasLtMatmulDescSetAttribute(matmul_desc, HIPBLASLT_MATMUL_DESC_TRANSA,
+                                       &op_b, sizeof(op_b)) != HIPBLAS_STATUS_SUCCESS ||
+        hipblasLtMatmulDescSetAttribute(matmul_desc, HIPBLASLT_MATMUL_DESC_TRANSB,
+                                       &op_a, sizeof(op_a)) != HIPBLAS_STATUS_SUCCESS) {
+        ret = KILN_BLAS_ERR_DESC_CREATE;
+        goto cleanup;
+    }
 
     // Set the epilogue.
-    hipblasLtMatmulDescSetAttribute(matmul_desc, HIPBLASLT_MATMUL_DESC_EPILOGUE,
-                                    &lt_epi, sizeof(lt_epi));
+    if (hipblasLtMatmulDescSetAttribute(matmul_desc, HIPBLASLT_MATMUL_DESC_EPILOGUE,
+                                       &lt_epi, sizeof(lt_epi)) != HIPBLAS_STATUS_SUCCESS) {
+        ret = KILN_BLAS_ERR_DESC_CREATE;
+        goto cleanup;
+    }
 
     // Bias is keyed off the epilogue. hipBLASLt expects a per-column
     // (== per-N) bias vector with the output dtype.
     if (bias_ptr != nullptr &&
         (spec->epilogue == KILN_EPI_BIAS ||
          spec->epilogue == KILN_EPI_BIAS_GELU)) {
-        hipblasLtMatmulDescSetAttribute(
-            matmul_desc, HIPBLASLT_MATMUL_DESC_BIAS_POINTER,
-            &bias_ptr, sizeof(bias_ptr));
+        if (hipblasLtMatmulDescSetAttribute(
+                matmul_desc, HIPBLASLT_MATMUL_DESC_BIAS_POINTER,
+                &bias_ptr, sizeof(bias_ptr)) != HIPBLAS_STATUS_SUCCESS) {
+            ret = KILN_BLAS_ERR_DESC_CREATE;
+            goto cleanup;
+        }
         // Bias dtype defaults to output dtype.
     }
 
@@ -358,16 +395,6 @@ extern "C" int kiln_blas_hipblaslt_matmul(
     // with op_a = op_b = HIPBLAS_OP_N for the non-transposed case.
     // For the transposed cases, swap rows/cols on the layout AND set
     // op_a or op_b to T.
-    int64_t b_rows = spec->b_transposed ? spec->k : spec->n;
-    int64_t b_cols = spec->b_transposed ? spec->n : spec->k;
-    int64_t b_ld = b_rows;
-    int64_t a_rows = spec->a_transposed ? spec->m : spec->k;
-    int64_t a_cols = spec->a_transposed ? spec->k : spec->m;
-    int64_t a_ld = a_rows;
-    int64_t c_rows = spec->n;
-    int64_t c_cols = spec->m;
-    int64_t c_ld = c_rows;
-
     if (hipblasLtMatrixLayoutCreate(&b_desc, hip_dt_in, b_rows, b_cols, b_ld)
         != HIPBLAS_STATUS_SUCCESS ||
         hipblasLtMatrixLayoutCreate(&a_desc, hip_dt_in, a_rows, a_cols, a_ld)
@@ -412,9 +439,12 @@ extern "C" int kiln_blas_hipblaslt_matmul(
             ret = KILN_BLAS_ERR_PREFERENCE;
             goto cleanup;
         }
-        hipblasLtMatmulPreferenceSetAttribute(
-            pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-            &workspace_bytes, sizeof(workspace_bytes));
+        if (hipblasLtMatmulPreferenceSetAttribute(
+                pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                &workspace_bytes, sizeof(workspace_bytes)) != HIPBLAS_STATUS_SUCCESS) {
+            ret = KILN_BLAS_ERR_PREFERENCE;
+            goto cleanup;
+        }
     }
 
     {
@@ -493,10 +523,25 @@ extern "C" int kiln_blas_hipblaslt_matmul(
     }
 
 cleanup:
-    if (pref) hipblasLtMatmulPreferenceDestroy(pref);
-    if (a_desc) hipblasLtMatrixLayoutDestroy(a_desc);
-    if (b_desc) hipblasLtMatrixLayoutDestroy(b_desc);
-    if (c_desc) hipblasLtMatrixLayoutDestroy(c_desc);
-    if (matmul_desc) hipblasLtMatmulDescDestroy(matmul_desc);
+    // Attempt every cleanup even after one fails. Any failed destroy loses a
+    // live native handle when these locals go out of scope, so it is a fatal
+    // resource-publication failure rather than a safe pre-dispatch fallback.
+    bool cleanup_failed = false;
+    if (pref && hipblasLtMatmulPreferenceDestroy(pref) != HIPBLAS_STATUS_SUCCESS) {
+        cleanup_failed = true;
+    }
+    if (a_desc && hipblasLtMatrixLayoutDestroy(a_desc) != HIPBLAS_STATUS_SUCCESS) {
+        cleanup_failed = true;
+    }
+    if (b_desc && hipblasLtMatrixLayoutDestroy(b_desc) != HIPBLAS_STATUS_SUCCESS) {
+        cleanup_failed = true;
+    }
+    if (c_desc && hipblasLtMatrixLayoutDestroy(c_desc) != HIPBLAS_STATUS_SUCCESS) {
+        cleanup_failed = true;
+    }
+    if (matmul_desc && hipblasLtMatmulDescDestroy(matmul_desc) != HIPBLAS_STATUS_SUCCESS) {
+        cleanup_failed = true;
+    }
+    if (cleanup_failed) return KILN_BLAS_ERR_RESOURCE_CLEANUP;
     return ret;
 }

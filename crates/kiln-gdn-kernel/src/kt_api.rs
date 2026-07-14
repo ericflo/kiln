@@ -104,10 +104,13 @@ fn alloc_cuda_tensor(
     )?)
 }
 
-/// Raw GPU stream pointer for `t`'s storage (replaces `st.cuda_stream_raw()`).
+/// Typed GPU stream submission for `t`'s next external FFI call.
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-fn device_stream_raw(t: &KtTensor, name: &'static str) -> Result<*mut core::ffi::c_void, GdnError> {
-    Ok(kiln_kt_bridge::device_stream_raw_of(t, name)?)
+fn device_stream_submission(
+    t: &KtTensor,
+    name: &'static str,
+) -> Result<kiln_kt_bridge::DeviceStreamSubmission, GdnError> {
+    Ok(kiln_kt_bridge::device_stream_submission_of(t, name)?)
 }
 
 /// Resolve the HIP stream the kernel must launch on, on the ROCm backend:
@@ -133,8 +136,13 @@ fn device_stream_raw(t: &KtTensor, name: &'static str) -> Result<*mut core::ffi:
 /// context/stream already orders memset→kernel→readback), and this helper plus
 /// every call to it is `cfg(feature = "rocm")`-only.
 #[cfg(feature = "rocm")]
-fn output_stream_raw(out: &KtTensor) -> Result<*mut core::ffi::c_void, GdnError> {
-    Ok(kiln_kt_bridge::device_stream_raw_of(out, "rocm_output")?)
+fn output_stream_submission(
+    out: &KtTensor,
+) -> Result<kiln_kt_bridge::DeviceStreamSubmission, GdnError> {
+    Ok(kiln_kt_bridge::device_stream_submission_of(
+        out,
+        "rocm_output",
+    )?)
 }
 
 #[cfg(feature = "rocm")]
@@ -159,15 +167,15 @@ fn rocm_launch_stream(
     out: &KtTensor,
     label: &'static str,
     inputs: &[(&'static str, &KtTensor)],
-) -> Result<*mut core::ffi::c_void, GdnError> {
+) -> Result<kiln_kt_bridge::DeviceStreamSubmission, GdnError> {
     synchronize_rocm_input_streams(label, inputs)?;
-    output_stream_raw(out)
+    output_stream_submission(out)
 }
 
 /// Block until the just-launched kernel finishes, on the ROCm backend, so the
 /// `rocm_to_host_copy` readback (which synchronizes only its OWN stream) cannot
 /// observe the output before the kernel — the readback runs on a different
-/// freshly-minted context/stream than the launch (see [`output_stream_raw`]).
+/// freshly-minted context/stream than the launch (see [`output_stream_submission`]).
 /// A device-wide `hipDeviceSynchronize` drains the launch stream too. CUDA keeps
 /// its byte-identical path (`cfg(feature = "rocm")`-only, compiled out on CUDA).
 #[cfg(feature = "rocm")]
@@ -246,13 +254,14 @@ pub fn gdn_forward_substitution_kt(
     let w_ptr = kiln_kt_bridge::device_output_ptr(&w_out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    let stream_submission = device_stream_submission(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &w_out,
         "forward_substitution",
         &[("a_strict", a_strict), ("v_prime", v_prime), ("beta", beta)],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_forward_substitution(
             a_ptr as *const _,
@@ -266,8 +275,10 @@ pub fn gdn_forward_substitution_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!("kt-gdn: FFI returned {status}")));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&w_out)?;
     Ok(w_out)
@@ -334,13 +345,14 @@ pub fn gdn_forward_substitution_f32_kt(
     let w_ptr = kiln_kt_bridge::device_output_ptr(&w_out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    let stream_submission = device_stream_submission(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &w_out,
         "forward_substitution_f32",
         &[("a_strict", a_strict), ("v_prime", v_prime), ("beta", beta)],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_forward_substitution_f32(
             a_ptr as *const _,
@@ -354,10 +366,12 @@ pub fn gdn_forward_substitution_f32_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: f32 forward_substitution FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&w_out)?;
     Ok(w_out)
@@ -426,13 +440,14 @@ pub fn gdn_solve_tri_transpose_f32_kt(
     let dr_ptr = kiln_kt_bridge::device_output_ptr(&dr_out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    let stream_submission = device_stream_submission(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &dr_out,
         "solve_tri_transpose_f32",
         &[("a_strict", a_strict), ("beta", beta), ("dw", dw)],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_solve_tri_transpose_f32(
             a_ptr as *const _,
@@ -446,10 +461,12 @@ pub fn gdn_solve_tri_transpose_f32_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: solve_tri_transpose FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&dr_out)?;
     Ok(dr_out)
@@ -539,9 +556,9 @@ pub fn gdn_recurrent_forward_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "recurrent_forward",
         &[
@@ -553,6 +570,7 @@ pub fn gdn_recurrent_forward_kt(
             ("state", state),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_recurrent_forward(
             q_ptr as *const _,
@@ -569,10 +587,12 @@ pub fn gdn_recurrent_forward_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: recurrent FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -659,9 +679,9 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "decode_qk_norm_gates_recurrent_rmsnorm_bf16",
         &[
@@ -677,6 +697,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
             ("weight", weight),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16(
             q_ptr as *const _,
@@ -702,10 +723,12 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: decode_qk_norm_rmsnorm FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -827,9 +850,9 @@ pub fn gdn_full_chunk_forward_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(g_st, "g_st")?;
+    let stream_submission = device_stream_submission(g_st, "g_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "full_chunk_forward",
         &[
@@ -844,6 +867,7 @@ pub fn gdn_full_chunk_forward_kt(
             ("state", state),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_full_chunk_forward(
             g_ptr as *const _,
@@ -864,10 +888,12 @@ pub fn gdn_full_chunk_forward_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: full_chunk_forward FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -934,9 +960,9 @@ pub fn gdn_decode_gates_recurrent_bf16_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "decode_gates_recurrent_bf16",
         &[
@@ -952,6 +978,7 @@ pub fn gdn_decode_gates_recurrent_bf16_kt(
             ("weight", weight),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_decode_gates_recurrent_bf16(
             q_ptr as *const _,
@@ -975,10 +1002,12 @@ pub fn gdn_decode_gates_recurrent_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: decode_gates_recurrent FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -1040,9 +1069,9 @@ pub fn gdn_decode_qk_norm_gates_recurrent_bf16_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "decode_qk_norm_gates_recurrent_bf16",
         &[
@@ -1056,6 +1085,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_bf16_kt(
             ("state", state),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_bf16(
             q_ptr as *const _,
@@ -1078,10 +1108,12 @@ pub fn gdn_decode_qk_norm_gates_recurrent_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: decode_qk_norm_gates_recurrent FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -1148,9 +1180,9 @@ pub fn gdn_decode_gates_recurrent_vf32_bf16_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "decode_gates_recurrent_vf32_bf16",
         &[
@@ -1166,6 +1198,7 @@ pub fn gdn_decode_gates_recurrent_vf32_bf16_kt(
             ("weight", weight),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_decode_gates_recurrent_vf32_bf16(
             q_ptr as *const _,
@@ -1189,10 +1222,12 @@ pub fn gdn_decode_gates_recurrent_vf32_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: decode_gates_recurrent_vf32 FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -1250,9 +1285,9 @@ pub fn gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "decode_qk_norm_gates_recurrent_vf32_bf16",
         &[
@@ -1266,6 +1301,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt(
             ("state", state),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16(
             q_ptr as *const _,
@@ -1288,10 +1324,12 @@ pub fn gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: decode_qk_norm_gates_recurrent_vf32 FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -1349,9 +1387,9 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "decode_qk_norm_gates_recurrent_qf32_vf32_bf16",
         &[
@@ -1365,6 +1403,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt(
             ("state", state),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16(
             q_ptr as *const _,
@@ -1387,10 +1426,12 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: decode_qk_norm_gates_recurrent_qf32_vf32 FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -1448,9 +1489,9 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "decode_qk_norm_gates_recurrent_qf32_vbf16_bf16",
         &[
@@ -1464,6 +1505,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt(
             ("state", state),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16(
             q_ptr as *const _,
@@ -1486,10 +1528,12 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: decode_qk_norm_gates_recurrent_qf32_vbf16 FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -1554,9 +1598,9 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16",
         &[
@@ -1572,6 +1616,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt(
             ("weight", weight),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16(
             q_ptr as *const _,
@@ -1597,10 +1642,12 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: decode_rmsnorm_vf32 FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -1665,9 +1712,9 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16",
         &[
@@ -1683,6 +1730,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt(
             ("weight", weight),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16(
             q_ptr as *const _,
@@ -1708,10 +1756,12 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: decode_rmsnorm_qf32_vf32 FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -1776,9 +1826,9 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16",
         &[
@@ -1794,6 +1844,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16_kt(
             ("weight", weight),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16(
             q_ptr as *const _,
@@ -1819,10 +1870,12 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: decode_rmsnorm_qf32_vbf16 FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -1942,9 +1995,9 @@ pub fn gdn_full_chunk_forward_multiblock_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(g_st, "g_st")?;
+    let stream_submission = device_stream_submission(g_st, "g_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "full_chunk_forward_multiblock",
         &[
@@ -1959,6 +2012,7 @@ pub fn gdn_full_chunk_forward_multiblock_kt(
             ("state", state),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_full_chunk_forward_multiblock(
             g_ptr as *const _,
@@ -1980,10 +2034,12 @@ pub fn gdn_full_chunk_forward_multiblock_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: full_chunk_forward_multiblock FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -2036,13 +2092,14 @@ pub fn gdn_gated_rms_norm_bf16_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(x_st, "x_st")?;
+    let stream_submission = device_stream_submission(x_st, "x_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "gated_rms_norm_bf16",
         &[("x", x), ("z", z), ("weight", weight)],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_gated_rms_norm_bf16(
             x_ptr as *const _,
@@ -2056,10 +2113,12 @@ pub fn gdn_gated_rms_norm_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: gated_rms_norm FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -2109,13 +2168,14 @@ pub fn gdn_gated_rms_norm_bf16_f32_weight_kt(
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(x_st, "x_st")?;
+    let stream_submission = device_stream_submission(x_st, "x_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out,
         "gated_rms_norm_bf16_f32_weight",
         &[("x", x), ("z", z), ("weight", weight)],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_gated_rms_norm_wf32_bf16(
             x_ptr as *const _,
@@ -2129,10 +2189,12 @@ pub fn gdn_gated_rms_norm_bf16_f32_weight_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: gated_rms_norm f32-weight FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out)?;
     Ok(out)
@@ -2311,9 +2373,9 @@ fn gdn_gated_rms_norm_bwd_impl(
         .unwrap_or(0);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(go_st, "grad_out")?;
+    let stream_submission = device_stream_submission(go_st, "grad_out")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &dx,
         "gated_rms_norm_bwd",
         &[
@@ -2323,6 +2385,7 @@ fn gdn_gated_rms_norm_bwd_impl(
             ("weight", weight),
         ],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         match (weight_dtype, compute_weight_grad) {
             (KtDType::BF16, true) => kiln_gdn_gated_rms_norm_bwd_bf16(
@@ -2379,10 +2442,12 @@ fn gdn_gated_rms_norm_bwd_impl(
         }
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: gated_rms_norm_bwd FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&dx)?;
     Ok(GdnGatedRmsNormBwdLaunchKt { dx, dz, dw })
@@ -2422,13 +2487,14 @@ pub fn gdn_l2_norm_scale_bwd_bf16_kt(
     let dx_ptr = kiln_kt_bridge::device_output_ptr(&dx);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(go_st, "grad_out")?;
+    let stream_submission = device_stream_submission(go_st, "grad_out")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &dx,
         "l2_norm_scale_bwd_bf16",
         &[("grad_out", grad_out), ("x", x)],
     )?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_l2_norm_scale_bwd_bf16(
             go_ptr as *const _,
@@ -2442,10 +2508,12 @@ pub fn gdn_l2_norm_scale_bwd_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: l2_norm_scale_bwd FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&dx)?;
     Ok(dx)
@@ -2553,14 +2621,15 @@ pub fn gdn_gates_bf16_kt(
     let g_ptr = kiln_kt_bridge::device_output_ptr(&g);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    let stream_submission = device_stream_submission(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &beta,
         "gates_bf16",
         &[("a", a), ("b", b), ("a_log", a_log), ("dt_bias", dt_bias)],
     )?;
 
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_gates_bf16(
             a_ptr as *const _,
@@ -2577,10 +2646,12 @@ pub fn gdn_gates_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: gates_bf16 FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&beta)?;
     Ok((beta, g))
@@ -2615,14 +2686,15 @@ pub fn gdn_gates_bf16_f32_params_kt(
     let g_ptr = kiln_kt_bridge::device_output_ptr(&g);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    let stream_submission = device_stream_submission(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &beta,
         "gates_bf16_f32_params",
         &[("a", a), ("b", b), ("a_log", a_log), ("dt_bias", dt_bias)],
     )?;
 
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_gates_bf16_f32_params(
             a_ptr as *const _,
@@ -2639,10 +2711,12 @@ pub fn gdn_gates_bf16_f32_params_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: gates_bf16_f32_params FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&beta)?;
     Ok((beta, g))
@@ -2676,14 +2750,15 @@ pub fn gdn_gates_bf16_f32_bf16_params_kt(
     let g_ptr = kiln_kt_bridge::device_output_ptr(&g);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    let stream_submission = device_stream_submission(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &beta,
         "gates_bf16_f32_bf16_params",
         &[("a", a), ("b", b), ("a_log", a_log), ("dt_bias", dt_bias)],
     )?;
 
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_gates_bf16_f32_bf16_params(
             a_ptr as *const _,
@@ -2700,10 +2775,12 @@ pub fn gdn_gates_bf16_f32_bf16_params_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: gates_bf16_f32_bf16_params FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&beta)?;
     Ok((beta, g))
@@ -2804,9 +2881,9 @@ pub fn gdn_chunk_prep_kt(
     let pl_ptr = kiln_kt_bridge::device_output_ptr(&p_last);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(g_st, "g_st")?;
+    let stream_submission = device_stream_submission(g_st, "g_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &a_strict,
         "chunk_prep",
         &[
@@ -2819,6 +2896,7 @@ pub fn gdn_chunk_prep_kt(
         ],
     )?;
 
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_chunk_prep(
             g_ptr as *const _,
@@ -2840,10 +2918,12 @@ pub fn gdn_chunk_prep_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: chunk_prep FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&a_strict)?;
     Ok((
@@ -2936,9 +3016,9 @@ pub fn gdn_chunk_scan_kt(
     let ww_ptr = kiln_kt_bridge::device_output_ptr(&w_weighted);
 
     #[cfg(feature = "cuda")]
-    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    let stream_submission = device_stream_submission(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = rocm_launch_stream(
+    let stream_submission = rocm_launch_stream(
         &out_chunk,
         "chunk_scan",
         &[
@@ -2951,6 +3031,7 @@ pub fn gdn_chunk_scan_kt(
         ],
     )?;
 
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_gdn_chunk_scan(
             a_ptr as *const _,
@@ -2968,10 +3049,12 @@ pub fn gdn_chunk_scan_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(GdnError::Msg(format!(
             "kt-gdn: chunk_scan FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&out_chunk)?;
     Ok((out_chunk, w_weighted))

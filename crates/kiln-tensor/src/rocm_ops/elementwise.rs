@@ -102,7 +102,8 @@ pub fn rocm_elementwise_binary(a: &Tensor, b: &Tensor, kind: i32) -> Result<Tens
     // all n), so the uninit alloc skips the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = a_storage.rocm_stream_raw()?;
+    let stream_submission = a_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
 
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
@@ -119,10 +120,12 @@ pub fn rocm_elementwise_binary(a: &Tensor, b: &Tensor, kind: i32) -> Result<Tens
         kiln_elementwise_binary_async(a_ptr, b_ptr, out_ptr, n as i64, kind, dtype_tag, raw_stream)
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_elementwise_binary: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
     crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
         &ctx,
         &[a_storage, b_storage],

@@ -28,7 +28,7 @@
 use std::cell::Cell;
 
 use half::bf16;
-use kiln_tensor::{DType as KtDType, Device as KtDevice, Tensor as KtTensor};
+use kiln_tensor::{DType as KtDType, Device as KtDevice, RocmStreamSubmission, Tensor as KtTensor};
 
 use crate::kt_api::FlashAttnError;
 
@@ -94,6 +94,25 @@ fn dev_index(device: KtDevice) -> Result<usize, FlashAttnError> {
 
 fn map_kt<T>(r: Result<T, kiln_tensor::Error>) -> Result<T, FlashAttnError> {
     r.map_err(|e| FlashAttnError::Msg(format!("rocm-sdpa: {e}")))
+}
+
+/// Settle one external ROCm FFI admission using `rocm_flash_api.cpp`'s status
+/// convention: zero is success, negative is a local/unsupported decline, and
+/// positive means an attempted device execution failed. Only the last class
+/// poisons the process-lifetime device gate.
+fn settle_rocm_ffi_submission(
+    submission: RocmStreamSubmission,
+    status: i32,
+    operation: &'static str,
+) -> Result<(), FlashAttnError> {
+    if status > 0 {
+        submission.quarantine();
+        return Err(FlashAttnError::Msg(format!(
+            "{operation}: ROCm execution failed with status {status}; device quarantined"
+        )));
+    }
+    submission.complete();
+    Ok(())
 }
 
 /// Materialize a (possibly strided) ROCm tensor into a fresh contiguous ROCm
@@ -2428,8 +2447,9 @@ fn try_ck_fwd_bf16_no_lse(
     let v_ptr = kiln_kt_bridge::rocm_input_device_ptr(v, KtDType::BF16, "v")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(&out);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(q, "q")
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(q, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
 
     let status = unsafe {
         crate::kiln_rocm_flash_attn_fwd_ck_bf16(
@@ -2449,6 +2469,7 @@ fn try_ck_fwd_bf16_no_lse(
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa native forward")?;
     if status == 0 {
         // The CK/no-LSE launch is async and reads q/k/v after returning.
         // Synchronize while those borrowed input tensors are still alive;
@@ -2849,8 +2870,6 @@ fn try_ffi_fwd_bf16(
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(&out);
     let lse_ptr = kiln_kt_bridge::rocm_output_device_ptr(&lse);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(q, "q")
-        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
 
     // The native FFI kernels launch on the same active ROCm stream as tensor
     // ops and stream-ordered allocation/free. Stream ordering preserves
@@ -2858,6 +2877,9 @@ fn try_ffi_fwd_bf16(
     // available for runtime debugging.
     rocm_native_ffi_sync_if_enabled(q.device())?;
 
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(q, "q")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         let launch = if use_ck {
             crate::kiln_rocm_flash_attn_fwd_ck_bf16
@@ -2881,6 +2903,7 @@ fn try_ffi_fwd_bf16(
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa native forward")?;
     if status == 0 {
         rocm_native_ffi_sync_if_enabled(q.device())?;
         Ok(Some((out, lse)))
@@ -2943,11 +2966,12 @@ fn try_ffi_fwd_bf16_abs_tile(
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(&out);
     let lse_ptr = kiln_kt_bridge::rocm_output_device_ptr(&lse);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(q, "q")
-        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
 
     rocm_native_ffi_sync_if_enabled(q.device())?;
 
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(q, "q")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_attn_fwd_abs_tile_bf16(
             q_ptr as *const _,
@@ -2968,6 +2992,7 @@ fn try_ffi_fwd_bf16_abs_tile(
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa native forward")?;
     if status == 0 {
         rocm_native_ffi_sync_if_enabled(q.device())?;
         Ok(Some((out, lse)))
@@ -3034,11 +3059,12 @@ fn try_ffi_fwd_bf16_abs_tile_base_into(
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(out);
     let lse_ptr = kiln_kt_bridge::rocm_output_device_ptr(lse);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(q, "q")
-        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
 
     rocm_native_ffi_sync_if_enabled(q.device())?;
 
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(q, "q")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_attn_fwd_abs_tile_base_into_bf16(
             q_ptr as *const _,
@@ -3059,6 +3085,7 @@ fn try_ffi_fwd_bf16_abs_tile_base_into(
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa native forward")?;
     if status == 0 {
         rocm_native_ffi_sync_if_enabled(q.device())?;
         Ok(true)
@@ -3203,8 +3230,19 @@ fn native_streaming_fwd_update_bf16(
     let row_m_ptr = kiln_kt_bridge::rocm_output_device_ptr(row_m);
     let row_l_ptr = kiln_kt_bridge::rocm_output_device_ptr(row_l);
     let acc_ptr = kiln_kt_bridge::rocm_output_device_ptr(acc);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(q, "q")
+    let b = usize_to_i32("streaming fwd batch", b)?;
+    let q_len = usize_to_i32("streaming fwd q_len", q_len)?;
+    let sk = usize_to_i32("streaming fwd seqlen_k", sk)?;
+    let sq_total = usize_to_i32("streaming fwd seqlen_q_total", sq_total)?;
+    let h = usize_to_i32("streaming fwd heads", h)?;
+    let hk = usize_to_i32("streaming fwd kv_heads", hk)?;
+    let d = usize_to_i32("streaming fwd head_dim", d)?;
+    let q_start = usize_to_i32("streaming fwd q_start", q_start)?;
+    let key_start = usize_to_i32("streaming fwd key_start", key_start)?;
+    let key_len = usize_to_i32("streaming fwd key_len", key_len)?;
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(q, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_attn_fwd_stream_update_bf16(
             q_ptr as *const _,
@@ -3213,21 +3251,22 @@ fn native_streaming_fwd_update_bf16(
             row_m_ptr as *mut _,
             row_l_ptr as *mut _,
             acc_ptr as *mut _,
-            usize_to_i32("streaming fwd batch", b)?,
-            usize_to_i32("streaming fwd q_len", q_len)?,
-            usize_to_i32("streaming fwd seqlen_k", sk)?,
-            usize_to_i32("streaming fwd seqlen_q_total", sq_total)?,
-            usize_to_i32("streaming fwd heads", h)?,
-            usize_to_i32("streaming fwd kv_heads", hk)?,
-            usize_to_i32("streaming fwd head_dim", d)?,
+            b,
+            q_len,
+            sk,
+            sq_total,
+            h,
+            hk,
+            d,
             softmax_scale,
             if causal { 1 } else { 0 },
-            usize_to_i32("streaming fwd q_start", q_start)?,
-            usize_to_i32("streaming fwd key_start", key_start)?,
-            usize_to_i32("streaming fwd key_len", key_len)?,
+            q_start,
+            key_start,
+            key_len,
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa stream update")?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "rocm native streaming fwd update returned status {status}"
@@ -3256,8 +3295,13 @@ fn native_streaming_fwd_finalize_bf16(
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(out);
     let lse_ptr = kiln_kt_bridge::rocm_output_device_ptr(lse);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(out, "out")
+    let b = usize_to_i32("streaming fwd finalize batch", b)?;
+    let q_len = usize_to_i32("streaming fwd finalize q_len", q_len)?;
+    let h = usize_to_i32("streaming fwd finalize heads", h)?;
+    let d = usize_to_i32("streaming fwd finalize head_dim", d)?;
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(out, "out")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_attn_fwd_stream_finalize_bf16(
             row_m_ptr as *const _,
@@ -3265,13 +3309,14 @@ fn native_streaming_fwd_finalize_bf16(
             acc_ptr as *const _,
             out_ptr as *mut _,
             lse_ptr as *mut _,
-            usize_to_i32("streaming fwd finalize batch", b)?,
-            usize_to_i32("streaming fwd finalize q_len", q_len)?,
-            usize_to_i32("streaming fwd finalize heads", h)?,
-            usize_to_i32("streaming fwd finalize head_dim", d)?,
+            b,
+            q_len,
+            h,
+            d,
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa stream finalize")?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "rocm native streaming fwd finalize returned status {status}"
@@ -3578,16 +3623,18 @@ unsafe extern "C" {
 }
 
 /// Copy `n_bytes` from `src_ptr` into `dst_ptr` (both raw ROCm device addresses)
-/// on `stream`. Used by the paged-KV writers to scatter a token row into the
-/// pool in place. Synchronizes the default stream afterward so the write is
-/// observable by a subsequent decode that reads the pool.
+/// on `stream_owner`'s active stream. Admission is acquired immediately around
+/// this one runtime call, so batched paged-KV writers cannot retain a raw stream
+/// across an unbounded host loop.
 fn rocm_d2d_copy(
     dst_ptr: u64,
     src_ptr: u64,
     n_bytes: usize,
-    stream: *mut core::ffi::c_void,
-    dev_idx: usize,
+    stream_owner: &KtTensor,
 ) -> Result<(), FlashAttnError> {
+    let stream_submission =
+        kiln_kt_bridge::rocm_stream_submission_of(stream_owner, "rocm_d2d_copy")?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         hipMemcpyDtoDAsync(
             dst_ptr as *mut core::ffi::c_void,
@@ -3596,6 +3643,7 @@ fn rocm_d2d_copy(
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa device copy")?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "rocm-sdpa: hipMemcpyDtoDAsync returned status {status}"
@@ -3604,7 +3652,6 @@ fn rocm_d2d_copy(
     // R.10 perf: no device sync needed — the d2d write and any later read of the
     // pool serialize on the one cached per-device stream (FIFO). The old
     // hipDeviceSynchronize stalled the decode pipeline every KV write.
-    let _ = dev_idx;
     Ok(())
 }
 
@@ -3622,13 +3669,11 @@ pub fn rocm_copy_into(src: &KtTensor, dst: &KtTensor) -> Result<(), FlashAttnErr
             dst.dtype()
         )));
     }
-    let dev_idx = dev_index(dst.device())?;
     let src_c = rocm_contig(src)?;
     let n_bytes = dst.element_count() * dst.dtype().size_in_bytes();
     let src_ptr = kiln_kt_bridge::rocm_input_device_ptr(&src_c, src.dtype(), "copy_src")?;
     let dst_ptr = kiln_kt_bridge::rocm_input_device_ptr(dst, dst.dtype(), "copy_dst")?;
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(dst, "copy_dst")?;
-    rocm_d2d_copy(dst_ptr, src_ptr, n_bytes, stream, dev_idx)
+    rocm_d2d_copy(dst_ptr, src_ptr, n_bytes, dst)
 }
 
 /// ROCm composite of `paged_kv_write_token_major_bf16_kt` (host-`usize`-slot
@@ -3643,8 +3688,6 @@ pub fn paged_kv_write_token_major_bf16_rocm(
     num_kv_heads: usize,
     head_dim: usize,
 ) -> Result<(), FlashAttnError> {
-    let device = k_pool.device();
-    let dev_idx = dev_index(device)?;
     let row_elems = num_kv_heads * head_dim;
     let bpe = KtDType::BF16.size_in_bytes();
     let row_bytes = row_elems * bpe;
@@ -3654,10 +3697,8 @@ pub fn paged_kv_write_token_major_bf16_rocm(
     let v_src = kiln_kt_bridge::rocm_input_device_ptr(&rocm_contig(v)?, KtDType::BF16, "v")?;
     let kp_dst = kiln_kt_bridge::rocm_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
     let vp_dst = kiln_kt_bridge::rocm_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(k_pool, "k_pool")?;
-
-    rocm_d2d_copy(kp_dst + slot_byte_off, k_src, row_bytes, stream, dev_idx)?;
-    rocm_d2d_copy(vp_dst + slot_byte_off, v_src, row_bytes, stream, dev_idx)?;
+    rocm_d2d_copy(kp_dst + slot_byte_off, k_src, row_bytes, k_pool)?;
+    rocm_d2d_copy(vp_dst + slot_byte_off, v_src, row_bytes, k_pool)?;
     Ok(())
 }
 
@@ -3705,8 +3746,6 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_rocm(
     num_kv_heads: usize,
     head_dim: usize,
 ) -> Result<(), FlashAttnError> {
-    let device = k_pool.device();
-    let dev_idx = dev_index(device)?;
     let row_elems = num_kv_heads * head_dim;
     let bpe = KtDType::BF16.size_in_bytes();
     let row_bytes = row_elems * bpe;
@@ -3720,25 +3759,11 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_rocm(
     let v_src_base = kiln_kt_bridge::rocm_input_device_ptr(&v_c, KtDType::BF16, "v")?;
     let kp_dst = kiln_kt_bridge::rocm_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
     let vp_dst = kiln_kt_bridge::rocm_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(k_pool, "k_pool")?;
-
     for (r, &slot) in slot_vec.iter().enumerate().take(batch) {
         let src_off = (r * row_elems * bpe) as u64;
         let dst_off = (slot as usize * row_elems * bpe) as u64;
-        rocm_d2d_copy(
-            kp_dst + dst_off,
-            k_src_base + src_off,
-            row_bytes,
-            stream,
-            dev_idx,
-        )?;
-        rocm_d2d_copy(
-            vp_dst + dst_off,
-            v_src_base + src_off,
-            row_bytes,
-            stream,
-            dev_idx,
-        )?;
+        rocm_d2d_copy(kp_dst + dst_off, k_src_base + src_off, row_bytes, k_pool)?;
+        rocm_d2d_copy(vp_dst + dst_off, v_src_base + src_off, row_bytes, k_pool)?;
     }
     Ok(())
 }
@@ -4697,8 +4722,9 @@ fn try_native_bwd_bf16(
     let dq_ptr = kiln_kt_bridge::rocm_output_device_ptr(&dq);
     let dk_ptr = kiln_kt_bridge::rocm_output_device_ptr(&dk);
     let dv_ptr = kiln_kt_bridge::rocm_output_device_ptr(&dv);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&q_c, "q")
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&q_c, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
 
     let status = unsafe {
         crate::kiln_rocm_flash_attn_bwd_bf16(
@@ -4722,6 +4748,7 @@ fn try_native_bwd_bf16(
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa native backward")?;
 
     if status == 0 {
         Ok(Some((dq, dk, dv)))
@@ -4792,8 +4819,9 @@ fn try_native_bwd_bf16_collapsed_gqa(
     let dq_ptr = kiln_kt_bridge::rocm_output_device_ptr(&dq);
     let dk_ptr = kiln_kt_bridge::rocm_output_device_ptr(&dk);
     let dv_ptr = kiln_kt_bridge::rocm_output_device_ptr(&dv);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&q_c, "q")
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&q_c, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
 
     let status = unsafe {
         crate::kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(
@@ -4817,6 +4845,7 @@ fn try_native_bwd_bf16_collapsed_gqa(
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa native backward")?;
 
     if status == 0 {
         Ok(Some((dq, dk, dv)))
@@ -4912,8 +4941,9 @@ fn collapse_expanded_bshd_gqa_grad_bf16(
             kiln_kt_bridge::rocm_input_device_ptr(&expanded, KtDType::BF16, "expanded")
                 .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
         let collapsed_ptr = kiln_kt_bridge::rocm_output_device_ptr(&collapsed);
-        let stream = kiln_kt_bridge::rocm_stream_raw_of(&expanded, "expanded")
+        let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&expanded, "expanded")
             .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+        let stream = stream_submission.raw_stream();
         let status = unsafe {
             crate::kiln_rocm_flash_collapse_gqa_bf16(
                 expanded_ptr as *const _,
@@ -4926,6 +4956,7 @@ fn collapse_expanded_bshd_gqa_grad_bf16(
                 stream,
             )
         };
+        settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa GQA collapse")?;
         if status == 0 {
             return Ok(collapsed);
         }
@@ -4957,8 +4988,6 @@ fn causal_mask_fill_offset_f32(
     let scores = rocm_contig(&scores)?;
     let device = scores.device();
     let scores_ptr = kiln_kt_bridge::rocm_output_device_ptr(&scores);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&scores, "scores")
-        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let bh_i32 = i32::try_from(bh)
         .map_err(|_| FlashAttnError::Msg(format!("causal mask bh too large: {bh}")))?;
     let sq_i32 = i32::try_from(sq)
@@ -4970,6 +4999,9 @@ fn causal_mask_fill_offset_f32(
     let causal_offset_i32 = i32::try_from(causal_offset).map_err(|_| {
         FlashAttnError::Msg(format!("causal mask offset too large: {causal_offset}"))
     })?;
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&scores, "scores")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_causal_mask_fill_offset_f32(
             scores_ptr as *mut _,
@@ -4982,6 +5014,7 @@ fn causal_mask_fill_offset_f32(
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa causal mask")?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "causal_mask_fill_offset_f32: FFI returned status {status}"
@@ -5013,23 +5046,31 @@ fn scale_mask_scores_f32(
     let scores = rocm_contig(&scores)?;
     let device = scores.device();
     let scores_ptr = kiln_kt_bridge::rocm_output_device_ptr(&scores);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&scores, "scores")
+    let bh = usize_to_i32("scale mask bh", bh)?;
+    let sq = usize_to_i32("scale mask sq", sq)?;
+    let sk = usize_to_i32("scale mask sk", sk)?;
+    let q_start = usize_to_i32("scale mask q_start", q_start)?;
+    let k_start = usize_to_i32("scale mask k_start", k_start)?;
+    let causal_offset = isize_to_i32("scale mask causal_offset", causal_offset)?;
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&scores, "scores")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_scale_mask_f32(
             scores_ptr as *mut _,
-            usize_to_i32("scale mask bh", bh)?,
-            usize_to_i32("scale mask sq", sq)?,
-            usize_to_i32("scale mask sk", sk)?,
-            usize_to_i32("scale mask q_start", q_start)?,
-            usize_to_i32("scale mask k_start", k_start)?,
-            isize_to_i32("scale mask causal_offset", causal_offset)?,
+            bh,
+            sq,
+            sk,
+            q_start,
+            k_start,
+            causal_offset,
             scale,
             NEG_FILL,
             if causal { 1 } else { 0 },
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa scale mask")?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "scale_mask_scores_f32: FFI returned status {status}"
@@ -5071,22 +5112,30 @@ fn exp_mask_scores_f32(
     let scores_ptr = kiln_kt_bridge::rocm_output_device_ptr(&scores);
     let row_max_ptr = kiln_kt_bridge::rocm_input_device_ptr(&row_max, KtDType::F32, "row_max")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&scores, "scores")
+    let bh = usize_to_i32("exp mask bh", bh)?;
+    let sq = usize_to_i32("exp mask sq", sq)?;
+    let sk = usize_to_i32("exp mask sk", sk)?;
+    let q_start = usize_to_i32("exp mask q_start", q_start)?;
+    let k_start = usize_to_i32("exp mask k_start", k_start)?;
+    let causal_offset = isize_to_i32("exp mask causal_offset", causal_offset)?;
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&scores, "scores")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_exp_mask_f32(
             scores_ptr as *mut _,
             row_max_ptr as *const _,
-            usize_to_i32("exp mask bh", bh)?,
-            usize_to_i32("exp mask sq", sq)?,
-            usize_to_i32("exp mask sk", sk)?,
-            usize_to_i32("exp mask q_start", q_start)?,
-            usize_to_i32("exp mask k_start", k_start)?,
-            isize_to_i32("exp mask causal_offset", causal_offset)?,
+            bh,
+            sq,
+            sk,
+            q_start,
+            k_start,
+            causal_offset,
             if causal { 1 } else { 0 },
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa exp mask")?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "exp_mask_scores_f32: FFI returned status {status}"
@@ -5129,23 +5178,36 @@ fn prob_from_lse_scores_f32(
     let scores_ptr = kiln_kt_bridge::rocm_output_device_ptr(&scores);
     let lse_ptr = kiln_kt_bridge::rocm_input_device_ptr(&lse, KtDType::F32, "lse")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&scores, "scores")
+    let bh = usize_to_i32("prob lse bh", bh)?;
+    let sq = usize_to_i32("prob lse sq", sq)?;
+    let sk = usize_to_i32("prob lse sk", sk)?;
+    let total_q = usize_to_i32("prob lse total_q", total_q)?;
+    let q_start = usize_to_i32("prob lse q_start", q_start)?;
+    let k_start = usize_to_i32("prob lse k_start", k_start)?;
+    let causal_offset = isize_to_i32("prob lse causal_offset", causal_offset)?;
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&scores, "scores")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_prob_from_lse_f32(
             scores_ptr as *mut _,
             lse_ptr as *const _,
-            usize_to_i32("prob lse bh", bh)?,
-            usize_to_i32("prob lse sq", sq)?,
-            usize_to_i32("prob lse sk", sk)?,
-            usize_to_i32("prob lse total_q", total_q)?,
-            usize_to_i32("prob lse q_start", q_start)?,
-            usize_to_i32("prob lse k_start", k_start)?,
-            isize_to_i32("prob lse causal_offset", causal_offset)?,
+            bh,
+            sq,
+            sk,
+            total_q,
+            q_start,
+            k_start,
+            causal_offset,
             if causal { 1 } else { 0 },
             stream,
         )
     };
+    settle_rocm_ffi_submission(
+        stream_submission,
+        status,
+        "rocm-sdpa probability reconstruction",
+    )?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "prob_from_lse_scores_f32: FFI returned status {status}"
@@ -5190,27 +5252,39 @@ fn softmax_bwd_scores_f32(
     let p = rocm_contig(p)?;
     let d_rows = rocm_contig(d_rows)?;
     let device = dp.device();
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&dp, "dp")
+    let dp_ptr = kiln_kt_bridge::rocm_output_device_ptr(&dp);
+    let p_ptr = kiln_kt_bridge::rocm_input_device_ptr(&p, KtDType::F32, "p")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let d_rows_ptr = kiln_kt_bridge::rocm_input_device_ptr(&d_rows, KtDType::F32, "d_rows")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let bh = usize_to_i32("softmax bwd bh", bh)?;
+    let sq = usize_to_i32("softmax bwd sq", sq)?;
+    let sk = usize_to_i32("softmax bwd sk", sk)?;
+    let total_q = usize_to_i32("softmax bwd total_q", total_q)?;
+    let q_start = usize_to_i32("softmax bwd q_start", q_start)?;
+    let k_start = usize_to_i32("softmax bwd k_start", k_start)?;
+    let causal_offset = isize_to_i32("softmax bwd causal_offset", causal_offset)?;
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&dp, "dp")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_softmax_bwd_f32(
-            kiln_kt_bridge::rocm_output_device_ptr(&dp) as *mut _,
-            kiln_kt_bridge::rocm_input_device_ptr(&p, KtDType::F32, "p")
-                .map_err(|e| FlashAttnError::Msg(e.to_string()))? as *const _,
-            kiln_kt_bridge::rocm_input_device_ptr(&d_rows, KtDType::F32, "d_rows")
-                .map_err(|e| FlashAttnError::Msg(e.to_string()))? as *const _,
-            usize_to_i32("softmax bwd bh", bh)?,
-            usize_to_i32("softmax bwd sq", sq)?,
-            usize_to_i32("softmax bwd sk", sk)?,
-            usize_to_i32("softmax bwd total_q", total_q)?,
-            usize_to_i32("softmax bwd q_start", q_start)?,
-            usize_to_i32("softmax bwd k_start", k_start)?,
-            isize_to_i32("softmax bwd causal_offset", causal_offset)?,
+            dp_ptr as *mut _,
+            p_ptr as *const _,
+            d_rows_ptr as *const _,
+            bh,
+            sq,
+            sk,
+            total_q,
+            q_start,
+            k_start,
+            causal_offset,
             scale,
             if causal { 1 } else { 0 },
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa softmax backward")?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "softmax_bwd_scores_f32: FFI returned status {status}"
@@ -5251,21 +5325,30 @@ fn accum_axis1_f32(
         )));
     }
     let device = dst.device();
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(dst, "dst")
+    let dst_ptr = kiln_kt_bridge::rocm_output_device_ptr(dst);
+    let src_ptr = kiln_kt_bridge::rocm_input_device_ptr(src, KtDType::F32, "src")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let bh = usize_to_i32("accum bh", bh)?;
+    let total_s = usize_to_i32("accum total_s", total_s)?;
+    let tile_s = usize_to_i32("accum tile_s", tile_s)?;
+    let d = usize_to_i32("accum head_dim", d)?;
+    let s_start = usize_to_i32("accum s_start", s_start)?;
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(dst, "dst")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_accum_axis1_f32(
-            kiln_kt_bridge::rocm_output_device_ptr(dst) as *mut _,
-            kiln_kt_bridge::rocm_input_device_ptr(src, KtDType::F32, "src")
-                .map_err(|e| FlashAttnError::Msg(e.to_string()))? as *const _,
-            usize_to_i32("accum bh", bh)?,
-            usize_to_i32("accum total_s", total_s)?,
-            usize_to_i32("accum tile_s", tile_s)?,
-            usize_to_i32("accum head_dim", d)?,
-            usize_to_i32("accum s_start", s_start)?,
+            dst_ptr as *mut _,
+            src_ptr as *const _,
+            bh,
+            total_s,
+            tile_s,
+            d,
+            s_start,
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa axis accumulation")?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "accum_axis1_f32: FFI returned status {status}"
@@ -5307,22 +5390,31 @@ fn online_update_state_f32(
     let alpha = rocm_contig(alpha)?;
     let beta = rocm_contig(beta)?;
     let device = row_m.device();
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&row_m, "row_m")
+    let row_m_ptr = kiln_kt_bridge::rocm_output_device_ptr(&row_m);
+    let row_l_ptr = kiln_kt_bridge::rocm_output_device_ptr(&row_l);
+    let block_m_ptr = kiln_kt_bridge::rocm_input_device_ptr(&block_m, KtDType::F32, "block_m")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let block_l_ptr = kiln_kt_bridge::rocm_input_device_ptr(&block_l, KtDType::F32, "block_l")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let alpha_ptr = kiln_kt_bridge::rocm_output_device_ptr(&alpha);
+    let beta_ptr = kiln_kt_bridge::rocm_output_device_ptr(&beta);
+    let rows = usize_to_i32("online state rows", rows)?;
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&row_m, "row_m")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_online_update_state_f32(
-            kiln_kt_bridge::rocm_output_device_ptr(&row_m) as *mut _,
-            kiln_kt_bridge::rocm_output_device_ptr(&row_l) as *mut _,
-            kiln_kt_bridge::rocm_input_device_ptr(&block_m, KtDType::F32, "block_m")
-                .map_err(|e| FlashAttnError::Msg(e.to_string()))? as *const _,
-            kiln_kt_bridge::rocm_input_device_ptr(&block_l, KtDType::F32, "block_l")
-                .map_err(|e| FlashAttnError::Msg(e.to_string()))? as *const _,
-            kiln_kt_bridge::rocm_output_device_ptr(&alpha) as *mut _,
-            kiln_kt_bridge::rocm_output_device_ptr(&beta) as *mut _,
-            usize_to_i32("online state rows", rows)?,
+            row_m_ptr as *mut _,
+            row_l_ptr as *mut _,
+            block_m_ptr as *const _,
+            block_l_ptr as *const _,
+            alpha_ptr as *mut _,
+            beta_ptr as *mut _,
+            rows,
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa online state update")?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "online_update_state_f32: FFI returned status {status}"
@@ -5370,22 +5462,35 @@ fn online_update_acc_f32(
     let alpha = rocm_contig(alpha)?;
     let beta = rocm_contig(beta)?;
     let device = acc2.device();
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&acc2, "acc")
+    let acc_ptr = kiln_kt_bridge::rocm_output_device_ptr(&acc2);
+    let block_out_ptr =
+        kiln_kt_bridge::rocm_input_device_ptr(&block_out2, KtDType::F32, "block_out")
+            .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let alpha_ptr = kiln_kt_bridge::rocm_input_device_ptr(&alpha, KtDType::F32, "alpha")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let beta_ptr = kiln_kt_bridge::rocm_input_device_ptr(&beta, KtDType::F32, "beta")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let rows = usize_to_i32("online acc rows", rows)?;
+    let d = usize_to_i32("online acc head_dim", d)?;
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&acc2, "acc")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_online_update_acc_f32(
-            kiln_kt_bridge::rocm_output_device_ptr(&acc2) as *mut _,
-            kiln_kt_bridge::rocm_input_device_ptr(&block_out2, KtDType::F32, "block_out")
-                .map_err(|e| FlashAttnError::Msg(e.to_string()))? as *const _,
-            kiln_kt_bridge::rocm_input_device_ptr(&alpha, KtDType::F32, "alpha")
-                .map_err(|e| FlashAttnError::Msg(e.to_string()))? as *const _,
-            kiln_kt_bridge::rocm_input_device_ptr(&beta, KtDType::F32, "beta")
-                .map_err(|e| FlashAttnError::Msg(e.to_string()))? as *const _,
-            usize_to_i32("online acc rows", rows)?,
-            usize_to_i32("online acc head_dim", d)?,
+            acc_ptr as *mut _,
+            block_out_ptr as *const _,
+            alpha_ptr as *const _,
+            beta_ptr as *const _,
+            rows,
+            d,
             stream,
         )
     };
+    settle_rocm_ffi_submission(
+        stream_submission,
+        status,
+        "rocm-sdpa online accumulator update",
+    )?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "online_update_acc_f32: FFI returned status {status}"
@@ -5424,23 +5529,32 @@ fn online_finalize_f32(
     let row_l = rocm_contig(row_l)?;
     let lse = rocm_contig(lse)?;
     let device = acc2.device();
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&acc2, "acc")
+    let acc_ptr = kiln_kt_bridge::rocm_input_device_ptr(&acc2, KtDType::F32, "acc")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let row_m_ptr = kiln_kt_bridge::rocm_input_device_ptr(&row_m, KtDType::F32, "row_m")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let row_l_ptr = kiln_kt_bridge::rocm_input_device_ptr(&row_l, KtDType::F32, "row_l")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(&out2);
+    let lse_ptr = kiln_kt_bridge::rocm_output_device_ptr(&lse);
+    let rows = usize_to_i32("online finalize rows", rows)?;
+    let d = usize_to_i32("online finalize head_dim", d)?;
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&acc2, "acc")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_online_finalize_f32(
-            kiln_kt_bridge::rocm_input_device_ptr(&acc2, KtDType::F32, "acc")
-                .map_err(|e| FlashAttnError::Msg(e.to_string()))? as *const _,
-            kiln_kt_bridge::rocm_input_device_ptr(&row_m, KtDType::F32, "row_m")
-                .map_err(|e| FlashAttnError::Msg(e.to_string()))? as *const _,
-            kiln_kt_bridge::rocm_input_device_ptr(&row_l, KtDType::F32, "row_l")
-                .map_err(|e| FlashAttnError::Msg(e.to_string()))? as *const _,
-            kiln_kt_bridge::rocm_output_device_ptr(&out2) as *mut _,
-            kiln_kt_bridge::rocm_output_device_ptr(&lse) as *mut _,
-            usize_to_i32("online finalize rows", rows)?,
-            usize_to_i32("online finalize head_dim", d)?,
+            acc_ptr as *const _,
+            row_m_ptr as *const _,
+            row_l_ptr as *const _,
+            out_ptr as *mut _,
+            lse_ptr as *mut _,
+            rows,
+            d,
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa online finalize")?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "online_finalize_f32: FFI returned status {status}"
@@ -5492,8 +5606,9 @@ fn row_broadcast_sub_last_axis_f32(
     let rowsum_ptr = kiln_kt_bridge::rocm_input_device_ptr(&rowsum_c, KtDType::F32, "rowsum")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(&out);
-    let stream = kiln_kt_bridge::rocm_stream_raw_of(&a_c, "a")
+    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&a_c, "a")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let stream = stream_submission.raw_stream();
     let status = unsafe {
         crate::kiln_rocm_flash_rowsum_sub_last_axis_f32(
             a_ptr as *const _,
@@ -5505,6 +5620,7 @@ fn row_broadcast_sub_last_axis_f32(
             stream,
         )
     };
+    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa row broadcast")?;
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "row_broadcast_sub_last_axis_f32: FFI returned status {status}"

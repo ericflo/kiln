@@ -377,14 +377,14 @@ training request
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
           runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
-          to produce <code>kiln.accelerator-runtime-policy.v1</code>. The same resolved object is installed in
+          to produce <code>kiln.accelerator-runtime-policy.v2</code>. The same resolved object is installed in
           the tensor context, projected into the model graph runner, stored in server state, and returned by
           product diagnostics. Tensor, model, and kernel code do not re-read the public graph or
           synchronization environment names during inference.
         </p>
         <pre class="mt-5"><code>typed [server] + [accelerator] configuration
   -> strict parse, source attribution, and serving-profile gate
-  -> immutable accelerator runtime policy v1
+  -> immutable accelerator runtime policy v2
   -> primary ROCm context synchronization discipline
   -> ModelRunner graph lifecycle and bounded graph cache
   -> /v1/config + /health + trusted debug + dashboard + Prometheus</code></pre>
@@ -412,7 +412,7 @@ training request
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>profile</code></td><td class="p-2">Stable and maintenance resolve to <code>disabled</code>; experimental resolves to <code>lazy_capture_replay</code>.</td><td class="p-2">Recommended default; the serving profile remains authoritative.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>disabled</code></td><td class="p-2">Bypasses graph-shaped warmup, native capture, and replay.</td><td class="p-2">Every profile.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>warmup_then_eager</code></td><td class="p-2">Runs one graph-shaped eager warmup, never captures, then remains eager.</td><td class="p-2">Experimental only.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lazy_capture_replay</code></td><td class="p-2">Warms eagerly, then lazily captures and replays eligible decode shapes.</td><td class="p-2">Experimental only; retained entries bounded by <code>rocm_graph_cache_entries</code> in 1&ndash;64.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lazy_capture_replay</code></td><td class="p-2">Warms eagerly, then lazily captures and replays eligible decode shapes.</td><td class="p-2">Experimental only; independently bounded by <code>rocm_graph_cache_entries</code> (1&ndash;64) and <code>rocm_graph_cache_max_bytes</code> (64 MiB&ndash;16 GiB, default 1 GiB).</td></tr>
             </tbody>
           </table>
         </div>
@@ -420,9 +420,10 @@ training request
           Capture and replay use a dedicated stream without weakening external visibility. A replay records
           completion on its capture stream, the primary stream waits on that event, and external yield then
           waits on the primary stream before a token becomes visible. Stable paged metadata is a correctness
-          invariant, not a user switch. Capture or replay failures use synchronized recovery, increment
-          closed-reason fallback counters, and trip the graph runner circuit breaker instead of continuing
-          with uncertain state.
+          invariant, not a user switch. A native capture failure may trip only the graph-runner circuit breaker
+          and continue eagerly when recoverable <code>capture_rollback</code> settlement and logical state restore
+          both succeed. A replay failure, failed capture settlement/rollback, or unclassified capture exit uses
+          fail-closed containment instead of continuing with uncertain state.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           hipBLASLt workspace ownership follows the same lifecycle. Every fresh capture stream receives a
@@ -434,9 +435,116 @@ training request
           ordinals.
         </p>
 
+        <h3 class="font-semibold mt-6 mb-3">Graph admission has independent entry and byte hard limits</h3>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm" style="color: var(--fg-dim);">
+            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Accounted category</th><th class="text-left p-2">What it includes</th><th class="text-left p-2">Live field</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Stable I/O</td><td class="p-2">Token, position, paged-KV metadata, rotary, output-hidden, paged-decode, and GDN graph-stable tensors.</td><td class="p-2"><code>retained_stable_io_bytes</code></td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Capture arena</td><td class="p-2">Freeze-pointer Q/K/V and intermediate activation allocations retained for replay.</td><td class="p-2"><code>retained_capture_arena_bytes</code></td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">hipBLASLt workspace</td><td class="p-2">Actual requested bytes held by each retained private capture stream&rsquo;s workspace lease.</td><td class="p-2"><code>retained_blaslt_workspace_bytes</code></td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Owner slot state</td><td class="p-2">Every runner-owned recurrent/conv slot, including active continuity state whose native graphs were evicted.</td><td class="p-2"><code>retained_slot_state_bytes</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Accounting uses the allocation&rsquo;s device ordinal and allocation identity, not tensor shape or Rust
+          owner count. One physical allocation is counted once across aliases, categories, and graph entries;
+          recurrent/conv slot state shared by several graphs for one owner is likewise deduplicated. Active
+          graphless slot state remains in both <code>retained_slot_state_bytes</code> and the total because graph
+          eviction cannot discard a live decode owner&rsquo;s continuity. The four categories sum to
+          <code>retained_bytes</code>, and <code>peak_retained_bytes</code> records the highest total after slot
+          creation or cache admission and is never below the current total. An unmappable retained tensor makes
+          <code>retained_bytes_accounting_complete=false</code> and fails byte-budget admission closed.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          The cap is exact for requested physical allocation bytes, but it is not a claim about total driver
+          residency. HIP does not expose allocation sizes for the graph, executable, private stream, or two
+          ordering events retained by each entry. Kiln reports those five objects per graph through
+          <code>opaque_native_object_count</code>; their driver overhead and allocator-pool slack remain outside
+          <code>retained_bytes</code> and are covered by the separate live memory-pressure policy.
+        </p>
+
+        <h3 class="font-semibold mt-6 mb-3">Admission, LRU eviction, and pressure are owner-aware</h3>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          Entry saturation and known byte saturation first reclaim deterministic least-recently-used idle owners,
+          oldest access tick then slot ID, before allocating a new candidate. After one settled warm Record pass
+          makes every candidate allocation measurable, pre-native admission performs exact deduplicated
+          accounting, matching-device pressure reconciliation, an atomic process-wide governor reservation, and
+          any remaining safe idle-owner eviction. Native capture does not begin unless that plan fits both hard
+          limits. Each eviction removes an idle owner as one unit: all of its graphs plus reclaimable slot state.
+          The active candidate owner and every other owner assigned to a live decode row are protected; ordinary
+          budget pressure never evicts active work merely to admit a new shape.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Capture and cache admission are deliberately separate outcomes. <code>capture_successes</code> means
+          the native graph instantiated and its first launch succeeded. A defensive exact recheck can still
+          reject and safely destroy that candidate if concurrent state changed before publication.
+          <code>cache_admission_successes</code> is the retained, replayable subset; entry, byte, and accounting
+          post-capture rejection counters explain the difference. Pre-capture entry/byte/accounting/global-governor
+          skips are separate outcomes and do not explain that delta. Candidate-alone byte-budget,
+          incomplete-accounting, and global-reservation denials are memoized by geometry and runner generation.
+          Matching steps use the typed fallback without repeating candidate allocation and a full warm pass until
+          observed headroom actually improves.
+          Required active graphless slot state stays counted and may consume the whole byte allowance; the runner
+          blocks new capture rather than dropping live continuity state merely to satisfy graph admission.
+        </p>
+        <div class="overflow-x-auto mt-3">
+          <table class="w-full text-sm" style="color: var(--fg-dim);">
+            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Governor result</th><th class="text-left p-2">Graph policy</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Comfortable</td><td class="p-2">Normal cache hit, capture, bounded admission, and idle-owner LRU behavior.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Moderate</td><td class="p-2">Permit an already-retained replay, but block cache growth and use typed eager fallback on a miss.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Tight</td><td class="p-2">Evict every eligible idle owner. Permit only an already-retained replay for the active owner; a cache miss uses eager execution and no new capture.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Critical or unavailable</td><td class="p-2">Treat unknown pressure as critical, settle and remove every graph, preserve active slot state, and use eager execution only after cleanup proves safe.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Eviction and rejected-candidate cleanup are three-stage fail-closed transactions: settle the device
+          before ownership removal, drop graph resources and eligible slot state, then settle async frees and
+          check cleanup quarantine again. A cached-eviction pre-drop failure leaves the cache map intact. A
+          rejected candidate whose pre-drop settlement fails enters cleanup quarantine, so its low-level owners
+          retain possibly in-flight handles until process exit rather than destroying them unsafely. A destructor
+          or post-drop settlement failure records <code>quarantined_retained_bytes</code>, trips the same
+          process-lifetime quarantine, reports no successful reclaimed-byte event, and forbids an eager retry.
+          The runtime never equates &ldquo;removed from a Rust map&rdquo; with &ldquo;safe to reuse VRAM.&rdquo;
+        </p>
+
+        <h3 class="font-semibold mt-6 mb-3">Capture pauses have fixed, live phase attribution</h3>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          Exact candidate size is unknowable until the warm Record pass has allocated its stable I/O, capture
+          arena, and private-stream workspace. That is the remaining transient exposure: the hard retained-byte
+          limit governs publication, while the global governor gates native capture after exact measurement.
+          <code>last_transient_candidate_bytes</code> and <code>peak_transient_candidate_bytes</code> report those
+          deduplicated queryable candidate bytes and exclude already-owned recurrent slot state.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          A cloneable telemetry handle is retained outside both the model-runner and graph-runner mutexes. It publishes
+          <code>current_phase</code> and <code>current_phase_elapsed_micros</code> while work is still in progress,
+          plus completed <code>calls</code>, <code>slow</code>, <code>total_duration_micros</code>, and
+          <code>max_duration_micros</code> for exactly five non-overlapping phases:
+          <code>pre_candidate_headroom</code>, <code>candidate_warm</code>,
+          <code>pre_native_reservation</code>, <code>native_capture</code>, and
+          <code>rejected_candidate_cleanup</code>. The first includes matching-device pressure checks and settled
+          pre-allocation eviction. <code>native_capture</code> remains active through native capture, the settled
+          first launch, defensive cache admission/publication, and the blocking committed governor debit. The last
+          begins only when an unretained candidate enters automatic destruction and settlement. A runner lock held
+          by a long phase therefore does not erase the phase that operators need to diagnose.
+          A successful full <code>rocm_graphs</code> snapshot also carries point-in-time copies of the five
+          completed summaries and transient-byte gauges; the separate handle is the authoritative active-phase
+          source and continues advancing when that full snapshot is unavailable.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Governor admission validates that its probe selector matches this runner&rsquo;s ROCm ordinal before reading
+          pressure or reserving bytes. A mismatch fails closed with distinct skip/fallback telemetry. Warm-pass
+          host-copy detection is scoped to the calling thread and device, so an unrelated concurrent copy cannot
+          permanently classify the geometry as capture-unsafe.
+        </p>
+
         <h3 class="font-semibold mt-6 mb-3">Synchronization reasons are fixed telemetry dimensions</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Every host-visible wait is attributed to one of 22 stable lower-snake-case reasons. The snapshot
+          Every host-visible wait is attributed to one of 23 stable lower-snake-case reasons. The snapshot
           stores device wait count, stream wait count, accumulated host wait nanoseconds, and stream-ordered
           skip count for each reason. Reading it loads atomics only; it never inserts a barrier or calls the
           driver. The complete reason set is:
@@ -451,9 +559,23 @@ training request
           <ul class="list-disc pl-5 check-list">
             <li><code>in_place_mutation</code>, <code>memory_reclaim</code>, <code>graph_boundary</code></li>
             <li><code>full_attention_handoff</code>, <code>model_handoff</code>, <code>host_readback</code></li>
-            <li><code>allocation_lifetime</code>, <code>error_recovery</code>, <code>global_state_mutation</code></li>
+            <li><code>allocation_lifetime</code>, <code>error_recovery</code>, <code>global_state_mutation</code>, <code>capture_rollback</code></li>
           </ul>
         </div>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          <code>error_recovery</code> is reserved for a device whose process-lifetime execution quarantine
+          was already published; it waits for pre-quarantine host submissions to settle before the diagnostic
+          drain. <code>capture_rollback</code> is the distinct recoverable path: it drains a failed capture before
+          a proven logical rollback while leaving execution admission open. Calling the fatal recovery path on
+          an open gate is rejected rather than silently changing either contract.
+        </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Successful physical settlement plus successful recurrent-state restoration disarms the capture guard;
+          the runner may disable further graph work, record <code>capture_failure</code>, and take the eager path.
+          Failed settlement, failed logical restoration, or an armed/unclassified guard leaving scope publishes
+          sticky STOP before the post-STOP diagnostic drain attributed to <code>error_recovery</code>. That drain is diagnostic only: even
+          if it succeeds, execution stays cleanup-quarantined and the process must restart.
+        </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Wait duration belongs to the boundary where the host discovered outstanding work. It is not a
           per-kernel profiler and does not prove which earlier operation consumed the time. For example, a
@@ -467,14 +589,23 @@ training request
           <table class="w-full text-sm" style="color: var(--fg-dim);">
             <thead style="color: var(--fg);"><tr><th class="text-left p-2">Surface</th><th class="text-left p-2">Contract</th></tr></thead>
             <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /v1/config</code></td><td class="p-2"><code>accelerator_runtime</code> exposes schema/version, serving-profile source, and configured/effective/source values for synchronization, graph mode, and graph-cache capacity.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /health</code></td><td class="p-2"><code>decode_runtime.accelerator_runtime</code>, <code>decode_runtime.rocm_synchronization</code>, and <code>decode_runtime.rocm_graphs</code> combine immutable intent with live wait/skip, cleanup-quarantine, and graph state.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Trusted debug</td><td class="p-2"><code>/v1/debug/model-state</code> repeats top-level <code>accelerator_runtime</code> and <code>rocm_synchronization</code>, including cleanup quarantine; it does not reintroduce raw runtime flags.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /metrics</code></td><td class="p-2">Policy/availability/quarantine gauges plus fixed <code>{reason,scope}</code> wait counts, <code>{reason}</code> wait seconds, and <code>{reason}</code> skipped counts.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">CLI and dashboard</td><td class="p-2"><code>kiln config</code> and the runtime configuration panel show the same effective policy and source attribution.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /v1/config</code></td><td class="p-2">Top-level <code>accelerator_runtime</code> schema v2 exposes configured/effective/source values for synchronization, graph mode, entry capacity, and retained-byte budget. Product snapshot fields are <code>rocm_graphs</code> plus <code>rocm_graphs_unavailable_reason</code> for full cache statistics, and <code>rocm_graph_telemetry</code> plus <code>rocm_graph_telemetry_unavailable_reason</code> for the separate phase/transient channel. The full-stat read is nonblocking; the phase read is independent of both runner locks. The complete config handler still reads unrelated training-capability state.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /health</code></td><td class="p-2"><code>decode_runtime.accelerator_runtime</code>, <code>decode_runtime.rocm_synchronization</code>, and <code>decode_runtime.rocm_graphs</code> combine immutable intent with live wait/skip and quarantine state. The graph object flattens full statistics and phase telemetry but preserves separate <code>unavailable_reason</code>, <code>phase_telemetry_available</code>, and <code>phase_telemetry_unavailable_reason</code> authorities; <code>state</code> is busy only for lock contention and unavailable for no-runner or poisoned-lock state.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Trusted debug</td><td class="p-2"><code>/v1/debug/model-state</code> repeats top-level <code>accelerator_runtime</code>, <code>rocm_synchronization</code>, and the same four graph value/reason fields as config; it does not reintroduce raw runtime flags.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /metrics</code></td><td class="p-2">Synchronization policy/availability/quarantine and 23 fixed-reason wait/skip families sit beside two graph availability gauges and two five-reason one-hot missing-data families. Full graph state/capacity/owner/retained/cache/capture/replay/fallback families and phase/current/transient families are independently governed.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">CLI and dashboard</td><td class="p-2"><code>kiln config</code> and the runtime configuration panel show the same effective policy and source attribution. The config snapshot supplies retained/transient bytes, cache actions, and completed phase envelopes. The dashboard&rsquo;s two-second health poll directly refreshes only Graph live and Graph current phase, including typed full-snapshot reason and active elapsed time.</td></tr>
             </tbody>
           </table>
         </div>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Both API reason fields and both Prometheus missing-data families use the same closed set:
+          <code>backend_without_graph_runner</code>, <code>model_runner_busy</code>,
+          <code>model_runner_lock_poisoned</code>, <code>graph_runner_busy</code>, and
+          <code>graph_runner_lock_poisoned</code>. Full statistics can use any reason. The phase handle is stored
+          outside both runner locks, so every real backend keeps it visible through model-runner or graph-runner
+          contention and poison; currently only <code>backend_without_graph_runner</code> makes phase telemetry
+          unavailable. Null never means zero activity.
+        </p>
         <pre class="mt-5"><code>kiln_rocm_synchronization_active
 kiln_rocm_synchronization_telemetry_available
 kiln_rocm_cleanup_quarantined
@@ -482,6 +613,55 @@ kiln_rocm_synchronization_policy_info{mode}
 kiln_rocm_synchronizations_total{reason,scope}
 kiln_rocm_synchronization_wait_seconds_total{reason}
 kiln_rocm_synchronization_skipped_total{reason}</code></pre>
+        <pre class="mt-5"><code>kiln_rocm_graph_telemetry_available
+kiln_rocm_graph_snapshot_unavailable{reason="backend_without_graph_runner|model_runner_busy|model_runner_lock_poisoned|graph_runner_busy|graph_runner_lock_poisoned"}
+kiln_rocm_graph_phase_telemetry_available
+kiln_rocm_graph_phase_telemetry_unavailable{reason="backend_without_graph_runner|model_runner_busy|model_runner_lock_poisoned|graph_runner_busy|graph_runner_lock_poisoned"}
+kiln_rocm_graph_state{kind="requested|capture_requested|enabled|capture_enabled"}
+kiln_rocm_graph_cache_entries
+kiln_rocm_graph_cache_entry_limit
+kiln_rocm_graph_slots{state="total|active|idle"}
+kiln_rocm_graph_tracked_decode_owners
+kiln_rocm_graph_owner_lifecycle_total{event="decode_release|graph_release|slot_create|slot_reuse"}
+kiln_rocm_graph_retained_bytes{kind="stable_io|capture_arena|blaslt_workspace|slot_state|total|peak|quarantined"}
+kiln_rocm_graph_retained_byte_limit
+kiln_rocm_graph_retained_byte_accounting_complete
+kiln_rocm_graph_opaque_native_objects
+kiln_rocm_graph_current_phase{phase="pre_candidate_headroom|candidate_warm|pre_native_reservation|native_capture|rejected_candidate_cleanup"}
+kiln_rocm_graph_current_phase_elapsed_seconds
+kiln_rocm_graph_phase_calls_total{phase}
+kiln_rocm_graph_phase_slow_total{phase}
+kiln_rocm_graph_phase_duration_seconds_total{phase}
+kiln_rocm_graph_phase_duration_seconds_max{phase}
+kiln_rocm_graph_transient_candidate_bytes{kind="last|peak"}
+kiln_rocm_graph_cache_admissions_total
+kiln_rocm_graph_cache_evictions_total
+kiln_rocm_graph_cache_evicted_bytes_total
+kiln_rocm_graph_cache_evictions_by_cause_total{cause="budget|pressure|invalidation|recovery"}
+kiln_rocm_graph_cache_admission_rejections_total{reason="entry_capacity|byte_budget|accounting_incomplete"}
+kiln_rocm_graph_pre_capture_skips_total{reason="entry_capacity|byte_budget|accounting_incomplete|memory_reservation_denied|memory_governor_selector_mismatch"}
+kiln_rocm_graph_capture_attempts_total
+kiln_rocm_graph_capture_outcomes_total{outcome="success|deferred|failure"}
+kiln_rocm_graph_replay_attempts_total
+kiln_rocm_graph_replay_outcomes_total{outcome="success|failure"}
+kiln_rocm_graph_fallbacks_total{reason}
+kiln_rocm_graph_fallback_slow_total
+kiln_rocm_graph_fallback_duration_seconds_total
+kiln_rocm_graph_fallback_duration_seconds_max</code></pre>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Graph fallback <code>reason</code> is a closed set:
+          <code>cold_cache_host_round_trip</code>, <code>persistent_host_round_trip</code>,
+          <code>shape_dependent_attention</code>,
+          <code>graph_cache_capacity</code>, <code>graph_cache_byte_budget</code>,
+          <code>graph_accounting_incomplete</code>, <code>moderate_memory_pressure</code>,
+          <code>tight_memory_pressure</code>, <code>critical_memory_pressure</code>,
+          <code>memory_reservation_denied</code>, <code>memory_governor_selector_mismatch</code>,
+          <code>capture_failure</code>, and <code>replay_failure</code>. Both availability gauges and both one-hot
+          unavailable-reason families are always emitted. When full-snapshot availability is zero, only the full
+          cache/counter families are omitted; phase/current/transient families remain authoritative when their own
+          availability is one. When phase availability is zero, only those live families are omitted. Absence must
+          not be interpreted as zero activity, zero retained bytes, or an idle phase.
+        </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           A fatal execution or synchronization failure marks the device cleanup-quarantined for the rest of
           the process lifetime. The flag is shared across every context for that device ordinal; a later

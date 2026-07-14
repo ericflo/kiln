@@ -18,7 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use kiln_hip::{
-    RocmContext, RocmExecutionPolicy, RocmSlice, RocmSyncReason, RocmSyncTelemetrySnapshot,
+    RocmContext, RocmExecutionPolicy, RocmSlice, RocmStreamId, RocmStreamSubmission,
+    RocmSyncReason, RocmSyncTelemetrySnapshot,
 };
 
 /// Diagnostic: counts host<->device round-trips (each one synchronizes its
@@ -28,10 +29,65 @@ use kiln_hip::{
 pub static ROCM_DTOH_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static ROCM_HTOD_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Current host→device copy count. The HIP-graph capture path snapshots this
-/// across the warm forward to detect a host round-trip (`host_to_rocm_copy`),
-/// which is illegal inside `hipStreamBeginCapture` — so any forward that does
-/// one is not capture-safe and the capture is skipped for that geometry.
+#[derive(Clone, Copy)]
+struct RocmHtodObserverState {
+    device_index: usize,
+    count: u64,
+}
+
+thread_local! {
+    static ROCM_HTOD_OBSERVERS: std::cell::RefCell<Vec<RocmHtodObserverState>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct RocmHtodObserverGuard {
+    depth: usize,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for RocmHtodObserverGuard {
+    fn drop(&mut self) {
+        ROCM_HTOD_OBSERVERS.with(|observers| observers.borrow_mut().truncate(self.depth));
+    }
+}
+
+/// Run `operation` while counting successful host-to-ROCm copies issued on this
+/// thread for exactly `device_index`. Unrelated threads and devices cannot
+/// create false graph-capture safety failures.
+pub fn with_rocm_htod_observer<R>(device_index: usize, operation: impl FnOnce() -> R) -> (R, u64) {
+    let depth = ROCM_HTOD_OBSERVERS.with(|observers| {
+        let mut observers = observers.borrow_mut();
+        let depth = observers.len();
+        observers.push(RocmHtodObserverState {
+            device_index,
+            count: 0,
+        });
+        depth
+    });
+    let guard = RocmHtodObserverGuard {
+        depth,
+        _not_send: std::marker::PhantomData,
+    };
+    let output = operation();
+    let count = ROCM_HTOD_OBSERVERS.with(|observers| observers.borrow()[depth].count);
+    drop(guard);
+    (output, count)
+}
+
+fn record_rocm_htod(device_index: usize) {
+    ROCM_HTOD_OBSERVERS.with(|observers| {
+        for observer in observers.borrow_mut().iter_mut() {
+            if observer.device_index == device_index {
+                observer.count = observer.count.saturating_add(1);
+            }
+        }
+    });
+}
+
+/// Process-wide diagnostic count of successful host-to-device copies.
+///
+/// Capture-safety decisions use [`with_rocm_htod_observer`] instead: this
+/// aggregate can change because another thread or ROCm device made progress.
 pub fn rocm_htod_count() -> u64 {
     ROCM_HTOD_COUNT.load(Ordering::Relaxed)
 }
@@ -409,27 +465,33 @@ impl RocmStorage {
         self.ctx.clone()
     }
 
-    /// Fallibly acquire the raw HIP stream pointer for FFI dispatch.
+    /// Opaque identity of the stream that would receive this storage's next
+    /// operation. This is safe for equality checks only and grants no execution
+    /// admission.
+    pub fn rocm_stream_id(&self) -> RocmStreamId {
+        crate::active_rocm_stream(&self.ctx).id()
+    }
+
+    /// Opaque identity of this storage context's owning default stream.
+    pub fn rocm_owner_stream_id(&self) -> RocmStreamId {
+        self.ctx.default_stream().id()
+    }
+
+    /// Acquire a typed HIP stream submission for one external FFI dispatch.
     ///
     /// Resolves through the thread-local active stream (capture stream during
     /// HIP-graph capture; `ctx.default_stream()` otherwise), but refuses to
-    /// expose a launch handle after cleanup has been quarantined. The checked
-    /// stream accessor also rebinds its device on this thread immediately
-    /// before the caller crosses FFI.
-    pub fn rocm_stream_raw(&self) -> Result<*mut core::ffi::c_void> {
-        self.ctx
-            .ensure_execution_available("RocmStorage::rocm_stream_raw")
-            .map_err(|error| {
-                Error::Msg(format!(
-                    "RocmStorage::rocm_stream_raw: execution unavailable: {error}"
-                ))
-            })?;
+    /// expose a launch handle after cleanup has been quarantined. The returned
+    /// token must remain alive until the external C call returns, which makes
+    /// admission linearizable with a concurrent quarantine transition. Callers
+    /// must then consume it with `complete` or `quarantine`; an unclassified
+    /// drop fails closed and permanently quarantines the device.
+    pub fn rocm_stream_submission(&self) -> Result<RocmStreamSubmission> {
         crate::active_rocm_stream(&self.ctx)
-            .hip_stream_for_execution()
-            .map(|stream| stream as *mut core::ffi::c_void)
+            .execution_submission("RocmStorage::rocm_stream_submission")
             .map_err(|error| {
                 Error::Msg(format!(
-                    "RocmStorage::rocm_stream_raw: stream unavailable: {error}"
+                    "RocmStorage::rocm_stream_submission: stream unavailable: {error}"
                 ))
             })
     }
@@ -897,15 +959,15 @@ pub fn rocm_synchronize_tensor_same_stream_dependency(
 /// width. The copy runs on the kt active stream (the default stream on the
 /// replay path) and is issued WITHOUT a trailing synchronize — the per-token
 /// replay refreshes ~7 of these buffers, and a sync after each one dominated the
-/// replay cost (decode dropped to ~5 tok/s). Ordering is instead provided by the
-/// single `rocm_synchronize_default_stream` the replay path issues before the
-/// graph launch, which is the actual cross-stream guarantee.
+/// replay cost (decode dropped to ~5 tok/s). Ordering is instead provided by an
+/// input-ready event recorded on the default stream and awaited by the capture
+/// stream before graph launch.
 ///
-/// Host-buffer safety: the staged `Vec<u8>` is pageable, and
-/// `hipMemcpyHtoDAsync` copies pageable host memory into a pinned staging buffer
-/// SYNCHRONOUSLY before returning (it cannot DMA pageable memory directly), so
-/// the local buffer is fully consumed by the time this function returns — only
-/// the device-side write remains queued. No dangling host read.
+/// Host-buffer safety: `E::to_bytes` creates an ordinary, unregistered
+/// `Vec<u8>`. The generic ROCm `hipMemcpyAsync` contract states that an
+/// unpinned host source is consumed synchronously before the call returns, so
+/// the local staging buffer cannot become a dangling runtime read. Stream
+/// ordering is still preserved without adding a trailing wait here.
 #[cfg(feature = "rocm")]
 pub fn rocm_write_host_in_place<E: crate::Element>(dst: &crate::Tensor, host: &[E]) -> Result<()> {
     if dst.dtype().is_packed() {
@@ -951,8 +1013,8 @@ pub fn rocm_write_host_in_place<E: crate::Element>(dst: &crate::Tensor, host: &[
     // (validated start_offset == 0); `bytes` is exactly `n * size_in_bytes`
     // bytes, matching the destination region, so the copy stays inside the
     // allocation. The copy is issued on the kt active stream — the same stream
-    // the captured graph runs on during replay — and is not synchronized here
-    // beyond the explicit stream sync below.
+    // the captured graph runs on during replay. The fresh `Vec` is pageable,
+    // satisfying `memcpy_htod_raw_async`'s synchronous-source contract.
     unsafe {
         stream
             .memcpy_htod_raw_async(dst_base as *mut core::ffi::c_void, &bytes)
@@ -962,8 +1024,8 @@ pub fn rocm_write_host_in_place<E: crate::Element>(dst: &crate::Tensor, host: &[
                 ))
             })?;
     }
-    // No trailing synchronize — see the doc comment. The replay path syncs the
-    // default stream once before the graph launch.
+    // No trailing synchronize — see the doc comment. Replay hands this write to
+    // the capture stream through an explicit input-ready event.
     Ok(())
 }
 
@@ -1049,7 +1111,8 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
     if let Some((bsz, heads, seq, dim, stride_b, stride_h, stride_t)) =
         rocm_view_is_4d_axis12_transpose(shape, strides_elems)
     {
-        let raw_stream = src_storage.rocm_stream_raw()?;
+        let stream_submission = src_storage.rocm_stream_submission()?;
+        let raw_stream = stream_submission.raw_stream();
         let status = unsafe {
             kiln_transpose_4d_12_copy_async(
                 src_ptr,
@@ -1066,10 +1129,12 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
             )
         };
         if status != 0 {
+            stream_submission.quarantine();
             return Err(Error::Msg(format!(
                 "rocm_contiguous: kiln_transpose_4d_12_copy_async returned status {status}"
             )));
         }
+        stream_submission.complete();
         rocm_synchronize_context_same_stream_dependency_with_inputs(
             &ctx,
             &[src_storage],
@@ -1091,7 +1156,8 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
 
     let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
     let strides_i64: Vec<i64> = strides_elems.iter().map(|&s| s as i64).collect();
-    let raw_stream = src_storage.rocm_stream_raw()?;
+    let stream_submission = src_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_contiguous_copy_async(
@@ -1106,10 +1172,12 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_contiguous: kiln_contiguous_copy_async returned status {status}"
         )));
     }
+    stream_submission.complete();
     rocm_synchronize_context_same_stream_dependency_with_inputs(
         &ctx,
         &[src_storage],
@@ -1242,7 +1310,8 @@ pub fn rocm_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
 
     let ctx = dst_storage.context();
     let stream = crate::active_rocm_stream(&ctx);
-    let raw_stream = dst_storage.rocm_stream_raw()?;
+    let stream_submission = dst_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (src_base, _) = src_storage.device_ptr_raw();
     let (dst_base, _) = dst_storage.device_ptr_raw();
     let src_byte_off = (src.layout().start_offset() * bpe) as u64;
@@ -1268,10 +1337,12 @@ pub fn rocm_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_slice_set: kiln_contiguous_copy_async returned status {status}"
         )));
     }
+    stream_submission.complete();
     // `slice_set` is an in-place API whose source tensor may be dropped as soon
     // as this function returns. The ROCm copy is async and RocmSlice frees are
     // stream-ordered, so drain the copy outside graph capture before releasing
@@ -1439,9 +1510,9 @@ pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
         .clone_htod(bytes)
         .map_err(|e| Error::Msg(format!("host_to_rocm_copy: clone_htod failed: {e:?}")))?;
 
-    // Always count (cheap atomic) — the HIP-graph capture-safety check reads this
-    // via `rocm_htod_count()` to detect a host round-trip during the warm pass.
-    // The profiling OUTPUT below stays gated behind KILN_ROCM_PROFILE.
+    // Notify capture-safety observers scoped to this thread and device. Keep the
+    // process-wide atomic as diagnostic profiling data only.
+    record_rocm_htod(device_index);
     let n = ROCM_HTOD_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     if rocm_profile_on() {
         rocm_bt_once("htod", src.shape(), n);
@@ -1537,7 +1608,8 @@ fn rocm_last_axis_normalization(
     let out_storage =
         RocmStorage::alloc_uninit_ctx(&ctx, device_index, output_dtype, x.element_count())?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (x_base, _) = x_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -1546,8 +1618,10 @@ fn rocm_last_axis_normalization(
 
     let status = unsafe { kernel(x_ptr, out_ptr, n_rows, n_cols, dtype_tag, raw_stream) };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!("{label}: FFI returned status {status}")));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     crate::Tensor::from_parts(
@@ -1616,5 +1690,50 @@ mod execution_policy_tests {
                 .to_string()
                 .contains("before model or tensor initialization")
         );
+    }
+
+    #[test]
+    fn htod_observer_is_scoped_to_thread_and_device() {
+        let ((), count) = with_rocm_htod_observer(3, || {
+            record_rocm_htod(4);
+            std::thread::spawn(|| record_rocm_htod(3))
+                .join()
+                .expect("unrelated observer thread");
+            record_rocm_htod(3);
+        });
+
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn nested_htod_observers_count_matching_dynamic_scopes() {
+        let ((inner_same, inner_other), outer) = with_rocm_htod_observer(0, || {
+            record_rocm_htod(0);
+            let ((), inner_same) = with_rocm_htod_observer(0, || record_rocm_htod(0));
+            let ((), inner_other) = with_rocm_htod_observer(1, || {
+                record_rocm_htod(0);
+                record_rocm_htod(1);
+            });
+            (inner_same, inner_other)
+        });
+
+        assert_eq!(outer, 3);
+        assert_eq!(inner_same, 1);
+        assert_eq!(inner_other, 1);
+    }
+
+    #[test]
+    fn htod_observer_guard_cleans_up_after_panic() {
+        let panic = std::panic::catch_unwind(|| {
+            let _ = with_rocm_htod_observer(7, || {
+                record_rocm_htod(7);
+                panic!("observer cleanup probe");
+            });
+        });
+        assert!(panic.is_err());
+
+        record_rocm_htod(7);
+        let ((), count) = with_rocm_htod_observer(7, || record_rocm_htod(7));
+        assert_eq!(count, 1);
     }
 }

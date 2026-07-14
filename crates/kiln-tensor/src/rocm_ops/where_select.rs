@@ -90,7 +90,8 @@ pub fn rocm_where_select(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<Tensor
     };
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
-    let raw_stream = t_storage.rocm_stream_raw()?;
+    let stream_submission = t_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (mask_base, _) = mask_storage.device_ptr_raw();
     let (t_base, _) = t_storage.device_ptr_raw();
     let (f_base, _) = f_storage.device_ptr_raw();
@@ -112,10 +113,12 @@ pub fn rocm_where_select(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<Tensor
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_where_select: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(

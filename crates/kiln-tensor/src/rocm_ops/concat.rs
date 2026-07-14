@@ -141,8 +141,6 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         TensorId::next(),
     )?;
 
-    let raw_stream = first_storage.rocm_stream_raw()?;
-
     // Collect per-input source pointers (base + start_offset bytes) and
     // per-input axis lengths.
     let mut src_ptrs: Vec<*const core::ffi::c_void> = Vec::with_capacity(inputs.len());
@@ -237,6 +235,8 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         })
         .unwrap_or(false);
     if axis0_row_copy_enabled && outer == 1 && n_out_elements >= 1_000_000 {
+        let stream_submission = first_storage.rocm_stream_submission()?;
+        let raw_stream = stream_submission.raw_stream();
         let status = unsafe {
             kiln_concat_axis0_contiguous_async(
                 dst_ptr,
@@ -248,10 +248,12 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
             )
         };
         if status != 0 {
+            stream_submission.quarantine();
             return Err(Error::Msg(format!(
                 "rocm_concat: axis0 contiguous FFI returned status {status}"
             )));
         }
+        stream_submission.complete();
         crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
             &ctx,
             &input_storages,
@@ -265,6 +267,8 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         return Ok(out);
     }
 
+    let stream_submission = first_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_concat_async(
             dst_ptr,
@@ -277,10 +281,12 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_concat: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
     crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
         &ctx,
         &input_storages,

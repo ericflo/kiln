@@ -159,8 +159,8 @@ pub use fp8::{
 };
 #[cfg(feature = "rocm")]
 pub use kiln_hip::{
-    ROCM_SYNC_REASON_COUNT, RocmExecutionPolicy, RocmSyncReason, RocmSyncReasonStats,
-    RocmSyncTelemetrySnapshot, RocmSynchronizationMode,
+    ROCM_SYNC_REASON_COUNT, RocmExecutionPolicy, RocmStreamId, RocmStreamSubmission,
+    RocmSyncReason, RocmSyncReasonStats, RocmSyncTelemetrySnapshot, RocmSynchronizationMode,
 };
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;
@@ -208,7 +208,7 @@ pub use rocm_storage::{
     rocm_synchronize_legacy_device_same_stream_dependency, rocm_synchronize_same_stream_dependency,
     rocm_synchronize_tensor_same_stream_dependency, rocm_synchronize_tensor_stream,
     rocm_synchronize_tensor_stream_for, rocm_to_host_copy, rocm_trim_pool,
-    rocm_write_host_in_place, rocm_zeros_ctx,
+    rocm_write_host_in_place, rocm_zeros_ctx, with_rocm_htod_observer,
 };
 #[cfg(feature = "vulkan")]
 pub use vulkan_allocator::VulkanAllocator;

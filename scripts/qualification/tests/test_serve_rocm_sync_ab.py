@@ -115,7 +115,7 @@ class ServeRocmSynchronizationAbTests(unittest.TestCase):
         end = source.index("const fn index(self)", start)
         labels = tuple(re.findall(r'=> "([a-z_]+)"', source[start:end]))
         self.assertEqual(labels, sync_ab.ROCM_SYNC_REASONS)
-        self.assertEqual(len(labels), 22)
+        self.assertEqual(len(labels), 23)
 
     def test_checked_in_workload_exactly_matches_driver_contract(self) -> None:
         workload = json.loads(

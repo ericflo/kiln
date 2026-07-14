@@ -61,6 +61,7 @@ ROCM_SYNC_REASONS = (
     "allocation_lifetime",
     "error_recovery",
     "global_state_mutation",
+    "capture_rollback",
 )
 
 
@@ -245,8 +246,8 @@ def require_nonnegative_int(value: Any, label: str) -> int:
 
 def expected_policy(mode: str) -> dict[str, Any]:
     return {
-        "schema_id": "kiln.accelerator-runtime-policy.v1",
-        "version": 1,
+        "schema_id": "kiln.accelerator-runtime-policy.v2",
+        "version": 2,
         "serving_profile": "experimental",
         "serving_profile_source": "environment",
         "rocm_synchronization_mode": {
@@ -262,6 +263,11 @@ def expected_policy(mode: str) -> dict[str, Any]:
         "rocm_graph_cache_entries": {
             "configured": 8,
             "effective": 8,
+            "source": "default",
+        },
+        "rocm_graph_cache_max_bytes": {
+            "configured": 1 << 30,
+            "effective": 1 << 30,
             "source": "default",
         },
     }

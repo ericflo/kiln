@@ -1687,6 +1687,13 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 accelerator_runtime.rocm_graph_cache_entries.source,
             );
             println!(
+                "  {} {} MiB ({} bytes; source: {})",
+                style("ROCm graph byte budget:").dim(),
+                accelerator_runtime.rocm_graph_cache_max_bytes.effective / (1024 * 1024),
+                accelerator_runtime.rocm_graph_cache_max_bytes.effective,
+                accelerator_runtime.rocm_graph_cache_max_bytes.source,
+            );
+            println!(
                 "  {} {}",
                 style("Prefix cache:").dim(),
                 config.prefix_cache.enabled

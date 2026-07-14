@@ -320,15 +320,15 @@
         <div class="label mb-3">Run and observe</div>
         <h2 id="server-status" class="text-2xl font-semibold mb-4">Server status, metrics, UI, and config</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
-          <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics, including bounded base-weight aggregate and execution-identity summaries, the immutable SFT checkpoint-boundary policy under <code>training.checkpoint_boundary_policy</code>, memory-sampler age/liveness, a separately bounded host-backed tier when present, closed ROCm graph fallback counters under <code>decode_runtime.rocm_graphs.fallbacks</code>, and reasoned ROCm wait/skip plus cleanup-quarantine state under <code>decode_runtime.rocm_synchronization</code>. A real backend without valid execution provenance is not ready.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics, including bounded base-weight aggregate and execution-identity summaries, the immutable SFT checkpoint-boundary policy under <code>training.checkpoint_boundary_policy</code>, memory-sampler age/liveness, a separately bounded host-backed tier when present, ROCm graph full-snapshot availability, entry/byte limits, retained-byte categories, cache actions and closed fallbacks plus independently available live phase/transient telemetry under <code>decode_runtime.rocm_graphs</code>, and reasoned ROCm wait/skip and cleanup-quarantine state under <code>decode_runtime.rocm_synchronization</code>. A real backend without valid execution provenance is not ready.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/health</code> &mdash; /v1 compatibility alias for the same health and diagnostics response.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, sampler freshness/liveness, fixed-reason ROCm synchronization, training progress, and bounded thinking-budget provenance/outcomes.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/ui</code> &mdash; embedded dashboard for status, adapters, training, and chat.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, sampler freshness/liveness, fixed-reason ROCm synchronization, ROCm graph phase/current-pause telemetry independent of the model and graph-runner locks, graph state/capacity/retained and transient bytes/cache actions/capture/replay/closed fallbacks, training progress, and bounded thinking-budget provenance/outcomes.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/ui</code> &mdash; embedded dashboard for status, runtime configuration including live ROCm graph retained/transient memory, cache state, and phase latency, adapters, training, and chat.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history with effective thinking-budget provenance and outcomes for the dashboard's request panel.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, the versioned accelerator execution policy, typed batching and streaming-prefill intent/backend/effective policy, actor activity, direct-rendezvous worker/route status, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective gradient and SFT boundary-checkpoint policy, the resident optimizer implementation/tuple/per-workload admission contract, memory-budget partitions, and generation defaults.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest, execution-provenance record, and immutable checkpoint-boundary policy under <code>training.checkpoint_boundary_policy</code>.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, the versioned accelerator execution policy, independent top-level <code>rocm_graphs</code> full statistics and <code>rocm_graph_telemetry</code> live phase/transient snapshots with a typed unavailable-reason field beside each, typed batching and streaming-prefill intent/backend/effective policy, actor activity, direct-rendezvous worker/route status, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective gradient and SFT boundary-checkpoint policy, the resident optimizer implementation/tuple/per-workload admission contract, memory-budget partitions, and generation defaults. A null live value never means its counters were zero.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest, execution-provenance record, immutable checkpoint-boundary policy under <code>training.checkpoint_boundary_policy</code>, and the resolved ROCm policy plus the same four graph value/reason fields as config. Do not enable this endpoint merely to collect routine graph telemetry; health carries the operational snapshot.</div>
         </div>
         <div class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Check runtime configuration</h3>
@@ -338,7 +338,10 @@
             capacity resolution, the current safe memory sample, and the budget derived from effective
             capacity separate. Every <code>*_gib</code> value uses
             1 GiB = 1,073,741,824 bytes and is paired with an exact <code>*_bytes</code> value where the
-            response exposes both units. The Playground uses the same response to preview the resolved
+            response exposes both units. Its top-level <code>accelerator_runtime</code> object is immutable
+            startup policy. Top-level <code>rocm_graphs</code> is a nonblocking full cache/counter snapshot, while
+            <code>rocm_graph_telemetry</code> is the separate current/completed phase and transient-candidate
+            snapshot; each has its own typed unavailable-reason sibling. The Playground uses the same response to preview the resolved
             thinking token/time pair before send, marking each dimension as server- or request-owned.
           </p>
           <div class="grid gap-4 mt-4">
@@ -346,8 +349,8 @@
               <h4 class="font-semibold mb-2"><code>accelerator_runtime</code>: immutable ROCm execution policy</h4>
               <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
   "accelerator_runtime": {
-    "schema_id": "kiln.accelerator-runtime-policy.v1",
-    "version": 1,
+    "schema_id": "kiln.accelerator-runtime-policy.v2",
+    "version": 2,
     "serving_profile": "stable",
     "serving_profile_source": "default",
     "rocm_synchronization_mode": {
@@ -364,6 +367,11 @@
       "configured": 8,
       "effective": 8,
       "source": "default"
+    },
+    "rocm_graph_cache_max_bytes": {
+      "configured": 1073741824,
+      "effective": 1073741824,
+      "source": "default"
     }
   }
 }</code></pre>
@@ -372,8 +380,40 @@
                 <code>profile</code> graph mode becomes <code>disabled</code> under stable and maintenance,
                 and <code>lazy_capture_replay</code> under experimental. Explicit
                 <code>warmup_then_eager</code> and <code>lazy_capture_replay</code> modes require the
-                experimental profile. Graph-cache capacity is bounded to 1&ndash;64 entries. Stable paged
-                metadata is a correctness invariant rather than a switch.
+                experimental profile. Graph-cache entries and retained requested physical bytes are independent
+                hard admission limits: 1&ndash;64 entries and 64 MiB&ndash;16 GiB respectively. Stable paged metadata is a
+                correctness invariant rather than a switch.
+              </p>
+              <h5 class="font-semibold mt-4 mb-2">All four typed <code>[accelerator]</code> fields</h5>
+              <div class="overflow-x-auto">
+                <table class="w-full text-xs" style="color: var(--fg-dim);">
+                  <thead style="color: var(--fg);"><tr><th class="text-left p-2">TOML field</th><th class="text-left p-2">Default and validation</th><th class="text-left p-2">Canonical environment name</th></tr></thead>
+                  <tbody>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_synchronization_mode</code></td><td class="p-2"><code>legacy_host_barriers</code>; also accepts experimental-only <code>stream_ordered</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE</code></td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_mode</code></td><td class="p-2"><code>profile</code>; accepts <code>disabled</code>, <code>warmup_then_eager</code>, or <code>lazy_capture_replay</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_MODE</code></td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_cache_entries</code></td><td class="p-2"><code>8</code>; unsigned integer in <code>1..=64</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES</code></td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_cache_max_bytes</code></td><td class="p-2"><code>1073741824</code> (1 GiB); unsigned integer bytes in <code>67108864..=17179869184</code> (64 MiB&ndash;16 GiB).</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES</code></td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                The byte limit counts requested physical bytes held by graph-stable direct I/O tensors,
+                freeze-pointer capture arenas, each retained private-stream hipBLASLt workspace, and recurrent/conv
+                state in every runner-owned owner slot, including active slot state that outlives graph eviction.
+                Accounting deduplicates one physical
+                allocation across tensors, graphs, and categories by device ordinal plus allocation identity;
+                shared slot state is counted once per allocation even when one owner retains several graphs.
+                <code>retained_bytes</code> is the deduplicated sum, while the four
+                <code>retained_*_bytes</code> fields preserve category attribution. <code>peak_retained_bytes</code>
+                advances after slot creation or cache admission and is never reported below the current total.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                HIP does not expose byte sizes for a retained graph, executable, stream, or either ordering event.
+                These five objects per graph are reported through <code>opaque_native_object_count</code> but are
+                excluded from <code>retained_bytes</code>; allocator-pool slack is excluded too. Therefore
+                <code>retained_bytes_accounting_complete=true</code> means every byte-accounted tensor mapped to
+                allocation metadata, not that opaque driver overhead is zero. Live memory pressure complements
+                rather than expands the immutable byte limit.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 <code>legacy_host_barriers</code> preserves the qualified host waits, including a device-wide
@@ -384,10 +424,154 @@
                 stream and orders that event into the primary stream first.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>GET /v1/config</code> exposes immutable policy at top-level
+                <code>accelerator_runtime</code>. Its live graph contract has four separate top-level fields, and
+                trusted debug repeats those same four fields alongside <code>accelerator_runtime</code> and
+                <code>rocm_synchronization</code>:
+              </p>
+              <div class="overflow-x-auto mt-3">
+                <table class="w-full text-xs" style="color: var(--fg-dim);">
+                  <thead style="color: var(--fg);"><tr><th class="text-left p-2">Config/debug field</th><th class="text-left p-2">Authority</th></tr></thead>
+                  <tbody>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graphs</code></td><td class="p-2">Optional nonblocking full graph-cache/counter snapshot.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graphs_unavailable_reason</code></td><td class="p-2">Null exactly when <code>rocm_graphs</code> is present; otherwise one closed reason.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_telemetry</code></td><td class="p-2">Optional current/completed phase and transient-candidate snapshot, independent of the model and graph-runner locks.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_telemetry_unavailable_reason</code></td><td class="p-2">Null exactly when <code>rocm_graph_telemetry</code> is present; otherwise one closed reason.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <pre class="overflow-x-auto text-xs leading-relaxed mt-3"><code>{
+  "rocm_graphs": { "requested": true, "capture_requested": true, "enabled": true },
+  "rocm_graphs_unavailable_reason": null,
+  "rocm_graph_telemetry": {
+    "current_phase": "native_capture",
+    "current_phase_elapsed_micros": 42000,
+    "pre_candidate_headroom_phase": { "calls": 14, "slow": 0, "total_duration_micros": 1200, "max_duration_micros": 300 },
+    "candidate_warm_phase": { "calls": 12, "slow": 1, "total_duration_micros": 155000, "max_duration_micros": 108000 },
+    "pre_native_reservation_phase": { "calls": 9, "slow": 0, "total_duration_micros": 900, "max_duration_micros": 180 },
+    "native_capture_phase": { "calls": 8, "slow": 1, "total_duration_micros": 210000, "max_duration_micros": 120000 },
+    "rejected_candidate_cleanup_phase": { "calls": 2, "slow": 0, "total_duration_micros": 9000, "max_duration_micros": 5000 },
+    "last_transient_candidate_bytes": 67108864,
+    "peak_transient_candidate_bytes": 100663296
+  },
+  "rocm_graph_telemetry_unavailable_reason": null
+}</code></pre>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Both reason fields use exactly <code>backend_without_graph_runner</code>,
+                <code>model_runner_busy</code>, <code>model_runner_lock_poisoned</code>,
+                <code>graph_runner_busy</code>, or <code>graph_runner_lock_poisoned</code>. Full statistics may use
+                any of the five. The phase handle is stored outside both runner locks, so every real backend keeps
+                phase telemetry readable through model-runner or graph-runner contention and poison; currently
+                only <code>backend_without_graph_runner</code> makes that value null. Its reason field and metric
+                family still use the same closed schema. A null value never means an empty cache or zero activity.
+                The graph observations themselves do not wait for either runner mutex; this is not a latency
+                guarantee for the complete <code>/v1/config</code> handler, which also reads unrelated immutable
+                training-capability state.
+              </p>
+              <div class="overflow-x-auto mt-3">
+                <table class="w-full text-xs" style="color: var(--fg-dim);">
+                  <thead style="color: var(--fg);"><tr><th class="text-left p-2"><code>rocm_graphs</code> full-statistics group</th><th class="text-left p-2">Fields</th></tr></thead>
+                  <tbody>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Policy and circuit breaker</td><td class="p-2"><code>requested</code>, <code>capture_requested</code>, <code>enabled</code>, <code>capture_enabled</code>, <code>max_cached_graphs</code>, <code>max_retained_bytes</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Capture and replay</td><td class="p-2"><code>capture_attempts</code>, <code>capture_successes</code>, <code>capture_deferrals</code>, <code>capture_failures</code>, <code>replay_attempts</code>, <code>replay_successes</code>, <code>replay_failures</code>, <code>failures</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Owner and slot lifecycle</td><td class="p-2"><code>decode_owner_release_count</code>, <code>decode_owner_graph_release_count</code>, <code>graph_slot_create_count</code>, <code>graph_slot_reuse_count</code>, <code>graph_slot_count</code>, <code>active_graph_slot_count</code>, <code>idle_graph_slot_count</code>, <code>tracked_decode_owner_count</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Bounded cache</td><td class="p-2"><code>cache_admission_successes</code>, <code>cache_evictions</code>, <code>cache_evicted_bytes</code>, <code>budget_evictions</code>, <code>pressure_evictions</code>, <code>invalidation_evictions</code>, <code>recovery_evictions</code>, <code>entry_capacity_rejections</code>, <code>byte_budget_rejections</code>, <code>accounting_incomplete_rejections</code>, <code>pre_capture_entry_capacity_skips</code>, <code>pre_capture_byte_budget_skips</code>, <code>pre_capture_accounting_incomplete_skips</code>, <code>pre_capture_memory_reservation_denied_skips</code>, <code>memory_governor_selector_mismatch_skips</code>, and <code>captured_graph_count</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Retained memory</td><td class="p-2"><code>retained_stable_io_bytes</code>, <code>retained_capture_arena_bytes</code>, <code>retained_blaslt_workspace_bytes</code>, <code>retained_slot_state_bytes</code>, <code>retained_bytes</code>, <code>peak_retained_bytes</code>, <code>opaque_native_object_count</code>, <code>retained_bytes_accounting_complete</code>, and <code>quarantined_retained_bytes</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Point-in-time phase/transient copy</td><td class="p-2">The five completed <code>*_phase</code> summaries plus <code>last_transient_candidate_bytes</code> and <code>peak_transient_candidate_bytes</code> are also serialized with a successful full snapshot. Use separate <code>rocm_graph_telemetry</code> for the active phase and for telemetry that remains available while either runner lock blocks full statistics.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Closed fallbacks</td><td class="p-2"><code>fallbacks</code> contains <code>total</code>, all 13 reason counters, <code>slow</code>, <code>total_duration_micros</code>, and <code>max_duration_micros</code>.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="overflow-x-auto mt-3">
+                <table class="w-full text-xs" style="color: var(--fg-dim);">
+                  <thead style="color: var(--fg);"><tr><th class="text-left p-2"><code>rocm_graph_telemetry</code> field</th><th class="text-left p-2">Meaning</th></tr></thead>
+                  <tbody>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>current_phase</code>, <code>current_phase_elapsed_micros</code></td><td class="p-2">Null phase plus zero elapsed while idle; otherwise the active phase and monotonic elapsed time.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Five phase summaries</td><td class="p-2"><code>pre_candidate_headroom_phase</code>, <code>candidate_warm_phase</code>, <code>pre_native_reservation_phase</code>, <code>native_capture_phase</code>, and <code>rejected_candidate_cleanup_phase</code>. Each contains <code>calls</code>, <code>slow</code>, <code>total_duration_micros</code>, and <code>max_duration_micros</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>last_transient_candidate_bytes</code>, <code>peak_transient_candidate_bytes</code></td><td class="p-2">Exact deduplicated queryable candidate allocations measured before admission; excludes already-owned recurrent slot state and opaque native objects.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Health flattens these two authorities into <code>decode_runtime.rocm_graphs</code>. Full-statistic
+                fields are null when unavailable. Its <code>state</code> is <code>enabled</code> or
+                <code>disabled</code> when full statistics exist, <code>busy</code> only for
+                <code>model_runner_busy</code> or <code>graph_runner_busy</code>, and <code>unavailable</code> for
+                <code>backend_without_graph_runner</code> or either poisoned-lock reason.
+                <code>unavailable_reason</code> governs full statistics;
+                <code>phase_telemetry_available</code> and <code>phase_telemetry_unavailable_reason</code> govern
+                the current phase, five summaries, and transient-byte fields independently. The dashboard uses
+                config for static policy/full-stat context and its two-second health poll to refresh Graph live
+                and Graph current phase, including typed unavailable reason and elapsed time; it never fabricates
+                zeroes for missing snapshots.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>capture_successes</code> means native graph instantiation and its first launch succeeded;
+                <code>cache_admission_successes</code> is the retained, replayable subset, and the entry, byte, and
+                accounting post-capture rejection counters explain their difference. Pre-capture skips are
+                intentionally separate. Entry/known-byte saturation is reclaimed before candidate allocation;
+                after the settled warm Record pass, exact pre-native accounting, matching-device pressure, and
+                atomic global reservation must pass before native capture. Post-capture admission is a defensive
+                concurrency recheck. Candidate-alone byte and incomplete-accounting results make the geometry
+                non-capture-safe for the runner lifetime. Aggregate budget suppression clears after ownership or
+                budget relief; global-reservation denial retries only after matching-device cached headroom is
+                sufficient. A memory-governor selector mismatch fails closed rather than consuming another
+                accelerator's budget. These distinct rules prevent a per-token warm/allocation storm.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Exact candidate size is unavailable until its warm pass allocates stable I/O, arena buffers, and
+                private-stream workspace. The transient fields expose that residual rather than retained cache
+                residency. The five fixed phases attribute headroom reclamation, warm allocation and execution,
+                reservation/accounting, native capture plus settled first launch plus defensive cache
+                admission/publication and blocking committed governor debit, and rejected-candidate cleanup.
+                <code>rejected_candidate_cleanup</code> starts only when an unretained candidate enters destruction
+                and settlement. The phase
+                handle is independent of both runner locks, so health and phase metrics can show an
+                in-progress phase while the full cache snapshot is busy or poisoned. Governor reads fail closed unless their device selector matches the
+                runner, and warm-pass host-copy observation is scoped so unrelated concurrent copies cannot poison
+                capture eligibility.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                A native capture error is not automatically a process fault. The recoverable path attributes a
+                device drain to <code>capture_rollback</code> while admission remains open, then proves logical
+                recurrent-state restoration. Only when both steps succeed may the runner disable graph capture,
+                count <code>capture_failure</code>, and continue eagerly. Failed settlement, failed logical rollback,
+                or an armed/unclassified capture guard leaving scope publishes sticky STOP first, uses
+                <code>error_recovery</code> only for a post-STOP diagnostic drain, rejects eager continuation, and
+                requires process restart. A later successful diagnostic drain never clears the quarantine.
+              </p>
+              <h5 class="font-semibold mt-4 mb-2">ROCm graph Prometheus contract</h5>
+              <div class="overflow-x-auto">
+                <table class="w-full text-xs" style="color: var(--fg-dim);">
+                  <thead style="color: var(--fg);"><tr><th class="text-left p-2">Metric family</th><th class="text-left p-2">Closed dimensions and meaning</th></tr></thead>
+                  <tbody>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln_rocm_graph_telemetry_available</code>, <code>kiln_rocm_graph_snapshot_unavailable{reason}</code></td><td class="p-2">Always emitted. Availability governs the full cache/counter families; the reason family is one-hot over the five closed unavailable reasons and all zero when the snapshot is present.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln_rocm_graph_phase_telemetry_available</code>, <code>kiln_rocm_graph_phase_telemetry_unavailable{reason}</code></td><td class="p-2">Always emitted independently. Availability governs current/completed phase and transient-candidate families; the reason family uses the same five-value one-hot set.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln_rocm_graph_state{kind}</code></td><td class="p-2"><code>kind</code> is exactly <code>requested</code>, <code>capture_requested</code>, <code>enabled</code>, or <code>capture_enabled</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Cache and limits</td><td class="p-2"><code>kiln_rocm_graph_cache_entries</code>, <code>kiln_rocm_graph_cache_entry_limit</code>, <code>kiln_rocm_graph_retained_byte_limit</code>, <code>kiln_rocm_graph_retained_byte_accounting_complete</code>, and <code>kiln_rocm_graph_opaque_native_objects</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Slots and owners</td><td class="p-2"><code>kiln_rocm_graph_slots{state="total|active|idle"}</code>, <code>kiln_rocm_graph_tracked_decode_owners</code>, and <code>kiln_rocm_graph_owner_lifecycle_total{event="decode_release|graph_release|slot_create|slot_reuse"}</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln_rocm_graph_retained_bytes{kind}</code></td><td class="p-2"><code>kind</code> is exactly <code>stable_io</code>, <code>capture_arena</code>, <code>blaslt_workspace</code>, <code>slot_state</code>, <code>total</code>, <code>peak</code>, or <code>quarantined</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Phase and transient telemetry</td><td class="p-2"><code>kiln_rocm_graph_current_phase{phase}</code> is one-hot, <code>kiln_rocm_graph_current_phase_elapsed_seconds</code> is zero while idle, <code>kiln_rocm_graph_phase_calls_total{phase}</code>, <code>kiln_rocm_graph_phase_slow_total{phase}</code>, <code>kiln_rocm_graph_phase_duration_seconds_total{phase}</code>, and <code>kiln_rocm_graph_phase_duration_seconds_max{phase}</code> use exactly the five phase labels, and <code>kiln_rocm_graph_transient_candidate_bytes{kind="last|peak"}</code> reports the measured residual. These remain readable for a real backend while either runner lock blocks or is poisoned.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Cache action counters</td><td class="p-2"><code>kiln_rocm_graph_cache_admissions_total</code>, <code>kiln_rocm_graph_cache_evictions_total</code>, <code>kiln_rocm_graph_cache_evicted_bytes_total</code>, <code>kiln_rocm_graph_cache_evictions_by_cause_total{cause="budget|pressure|invalidation|recovery"}</code>, <code>kiln_rocm_graph_cache_admission_rejections_total{reason="entry_capacity|byte_budget|accounting_incomplete"}</code>, and <code>kiln_rocm_graph_pre_capture_skips_total{reason="entry_capacity|byte_budget|accounting_incomplete|memory_reservation_denied|memory_governor_selector_mismatch"}</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Capture and replay counters</td><td class="p-2"><code>kiln_rocm_graph_capture_attempts_total</code>, <code>kiln_rocm_graph_capture_outcomes_total{outcome="success|deferred|failure"}</code>, <code>kiln_rocm_graph_replay_attempts_total</code>, and <code>kiln_rocm_graph_replay_outcomes_total{outcome="success|failure"}</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Fallback counters and latency</td><td class="p-2"><code>kiln_rocm_graph_fallbacks_total{reason}</code> uses exactly <code>cold_cache_host_round_trip</code>, <code>persistent_host_round_trip</code>, <code>shape_dependent_attention</code>, <code>graph_cache_capacity</code>, <code>graph_cache_byte_budget</code>, <code>graph_accounting_incomplete</code>, <code>moderate_memory_pressure</code>, <code>tight_memory_pressure</code>, <code>critical_memory_pressure</code>, <code>memory_reservation_denied</code>, <code>memory_governor_selector_mismatch</code>, <code>capture_failure</code>, or <code>replay_failure</code>. <code>kiln_rocm_graph_fallback_slow_total</code>, <code>kiln_rocm_graph_fallback_duration_seconds_total</code>, and <code>kiln_rocm_graph_fallback_duration_seconds_max</code> are unlabelled bounded-latency summaries.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Counter labels are closed sets; decode shapes, allocation identities, byte limits, and request
+                values never become labels. Check <code>kiln_rocm_graph_telemetry_available == 1</code> before
+                interpreting full cache/counter families, and inspect its one-hot unavailable reason when zero.
+                Phase and transient families have their own
+                <code>kiln_rocm_graph_phase_telemetry_available</code> authority and reason family and remains
+                available for a real backend during either runner-lock contention or poison. A zero full-snapshot gauge therefore omits the
+                full families, not the independently authoritative phase families, and vice versa.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Health repeats the policy at <code>decode_runtime.accelerator_runtime</code>. Its sibling
                 <code>decode_runtime.rocm_synchronization</code> reports whether ROCm is active, telemetry
                 availability, cleanup quarantine, total device/stream waits, waited nanoseconds, skipped
-                barriers, and a fixed 22-reason array. <code>cleanup_quarantined=true</code> is a process-lifetime
+                barriers, and a fixed 23-reason array. <code>cleanup_quarantined=true</code> is a process-lifetime
                 sticky device fault: further execution is rejected, possibly in-flight resources are retained
                 rather than destroyed unsafely, and restart is required. Active ROCm telemetry unavailability is
                 likewise fail-closed instead of being interpreted as a false quarantine value. The shared server
@@ -404,7 +588,7 @@
                 endpoints load atomics only and never synchronize the accelerator.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Configure the three fields under <code>[accelerator]</code>. Canonical environment names derive
+                Configure the four fields under <code>[accelerator]</code>. Canonical environment names derive
                 mechanically as <code>KILN_ACCELERATOR_&lt;FIELD&gt;</code>. Historical
                 <code>KILN_ROCM_GRAPHS</code>, <code>KILN_ROCM_GRAPH_CAPTURE</code>, and
                 <code>KILN_ROCM_GRAPH_CACHE_MAX</code> are strict deprecated startup aliases, not hot runtime

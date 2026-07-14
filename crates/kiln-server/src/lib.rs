@@ -31,6 +31,7 @@ pub mod pi_rpc;
 pub mod recent_requests;
 pub mod request_log;
 pub(crate) mod response_delivery;
+pub(crate) mod rocm_graph_observability;
 pub mod rollout_generate_cli;
 pub(crate) mod sft_dataset;
 pub mod state;

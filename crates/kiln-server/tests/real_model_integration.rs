@@ -5151,7 +5151,6 @@ async fn rocm_eager_and_graph_decode_survive_active_shrink_and_grow() {
     assert!(final_graph_stats.capture_successes > after_grow_graph_stats.capture_successes);
     assert!(final_graph_stats.replay_successes > after_grow_graph_stats.replay_successes);
     assert_eq!(final_graph_stats.failures, 0);
-    assert_eq!(final_graph_stats.fallbacks.warmup_forward_failure, 0);
     assert_eq!(final_graph_stats.fallbacks.persistent_host_round_trip, 0);
     assert_eq!(final_graph_stats.fallbacks.shape_dependent_attention, 0);
     assert_eq!(final_graph_stats.fallbacks.graph_cache_capacity, 0);

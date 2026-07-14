@@ -31,6 +31,31 @@
 namespace {
 
 constexpr int KilnLogicalWarpSize = 32;
+// Public FFI convention: negative values are local validation/unsupported
+// declines; positive values mean an attempted HIP/CK execution could not be
+// proven safe and must quarantine the device at the Rust admission boundary.
+constexpr int KilnExternalExecutionFailure = 1000000;
+constexpr int KilnRecoverableAllocationDecline = -1000001;
+
+bool clean_allocation_decline(hipError_t error, const void* pointer)
+{
+    return pointer == nullptr &&
+           (error == hipErrorOutOfMemory || error == hipErrorInvalidValue ||
+            error == hipErrorNotSupported);
+}
+
+int allocation_failure_status(hipError_t error, const void* pointer)
+{
+    // Direct runtime-return errors may also occupy HIP's thread-local sticky
+    // slot. Preserve the direct status for classification, but consume the
+    // sticky copy before Rust decides whether to fall back or quarantine.
+    (void)hipGetLastError();
+    if(clean_allocation_decline(error, pointer))
+    {
+        return KilnRecoverableAllocationDecline;
+    }
+    return error == hipSuccess ? KilnExternalExecutionFailure : static_cast<int>(error);
+}
 
 #if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || \
     defined(__gfx1103__) || defined(__gfx1151__) || defined(__gfx11_generic__)
@@ -143,21 +168,32 @@ bool wmma_gqa_r64k32_log2_enabled(int seqlen_q, int seqlen_k)
     return std::max(seqlen_q, seqlen_k) >= threshold;
 }
 
-bool current_device_supports_gfx11_wmma()
+// Return 0 only after a completed capability query. Positive HIP statuses must
+// cross the FFI boundary so Rust quarantines instead of treating them as an
+// ordinary unsupported-device decline.
+int query_current_device_gfx11_wmma(bool* supported)
 {
+    if(supported == nullptr)
+    {
+        return KilnExternalExecutionFailure;
+    }
+    *supported = false;
     int device = 0;
     hipError_t err = hipGetDevice(&device);
     if(err != hipSuccess)
     {
-        return false;
+        (void)hipGetLastError();
+        return static_cast<int>(err);
     }
     hipDeviceProp_t props;
     err = hipGetDeviceProperties(&props, device);
     if(err != hipSuccess)
     {
-        return false;
+        (void)hipGetLastError();
+        return static_cast<int>(err);
     }
-    return std::strstr(props.gcnArchName, "gfx11") != nullptr;
+    *supported = std::strstr(props.gcnArchName, "gfx11") != nullptr;
+    return 0;
 }
 
 __device__ __forceinline__ __bf16 kiln_to_native_bf16(hip_bfloat16 value)
@@ -1416,11 +1452,11 @@ int launch_ck_fwd_bf16(const hip_bfloat16* q,
     }
     catch(const std::exception&)
     {
-        return -20;
+        return KilnExternalExecutionFailure;
     }
 
-    const hipError_t err = hipPeekAtLastError();
-    return err == hipSuccess ? 0 : -static_cast<int>(err);
+    const hipError_t err = hipGetLastError();
+    return err == hipSuccess ? 0 : static_cast<int>(err);
 }
 #endif
 
@@ -3537,7 +3573,19 @@ int launch_bwd(const void* dout,
             hipMallocAsync(reinterpret_cast<void**>(&delta),
                            delta_count * sizeof(float),
                            static_cast<hipStream_t>(stream));
-        if(alloc_err == hipSuccess)
+        if(alloc_err == hipSuccess && delta == nullptr)
+        {
+            return KilnExternalExecutionFailure;
+        }
+        if(alloc_err != hipSuccess)
+        {
+            if(!clean_allocation_decline(alloc_err, delta))
+            {
+                return allocation_failure_status(alloc_err, delta);
+            }
+            (void)allocation_failure_status(alloc_err, delta);
+        }
+        else
         {
             dim3 delta_grid(static_cast<unsigned>(seqlen_q),
                             static_cast<unsigned>(num_heads),
@@ -3703,7 +3751,19 @@ int launch_bwd_collapsed_gqa(const void* dout,
             hipMallocAsync(reinterpret_cast<void**>(&delta),
                            delta_count * sizeof(float),
                            static_cast<hipStream_t>(stream));
-        if(alloc_err == hipSuccess)
+        if(alloc_err == hipSuccess && delta == nullptr)
+        {
+            return KilnExternalExecutionFailure;
+        }
+        if(alloc_err != hipSuccess)
+        {
+            if(!clean_allocation_decline(alloc_err, delta))
+            {
+                return allocation_failure_status(alloc_err, delta);
+            }
+            (void)allocation_failure_status(alloc_err, delta);
+        }
+        else
         {
             dim3 delta_grid(static_cast<unsigned>(seqlen_q),
                             static_cast<unsigned>(num_heads),
@@ -3863,8 +3923,17 @@ int launch_bwd_collapsed_gqa_warp(const void* dout,
     const hipError_t alloc_err = hipMallocAsync(reinterpret_cast<void**>(&delta),
                                                delta_count * sizeof(float),
                                                static_cast<hipStream_t>(stream));
+    if(alloc_err == hipSuccess && delta == nullptr)
+    {
+        return KilnExternalExecutionFailure;
+    }
     if(alloc_err != hipSuccess)
     {
+        if(!clean_allocation_decline(alloc_err, delta))
+        {
+            return allocation_failure_status(alloc_err, delta);
+        }
+        (void)allocation_failure_status(alloc_err, delta);
         return launch_bwd_collapsed_gqa<HeadDim, 1>(dout,
                                                     q,
                                                     k,
@@ -4071,32 +4140,81 @@ int launch_bwd_collapsed_gqa_ck_trload(const void* dout,
         hipMallocAsync(reinterpret_cast<void**>(&delta), delta_count * sizeof(float), hip_stream);
     if(err != hipSuccess)
     {
-        return static_cast<int>(err);
+        return allocation_failure_status(err, delta);
+    }
+    if(delta == nullptr)
+    {
+        return KilnExternalExecutionFailure;
     }
     err = hipMallocAsync(reinterpret_cast<void**>(&dq_acc), dq_count * sizeof(float), hip_stream);
     if(err != hipSuccess)
     {
-        hipFreeAsync(delta, hip_stream);
-        return static_cast<int>(err);
+        if(!clean_allocation_decline(err, dq_acc))
+        {
+            return allocation_failure_status(err, dq_acc);
+        }
+        const hipError_t free_err = hipFreeAsync(delta, hip_stream);
+        if(free_err != hipSuccess)
+        {
+            return allocation_failure_status(free_err, delta);
+        }
+        return allocation_failure_status(err, dq_acc);
+    }
+    if(dq_acc == nullptr)
+    {
+        return KilnExternalExecutionFailure;
     }
     err = hipMallocAsync(reinterpret_cast<void**>(&dk_full),
                          dkdv_full_count * sizeof(float),
                          hip_stream);
     if(err != hipSuccess)
     {
-        hipFreeAsync(dq_acc, hip_stream);
-        hipFreeAsync(delta, hip_stream);
-        return static_cast<int>(err);
+        if(!clean_allocation_decline(err, dk_full))
+        {
+            return allocation_failure_status(err, dk_full);
+        }
+        hipError_t free_err = hipFreeAsync(dq_acc, hip_stream);
+        if(free_err == hipSuccess)
+        {
+            free_err = hipFreeAsync(delta, hip_stream);
+        }
+        if(free_err != hipSuccess)
+        {
+            return allocation_failure_status(free_err, dq_acc);
+        }
+        return allocation_failure_status(err, dk_full);
+    }
+    if(dk_full == nullptr)
+    {
+        return KilnExternalExecutionFailure;
     }
     err = hipMallocAsync(reinterpret_cast<void**>(&dv_full),
                          dkdv_full_count * sizeof(float),
                          hip_stream);
     if(err != hipSuccess)
     {
-        hipFreeAsync(dk_full, hip_stream);
-        hipFreeAsync(dq_acc, hip_stream);
-        hipFreeAsync(delta, hip_stream);
-        return static_cast<int>(err);
+        if(!clean_allocation_decline(err, dv_full))
+        {
+            return allocation_failure_status(err, dv_full);
+        }
+        hipError_t free_err = hipFreeAsync(dk_full, hip_stream);
+        if(free_err == hipSuccess)
+        {
+            free_err = hipFreeAsync(dq_acc, hip_stream);
+        }
+        if(free_err == hipSuccess)
+        {
+            free_err = hipFreeAsync(delta, hip_stream);
+        }
+        if(free_err != hipSuccess)
+        {
+            return allocation_failure_status(free_err, dk_full);
+        }
+        return allocation_failure_status(err, dv_full);
+    }
+    if(dv_full == nullptr)
+    {
+        return KilnExternalExecutionFailure;
     }
 
     dim3 delta_grid(static_cast<unsigned>(seqlen_q),
@@ -4225,7 +4343,7 @@ int launch_bwd_collapsed_gqa_ck_trload(const void* dout,
         hipFreeAsync(dk_full, hip_stream);
         hipFreeAsync(dq_acc, hip_stream);
         hipFreeAsync(delta, hip_stream);
-        return -21;
+        return KilnExternalExecutionFailure;
     }
     err = hipGetLastError();
     if(err == hipSuccess)
@@ -4371,7 +4489,13 @@ extern "C" int kiln_rocm_flash_wmma_qk16_bf16(const void* a,
     {
         return -1;
     }
-    if(!current_device_supports_gfx11_wmma())
+    bool supports_gfx11_wmma = false;
+    const int device_query_status = query_current_device_gfx11_wmma(&supports_gfx11_wmma);
+    if(device_query_status != 0)
+    {
+        return device_query_status;
+    }
+    if(!supports_gfx11_wmma)
     {
         return -30;
     }
@@ -4475,12 +4599,40 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
     case 256:
         if(native_gqa_qblock_enabled(head_dim, seqlen_q, seqlen_k, num_heads, num_heads_k))
         {
-            if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK") &&
-               current_device_supports_gfx11_wmma())
+            if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK"))
             {
-                if(wmma_gqa_r64k32_enabled(seqlen_q, seqlen_k))
+                bool supports_gfx11_wmma = false;
+                const int device_query_status =
+                    query_current_device_gfx11_wmma(&supports_gfx11_wmma);
+                if(device_query_status != 0)
                 {
-                    return launch_fwd_wmma_gqa_r64h1k32(q,
+                    return device_query_status;
+                }
+                if(supports_gfx11_wmma)
+                {
+                    if(wmma_gqa_r64k32_enabled(seqlen_q, seqlen_k))
+                    {
+                        return launch_fwd_wmma_gqa_r64h1k32(q,
+                                                            k,
+                                                            v,
+                                                            out,
+                                                            softmax_lse_out,
+                                                            batch_size,
+                                                            seqlen_q,
+                                                            seqlen_k,
+                                                            seqlen_q,
+                                                            0,
+                                                            seqlen_q,
+                                                            num_heads,
+                                                            num_heads_k,
+                                                            softmax_scale,
+                                                            0,
+                                                            0,
+                                                            seqlen_q,
+                                                            is_causal,
+                                                            stream);
+                    }
+                    return launch_fwd_wmma_gqa_r32h1k32(q,
                                                         k,
                                                         v,
                                                         out,
@@ -4488,31 +4640,12 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                         batch_size,
                                                         seqlen_q,
                                                         seqlen_k,
-                                                        seqlen_q,
-                                                        0,
-                                                        seqlen_q,
                                                         num_heads,
                                                         num_heads_k,
                                                         softmax_scale,
-                                                        0,
-                                                        0,
-                                                        seqlen_q,
                                                         is_causal,
                                                         stream);
                 }
-                return launch_fwd_wmma_gqa_r32h1k32(q,
-                                                    k,
-                                                    v,
-                                                    out,
-                                                    softmax_lse_out,
-                                                    batch_size,
-                                                    seqlen_q,
-                                                    seqlen_k,
-                                                    num_heads,
-                                                    num_heads_k,
-                                                    softmax_scale,
-                                                    is_causal,
-                                                    stream);
             }
             return launch_fwd_gqa_qblock_cached<256, 8, 4, 64>(q,
                                                                k,
@@ -4534,22 +4667,31 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                                is_causal,
                                                                stream);
         }
-        if(native_wmma_qblock_enabled(head_dim, seqlen_q, seqlen_k) &&
-           current_device_supports_gfx11_wmma())
+        if(native_wmma_qblock_enabled(head_dim, seqlen_q, seqlen_k))
         {
-            return launch_fwd_wmma_qblock256(q,
-                                             k,
-                                             v,
-                                             out,
-                                             softmax_lse_out,
-                                             batch_size,
-                                             seqlen_q,
-                                             seqlen_k,
-                                             num_heads,
-                                             num_heads_k,
-                                             softmax_scale,
-                                             is_causal,
-                                             stream);
+            bool supports_gfx11_wmma = false;
+            const int device_query_status =
+                query_current_device_gfx11_wmma(&supports_gfx11_wmma);
+            if(device_query_status != 0)
+            {
+                return device_query_status;
+            }
+            if(supports_gfx11_wmma)
+            {
+                return launch_fwd_wmma_qblock256(q,
+                                                 k,
+                                                 v,
+                                                 out,
+                                                 softmax_lse_out,
+                                                 batch_size,
+                                                 seqlen_q,
+                                                 seqlen_k,
+                                                 num_heads,
+                                                 num_heads_k,
+                                                 softmax_scale,
+                                                 is_causal,
+                                                 stream);
+            }
         }
         if(native_keysplit_enabled(seqlen_q, seqlen_k))
         {
@@ -4669,28 +4811,37 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_bf16(const void* q,
     if(native_gqa_qblock_enabled(head_dim, seqlen_q_tile, seqlen_k, num_heads, num_heads_k))
     {
         if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK") &&
-           current_device_supports_gfx11_wmma() &&
            wmma_gqa_r64k32_enabled(seqlen_q_tile, seqlen_k))
         {
-            return launch_fwd_wmma_gqa_r64h1k32(q,
-                                                k,
-                                                v,
-                                                out,
-                                                softmax_lse_out,
-                                                batch_size,
-                                                seqlen_q_tile,
-                                                seqlen_k,
-                                                seqlen_q_total,
-                                                0,
-                                                seqlen_q_tile,
-                                                num_heads,
-                                                num_heads_k,
-                                                softmax_scale,
-                                                q_start,
-                                                0,
-                                                seqlen_q_tile,
-                                                is_causal,
-                                                stream);
+            bool supports_gfx11_wmma = false;
+            const int device_query_status =
+                query_current_device_gfx11_wmma(&supports_gfx11_wmma);
+            if(device_query_status != 0)
+            {
+                return device_query_status;
+            }
+            if(supports_gfx11_wmma)
+            {
+                return launch_fwd_wmma_gqa_r64h1k32(q,
+                                                    k,
+                                                    v,
+                                                    out,
+                                                    softmax_lse_out,
+                                                    batch_size,
+                                                    seqlen_q_tile,
+                                                    seqlen_k,
+                                                    seqlen_q_total,
+                                                    0,
+                                                    seqlen_q_tile,
+                                                    num_heads,
+                                                    num_heads_k,
+                                                    softmax_scale,
+                                                    q_start,
+                                                    0,
+                                                    seqlen_q_tile,
+                                                    is_causal,
+                                                    stream);
+            }
         }
         return launch_fwd_gqa_qblock_cached<256, 8, 4, 64>(q,
                                                            k,
@@ -4796,28 +4947,37 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_into_bf16(const void* q,
     if(native_gqa_qblock_enabled(head_dim, seqlen_q_tile, seqlen_k, num_heads, num_heads_k))
     {
         if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK") &&
-           current_device_supports_gfx11_wmma() &&
            wmma_gqa_r64k32_enabled(seqlen_q_tile, seqlen_k))
         {
-            return launch_fwd_wmma_gqa_r64h1k32(q,
-                                                k,
-                                                v,
-                                                out,
-                                                softmax_lse_out,
-                                                batch_size,
-                                                seqlen_q_tile,
-                                                seqlen_k,
-                                                seqlen_q_total,
-                                                0,
-                                                seqlen_q_tile,
-                                                num_heads,
-                                                num_heads_k,
-                                                softmax_scale,
-                                                q_start,
-                                                q_start,
-                                                seqlen_q_total,
-                                                is_causal,
-                                                stream);
+            bool supports_gfx11_wmma = false;
+            const int device_query_status =
+                query_current_device_gfx11_wmma(&supports_gfx11_wmma);
+            if(device_query_status != 0)
+            {
+                return device_query_status;
+            }
+            if(supports_gfx11_wmma)
+            {
+                return launch_fwd_wmma_gqa_r64h1k32(q,
+                                                    k,
+                                                    v,
+                                                    out,
+                                                    softmax_lse_out,
+                                                    batch_size,
+                                                    seqlen_q_tile,
+                                                    seqlen_k,
+                                                    seqlen_q_total,
+                                                    0,
+                                                    seqlen_q_tile,
+                                                    num_heads,
+                                                    num_heads_k,
+                                                    softmax_scale,
+                                                    q_start,
+                                                    q_start,
+                                                    seqlen_q_total,
+                                                    is_causal,
+                                                    stream);
+            }
         }
         return launch_fwd_gqa_qblock_cached<256, 8, 4, 64>(q,
                                                            k,
@@ -4923,28 +5083,37 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_base_into_bf16(const void* q,
     if(native_gqa_qblock_enabled(head_dim, seqlen_q_tile, seqlen_k, num_heads, num_heads_k))
     {
         if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK") &&
-           current_device_supports_gfx11_wmma() &&
            wmma_gqa_r64k32_enabled(seqlen_q_tile, seqlen_k))
         {
-            return launch_fwd_wmma_gqa_r64h1k32(q,
-                                                k,
-                                                v,
-                                                out,
-                                                softmax_lse_out,
-                                                batch_size,
-                                                seqlen_q_tile,
-                                                seqlen_k,
-                                                seqlen_q_total,
-                                                q_start,
-                                                seqlen_q_total,
-                                                num_heads,
-                                                num_heads_k,
-                                                softmax_scale,
-                                                q_start,
-                                                q_start,
-                                                seqlen_q_total,
-                                                is_causal,
-                                                stream);
+            bool supports_gfx11_wmma = false;
+            const int device_query_status =
+                query_current_device_gfx11_wmma(&supports_gfx11_wmma);
+            if(device_query_status != 0)
+            {
+                return device_query_status;
+            }
+            if(supports_gfx11_wmma)
+            {
+                return launch_fwd_wmma_gqa_r64h1k32(q,
+                                                    k,
+                                                    v,
+                                                    out,
+                                                    softmax_lse_out,
+                                                    batch_size,
+                                                    seqlen_q_tile,
+                                                    seqlen_k,
+                                                    seqlen_q_total,
+                                                    q_start,
+                                                    seqlen_q_total,
+                                                    num_heads,
+                                                    num_heads_k,
+                                                    softmax_scale,
+                                                    q_start,
+                                                    q_start,
+                                                    seqlen_q_total,
+                                                    is_causal,
+                                                    stream);
+            }
         }
         return launch_fwd_gqa_qblock_cached<256, 8, 4, 64>(q,
                                                            k,
@@ -5232,26 +5401,35 @@ extern "C" int kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(const void* dout,
 
 #if KILN_HAS_CK_TILE_FMHA
     if(!env_truthy("KILN_ROCM_FLASH_DISABLE_CK_BWD_COLLAPSED_GQA") && head_dim == 256 &&
-       is_causal &&
-       current_device_supports_gfx11_wmma())
+       is_causal)
     {
-        return launch_bwd_collapsed_gqa_ck_trload<256>(dout,
-                                                       q,
-                                                       k,
-                                                       v,
-                                                       out,
-                                                       softmax_lse,
-                                                       dq,
-                                                       dk,
-                                                       dv,
-                                                       batch_size,
-                                                       seqlen_q,
-                                                       seqlen_k,
-                                                       num_heads,
-                                                       num_heads_k,
-                                                       softmax_scale,
-                                                       is_causal,
-                                                       stream);
+        bool supports_gfx11_wmma = false;
+        const int device_query_status =
+            query_current_device_gfx11_wmma(&supports_gfx11_wmma);
+        if(device_query_status != 0)
+        {
+            return device_query_status;
+        }
+        if(supports_gfx11_wmma)
+        {
+            return launch_bwd_collapsed_gqa_ck_trload<256>(dout,
+                                                           q,
+                                                           k,
+                                                           v,
+                                                           out,
+                                                           softmax_lse,
+                                                           dq,
+                                                           dk,
+                                                           dv,
+                                                           batch_size,
+                                                           seqlen_q,
+                                                           seqlen_k,
+                                                           num_heads,
+                                                           num_heads_k,
+                                                           softmax_scale,
+                                                           is_causal,
+                                                           stream);
+        }
     }
 #endif
 

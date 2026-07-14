@@ -90,7 +90,7 @@ function checkThinkingBudgetParserContract(source) {
 }
 
 function checkRuntimeConfigSchemaContract(source) {
-  const rendererStart = source.indexOf('function renderRuntimeConfigBody(cfg)');
+  const rendererStart = source.indexOf('function graphUnavailableLabel(reason)');
   const rendererEnd = source.indexOf('async function loadRuntimeConfig(', rendererStart);
   if (rendererStart < 0 || rendererEnd < 0) fail('Server runtime-config renderer is missing');
   const renderer = source.slice(rendererStart, rendererEnd);
@@ -106,6 +106,12 @@ function checkRuntimeConfigSchemaContract(source) {
     'reclaim_mode_requested',
     'reclaim_mode_effective',
     'reclaim_disabled_by_serving_profile',
+    'cfg.rocm_graphs',
+    'cfg.rocm_graphs_unavailable_reason',
+    'cfg.rocm_graph_telemetry',
+    'cfg.rocm_graph_telemetry_unavailable_reason',
+    'rocmGraphTelemetry.current_phase',
+    'rocmGraphTelemetry.current_phase_elapsed_micros',
     'runtime_device',
     'model_weight_device',
     'native_training_supported',
@@ -1468,6 +1474,17 @@ async function startServer({
         uptime_seconds: 42,
         active_adapter: activeAdapter,
         scheduler: { waiting: 0, running: 0, blocks_used: healthTick % 2, blocks_free: 1024 },
+        decode_runtime: {
+          rocm_graphs: {
+            state: 'busy',
+            unavailable_reason: 'model_runner_busy',
+            capture_enabled: null,
+            phase_telemetry_available: true,
+            phase_telemetry_unavailable_reason: null,
+            current_phase: 'native_capture',
+            current_phase_elapsed_micros: healthTick * 1_000_000,
+          },
+        },
         gpu_memory: { total_vram_gb: 24, model_gb: 8, kv_cache_gb: 2, training_budget_gb: 4 },
         checks: [{ name: 'mock smoke server', pass: true }],
       });
@@ -4041,6 +4058,8 @@ async function runSmoke(baseUrl, {
     await waitForPanelText(page, '#runtime-config-body', /Usable[\s\S]*12\.50 GiB/, 'Runtime config should render live usable memory after the governor floor');
     await waitForPanelText(page, '#runtime-config-body', /Probe cadence[\s\S]*750 ms/, 'Runtime config should render the governor probe cadence');
     await waitForPanelText(page, '#runtime-config-body', /Reclaim[\s\S]*off[\s\S]*requested automatic/, 'Runtime config should distinguish effective reclaim from a profile-constrained request');
+    await waitForPanelText(page, '#runtime-config-body', /Graph live[\s\S]*busy[\s\S]*model runner busy/, 'Runtime config should take live graph contention from the health poll');
+    await waitForPanelText(page, '#runtime-config-body', /Graph current phase[\s\S]*native capture[\s\S]*\d+\.\d s/, 'Runtime config should show the runner-lock-independent in-progress graph phase from health');
     await waitForPanelText(page, '#runtime-config-body', /1,024/, 'Runtime config should render the KV cache block count');
     await waitForPanelText(page, '#runtime-config-body', /FP8 cache/, 'Runtime config should render the fp8 cache mode');
     await waitForPanelText(page, '#runtime-config-body', /Primary actor[\s\S]*active/, 'Runtime config should render primary batching actor activity');

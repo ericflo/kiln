@@ -93,41 +93,41 @@ fn alloc_rmsnorm_backward_like(
     alloc_like(source, dtype, shape)
 }
 
-/// Raw GPU stream pointer for `t`'s storage (replaces `device_stream_raw(st, "st")?`).
-fn device_stream_raw(
+/// Typed GPU stream submission for `t`'s next external FFI call.
+fn device_stream_submission(
     t: &KtTensor,
     name: &'static str,
-) -> Result<*mut core::ffi::c_void, RmsNormError> {
-    Ok(kiln_kt_bridge::device_stream_raw_of(t, name)?)
+) -> Result<kiln_kt_bridge::DeviceStreamSubmission, RmsNormError> {
+    Ok(kiln_kt_bridge::device_stream_submission_of(t, name)?)
 }
 
 #[cfg(feature = "rocm")]
-fn rocm_owner_stream_raw(
+fn rocm_owner_stream_identity(
     tensor: &KtTensor,
     name: &'static str,
-) -> Result<*mut core::ffi::c_void, RmsNormError> {
+) -> Result<kiln_tensor::RocmStreamId, RmsNormError> {
     let (storage, _) = kiln_kt_bridge::rocm_storage_and_byte_offset(tensor, tensor.dtype(), name)?;
-    storage
-        .context()
-        .default_stream()
-        .hip_stream_for_execution()
-        .map(|stream| stream as *mut core::ffi::c_void)
-        .map_err(|error| {
-            RmsNormError::Msg(format!(
-                "kt-rmsnorm bwd: ROCm owner stream acquisition for {name}: {error}"
-            ))
-        })
+    Ok(storage.rocm_owner_stream_id())
+}
+
+#[cfg(feature = "rocm")]
+fn rocm_active_stream_identity(
+    tensor: &KtTensor,
+    name: &'static str,
+) -> Result<kiln_tensor::RocmStreamId, RmsNormError> {
+    let (storage, _) = kiln_kt_bridge::rocm_storage_and_byte_offset(tensor, tensor.dtype(), name)?;
+    Ok(storage.rocm_stream_id())
 }
 
 #[cfg(feature = "rocm")]
 fn synchronize_rocm_rmsnorm_backward_inputs(
-    launch_stream: *mut core::ffi::c_void,
-    output_owner_stream: *mut core::ffi::c_void,
+    launch_stream: kiln_tensor::RocmStreamId,
+    output_owner_stream: kiln_tensor::RocmStreamId,
     inputs: &[(&'static str, &KtTensor)],
 ) -> Result<(), RmsNormError> {
     let capture_active = kiln_tensor::rocm_capture_arena_active();
     for (name, tensor) in inputs {
-        let input_owner_stream = rocm_owner_stream_raw(tensor, name)?;
+        let input_owner_stream = rocm_owner_stream_identity(tensor, name)?;
         if capture_active {
             if input_owner_stream != output_owner_stream {
                 return Err(RmsNormError::Msg(format!(
@@ -136,7 +136,7 @@ fn synchronize_rocm_rmsnorm_backward_inputs(
             }
             continue;
         }
-        let input_stream = kiln_kt_bridge::device_stream_raw_of(tensor, name)?;
+        let input_stream = rocm_active_stream_identity(tensor, name)?;
         if input_stream == launch_stream {
             continue;
         }
@@ -220,9 +220,10 @@ pub fn fused_rmsnorm_kt(
     // serializes memset -> kernel -> readback on one stream. ROCm inputs can be
     // freshly materialized on another stream (not just synchronizing H2D uploads),
     // so synchronize their owning streams before this output-stream launch. CUDA
-    // is unaffected: `device_stream_raw` resolves to the single shared default
+    // is unaffected: `device_stream_submission` resolves to the shared default
     // stream there.
-    let raw_stream = device_stream_raw(&out, "out")?;
+    let stream_submission = device_stream_submission(&out, "out")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_fused_rmsnorm(
@@ -236,10 +237,12 @@ pub fn fused_rmsnorm_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-rmsnorm: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(out)
 }
 
@@ -413,12 +416,11 @@ fn fused_rmsnorm_backward_impl(
     // and later output consumers are ordered on this stream. Inputs owned by a
     // different ROCm stream are handed off below. CUDA continues through its
     // existing allocation and stream path unchanged.
-    let raw_stream = device_stream_raw(&grad_x, "grad_x")?;
-
     #[cfg(feature = "rocm")]
     if matches!(x.device(), KtDevice::Rocm(_)) {
-        let x_owner_stream = rocm_owner_stream_raw(x, "x")?;
-        let output_owner_stream = rocm_owner_stream_raw(&grad_x, "grad_x")?;
+        let launch_stream = rocm_active_stream_identity(&grad_x, "grad_x")?;
+        let x_owner_stream = rocm_owner_stream_identity(x, "x")?;
+        let output_owner_stream = rocm_owner_stream_identity(&grad_x, "grad_x")?;
         if output_owner_stream != x_owner_stream {
             return Err(RmsNormError::Msg(
                 "kt-rmsnorm bwd: output allocation did not preserve x's ROCm storage context"
@@ -426,7 +428,7 @@ fn fused_rmsnorm_backward_impl(
             ));
         }
         if let Some(grad_weight) = &grad_weight {
-            let grad_weight_owner_stream = rocm_owner_stream_raw(grad_weight, "grad_weight")?;
+            let grad_weight_owner_stream = rocm_owner_stream_identity(grad_weight, "grad_weight")?;
             if grad_weight_owner_stream != output_owner_stream {
                 return Err(RmsNormError::Msg(
                     "kt-rmsnorm bwd: backward outputs have different ROCm storage contexts"
@@ -435,12 +437,14 @@ fn fused_rmsnorm_backward_impl(
             }
         }
         synchronize_rocm_rmsnorm_backward_inputs(
-            raw_stream,
+            launch_stream,
             output_owner_stream,
             &[("x", x), ("weight", weight), ("grad_out", grad_out)],
         )?;
     }
 
+    let stream_submission = device_stream_submission(&grad_x, "grad_x")?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_fused_rmsnorm_bwd(
             x_ptr as *const _,
@@ -455,10 +459,12 @@ fn fused_rmsnorm_backward_impl(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-rmsnorm bwd: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
 
     // No post-launch sync is needed outside capture because both outputs own
     // the launch stream. During capture, all in-graph consumers use the active
@@ -538,7 +544,8 @@ pub fn fused_rotary_qk_kt(
     let qo_ptr = kiln_kt_bridge::device_output_ptr(&q_out);
     let ko_ptr = kiln_kt_bridge::device_output_ptr(&k_out);
 
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_fused_rotary_qk(
@@ -558,10 +565,12 @@ pub fn fused_rotary_qk_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-rotary: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok((q_out, k_out))
 }
 
@@ -588,7 +597,8 @@ pub fn fused_mlp_silu_mul_kt(gate: &KtTensor, up: &KtTensor) -> Result<KtTensor,
     let out = alloc_like(g_st, KtDType::BF16, shape)?;
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = device_stream_raw(g_st, "g_st")?;
+    let stream_submission = device_stream_submission(g_st, "g_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_fused_mlp_silu_mul_bf16(
@@ -600,10 +610,12 @@ pub fn fused_mlp_silu_mul_kt(gate: &KtTensor, up: &KtTensor) -> Result<KtTensor,
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-mlp-silu-mul: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(out)
 }
 
@@ -631,15 +643,18 @@ pub fn sgd_step_f32_kt(param: &KtTensor, grad: &KtTensor, lr: f32) -> Result<(),
     let g_ptr = kiln_kt_bridge::device_input_ptr(grad, KtDType::F32, "grad")?;
     let p_st = param;
 
-    let raw_stream = device_stream_raw(p_st, "p_st")?;
+    let stream_submission = device_stream_submission(p_st, "p_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status =
         unsafe { kiln_sgd_step_f32(p_ptr as *mut f32, g_ptr as *const f32, lr, n, raw_stream) };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-sgd-step: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(())
 }
 
@@ -685,7 +700,8 @@ pub fn adamw_step_f32_kt(
     let m2_ptr = kiln_kt_bridge::device_input_ptr(second_moment, KtDType::F32, "second_moment")?;
     let p_st = param;
 
-    let raw_stream = device_stream_raw(p_st, "p_st")?;
+    let stream_submission = device_stream_submission(p_st, "p_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_adamw_step_f32(
@@ -705,10 +721,12 @@ pub fn adamw_step_f32_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-adamw-step: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(())
 }
 
@@ -785,7 +803,8 @@ pub fn muon_step_f32_kt(
     let m_ptr = kiln_kt_bridge::device_input_ptr(momentum, KtDType::F32, "momentum")?;
     let p_st = param;
 
-    let raw_stream = device_stream_raw(p_st, "p_st")?;
+    let stream_submission = device_stream_submission(p_st, "p_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_muon_step_f32(
@@ -803,10 +822,12 @@ pub fn muon_step_f32_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-muon-step: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(())
 }
 
@@ -857,7 +878,8 @@ pub fn muon_step_bf16_kt(
     let m_ptr = kiln_kt_bridge::device_input_ptr(momentum, KtDType::BF16, "momentum")?;
     let p_st = param;
 
-    let raw_stream = device_stream_raw(p_st, "p_st")?;
+    let stream_submission = device_stream_submission(p_st, "p_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_muon_step_bf16(
@@ -875,10 +897,12 @@ pub fn muon_step_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-muon-step-bf16: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(())
 }
 
@@ -914,7 +938,8 @@ pub fn lora_decode_hidden_kt(x: &KtTensor, a: &KtTensor) -> Result<KtTensor, Rms
     let hidden = alloc_like(x_st, KtDType::F32, vec![batch, rank])?;
     let h_ptr = kiln_kt_bridge::device_output_ptr(&hidden);
 
-    let raw_stream = device_stream_raw(x_st, "x_st")?;
+    let stream_submission = device_stream_submission(x_st, "x_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_lora_decode_hidden_bf16(
@@ -928,10 +953,12 @@ pub fn lora_decode_hidden_kt(x: &KtTensor, a: &KtTensor) -> Result<KtTensor, Rms
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-lora-hidden: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(hidden)
 }
 
@@ -979,7 +1006,8 @@ pub fn lora_decode_add_kt(
     let out = alloc_like(base_st, KtDType::BF16, vec![batch, out_dim])?;
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = device_stream_raw(base_st, "base_st")?;
+    let stream_submission = device_stream_submission(base_st, "base_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_lora_decode_add_bf16(
@@ -995,10 +1023,12 @@ pub fn lora_decode_add_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-lora-add: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(out)
 }
 
@@ -1078,7 +1108,8 @@ pub fn fused_l2_qk_norm_kt(
     let qo_ptr = kiln_kt_bridge::device_output_ptr(&q_out);
     let ko_ptr = kiln_kt_bridge::device_output_ptr(&k_out);
 
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_fused_l2_qk_norm(
@@ -1094,10 +1125,12 @@ pub fn fused_l2_qk_norm_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-l2-qk-norm: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok((q_out, k_out))
 }
 
@@ -1148,7 +1181,8 @@ pub fn fused_l2_qk_norm_gqa_kt(
     let qo_ptr = kiln_kt_bridge::device_output_ptr(&q_out);
     let ko_ptr = kiln_kt_bridge::device_output_ptr(&k_out);
 
-    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    let stream_submission = device_stream_submission(q_st, "q_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_fused_l2_qk_norm_gqa(
@@ -1166,10 +1200,12 @@ pub fn fused_l2_qk_norm_gqa_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-l2-qk-norm-gqa: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok((q_out, k_out))
 }
 
@@ -1218,7 +1254,8 @@ pub fn fused_rotary_one_kt(
     let out = alloc_like(x_st, KtDType::BF16, vec![batch, seq_len, heads, head_dim])?;
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = device_stream_raw(x_st, "x_st")?;
+    let stream_submission = device_stream_submission(x_st, "x_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_fused_rotary_one(
@@ -1235,10 +1272,12 @@ pub fn fused_rotary_one_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-rotary-one: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(out)
 }
 
@@ -1271,7 +1310,8 @@ pub fn fused_sigmoid_mul_kt(x: &KtTensor, gate: &KtTensor) -> Result<KtTensor, R
     let out = alloc_like(x_st, KtDType::BF16, shape)?;
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = device_stream_raw(x_st, "x_st")?;
+    let stream_submission = device_stream_submission(x_st, "x_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_fused_sigmoid_mul_bf16(
@@ -1283,10 +1323,12 @@ pub fn fused_sigmoid_mul_kt(x: &KtTensor, gate: &KtTensor) -> Result<KtTensor, R
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-sigmoid-mul: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(out)
 }
 
@@ -1358,7 +1400,8 @@ pub fn attn_decode_qkv_split_qk_norm_rope_kt(
         .map(|go| kiln_kt_bridge::device_output_ptr(go) as *mut _)
         .unwrap_or(core::ptr::null_mut());
 
-    let raw_stream = device_stream_raw(qr_st, "qr_st")?;
+    let stream_submission = device_stream_submission(qr_st, "qr_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_attn_decode_qkv_split_qk_norm_rope_bf16(
@@ -1382,10 +1425,12 @@ pub fn attn_decode_qkv_split_qk_norm_rope_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-attn-decode-prep: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok((q_out, k_out, gate_out))
 }
 
@@ -1432,7 +1477,8 @@ pub fn causal_depthwise_conv1d_kt(
     let out = alloc_like(i_st, KtDType::F32, vec![rows, channels])?;
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = device_stream_raw(i_st, "i_st")?;
+    let stream_submission = device_stream_submission(i_st, "i_st")?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_causal_depthwise_conv1d_f32(
             i_ptr as *const f32,
@@ -1446,10 +1492,12 @@ pub fn causal_depthwise_conv1d_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-depth-conv1d: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(out)
 }
 
@@ -1486,7 +1534,8 @@ pub fn causal_depthwise_conv1d_inplace_kt(
     let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
     let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::F32, "state")?;
     let i_st = input_out;
-    let raw_stream = device_stream_raw(i_st, "i_st")?;
+    let stream_submission = device_stream_submission(i_st, "i_st")?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_causal_depthwise_conv1d_inplace_f32(
             i_ptr as *mut f32,
@@ -1499,10 +1548,12 @@ pub fn causal_depthwise_conv1d_inplace_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-depth-conv1d-inplace: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(())
 }
 
@@ -1530,7 +1581,8 @@ pub fn causal_depthwise_conv1d_bwd_input_kt(
     let g_st = grad_out;
     let gi = alloc_like(g_st, KtDType::F32, vec![rows, channels])?;
     let gi_ptr = kiln_kt_bridge::device_output_ptr(&gi);
-    let raw_stream = device_stream_raw(g_st, "g_st")?;
+    let stream_submission = device_stream_submission(g_st, "g_st")?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_causal_depthwise_conv1d_bwd_input_f32(
             g_ptr as *const f32,
@@ -1543,10 +1595,12 @@ pub fn causal_depthwise_conv1d_bwd_input_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-depth-conv1d-bwd-input: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(gi)
 }
 
@@ -1583,7 +1637,8 @@ pub fn causal_depthwise_conv1d_bwd_weight_kt(
     let g_st = grad_out;
     let gw = alloc_like(g_st, KtDType::F32, vec![channels, kernel])?;
     let gw_ptr = kiln_kt_bridge::device_output_ptr(&gw);
-    let raw_stream = device_stream_raw(g_st, "g_st")?;
+    let stream_submission = device_stream_submission(g_st, "g_st")?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_causal_depthwise_conv1d_bwd_weight_f32(
             g_ptr as *const f32,
@@ -1597,10 +1652,12 @@ pub fn causal_depthwise_conv1d_bwd_weight_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-depth-conv1d-bwd-weight: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(gw)
 }
 
@@ -1628,7 +1685,8 @@ pub fn causal_depthwise_conv1d_bwd_state_kt(
     let g_st = grad_out;
     let gs = alloc_like(g_st, KtDType::F32, vec![channels, kernel - 1])?;
     let gs_ptr = kiln_kt_bridge::device_output_ptr(&gs);
-    let raw_stream = device_stream_raw(g_st, "g_st")?;
+    let stream_submission = device_stream_submission(g_st, "g_st")?;
+    let raw_stream = stream_submission.raw_stream();
     let status = unsafe {
         kiln_causal_depthwise_conv1d_bwd_state_f32(
             g_ptr as *const f32,
@@ -1641,10 +1699,12 @@ pub fn causal_depthwise_conv1d_bwd_state_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-depth-conv1d-bwd-state: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(gs)
 }
 
@@ -1669,15 +1729,18 @@ pub fn f32_to_bf16_kt(src: &KtTensor) -> Result<KtTensor, RmsNormError> {
     let out = alloc_like(s_st, KtDType::BF16, shape)?;
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = device_stream_raw(s_st, "s_st")?;
+    let stream_submission = device_stream_submission(s_st, "s_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status =
         unsafe { kiln_f32_to_bf16(s_ptr as *const f32, o_ptr as *mut _, n as i32, raw_stream) };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-f32-to-bf16: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(out)
 }
 
@@ -1698,15 +1761,18 @@ pub fn sgd_step_bf16_kt(param: &KtTensor, grad: &KtTensor, lr: f32) -> Result<()
     let g_ptr = kiln_kt_bridge::device_input_ptr(grad, KtDType::BF16, "grad")?;
     let p_st = param;
 
-    let raw_stream = device_stream_raw(p_st, "p_st")?;
+    let stream_submission = device_stream_submission(p_st, "p_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status =
         unsafe { kiln_sgd_step_bf16(p_ptr as *mut _, g_ptr as *const _, lr, n, raw_stream) };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-sgd-step-bf16: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(())
 }
 
@@ -1749,7 +1815,8 @@ pub fn adamw_step_bf16_kt(
     let m2_ptr = kiln_kt_bridge::device_input_ptr(second_moment, KtDType::BF16, "second_moment")?;
     let p_st = param;
 
-    let raw_stream = device_stream_raw(p_st, "p_st")?;
+    let stream_submission = device_stream_submission(p_st, "p_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_adamw_step_bf16(
@@ -1769,10 +1836,12 @@ pub fn adamw_step_bf16_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-adamw-step-bf16: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(())
 }
 
@@ -1819,7 +1888,8 @@ pub fn fused_rotary_one_bwd_kt(
     let out = alloc_like(y_st, KtDType::BF16, vec![batch, seq_len, heads, head_dim])?;
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = device_stream_raw(y_st, "y_st")?;
+    let stream_submission = device_stream_submission(y_st, "y_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_fused_rotary_one_bwd(
@@ -1836,10 +1906,12 @@ pub fn fused_rotary_one_bwd_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-rotary-one-bwd: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(out)
 }
 
@@ -1871,7 +1943,8 @@ pub fn fused_mlp_silu_mul_packed_kt(
     }
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = device_stream_raw(gu_st, "gu_st")?;
+    let stream_submission = device_stream_submission(gu_st, "gu_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_fused_mlp_silu_mul_packed_bf16(
@@ -1883,10 +1956,12 @@ pub fn fused_mlp_silu_mul_packed_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-mlp-packed: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(out)
 }
 
@@ -1941,7 +2016,8 @@ pub fn lora_add_inplace_f32_kt(
     let b_ptr = kiln_kt_bridge::device_input_ptr(b, KtDType::F32, "b")?;
     let base_st = base;
 
-    let raw_stream = device_stream_raw(base_st, "base_st")?;
+    let stream_submission = device_stream_submission(base_st, "base_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_lora_add_inplace_f32(
@@ -1956,10 +2032,12 @@ pub fn lora_add_inplace_f32_kt(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-lora-add: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(())
 }
 
@@ -1993,16 +2071,19 @@ pub fn silu_inplace_save_sigmoid_f32_kt(
     let s_ptr = kiln_kt_bridge::device_input_ptr(sigmoid_out, KtDType::F32, "sigmoid_out")?;
     let i_st = input_out;
 
-    let raw_stream = device_stream_raw(i_st, "i_st")?;
+    let stream_submission = device_stream_submission(i_st, "i_st")?;
+    let raw_stream = stream_submission.raw_stream();
 
     let status = unsafe {
         kiln_silu_inplace_save_sigmoid_f32(i_ptr as *mut f32, s_ptr as *mut f32, elems, raw_stream)
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(RmsNormError::Msg(format!(
             "kt-silu-save: FFI returned {status}"
         )));
     }
+    stream_submission.complete();
     Ok(())
 }
 

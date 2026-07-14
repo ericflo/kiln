@@ -108,6 +108,13 @@ impl RocmCaptureArena {
         self.bufs.len()
     }
 
+    /// Borrow the owned buffers recorded so far without changing arena mode or
+    /// cursor state. Capture admission uses this after the warm pass to reserve
+    /// the exact requested physical bytes before native stream capture begins.
+    pub fn retained_buffers(&self) -> impl ExactSizeIterator<Item = &Arc<RocmStorage>> {
+        self.bufs.iter().map(|buf| &buf.storage)
+    }
+
     /// Allocate (`Record`) or hand out (`Replay`) a buffer, returning a
     /// Borrowed [`RocmStorage`] view into an arena-owned allocation.
     fn alloc(&mut self, dtype: DType, n_elements: usize, zero: bool) -> Result<RocmStorage> {

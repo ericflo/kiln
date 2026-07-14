@@ -127,6 +127,11 @@ rocm_graph_mode = "profile"           # profile | disabled | warmup_then_eager |
 rocm_graph_cache_entries = 8          # Bounded retained native graph entries, 1..=64. Override
                                       # with KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES; historical
                                       # KILN_ROCM_GRAPH_CACHE_MAX is a deprecated startup alias.
+rocm_graph_cache_max_bytes = 1073741824 # Independent 1 GiB retained-device-byte budget; valid
+                                      # range is 64 MiB..=16 GiB. Counts graph-stable tensors,
+                                      # capture arenas, private-stream hipBLASLt workspaces, and
+                                      # persistent owner state. Override with the mechanically
+                                      # derived KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES.
 
 [batching]
 mode = "auto"                         # auto | enabled | disabled. Auto preserves the active

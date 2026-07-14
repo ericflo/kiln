@@ -222,7 +222,8 @@ pub fn rocm_paged_gather_index(
     let n = b * seqlen_k;
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::U32, n)?;
 
-    let raw_stream = bt_storage.rocm_stream_raw()?;
+    let stream_submission = bt_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (bt_base, _) = bt_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
 
@@ -238,10 +239,12 @@ pub fn rocm_paged_gather_index(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_paged_gather_index: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(vec![n]), TensorId::next())
@@ -350,7 +353,8 @@ pub fn rocm_paged_gather_rows(
     let n_out = b * seqlen_k * hk * d;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n_out)?;
 
-    let raw_stream = pool_storage.rocm_stream_raw()?;
+    let stream_submission = pool_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (pool_base, _) = pool_storage.device_ptr_raw();
     let (bt_base, _) = bt_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
@@ -375,10 +379,12 @@ pub fn rocm_paged_gather_rows(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_paged_gather_rows: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(
@@ -444,7 +450,8 @@ pub fn rocm_gqa_repeat_heads(src: &Tensor, h: usize) -> Result<Tensor> {
     let n_out = b * sk * h * d;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n_out)?;
 
-    let raw_stream = src_storage.rocm_stream_raw()?;
+    let stream_submission = src_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (src_base, _) = src_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let src_off = (src_c.layout().start_offset() * elem_bytes) as u64;
@@ -463,10 +470,12 @@ pub fn rocm_gqa_repeat_heads(src: &Tensor, h: usize) -> Result<Tensor> {
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_gqa_repeat_heads: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
     crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
         &ctx,
         &[src_storage],
@@ -541,7 +550,8 @@ pub fn rocm_gqa_repeat_heads_head_major(src: &Tensor, h: usize) -> Result<Tensor
     let n_out = b * h * sk * d;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n_out)?;
 
-    let raw_stream = src_storage.rocm_stream_raw()?;
+    let stream_submission = src_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (src_base, _) = src_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
     let src_off = (src_c.layout().start_offset() * elem_bytes) as u64;
@@ -560,10 +570,12 @@ pub fn rocm_gqa_repeat_heads_head_major(src: &Tensor, h: usize) -> Result<Tensor
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_gqa_repeat_heads_head_major: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
     crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
         &ctx,
         &[src_storage],
@@ -760,12 +772,19 @@ pub fn rocm_paged_attn_decode_bf16(
     let group = h / hk;
     let use_gqa4 =
         (2..=4).contains(&group) && std::env::var("KILN_DISABLE_ROCM_GQA_PAGED_ATTN").is_err();
-    let status = if split_count > 1 {
+    let partial_buffers = if split_count > 1 {
         let partials = b * h * split_count;
-        let partial_m = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials)?;
-        let partial_l = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials)?;
-        let partial_acc =
-            RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials * d)?;
+        Some((
+            RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials)?,
+            RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials)?,
+            RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials * d)?,
+        ))
+    } else {
+        None
+    };
+    let stream_submission = q_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
+    let status = if let Some((partial_m, partial_l, partial_acc)) = partial_buffers.as_ref() {
         let (partial_m_base, _) = partial_m.device_ptr_raw();
         let (partial_l_base, _) = partial_l.device_ptr_raw();
         let (partial_acc_base, _) = partial_acc.device_ptr_raw();
@@ -791,7 +810,7 @@ pub fn rocm_paged_attn_decode_bf16(
                     pool_rows as i64,
                     split_count as i64,
                     scale,
-                    q_storage.rocm_stream_raw()?,
+                    raw_stream,
                 )
             }
         } else {
@@ -816,7 +835,7 @@ pub fn rocm_paged_attn_decode_bf16(
                     pool_rows as i64,
                     split_count as i64,
                     scale,
-                    q_storage.rocm_stream_raw()?,
+                    raw_stream,
                 )
             }
         }
@@ -838,7 +857,7 @@ pub fn rocm_paged_attn_decode_bf16(
                 page_block_size as i64,
                 pool_rows as i64,
                 scale,
-                q_storage.rocm_stream_raw()?,
+                raw_stream,
             )
         }
     } else {
@@ -859,15 +878,17 @@ pub fn rocm_paged_attn_decode_bf16(
                 page_block_size as i64,
                 pool_rows as i64,
                 scale,
-                q_storage.rocm_stream_raw()?,
+                raw_stream,
             )
         }
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_paged_attn_decode_bf16: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(
@@ -908,7 +929,8 @@ pub fn rocm_build_tail_mask(seqused_k: &Tensor, b: usize, h: usize, sk: usize) -
     let n = b * h * sk;
     let out_storage = RocmStorage::zeros_ctx(&ctx, device_index, DType::U8, n)?;
 
-    let raw_stream = su_storage.rocm_stream_raw()?;
+    let stream_submission = su_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (su_base, _) = su_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
 
@@ -923,10 +945,12 @@ pub fn rocm_build_tail_mask(seqused_k: &Tensor, b: usize, h: usize, sk: usize) -
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_build_tail_mask: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(

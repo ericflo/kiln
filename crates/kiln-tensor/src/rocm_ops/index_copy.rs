@@ -101,7 +101,8 @@ pub fn rocm_index_copy_dim0(dst: &Tensor, indices: &Tensor, src: &Tensor) -> Res
             Error::Msg("rocm_index_copy_dim0: indices must be ROCm storage".to_string())
         })?;
 
-    let raw_stream = dst_storage.rocm_stream_raw()?;
+    let stream_submission = dst_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
     let (dst_base, _) = dst_storage.device_ptr_raw();
     let (src_base, _) = src_storage.device_ptr_raw();
     let (idx_base, _) = idx_storage.device_ptr_raw();
@@ -127,9 +128,11 @@ pub fn rocm_index_copy_dim0(dst: &Tensor, indices: &Tensor, src: &Tensor) -> Res
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_index_copy_dim0: kiln_index_copy_dim0_async returned status {status}"
         )));
     }
+    stream_submission.complete();
     Ok(())
 }

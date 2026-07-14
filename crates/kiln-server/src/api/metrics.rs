@@ -16,6 +16,7 @@ use kiln_train::TrainingState;
 
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     let rocm_synchronization = state.observe_rocm_runtime_health();
+    let rocm_graph_observation = crate::rocm_graph_observability::observe_rocm_graphs(&state);
     // Snapshot scheduler gauges.
     let (
         scheduler_waiting,
@@ -115,6 +116,11 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
             .effective
             .as_str(),
         rocm_synchronization,
+        rocm_graph: rocm_graph_observation.stats,
+        rocm_graph_unavailable_reason: rocm_graph_observation.stats_unavailable_reason,
+        rocm_graph_telemetry: rocm_graph_observation.telemetry,
+        rocm_graph_telemetry_unavailable_reason: rocm_graph_observation
+            .telemetry_unavailable_reason,
         scheduler_waiting,
         scheduler_running,
         blocks_used,

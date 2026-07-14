@@ -1730,6 +1730,7 @@ async function pollHealth() {
     if (ub) ub.hidden = true;
     renderHeader(h);
     renderServerStatus(h);
+    updateRuntimeGraphLive(h);
     updateFlywheel();
     // Cold-start follow-up: /v1/models may have failed (or listed nothing)
     // while weights loaded, leaving the fallback model id baked into the
@@ -1865,8 +1866,9 @@ function renderServerStatus(h) {
    overwrites it wholesale), so anything rendered inside it is destroyed
    by the 2s poll — exactly how the VRAM donut used to vanish. Out here
    the open state and the rendered content survive repaints by
-   construction. Fetched once per open (no poll loop); Refresh re-fetches;
-   failures render a quiet retry line and never throw.
+   construction. Policy is fetched once per open; the existing health poll
+   refreshes only the graph live/current-phase values. Refresh re-fetches the
+   full contract; failures render a quiet retry line and never throw.
    ===================================================================== */
 let runtimeConfigLoaded = false;
 let runtimeConfigRenderSeq = 0;
@@ -1918,6 +1920,48 @@ function runtimeConfigFailureHtml(error) {
     <div class="rc-actions"><button class="btn btn-sm" type="button" data-rc-refresh>Retry</button></div>`;
 }
 
+function graphUnavailableLabel(reason) {
+  return typeof reason === 'string' && reason.includes('busy') ? 'busy' : 'unavailable';
+}
+
+function graphReasonChip(reason) {
+  return reason
+    ? ` <span class="rc-source" title="${escapeHtml(`Closed missing-data reason: ${reason}.`)}">${escapeHtml(String(reason).replaceAll('_', ' '))}</span>`
+    : '';
+}
+
+function updateRuntimeGraphLive(health) {
+  const graph = health?.decode_runtime?.rocm_graphs;
+  if (!graph || typeof graph !== 'object') return;
+
+  const live = document.getElementById('runtime-graph-live-value');
+  if (live) {
+    const state = typeof graph.state === 'string'
+      ? graph.state
+      : graphUnavailableLabel(graph.unavailable_reason);
+    const armed = graph.capture_enabled === true
+      ? ' <span class="rc-source" title="Native capture and replay remain armed.">capture armed</span>'
+      : '';
+    live.innerHTML = `<strong>${escapeHtml(state)}</strong>${graphReasonChip(graph.unavailable_reason)}${armed}`;
+  }
+
+  const current = document.getElementById('runtime-graph-current-phase-value');
+  if (current) {
+    const available = graph.phase_telemetry_available === true;
+    const phase = available
+      ? typeof graph.current_phase === 'string'
+        ? graph.current_phase.replaceAll('_', ' ')
+        : 'idle'
+      : graphUnavailableLabel(graph.phase_telemetry_unavailable_reason);
+    const elapsed = available
+      && graph.current_phase != null
+      && Number.isFinite(graph.current_phase_elapsed_micros)
+      ? ` <span class="rc-source" title="Monotonic time spent in the currently active graph lifecycle phase.">${escapeHtml(fmtMsShort(graph.current_phase_elapsed_micros / 1000))}</span>`
+      : '';
+    current.innerHTML = `<strong>${escapeHtml(phase)}</strong>${elapsed}${graphReasonChip(graph.phase_telemetry_unavailable_reason)}`;
+  }
+}
+
 // Renders the operational subset of /v1/config (shape: api/config.rs
 // ConfigResponse) plus a raw pretty-printed JSON toggle so diagnostics that
 // do not belong in the compact summary remain available.
@@ -1929,6 +1973,12 @@ function renderRuntimeConfigBody(cfg) {
   const rocmSynchronization = acceleratorRuntime.rocm_synchronization_mode || {};
   const rocmGraphMode = acceleratorRuntime.rocm_graph_mode || {};
   const rocmGraphCache = acceleratorRuntime.rocm_graph_cache_entries || {};
+  const rocmGraphBudget = acceleratorRuntime.rocm_graph_cache_max_bytes || {};
+  const rocmGraphs = cfg.rocm_graphs || {};
+  const rocmGraphUnavailableReason = cfg.rocm_graphs_unavailable_reason;
+  const rocmGraphTelemetry = cfg.rocm_graph_telemetry || {};
+  const rocmGraphTelemetryUnavailableReason = cfg.rocm_graph_telemetry_unavailable_reason;
+  const rocmGraphFallbacks = rocmGraphs.fallbacks || {};
   const kv = cfg.kv_cache || {};
   const train = cfg.training || {};
   const b = cfg.memory_budget || {};
@@ -1962,6 +2012,45 @@ function renderRuntimeConfigBody(cfg) {
   const availableState = v => v === true ? 'available' : v === false ? 'unavailable' : '—';
   const hasOwn = (object, field) => Object.prototype.hasOwnProperty.call(object, field);
   const num = v => (typeof v === 'number' && isFinite(v)) ? v.toLocaleString() : '—';
+  const closedSum = (object, fields) => fields.every(field => Number.isFinite(object[field]))
+    ? fields.reduce((total, field) => total + object[field], 0)
+    : null;
+  const graphPostCaptureRejections = closedSum(rocmGraphs, [
+    'entry_capacity_rejections',
+    'byte_budget_rejections',
+    'accounting_incomplete_rejections',
+  ]);
+  const graphPreCaptureSkips = closedSum(rocmGraphs, [
+    'pre_capture_entry_capacity_skips',
+    'pre_capture_byte_budget_skips',
+    'pre_capture_accounting_incomplete_skips',
+    'pre_capture_memory_reservation_denied_skips',
+    'memory_governor_selector_mismatch_skips',
+  ]);
+  const graphPreCandidateHeadroom = rocmGraphTelemetry.pre_candidate_headroom_phase || {};
+  const graphCandidateWarm = rocmGraphTelemetry.candidate_warm_phase || {};
+  const graphPreNativeReservation = rocmGraphTelemetry.pre_native_reservation_phase || {};
+  const graphNativeCapture = rocmGraphTelemetry.native_capture_phase || {};
+  const graphRejectedCandidateCleanup = rocmGraphTelemetry.rejected_candidate_cleanup_phase || {};
+  const graphLiveState = cfg.rocm_graphs == null
+    ? graphUnavailableLabel(rocmGraphUnavailableReason)
+    : enabledState(rocmGraphs.enabled);
+  const graphCurrentPhase = typeof rocmGraphTelemetry.current_phase === 'string'
+    ? rocmGraphTelemetry.current_phase.replaceAll('_', ' ')
+    : cfg.rocm_graph_telemetry == null ? graphUnavailableLabel(rocmGraphTelemetryUnavailableReason) : 'idle';
+  const graphCurrentPhaseElapsed = Number.isFinite(rocmGraphTelemetry.current_phase_elapsed_micros)
+    && rocmGraphTelemetry.current_phase != null
+    ? flagChip(
+      fmtMsShort(rocmGraphTelemetry.current_phase_elapsed_micros / 1000),
+      'Monotonic time spent in the currently active graph lifecycle phase.',
+    )
+    : '';
+  const graphPhaseMax = phase => Number.isFinite(phase.max_duration_micros)
+    ? fmtMsShort(phase.max_duration_micros / 1000)
+    : '—';
+  const graphPhaseSlowChip = (phase, label) => Number.isFinite(phase.slow) && phase.slow > 0
+    ? flagChip(`${num(phase.slow)} ${label} slow`, `${label} phase calls taking at least 100 ms.`)
+    : '';
   const autoNumber = (object, field, suffix = '') => {
     if (!hasOwn(object, field)) return '—';
     const value = object[field];
@@ -2159,6 +2248,20 @@ function renderRuntimeConfigBody(cfg) {
         ${runtimeConfigRow('Graph configured', `<strong>${escapeHtml(rocmGraphMode.configured || '—')}</strong>${srcChip(rocmGraphMode.source)}`, 'Configured graph lifecycle before serving-profile resolution.')}
         ${runtimeConfigRow('Graph effective', `<strong>${escapeHtml(rocmGraphMode.effective || '—')}</strong>`, 'Effective immutable graph lifecycle. Stable and maintenance profiles resolve profile mode to disabled.')}
         ${runtimeConfigRow('Graph cache', `<strong>${num(rocmGraphCache.effective)}</strong>${srcChip(rocmGraphCache.source)}`, 'Bounded number of retained ROCm graph entries; valid range 1 through 64.')}
+        ${runtimeConfigRow('Graph byte budget', `<strong>${Number.isFinite(rocmGraphBudget.effective) ? fmtBytes(rocmGraphBudget.effective) : '—'}</strong>${srcChip(rocmGraphBudget.source)}`, 'Bounded requested physical bytes retained by graph-owned tensors, capture arenas, workspaces, and owner state; opaque HIP object overhead is reported separately.')}
+        ${runtimeConfigRow('Graph live', `<span id="runtime-graph-live-value"><strong>${escapeHtml(graphLiveState)}</strong>${graphReasonChip(rocmGraphUnavailableReason)}${rocmGraphs.capture_enabled === true ? flagChip('capture armed', 'Native capture and replay remain armed.') : ''}</span>`, 'Live graph-runner state. Failed or unclassified physical settlement quarantines the circuit breaker until restart; an acknowledged capture rollback may continue in eager mode.')}
+        ${runtimeConfigRow('Graph current phase', `<span id="runtime-graph-current-phase-value"><strong>${escapeHtml(graphCurrentPhase)}</strong>${graphCurrentPhaseElapsed}${graphReasonChip(rocmGraphTelemetryUnavailableReason)}</span>`, 'Live attribution independent of the model and graph-runner locks for graph headroom checks, candidate preparation, native publication, and rejected-candidate cleanup.')}
+        ${runtimeConfigRow('Graph retained', `<strong>${Number.isFinite(rocmGraphs.retained_bytes) ? fmtBytes(rocmGraphs.retained_bytes) : '—'}</strong>${Number.isFinite(rocmGraphs.peak_retained_bytes) ? flagChip(`peak ${fmtBytes(rocmGraphs.peak_retained_bytes)}`, 'Highest deduplicated retained-byte measurement after admission.') : ''}`, 'Deduplicated requested physical bytes held by stable tensors, capture arenas, private-stream workspaces, and owner state.')}
+        ${runtimeConfigRow('Graph entries live', `<strong>${num(rocmGraphs.captured_graph_count)} / ${num(rocmGraphs.max_cached_graphs)}</strong>`, 'Current retained native graph entries and the installed entry limit.')}
+        ${runtimeConfigRow('Graph slots', `<strong>${num(rocmGraphs.active_graph_slot_count)} active · ${num(rocmGraphs.idle_graph_slot_count)} idle</strong>`, 'Persistent recurrent and convolution state slots. Active graphless slots remain byte-accounted until their decode row is released.')}
+        ${runtimeConfigRow('Graph accounting', `<strong>${rocmGraphs.retained_bytes_accounting_complete === true ? 'exact' : rocmGraphs.retained_bytes_accounting_complete === false ? 'incomplete' : '—'}</strong>${Number.isFinite(rocmGraphs.opaque_native_object_count) ? flagChip(`${num(rocmGraphs.opaque_native_object_count)} opaque`, 'HIP graph, executable, stream, and event object sizes are not queryable from the driver.') : ''}`, 'Exact means every retained tensor mapped to physical ROCm allocation metadata.')}
+        ${runtimeConfigRow('Graph transient', `<strong>${Number.isFinite(rocmGraphTelemetry.last_transient_candidate_bytes) ? fmtBytes(rocmGraphTelemetry.last_transient_candidate_bytes) : '—'}</strong>${Number.isFinite(rocmGraphTelemetry.peak_transient_candidate_bytes) ? flagChip(`peak ${fmtBytes(rocmGraphTelemetry.peak_transient_candidate_bytes)}`, 'Largest exact pre-admission candidate measured after its settled warm pass.') : ''}`, 'Exact requested physical bytes in the latest graph candidate before cache admission, excluding already owned recurrent slot state.')}
+        ${runtimeConfigRow('Graph headroom latency', `<strong>max ${graphPhaseMax(graphPreCandidateHeadroom)}</strong>${graphPhaseSlowChip(graphPreCandidateHeadroom, 'headroom')}`, 'Longest observed matching-device governor check and safely settled idle-owner reclamation before candidate allocation.')}
+        ${runtimeConfigRow('Graph prepare latency', `<strong>warm ${graphPhaseMax(graphCandidateWarm)} · reserve ${graphPhaseMax(graphPreNativeReservation)}</strong>${graphPhaseSlowChip(graphCandidateWarm, 'warm')}${graphPhaseSlowChip(graphPreNativeReservation, 'reserve')}`, 'Longest observed candidate allocation and settled warm pass, followed by exact accounting, pressure reconciliation, reservation, and any pre-native cleanup.')}
+        ${runtimeConfigRow('Graph native latency', `<strong>capture ${graphPhaseMax(graphNativeCapture)} · cleanup ${graphPhaseMax(graphRejectedCandidateCleanup)}</strong>${graphPhaseSlowChip(graphNativeCapture, 'capture')}${graphPhaseSlowChip(graphRejectedCandidateCleanup, 'cleanup')}`, 'Longest observed native capture through settled first launch, defensive cache admission and publication, and committed governor debit; cleanup covers settled rejected candidates.')}
+        ${runtimeConfigRow('Graph cache actions', `<strong>${num(rocmGraphs.cache_admission_successes)} admitted · ${num(rocmGraphs.cache_evictions)} evicted</strong>${graphPostCaptureRejections == null ? '' : flagChip(`${num(graphPostCaptureRejections)} post-capture rejected`, 'Successfully launched candidates rejected by exact entry, byte, or accounting admission.')}`, 'Lifetime cache admissions, safely settled evictions, and post-capture admission rejections.')}
+        ${runtimeConfigRow('Graph capture skips', `<strong>${num(graphPreCaptureSkips)}</strong>${Number.isFinite(rocmGraphs.pre_capture_accounting_incomplete_skips) && rocmGraphs.pre_capture_accounting_incomplete_skips > 0 ? flagChip(`${num(rocmGraphs.pre_capture_accounting_incomplete_skips)} accounting`, 'Capture was skipped because exact retained-allocation accounting could not be completed.') : ''}${Number.isFinite(rocmGraphs.pre_capture_memory_reservation_denied_skips) && rocmGraphs.pre_capture_memory_reservation_denied_skips > 0 ? flagChip(`${num(rocmGraphs.pre_capture_memory_reservation_denied_skips)} governor`, 'The process-wide memory governor denied transient candidate headroom.') : ''}${Number.isFinite(rocmGraphs.memory_governor_selector_mismatch_skips) && rocmGraphs.memory_governor_selector_mismatch_skips > 0 ? flagChip(`${num(rocmGraphs.memory_governor_selector_mismatch_skips)} device mismatch`, 'The process-wide governor was observing a different accelerator, so graph growth failed closed.') : ''}`, 'Candidates declined before native capture by entry capacity, retained-byte budget, incomplete accounting, global reservation denial, or governor device mismatch.')}
+        ${runtimeConfigRow('Graph fallbacks', `<strong>${num(rocmGraphFallbacks.total)}</strong>${Number.isFinite(rocmGraphFallbacks.slow) ? flagChip(`${num(rocmGraphFallbacks.slow)} slow`, 'Fallbacks taking at least 100 ms end to end.') : ''}${Number.isFinite(rocmGraphFallbacks.max_duration_micros) ? flagChip(`max ${fmtMsShort(rocmGraphFallbacks.max_duration_micros / 1000)}`, 'Longest observed end-to-end eager graph fallback.') : ''}`, 'Closed-reason eager fallbacks and their observed pause envelope.')}
       </div>
       <div class="rc-group">
         <div class="rc-group-title">KV cache</div>
@@ -2289,6 +2392,7 @@ async function loadRuntimeConfig(force = false) {
     if (seq !== runtimeConfigRenderSeq) return; // superseded by a newer refresh
     runtimeConfigLoaded = true;
     body.innerHTML = renderRuntimeConfigBody(cfg);
+    updateRuntimeGraphLive(lastHealth);
   } catch (e) {
     if (seq !== runtimeConfigRenderSeq) return;
     runtimeConfigLoaded = false; // the next open retries automatically

@@ -108,18 +108,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 89 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 90 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 89 fixed fields:
+credential. Of the 90 fixed fields:
 
-- 81 implement the canonical mechanical environment name;
+- 82 implement the canonical mechanical environment name;
 - 58 also retain one or more deprecated compatibility spellings (61 aliases
   total);
 - 8 are config-file-only and have no environment override;
 - the 61 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 89 fixed fields and both dynamic credential fields.
+The tables below cover all 90 fixed fields and both dynamic credential fields.
 
 ## `[server]`
 
@@ -165,7 +165,7 @@ disabled.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v1`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v2`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
 dashboard all report the same configured/effective/source values; lower model,
 tensor, and kernel paths do not re-read these public environment names.
@@ -175,6 +175,7 @@ tensor, and kernel paths do not re-read these public environment names.
 | `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
 | `accelerator.rocm_graph_mode` | string enum; `"profile"` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` (implemented) | `KILN_ROCM_GRAPHS` and `KILN_ROCM_GRAPH_CAPTURE` (deprecated compatibility) | `profile`, `disabled`, `warmup_then_eager`, or `lazy_capture_replay`, case-insensitive. `profile` resolves to `disabled` under stable/maintenance and `lazy_capture_replay` under experimental. The two explicit non-disabled modes require the experimental profile. Restart required. |
 | `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | `KILN_ROCM_GRAPH_CACHE_MAX` (deprecated compatibility) | `1..=64`. Bounds retained native graph entries in every product and embedding constructor; zero or unbounded capacities are rejected. Restart required. |
+| `accelerator.rocm_graph_cache_max_bytes` | unsigned integer bytes; `1073741824` (1 GiB) | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` (implemented) | none | `67108864..=17179869184` (64 MiB through 16 GiB). Independently bounds requested physical bytes retained by graph-owned stable tensors, capture arenas, private-stream hipBLASLt workspaces, and owner slot state. Opaque HIP graph/exec/stream/event overhead is counted as objects and remains subject to live driver-pressure policy. Restart required. |
 
 ### ROCm synchronization semantics
 
@@ -199,7 +200,7 @@ for a different policy on the same device receives a startup error naming the
 already-installed and requested policies. This prevents two model/runtime
 owners from silently mixing synchronization disciplines.
 
-Synchronization telemetry has 22 fixed reason values. `/health` reports device
+Synchronization telemetry has 23 fixed reason values. `/health` reports device
 wait count, stream wait count, waited nanoseconds, and skipped count for every
 reason under `decode_runtime.rocm_synchronization`. The same object exposes
 `cleanup_quarantined`: when true, a fatal execution or synchronization failure
@@ -223,6 +224,16 @@ unless `kiln_rocm_synchronization_telemetry_available` is `1`.
 Reading these surfaces loads atomics only; it never synchronizes the device or
 probes the driver.
 
+`capture_rollback` and `error_recovery` are deliberately different reasons.
+After a native capture error, `capture_rollback` may settle the device while
+execution admission remains open; eager continuation is allowed only after the
+runner also proves that its logical recurrent state was restored. A settlement
+failure, a logical-rollback failure, or an armed/unclassified capture guard
+leaving scope publishes the process-lifetime STOP state first, then uses
+`error_recovery` only as a diagnostic drain. That fatal path remains
+cleanup-quarantined even if the later drain succeeds and always requires a
+process restart.
+
 Stream-ordered mode is not promoted by configuration alone. Qualify legacy and
 stream-ordered runs on the same source tree using token/logit parity,
 throughput at concurrency 1/8/16/32/64, p50/p95/p99/max inter-token latency,
@@ -240,6 +251,121 @@ default.
 - `profile` is the recommended default because the serving profile remains the
   authority: stable and maintenance stay eager, while experimental selects
   lazy capture/replay.
+
+Entry count and retained bytes are independent hard limits. Byte accounting
+deduplicates physical ROCm allocations by device pointer, counts graph-stable
+I/O, freeze-pointer capture arenas, each private stream's actual hipBLASLt
+workspace, and persistent recurrent/conv slot state once per owner. Health,
+trusted debug, and Prometheus split those categories and report peak bytes,
+evictions, admission rejections, and the number of opaque HIP graph, exec,
+stream, and event objects. The byte budget deliberately does not pretend that
+HIP exposes the allocator overhead of those opaque objects; live driver memory
+pressure remains a separate complementary signal.
+
+Before native capture, the runner reclaims eligible idle owners at entry/byte
+saturation, performs one settled warm Record pass, measures the candidate's
+exact queryable allocation identities, rechecks matching-device pressure, and
+atomically reserves global governor headroom. Native capture begins only after
+that sequence admits it. A governor device-selector mismatch fails closed rather
+than consuming another accelerator's headroom. The Record pass necessarily
+allocates the candidate before its exact size is knowable. Phase telemetry
+independent of the model and graph-runner locks plus last/peak
+transient-candidate bytes make that residual exposure observable. A candidate
+that alone exceeds the byte budget or cannot
+be accounted exactly makes its geometry non-capture-safe for this runner.
+Aggregate byte-budget suppression clears after ownership or budget relief;
+global-reservation denial retries after the matching device reports enough
+cached headroom. A selector mismatch remains fail-closed rather than consuming
+another accelerator's budget. None repeats a full warm pass on every token.
+
+Ordinary budget eviction is deterministic least-recently-used eviction of
+idle owners as a unit, including every graph for the owner and its retained
+slot state. It never evicts an active owner merely to admit another graph.
+Moderate pressure permits retained replay but blocks cache growth. Tight
+pressure additionally reclaims eligible idle owners while preserving an active
+cache hit. Critical or unavailable pressure disables replay,
+reclaims all graphs only after device settlement, and uses eager execution only
+if both pre-drop and post-drop settlement prove cleanup safe. A destructor,
+async-free, or settlement failure activates the process-lifetime device
+quarantine; no reclaimed-byte success is reported and no eager retry follows.
+
+### ROCm graph observability contract
+
+`GET /v1/config` and trusted `GET /v1/debug/model-state` expose two independent
+live values and a reason beside each one:
+
+- `rocm_graphs` is the nonblocking full cache/counter snapshot, with
+  `rocm_graphs_unavailable_reason`.
+- `rocm_graph_telemetry` is the current/completed phase and transient-candidate
+  snapshot, independent of the model and graph-runner locks, with
+  `rocm_graph_telemetry_unavailable_reason`.
+
+Each value is either an object with a null reason or `null` with exactly one of
+`backend_without_graph_runner`, `model_runner_busy`,
+`model_runner_lock_poisoned`, `graph_runner_busy`, or
+`graph_runner_lock_poisoned`. The full snapshot can use any of those five. The
+phase handle is stored outside both runner locks, so a real backend retains live
+phase telemetry through model-runner and graph-runner contention or poison;
+currently only `backend_without_graph_runner` makes that value null. The phase
+reason family nevertheless uses the same closed schema. Do not interpret any
+null value as an empty cache or zero activity.
+
+Health flattens both authorities into `decode_runtime.rocm_graphs` for an
+operational view. Its `state` is `enabled` or `disabled` when full statistics
+are present, `busy` only for `model_runner_busy` or `graph_runner_busy`, and
+`unavailable` for the no-runner and poisoned-lock reasons. `unavailable_reason`
+belongs to the full statistics. `phase_telemetry_available` and
+`phase_telemetry_unavailable_reason` independently govern `current_phase`,
+`current_phase_elapsed_micros`, five phase summary objects, and last/peak
+transient candidate bytes. Every unavailable field is serialized as `null`;
+the server never fabricates a zero snapshot.
+
+For a coherent point-in-time full snapshot, `rocm_graphs` also serializes the
+five completed phase summaries and last/peak transient bytes. The separate
+`rocm_graph_telemetry` object is the authoritative current-phase source and
+continues advancing when full statistics cannot acquire either runner lock.
+Health sources its phase and transient fields from that separate channel.
+
+The phase names are exactly `pre_candidate_headroom`, `candidate_warm`,
+`pre_native_reservation`, `native_capture`, and
+`rejected_candidate_cleanup`. Each completed phase object contains `calls`,
+`slow`, `total_duration_micros`, and `max_duration_micros`; `slow` means at
+least 100 ms. `current_phase_elapsed_micros` uses a monotonic clock while a
+phase is active. `native_capture` remains active through capture, the settled
+first launch, defensive cache admission/publication, and the blocking committed
+governor debit. `rejected_candidate_cleanup` begins only when an unretained
+candidate enters destruction and settlement. `last_transient_candidate_bytes` and
+`peak_transient_candidate_bytes` measure the exact deduplicated queryable bytes
+allocated by the measured pre-admission candidate, excluding already-owned
+recurrent slot state and opaque native objects. They are not retained-cache
+bytes and are not governed as if they were already published.
+
+The eager-fallback reasons are exactly `cold_cache_host_round_trip`,
+`persistent_host_round_trip`, `shape_dependent_attention`,
+`graph_cache_capacity`, `graph_cache_byte_budget`,
+`graph_accounting_incomplete`, `moderate_memory_pressure`,
+`tight_memory_pressure`, `critical_memory_pressure`,
+`memory_reservation_denied`, `memory_governor_selector_mismatch`,
+`capture_failure`, and `replay_failure`. The full snapshot reports one counter
+per reason plus total, slow, total-duration, and maximum-duration values.
+
+Prometheus always emits two availability gauges and two closed one-hot reason
+families. A zero `kiln_rocm_graph_telemetry_available` is explained by
+`kiln_rocm_graph_snapshot_unavailable{reason}` and omits only the full
+cache/counter families. A zero
+`kiln_rocm_graph_phase_telemetry_available` is explained by
+`kiln_rocm_graph_phase_telemetry_unavailable{reason}` and omits only current
+phase, phase latency, and transient-candidate families. Both reason labels use
+the same five-value set above. Phase availability remains one for a real backend
+while full snapshot availability is zero during either runner-lock contention
+or poison. Full
+families cover state; cache, slot, owner, retained-byte and opaque-object
+gauges; admissions, evictions and their four causes; three post-capture
+rejection reasons; five pre-capture skip reasons; capture/replay outcomes; and
+all 13 fallback reasons and latency. Live families cover the one-hot current
+phase, active elapsed seconds, calls/slow/total/max duration for all five
+phases, and last/peak transient bytes. Every label set is closed; request,
+shape, allocation, and configured-byte values never become labels.
 
 Graph-stable paged metadata is now a correctness invariant rather than a knob.
 The runtime no longer reads `KILN_ROCM_GRAPH_STABLE_PAGED_METADATA`, graph
@@ -1247,7 +1373,7 @@ Explicit source tracking (`default`, `config_file`, or `environment`) currently
 exists for `server.serving_profile`, `server.deterministic`,
 `server.stream_stall_grace_ms`, the three server batching/prefill budgets,
 `server.max_decode_batch`, all eight `[batching]` fields, all six
-`[streaming_prefill]` fields, all three `[accelerator]` fields, and
+`[streaming_prefill]` fields, all four `[accelerator]` fields, and
 `memory.reclaim_mode`. Other fields have
 resolved values but do not yet carry per-field source metadata.
 

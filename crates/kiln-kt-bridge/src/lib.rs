@@ -318,24 +318,71 @@ pub fn rocm_output_device_ptr(t: &KtTensor) -> u64 {
     rocm_storage_of_output(t).device_ptr_raw().0
 }
 
-/// Raw HIP stream pointer (`*mut c_void`) for an input kt-Tensor's ROCm storage
-/// — the FFI `stream` argument kernel launchers expect. Mirrors how the CUDA
-/// kt-APIs reach `CudaStorage::cuda_stream_raw`.
+/// Typed ROCm stream submission for an input tensor's next FFI call.
 #[cfg(feature = "rocm")]
-pub fn rocm_stream_raw_of(
+pub fn rocm_stream_submission_of(
     t: &KtTensor,
     name: &'static str,
-) -> Result<*mut core::ffi::c_void, BridgeError> {
+) -> Result<kiln_tensor::RocmStreamSubmission, BridgeError> {
     let st = t
         .storage()
         .as_any()
         .downcast_ref::<RocmStorage>()
         .ok_or_else(|| BridgeError::new(format!("kt-bridge: {name} must be ROCm")))?;
-    st.rocm_stream_raw().map_err(|error| {
+    st.rocm_stream_submission().map_err(|error| {
         BridgeError::new(format!(
             "kt-bridge: {name} ROCm stream acquisition failed: {error}"
         ))
     })
+}
+
+/// Backend-neutral stream submission. The ROCm variant owns the device
+/// admission token that must survive the external C call; CUDA preserves its
+/// established raw-stream behavior. Every call site must explicitly consume
+/// the value with `complete` or `quarantine`; an unclassified ROCm drop fails
+/// closed and permanently quarantines the device.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+#[derive(Debug)]
+#[must_use = "consume the device stream submission with complete() or quarantine() after the FFI call"]
+pub enum DeviceStreamSubmission {
+    #[cfg(feature = "cuda")]
+    Cuda(*mut core::ffi::c_void),
+    #[cfg(feature = "rocm")]
+    Rocm(kiln_tensor::RocmStreamSubmission),
+}
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+impl DeviceStreamSubmission {
+    /// Raw backend stream for the immediate FFI call protected by this value.
+    pub fn raw_stream(&self) -> *mut core::ffi::c_void {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(stream) => *stream,
+            #[cfg(feature = "rocm")]
+            Self::Rocm(submission) => submission.raw_stream(),
+        }
+    }
+
+    /// Complete a successful or explicitly nonfatal external FFI call.
+    pub fn complete(self) {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(_) => {}
+            #[cfg(feature = "rocm")]
+            Self::Rocm(submission) => submission.complete(),
+        }
+    }
+
+    /// Quarantine ROCm execution after a fatal external FFI result. CUDA has no
+    /// corresponding process-wide gate, so its variant is a no-op.
+    pub fn quarantine(self) {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(_) => {}
+            #[cfg(feature = "rocm")]
+            Self::Rocm(submission) => submission.quarantine(),
+        }
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -411,13 +458,12 @@ pub fn alloc_device_tensor_like(
     .map_err(|e| BridgeError::new(format!("kt-bridge alloc wrap: {e}")))
 }
 
-/// Backend-neutral raw GPU stream pointer for a kt-Tensor's storage — the FFI
-/// `stream` argument kernel launchers expect.
+/// Backend-neutral typed stream submission for one external FFI call.
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-pub fn device_stream_raw_of(
+pub fn device_stream_submission_of(
     t: &KtTensor,
     name: &'static str,
-) -> Result<*mut core::ffi::c_void, BridgeError> {
+) -> Result<DeviceStreamSubmission, BridgeError> {
     use kiln_tensor::Backend;
     match t.device().backend() {
         #[cfg(feature = "cuda")]
@@ -427,12 +473,12 @@ pub fn device_stream_raw_of(
                 .as_any()
                 .downcast_ref::<CudaStorage>()
                 .ok_or_else(|| BridgeError::new(format!("kt-bridge: {name} must be CUDA")))?;
-            Ok(st.cuda_stream_raw())
+            Ok(DeviceStreamSubmission::Cuda(st.cuda_stream_raw()))
         }
         #[cfg(feature = "rocm")]
-        Backend::Rocm => rocm_stream_raw_of(t, name),
+        Backend::Rocm => rocm_stream_submission_of(t, name).map(DeviceStreamSubmission::Rocm),
         other => Err(BridgeError::new(format!(
-            "kt-bridge: device_stream_raw_of {name} on unsupported backend {other:?}"
+            "kt-bridge: device_stream_submission_of {name} on unsupported backend {other:?}"
         ))),
     }
 }

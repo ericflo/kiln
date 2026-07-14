@@ -106,7 +106,8 @@ pub fn rocm_layernorm_last_axis(
     // out[row, c] for all rows × cols), so skip the zero-fill.
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let raw_stream = x_storage.rocm_stream_raw()?;
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
 
     let (x_base, _) = x_storage.device_ptr_raw();
     let (weight_base, _) = weight_storage.device_ptr_raw();
@@ -128,10 +129,12 @@ pub fn rocm_layernorm_last_axis(
         )
     };
     if status != 0 {
+        stream_submission.quarantine();
         return Err(Error::Msg(format!(
             "rocm_layernorm_last_axis: FFI returned status {status}"
         )));
     }
+    stream_submission.complete();
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(
