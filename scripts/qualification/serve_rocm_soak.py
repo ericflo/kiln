@@ -8,7 +8,6 @@ import concurrent.futures
 import math
 import os
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -391,20 +390,7 @@ def execute(
         snapshot_dir,
         rocm_graph_cache_entries=GRAPH_CACHE_MAX,
     )
-    environment = mixed.server_environment(RUNTIME_VARIANT)
-    process = subprocess.Popen(
-        [str(binary), "--config", str(config_path), "serve"],
-        cwd=ROOT,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        start_new_session=True,
-    )
-    assert process.stdout is not None
-    server_log = mixed.ServerLog(process.stdout)
-    server_log.start()
+    process, server_log = mixed.start_server(binary, config_path, RUNTIME_VARIANT)
     sampler = mixed.MemorySampler(port)
     shutdown: mixed.ShutdownOutcome | None = None
     snapshot_residue: list[str] = []

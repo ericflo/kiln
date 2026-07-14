@@ -380,19 +380,9 @@ def run_adapter_arm(
         rocm_graph_cache_max_bytes=GRAPH_CACHE_MAX_BYTES,
     )
     generated_config_hash = mixed.sha256_file(config_path)
-    process = subprocess.Popen(
-        [str(binary), "--config", str(config_path), "serve"],
-        cwd=ROOT,
-        env=mixed.server_environment(ADAPTER_VARIANT_ID),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        start_new_session=True,
+    process, server_log = mixed.start_server(
+        binary, config_path, ADAPTER_VARIANT_ID
     )
-    assert process.stdout is not None
-    server_log = mixed.ServerLog(process.stdout)
-    server_log.start()
     residue: list[str] = []
     try:
         health = mixed.wait_ready(port, process, server_log, deadline)
@@ -580,19 +570,9 @@ def run_maintenance_arm(
         kv_force_blocks=FORCED_KV_BLOCKS,
     )
     generated_config_hash = mixed.sha256_file(config_path)
-    process = subprocess.Popen(
-        [str(binary), "--config", str(config_path), "serve"],
-        cwd=ROOT,
-        env=mixed.server_environment(MAINTENANCE_VARIANT_ID),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        start_new_session=True,
+    process, server_log = mixed.start_server(
+        binary, config_path, MAINTENANCE_VARIANT_ID
     )
-    assert process.stdout is not None
-    server_log = mixed.ServerLog(process.stdout)
-    server_log.start()
     try:
         health = wait_maintenance_ready(port, process, server_log, deadline)
         resize_event: mixed.ObservedEvent | None = None

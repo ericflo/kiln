@@ -186,14 +186,6 @@ class ServeRocmGraphResilienceTests(unittest.TestCase):
         self.assertEqual(by_name["output_mismatch_count"], 1)
         self.assertIsNotNone(details)
 
-    def test_launch_source_uses_generated_config_not_public_runtime_env(self) -> None:
-        source = (QUALIFICATION_DIR / "serve_rocm_graph_resilience.py").read_text()
-        self.assertIn("mixed.write_server_config(", source)
-        self.assertIn('[str(binary), "--config", str(config_path), "serve"]', source)
-        self.assertNotIn('"--config", "/dev/null"', source)
-        self.assertNotIn("ROCM_GRAPH_CACHE_MAX_BYTES_ENV", source)
-
-
 def dataclasses_replace(value: resilience.ArmRun, **changes: object) -> resilience.ArmRun:
     fields = {
         field.name: getattr(value, field.name)

@@ -3,9 +3,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import os
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 QUALIFICATION_DIR = Path(__file__).resolve().parents[1]
@@ -134,10 +138,20 @@ class ServeVulkanBaselineTests(unittest.TestCase):
         self.assertEqual(build["timeout_seconds"], 900)
         self.assertNotIn("rocm_path", build)
         self.assertNotIn("rocm_archs", build)
-        source = (QUALIFICATION_DIR / "serve_vulkan_baseline.py").read_text()
-        self.assertIn("mixed.VULKAN_BUILD_SPEC", source)
-        self.assertIn("build_timeout_seconds=BUILD_TIMEOUT_SECONDS", source)
-        self.assertNotIn("ROCM_PATH", source)
+        with mock.patch.object(
+            baseline.mixed,
+            "build_binary",
+            side_effect=baseline.VulkanBaselineError("build boundary reached"),
+        ) as build_binary:
+            with self.assertRaisesRegex(
+                baseline.VulkanBaselineError, "build boundary reached"
+            ):
+                baseline.execute(Path("/model"), 7)
+        self.assertIs(build_binary.call_args.args[1], baseline.mixed.VULKAN_BUILD_SPEC)
+        self.assertEqual(
+            build_binary.call_args.kwargs["build_timeout_seconds"],
+            baseline.BUILD_TIMEOUT_SECONDS,
+        )
 
     def test_semantic_hash_excludes_dynamic_envelope_and_binds_content(self) -> None:
         first = stream_result("same")
@@ -191,12 +205,57 @@ class ServeVulkanBaselineTests(unittest.TestCase):
         with self.assertRaisesRegex(baseline.VulkanBaselineError, "not finite"):
             baseline.metric_records(values)
 
-    def test_result_writer_uses_atomic_shared_protocol(self) -> None:
-        source = (QUALIFICATION_DIR / "serve_vulkan_baseline.py").read_text()
-        self.assertIn("mixed.write_result(Path(result_path_value), result)", source)
-        self.assertIn("mixed.terminate_process(process)", source)
-        self.assertIn("mixed.snapshot_payload_residue(snapshot_dir)", source)
-        self.assertIn("threading.Barrier(len(prompt_words) + 1)", source)
+    def test_wave_runner_releases_every_request_through_one_dispatch_gate(self) -> None:
+        prompt_words = (16, 32, 64)
+        gate = threading.Barrier(len(prompt_words) + 1)
+        with (
+            mock.patch.object(baseline.threading, "Barrier", return_value=gate) as barrier,
+            mock.patch.object(
+                baseline.mixed,
+                "run_stream",
+                side_effect=lambda _port, **kwargs: stream_result(kwargs["name"]),
+            ) as run_stream,
+        ):
+            wave = baseline.run_wave(
+                8420,
+                2,
+                "batch-3",
+                prompt_words,
+                11,
+                baseline.time.monotonic() + 10,
+            )
+        barrier.assert_called_once_with(4)
+        self.assertEqual(len(wave.results), 3)
+        self.assertEqual(run_stream.call_count, 3)
+
+    def test_main_publishes_a_structured_result_through_the_shared_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = root / "model"
+            result_path = root / "result.json"
+            model.mkdir()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        baseline.VARIANT_ENV: baseline.VARIANT_ID,
+                        baseline.RESULT_ENV: str(result_path),
+                    },
+                ),
+                mock.patch.object(
+                    baseline,
+                    "execute",
+                    return_value=(baseline.zero_metrics(), '{"evidence":true}'),
+                ),
+            ):
+                exit_code = baseline.main(
+                    ["--model-path", str(model), "--seed", "7"]
+                )
+            result = json.loads(result_path.read_text())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["case_id"], baseline.CASE_ID)
+        self.assertEqual(result["effective_config"], baseline.EFFECTIVE_CONFIG)
 
 
 if __name__ == "__main__":

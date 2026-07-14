@@ -11,7 +11,6 @@ import json
 import math
 import os
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -578,19 +577,9 @@ def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str]:
         rocm_graph_mode="disabled",
     )
     config_sha256 = mixed.sha256_file(config_path)
-    process = subprocess.Popen(
-        [str(binary), "--config", str(config_path), "serve"],
-        cwd=ROOT,
-        env=mixed.server_environment(VARIANT_ID, mixed.VULKAN_BUILD_SPEC),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        start_new_session=True,
+    process, server_log = mixed.start_server(
+        binary, config_path, VARIANT_ID, mixed.VULKAN_BUILD_SPEC
     )
-    assert process.stdout is not None
-    server_log = mixed.ServerLog(process.stdout)
-    server_log.start()
     sampler = mixed.MemorySampler(port)
     values: dict[str, float | int] | None = None
     evidence: dict[str, Any] | None = None

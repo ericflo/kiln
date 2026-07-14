@@ -9,11 +9,11 @@ evidence.
 
 ## Current baseline
 
-- Tests: **67**
-- Direct or module-bound source reads: **114**
-- Text search/split assertions: **946**
+- Tests: **61**
+- Direct or module-bound source reads: **108**
+- Text search/split assertions: **921**
 - Rust tests: **61**
-- Python qualification tests: **6**
+- Python qualification tests: **0**
 
 The three limits are monotonic: `--write` lowers them after a migration but refuses
 to bless an increase. The contract is
@@ -41,17 +41,12 @@ presence in a `.rs`, `.cu`, or driver file proves none of those things.
 | `crates/kiln-model/src/generate.rs` | 4 |
 | `crates/kiln-gdn-kernel/tests/frozen_weight_backward_contract.rs` | 3 |
 | `crates/kiln-train/src/trainer.rs` | 2 |
-| `scripts/qualification/tests/test_serve_vulkan_baseline.py` | 2 |
 | `crates/kiln-model/src/rocm_graph.rs` | 1 |
 | `crates/kiln-rmsnorm-kernel/tests/rmsnorm_stream_contract.rs` | 1 |
 | `crates/kiln-server/src/api/completions.rs` | 1 |
 | `crates/kiln-server/src/api/config.rs` | 1 |
 | `crates/kiln-server/src/bench.rs` | 1 |
 | `crates/kiln-server/src/training_queue.rs` | 1 |
-| `scripts/qualification/tests/test_serve_mixed_load.py` | 1 |
-| `scripts/qualification/tests/test_serve_rocm_graph_resilience.py` | 1 |
-| `scripts/qualification/tests/test_serve_rocm_public_mutation_lifecycle.py` | 1 |
-| `scripts/qualification/tests/test_serve_rocm_sync_ab.py` | 1 |
 
 ## Migration queue
 
@@ -118,12 +113,6 @@ presence in a `.rs`, `.cu`, or driver file proves none of those things.
 | `crates/kiln-server/src/training_queue.rs::production_server_teacher_paths_reject_compatibility_policy_constructors` | `implementation_source_text` | 1 | 4 |
 | `crates/kiln-train/src/trainer.rs::frozen_final_rmsnorm_backward_never_requests_a_weight_gradient` | `implementation_source_text` | 1 | 2 |
 | `crates/kiln-train/src/trainer.rs::production_training_blocks_use_explicit_streaming_policy` | `implementation_source_text` | 1 | 2 |
-| `scripts/qualification/tests/test_serve_mixed_load.py::test_all_rocm_serving_drivers_launch_through_the_typed_file` | `implementation_source_text` | 1 | 6 |
-| `scripts/qualification/tests/test_serve_rocm_graph_resilience.py::test_launch_source_uses_generated_config_not_public_runtime_env` | `qualification_driver_source_text` | 1 | 4 |
-| `scripts/qualification/tests/test_serve_rocm_public_mutation_lifecycle.py::test_driver_uses_typed_config_and_one_binary_for_both_arms` | `qualification_driver_source_text` | 1 | 6 |
-| `scripts/qualification/tests/test_serve_rocm_sync_ab.py::test_reason_dimensions_exactly_match_rocm_core_contract` | `implementation_source_text` | 1 | 0 |
-| `scripts/qualification/tests/test_serve_vulkan_baseline.py::test_result_writer_uses_atomic_shared_protocol` | `qualification_driver_source_text` | 1 | 4 |
-| `scripts/qualification/tests/test_serve_vulkan_baseline.py::test_source_build_is_vulkan_only_bounded_and_timeout_separated` | `qualification_driver_source_text` | 1 | 5 |
 
 ## Gate
 

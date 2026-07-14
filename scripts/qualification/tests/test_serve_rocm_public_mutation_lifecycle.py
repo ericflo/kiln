@@ -211,16 +211,60 @@ class ServeRocmPublicMutationLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(lifecycle.LifecycleError, "not finite"):
             lifecycle.metric_records(values)
 
-    def test_driver_uses_typed_config_and_one_binary_for_both_arms(self) -> None:
-        source = (
-            QUALIFICATION_DIR / "serve_rocm_public_mutation_lifecycle.py"
-        ).read_text()
-        self.assertEqual(source.count("mixed.build_binary(deadline)"), 1)
-        self.assertEqual(source.count("mixed.write_server_config("), 2)
-        self.assertIn('kv_force_blocks=FORCED_KV_BLOCKS', source)
-        self.assertIn('[str(binary), "--config", str(config_path), "serve"]', source)
-        self.assertNotIn('"--config", "/dev/null"', source)
-        self.assertNotIn("KILN_KV_FORCE_BLOCKS", source)
+    def test_execute_builds_once_and_reuses_the_binary_for_both_arms(self) -> None:
+        digest = "sha256:" + "a" * 64
+        binary = ROOT / "target" / "release" / "kiln"
+        adapter = lifecycle.AdapterArm(
+            digest,
+            digest,
+            128,
+            digest,
+            digest,
+            digest,
+            digest,
+            digest,
+            1.0,
+            2.0,
+            1,
+            2,
+            0,
+        )
+        maintenance = lifecycle.MaintenanceArm(
+            digest,
+            8,
+            lifecycle.FORCED_KV_BLOCKS,
+            1024,
+            1.0,
+            2.0,
+            503,
+            "maintenance_in_progress",
+            0,
+        )
+        with (
+            mock.patch.object(
+                lifecycle.mixed,
+                "build_binary",
+                return_value=(binary, digest, 0.5),
+            ) as build,
+            mock.patch.object(
+                lifecycle, "run_adapter_arm", return_value=adapter
+            ) as adapter_arm,
+            mock.patch.object(
+                lifecycle, "run_maintenance_arm", return_value=maintenance
+            ) as maintenance_arm,
+        ):
+            metrics, details = lifecycle.execute(
+                Path("/model"), Path("/adapter"), 17
+            )
+
+        build.assert_called_once()
+        self.assertIs(adapter_arm.call_args.args[0], binary)
+        self.assertIs(maintenance_arm.call_args.args[0], binary)
+        self.assertEqual(adapter_arm.call_args.args[-1], maintenance_arm.call_args.args[-1])
+        by_name = {record["name"]: record["value"] for record in metrics}
+        self.assertEqual(by_name["binary_build_count"], 1)
+        self.assertEqual(by_name["forced_resize_actual_blocks"], 1)
+        self.assertEqual(json.loads(details)["kiln_binary"], digest)
 
 
 if __name__ == "__main__":

@@ -351,9 +351,9 @@ const generatedDocsPages = [
       'gate',
     ],
     terms: [
-      '67',
-      '114',
-      '946',
+      '61',
+      '108',
+      '921',
       'implementation_source_text',
       'qualification_driver_source_text',
       'generated_artifact_text',

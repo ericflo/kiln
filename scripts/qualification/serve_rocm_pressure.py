@@ -606,21 +606,8 @@ def execute(model_path: Path, seed: int) -> tuple[list[dict[str, Any]], str | No
     mixed.write_server_config(
         config_path, VARIANT_ID, model_path, port, adapter_dir, snapshot_dir
     )
-    environment = mixed.server_environment(VARIANT_ID)
     observed_since = time.monotonic()
-    server = subprocess.Popen(
-        [str(binary), "--config", str(config_path), "serve"],
-        cwd=ROOT,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        start_new_session=True,
-    )
-    assert server.stdout is not None
-    server_log = mixed.ServerLog(server.stdout)
-    server_log.start()
+    server, server_log = mixed.start_server(binary, config_path, VARIANT_ID)
     shutdown: mixed.ShutdownOutcome | None = None
     snapshot_residue: list[str] = []
     result: tuple[list[dict[str, Any]], str | None] | None = None

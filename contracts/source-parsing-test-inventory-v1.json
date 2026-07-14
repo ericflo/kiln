@@ -10,21 +10,19 @@
     }
   },
   "ratchet": {
-    "max_test_count": 67,
-    "max_read_site_count": 114,
-    "max_text_assertion_count": 946
+    "max_test_count": 61,
+    "max_read_site_count": 108,
+    "max_text_assertion_count": 921
   },
   "summary": {
-    "test_count": 67,
-    "read_site_count": 114,
-    "text_assertion_count": 946,
+    "test_count": 61,
+    "read_site_count": 108,
+    "text_assertion_count": 921,
     "by_classification": {
       "generated_artifact_text": 3,
-      "implementation_source_text": 60,
-      "qualification_driver_source_text": 4
+      "implementation_source_text": 58
     },
     "by_language": {
-      "python": 6,
       "rust": 61
     },
     "by_owner": {
@@ -38,12 +36,7 @@
       "crates/kiln-server/src/api/config.rs": 1,
       "crates/kiln-server/src/bench.rs": 1,
       "crates/kiln-server/src/training_queue.rs": 1,
-      "crates/kiln-train/src/trainer.rs": 2,
-      "scripts/qualification/tests/test_serve_mixed_load.py": 1,
-      "scripts/qualification/tests/test_serve_rocm_graph_resilience.py": 1,
-      "scripts/qualification/tests/test_serve_rocm_public_mutation_lifecycle.py": 1,
-      "scripts/qualification/tests/test_serve_rocm_sync_ab.py": 1,
-      "scripts/qualification/tests/test_serve_vulkan_baseline.py": 2
+      "crates/kiln-train/src/trainer.rs": 2
     }
   },
   "entries": [
@@ -1088,90 +1081,6 @@
       ],
       "text_assertion_count": 2,
       "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
-    },
-    {
-      "language": "python",
-      "test_path": "scripts/qualification/tests/test_serve_mixed_load.py",
-      "test_name": "test_all_rocm_serving_drivers_launch_through_the_typed_file",
-      "classification": "implementation_source_text",
-      "read_sites": [
-        {
-          "api": "read_text",
-          "target": "QUALIFICATION_DIR / name"
-        }
-      ],
-      "text_assertion_count": 6,
-      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
-    },
-    {
-      "language": "python",
-      "test_path": "scripts/qualification/tests/test_serve_rocm_graph_resilience.py",
-      "test_name": "test_launch_source_uses_generated_config_not_public_runtime_env",
-      "classification": "qualification_driver_source_text",
-      "read_sites": [
-        {
-          "api": "read_text",
-          "target": "QUALIFICATION_DIR / 'serve_rocm_graph_resilience.py'"
-        }
-      ],
-      "text_assertion_count": 4,
-      "replacement": "Exercise a public helper or CLI preflight and assert its structured output instead of matching the driver's Python source."
-    },
-    {
-      "language": "python",
-      "test_path": "scripts/qualification/tests/test_serve_rocm_public_mutation_lifecycle.py",
-      "test_name": "test_driver_uses_typed_config_and_one_binary_for_both_arms",
-      "classification": "qualification_driver_source_text",
-      "read_sites": [
-        {
-          "api": "read_text",
-          "target": "QUALIFICATION_DIR / 'serve_rocm_public_mutation_lifecycle.py'"
-        }
-      ],
-      "text_assertion_count": 6,
-      "replacement": "Exercise a public helper or CLI preflight and assert its structured output instead of matching the driver's Python source."
-    },
-    {
-      "language": "python",
-      "test_path": "scripts/qualification/tests/test_serve_rocm_sync_ab.py",
-      "test_name": "test_reason_dimensions_exactly_match_rocm_core_contract",
-      "classification": "implementation_source_text",
-      "read_sites": [
-        {
-          "api": "read_text",
-          "target": "ROOT / 'crates/kiln-hip/src/lib.rs'"
-        }
-      ],
-      "text_assertion_count": 0,
-      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
-    },
-    {
-      "language": "python",
-      "test_path": "scripts/qualification/tests/test_serve_vulkan_baseline.py",
-      "test_name": "test_result_writer_uses_atomic_shared_protocol",
-      "classification": "qualification_driver_source_text",
-      "read_sites": [
-        {
-          "api": "read_text",
-          "target": "QUALIFICATION_DIR / 'serve_vulkan_baseline.py'"
-        }
-      ],
-      "text_assertion_count": 4,
-      "replacement": "Exercise a public helper or CLI preflight and assert its structured output instead of matching the driver's Python source."
-    },
-    {
-      "language": "python",
-      "test_path": "scripts/qualification/tests/test_serve_vulkan_baseline.py",
-      "test_name": "test_source_build_is_vulkan_only_bounded_and_timeout_separated",
-      "classification": "qualification_driver_source_text",
-      "read_sites": [
-        {
-          "api": "read_text",
-          "target": "QUALIFICATION_DIR / 'serve_vulkan_baseline.py'"
-        }
-      ],
-      "text_assertion_count": 5,
-      "replacement": "Exercise a public helper or CLI preflight and assert its structured output instead of matching the driver's Python source."
     }
   ]
 }

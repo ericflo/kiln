@@ -1429,24 +1429,44 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(parsed["memory"]["kv_force_blocks"], 7)
         self.assertEqual(parsed["model"]["path"], str(root / 'model "quoted"'))
 
-    def test_all_rocm_serving_drivers_launch_through_the_typed_file(self) -> None:
-        for name in (
-            "serve_mixed_load.py",
-            "serve_rocm_graph_correctness.py",
-            "serve_rocm_graph_resilience.py",
-            "serve_rocm_public_mutation_lifecycle.py",
-            "serve_rocm_pressure.py",
-            "serve_rocm_soak.py",
-            "serve_rocm_sync_ab.py",
-        ):
-            with self.subTest(name=name):
-                source = (QUALIFICATION_DIR / name).read_text()
-                self.assertIn("write_server_config(", source)
-                self.assertIn('"--config", str(config_path), "serve"', source)
-                self.assertNotIn('"--config", "/dev/null"', source)
-                self.assertNotIn("ROCM_GRAPH_MODE_ENV", source)
-                self.assertNotIn("ROCM_GRAPH_CACHE_ENTRIES_ENV", source)
-                self.assertNotIn("ROCM_SYNCHRONIZATION_MODE_ENV", source)
+    def test_server_launcher_requires_and_consumes_one_typed_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / "kiln"
+            config = root / "kiln.toml"
+            binary.write_bytes(b"fixture")
+            config.write_text("[server]\nport = 8420\n")
+            process = mock.Mock(stdout=object())
+            server_log = mock.Mock()
+            environment = {"RUST_LOG": "kiln=info"}
+            with (
+                mock.patch.object(serve, "server_environment", return_value=environment),
+                mock.patch.object(serve.subprocess, "Popen", return_value=process) as popen,
+                mock.patch.object(serve, "ServerLog", return_value=server_log) as log_type,
+            ):
+                observed_process, observed_log = serve.start_server(
+                    binary, config, "default"
+                )
+
+            self.assertIs(observed_process, process)
+            self.assertIs(observed_log, server_log)
+            popen.assert_called_once_with(
+                [str(binary), "--config", str(config), "serve"],
+                cwd=serve.ROOT,
+                env=environment,
+                stdout=serve.subprocess.PIPE,
+                stderr=serve.subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+            )
+            log_type.assert_called_once_with(process.stdout)
+            server_log.start.assert_called_once_with()
+
+            with self.assertRaisesRegex(
+                serve.QualificationError, "configuration is missing"
+            ):
+                serve.start_server(binary, root / "missing.toml", "default")
 
     def test_server_termination_reports_graceful_and_forced_outcomes(self) -> None:
         graceful = mock.Mock(pid=101)

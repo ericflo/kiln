@@ -1827,6 +1827,38 @@ def write_server_config(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def start_server(
+    binary: Path,
+    config_path: Path,
+    variant: str,
+    spec: SourceBuildSpec = ROCM_BUILD_SPEC,
+) -> tuple[subprocess.Popen[str], ServerLog]:
+    """Start one source-built server from one complete typed configuration file."""
+    if not binary.is_file():
+        raise QualificationError(f"source-built server binary is missing: {binary}")
+    if not config_path.is_file():
+        raise QualificationError(
+            f"source-bound server configuration is missing or not a regular file: {config_path}"
+        )
+    process = subprocess.Popen(
+        [str(binary), "--config", str(config_path), "serve"],
+        cwd=ROOT,
+        env=server_environment(variant, spec),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
+    if process.stdout is None:
+        process.kill()
+        process.wait(timeout=SERVER_KILL_WAIT_SECONDS)
+        raise QualificationError("server launch did not provide the required output pipe")
+    server_log = ServerLog(process.stdout)
+    server_log.start()
+    return process, server_log
+
+
 def terminate_process(process: subprocess.Popen[str]) -> ShutdownOutcome:
     started = time.monotonic()
     returncode = process.poll()
@@ -3341,21 +3373,8 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
     write_server_config(
         config_path, variant, model_path, port, adapter_dir, snapshot_dir
     )
-    environment = server_environment(variant)
     policy_events_started = time.monotonic()
-    process = subprocess.Popen(
-        [str(binary), "--config", str(config_path), "serve"],
-        cwd=ROOT,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        start_new_session=True,
-    )
-    assert process.stdout is not None
-    server_log = ServerLog(process.stdout)
-    server_log.start()
+    process, server_log = start_server(binary, config_path, variant)
     sampler = MemorySampler(port)
     slow: SlowConsumer | None = None
     result: tuple[list[dict[str, Any]], str | None] | None = None

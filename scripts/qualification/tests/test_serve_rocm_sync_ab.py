@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
-import re
 import sys
 import unittest
 from pathlib import Path
@@ -109,13 +108,15 @@ def correctness_record() -> sync_ab.correctness.CompletionRecord:
 
 
 class ServeRocmSynchronizationAbTests(unittest.TestCase):
-    def test_reason_dimensions_exactly_match_rocm_core_contract(self) -> None:
-        source = (ROOT / "crates/kiln-hip/src/lib.rs").read_text()
-        start = source.index("pub const fn as_str(self) -> &'static str")
-        end = source.index("const fn index(self)", start)
-        labels = tuple(re.findall(r'=> "([a-z_]+)"', source[start:end]))
-        self.assertEqual(labels, sync_ab.ROCM_SYNC_REASONS)
-        self.assertEqual(len(labels), 23)
+    def test_runtime_reason_dimensions_fail_closed_on_drift(self) -> None:
+        self.assertEqual(len(sync_ab.ROCM_SYNC_REASONS), 23)
+        health = health_fixture("stream_ordered")
+        reasons = health["decode_runtime"]["rocm_synchronization"]["reasons"]
+        reasons.pop()
+        with self.assertRaisesRegex(
+            sync_ab.SynchronizationQualificationError, "dimensions drifted"
+        ):
+            sync_ab.synchronization_snapshot(health, "stream_ordered")
 
     def test_checked_in_workload_exactly_matches_driver_contract(self) -> None:
         workload = json.loads(

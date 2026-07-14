@@ -11,7 +11,6 @@ import math
 import os
 import re
 import shutil
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -563,20 +562,7 @@ def run_arm(
         rocm_synchronization_mode=mode,
         rocm_graph_mode="disabled",
     )
-    environment = mixed.server_environment(mode)
-    process = subprocess.Popen(
-        [str(binary), "--config", str(config_path), "serve"],
-        cwd=ROOT,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        start_new_session=True,
-    )
-    assert process.stdout is not None
-    server_log = mixed.ServerLog(process.stdout)
-    server_log.start()
+    process, server_log = mixed.start_server(binary, config_path, mode)
     sampler = mixed.MemorySampler(port)
     shutdown: mixed.ShutdownOutcome | None = None
     residue: tuple[str, ...] = ()
