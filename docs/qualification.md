@@ -377,12 +377,37 @@ reduced to a secondary missing-finish-reason error.
 The gate fails on any request error, non-length or short output, missing actor
 timing, unexpected named adapter identity, device fault, resize/reclaim/graph
 event, batching error, failed or at-least-100-ms external-yield synchronization,
-changed KV
-capacity, missing memory sample, unexplained adaptive ITL outlier, or ITL gap
+changed KV capacity, missing memory sample, unexplained adaptive ITL outlier, or ITL gap
 above two seconds. Gaps above 250 ms are always counted as stall evidence even
 when they remain below the hard pause gate. The server must drain, exit zero
 without force inside the shared 60-second grace period, and leave no private
 snapshot payload.
+
+#### Current Strix Halo result
+
+The source-bound 2026-07-14 run on RADV Strix Halo passed from clean commit
+`e2efd5dff` and tree hash
+`sha256:c5e7d485a9afb8319435e87c4eb91808652a2cc3d0a88fbac602b794a10cad66`.
+Its retained receipt is
+`qualification/receipts/vulkan/strix-halo/20260714t232612510178z-vulkan-strix-halo-serving-vulkan-baseline--8da450e169-v1.json`.
+The run completed 25/25 measured requests and 800/800 completion tokens with
+exact length termination, zero request/batching/device/policy/sampler errors,
+zero graph/resize/reclaim activity, stable 5,365-block KV capacity, zero
+unexplained or two-second ITL pauses, clean zero-exit shutdown, and no snapshot
+residue. Four adaptive ITL outliers were causally attributed to concurrent
+prefill; 395 client-visible gaps exceeded the 250 ms evidence threshold but
+none crossed the two-second failure gate.
+
+This accepted correctness result is also negative performance evidence. The
+single, four-way, eight-way, and twelve-way waves took 6.473, 93.384, 324.697,
+and 464.650 seconds. Overall output throughput was 0.900 tokens/second; the
+eight- and twelve-way waves achieved 0.788 and 0.826 tokens/second. Although
+eight active requests were observed, only two decode rows were ever combined,
+with 2 batched forwards out of 773 decode forwards. Peak sampled unified-device
+usage was 54,288,658,432 bytes. This receipt accepts bounded mixed/long-prompt
+correctness and the absence of unexplained pauses or runtime memory-policy
+mutation. It does not establish competitive Vulkan batching, and it must not
+be presented as a vLLM parity result.
 
 A passing receipt closes only the Phase 6 short/mixed/long serving-baseline
 item and the no-silent-skip/no-unexplained-outlier condition for this bounded
