@@ -274,14 +274,14 @@ def validate_result_provenance(
 
     if isinstance(raw_log, str) and raw_log:
         raw_log_path = resolve_artifact_path(raw_log)
+        if enforce_git_retention and git_path_is_tracked(raw_log):
+            errors.append(
+                f"{context}.result_artifact.raw_log must not be tracked by git when --require-covered is set"
+            )
         if raw_log_path.is_file():
             if raw_log_digest(raw_log_path) != raw_log_sha256:
                 errors.append(
                     f"{context}.result_artifact.raw_log_sha256 does not match raw_log"
-                )
-            if enforce_git_retention and git_path_is_tracked(raw_log):
-                errors.append(
-                    f"{context}.result_artifact.raw_log must not be tracked by git when --require-covered is set"
                 )
 
 

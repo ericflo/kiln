@@ -40,7 +40,8 @@ To cover the gate, each fixture must:
 - set every metric `max` to a numeric threshold
 - write the referenced repo-relative `result_artifact` under
   `bench-results/backend-latency` with a `.json` extension
-- track the `result_artifact` and referenced `raw_log` in git
+- track the compact `result_artifact` in Git and keep the referenced `raw_log`
+  ignored or externally retained
 - set the manifest `status` to `covered`
 - pass `python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered`
 
@@ -94,10 +95,11 @@ Required fields:
 - `source`: exactly matches the fixture `source`
 - `source_sha256`: lowercase SHA-256 hex digest of the fixture source file
 - `command`: exactly matches the fixture `command`
-- `raw_log`: non-empty repo-relative path for the captured raw fixture log;
-  covered fixtures require this file to live under
-  `bench-results/backend-latency/raw`, use a `.log` extension, and exist when
-  validated
+- `raw_log`: non-empty repo-relative retention reference for the captured raw
+  fixture log. Covered fixtures require this path to live under
+  `bench-results/backend-latency/raw` and use a `.log` extension. The file must
+  exist at ingestion and threshold-lock time, but may be absent from a clean
+  checkout after its digest and metrics are retained.
 - `raw_log_sha256`: lowercase SHA-256 hex digest of the raw fixture log
 - `git_commit`: lowercase 40-character git commit object for the checkout that
   captured the artifact
@@ -136,8 +138,8 @@ lowercase 40-character commit that exists in the local repository, requires the
 fixture source to exist at `git_commit`, requires `source_sha256` to match the
 source bytes at that commit, and requires `git_tracked_dirty` to be `false` for
 covered validation. The writer sets that field from
-`git status --porcelain --untracked-files=all`. It then re-parses the
-It rejects unknown artifact keys and undeclared artifact metrics.
+`git status --porcelain --untracked-files=all`. It rejects unknown artifact
+keys and undeclared artifact metrics.
 
 The fixture digest deliberately excludes metric `max`, `threshold_state`, and
 `result_artifact` so a reviewed artifact remains valid while thresholds are

@@ -217,6 +217,13 @@
       "description": "Run, validate, compare, and publish hardware qualification receipts."
     },
     {
+      "source": "docs/backend-latency-result-schema.md",
+      "slug": "backend-latency-evidence",
+      "title": "Backend Latency Evidence",
+      "section": "operations",
+      "description": "Hardware latency fixture schema, compact evidence contract, ignored raw-log retention, import validation, and threshold locking."
+    },
+    {
       "source": "docs/RUNTIME_ENVIRONMENT_INVENTORY.md",
       "slug": "runtime-environment-inventory",
       "title": "Runtime Environment Inventory",
