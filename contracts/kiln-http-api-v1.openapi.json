@@ -119,6 +119,17 @@
               }
             },
             "x-kiln-rust-type": "HealthResponse"
+          },
+          "503": {
+            "description": "Server is not ready for inference; the body contains the same complete diagnostics as HTTP 200.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "HealthResponse"
           }
         }
       }
@@ -1675,8 +1686,27 @@
             },
             "x-kiln-rust-type": "ModelStateResponse"
           },
-          "default": {
-            "$ref": "#/components/responses/ApiError"
+          "403": {
+            "description": "Debug diagnostics are disabled outside eval mode unless explicitly enabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebugDisabledResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "DebugDisabledResponse"
+          },
+          "500": {
+            "description": "The resident execution provenance failed its self-validation contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebugProvenanceErrorResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "serde_json::Value"
           }
         }
       }
@@ -2477,8 +2507,16 @@
             },
             "x-kiln-rust-type": "HealthResponse"
           },
-          "default": {
-            "$ref": "#/components/responses/ApiError"
+          "503": {
+            "description": "Server is not ready for inference; the body contains the same complete diagnostics as HTTP 200.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "HealthResponse"
           }
         }
       }
@@ -4281,11 +4319,9 @@
         "x-kiln-field-schema-status": "complete"
       },
       "CacheStatsResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type CacheStatsResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-observability-v1.schema.json#/$defs/CacheStatsResponse",
         "x-kiln-rust-type": "CacheStatsResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "CapacityRequest": {
         "type": "object",
@@ -4331,11 +4367,9 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "ConfigResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type ConfigResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-observability-v1.schema.json#/$defs/ConfigResponse",
         "x-kiln-rust-type": "ConfigResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "CorrectionRow": {
         "type": "object",
@@ -4385,12 +4419,20 @@
         "x-kiln-rust-type": "DatasetUploadMultipart",
         "x-kiln-field-schema-status": "migration_pending"
       },
+      "DebugDisabledResponse": {
+        "$ref": "kiln-observability-v1.schema.json#/$defs/DebugDisabledResponse",
+        "x-kiln-rust-type": "DebugDisabledResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
+      "DebugProvenanceErrorResponse": {
+        "$ref": "kiln-observability-v1.schema.json#/$defs/DebugProvenanceErrorResponse",
+        "x-kiln-rust-type": "serde_json::Value",
+        "x-kiln-field-schema-status": "complete"
+      },
       "DecodeStatsSnapshot": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DecodeStatsSnapshot. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-observability-v1.schema.json#/$defs/DecodeStatsSnapshot",
         "x-kiln-rust-type": "DecodeStatsSnapshot",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "DeleteAdapterResponse": {
         "type": "object",
@@ -4540,11 +4582,9 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "HealthResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type HealthResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-observability-v1.schema.json#/$defs/HealthResponse",
         "x-kiln-rust-type": "HealthResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "HtmlDocument": {
         "type": "string",
@@ -4671,18 +4711,14 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "ModelStateResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type ModelStateResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-observability-v1.schema.json#/$defs/ModelStateResponse",
         "x-kiln-rust-type": "ModelStateResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "ModelsResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type ModelsResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-observability-v1.schema.json#/$defs/ModelsResponse",
         "x-kiln-rust-type": "ModelsResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "OpdRequest": {
         "type": "object",
@@ -4746,11 +4782,9 @@
         "x-kiln-field-schema-status": "complete"
       },
       "RequestRecord": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type RequestRecord. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
+        "$ref": "kiln-observability-v1.schema.json#/$defs/RequestRecord",
         "x-kiln-rust-type": "RequestRecord",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "RerunBody": {
         "type": "object",
@@ -4889,13 +4923,9 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "Vec_RequestRecord": {
-        "type": "array",
-        "items": {
-          "$ref": "#/components/schemas/RequestRecord"
-        },
-        "description": "Runtime payload represented by Rust type Vec<RequestRecord>. The referenced item field schema is still migration pending.",
+        "$ref": "kiln-observability-v1.schema.json#/$defs/Vec_RequestRecord",
         "x-kiln-rust-type": "Vec<RequestRecord>",
-        "x-kiln-field-schema-status": "migration_pending"
+        "x-kiln-field-schema-status": "complete"
       },
       "Vec_TrainingStatus": {
         "type": "array",
@@ -4946,8 +4976,8 @@
   },
   "x-kiln-field-schema-status": "migration_pending",
   "x-kiln-component-schema-counts": {
-    "complete": 17,
-    "migration_pending": 88,
-    "total": 105
+    "complete": 27,
+    "migration_pending": 80,
+    "total": 107
   }
 }

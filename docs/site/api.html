@@ -277,7 +277,10 @@
         A compact website map for cold readers who want to see the serving, adapter, training,
         monitoring, and configuration endpoints before walking through the full Quickstart. The
         <a href="docs/http-api/">generated HTTP contract</a> is the complete machine-readable
-        inventory of all 101 paths and 112 method bindings.
+        inventory of all 101 paths and 112 method bindings. Generated
+        <a href="docs/inference-schema/">inference</a> and
+        <a href="docs/observability-schema/">observability</a> schemas own the completed
+        field-level wire contracts.
       </p>
       <div class="flex flex-wrap gap-3 mt-8">
         <a href="quickstart.html" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
@@ -335,6 +338,15 @@
           <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return resolved startup policy, the versioned accelerator execution policy, independent top-level <code>rocm_graphs</code> full statistics and <code>rocm_graph_telemetry</code> live phase/transient snapshots with a typed unavailable-reason field beside each, typed batching and streaming-prefill intent/backend/effective policy, actor activity, direct-rendezvous worker/route status, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective gradient and SFT boundary-checkpoint policy, the resident optimizer implementation/tuple/per-workload admission contract, memory-budget partitions, and generation defaults. A null live value never means its counters were zero.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest, execution-provenance record, immutable checkpoint-boundary policy under <code>training.checkpoint_boundary_policy</code>, and the resolved ROCm policy plus the same four graph value/reason fields as config. Do not enable this endpoint merely to collect routine graph telemetry; health carries the operational snapshot.</div>
         </div>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
+          The generated <a href="docs/observability-schema/">Observability API Schema</a> is the
+          canonical field, requiredness, nullability, enum, and closed-object contract for these
+          JSON responses and for <code>GET /v1/cache/stats</code>. The generated
+          <a href="docs/http-api/">HTTP API Contract</a> records that health returns the same
+          diagnostic body with HTTP 200 when ready and HTTP 503 when degraded or in maintenance,
+          and records the gated debug endpoint's distinct HTTP 403 and provenance-validation HTTP
+          500 bodies. The operational guidance below does not redefine those wire contracts.
+        </p>
         <div class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Check runtime configuration</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/config | python3 -m json.tool</code></pre>

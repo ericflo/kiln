@@ -18,6 +18,7 @@ from json_schema_subset import SchemaResolutionError, resolve_ref, validate_inst
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "contracts" / "kiln-http-api-v1.openapi.json"
 INFERENCE_SCHEMA_PATH = ROOT / "contracts" / "kiln-inference-v1.schema.json"
+OBSERVABILITY_SCHEMA_PATH = ROOT / "contracts" / "kiln-observability-v1.schema.json"
 THINKING_SCHEMA_PATH = ROOT / "contracts" / "thinking-budget-v1.schema.json"
 INFERENCE_ENTRYPOINTS = (
     "BatchCompletionRequest",
@@ -28,10 +29,34 @@ INFERENCE_ENTRYPOINTS = (
     "TextCompletionRequest",
     "TextCompletionResponse",
 )
+OBSERVABILITY_ENTRYPOINTS = (
+    "CacheStatsResponse",
+    "ConfigResponse",
+    "DebugDisabledResponse",
+    "DebugProvenanceErrorResponse",
+    "DecodeStatsSnapshot",
+    "HealthResponse",
+    "ModelStateResponse",
+    "ModelsResponse",
+    "RequestRecord",
+    "Vec_RequestRecord",
+)
+OBSERVABILITY_COMPONENT_TYPES = {
+    "CacheStatsResponse": "CacheStatsResponse",
+    "ConfigResponse": "ConfigResponse",
+    "DebugDisabledResponse": "DebugDisabledResponse",
+    "DebugProvenanceErrorResponse": "serde_json::Value",
+    "DecodeStatsSnapshot": "DecodeStatsSnapshot",
+    "HealthResponse": "HealthResponse",
+    "ModelStateResponse": "ModelStateResponse",
+    "ModelsResponse": "ModelsResponse",
+    "RequestRecord": "RequestRecord",
+    "Vec_RequestRecord": "Vec<RequestRecord>",
+}
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
-    "complete": 17,
-    "migration_pending": 88,
-    "total": 105,
+    "complete": 27,
+    "migration_pending": 80,
+    "total": 107,
 }
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
 EXPECTED_METHOD_COUNTS = {"DELETE": 12, "GET": 53, "POST": 47}
@@ -66,6 +91,7 @@ NO_BODY_POSTS = {
     "/v1/agent/runs/{id}/abort",
     "/v1/library/install/{id}",
 }
+EXPLICIT_ERROR_PATHS = {"/v1/debug/model-state", "/v1/health"}
 
 
 class ContractError(Exception):
@@ -104,9 +130,13 @@ def resolve_contract_ref(document: dict[str, Any], reference: str) -> Any:
     if not separator:
         fragment = ""
     if document_name:
-        if document_name != INFERENCE_SCHEMA_PATH.name:
+        external_documents = {
+            INFERENCE_SCHEMA_PATH.name: INFERENCE_SCHEMA_PATH,
+            OBSERVABILITY_SCHEMA_PATH.name: OBSERVABILITY_SCHEMA_PATH,
+        }
+        if document_name not in external_documents:
             raise ContractError(f"unsupported external OpenAPI reference {reference!r}")
-        value: Any = load_json(INFERENCE_SCHEMA_PATH)
+        value: Any = load_json(external_documents[document_name])
     else:
         value = document
     if fragment and not fragment.startswith("/"):
@@ -330,10 +360,12 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
                     value != {"schema": {"type": "string"}} for value in headers.values()
                 ):
                     errors.append(f"{label}: response headers must be string schemas")
-        if path.startswith("/v1/") and responses.get("default") != {
+        if path.startswith("/v1/") and path not in EXPLICIT_ERROR_PATHS and responses.get("default") != {
             "$ref": "#/components/responses/ApiError"
         }:
             errors.append(f"{label}: /v1 operations must reference the structured default error")
+        if path in EXPLICIT_ERROR_PATHS and "default" in responses:
+            errors.append(f"{label}: explicit error responses must not retain a fictitious default error")
 
     if operation_count != 112:
         errors.append(f"operation count must be 112, got {operation_count}")
@@ -343,6 +375,35 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         errors.append(f"observed tag counts drifted: {dict(sorted(tag_counts.items()))}")
     if websocket_operations != ["GET /v1/terminal/ws"]:
         errors.append(f"WebSocket transport must be exactly GET /v1/terminal/ws, got {websocket_operations}")
+
+    explicit_responses = {
+        "/health": {
+            "200": ("HealthResponse", "HealthResponse"),
+            "503": ("HealthResponse", "HealthResponse"),
+        },
+        "/v1/health": {
+            "200": ("HealthResponse", "HealthResponse"),
+            "503": ("HealthResponse", "HealthResponse"),
+        },
+        "/v1/debug/model-state": {
+            "200": ("ModelStateResponse", "ModelStateResponse"),
+            "403": ("DebugDisabledResponse", "DebugDisabledResponse"),
+            "500": ("DebugProvenanceErrorResponse", "serde_json::Value"),
+        },
+    }
+    for path, expected in explicit_responses.items():
+        responses = paths.get(path, {}).get("get", {}).get("responses", {})
+        if set(responses) != set(expected):
+            errors.append(f"GET {path}: response statuses must be exactly {sorted(expected)}")
+            continue
+        for code, (component, rust_type) in expected.items():
+            response = responses[code]
+            schema = response.get("content", {}).get("application/json", {}).get("schema", {})
+            expected_ref = f"#/components/schemas/{component}"
+            if schema.get("$ref") != expected_ref:
+                errors.append(f"GET {path} {code}: response schema must be {expected_ref}")
+            if response.get("x-kiln-rust-type") != rust_type:
+                errors.append(f"GET {path} {code}: response Rust type must be {rust_type}")
 
     components = document.get("components")
     if not isinstance(components, dict):
@@ -388,6 +449,13 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         expected_ref = f"{INFERENCE_SCHEMA_PATH.name}#/$defs/{entrypoint}"
         if schema.get("$ref") != expected_ref or schema.get("x-kiln-field-schema-status") != "complete":
             errors.append(f"inference component {entrypoint} must use complete ref {expected_ref}")
+    for entrypoint, rust_type in OBSERVABILITY_COMPONENT_TYPES.items():
+        schema = schemas.get(entrypoint, {})
+        expected_ref = f"{OBSERVABILITY_SCHEMA_PATH.name}#/$defs/{entrypoint}"
+        if schema.get("$ref") != expected_ref or schema.get("x-kiln-field-schema-status") != "complete":
+            errors.append(f"observability component {entrypoint} must use complete ref {expected_ref}")
+        if schema.get("x-kiln-rust-type") != rust_type:
+            errors.append(f"observability component {entrypoint} must bind Rust type {rust_type}")
 
     for reference in collect_references(document):
         try:
@@ -535,6 +603,105 @@ def validate_inference_schema(
     return errors
 
 
+def validate_observability_schema(schema: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    expected_identity = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://ericflo.github.io/kiln/contracts/kiln-observability-v1.schema.json",
+        "x-kiln-field-schema-status": "complete",
+    }
+    for key, expected in expected_identity.items():
+        if schema.get(key) != expected:
+            errors.append(f"observability schema {key} must be {expected!r}")
+    if schema.get("x-kiln-entrypoints") != list(OBSERVABILITY_ENTRYPOINTS):
+        errors.append("observability schema entrypoints drifted")
+    if schema.get("oneOf") != [
+        {"$ref": f"#/$defs/{name}"} for name in OBSERVABILITY_ENTRYPOINTS
+    ]:
+        errors.append("observability schema root union must contain every public response shape")
+
+    definitions = schema.get("$defs")
+    if not isinstance(definitions, dict):
+        errors.append("observability schema $defs must be an object")
+        return errors
+    if len(definitions) != 135:
+        errors.append(f"observability schema must contain 135 definitions, got {len(definitions)}")
+    if list(definitions) != sorted(definitions):
+        errors.append("observability schema definitions must be sorted")
+    for name, definition in definitions.items():
+        if not isinstance(definition, dict):
+            errors.append(f"observability definition {name} must be an object")
+            continue
+        if definition.get("x-kiln-field-schema-status") != "complete":
+            errors.append(f"observability definition {name} must be field-schema complete")
+        if not isinstance(definition.get("x-kiln-rust-type"), str):
+            errors.append(f"observability definition {name} must bind a Rust wire type")
+        if definition.get("type") == "object" and definition.get("additionalProperties") is not False:
+            errors.append(f"observability object definition {name} must be closed")
+
+    for entrypoint in OBSERVABILITY_ENTRYPOINTS:
+        if entrypoint not in definitions:
+            errors.append(f"observability schema is missing entrypoint {entrypoint}")
+
+    for reference in collect_references(schema):
+        try:
+            resolve_ref({"$ref": reference}, schema)
+        except SchemaResolutionError as error:
+            errors.append(str(error))
+
+    reachable: set[str] = set()
+    pending = list(OBSERVABILITY_ENTRYPOINTS)
+    while pending:
+        name = pending.pop()
+        if name in reachable or name not in definitions:
+            continue
+        reachable.add(name)
+        for reference in collect_references(definitions[name]):
+            match = re.fullmatch(r"#/\$defs/([^/]+)", reference)
+            if match:
+                pending.append(match.group(1))
+    orphaned = sorted(set(definitions) - reachable)
+    if orphaned:
+        errors.append("observability schema has unreachable definitions: " + ", ".join(orphaned))
+
+    examples = schema.get("x-kiln-examples")
+    if not isinstance(examples, dict) or set(examples) != set(OBSERVABILITY_ENTRYPOINTS):
+        errors.append("observability examples must cover every public JSON response shape")
+    else:
+        for name, values in examples.items():
+            if not isinstance(values, list) or not values:
+                errors.append(f"observability examples for {name} must be a non-empty array")
+                continue
+            for index, value in enumerate(values):
+                errors.extend(
+                    validate_instance(
+                        value,
+                        {"$ref": f"#/$defs/{name}"},
+                        schema,
+                        f"example({name})[{index}]",
+                    )
+                )
+
+    health = definitions.get("HealthResponse", {})
+    status = health.get("properties", {}).get("status", {})
+    if status.get("enum") != ["ok", "degraded", "maintenance"]:
+        errors.append("HealthResponse must publish the complete readiness status enum")
+    if "self_improve_scheduler" in health.get("required", []):
+        errors.append("HealthResponse must preserve skipped-when-unarmed scheduler semantics")
+    for name in ("ConfigResponse", "HealthResponse", "ModelStateResponse", "ModelsResponse"):
+        if definitions.get(name, {}).get("additionalProperties") is not False:
+            errors.append(f"{name} must remain a closed emitted response")
+    request_record = definitions.get("RequestRecord", {})
+    optional_request_fields = {
+        "adapter", "temperature", "top_p", "max_tokens", "ttft_ms", "model_prefill_ms",
+        "model_decode_ms", "error", "thinking_mode", "prefix_cache", "prompt_full",
+        "completion_full", "user_agent", "client", "thinking_budget",
+    }
+    if optional_request_fields & set(request_record.get("required", [])):
+        errors.append("RequestRecord must preserve serde skipped-option wire semantics")
+    return errors
+
+
 def run_inference_self_tests(
     schema: dict[str, Any], thinking_schema: dict[str, Any]
 ) -> list[str]:
@@ -578,8 +745,47 @@ def run_inference_self_tests(
     return errors
 
 
+def run_observability_self_tests(schema: dict[str, Any]) -> list[str]:
+    examples = schema["x-kiln-examples"]
+    cases: list[tuple[str, Any, str]] = []
+    health_missing = copy.deepcopy(examples["HealthResponse"][0])
+    health_missing.pop("status")
+    cases.append(("HealthResponse", health_missing, "missing health status"))
+    health_extra = copy.deepcopy(examples["HealthResponse"][0])
+    health_extra["unknown"] = True
+    cases.append(("HealthResponse", health_extra, "unknown health field"))
+    models_owner = copy.deepcopy(examples["ModelsResponse"][0])
+    models_owner["data"][0]["owned_by"] = "other"
+    cases.append(("ModelsResponse", models_owner, "model ownership constant"))
+    negative_decode = copy.deepcopy(examples["DecodeStatsSnapshot"][0])
+    negative_decode["p99_itl_ms"] = -1
+    cases.append(("DecodeStatsSnapshot", negative_decode, "negative decode latency"))
+    nullable_skipped = copy.deepcopy(examples["RequestRecord"][0])
+    nullable_skipped["adapter"] = None
+    cases.append(("RequestRecord", nullable_skipped, "null skipped request field"))
+    debug_missing = copy.deepcopy(examples["DebugProvenanceErrorResponse"][0])
+    debug_missing.pop("detail")
+    cases.append(("DebugProvenanceErrorResponse", debug_missing, "missing debug error detail"))
+    cache_negative = copy.deepcopy(examples["CacheStatsResponse"][0])
+    cache_negative["stats"]["total_entries"] = -1
+    cases.append(("CacheStatsResponse", cache_negative, "negative cache entry count"))
+
+    errors = []
+    for name, value, label in cases:
+        observed = validate_instance(value, {"$ref": f"#/$defs/{name}"}, schema)
+        if not observed:
+            errors.append(f"observability self-test {label!r} unexpectedly passed")
+
+    open_health = copy.deepcopy(schema)
+    open_health["$defs"]["HealthResponse"]["additionalProperties"] = True
+    if not any("HealthResponse must be closed" in error for error in validate_observability_schema(open_health)):
+        errors.append("observability self-test failed to reject an open HealthResponse")
+    return errors
+
+
 def run_self_tests(
-    document: dict[str, Any], inference_schema: dict[str, Any], thinking_schema: dict[str, Any]
+    document: dict[str, Any], inference_schema: dict[str, Any], observability_schema: dict[str, Any],
+    thinking_schema: dict[str, Any]
 ) -> list[str]:
     mutations = []
 
@@ -610,17 +816,20 @@ def run_self_tests(
         if not any(expected_fragment in error for error in observed):
             errors.append(f"self-test mutation did not produce {expected_fragment!r}: {observed[:3]}")
     errors.extend(run_inference_self_tests(inference_schema, thinking_schema))
+    errors.extend(run_observability_self_tests(observability_schema))
     return errors
 
 
 def check(*, self_test: bool) -> None:
     document = load_contract()
     inference_schema = load_json(INFERENCE_SCHEMA_PATH)
+    observability_schema = load_json(OBSERVABILITY_SCHEMA_PATH)
     thinking_schema = load_json(THINKING_SCHEMA_PATH)
     errors = validate_contract(document)
     errors.extend(validate_inference_schema(inference_schema, thinking_schema))
+    errors.extend(validate_observability_schema(observability_schema))
     if self_test:
-        errors.extend(run_self_tests(document, inference_schema, thinking_schema))
+        errors.extend(run_self_tests(document, inference_schema, observability_schema, thinking_schema))
     if errors:
         raise ContractError("HTTP API contract failed:\n- " + "\n- ".join(errors))
     print(
@@ -631,7 +840,8 @@ def check(*, self_test: bool) -> None:
         f"{len(document['components']['schemas'])} payload components "
         f"({document['x-kiln-component-schema-counts']['complete']} complete, "
         f"{document['x-kiln-component-schema-counts']['migration_pending']} migration pending), "
-        f"{len(inference_schema['$defs'])} inference definitions"
+        f"{len(inference_schema['$defs'])} inference definitions, "
+        f"{len(observability_schema['$defs'])} observability definitions"
     )
 
 

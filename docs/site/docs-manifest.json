@@ -87,6 +87,14 @@
       "description": "Generated field-level request, response, SSE event, thinking metadata, performance metadata, prompt-logprob, batch, and rollout-provenance contract for all three inference endpoints."
     },
     {
+      "source": "contracts/kiln-observability-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "observability-schema",
+      "title": "Observability API Schema",
+      "section": "serving",
+      "description": "Generated field-level contract for health and degraded readiness, resolved configuration, gated model-state diagnostics and errors, model discovery, decode statistics, recent requests, and persistent logit-cache statistics."
+    },
+    {
       "source": "CHANGELOG.md",
       "slug": "changelog",
       "title": "Changelog",
