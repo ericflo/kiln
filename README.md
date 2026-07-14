@@ -586,6 +586,16 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 
 ## API
 
+The table below is a curated workflow index. The generated
+[HTTP operation contract](contracts/kiln-http-api-v1.openapi.json) is the
+complete route, transport, status, header, and error inventory. Field-level
+wire semantics live in the generated
+[inference](contracts/kiln-inference-v1.schema.json),
+[observability](contracts/kiln-observability-v1.schema.json), and
+[artifact lifecycle](contracts/kiln-artifacts-v1.schema.json) schemas; those
+contracts distinguish required, nullable, omitted, closed, and deliberately
+open inputs and include validated examples for every public entrypoint.
+
 | Method | Path | Description |
 |---|---|---|
 | POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets, bounded `ignore_eos`, and opt-in exact single-choice `rollout_provenance` |

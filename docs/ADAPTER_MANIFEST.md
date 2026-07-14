@@ -7,6 +7,11 @@ hashes needed to audit or restore it.
 
 ## Schema
 
+The generated [Artifact Lifecycle API Schema](../contracts/kiln-artifacts-v1.schema.json)
+is the field-level authority for `AdapterManifest` and every adapter API
+request and response that contains it. This document describes storage and
+audit semantics.
+
 Current schema version: `1`.
 
 Required fields:

@@ -371,6 +371,12 @@ does not authenticate the server.
 
 ## Register with Kiln
 
+The generated [Artifact Lifecycle API Schema](../contracts/kiln-artifacts-v1.schema.json)
+is authoritative for `RegisterTeacherRequest`, `TeacherEntry`,
+`TeachersListResponse`, deletion responses, capabilities, and the complete
+teacher identity object. The rules below explain registration and trust
+semantics rather than defining a second copy of those fields.
+
 Credential-free registration is limited to an exact loopback URL. For an
 off-host teacher, configure an exact canonical HTTPS origin and a server-owned
 secret environment variable before Kiln starts:

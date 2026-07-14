@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "contracts" / "kiln-http-api-v1.openapi.json"
 INFERENCE_SCHEMA_PATH = ROOT / "contracts" / "kiln-inference-v1.schema.json"
 OBSERVABILITY_SCHEMA_PATH = ROOT / "contracts" / "kiln-observability-v1.schema.json"
+ARTIFACT_SCHEMA_PATH = ROOT / "contracts" / "kiln-artifacts-v1.schema.json"
 THINKING_SCHEMA_PATH = ROOT / "contracts" / "thinking-budget-v1.schema.json"
 INFERENCE_ENTRYPOINTS = (
     "BatchCompletionRequest",
@@ -53,10 +54,38 @@ OBSERVABILITY_COMPONENT_TYPES = {
     "RequestRecord": "RequestRecord",
     "Vec_RequestRecord": "Vec<RequestRecord>",
 }
+ARTIFACT_ENTRYPOINTS = (
+    "AdapterDetail",
+    "AdapterUploadMultipart",
+    "AdaptersResponse",
+    "DeleteAdapterResponse",
+    "DeleteExportResponse",
+    "DeleteTeacherResponse",
+    "ExportDetail",
+    "ExportList",
+    "ExportSummary",
+    "GrpoExportRequest",
+    "ImportPeftResponse",
+    "LoadAdapterRequest",
+    "LoadAdapterResponse",
+    "MergeAdapterRequest",
+    "MergeAdapterResponse",
+    "RegisterTeacherRequest",
+    "SftExportRequest",
+    "TeacherEntry",
+    "TeachersListResponse",
+    "UnloadAdapterResponse",
+    "UploadAdapterResponse",
+    "kiln_train_AdapterReceipt",
+)
+ARTIFACT_COMPONENT_TYPES = {
+    name: name for name in ARTIFACT_ENTRYPOINTS
+}
+ARTIFACT_COMPONENT_TYPES["kiln_train_AdapterReceipt"] = "kiln_train::AdapterReceipt"
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
-    "complete": 27,
-    "migration_pending": 80,
-    "total": 107,
+    "complete": 49,
+    "migration_pending": 60,
+    "total": 109,
 }
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
 EXPECTED_METHOD_COUNTS = {"DELETE": 12, "GET": 53, "POST": 47}
@@ -133,6 +162,7 @@ def resolve_contract_ref(document: dict[str, Any], reference: str) -> Any:
         external_documents = {
             INFERENCE_SCHEMA_PATH.name: INFERENCE_SCHEMA_PATH,
             OBSERVABILITY_SCHEMA_PATH.name: OBSERVABILITY_SCHEMA_PATH,
+            ARTIFACT_SCHEMA_PATH.name: ARTIFACT_SCHEMA_PATH,
         }
         if document_name not in external_documents:
             raise ContractError(f"unsupported external OpenAPI reference {reference!r}")
@@ -456,6 +486,86 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
             errors.append(f"observability component {entrypoint} must use complete ref {expected_ref}")
         if schema.get("x-kiln-rust-type") != rust_type:
             errors.append(f"observability component {entrypoint} must bind Rust type {rust_type}")
+    for entrypoint, rust_type in ARTIFACT_COMPONENT_TYPES.items():
+        schema = schemas.get(entrypoint, {})
+        expected_ref = f"{ARTIFACT_SCHEMA_PATH.name}#/$defs/{entrypoint}"
+        if schema.get("$ref") != expected_ref or schema.get("x-kiln-field-schema-status") != "complete":
+            errors.append(f"artifact component {entrypoint} must use complete ref {expected_ref}")
+        if schema.get("x-kiln-rust-type") != rust_type:
+            errors.append(f"artifact component {entrypoint} must bind Rust type {rust_type}")
+
+    artifact_operations = {
+        ("get", "/v1/adapters"): (None, "200", "AdaptersResponse"),
+        ("post", "/v1/adapters/load"): ("LoadAdapterRequest", "200", "LoadAdapterResponse"),
+        ("post", "/v1/adapters/merge"): ("MergeAdapterRequest", "200", "MergeAdapterResponse"),
+        ("post", "/v1/adapters/unload"): (None, "200", "UnloadAdapterResponse"),
+        ("post", "/v1/adapters/upload"): ("AdapterUploadMultipart", "200", "UploadAdapterResponse"),
+        ("delete", "/v1/adapters/{name}"): (None, "200", "DeleteAdapterResponse"),
+        ("get", "/v1/adapters/{name}/detail"): (None, "200", "AdapterDetail"),
+        ("get", "/v1/adapters/{name}/download"): (None, "200", "BinaryArchive"),
+        ("get", "/v1/adapters/{name}/receipt"): (None, "200", "kiln_train_AdapterReceipt"),
+        ("get", "/v1/teachers"): (None, "200", "TeachersListResponse"),
+        ("post", "/v1/teachers"): ("RegisterTeacherRequest", "200", "TeacherEntry"),
+        ("delete", "/v1/teachers/{alias}"): (None, "200", "DeleteTeacherResponse"),
+        ("get", "/v1/train/hf/exports"): (None, "200", "ExportList"),
+        ("delete", "/v1/train/hf/exports/{name}"): (None, "200", "DeleteExportResponse"),
+        ("get", "/v1/train/hf/exports/{name}"): (None, "200", "ExportDetail"),
+        ("get", "/v1/train/hf/exports/{name}/download"): (None, "200", "BinaryArchive"),
+        ("post", "/v1/train/hf/grpo/exports"): ("GrpoExportRequest", "201", "ExportSummary"),
+        ("post", "/v1/train/hf/peft/imports/{name}"): ("BinaryArchive", "201", "ImportPeftResponse"),
+        ("post", "/v1/train/hf/sft/exports"): ("SftExportRequest", "201", "ExportSummary"),
+    }
+    for (method, path), (request_component, status, response_component) in artifact_operations.items():
+        operation = paths.get(path, {}).get(method, {})
+        request_schema = (
+            operation.get("requestBody", {}).get("content", {})
+        )
+        request_refs = [
+            media.get("schema", {}).get("$ref")
+            for media in request_schema.values()
+            if isinstance(media, dict)
+        ]
+        expected_request_ref = (
+            f"#/components/schemas/{request_component}" if request_component else None
+        )
+        if (request_refs[0] if len(request_refs) == 1 else None) != expected_request_ref:
+            errors.append(f"{method.upper()} {path}: artifact request schema must be {expected_request_ref}")
+        response = operation.get("responses", {}).get(status, {})
+        response_refs = [
+            media.get("schema", {}).get("$ref")
+            for media in response.get("content", {}).values()
+            if isinstance(media, dict)
+        ]
+        expected_response_ref = f"#/components/schemas/{response_component}"
+        if response_refs != [expected_response_ref]:
+            errors.append(
+                f"{method.upper()} {path} {status}: artifact response schema must be {expected_response_ref}"
+            )
+
+    expected_artifact_headers = {
+        ("get", "/v1/adapters/{name}/download"): {"Content-Disposition"},
+        ("get", "/v1/train/hf/exports/{name}"): {"ETag"},
+        ("get", "/v1/train/hf/exports/{name}/download"): {"Content-Disposition", "ETag"},
+        ("post", "/v1/train/hf/grpo/exports"): {"ETag"},
+        ("post", "/v1/train/hf/peft/imports/{name}"): {"ETag"},
+        ("post", "/v1/train/hf/sft/exports"): {"ETag"},
+    }
+    for (method, path), expected_headers in expected_artifact_headers.items():
+        operation = paths[path][method]
+        success = next(code for code in operation["responses"] if code.isdigit() and int(code) < 400)
+        observed_headers = set(operation["responses"][success].get("headers", {}))
+        if observed_headers != expected_headers:
+            errors.append(
+                f"{method.upper()} {path}: success headers must be exactly {sorted(expected_headers)}"
+            )
+    delete_export_parameters = paths["/v1/train/hf/exports/{name}"]["delete"].get("parameters", [])
+    if not any(
+        parameter.get("in") == "header"
+        and parameter.get("name") == "If-Match"
+        and parameter.get("required") is False
+        for parameter in delete_export_parameters
+    ):
+        errors.append("DELETE /v1/train/hf/exports/{name}: optional If-Match contract is missing")
 
     for reference in collect_references(document):
         try:
@@ -702,6 +812,151 @@ def validate_observability_schema(schema: dict[str, Any]) -> list[str]:
     return errors
 
 
+def validate_artifact_schema(
+    schema: dict[str, Any],
+    inference_schema: dict[str, Any],
+    observability_schema: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    expected_identity = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://ericflo.github.io/kiln/contracts/kiln-artifacts-v1.schema.json",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-external-contracts": [OBSERVABILITY_SCHEMA_PATH.name, INFERENCE_SCHEMA_PATH.name],
+    }
+    for key, expected in expected_identity.items():
+        if schema.get(key) != expected:
+            errors.append(f"artifact schema {key} must be {expected!r}")
+    if schema.get("x-kiln-entrypoints") != list(ARTIFACT_ENTRYPOINTS):
+        errors.append("artifact schema entrypoints drifted")
+    if schema.get("oneOf") != [{"$ref": f"#/$defs/{name}"} for name in ARTIFACT_ENTRYPOINTS]:
+        errors.append("artifact schema root union must contain every public payload shape")
+
+    definitions = schema.get("$defs")
+    if not isinstance(definitions, dict):
+        errors.append("artifact schema $defs must be an object")
+        return errors
+    if len(definitions) != 80:
+        errors.append(f"artifact schema must contain 80 definitions, got {len(definitions)}")
+    if list(definitions) != sorted(definitions):
+        errors.append("artifact schema definitions must be sorted")
+    open_input_objects = {
+        "AdapterUploadMultipart",
+        "AgenticGroup",
+        "LoadAdapterRequest",
+        "MergeAdapterRequest",
+        "MergeSource",
+        "ScoredRollout",
+        "SftExample",
+        "TrainingChatMessage",
+        "TurnSegment",
+    }
+    for name, definition in definitions.items():
+        if not isinstance(definition, dict):
+            errors.append(f"artifact definition {name} must be an object")
+            continue
+        if definition.get("x-kiln-field-schema-status") != "complete":
+            errors.append(f"artifact definition {name} must be field-schema complete")
+        if not isinstance(definition.get("x-kiln-rust-type"), str):
+            errors.append(f"artifact definition {name} must bind a Rust wire type")
+        if definition.get("type") == "object":
+            expected_open = name in open_input_objects
+            if definition.get("additionalProperties") is not expected_open:
+                state = "open" if expected_open else "closed"
+                errors.append(f"artifact object definition {name} must be {state}")
+            if expected_open and definition.get("x-kiln-unknown-field-policy") != "accepted_and_ignored":
+                errors.append(f"artifact open input {name} must name its ignored-unknown-field policy")
+    for entrypoint, rust_type in ARTIFACT_COMPONENT_TYPES.items():
+        definition = definitions.get(entrypoint, {})
+        if definition.get("x-kiln-rust-type") != rust_type:
+            errors.append(f"artifact definition {entrypoint} must bind Rust type {rust_type}")
+
+    registry = {
+        INFERENCE_SCHEMA_PATH.name: inference_schema,
+        inference_schema.get("$id", ""): inference_schema,
+        OBSERVABILITY_SCHEMA_PATH.name: observability_schema,
+        observability_schema.get("$id", ""): observability_schema,
+        schema.get("$id", ""): schema,
+    }
+    for reference in collect_references(schema):
+        try:
+            resolve_ref({"$ref": reference}, schema, registry)
+        except SchemaResolutionError as error:
+            errors.append(str(error))
+
+    reachable: set[str] = set()
+    pending = list(ARTIFACT_ENTRYPOINTS)
+    while pending:
+        name = pending.pop()
+        if name in reachable or name not in definitions:
+            continue
+        reachable.add(name)
+        for reference in collect_references(definitions[name]):
+            match = re.fullmatch(r"#/\$defs/([^/]+)", reference)
+            if match:
+                pending.append(match.group(1))
+    orphaned = sorted(set(definitions) - reachable)
+    if orphaned:
+        errors.append("artifact schema has unreachable definitions: " + ", ".join(orphaned))
+
+    examples = schema.get("x-kiln-examples")
+    if not isinstance(examples, dict) or set(examples) != set(ARTIFACT_ENTRYPOINTS):
+        errors.append("artifact examples must cover every public payload shape")
+    else:
+        for name, values in examples.items():
+            if not isinstance(values, list) or not values:
+                errors.append(f"artifact examples for {name} must be a non-empty array")
+                continue
+            for index, value in enumerate(values):
+                errors.extend(
+                    validate_instance(
+                        value,
+                        {"$ref": f"#/$defs/{name}"},
+                        schema,
+                        f"example({name})[{index}]",
+                        registry=registry,
+                    )
+                )
+
+    for response_name in (
+        "AdapterDetail",
+        "AdaptersResponse",
+        "ExportDetail",
+        "ImportPeftResponse",
+        "TeacherEntry",
+        "kiln_train_AdapterReceipt",
+    ):
+        if definitions.get(response_name, {}).get("additionalProperties") is not False:
+            errors.append(f"{response_name} must remain a closed emitted response")
+    for request_name in ("GrpoExportRequest", "RegisterTeacherRequest", "SftExportRequest"):
+        if definitions.get(request_name, {}).get("additionalProperties") is not False:
+            errors.append(f"{request_name} must preserve deny_unknown_fields")
+    for request_name in ("AdapterUploadMultipart", "LoadAdapterRequest", "MergeAdapterRequest"):
+        if definitions.get(request_name, {}).get("additionalProperties") is not True:
+            errors.append(f"{request_name} must preserve its accepted-and-ignored input policy")
+    if definitions.get("TeacherIdentityV1", {}).get("properties", {}).get("base_model_sha256") != {
+        "$ref": "#/$defs/RawSha256"
+    }:
+        errors.append("teacher identities must preserve raw SHA-256 wire encoding")
+    if definitions.get("HfTrlExportManifestV1", {}).get("properties", {}).get("export_sha256") != {
+        "$ref": "#/$defs/Sha256"
+    }:
+        errors.append("HF/TRL manifests must preserve prefixed SHA-256 wire encoding")
+    model_identity = definitions.get("HfTrlModelIdentity", {}).get("properties", {})
+    expected_model_paths = {
+        "model_config": "kiln_model_config.json",
+        "tokenizer": "tokenizer.json",
+        "chat_template": "chat_template.jinja",
+        "native_training_chat_template": "kiln_training_chat_template.jinja",
+        "trl_training_chat_template": "training_chat_template.jinja",
+    }
+    for field, path in expected_model_paths.items():
+        rules = model_identity.get(field, {}).get("allOf", [])
+        if not any(rule.get("properties", {}).get("relative_path", {}).get("const") == path for rule in rules):
+            errors.append(f"HfTrlModelIdentity.{field} must pin relative_path {path!r}")
+    return errors
+
+
 def run_inference_self_tests(
     schema: dict[str, Any], thinking_schema: dict[str, Any]
 ) -> list[str]:
@@ -783,8 +1038,110 @@ def run_observability_self_tests(schema: dict[str, Any]) -> list[str]:
     return errors
 
 
+def run_artifact_self_tests(
+    schema: dict[str, Any],
+    inference_schema: dict[str, Any],
+    observability_schema: dict[str, Any],
+) -> list[str]:
+    examples = schema["x-kiln-examples"]
+    cases: list[tuple[str, Any, str]] = []
+
+    extra_response = copy.deepcopy(examples["AdaptersResponse"][0])
+    extra_response["unknown"] = True
+    cases.append(("AdaptersResponse", extra_response, "unknown adapter response field"))
+    nullable_skipped = copy.deepcopy(examples["TeacherEntry"][0])
+    nullable_skipped["identity_revision"] = None
+    cases.append(("TeacherEntry", nullable_skipped, "null skipped identity revision"))
+    ambiguous_sft = copy.deepcopy(examples["SftExportRequest"][0])
+    ambiguous_sft["dataset_path"] = "/srv/data.jsonl"
+    cases.append(("SftExportRequest", ambiguous_sft, "ambiguous SFT source"))
+    missing_grpo_source = {"name": "missing-source"}
+    cases.append(("GrpoExportRequest", missing_grpo_source, "missing GRPO source"))
+    secret_teacher_field = copy.deepcopy(examples["RegisterTeacherRequest"][0])
+    secret_teacher_field["api_key_env"] = "SECRET"
+    cases.append(("RegisterTeacherRequest", secret_teacher_field, "server-controlled teacher secret"))
+    unsupported_remote = {
+        "alias": "remote",
+        "kind": "remote",
+        "provider": "sglang",
+        "model_id": "model",
+        "url": "http://127.0.0.1:8000",
+    }
+    cases.append(("RegisterTeacherRequest", unsupported_remote, "unsupported remote provider"))
+    invalid_density = copy.deepcopy(examples["MergeAdapterRequest"][0])
+    invalid_density["density"] = 0.2
+    cases.append(("MergeAdapterRequest", invalid_density, "density outside TIES mode"))
+    bad_import_hash = copy.deepcopy(examples["ImportPeftResponse"][0])
+    bad_import_hash["import_sha256"] = "0" * 64
+    cases.append(("ImportPeftResponse", bad_import_hash, "unprefixed import digest"))
+    bad_manifest_path = copy.deepcopy(examples["ExportDetail"][0])
+    bad_manifest_path["manifest"]["model"]["tokenizer"]["relative_path"] = "model/tokenizer.json"
+    cases.append(("ExportDetail", bad_manifest_path, "relocated tokenizer artifact"))
+    dotted_export = copy.deepcopy(examples["SftExportRequest"][0])
+    dotted_export["name"] = "not.an.export"
+    cases.append(("SftExportRequest", dotted_export, "dotted export name"))
+    traversing_import = copy.deepcopy(examples["ImportPeftResponse"][0])
+    traversing_import["name"] = "bad..adapter"
+    cases.append(("ImportPeftResponse", traversing_import, "traversing import name"))
+    duplicate_rollout_alias = copy.deepcopy(examples["GrpoExportRequest"][0])
+    group = duplicate_rollout_alias["groups"][0]
+    group["rollouts"] = copy.deepcopy(group["completions"])
+    cases.append(("GrpoExportRequest", duplicate_rollout_alias, "duplicate rollout alias"))
+    undersized_grpo = copy.deepcopy(examples["GrpoExportRequest"][0])
+    undersized_grpo["groups"][0]["completions"].pop()
+    cases.append(("GrpoExportRequest", undersized_grpo, "undersized GRPO group"))
+    provenance_free_grpo = copy.deepcopy(examples["GrpoExportRequest"][0])
+    provenance_free_grpo["groups"][0]["completions"][0].pop("provenance")
+    cases.append(("GrpoExportRequest", provenance_free_grpo, "provenance-free GRPO rollout"))
+    task_format_mismatch = copy.deepcopy(examples["ExportDetail"][0])
+    task_format_mismatch["manifest"]["task"] = "grpo"
+    cases.append(("ExportDetail", task_format_mismatch, "HF/TRL task and data-format mismatch"))
+
+    registry = {
+        INFERENCE_SCHEMA_PATH.name: inference_schema,
+        inference_schema.get("$id", ""): inference_schema,
+        OBSERVABILITY_SCHEMA_PATH.name: observability_schema,
+        observability_schema.get("$id", ""): observability_schema,
+    }
+    errors = []
+    for name, value, label in cases:
+        observed = validate_instance(
+            value, {"$ref": f"#/$defs/{name}"}, schema, registry=registry
+        )
+        if not observed:
+            errors.append(f"artifact self-test {label!r} unexpectedly passed")
+
+    open_load = copy.deepcopy(examples["LoadAdapterRequest"][0])
+    open_load["future_field"] = True
+    if validate_instance(open_load, {"$ref": "#/$defs/LoadAdapterRequest"}, schema):
+        errors.append("artifact self-test rejected an ignored unknown LoadAdapterRequest field")
+    open_load["name"] = "adapter name with spaces"
+    if validate_instance(open_load, {"$ref": "#/$defs/LoadAdapterRequest"}, schema):
+        errors.append("artifact self-test rejected a runtime-valid non-export adapter name")
+    nullable_remote_fields = {
+        "alias": "local",
+        "kind": "local",
+        "provider": None,
+        "url": None,
+        "credential_id": None,
+        "adapter": None,
+    }
+    if validate_instance(
+        nullable_remote_fields, {"$ref": "#/$defs/RegisterTeacherRequest"}, schema
+    ):
+        errors.append("artifact self-test rejected null optional local-teacher fields")
+
+    open_export = copy.deepcopy(schema)
+    open_export["$defs"]["ExportSummary"]["additionalProperties"] = True
+    observed = validate_artifact_schema(open_export, inference_schema, observability_schema)
+    if not any("ExportSummary must be closed" in error for error in observed):
+        errors.append("artifact self-test failed to reject an open ExportSummary")
+    return errors
+
+
 def run_self_tests(
     document: dict[str, Any], inference_schema: dict[str, Any], observability_schema: dict[str, Any],
+    artifact_schema: dict[str, Any],
     thinking_schema: dict[str, Any]
 ) -> list[str]:
     mutations = []
@@ -817,6 +1174,7 @@ def run_self_tests(
             errors.append(f"self-test mutation did not produce {expected_fragment!r}: {observed[:3]}")
     errors.extend(run_inference_self_tests(inference_schema, thinking_schema))
     errors.extend(run_observability_self_tests(observability_schema))
+    errors.extend(run_artifact_self_tests(artifact_schema, inference_schema, observability_schema))
     return errors
 
 
@@ -824,12 +1182,22 @@ def check(*, self_test: bool) -> None:
     document = load_contract()
     inference_schema = load_json(INFERENCE_SCHEMA_PATH)
     observability_schema = load_json(OBSERVABILITY_SCHEMA_PATH)
+    artifact_schema = load_json(ARTIFACT_SCHEMA_PATH)
     thinking_schema = load_json(THINKING_SCHEMA_PATH)
     errors = validate_contract(document)
     errors.extend(validate_inference_schema(inference_schema, thinking_schema))
     errors.extend(validate_observability_schema(observability_schema))
+    errors.extend(validate_artifact_schema(artifact_schema, inference_schema, observability_schema))
     if self_test:
-        errors.extend(run_self_tests(document, inference_schema, observability_schema, thinking_schema))
+        errors.extend(
+            run_self_tests(
+                document,
+                inference_schema,
+                observability_schema,
+                artifact_schema,
+                thinking_schema,
+            )
+        )
     if errors:
         raise ContractError("HTTP API contract failed:\n- " + "\n- ".join(errors))
     print(
@@ -841,7 +1209,8 @@ def check(*, self_test: bool) -> None:
         f"({document['x-kiln-component-schema-counts']['complete']} complete, "
         f"{document['x-kiln-component-schema-counts']['migration_pending']} migration pending), "
         f"{len(inference_schema['$defs'])} inference definitions, "
-        f"{len(observability_schema['$defs'])} observability definitions"
+        f"{len(observability_schema['$defs'])} observability definitions, "
+        f"{len(artifact_schema['$defs'])} artifact definitions"
     )
 
 

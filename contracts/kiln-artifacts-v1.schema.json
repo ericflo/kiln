@@ -1,0 +1,3643 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/contracts/kiln-artifacts-v1.schema.json",
+  "title": "Kiln Artifact Lifecycle API",
+  "description": "Complete field-level wire contract for installed adapters, live adapter transitions, immutable HF/TRL handoffs and PEFT imports, adapter audit receipts, and teacher registry identities. Open input objects explicitly identify serde-compatible ignored unknown fields; emitted objects are closed.",
+  "x-kiln-field-schema-status": "complete",
+  "x-kiln-entrypoints": [
+    "AdapterDetail",
+    "AdapterUploadMultipart",
+    "AdaptersResponse",
+    "DeleteAdapterResponse",
+    "DeleteExportResponse",
+    "DeleteTeacherResponse",
+    "ExportDetail",
+    "ExportList",
+    "ExportSummary",
+    "GrpoExportRequest",
+    "ImportPeftResponse",
+    "LoadAdapterRequest",
+    "LoadAdapterResponse",
+    "MergeAdapterRequest",
+    "MergeAdapterResponse",
+    "RegisterTeacherRequest",
+    "SftExportRequest",
+    "TeacherEntry",
+    "TeachersListResponse",
+    "UnloadAdapterResponse",
+    "UploadAdapterResponse",
+    "kiln_train_AdapterReceipt"
+  ],
+  "x-kiln-external-contracts": [
+    "kiln-observability-v1.schema.json",
+    "kiln-inference-v1.schema.json"
+  ],
+  "oneOf": [
+    {
+      "$ref": "#/$defs/AdapterDetail"
+    },
+    {
+      "$ref": "#/$defs/AdapterUploadMultipart"
+    },
+    {
+      "$ref": "#/$defs/AdaptersResponse"
+    },
+    {
+      "$ref": "#/$defs/DeleteAdapterResponse"
+    },
+    {
+      "$ref": "#/$defs/DeleteExportResponse"
+    },
+    {
+      "$ref": "#/$defs/DeleteTeacherResponse"
+    },
+    {
+      "$ref": "#/$defs/ExportDetail"
+    },
+    {
+      "$ref": "#/$defs/ExportList"
+    },
+    {
+      "$ref": "#/$defs/ExportSummary"
+    },
+    {
+      "$ref": "#/$defs/GrpoExportRequest"
+    },
+    {
+      "$ref": "#/$defs/ImportPeftResponse"
+    },
+    {
+      "$ref": "#/$defs/LoadAdapterRequest"
+    },
+    {
+      "$ref": "#/$defs/LoadAdapterResponse"
+    },
+    {
+      "$ref": "#/$defs/MergeAdapterRequest"
+    },
+    {
+      "$ref": "#/$defs/MergeAdapterResponse"
+    },
+    {
+      "$ref": "#/$defs/RegisterTeacherRequest"
+    },
+    {
+      "$ref": "#/$defs/SftExportRequest"
+    },
+    {
+      "$ref": "#/$defs/TeacherEntry"
+    },
+    {
+      "$ref": "#/$defs/TeachersListResponse"
+    },
+    {
+      "$ref": "#/$defs/UnloadAdapterResponse"
+    },
+    {
+      "$ref": "#/$defs/UploadAdapterResponse"
+    },
+    {
+      "$ref": "#/$defs/kiln_train_AdapterReceipt"
+    }
+  ],
+  "$defs": {
+    "AdapterCanaryCheckReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "passed"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "passed": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "failure_reason": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "description": "One adapter smoke-check outcome.",
+      "x-kiln-rust-type": "kiln_train::AdapterCanaryCheckReceipt",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdapterCanaryStatus": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "passed",
+        "quarantined"
+      ],
+      "description": "The current adapter canary result.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdapterDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "is_active",
+        "has_config",
+        "has_weights",
+        "size_bytes",
+        "files",
+        "training_jobs",
+        "eval_jobs"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "is_active": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "has_config": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "has_weights": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AdapterFileEntry"
+          }
+        },
+        "training_jobs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AdapterLinkedJob"
+          }
+        },
+        "eval_jobs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AdapterLinkedEval"
+          }
+        },
+        "lineage": {
+          "$ref": "#/$defs/AnyJson"
+        }
+      },
+      "description": "Adapter file inventory plus retained training, evaluation, and lineage evidence.",
+      "x-kiln-rust-type": "AdapterDetail",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdapterDiskEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "has_config",
+        "has_weights",
+        "size_bytes",
+        "modified_at",
+        "files",
+        "path",
+        "status",
+        "adapter_model_sha256",
+        "adapter_model_size_bytes",
+        "rank",
+        "alpha",
+        "alpha_over_rank",
+        "target_modules",
+        "base_model_name_or_path",
+        "parent_adapter_metadata",
+        "canary_status",
+        "canary_failure_reason",
+        "canary_warnings",
+        "canary_checks",
+        "canary_status_path",
+        "adapter_manifest",
+        "adapter_manifest_path",
+        "adapter_manifest_error",
+        "last_load_error",
+        "error"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "has_config": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "has_weights": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "modified_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rfc3339Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/AdapterRegistryStatus"
+        },
+        "adapter_model_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RawSha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_model_size_bytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rank": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "alpha": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "alpha_over_rank": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_modules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "base_model_name_or_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent_adapter_metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnyJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "canary_status": {
+          "$ref": "#/$defs/AdapterCanaryStatus"
+        },
+        "canary_failure_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "canary_warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "canary_checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AdapterCanaryCheckReceipt"
+          }
+        },
+        "canary_status_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_manifest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdapterManifest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_manifest_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_manifest_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_load_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "One adapter directory discovered by the server, including invalid and quarantined entries.",
+      "x-kiln-rust-type": "AdapterDiskEntry",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdapterFileEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "size_bytes"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "One regular file in an adapter directory.",
+      "x-kiln-rust-type": "AdapterFileEntry",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdapterLinkedEval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "suite_name",
+        "accuracy",
+        "state"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "suite_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "accuracy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/EvalJobState"
+        }
+      },
+      "description": "A retained evaluation linked to an adapter.",
+      "x-kiln-rust-type": "AdapterLinkedEval",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdapterLinkedJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "job_type",
+        "state",
+        "elapsed_secs",
+        "final_loss"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "job_type": {
+          "$ref": "#/$defs/TrainingJobType"
+        },
+        "state": {
+          "$ref": "#/$defs/TrainingState"
+        },
+        "elapsed_secs": {
+          "type": "number",
+          "minimum": 0
+        },
+        "final_loss": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiniteNumber"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "A retained training job linked to an adapter.",
+      "x-kiln-rust-type": "AdapterLinkedJob",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdapterManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "manifest_type",
+        "adapter_name",
+        "safetensors_hash",
+        "config_hash",
+        "receipt_hash",
+        "parent_adapter",
+        "model_config_hash",
+        "kiln_commit",
+        "training_data_hash",
+        "training_data_source",
+        "training_data_path",
+        "files"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "manifest_type": {
+          "const": "kiln_adapter_manifest"
+        },
+        "adapter_name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "safetensors_hash": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "config_hash": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "receipt_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent_adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model_config_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "training_chat_template_hash": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "base_weight_shard_manifest": {
+          "$ref": "kiln-observability-v1.schema.json#/$defs/BaseWeightShardManifest"
+        },
+        "execution_provenance": {
+          "$ref": "kiln-observability-v1.schema.json#/$defs/ExecutionProvenanceV1"
+        },
+        "training_precision": {
+          "$ref": "#/$defs/TrainingCheckpointPrecision"
+        },
+        "kiln_commit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "training_data_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "training_data_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "training_data_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files": {
+          "$ref": "#/$defs/AdapterManifestFiles"
+        }
+      },
+      "description": "Audit and content identity metadata for an installed adapter.",
+      "x-kiln-rust-type": "kiln_train::AdapterManifest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdapterManifestFiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_model",
+        "adapter_config",
+        "train_receipt"
+      ],
+      "properties": {
+        "adapter_model": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "adapter_config": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "train_receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Canonical filenames bound by an adapter manifest.",
+      "x-kiln-rust-type": "kiln_train::AdapterManifestFiles",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdapterName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\.)(?![\\s\\S]*\\.\\.)(?![\\s\\S]*[\\\\/])[\\s\\S]+$",
+      "x-kiln-runtime-footgun": "adapter names currently have no byte limit or control-character restriction",
+      "description": "An adapter registry name: non-empty, relative, not dot-prefixed, and without separators or '..'.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdapterRegistryStatus": {
+      "type": "string",
+      "enum": [
+        "loaded",
+        "available",
+        "quarantined",
+        "invalid"
+      ],
+      "description": "The registry state of an adapter directory.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdapterUploadMultipart": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name",
+        "archive"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "archive": {
+          "type": "string",
+          "format": "binary",
+          "contentMediaType": "application/gzip"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "x-kiln-max-body-bytes": 2147483648,
+      "x-kiln-max-extracted-bytes": 4294967296,
+      "x-kiln-max-extracted-entries": 100000,
+      "description": "Multipart adapter installation body. Unknown parts are drained and ignored.",
+      "x-kiln-rust-type": "AdapterUploadMultipart",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AdaptersResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active_adapter",
+        "active",
+        "loaded_adapter",
+        "loaded_adapter_identity",
+        "loaded_adapters",
+        "adapter_dir",
+        "available",
+        "available_adapters"
+      ],
+      "properties": {
+        "active_adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "active": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "loaded_adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "loaded_adapter_identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoadedAdapterIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "loaded_adapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          }
+        },
+        "adapter_dir": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "available": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AdapterDiskEntry"
+          }
+        },
+        "available_adapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AdapterDiskEntry"
+          }
+        }
+      },
+      "description": "The complete resident and on-disk adapter registry view.",
+      "x-kiln-rust-type": "AdaptersResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AgenticGroup": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "messages"
+      ],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrainingChatMessage"
+          },
+          "minItems": 1
+        },
+        "completions": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/ScoredRollout"
+              },
+              {
+                "required": [
+                  "provenance"
+                ]
+              }
+            ]
+          },
+          "minItems": 2,
+          "maxItems": 1024
+        },
+        "rollouts": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/ScoredRollout"
+              },
+              {
+                "required": [
+                  "provenance"
+                ]
+              }
+            ]
+          },
+          "minItems": 2,
+          "maxItems": 1024
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "oneOf": [
+        {
+          "required": [
+            "completions"
+          ]
+        },
+        {
+          "required": [
+            "rollouts"
+          ]
+        }
+      ],
+      "description": "A prompt and its group-relative scored rollouts. rollouts is a request alias for completions.",
+      "x-kiln-rust-type": "kiln_train::GrpoGroup",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AnyJson": {
+      "description": "Any JSON value carried without field-level interpretation.",
+      "x-kiln-rust-type": "serde_json::Value",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Boolean": {
+      "type": "boolean",
+      "description": "A serialized Rust boolean.",
+      "x-kiln-rust-type": "bool",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DeleteAdapterResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "name"
+      ],
+      "properties": {
+        "status": {
+          "const": "deleted"
+        },
+        "name": {
+          "$ref": "#/$defs/AdapterName"
+        }
+      },
+      "description": "Confirmation that an adapter directory was deleted.",
+      "x-kiln-rust-type": "DeleteAdapterResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DeleteExportResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "name"
+      ],
+      "properties": {
+        "status": {
+          "const": "deleted"
+        },
+        "name": {
+          "$ref": "#/$defs/ExportName"
+        }
+      },
+      "description": "Confirmation that an immutable export bundle was deleted.",
+      "x-kiln-rust-type": "DeleteExportResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DeleteTeacherResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "alias"
+      ],
+      "properties": {
+        "status": {
+          "const": "deleted"
+        },
+        "alias": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "description": "Confirmation that a teacher alias was removed.",
+      "x-kiln-rust-type": "DeleteTeacherResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DiagnosticSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "overlap_ratio_final": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "rep_rate_max": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "guardrail_triggers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "final_loss": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "echo": {
+          "$ref": "#/$defs/EchoDiagnosticSummary"
+        }
+      },
+      "description": "Coarse post-mortem diagnostics from an adapter training run.",
+      "x-kiln-rust-type": "kiln_train::DiagnosticSummary",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EchoDiagnosticSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lambda",
+        "env_tokens_supervised"
+      ],
+      "properties": {
+        "lambda": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "env_ce_initial": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "env_ce_final": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "env_ce_drop_pct": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "lambda_effective_final": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "env_tokens_supervised": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "dynamics_holdout_ce_initial": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "dynamics_holdout_ce_final": {
+          "$ref": "#/$defs/FiniteNumber"
+        }
+      },
+      "description": "Receipt-grade ECHO training diagnostics.",
+      "x-kiln-rust-type": "kiln_train::EchoDiagnosticSummary",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalJobState": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "description": "An evaluation job lifecycle state.",
+      "x-kiln-rust-type": "kiln_eval::EvalJobState",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ExportDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "manifest"
+      ],
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/ExportSummary"
+        },
+        "manifest": {
+          "$ref": "#/$defs/HfTrlExportManifestV1"
+        }
+      },
+      "description": "An export summary plus its full self-verifying handoff manifest.",
+      "x-kiln-rust-type": "ExportDetail",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ExportList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "data"
+      ],
+      "properties": {
+        "data": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExportSummary"
+          }
+        }
+      },
+      "description": "All immutable HF/TRL exports currently retained by the server.",
+      "x-kiln-rust-type": "ExportList",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ExportName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+      "description": "A server-owned HF/TRL export name.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ExportSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "task",
+        "export_sha256",
+        "source_name",
+        "row_count",
+        "ordered_corpus_sha256",
+        "input_adapter",
+        "bundle_filename",
+        "download_url"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/ExportName"
+        },
+        "task": {
+          "$ref": "#/$defs/HfTrlTask"
+        },
+        "export_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "source_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "row_count": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "ordered_corpus_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "input_adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdapterName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bundle_filename": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "download_url": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "description": "Compact immutable HF/TRL export identity.",
+      "x-kiln-rust-type": "ExportSummary",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "FiniteNumber": {
+      "type": "number",
+      "description": "A finite JSON number.",
+      "x-kiln-rust-type": "f32 | f64",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "GrpoExportRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/ExportName"
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgenticGroup"
+          },
+          "maxItems": 10000000
+        },
+        "dataset_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdapterName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "split_manifest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnyJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "groups"
+          ],
+          "properties": {
+            "groups": {
+              "minItems": 1
+            },
+            "dataset_path": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "required": [
+            "dataset_path"
+          ],
+          "properties": {
+            "groups": {
+              "maxItems": 0
+            },
+            "dataset_path": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ],
+      "description": "Create an immutable GRPO handoff from exactly one inline or filesystem source.",
+      "x-kiln-rust-type": "GrpoExportRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "HfTrlDataExport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_name",
+        "format",
+        "row_count",
+        "ordered_corpus_sha256",
+        "dataset"
+      ],
+      "properties": {
+        "source_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "format": {
+          "$ref": "#/$defs/HfTrlDatasetFormat"
+        },
+        "row_count": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "ordered_corpus_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "dataset": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "train.jsonl"
+                }
+              }
+            }
+          ]
+        },
+        "sft_selection": {
+          "$ref": "#/$defs/HfTrlSftSelection"
+        },
+        "rollout_provenance_schema": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "split_manifest": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "split_manifest.json"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "format": {
+                "const": "sft_messages_jsonl"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "sft_selection"
+            ],
+            "not": {
+              "required": [
+                "rollout_provenance_schema"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "rollout_provenance_schema"
+            ],
+            "properties": {
+              "rollout_provenance_schema": {
+                "const": "kiln.rollout-provenance.v1"
+              }
+            },
+            "not": {
+              "required": [
+                "sft_selection"
+              ]
+            }
+          }
+        }
+      ],
+      "description": "Dataset bytes and selection/provenance policy exported to HF/TRL.",
+      "x-kiln-rust-type": "kiln_train::HfTrlDataExport",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "HfTrlDatasetFormat": {
+      "type": "string",
+      "enum": [
+        "sft_messages_jsonl",
+        "grpo_groups_jsonl"
+      ],
+      "description": "The exported JSONL row format.",
+      "x-kiln-rust-type": "HfTrlDatasetFormat",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "HfTrlExportManifestV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "manifest_type",
+        "task",
+        "source_execution_provenance",
+        "model",
+        "data",
+        "reference_script",
+        "environment_lock",
+        "export_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "manifest_type": {
+          "const": "kiln.hf-trl-export.v1"
+        },
+        "task": {
+          "$ref": "#/$defs/HfTrlTask"
+        },
+        "source_execution_provenance": {
+          "$ref": "kiln-observability-v1.schema.json#/$defs/ExecutionProvenanceV1"
+        },
+        "model": {
+          "$ref": "#/$defs/HfTrlModelIdentity"
+        },
+        "data": {
+          "$ref": "#/$defs/HfTrlDataExport"
+        },
+        "reference_script": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "train.py"
+                }
+              }
+            }
+          ]
+        },
+        "environment_lock": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "requirements.lock"
+                }
+              }
+            }
+          ]
+        },
+        "input_adapter": {
+          "$ref": "#/$defs/HfTrlInputAdapter"
+        },
+        "export_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "task": {
+                "const": "sft"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "format": {
+                    "const": "sft_messages_jsonl"
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "format": {
+                    "const": "grpo_groups_jsonl"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "x-kiln-semantic-constraints": [
+        "model file identities match source_execution_provenance.model",
+        "base_weight_shard_manifest matches source_execution_provenance model content",
+        "export_sha256 matches the canonical manifest digest"
+      ],
+      "description": "Immutable identity of one server-owned Kiln-to-HF/TRL export directory.",
+      "x-kiln-rust-type": "kiln_train::HfTrlExportManifestV1",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "HfTrlFileIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relative_path",
+        "size_bytes",
+        "sha256"
+      ],
+      "properties": {
+        "relative_path": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "description": "Exact identity of one regular file in an interoperability bundle.",
+      "x-kiln-rust-type": "kiln_train::HfTrlFileIdentity",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "HfTrlInputAdapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "config",
+        "model"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "config": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "input_adapter/adapter_config.json"
+                }
+              }
+            }
+          ]
+        },
+        "model": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "input_adapter/adapter_model.safetensors"
+                }
+              }
+            }
+          ]
+        },
+        "kiln_manifest": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "input_adapter/adapter_manifest.json"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "description": "Exact optional Kiln adapter copied into an interoperability bundle.",
+      "x-kiln-rust-type": "kiln_train::HfTrlInputAdapter",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "HfTrlModelIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "served_model_id",
+        "base_weight_shard_manifest",
+        "tokenizer_vocab_sha256",
+        "model_config",
+        "tokenizer",
+        "chat_template",
+        "native_training_chat_template",
+        "trl_training_chat_template"
+      ],
+      "properties": {
+        "served_model_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "base_weight_shard_manifest": {
+          "$ref": "kiln-observability-v1.schema.json#/$defs/BaseWeightShardManifest"
+        },
+        "tokenizer_vocab_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "model_config": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "kiln_model_config.json"
+                }
+              }
+            }
+          ]
+        },
+        "tokenizer": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "tokenizer.json"
+                }
+              }
+            }
+          ]
+        },
+        "chat_template": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "chat_template.jinja"
+                }
+              }
+            }
+          ]
+        },
+        "native_training_chat_template": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "kiln_training_chat_template.jinja"
+                }
+              }
+            }
+          ]
+        },
+        "trl_training_chat_template": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "training_chat_template.jinja"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "description": "Model bytes and template identities an external trainer must use.",
+      "x-kiln-rust-type": "kiln_train::HfTrlModelIdentity",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "HfTrlSftLabelPolicy": {
+      "type": "string",
+      "enum": [
+        "assistant_only_generation_spans"
+      ],
+      "description": "How the exported SFT template selects labels.",
+      "x-kiln-rust-type": "HfTrlSftLabelPolicy",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "HfTrlSftSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invalid_row_policy",
+        "label_policy",
+        "rows_read",
+        "rows_kept",
+        "rows_rejected",
+        "kept_corpus_sha256",
+        "ingestion_receipt"
+      ],
+      "properties": {
+        "invalid_row_policy": {
+          "$ref": "#/$defs/SftInvalidRowPolicy"
+        },
+        "label_policy": {
+          "$ref": "#/$defs/HfTrlSftLabelPolicy"
+        },
+        "rows_read": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "rows_kept": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "rows_rejected": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "kept_corpus_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "ingestion_receipt": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/HfTrlFileIdentity"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "const": "sft_ingestion.json"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "x-kiln-semantic-constraints": [
+        "rows_read = rows_kept + rows_rejected"
+      ],
+      "description": "Compact SFT row-selection evidence.",
+      "x-kiln-rust-type": "kiln_train::HfTrlSftSelection",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "HfTrlTask": {
+      "type": "string",
+      "enum": [
+        "sft",
+        "grpo"
+      ],
+      "description": "The external HF/TRL training task.",
+      "x-kiln-rust-type": "kiln_train::HfTrlTask",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ImportAdapterName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9_-]|\\.(?!\\.))*$",
+      "description": "A path-safe adapter name accepted by verified HF/TRL PEFT import.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ImportPeftResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "name",
+        "task",
+        "export_sha256",
+        "result_sha256",
+        "import_sha256",
+        "content_revision",
+        "used_exported_reference_script",
+        "size_bytes",
+        "files"
+      ],
+      "properties": {
+        "status": {
+          "const": "imported"
+        },
+        "name": {
+          "$ref": "#/$defs/ImportAdapterName"
+        },
+        "task": {
+          "$ref": "#/$defs/HfTrlTask"
+        },
+        "export_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "result_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "import_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "content_revision": {
+          "$ref": "#/$defs/RawSha256"
+        },
+        "used_exported_reference_script": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "files": {
+          "$ref": "#/$defs/PositiveInteger"
+        }
+      },
+      "description": "The verified external PEFT result installed into Kiln's adapter registry.",
+      "x-kiln-rust-type": "ImportPeftResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "LoadAdapterRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "allow_quarantined": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "Load an installed adapter, optionally overriding quarantine admission.",
+      "x-kiln-rust-type": "LoadAdapterRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "LoadAdapterResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "name",
+        "content_revision"
+      ],
+      "properties": {
+        "status": {
+          "const": "loaded"
+        },
+        "name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "content_revision": {
+          "$ref": "#/$defs/RawSha256"
+        }
+      },
+      "description": "Confirmation that an exact adapter revision is live.",
+      "x-kiln-rust-type": "LoadAdapterResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "LoadedAdapterIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "content_revision"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "content_revision": {
+          "$ref": "#/$defs/RawSha256"
+        }
+      },
+      "description": "The exact name and immutable content revision published by the live runner.",
+      "x-kiln-rust-type": "LoadedAdapterIdentity",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "LogitSourceCaps": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "teacher_id",
+        "vocab_size",
+        "max_top_k",
+        "supports_full_vocab",
+        "supports_batched",
+        "tokenizer_hash"
+      ],
+      "properties": {
+        "teacher_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "vocab_size": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "max_top_k": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "supports_full_vocab": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "supports_batched": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "tokenizer_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Resolved scoring capabilities for a teacher source.",
+      "x-kiln-rust-type": "kiln_train::LogitSourceCaps",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "MergeAdapterRequest": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "sources",
+        "output_name"
+      ],
+      "properties": {
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MergeSource"
+          },
+          "minItems": 1
+        },
+        "output_name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MergeMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "density": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnitInterval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "density"
+            ],
+            "properties": {
+              "density": {
+                "type": "number"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "ties"
+              }
+            }
+          }
+        }
+      ],
+      "x-kiln-semantic-constraints": [
+        "source names must be distinct",
+        "output_name must not already exist"
+      ],
+      "description": "Create an immutable merged adapter. Density is accepted only for TIES and defaults to 0.2 there.",
+      "x-kiln-rust-type": "MergeAdapterRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "MergeAdapterResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "output_name",
+        "mode",
+        "sources",
+        "num_tensors"
+      ],
+      "properties": {
+        "status": {
+          "const": "merged"
+        },
+        "output_name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "mode": {
+          "$ref": "#/$defs/MergeMode"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MergeSourceInfo"
+          },
+          "minItems": 1
+        },
+        "num_tensors": {
+          "$ref": "#/$defs/PositiveInteger"
+        }
+      },
+      "description": "The published adapter merge summary.",
+      "x-kiln-rust-type": "MergeAdapterResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "MergeMode": {
+      "type": "string",
+      "enum": [
+        "weighted_average",
+        "ties",
+        "concat"
+      ],
+      "description": "The adapter merge algorithm.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "MergeSource": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name",
+        "weight"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "weight": {
+          "$ref": "#/$defs/FiniteNumber"
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "One weighted source adapter.",
+      "x-kiln-rust-type": "MergeSource",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "MergeSourceInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "weight"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "weight": {
+          "$ref": "#/$defs/FiniteNumber"
+        }
+      },
+      "description": "One source echoed after a merge.",
+      "x-kiln-rust-type": "MergeSourceInfo",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "NonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A non-empty UTF-8 string.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "NonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "A non-negative integer.",
+      "x-kiln-rust-type": "u64 | u32 | usize",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PositiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "A positive integer.",
+      "x-kiln-rust-type": "u64 | u32 | usize",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PromptSourceDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "manifest_hash",
+        "count"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "manifest_hash": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Seed prompt-source audit descriptor.",
+      "x-kiln-rust-type": "kiln_train::PromptSourceDescriptor",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RawSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "A raw lowercase 64-character SHA-256 digest.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RegisterTeacherRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alias",
+        "kind"
+      ],
+      "properties": {
+        "alias": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "kind": {
+          "$ref": "#/$defs/TeacherKind"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemoteProvider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdapterName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "remote"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "provider",
+              "model_id",
+              "url"
+            ],
+            "properties": {
+              "provider": {
+                "const": "vllm"
+              },
+              "model_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1
+              },
+              "adapter": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "provider": {
+                "type": "null"
+              },
+              "url": {
+                "type": "null"
+              },
+              "credential_id": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "fixture"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "model_id"
+            ],
+            "properties": {
+              "model_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "adapter": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "Caller-controlled teacher registration fields. Identity, capabilities, and secret environment names are rejected.",
+      "x-kiln-rust-type": "RegisterTeacherRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RemoteProvider": {
+      "type": "string",
+      "enum": [
+        "vllm",
+        "sglang",
+        "llama_cpp",
+        "open_router",
+        "together",
+        "fireworks",
+        "deep_infra",
+        "tgi"
+      ],
+      "description": "A named remote scoring protocol. Registration currently admits only vllm.",
+      "x-kiln-rust-type": "kiln_train::RemoteProvider",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Rfc3339Timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "An RFC 3339 timestamp.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ScoredRollout": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "text",
+        "reward"
+      ],
+      "properties": {
+        "text": {
+          "$ref": "#/$defs/String"
+        },
+        "reward": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "trajectory": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TurnSegment"
+          }
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "kiln-inference-v1.schema.json#/$defs/RolloutProvenanceV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "One reward-scored rollout with optional multi-turn and generation provenance.",
+      "x-kiln-rust-type": "kiln_train::ScoredRollout",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SftExample": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrainingChatMessage"
+          }
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "One supervised conversation.",
+      "x-kiln-rust-type": "kiln_train::SftExample",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SftExportRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/ExportName"
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SftExample"
+          }
+        },
+        "dataset_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dataset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "invalid_row_policy": {
+          "$ref": "#/$defs/SftInvalidRowPolicy",
+          "default": "fail"
+        },
+        "input_adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdapterName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "split_manifest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnyJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "examples"
+          ],
+          "properties": {
+            "examples": {
+              "minItems": 1
+            },
+            "dataset_path": {
+              "type": "null"
+            },
+            "dataset": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "required": [
+            "dataset_path"
+          ],
+          "properties": {
+            "examples": {
+              "maxItems": 0
+            },
+            "dataset_path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "dataset": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "required": [
+            "dataset"
+          ],
+          "properties": {
+            "examples": {
+              "maxItems": 0
+            },
+            "dataset_path": {
+              "type": "null"
+            },
+            "dataset": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ],
+      "description": "Create an immutable SFT handoff from exactly one inline, filesystem, or named-dataset source.",
+      "x-kiln-rust-type": "SftExportRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "SftInvalidRowPolicy": {
+      "type": "string",
+      "enum": [
+        "fail",
+        "skip"
+      ],
+      "description": "How invalid SFT rows are admitted.",
+      "x-kiln-rust-type": "SftInvalidRowPolicy",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "A lowercase SHA-256 digest with the sha256: prefix.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "String": {
+      "type": "string",
+      "description": "A serialized UTF-8 Rust string.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TeacherAdapterIdentityV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "weights_sha256",
+        "config_sha256"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "weights_sha256": {
+          "$ref": "#/$defs/RawSha256"
+        },
+        "config_sha256": {
+          "$ref": "#/$defs/RawSha256"
+        }
+      },
+      "description": "Exact static adapter identity served by a teacher.",
+      "x-kiln-rust-type": "kiln_train::TeacherAdapterIdentityV1",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TeacherDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alias",
+        "model_id"
+      ],
+      "properties": {
+        "alias": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "model_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "model_version_hash": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "identity": {
+          "$ref": "#/$defs/TeacherIdentityV1"
+        },
+        "snapshot_url": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "description": "Teacher audit identity retained by a legacy adapter receipt.",
+      "x-kiln-rust-type": "kiln_train::TeacherDescriptor",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TeacherEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec",
+        "capabilities",
+        "status",
+        "usable"
+      ],
+      "properties": {
+        "spec": {
+          "$ref": "#/$defs/TeacherSpec"
+        },
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LogitSourceCaps"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/TeacherStatus"
+        },
+        "usable": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "identity_revision": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "off_policy_manifest": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "status_message": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "description": "A persisted teacher plus its resolved identity, capabilities, and usability state.",
+      "x-kiln-rust-type": "TeacherEntry",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TeacherIdentityV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "protocol",
+        "served_model_id",
+        "base_model_sha256",
+        "tokenizer_vocab_sha256",
+        "tokenizer_config_sha256",
+        "adapter",
+        "vocab_size",
+        "max_top_k",
+        "max_model_len",
+        "max_prompt_logprob_candidates",
+        "logprobs_mode",
+        "implementation",
+        "inference_config_sha256"
+      ],
+      "properties": {
+        "schema": {
+          "const": "kiln.teacher-identity.v1"
+        },
+        "protocol": {
+          "const": "vllm.prompt-logprobs.numeric-token-ids.causal.v1"
+        },
+        "served_model_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "base_model_sha256": {
+          "$ref": "#/$defs/RawSha256"
+        },
+        "tokenizer_vocab_sha256": {
+          "$ref": "#/$defs/RawSha256"
+        },
+        "tokenizer_config_sha256": {
+          "$ref": "#/$defs/RawSha256"
+        },
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TeacherAdapterIdentityV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "vocab_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "max_top_k": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "max_model_len": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "max_prompt_logprob_candidates": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "logprobs_mode": {
+          "const": "raw_logprobs"
+        },
+        "implementation": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "inference_config_sha256": {
+          "$ref": "#/$defs/RawSha256"
+        }
+      },
+      "description": "Canonical content and protocol identity pinned by teacher registration.",
+      "x-kiln-rust-type": "kiln_train::TeacherIdentityV1",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TeacherKind": {
+      "type": "string",
+      "enum": [
+        "fixture",
+        "local",
+        "remote"
+      ],
+      "description": "The teacher implementation family.",
+      "x-kiln-rust-type": "TeacherKind",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TeacherSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alias",
+        "kind",
+        "provider",
+        "model_id",
+        "max_top_k",
+        "vocab_size",
+        "supports_full_vocab",
+        "tokenizer_hash",
+        "url",
+        "notes",
+        "adapter"
+      ],
+      "properties": {
+        "alias": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "kind": {
+          "$ref": "#/$defs/TeacherKind"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemoteProvider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model_id": {
+          "$ref": "#/$defs/String"
+        },
+        "max_top_k": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "vocab_size": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "supports_full_vocab": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tokenizer_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity": {
+          "$ref": "#/$defs/TeacherIdentityV1"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdapterName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Persisted teacher registry description. Identity and capability claims are server-controlled.",
+      "x-kiln-rust-type": "TeacherSpec",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TeacherStatus": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "configured",
+        "legacy_unverified",
+        "unavailable"
+      ],
+      "description": "The registry's stable usability state.",
+      "x-kiln-rust-type": "TeacherStatus",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TeachersListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "teachers"
+      ],
+      "properties": {
+        "teachers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TeacherEntry"
+          }
+        }
+      },
+      "description": "The complete teacher registry view.",
+      "x-kiln-rust-type": "TeachersListResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingChatMessage": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "content": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              }
+            }
+          ],
+          "default": ""
+        },
+        "tool_calls": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "A training chat message. Text content parts are concatenated and non-text parts ignored.",
+      "x-kiln-rust-type": "kiln_core::tokenizer::ChatMessage",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingCheckpointPrecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parameter_dtype",
+        "optimizer_state_dtype",
+        "activation_dtype",
+        "gradient_dtype",
+        "stochastic_rounding"
+      ],
+      "properties": {
+        "parameter_dtype": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "optimizer_state_dtype": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "activation_dtype": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "gradient_dtype": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "stochastic_rounding": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "description": "The validated stochastic-rounding policy object."
+        }
+      },
+      "description": "The exact precision policy recorded by a native training checkpoint.",
+      "x-kiln-rust-type": "kiln_train::TrainingCheckpointPrecision",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingJobType": {
+      "type": "string",
+      "enum": [
+        "sft",
+        "grpo",
+        "opd"
+      ],
+      "description": "The native training workflow that produced a linked job.",
+      "x-kiln-rust-type": "TrainingJobType",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TrainingState": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "failed"
+      ],
+      "description": "A training job lifecycle state.",
+      "x-kiln-rust-type": "kiln_train::TrainingState",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TurnKind": {
+      "type": "string",
+      "enum": [
+        "context",
+        "action",
+        "observation"
+      ],
+      "description": "The supervision role of one trajectory segment.",
+      "x-kiln-rust-type": "kiln_train::TurnKind",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "TurnSegment": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "role",
+        "content"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "content": {
+          "$ref": "#/$defs/String"
+        },
+        "kind": {
+          "$ref": "#/$defs/TurnKind"
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warning_prefix_len": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-kiln-unknown-field-policy": "accepted_and_ignored",
+      "description": "One context, action, or observation segment in an agentic rollout.",
+      "x-kiln-rust-type": "kiln_train::TurnSegment",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "UnitInterval": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "A merge density in the interval (0, 1].",
+      "x-kiln-rust-type": "f32",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "UnloadAdapterResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "unloaded"
+        }
+      },
+      "description": "Confirmation that the runtime adapter is unloaded.",
+      "x-kiln-rust-type": "UnloadAdapterResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "UploadAdapterResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "size_bytes",
+        "files"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "files": {
+          "$ref": "#/$defs/PositiveInteger"
+        }
+      },
+      "description": "The atomically installed adapter archive summary.",
+      "x-kiln-rust-type": "UploadAdapterResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "kiln_train_AdapterReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "adapter",
+        "produced_at",
+        "kiln_version",
+        "kernel_versions",
+        "seed",
+        "source_kind",
+        "hyperparameters",
+        "diagnostic_summary",
+        "post_eval"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "adapter": {
+          "$ref": "#/$defs/AdapterName"
+        },
+        "produced_at": {
+          "$ref": "#/$defs/Rfc3339Timestamp"
+        },
+        "kiln_version": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "kernel_versions": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "seed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "teacher": {
+          "$ref": "#/$defs/TeacherDescriptor"
+        },
+        "prompts": {
+          "$ref": "#/$defs/PromptSourceDescriptor"
+        },
+        "hyperparameters": {
+          "$ref": "#/$defs/AnyJson"
+        },
+        "diagnostic_summary": {
+          "$ref": "#/$defs/DiagnosticSummary"
+        },
+        "post_eval": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/FiniteNumber"
+          }
+        }
+      },
+      "description": "Legacy adapter audit receipt. It supports drift analysis, not exact replay.",
+      "x-kiln-rust-type": "kiln_train::AdapterReceipt",
+      "x-kiln-field-schema-status": "complete"
+    }
+  },
+  "x-kiln-examples": {
+    "AdapterDetail": [
+      {
+        "name": "reasoning-v1",
+        "is_active": true,
+        "has_config": true,
+        "has_weights": true,
+        "size_bytes": 4096,
+        "files": [
+          {
+            "name": "adapter_model.safetensors",
+            "size_bytes": 3072
+          }
+        ],
+        "training_jobs": [
+          {
+            "job_id": "train-1",
+            "job_type": "sft",
+            "state": "completed",
+            "elapsed_secs": 12.5,
+            "final_loss": 0.12
+          }
+        ],
+        "eval_jobs": [
+          {
+            "job_id": "eval-1",
+            "suite_name": "math",
+            "accuracy": 0.75,
+            "state": "completed"
+          }
+        ]
+      }
+    ],
+    "AdapterUploadMultipart": [
+      {
+        "name": "reasoning-v1",
+        "archive": "<binary gzip body>"
+      }
+    ],
+    "AdaptersResponse": [
+      {
+        "active_adapter": "reasoning-v1",
+        "active": "reasoning-v1",
+        "loaded_adapter": "reasoning-v1",
+        "loaded_adapter_identity": {
+          "name": "reasoning-v1",
+          "content_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "loaded_adapters": [
+          "reasoning-v1"
+        ],
+        "adapter_dir": "/srv/kiln/adapters",
+        "available": [
+          {
+            "name": "reasoning-v1",
+            "has_config": true,
+            "has_weights": true,
+            "size_bytes": 4096,
+            "modified_at": "2026-07-14T12:00:00Z",
+            "files": [
+              "adapter_config.json",
+              "adapter_model.safetensors"
+            ],
+            "path": "/srv/kiln/adapters/reasoning-v1",
+            "status": "loaded",
+            "adapter_model_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "adapter_model_size_bytes": 3072,
+            "rank": 16,
+            "alpha": 32.0,
+            "alpha_over_rank": 2.0,
+            "target_modules": [
+              "q_proj",
+              "v_proj"
+            ],
+            "base_model_name_or_path": "Qwen/Qwen3.5-4B",
+            "parent_adapter_metadata": null,
+            "canary_status": "passed",
+            "canary_failure_reason": null,
+            "canary_warnings": [],
+            "canary_checks": [
+              {
+                "name": "finite_logits",
+                "passed": true
+              }
+            ],
+            "canary_status_path": "/srv/kiln/adapters/reasoning-v1/adapter_canary_status.json",
+            "adapter_manifest": null,
+            "adapter_manifest_path": null,
+            "adapter_manifest_error": null,
+            "last_load_error": null,
+            "error": null
+          }
+        ],
+        "available_adapters": [
+          {
+            "name": "reasoning-v1",
+            "has_config": true,
+            "has_weights": true,
+            "size_bytes": 4096,
+            "modified_at": "2026-07-14T12:00:00Z",
+            "files": [
+              "adapter_config.json",
+              "adapter_model.safetensors"
+            ],
+            "path": "/srv/kiln/adapters/reasoning-v1",
+            "status": "loaded",
+            "adapter_model_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "adapter_model_size_bytes": 3072,
+            "rank": 16,
+            "alpha": 32.0,
+            "alpha_over_rank": 2.0,
+            "target_modules": [
+              "q_proj",
+              "v_proj"
+            ],
+            "base_model_name_or_path": "Qwen/Qwen3.5-4B",
+            "parent_adapter_metadata": null,
+            "canary_status": "passed",
+            "canary_failure_reason": null,
+            "canary_warnings": [],
+            "canary_checks": [
+              {
+                "name": "finite_logits",
+                "passed": true
+              }
+            ],
+            "canary_status_path": "/srv/kiln/adapters/reasoning-v1/adapter_canary_status.json",
+            "adapter_manifest": null,
+            "adapter_manifest_path": null,
+            "adapter_manifest_error": null,
+            "last_load_error": null,
+            "error": null
+          }
+        ]
+      }
+    ],
+    "DeleteAdapterResponse": [
+      {
+        "status": "deleted",
+        "name": "reasoning-v1"
+      }
+    ],
+    "DeleteExportResponse": [
+      {
+        "status": "deleted",
+        "name": "math-sft-v1"
+      }
+    ],
+    "DeleteTeacherResponse": [
+      {
+        "status": "deleted",
+        "alias": "fixture-teacher"
+      }
+    ],
+    "ExportDetail": [
+      {
+        "summary": {
+          "name": "math-sft-v1",
+          "task": "sft",
+          "export_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "source_name": "inline",
+          "row_count": 1,
+          "ordered_corpus_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "input_adapter": null,
+          "bundle_filename": "math-sft-v1.kiln-hf",
+          "download_url": "/v1/train/hf/exports/math-sft-v1/download"
+        },
+        "manifest": {
+          "schema_version": 1,
+          "manifest_type": "kiln.hf-trl-export.v1",
+          "task": "sft",
+          "source_execution_provenance": {
+            "schema_version": 1,
+            "provenance_type": "kiln.execution-provenance.v1",
+            "backend": {
+              "name": "rocm",
+              "device": "gfx1151",
+              "numerical_runtime_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "build": {
+              "package_version": "0.1.0",
+              "target": "x86_64-unknown-linux-gnu",
+              "executable_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "model": {
+              "model_config_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "tokenizer_vocab_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "tokenizer_config_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "chat_template_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "training_chat_template_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+            },
+            "precision": {
+              "inference_dtype": "bf16",
+              "training_policy": "bf16"
+            },
+            "kernels": {
+              "contract_type": "kiln.kernel-contract.v1",
+              "versions": {
+                "kiln": "0.1.0"
+              },
+              "compiled_features": [
+                "rocm"
+              ],
+              "contract_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+            },
+            "configuration": {
+              "effective_server_config_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "effective_environment_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+            },
+            "provenance_sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+          },
+          "model": {
+            "served_model_id": "Qwen/Qwen3.5-4B",
+            "base_weight_shard_manifest": {
+              "schema_version": 1,
+              "manifest_type": "kiln.base-weight-shards.v1",
+              "aggregate_algorithm": "kiln.base-model-content.v1",
+              "aggregate_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "total_size_bytes": 1024,
+              "shards": [
+                {
+                  "filename": "model.safetensors",
+                  "size_bytes": 1024,
+                  "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }
+              ]
+            },
+            "tokenizer_vocab_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "model_config": {
+              "relative_path": "kiln_model_config.json",
+              "size_bytes": 128,
+              "sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+            },
+            "tokenizer": {
+              "relative_path": "tokenizer.json",
+              "size_bytes": 128,
+              "sha256": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+            },
+            "chat_template": {
+              "relative_path": "chat_template.jinja",
+              "size_bytes": 128,
+              "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "native_training_chat_template": {
+              "relative_path": "kiln_training_chat_template.jinja",
+              "size_bytes": 128,
+              "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "trl_training_chat_template": {
+              "relative_path": "training_chat_template.jinja",
+              "size_bytes": 128,
+              "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          },
+          "data": {
+            "source_name": "inline",
+            "format": "sft_messages_jsonl",
+            "row_count": 1,
+            "ordered_corpus_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "dataset": {
+              "relative_path": "train.jsonl",
+              "size_bytes": 128,
+              "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            "sft_selection": {
+              "invalid_row_policy": "fail",
+              "label_policy": "assistant_only_generation_spans",
+              "rows_read": 1,
+              "rows_kept": 1,
+              "rows_rejected": 0,
+              "kept_corpus_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "ingestion_receipt": {
+                "relative_path": "sft_ingestion.json",
+                "size_bytes": 128,
+                "sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+              }
+            }
+          },
+          "reference_script": {
+            "relative_path": "train.py",
+            "size_bytes": 128,
+            "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "environment_lock": {
+            "relative_path": "requirements.lock",
+            "size_bytes": 128,
+            "sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          "export_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+        }
+      }
+    ],
+    "ExportList": [
+      {
+        "data": [
+          {
+            "name": "math-sft-v1",
+            "task": "sft",
+            "export_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "source_name": "inline",
+            "row_count": 1,
+            "ordered_corpus_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "input_adapter": null,
+            "bundle_filename": "math-sft-v1.kiln-hf",
+            "download_url": "/v1/train/hf/exports/math-sft-v1/download"
+          }
+        ]
+      }
+    ],
+    "ExportSummary": [
+      {
+        "name": "math-sft-v1",
+        "task": "sft",
+        "export_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "source_name": "inline",
+        "row_count": 1,
+        "ordered_corpus_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "input_adapter": null,
+        "bundle_filename": "math-sft-v1.kiln-hf",
+        "download_url": "/v1/train/hf/exports/math-sft-v1/download"
+      }
+    ],
+    "GrpoExportRequest": [
+      {
+        "name": "math-grpo-v1",
+        "groups": [
+          {
+            "messages": [
+              {
+                "role": "user",
+                "content": "What is 2 + 2?"
+              }
+            ],
+            "completions": [
+              {
+                "text": "4",
+                "reward": 1.0,
+                "provenance": {
+                  "schema": "kiln.rollout-provenance.v1",
+                  "input_token_ids": [
+                    1,
+                    4
+                  ],
+                  "prompt_token_count": 1,
+                  "prompt_messages_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+                  "scored_payload_sha256": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+                  "action_tokens": [
+                    {
+                      "sequence_index": 1,
+                      "token_id": 4,
+                      "source": "sampled",
+                      "behavior_logprob": -0.25
+                    }
+                  ],
+                  "behavior_policy": {
+                    "served_model_id": "Qwen/Qwen3.5-4B",
+                    "base_model_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "inference_config_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "implementation": "kiln/rocm"
+                  },
+                  "tokenizer": {
+                    "vocab_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "config_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "chat_template_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                  },
+                  "sampling": {
+                    "temperature": 0.8,
+                    "top_p": 0.95,
+                    "top_k": 20,
+                    "min_p": 0.0,
+                    "max_tokens": 64,
+                    "repetition_penalty": 1.0,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "stop": []
+                  },
+                  "seed": 42,
+                  "generation_backend": "rocm"
+                }
+              },
+              {
+                "text": "5",
+                "reward": 0.0,
+                "provenance": {
+                  "schema": "kiln.rollout-provenance.v1",
+                  "input_token_ids": [
+                    1,
+                    5
+                  ],
+                  "prompt_token_count": 1,
+                  "prompt_messages_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+                  "scored_payload_sha256": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+                  "action_tokens": [
+                    {
+                      "sequence_index": 1,
+                      "token_id": 5,
+                      "source": "sampled",
+                      "behavior_logprob": -0.25
+                    }
+                  ],
+                  "behavior_policy": {
+                    "served_model_id": "Qwen/Qwen3.5-4B",
+                    "base_model_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "inference_config_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "implementation": "kiln/rocm"
+                  },
+                  "tokenizer": {
+                    "vocab_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "config_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "chat_template_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                  },
+                  "sampling": {
+                    "temperature": 0.8,
+                    "top_p": 0.95,
+                    "top_k": 20,
+                    "min_p": 0.0,
+                    "max_tokens": 64,
+                    "repetition_penalty": 1.0,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "stop": []
+                  },
+                  "seed": 43,
+                  "generation_backend": "rocm"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "ImportPeftResponse": [
+      {
+        "status": "imported",
+        "name": "math-sft-result",
+        "task": "sft",
+        "export_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "result_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "import_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "content_revision": "6666666666666666666666666666666666666666666666666666666666666666",
+        "used_exported_reference_script": true,
+        "size_bytes": 4096,
+        "files": 3
+      }
+    ],
+    "LoadAdapterRequest": [
+      {
+        "name": "reasoning-v1"
+      }
+    ],
+    "LoadAdapterResponse": [
+      {
+        "status": "loaded",
+        "name": "reasoning-v1",
+        "content_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "MergeAdapterRequest": [
+      {
+        "sources": [
+          {
+            "name": "math-v1",
+            "weight": 0.6
+          },
+          {
+            "name": "code-v1",
+            "weight": 0.4
+          }
+        ],
+        "output_name": "blended-v1",
+        "mode": "weighted_average"
+      }
+    ],
+    "MergeAdapterResponse": [
+      {
+        "status": "merged",
+        "output_name": "blended-v1",
+        "mode": "weighted_average",
+        "sources": [
+          {
+            "name": "math-v1",
+            "weight": 0.6
+          },
+          {
+            "name": "code-v1",
+            "weight": 0.4
+          }
+        ],
+        "num_tensors": 64
+      }
+    ],
+    "RegisterTeacherRequest": [
+      {
+        "alias": "fixture-teacher",
+        "kind": "fixture",
+        "model_id": "fixture/model",
+        "notes": "deterministic local fixture"
+      }
+    ],
+    "SftExportRequest": [
+      {
+        "name": "math-sft-v1",
+        "examples": [
+          {
+            "messages": [
+              {
+                "role": "user",
+                "content": "What is 2 + 2?"
+              },
+              {
+                "role": "assistant",
+                "content": "4"
+              }
+            ]
+          }
+        ],
+        "invalid_row_policy": "fail"
+      }
+    ],
+    "TeacherEntry": [
+      {
+        "spec": {
+          "alias": "fixture-teacher",
+          "kind": "fixture",
+          "provider": null,
+          "model_id": "fixture/model",
+          "max_top_k": 20,
+          "vocab_size": 248320,
+          "supports_full_vocab": false,
+          "tokenizer_hash": null,
+          "url": null,
+          "notes": "deterministic local fixture",
+          "adapter": null
+        },
+        "capabilities": {
+          "teacher_id": "fixture-teacher",
+          "vocab_size": 248320,
+          "max_top_k": 20,
+          "supports_full_vocab": false,
+          "supports_batched": true,
+          "tokenizer_hash": null
+        },
+        "status": "configured",
+        "usable": true
+      }
+    ],
+    "TeachersListResponse": [
+      {
+        "teachers": [
+          {
+            "spec": {
+              "alias": "fixture-teacher",
+              "kind": "fixture",
+              "provider": null,
+              "model_id": "fixture/model",
+              "max_top_k": 20,
+              "vocab_size": 248320,
+              "supports_full_vocab": false,
+              "tokenizer_hash": null,
+              "url": null,
+              "notes": "deterministic local fixture",
+              "adapter": null
+            },
+            "capabilities": {
+              "teacher_id": "fixture-teacher",
+              "vocab_size": 248320,
+              "max_top_k": 20,
+              "supports_full_vocab": false,
+              "supports_batched": true,
+              "tokenizer_hash": null
+            },
+            "status": "configured",
+            "usable": true
+          }
+        ]
+      }
+    ],
+    "UnloadAdapterResponse": [
+      {
+        "status": "unloaded"
+      }
+    ],
+    "UploadAdapterResponse": [
+      {
+        "name": "reasoning-v1",
+        "size_bytes": 4096,
+        "files": 2
+      }
+    ],
+    "kiln_train_AdapterReceipt": [
+      {
+        "schema_version": 1,
+        "adapter": "reasoning-v1",
+        "produced_at": "2026-07-14T12:00:00Z",
+        "kiln_version": "0.1.0",
+        "kernel_versions": {
+          "kiln-opd-loss-kernel": "0.1.0"
+        },
+        "seed": 42,
+        "source_kind": "sft",
+        "hyperparameters": {
+          "rank": 16
+        },
+        "diagnostic_summary": {
+          "final_loss": 0.12
+        },
+        "post_eval": {
+          "math": 0.75
+        }
+      }
+    ]
+  }
+}

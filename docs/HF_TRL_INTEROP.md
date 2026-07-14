@@ -14,6 +14,11 @@ resident-validated PEFT import API and CLI, and local production-model
 round-trip qualification workload are implemented. A PEFT directory installed
 through the generic adapter upload route has not passed this contract.
 
+The generated [Artifact Lifecycle API Schema](../contracts/kiln-artifacts-v1.schema.json)
+is authoritative for the HTTP request, response, export-summary, and complete
+export-manifest field shapes. This guide owns workflow and verification
+semantics; it does not duplicate the wire schema.
+
 ## Bundle Model
 
 One handoff directory contains two independently self-verifying documents:

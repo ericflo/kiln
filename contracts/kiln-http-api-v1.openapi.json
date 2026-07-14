@@ -3289,18 +3289,18 @@
         "summary": "Register teacher",
         "operationId": "teachers_register_teacher_post_v1_teachers",
         "x-kiln-handler": "teachers::register_teacher",
-        "x-kiln-rust-signature": "async fn register_teacher( State(state): State<AppState>, Json(body): Json<serde_json::Value>, ) -> Result<Json<TeacherEntry>, ApiError>",
+        "x-kiln-rust-signature": "async fn register_teacher( State(state): State<AppState>, payload: Result<Json<RegisterTeacherRequest>, JsonRejection>, ) -> Result<Json<TeacherEntry>, ApiError>",
         "x-kiln-transport": "http",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonValue"
+                "$ref": "#/components/schemas/RegisterTeacherRequest"
               }
             }
           },
-          "x-kiln-rust-type": "serde_json::Value"
+          "x-kiln-rust-type": "RegisterTeacherRequest"
         },
         "responses": {
           "200": {
@@ -3328,7 +3328,7 @@
         "summary": "Delete teacher",
         "operationId": "teachers_delete_teacher_delete_v1_teachers_alias",
         "x-kiln-handler": "teachers::delete_teacher",
-        "x-kiln-rust-signature": "async fn delete_teacher( State(state): State<AppState>, AxumPath(alias): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
+        "x-kiln-rust-signature": "async fn delete_teacher( State(state): State<AppState>, AxumPath(alias): AxumPath<String>, ) -> Result<Json<DeleteTeacherResponse>, ApiError>",
         "x-kiln-transport": "http",
         "parameters": [
           {
@@ -3347,11 +3347,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/DeleteTeacherResponse"
                 }
               }
             },
-            "x-kiln-rust-type": "serde_json::Value"
+            "x-kiln-rust-type": "DeleteTeacherResponse"
           },
           "default": {
             "$ref": "#/components/responses/ApiError"
@@ -4215,25 +4215,22 @@
     },
     "schemas": {
       "AdapterDetail": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type AdapterDetail. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "AdapterDetail",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/AdapterDetail",
+        "description": "Adapter file inventory plus retained training, evaluation, and lineage evidence.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "AdapterDetail"
       },
       "AdapterUploadMultipart": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type AdapterUploadMultipart. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "AdapterUploadMultipart",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/AdapterUploadMultipart",
+        "description": "Multipart adapter installation body. Unknown parts are drained and ignored.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "AdapterUploadMultipart"
       },
       "AdaptersResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type AdaptersResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "AdaptersResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/AdaptersResponse",
+        "description": "The complete resident and on-disk adapter registry view.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "AdaptersResponse"
       },
       "AgentRunRecord": {
         "type": "object",
@@ -4435,18 +4432,22 @@
         "x-kiln-field-schema-status": "complete"
       },
       "DeleteAdapterResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DeleteAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DeleteAdapterResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/DeleteAdapterResponse",
+        "description": "Confirmation that an adapter directory was deleted.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "DeleteAdapterResponse"
       },
       "DeleteExportResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type DeleteExportResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "DeleteExportResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/DeleteExportResponse",
+        "description": "Confirmation that an immutable export bundle was deleted.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "DeleteExportResponse"
+      },
+      "DeleteTeacherResponse": {
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/DeleteTeacherResponse",
+        "description": "Confirmation that a teacher alias was removed.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "DeleteTeacherResponse"
       },
       "DiscoverRequest": {
         "type": "object",
@@ -4533,25 +4534,22 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "ExportDetail": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type ExportDetail. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ExportDetail",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/ExportDetail",
+        "description": "An export summary plus its full self-verifying handoff manifest.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "ExportDetail"
       },
       "ExportList": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type ExportList. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ExportList",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/ExportList",
+        "description": "All immutable HF/TRL exports currently retained by the server.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "ExportList"
       },
       "ExportSummary": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type ExportSummary. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ExportSummary",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/ExportSummary",
+        "description": "Compact immutable HF/TRL export identity.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "ExportSummary"
       },
       "FrontDoorRequest": {
         "type": "object",
@@ -4568,11 +4566,10 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "GrpoExportRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type GrpoExportRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "GrpoExportRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/GrpoExportRequest",
+        "description": "Create an immutable GRPO handoff from exactly one inline or filesystem source.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "GrpoExportRequest"
       },
       "GrpoRequest": {
         "type": "object",
@@ -4593,11 +4590,10 @@
         "x-kiln-field-schema-status": "complete"
       },
       "ImportPeftResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type ImportPeftResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "ImportPeftResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/ImportPeftResponse",
+        "description": "The verified external PEFT result installed into Kiln's adapter registry.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "ImportPeftResponse"
       },
       "JavaScriptSource": {
         "type": "string",
@@ -4669,18 +4665,16 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "LoadAdapterRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type LoadAdapterRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "LoadAdapterRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/LoadAdapterRequest",
+        "description": "Load an installed adapter, optionally overriding quarantine admission.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "LoadAdapterRequest"
       },
       "LoadAdapterResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type LoadAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "LoadAdapterResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/LoadAdapterResponse",
+        "description": "Confirmation that an exact adapter revision is live.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "LoadAdapterResponse"
       },
       "MarkTrainedRequest": {
         "type": "object",
@@ -4690,18 +4684,16 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "MergeAdapterRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type MergeAdapterRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "MergeAdapterRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/MergeAdapterRequest",
+        "description": "Create an immutable merged adapter. Density is accepted only for TIES and defaults to 0.2 there.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "MergeAdapterRequest"
       },
       "MergeAdapterResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type MergeAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "MergeAdapterResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/MergeAdapterResponse",
+        "description": "The published adapter merge summary.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "MergeAdapterResponse"
       },
       "MessageRequest": {
         "type": "object",
@@ -4781,6 +4773,12 @@
         "x-kiln-rust-type": "Redirect",
         "x-kiln-field-schema-status": "complete"
       },
+      "RegisterTeacherRequest": {
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/RegisterTeacherRequest",
+        "description": "Caller-controlled teacher registration fields. Identity, capabilities, and secret environment names are rejected.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "RegisterTeacherRequest"
+      },
       "RequestRecord": {
         "$ref": "kiln-observability-v1.schema.json#/$defs/RequestRecord",
         "x-kiln-rust-type": "RequestRecord",
@@ -4808,11 +4806,10 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "SftExportRequest": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type SftExportRequest. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "SftExportRequest",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/SftExportRequest",
+        "description": "Create an immutable SFT handoff from exactly one inline, filesystem, or named-dataset source.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "SftExportRequest"
       },
       "SftRequest": {
         "type": "object",
@@ -4850,18 +4847,16 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "TeacherEntry": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type TeacherEntry. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "TeacherEntry",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/TeacherEntry",
+        "description": "A persisted teacher plus its resolved identity, capabilities, and usability state.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "TeacherEntry"
       },
       "TeachersListResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type TeachersListResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "TeachersListResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/TeachersListResponse",
+        "description": "The complete teacher registry view.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "TeachersListResponse"
       },
       "TextCompletionRequest": {
         "$ref": "kiln-inference-v1.schema.json#/$defs/TextCompletionRequest",
@@ -4909,18 +4904,16 @@
         "x-kiln-field-schema-status": "migration_pending"
       },
       "UnloadAdapterResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type UnloadAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "UnloadAdapterResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/UnloadAdapterResponse",
+        "description": "Confirmation that the runtime adapter is unloaded.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "UnloadAdapterResponse"
       },
       "UploadAdapterResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type UploadAdapterResponse. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "UploadAdapterResponse",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/UploadAdapterResponse",
+        "description": "The atomically installed adapter archive summary.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "UploadAdapterResponse"
       },
       "Vec_RequestRecord": {
         "$ref": "kiln-observability-v1.schema.json#/$defs/Vec_RequestRecord",
@@ -4944,11 +4937,10 @@
         "x-kiln-field-schema-status": "complete"
       },
       "kiln_train_AdapterReceipt": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Runtime payload represented by Rust type kiln_train::AdapterReceipt. Field-level schema migration is tracked separately from this complete operation and transport inventory.",
-        "x-kiln-rust-type": "kiln_train::AdapterReceipt",
-        "x-kiln-field-schema-status": "migration_pending"
+        "$ref": "kiln-artifacts-v1.schema.json#/$defs/kiln_train_AdapterReceipt",
+        "description": "Legacy adapter audit receipt. It supports drift analysis, not exact replay.",
+        "x-kiln-field-schema-status": "complete",
+        "x-kiln-rust-type": "kiln_train::AdapterReceipt"
       }
     }
   },
@@ -4976,8 +4968,8 @@
   },
   "x-kiln-field-schema-status": "migration_pending",
   "x-kiln-component-schema-counts": {
-    "complete": 27,
-    "migration_pending": 80,
-    "total": 107
+    "complete": 49,
+    "migration_pending": 60,
+    "total": 109
   }
 }

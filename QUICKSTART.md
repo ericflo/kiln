@@ -970,6 +970,14 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 
 ## API Endpoints
 
+This is the task-oriented subset used by the quickstart. The generated
+[HTTP operation contract](contracts/kiln-http-api-v1.openapi.json) inventories
+every route and transport. Use the generated
+[inference](contracts/kiln-inference-v1.schema.json),
+[observability](contracts/kiln-observability-v1.schema.json), and
+[artifact lifecycle](contracts/kiln-artifacts-v1.schema.json) schemas for the
+complete field, nullability, unknown-field, constraint, and example reference.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/ui/` | Embedded web dashboard (status, adapters, training, chat) |

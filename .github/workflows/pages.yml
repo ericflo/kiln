@@ -13,6 +13,7 @@ on:
       - 'contracts/kiln-http-api-v1.openapi.json'
       - 'contracts/kiln-inference-v1.schema.json'
       - 'contracts/kiln-observability-v1.schema.json'
+      - 'contracts/kiln-artifacts-v1.schema.json'
       - 'contracts/runtime-defaults-v1.json'
       - 'crates/kiln-server/src/ui/index.html'
       - 'desktop/ui/dashboard.html'
@@ -24,6 +25,7 @@ on:
       - 'scripts/check_config_schema.py'
       - 'scripts/check_http_api_contract.py'
       - 'scripts/generate_observability_schema.py'
+      - 'scripts/generate_artifact_schema.py'
       - 'scripts/json_schema_subset.py'
       - 'scripts/docs-site/**'
       - '.github/workflows/pages.yml'
@@ -62,6 +64,7 @@ jobs:
       - name: Check HTTP API operation contract
         run: |
           python3 scripts/generate_observability_schema.py --check
+          python3 scripts/generate_artifact_schema.py --check
           python3 scripts/check_http_api_contract.py --self-test
       - name: Check release version drift
         run: python3 scripts/check_release_versions.py

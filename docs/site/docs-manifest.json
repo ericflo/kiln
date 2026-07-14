@@ -201,6 +201,14 @@
       "description": "Immutable exports, pinned runners, verified PEFT imports, and identity checks."
     },
     {
+      "source": "contracts/kiln-artifacts-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "artifact-api-schema",
+      "title": "Artifact Lifecycle API Schema",
+      "section": "interop",
+      "description": "Generated field-level contract for adapter discovery and mutation, immutable HF/TRL exports and verified PEFT imports, audit receipts, and teacher registry identities."
+    },
+    {
       "source": "docs/OPD_TEACHER_JSONL.md",
       "slug": "opd-teacher-jsonl",
       "title": "OPD Teacher JSONL",

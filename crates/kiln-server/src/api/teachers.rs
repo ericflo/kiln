@@ -29,6 +29,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use axum::Json;
 use axum::Router;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path as AxumPath, State};
 use axum::routing::{delete, get};
 use serde::{Deserialize, Serialize};
@@ -398,6 +399,12 @@ struct TeachersListResponse {
     teachers: Vec<TeacherEntry>,
 }
 
+#[derive(Debug, Serialize)]
+struct DeleteTeacherResponse {
+    status: &'static str,
+    alias: String,
+}
+
 async fn list_teachers(State(state): State<AppState>) -> Json<TeachersListResponse> {
     let specs = state.teacher_registry.list();
     let teachers = specs
@@ -409,11 +416,12 @@ async fn list_teachers(State(state): State<AppState>) -> Json<TeachersListRespon
 
 async fn register_teacher(
     State(state): State<AppState>,
-    Json(body): Json<serde_json::Value>,
+    payload: Result<Json<RegisterTeacherRequest>, JsonRejection>,
 ) -> Result<Json<TeacherEntry>, ApiError> {
-    let request: RegisterTeacherRequest = serde_json::from_value(body).map_err(|error| {
+    let request = payload.map(|Json(request)| request).map_err(|error| {
         ApiError::teacher_registration_invalid(format!(
-            "{error}; identity, capability, and secret environment fields are server-controlled"
+            "{}; identity, capability, and secret environment fields are server-controlled",
+            error.body_text()
         ))
     })?;
     let mut spec = request.into_unverified_spec();
@@ -791,17 +799,17 @@ fn validate_local_teacher_identity(state: &AppState, spec: &TeacherSpec) -> Resu
 async fn delete_teacher(
     State(state): State<AppState>,
     AxumPath(alias): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<DeleteTeacherResponse>, ApiError> {
     let teachers_path = state.adapter_dir.join("teachers.json");
     if state
         .teacher_registry
         .remove_and_save(&alias, &teachers_path)
         .map_err(|error| ApiError::internal(error.to_string()))?
     {
-        Ok(Json(serde_json::json!({
-            "status": "deleted",
-            "alias": alias
-        })))
+        Ok(Json(DeleteTeacherResponse {
+            status: "deleted",
+            alias,
+        }))
     } else {
         Err(ApiError::teacher_not_found(alias))
     }
@@ -1069,10 +1077,15 @@ mod tests {
 
         let Json(entry) = register_teacher(
             State(state),
-            Json(serde_json::json!({
-                "alias": "prior@local",
-                "kind": "local",
-                "adapter": "prior-self"
+            Ok(Json(RegisterTeacherRequest {
+                alias: "prior@local".into(),
+                kind: TeacherKind::Local,
+                provider: None,
+                model_id: None,
+                url: None,
+                credential_id: None,
+                notes: None,
+                adapter: Some("prior-self".into()),
             })),
         )
         .await
@@ -1099,10 +1112,15 @@ mod tests {
 
         let Json(entry) = register_teacher(
             State(state),
-            Json(serde_json::json!({
-                "alias": "base@local",
-                "kind": "local",
-                "model_id": "untrusted-caller-claim"
+            Ok(Json(RegisterTeacherRequest {
+                alias: "base@local".into(),
+                kind: TeacherKind::Local,
+                provider: None,
+                model_id: Some("untrusted-caller-claim".into()),
+                url: None,
+                credential_id: None,
+                notes: None,
+                adapter: None,
             })),
         )
         .await
