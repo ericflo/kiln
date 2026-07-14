@@ -998,7 +998,7 @@ Current audit findings and migration order (2026-07-12):
   the old spellings are warning compatibility aliases resolved only by the
   central registry.
 
-- [ ] Inventory every direct `KILN_*` read and classify it as public stable,
+- [x] Inventory every direct `KILN_*` read and classify it as public stable,
   experimental/debug, build-time, or test-only.
 - [ ] Centralize public runtime configuration into typed structures with one
   parser, validation, defaults, source attribution, and effective-config dump.
@@ -1009,6 +1009,20 @@ Current audit findings and migration order (2026-07-12):
 - [ ] Ensure tests use scoped configuration rather than process-global env
   mutation wherever possible; use one global serialization helper where env is
   unavoidable.
+
+Environment-inventory checkpoint (2026-07-13): the lexical ratchet now resolves
+simple named environment constants, recognizes colocated `#[cfg(test)]` modules
+and `#[test]` functions, and classifies every direct crate-owned read and
+mutation with an explicit rationale. The generated permanent website reference
+and schema-v2 JSON enumerate 923 read call sites, 376 mutation call sites, and
+374 statically named literal `KILN_*` inputs. The real production migration
+surface is 444 reads outside the typed startup boundary; 368 mutations are
+test-only and eight are build-script toolchain setup, while a hard policy gate
+forbids production mutation. The public typed loader uses seven syntactic reads
+to resolve its complete registry, so call-site totals are deliberately not
+presented as public-field totals. This closes the inventory/classification item,
+not the remaining centralization, experimental-namespace, deletion, or test-
+fixture migration items.
 
 Checkpoint at `a9bd8330f`: the actor-absent direct streaming effectively-greedy rendezvous
 no longer reads its four public controls during model execution. Typed
@@ -1739,6 +1753,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-13 | Source-bound public adapter and maintenance mutation lifecycle | `sha256:5dd91bbac36e5ec13a4dd6a8949c4a8fd0593aa4aaf0553085fde267b1184625` | this commit | portable qualification/product contract; Strix Halo ROCm execution pending | 378 qualification-tooling tests; exact runtime-environment contract at 923 reads/376 process mutations; strict workload validation; Python compilation; 8/8 docs-builder tests; 30-document/5-asset website build and generated static smoke; release/link and diff hygiene | passed static checkpoint | One exact source-built binary now drives two isolated public lifecycle arms. The experimental arm privately copies and SHA-256 attests a real adapter, proves load/list/health/debug/chat-header revision agreement, requires ordered barrier-swap logs and captured-graph invalidation, unloads, and requires exact canonical base-output restoration. The maintenance arm expresses autoscaling plus a one-block forced target only in typed TOML, requires one exact structured physical resize with finite coordination timing, observes the target through config/health/debug, and proves an HTTP 503 inference rejection changes no batching work counter. Both arms reject device faults, dirty shutdown, and snapshot residue; result details bind the binary, adapter inputs/content revision, generated configs, and semantic outputs. The permanent qualification website documents the invocation, evidence, hard failures, and non-promises. No compile or GPU process started below the unchanged 15 GiB floor, so the Phase 1.7 checkbox remains open until the clean pushed-source Strix Halo receipt exists. |
 
 | 2026-07-13 | Source-bound Vulkan serving baseline contract | `sha256:b60a1b27057d7d8374c95d7799dcc32ecaaa94a4a9d727b1696952d0ed5b2c4e` | this commit | portable qualification/website contract; Strix Halo Vulkan execution ordered after ROCm | focused shared-build and Vulkan-driver tests; strict workload validation; Python compilation; documentation-site validation and generated static smoke; diff hygiene; bounded Cargo admission remains unavailable below 15 GiB | passed static checkpoint | Backend selection is now an immutable build specification: ROCm remains the exact default, Vulkan uses only its feature, and ambient ROCm toolchain variables cannot leak into the Vulkan build. The new required-device/no-skip workload drives synchronized concurrency 1/4/8/12 waves for 25 fixed 32-token requests, binds executable/config/provenance/kernel/semantic identities, proves multi-row batching, records per-wave tail latency and throughput plus memory/synchronization/capacity evidence, and fails on device faults, runtime mutation, batching errors, unexplained outliers, two-second pauses, dirty shutdown, or residue. The permanent website documents the invocation, complete contract, and non-promises. No compile or GPU process started while host admission remained below the unchanged floor, so Phase 6 stays open pending the ordered hardware receipt. |
+| 2026-07-13 | Classified runtime-environment inventory and permanent reference | `sha256:12b69425888fefb30006d4283d5f8d416942834931909c1a92cccc1d614f3e17` | this commit | portable source/static and documentation website; accelerator execution unaffected | 391 qualification-tooling tests; exact schema-v2 environment contract/report regeneration; 14 strict workload manifests; Python compilation; 8/8 docs-builder tests; 31-document/5-asset website build and generated static smoke; release/link, runtime-default, thinking-budget, and diff-hygiene gates | passed static checkpoint | The scanner now separates colocated unit tests from production, resolves simple named environment constants, classifies every direct crate-owned access with a rationale, and forbids production process-environment mutation. The generated website and JSON catalog all 923 reads, 376 mutations, 374 literal `KILN_*` names, dynamic call sites, owner paths, and the exact 444-read production migration queue. Of the mutations, 368 are test-only and eight are build-time. The Configuration Reference remains the sole public support authority and links to the inventory; a cataloged name is not promoted merely by existing. This closes only the Phase 8.1 inventory/classification item. Typed policy migration, an explicit experimental namespace/profile, dead-control deletion, and test fixture cleanup remain open. |
 
 ## Known Starting Defects
 

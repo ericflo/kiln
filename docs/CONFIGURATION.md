@@ -37,6 +37,11 @@ repository contains internal diagnostics, qualification switches, kernel
 experiments, and temporary compatibility flags. Only the canonical names and
 deprecated compatibility spellings listed here are supported inputs.
 
+The generated [Runtime Environment Inventory](RUNTIME_ENVIRONMENT_INVENTORY.md)
+catalogs every direct environment read and mutation in crate-owned source,
+classifies its owner boundary, and exposes the remaining typed-config migration
+queue. It is an engineering inventory, not a second list of supported settings.
+
 ## Resolution and startup
 
 ### Config file selection

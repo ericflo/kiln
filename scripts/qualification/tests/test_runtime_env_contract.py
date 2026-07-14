@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 MODULE_PATH = ROOT / "scripts" / "check_runtime_env_contract.py"
 CONTRACT_PATH = ROOT / "contracts" / "runtime-env-direct-reads-v1.json"
+REPORT_PATH = ROOT / "docs" / "RUNTIME_ENVIRONMENT_INVENTORY.md"
 SPEC = importlib.util.spec_from_file_location("check_runtime_env_contract", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 runtime_env = importlib.util.module_from_spec(SPEC)
@@ -41,6 +42,14 @@ class RuntimeEnvironmentContractTests(unittest.TestCase):
             (str(entry["api"]), str(entry["argument_kind"]), str(entry["argument"]), int(entry["count"]))
             for entry in entries
         }
+
+    @staticmethod
+    def _entry(
+        contract: dict[str, object], section: str, argument: str
+    ) -> dict[str, object]:
+        entries = contract[section]
+        assert isinstance(entries, list)
+        return next(entry for entry in entries if entry["argument"] == argument)
 
     def test_rust_scan_ignores_comments_and_string_contents(self) -> None:
         self._write(
@@ -144,6 +153,76 @@ fn read() {
             {("env!", "literal", "CARGO_MANIFEST_DIR", 1)},
         )
 
+    def test_unit_test_accesses_are_not_classified_as_production_runtime(self) -> None:
+        self._write(
+            "crates/demo/src/lib.rs",
+            '''
+const PROD_ENV: &str = "KILN_PRODUCTION_EXPERIMENT";
+
+pub fn production() {
+    let _ = std::env::var(PROD_ENV);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn isolated() {
+        let _ = std::env::var("KILN_UNIT_READ");
+        unsafe { std::env::set_var("KILN_UNIT_MUTATION", "1"); }
+    }
+}
+''',
+        )
+        contract = runtime_env.build_contract(self.root)
+        production = self._entry(contract, "reads", "KILN_PRODUCTION_EXPERIMENT")
+        unit_read = self._entry(contract, "reads", "KILN_UNIT_READ")
+        unit_mutation = self._entry(
+            contract, "process_mutations", "KILN_UNIT_MUTATION"
+        )
+        self.assertEqual(production["surface"], "source")
+        self.assertEqual(production["classification"], "experimental_debug")
+        self.assertEqual(unit_read["surface"], "unit-test")
+        self.assertEqual(unit_read["classification"], "test_only")
+        self.assertEqual(unit_mutation["surface"], "unit-test")
+        self.assertEqual(unit_mutation["classification"], "test_only")
+
+    def test_public_build_and_integration_surfaces_have_distinct_ownership(self) -> None:
+        self._write(
+            "crates/kiln-server/src/config.rs",
+            'pub fn load() { let _ = std::env::var("KILN_SERVER_PORT"); }\n',
+        )
+        self._write(
+            "crates/demo/build.rs",
+            'fn main() { let _ = std::env::var("KILN_DEMO_ARCH"); }\n',
+        )
+        self._write(
+            "crates/demo/tests/device.rs",
+            '#[test] fn device() { let _ = std::env::var("KILN_QUALIFICATION"); }\n',
+        )
+        contract = runtime_env.build_contract(self.root)
+        self.assertEqual(
+            self._entry(contract, "reads", "KILN_SERVER_PORT")["classification"],
+            "public_stable",
+        )
+        self.assertEqual(
+            self._entry(contract, "reads", "KILN_DEMO_ARCH")["classification"],
+            "build_time",
+        )
+        self.assertEqual(
+            self._entry(contract, "reads", "KILN_QUALIFICATION")["classification"],
+            "test_only",
+        )
+
+    def test_production_process_environment_mutation_is_forbidden(self) -> None:
+        self._write(
+            "crates/demo/src/lib.rs",
+            'pub fn mutate() { unsafe { std::env::set_var("KILN_LIVE", "1"); } }\n',
+        )
+        with self.assertRaisesRegex(
+            runtime_env.ScanError, "production process-environment mutation is forbidden"
+        ):
+            runtime_env.validate_policy(runtime_env.build_contract(self.root))
+
     def test_contract_check_rejects_new_accesses(self) -> None:
         self._write("crates/demo/src/lib.rs", "pub fn clean() {}\n")
         expected = runtime_env.build_contract(self.root)
@@ -161,7 +240,12 @@ fn read() {
 
     def test_committed_contract_matches_source_tree(self) -> None:
         expected = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(expected, runtime_env.build_contract(ROOT))
+        actual = runtime_env.build_contract(ROOT)
+        self.assertEqual(expected, actual)
+        self.assertEqual(
+            REPORT_PATH.read_text(encoding="utf-8"),
+            runtime_env.render_report(actual),
+        )
 
 
 if __name__ == "__main__":

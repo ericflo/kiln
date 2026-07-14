@@ -19,6 +19,7 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTRACT = ROOT / "contracts" / "runtime-env-direct-reads-v1.json"
+DEFAULT_REPORT = ROOT / "docs" / "RUNTIME_ENVIRONMENT_INVENTORY.md"
 RUST_SUFFIXES = frozenset({".rs"})
 NATIVE_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".h", ".hpp", ".cu", ".cuh"})
 SOURCE_SUFFIXES = RUST_SUFFIXES | NATIVE_SUFFIXES
@@ -62,6 +63,22 @@ class ScanError(ValueError):
 class Token:
     kind: str
     value: str
+
+
+TEST_SURFACES = frozenset({"unit-test", "integration-test", "benchmark", "example"})
+PUBLIC_RUNTIME_BOUNDARIES = frozenset(
+    {
+        "crates/kiln-server/src/config.rs",
+        "crates/kiln-server/src/logging.rs",
+    }
+)
+BUILD_PROVENANCE_BOUNDARIES = frozenset(
+    {
+        "crates/kiln-server/src/execution_provenance.rs",
+        "crates/kiln-train/src/replay.rs",
+        "crates/kiln-train/src/train_receipt.rs",
+    }
+)
 
 
 def _decode_escaped_string(text: str, start: int, source: str) -> tuple[str, int]:
@@ -288,7 +305,37 @@ def _use_statements(tokens: list[Token]) -> tuple[set[str], dict[str, str], set[
     return namespace_aliases, function_aliases, use_indexes
 
 
-def _first_argument(tokens: list[Token], open_paren: int) -> tuple[str, str]:
+def _literal_bindings(tokens: list[Token]) -> dict[str, str]:
+    """Return unambiguous file-local string constants used as env names."""
+    candidates: dict[str, set[str]] = {}
+    for index, token in enumerate(tokens[:-1]):
+        if token.value not in {"const", "static"}:
+            continue
+        name = tokens[index + 1]
+        if name.kind != "identifier":
+            continue
+        cursor = index + 2
+        while cursor < len(tokens) and tokens[cursor].value not in {"=", ";"}:
+            cursor += 1
+        if cursor >= len(tokens) or tokens[cursor].value != "=":
+            continue
+        cursor += 1
+        while cursor < len(tokens) and tokens[cursor].value in {"&"}:
+            cursor += 1
+        if cursor < len(tokens) and tokens[cursor].kind == "string":
+            candidates.setdefault(name.value, set()).add(tokens[cursor].value)
+    return {
+        name: next(iter(values))
+        for name, values in candidates.items()
+        if len(values) == 1
+    }
+
+
+def _first_argument(
+    tokens: list[Token],
+    open_paren: int,
+    literal_bindings: dict[str, str] | None = None,
+) -> tuple[str, str]:
     expression: list[Token] = []
     stack: list[str] = []
     matching = {")": "(", "]": "[", "}": "{"}
@@ -306,11 +353,86 @@ def _first_argument(tokens: list[Token], open_paren: int) -> tuple[str, str]:
         return "all", "<all>"
     if len(expression) == 1 and expression[0].kind == "string":
         return "literal", expression[0].value
+    if (
+        len(expression) == 1
+        and expression[0].kind == "identifier"
+        and literal_bindings is not None
+        and expression[0].value in literal_bindings
+    ):
+        return "literal", literal_bindings[expression[0].value]
     rendered = " ".join(
         json.dumps(token.value, ensure_ascii=True) if token.kind == "string" else token.value
         for token in expression
     )
     return "expression", rendered
+
+
+def _matching_delimiter(
+    tokens: list[Token], start: int, opening: str, closing: str
+) -> int | None:
+    depth = 0
+    for index in range(start, len(tokens)):
+        if tokens[index].value == opening:
+            depth += 1
+        elif tokens[index].value == closing:
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _attribute_requires_test(values: list[str]) -> bool:
+    if values == ["test"] or (len(values) >= 3 and values[-2:] == ["::", "test"]):
+        return True
+    # The repository's gated unit-test modules use #[cfg(test)]. Be
+    # conservative for richer cfg expressions rather than labeling code that
+    # can compile without `test` as test-only.
+    return values == ["cfg", "(", "test", ")"]
+
+
+def _test_only_token_indexes(tokens: list[Token]) -> set[int]:
+    indexes: set[int] = set()
+    cursor = 0
+    while cursor + 2 < len(tokens):
+        if tokens[cursor].value != "#" or tokens[cursor + 1].value != "[":
+            cursor += 1
+            continue
+        attribute_end = _matching_delimiter(tokens, cursor + 1, "[", "]")
+        if attribute_end is None:
+            cursor += 1
+            continue
+        values = [token.value for token in tokens[cursor + 2 : attribute_end]]
+        if not _attribute_requires_test(values):
+            cursor = attribute_end + 1
+            continue
+
+        item_start = attribute_end + 1
+        while item_start + 1 < len(tokens) and tokens[item_start].value == "#":
+            nested_end = _matching_delimiter(tokens, item_start + 1, "[", "]")
+            if nested_end is None:
+                break
+            item_start = nested_end + 1
+
+        item_end = item_start
+        while item_end < len(tokens) and tokens[item_end].value not in {"{", ";"}:
+            item_end += 1
+        if item_end < len(tokens) and tokens[item_end].value == "{":
+            matched = _matching_delimiter(tokens, item_end, "{", "}")
+            if matched is not None:
+                item_end = matched
+            else:
+                # A cfg(test) module conventionally owns the remainder of a
+                # source file. Tokenization deliberately discards literal
+                # interiors and can therefore make macro-heavy test modules
+                # appear one delimiter short; classify the conservative
+                # remainder as test-only instead of production runtime.
+                item_end = len(tokens) - 1
+        if item_end < len(tokens):
+            indexes.update(range(cursor, item_end + 1))
+            cursor = item_end + 1
+        else:
+            cursor = attribute_end + 1
+    return indexes
 
 
 def _source_surface(relative: Path) -> str:
@@ -332,8 +454,9 @@ def _entry(
     operation: str,
     argument_kind: str,
     argument: str,
+    surface_override: str | None = None,
 ) -> tuple[str, ...]:
-    surface = _source_surface(relative)
+    surface = surface_override or _source_surface(relative)
     if api in {"env!", "option_env!"}:
         phase = "compile-time"
     elif surface == "build-script":
@@ -355,6 +478,8 @@ def _entry(
 def scan_rust(text: str, relative: Path) -> list[tuple[str, ...]]:
     tokens = tokenize(text, "rust", relative.as_posix())
     namespaces, direct_aliases, use_indexes = _use_statements(tokens)
+    literal_bindings = _literal_bindings(tokens)
+    test_only_indexes = _test_only_token_indexes(tokens)
     matches: dict[tuple[str, int], tuple[str, int]] = {}
 
     for index, token in enumerate(tokens):
@@ -389,9 +514,20 @@ def scan_rust(text: str, relative: Path) -> list[tuple[str, ...]]:
 
     entries: list[tuple[str, ...]] = []
     for api, open_paren in matches.values():
-        argument_kind, argument = _first_argument(tokens, open_paren)
+        argument_kind, argument = _first_argument(tokens, open_paren, literal_bindings)
         operation = RUST_ENV_APIS.get(api, "read")
-        entries.append(_entry(relative, "rust", api, operation, argument_kind, argument))
+        surface_override = "unit-test" if open_paren in test_only_indexes else None
+        entries.append(
+            _entry(
+                relative,
+                "rust",
+                api,
+                operation,
+                argument_kind,
+                argument,
+                surface_override,
+            )
+        )
     return entries
 
 
@@ -439,8 +575,33 @@ ENTRY_FIELDS = (
 )
 
 
+def _classification(entry: dict[str, object]) -> tuple[str, str]:
+    path = str(entry["path"])
+    surface = str(entry["surface"])
+    phase = str(entry["phase"])
+    if surface in TEST_SURFACES:
+        return "test_only", f"{surface} source surface"
+    if phase in {"build-time", "compile-time"}:
+        return "build_time", f"{phase} environment access"
+    if path in BUILD_PROVENANCE_BOUNDARIES:
+        return "build_time", "immutable build/source provenance boundary"
+    if path in PUBLIC_RUNTIME_BOUNDARIES:
+        return "public_stable", "central typed startup configuration boundary"
+    return (
+        "experimental_debug",
+        "runtime access outside the typed startup configuration boundary",
+    )
+
+
 def _entry_dict(key: tuple[str, ...], count: int) -> dict[str, object]:
-    return {**dict(zip(ENTRY_FIELDS, key, strict=True)), "count": count}
+    entry: dict[str, object] = {
+        **dict(zip(ENTRY_FIELDS, key, strict=True)),
+        "count": count,
+    }
+    classification, basis = _classification(entry)
+    entry["classification"] = classification
+    entry["classification_basis"] = basis
+    return entry
 
 
 def build_contract(repo_root: Path) -> dict[str, object]:
@@ -450,19 +611,278 @@ def build_contract(repo_root: Path) -> dict[str, object]:
     for key, count in sorted(calls.items()):
         destination = reads if key[5] == "read" else mutations
         destination.append(_entry_dict(key, count))
+    read_classifications = {
+        classification: sum(
+            int(item["count"])
+            for item in reads
+            if item["classification"] == classification
+        )
+        for classification in sorted({str(item["classification"]) for item in reads})
+    }
+    mutation_classifications = {
+        classification: sum(
+            int(item["count"])
+            for item in mutations
+            if item["classification"] == classification
+        )
+        for classification in sorted(
+            {str(item["classification"]) for item in mutations}
+        )
+    }
+    literal_kiln_reads = [
+        item
+        for item in reads
+        if item["argument_kind"] == "literal" and str(item["argument"]).startswith("KILN_")
+    ]
+    literal_kiln_names_by_classification = {
+        classification: len(
+            {
+                str(item["argument"])
+                for item in literal_kiln_reads
+                if item["classification"] == classification
+            }
+        )
+        for classification in sorted(
+            {str(item["classification"]) for item in literal_kiln_reads}
+        )
+    }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_root": "crates",
         "source_extensions": sorted(SOURCE_SUFFIXES),
         "summary": {
             "read_call_sites": sum(int(item["count"]) for item in reads),
             "read_entries": len(reads),
+            "read_call_sites_by_classification": read_classifications,
+            "literal_kiln_read_call_sites": sum(
+                int(item["count"]) for item in literal_kiln_reads
+            ),
+            "literal_kiln_read_names": len(
+                {str(item["argument"]) for item in literal_kiln_reads}
+            ),
+            "literal_kiln_read_names_by_classification": (
+                literal_kiln_names_by_classification
+            ),
             "process_mutation_call_sites": sum(int(item["count"]) for item in mutations),
             "process_mutation_entries": len(mutations),
+            "process_mutation_call_sites_by_classification": mutation_classifications,
         },
         "reads": reads,
         "process_mutations": mutations,
     }
+
+
+def _markdown_code(value: str) -> str:
+    return f"`{value.replace('`', '&#96;')}`"
+
+
+def render_report(contract: dict[str, object]) -> str:
+    summary = contract["summary"]
+    reads = contract["reads"]
+    mutations = contract["process_mutations"]
+    assert isinstance(summary, dict)
+    assert isinstance(reads, list)
+    assert isinstance(mutations, list)
+
+    read_classes = summary["read_call_sites_by_classification"]
+    mutation_classes = summary["process_mutation_call_sites_by_classification"]
+    literal_names_by_class = summary["literal_kiln_read_names_by_classification"]
+    assert isinstance(read_classes, dict)
+    assert isinstance(mutation_classes, dict)
+    assert isinstance(literal_names_by_class, dict)
+
+    labels = {
+        "public_stable": "Public stable",
+        "experimental_debug": "Experimental/debug migration",
+        "build_time": "Build time/provenance",
+        "test_only": "Test only",
+    }
+    lines = [
+        "# Runtime Environment Inventory",
+        "",
+        "> Generated by `python3 scripts/check_runtime_env_contract.py --write`; do not edit by hand.",
+        "",
+        "This is the generated, exhaustive ownership inventory for direct process-environment",
+        "access under `crates/`. The source of truth is",
+        "[`contracts/runtime-env-direct-reads-v1.json`](../contracts/runtime-env-direct-reads-v1.json);",
+        "`python3 scripts/check_runtime_env_contract.py` rejects any source, classification,",
+        "or generated-report drift on the inexpensive qualification path.",
+        "",
+        "The supported operator surface is narrower. Use the",
+        "[Configuration Reference](CONFIGURATION.md) for typed TOML fields, mechanically",
+        "derived canonical names, deprecated compatibility aliases, defaults, validation,",
+        "and provenance. A name appearing in this inventory is not evidence that it is a",
+        "supported public setting.",
+        "",
+        "## Current baseline",
+        "",
+        f"The scanner records **{summary['read_call_sites']} direct read call sites** and",
+        f"**{summary['process_mutation_call_sites']} process-mutation call sites**. It can",
+        f"statically name **{summary['literal_kiln_read_names']} distinct literal `KILN_*`",
+        f"read names** across **{summary['literal_kiln_read_call_sites']} call sites**.",
+        "Dynamically named reads remain listed separately and are classified by their owner",
+        "boundary.",
+        "",
+        "| Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |",
+        "|---|---:|---:|---:|",
+    ]
+    for classification in ("public_stable", "experimental_debug", "build_time", "test_only"):
+        lines.append(
+            "| "
+            + labels[classification]
+            + f" | {int(read_classes.get(classification, 0))}"
+            + f" | {int(literal_names_by_class.get(classification, 0))}"
+            + f" | {int(mutation_classes.get(classification, 0))} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "The counts are call sites, not configuration-field counts. The central typed",
+            "loader deliberately uses a small number of dynamic reads to resolve all public",
+            "registry entries once. Conversely, a kernel file can read many experimental",
+            "flags repeatedly even when each name has only one syntactic call site.",
+            "",
+            "## Classification policy",
+            "",
+            "| Class | Meaning and required disposition |",
+            "|---|---|",
+            "| Public stable | Access occurs only in the central typed startup/configuration boundary. Public support still requires an entry in the Configuration Reference. |",
+            "| Experimental/debug migration | Runtime source reads the process environment outside that boundary. Move real policy into typed immutable configuration; put retained diagnostics behind one explicit experimental profile; delete dead controls. |",
+            "| Build time/provenance | A build script, compile-time macro, or immutable build/source provenance boundary owns the read. It must never become request-time policy. |",
+            "| Test only | The access is in a unit-test, integration-test, benchmark, or example surface. Prefer scoped typed fixtures; serialize the few tests that must mutate process-global state. |",
+            "",
+            "`#[cfg(test)]` modules and `#[test]` functions are recognized as test surfaces,",
+            "including tests colocated in production source files. Simple file-local string",
+            "constants used as environment names are resolved before classification. Unknown",
+            "dynamic expressions are retained verbatim rather than guessed.",
+            "",
+            "## Production migration owners",
+            "",
+            "These files contain the runtime accesses still outside the typed startup",
+            "boundary. This table is the prioritized deletion/migration queue.",
+            "",
+            "| Owner | Read call sites | Literal `KILN_*` names |",
+            "|---|---:|---:|",
+        ]
+    )
+    owner_calls: Counter[str] = Counter()
+    owner_names: dict[str, set[str]] = {}
+    for entry in reads:
+        if entry["classification"] != "experimental_debug":
+            continue
+        path = str(entry["path"])
+        owner_calls[path] += int(entry["count"])
+        if entry["argument_kind"] == "literal" and str(entry["argument"]).startswith("KILN_"):
+            owner_names.setdefault(path, set()).add(str(entry["argument"]))
+    for path, count in sorted(owner_calls.items(), key=lambda item: (-item[1], item[0])):
+        lines.append(
+            f"| {_markdown_code(path)} | {count} | {len(owner_names.get(path, set()))} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Literal `KILN_*` catalog",
+            "",
+            "A name can appear in more than one class, such as a build control that is also",
+            "asserted by a test. Paths are deduplicated; counts retain duplicate call sites.",
+            "",
+            "| Name | Class | Read call sites | Owners |",
+            "|---|---|---:|---|",
+        ]
+    )
+    catalog: dict[str, dict[str, object]] = {}
+    for entry in reads:
+        argument = str(entry["argument"])
+        if entry["argument_kind"] != "literal" or not argument.startswith("KILN_"):
+            continue
+        item = catalog.setdefault(
+            argument,
+            {"classifications": set(), "count": 0, "paths": set()},
+        )
+        classifications = item["classifications"]
+        paths = item["paths"]
+        assert isinstance(classifications, set)
+        assert isinstance(paths, set)
+        classifications.add(str(entry["classification"]))
+        paths.add(str(entry["path"]))
+        item["count"] = int(item["count"]) + int(entry["count"])
+    for name, item in sorted(catalog.items()):
+        classifications = item["classifications"]
+        paths = item["paths"]
+        assert isinstance(classifications, set)
+        assert isinstance(paths, set)
+        rendered_classes = ", ".join(labels[value] for value in sorted(classifications))
+        rendered_paths = ", ".join(_markdown_code(path) for path in sorted(paths))
+        lines.append(
+            f"| {_markdown_code(name)} | {rendered_classes} | {item['count']} | {rendered_paths} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Dynamic read catalog",
+            "",
+            "These direct reads do not expose one literal name at the call site. They include",
+            "central registry loops, configured credential names, helper functions, and whole-",
+            "environment provenance scans. Their exact expression remains ratcheted so a",
+            "dynamic helper cannot conceal source growth.",
+            "",
+            "| Owner | API | Argument | Class | Call sites |",
+            "|---|---|---|---|---:|",
+        ]
+    )
+    for entry in reads:
+        argument = str(entry["argument"])
+        if entry["argument_kind"] == "literal" and argument.startswith("KILN_"):
+            continue
+        lines.append(
+            f"| {_markdown_code(str(entry['path']))} | {_markdown_code(str(entry['api']))} "
+            f"| {_markdown_code(argument)} | {labels[str(entry['classification'])]} "
+            f"| {entry['count']} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Mutation boundary",
+            "",
+            "Process-environment mutation is forbidden in production execution. The current",
+            "inventory contains only test/example mutation and build-script toolchain setup;",
+            "the classification check will fail if a production mutation is introduced.",
+            "Tests should still migrate toward scoped typed configuration because process-global",
+            "mutation creates ordering and parallelism hazards even when it is test-only.",
+            "",
+            "## Migration rule",
+            "",
+            "For each production owner, move a coherent policy family at once: define typed",
+            "fields, derive canonical `KILN_<SECTION>_<FIELD>` compatibility inputs",
+            "mechanically, validate once at startup, inject immutable policy, expose effective",
+            "value/source/restart semantics, remove lower rereads, and lower this ratchet in the",
+            "same commit. Do not promote one-off kernel flags into permanent public API merely",
+            "to preserve them.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def validate_policy(contract: dict[str, object]) -> None:
+    mutations = contract.get("process_mutations")
+    if not isinstance(mutations, list):
+        raise ScanError("contract field 'process_mutations' must be a list")
+    production = [
+        entry
+        for entry in mutations
+        if entry.get("classification") not in {"test_only", "build_time"}
+    ]
+    if production:
+        rendered = ", ".join(
+            f"{entry['path']}:{entry['api']}({entry['argument']})"
+            for entry in production[:10]
+        )
+        raise ScanError(f"production process-environment mutation is forbidden: {rendered}")
 
 
 def _contract_counter(contract: dict[str, object]) -> Counter[tuple[str, ...]]:
@@ -519,6 +939,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     action.add_argument("--write", action="store_true", help="replace the baseline with the current scan")
     parser.add_argument("--repo-root", type=Path, default=ROOT)
     parser.add_argument("--contract", type=Path)
+    parser.add_argument("--report", type=Path)
     return parser.parse_args(argv)
 
 
@@ -528,17 +949,31 @@ def main(argv: Iterable[str] | None = None) -> int:
     contract_path = args.contract or (
         DEFAULT_CONTRACT if repo_root == ROOT else repo_root / "contracts" / DEFAULT_CONTRACT.name
     )
+    report_path = args.report or (
+        DEFAULT_REPORT if repo_root == ROOT else repo_root / "docs" / DEFAULT_REPORT.name
+    )
     try:
         actual = build_contract(repo_root)
+        validate_policy(actual)
+        rendered_report = render_report(actual)
         if args.write:
             contract_path.parent.mkdir(parents=True, exist_ok=True)
             contract_path.write_text(json.dumps(actual, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            print(f"wrote {contract_path}")
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(rendered_report, encoding="utf-8")
+            print(f"wrote {contract_path} and {report_path}")
             return 0
         expected = json.loads(contract_path.read_text(encoding="utf-8"))
         if not isinstance(expected, dict):
             raise ScanError(f"contract root must be an object: {contract_path}")
         if not check_contract(expected, actual):
+            return 1
+        committed_report = report_path.read_text(encoding="utf-8")
+        if committed_report != rendered_report:
+            print(
+                "runtime environment inventory report drifted; regenerate it with --write",
+                file=sys.stderr,
+            )
             return 1
     except (OSError, UnicodeError, json.JSONDecodeError, ScanError) as error:
         print(f"runtime environment contract error: {error}", file=sys.stderr)
@@ -548,7 +983,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(
         "runtime environment contract matches "
         f"({summary['read_call_sites']} reads, "
-        f"{summary['process_mutation_call_sites']} process mutations)"
+        f"{summary['process_mutation_call_sites']} process mutations; "
+        f"{summary['read_call_sites_by_classification']['experimental_debug']} "
+        "runtime migration reads)"
     )
     return 0
 

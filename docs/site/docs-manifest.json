@@ -217,6 +217,13 @@
       "description": "Run, validate, compare, and publish hardware qualification receipts."
     },
     {
+      "source": "docs/RUNTIME_ENVIRONMENT_INVENTORY.md",
+      "slug": "runtime-environment-inventory",
+      "title": "Runtime Environment Inventory",
+      "section": "operations",
+      "description": "Generated ownership and migration inventory for every direct environment read and mutation, including literal KILN names, dynamic call sites, and test/build boundaries."
+    },
+    {
       "source": "CONTRIBUTING.md",
       "slug": "contributing",
       "title": "Contributing",
