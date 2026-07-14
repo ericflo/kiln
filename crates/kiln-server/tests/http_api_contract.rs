@@ -80,8 +80,7 @@ fn concrete_path(template: &str) -> String {
         .join("/")
 }
 
-fn documented_operations() -> BTreeMap<String, BTreeSet<String>> {
-    let document: serde_json::Value = serde_json::from_str(OPENAPI).unwrap();
+fn documented_operations(document: &serde_json::Value) -> BTreeMap<String, BTreeSet<String>> {
     document["paths"]
         .as_object()
         .unwrap()
@@ -105,11 +104,18 @@ fn documented_operations() -> BTreeMap<String, BTreeSet<String>> {
 async fn production_router_matches_openapi_paths_and_methods() {
     let root = tempfile::tempdir().unwrap();
     let app = api::router(mock_state(root.path()));
-    let operations = documented_operations();
-    assert_eq!(operations.len(), 101, "OpenAPI path accounting drifted");
+    let document: serde_json::Value = serde_json::from_str(OPENAPI).unwrap();
+    let operations = documented_operations(&document);
+    let declared_paths = document["x-kiln-path-count"].as_u64().unwrap() as usize;
+    let declared_operations = document["x-kiln-operation-count"].as_u64().unwrap() as usize;
+    assert_eq!(
+        operations.len(),
+        declared_paths,
+        "OpenAPI path accounting drifted"
+    );
     assert_eq!(
         operations.values().map(BTreeSet::len).sum::<usize>(),
-        112,
+        declared_operations,
         "OpenAPI operation accounting drifted"
     );
 
