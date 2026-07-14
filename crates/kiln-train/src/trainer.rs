@@ -17295,35 +17295,6 @@ pub(crate) mod tests {
     pub(crate) static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn production_training_blocks_use_explicit_streaming_policy() {
-        let source = include_str!("trainer.rs");
-        let production = source
-            .rsplit_once("\n#[cfg(test)]\npub(crate) mod tests {")
-            .map(|(production, _)| production)
-            .expect("trainer has a final test module after production source");
-        assert!(
-            !production.contains(concat!("forward::transformer_block", "(")),
-            "production training retained the compatibility transformer-block policy"
-        );
-        assert!(production.contains("forward::transformer_block_with_policy("));
-    }
-
-    #[test]
-    fn frozen_final_rmsnorm_backward_never_requests_a_weight_gradient() {
-        let source = include_str!("trainer.rs");
-        let production = source
-            .rsplit_once("\n#[cfg(test)]\npub(crate) mod tests {")
-            .map(|(production, _)| production)
-            .expect("trainer has a final test module after production source");
-
-        assert!(production.contains("kiln_rmsnorm_kernel::fused_rmsnorm_backward_dx_kt("));
-        assert!(
-            !production.contains("kiln_rmsnorm_kernel::fused_rmsnorm_backward_kt("),
-            "production training must not allocate or compute a final-norm weight gradient"
-        );
-    }
-
-    #[test]
     fn grpo_shared_prefix_uses_injected_streaming_tile_policy() {
         let forced = StreamingPrefillExecutionPolicy::resolve(
             kiln_model::StreamingPrefillBackendPolicy::for_device(Device::Cpu),

@@ -10439,21 +10439,6 @@ mod tests {
     }
 
     #[test]
-    fn cuda_compatibility_constructor_does_not_select_rocm_graphs() {
-        let source = include_str!("generate.rs");
-        let constructor_start = source
-            .find("    pub fn new_with_options(")
-            .expect("compatibility constructor");
-        let constructor_tail = &source[constructor_start..];
-        let constructor_end = constructor_tail
-            .find("    pub fn new_with_runtime_options(")
-            .expect("typed runtime constructor");
-        let constructor = &constructor_tail[..constructor_end];
-        assert!(constructor.contains("rocm_graph: RocmGraphExecutionPolicy::disabled()"));
-        assert!(!constructor.contains("lazy_capture_replay"));
-    }
-
-    #[test]
     fn speculative_generation_unavailable_reason_is_stable() {
         let error = ensure_speculative_generation_available()
             .expect_err("unqualified speculative generation must fail closed");
@@ -10461,39 +10446,6 @@ mod tests {
             error.to_string(),
             "speculative generation is disabled pending cancellation-safe owner settlement and local accelerator qualification"
         );
-    }
-
-    #[test]
-    fn public_speculative_generation_entry_points_guard_before_work() {
-        let source = include_str!("generate.rs");
-        let entry_points = [
-            "generate_paged_speculative_shared_tokens",
-            "generate_speculative",
-            "generate_from_tokens_speculative",
-            "generate_mtp_speculative",
-            "generate_from_tokens_mtp_speculative",
-            "generate_streaming_speculative",
-            "generate_streaming_mtp_speculative",
-            "generate_streaming_paged_speculative_shared_tokens",
-        ];
-
-        for entry_point in entry_points {
-            let signature = format!("    pub fn {entry_point}(");
-            let function_start = source
-                .find(&signature)
-                .unwrap_or_else(|| panic!("missing public entry point {entry_point}"));
-            let body_start = function_start
-                + source[function_start..]
-                    .find('{')
-                    .unwrap_or_else(|| panic!("missing body for public entry point {entry_point}"))
-                + 1;
-            assert!(
-                source[body_start..]
-                    .trim_start()
-                    .starts_with("ensure_speculative_generation_available()?;"),
-                "{entry_point} must reject unqualified speculative generation before doing work"
-            );
-        }
     }
 
     #[test]
@@ -10636,24 +10588,6 @@ mod tests {
         assert_eq!(result_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(block_manager.lock().unwrap().num_used(), 1);
         Ok(())
-    }
-
-    #[test]
-    fn shared_block_reservation_runner_sync_is_panic_fenced() {
-        let source = include_str!("generate.rs");
-        let start = source
-            .find("impl SharedBlockReservation<'_> {")
-            .expect("shared reservation implementation");
-        let end = start
-            + source[start..]
-                .find("\n}\n\nimpl Drop for SharedBlockReservation<'_>")
-                .expect("shared reservation implementation end");
-        let body = &source[start..end];
-
-        assert!(body.contains("catch_external_yield_sync_panic("));
-        assert!(body.contains("&runner.backend_health"));
-        assert!(body.contains("runner.synchronize_external_yield(boundary)"));
-        assert!(body.contains("std::mem::forget(result)"));
     }
 
     #[test]
@@ -10811,38 +10745,6 @@ mod tests {
         assert_eq!(
             snapshot.reason.as_deref(),
             Some("backend synchronization panicked at injected mutable reservation sync panic")
-        );
-    }
-
-    #[test]
-    fn legacy_mutable_paged_stream_has_one_settlement_epilogue() {
-        let source = include_str!("generate.rs");
-        let start = source
-            .find("    fn generate_from_tokens_streaming_paged_locked(")
-            .expect("legacy mutable paged stream function");
-        let end_marker = "\n    }\n}\n\n#[cfg(test)]";
-        let end = start
-            + source[start..]
-                .find(end_marker)
-                .expect("legacy mutable paged stream function end");
-        let body = &source[start..end];
-
-        assert!(body.contains("StreamTokenDisposition::ReceiverDropped"));
-        assert!(body.contains("SettlementOutcome { result, owners }"));
-        let health_gate = body
-            .find("self.ensure_backend_healthy()")
-            .expect("legacy stream health gate");
-        let allocation = body
-            .find(".allocate(num_blocks)")
-            .expect("legacy stream block allocation");
-        assert!(
-            health_gate < allocation,
-            "quarantined backends must fail before reserving reusable pages"
-        );
-        assert_eq!(body.matches("release_after_settlement(").count(), 1);
-        assert!(
-            !body.contains(".free_all("),
-            "execution body must not recycle pages outside the settlement epilogue"
         );
     }
 

@@ -8674,19 +8674,6 @@
       "surface": "unit-test"
     },
     {
-      "api": "env!",
-      "argument": "CARGO_MANIFEST_DIR",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "integration-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/tests/resource_concurrency_invariants.rs",
-      "phase": "compile-time",
-      "surface": "integration-test"
-    },
-    {
       "api": "var",
       "argument": "var",
       "argument_kind": "expression",
@@ -9334,19 +9321,6 @@
       "operation": "read",
       "path": "crates/kiln-tensor/tests/rocm_paged_attn_decode_parity.rs",
       "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "env!",
-      "argument": "CARGO_MANIFEST_DIR",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "integration-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/tests/rocm_quarantine_stream_contract.rs",
-      "phase": "compile-time",
       "surface": "integration-test"
     },
     {
@@ -11002,13 +10976,13 @@
       "test_only": 368
     },
     "process_mutation_entries": 217,
-    "read_call_sites": 923,
+    "read_call_sites": 921,
     "read_call_sites_by_classification": {
       "build_time": 328,
       "experimental_debug": 444,
       "public_stable": 7,
-      "test_only": 144
+      "test_only": 142
     },
-    "read_entries": 627
+    "read_entries": 625
   }
 }

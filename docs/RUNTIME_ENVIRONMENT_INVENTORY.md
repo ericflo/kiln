@@ -16,7 +16,7 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **923 direct read call sites** and
+The scanner records **921 direct read call sites** and
 **376 process-mutation call sites**. It can
 statically name **374 distinct literal `KILN_*`
 read names** across **546 call sites**.
@@ -28,7 +28,7 @@ boundary.
 | Public stable | 7 | 1 | 0 |
 | Experimental/debug migration | 444 | 333 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
-| Test only | 144 | 43 | 368 |
+| Test only | 142 | 43 | 368 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -639,7 +639,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-server/src/state.rs` | `var` | `policy . env` | Experimental/debug migration | 1 |
 | `crates/kiln-server/src/teacher_identity.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/teacher_identity.rs` | `env!` | `CARGO_PKG_VERSION` | Test only | 1 |
-| `crates/kiln-server/tests/resource_concurrency_invariants.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 1 |
 | `crates/kiln-tensor/build.rs` | `var` | `var` | Build time/provenance | 2 |
 | `crates/kiln-tensor/build.rs` | `var` | `CARGO_FEATURE_CUDA` | Build time/provenance | 1 |
 | `crates/kiln-tensor/build.rs` | `var` | `CARGO_FEATURE_ROCM` | Build time/provenance | 1 |
@@ -652,7 +651,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-tensor/src/rocm_matmul.rs` | `var` | `name` | Experimental/debug migration | 1 |
 | `crates/kiln-tensor/src/vk_shaders.rs` | `env!` | `OUT_DIR` | Build time/provenance | 1 |
 | `crates/kiln-tensor/tests/rocm_paged_attn_decode_parity.rs` | `var_os` | `key` | Test only | 1 |
-| `crates/kiln-tensor/tests/rocm_quarantine_stream_contract.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 1 |
 | `crates/kiln-train/src/opd.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-train/src/receipt.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 2 |
 | `crates/kiln-train/src/remote_teacher.rs` | `var` | `env_name` | Experimental/debug migration | 1 |

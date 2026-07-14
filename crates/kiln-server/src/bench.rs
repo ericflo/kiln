@@ -1549,29 +1549,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn benchmark_training_execution_policies_are_startup_bound() {
-        let source = include_str!("bench.rs");
-        assert!(source.contains("KilnConfig::load(args.config_path.as_deref())"));
-        assert!(source.contains(concat!("checkpoint_boundary_", "policy()")));
-        assert!(source.contains(concat!(
-            "with_checkpoint_boundary_",
-            "policy(checkpoint_boundary_policy)"
-        )));
-        assert!(source.contains("with_streaming_prefill_policy(streaming_prefill)"));
-        assert!(source.contains("streaming_prefill: Some(streaming_prefill)"));
-        for compatibility_call in [
-            concat!("model_forward_", "kt("),
-            concat!("streaming_prefill_enabled_", "for("),
-            concat!("model_forward_paged_streaming", "("),
-        ] {
-            assert!(
-                !source.contains(compatibility_call),
-                "benchmark retained compatibility policy call {compatibility_call}"
-            );
-        }
-    }
-
     fn default_speculative_policy_for_test() -> SpeculativeDecodePolicy {
         SpeculativeDecodePolicy::default()
     }

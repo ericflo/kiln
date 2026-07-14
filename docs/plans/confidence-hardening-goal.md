@@ -1014,7 +1014,7 @@ Environment-inventory checkpoint (2026-07-13): the lexical ratchet now resolves
 simple named environment constants, recognizes colocated `#[cfg(test)]` modules
 and `#[test]` functions, and classifies every direct crate-owned read and
 mutation with an explicit rationale. The generated permanent website reference
-and schema-v2 JSON enumerate 923 read call sites, 376 mutation call sites, and
+and schema-v2 JSON enumerate 921 read call sites, 376 mutation call sites, and
 374 statically named literal `KILN_*` inputs. The real production migration
 surface is 444 reads outside the typed startup boundary; 368 mutations are
 test-only and eight are build-script toolchain setup, while a hard policy gate
@@ -1320,12 +1320,24 @@ that can be checked out on the CUDA host.
 ### 8.4 Replace verification theater
 
 - [x] Inventory source-string and ad hoc Rust-source parsing tests.
-- [ ] Replace load-bearing source-string assertions with compile-time types,
+- [x] Replace load-bearing source-string assertions with compile-time types,
   runtime tests, property tests, or structured metadata validation.
+  - The corrected scanner found 112 source-text tests, including 51 hidden
+    behind workspace-relative reader helpers and dynamic source paths. The
+    source-text baseline is now exactly zero tests, zero reads, and zero text
+    assertions. Backend trait/type checking, executable tape/GDN/replay and
+    lifecycle tests, canonical JSON/schema validation, and source-bound local
+    qualification own the corresponding claims; `docs/VERIFICATION_POLICY.md`
+    publishes the permanent evidence map.
 - [x] Ensure hardware qualification reports skipped tests as failures.
 - [x] Rename mock tests so they cannot be mistaken for model/backend e2e tests.
-- [ ] Delete redundant tests that add maintenance cost without a distinct
+- [x] Delete redundant tests that add maintenance cost without a distinct
   invariant.
+  - The redundant layer was removed rather than renamed: five source-only test
+    targets are gone, source-parsing unit tests were removed from seven owning
+    modules, and `backend_capability_contract.rs` fell from 8,880 to 2,327
+    lines while retaining structured-report and executable replay/capability
+    checks. The checkpoint removes more than ten thousand net lines.
 
 ### 8.5 Artifact and documentation policy
 
@@ -1759,6 +1771,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-13 | Python qualification source-test retirement and shared server launch | `sha256:b15f02e827b934c73129d6ebdd842bc7608f5f2e52b576ca118ff5055b7645eb` | this commit | portable qualification runtime and documentation website; accelerator execution unaffected | 405 qualification-tooling tests; 85 focused serving-driver behavior tests; exact source-test ratchet reduced to 61 tests/108 reads/921 text assertions with zero Python entries; Python compilation; 8/8 docs-builder tests; 33-document/5-asset website build and generated static smoke; repository artifact, runtime-environment, runtime-default, thinking-budget, release/link, and diff-hygiene gates | passed static checkpoint | All seven ROCm serving drivers and the Vulkan baseline now use one fail-closed launcher that requires a source-built binary and regular typed config file, constructs the only supported `--config <path> serve` command, applies the backend-bound sanitized environment, owns the output pipe, and starts the shared structured log collector. Six Python source-inspection obligations were removed rather than renamed. Executable tests now prove launcher arguments and missing-config refusal, one binary build shared across both public-mutation arms, runtime synchronization-dimension rejection, the Vulkan build-spec boundary, synchronized wave dispatch, and structured atomic result publication. The contract dropped every Python source-parsing entry and all three ceilings decreased. The remaining 61 obligations are Rust implementation/generated-artifact tests; this checkpoint does not claim they are resolved or make an accelerator result claim. |
 | 2026-07-13 | Fail-closed required-device skip lifecycle | `sha256:c4b140c12d128d8cc6ffbb1e63b23fcc4db705d7f88f5c349236ca93ff9dfd70` | this commit | portable qualification runner and receipt contract; accelerator execution unaffected | focused workload-schema, runner-to-receipt, and receipt-validation skip regressions; 406 qualification-tooling tests; source-test ratchet; Python compilation and diff hygiene | passed static checkpoint | Non-CPU backends must declare `device_requirement=required`; required devices must declare `skip_policy=fail`; every variant must contain a required case. A structured command result with `status=skipped` now has an end-to-end regression proving the runner changes the required result to failed, emits a failed receipt with the explicit skip-policy reason, returns nonzero, and still passes strict receipt validation. Independently, a passed receipt rejects any skipped required result. This closes the Phase 8.4 skip-reporting item without claiming that a hardware case executed. |
 | 2026-07-13 | Explicit mock eval test identities | `sha256:f89df657345ac9b8d1c959bc17597368f4cc5717d826ec6c938d6c043a34a085` | this commit | Rust test-target identity and static parse; accelerator execution unaffected | repository-wide mock/e2e/integration naming audit; Rust 2024 formatter parse/check for both renamed targets; exact source-test ratchet and diff hygiene | passed static checkpoint | The only two integration targets whose e2e/end-to-end names concealed injected mock engines or canned generators are now `eval_mock_worker_pipeline` and `qwen3_agentic_mock_executor`. Their module descriptions and the remaining misleading executor test name explicitly state the mock boundary and deny model/backend execution. The `real_model_integration` target remains because it constructs `ModelRunner`/`AppState::new_real` and contains actual model/device qualifications; enum assertions that reject a `Mock` branch do not make it a mock test. Cargo remained blocked below the unchanged 15 GiB floor, so rustfmt provided syntax/edition validation but this checkpoint makes no compiled-test claim. |
+| 2026-07-13 | Zero source-text verification and redundant-test removal | `sha256:b13919048d3fd281894083312f031289ac5a6398636a55953dcc443ad8d09a14` | this commit | portable source/static and permanent documentation website; accelerator execution unaffected | corrected zero-test/zero-read/zero-text-assertion ratchet; 9 focused scanner regressions; 409 qualification-tooling tests; capability-report self-test/check; Rust 2024 formatter parse/check; exact runtime-environment contract at 921 reads/376 mutations; 8/8 docs-builder tests; 34-document/5-asset build and Chromium rendered smoke; repository artifact, runtime-default, thinking-budget, release/link, and diff-hygiene gates | passed static checkpoint | Helper-aware scanning exposed 51 obligations missed by the initial 61-entry inventory, including the 36-test resource-concurrency source contract and five ROCm stream source guards. All 112 source-text tests are replaced by or redundant with compiler-enforced types, executable tape/GDN/replay/lifecycle tests, structured canonical metadata validation, and source-bound local qualification as mapped in `docs/VERIFICATION_POLICY.md`. Five source-only targets and seven inline families were deleted; `backend_capability_contract.rs` now retains structured-report and executable tests. The change removes over ten thousand net lines and ratchets recurrence to zero. Bounded Cargo correctly refused below the unchanged 15 GiB available-memory floor, so this makes no new compiled-Rust or hardware claim; cheap hosted CPU checks remain supplemental and will be monitored. This closes the remaining Phase 8.4 replacement and redundancy items. |
 
 ## Known Starting Defects
 

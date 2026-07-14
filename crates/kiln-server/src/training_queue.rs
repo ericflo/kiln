@@ -5280,26 +5280,6 @@ mod tests {
     }
 
     #[test]
-    fn production_server_teacher_paths_reject_compatibility_policy_constructors() {
-        let source = include_str!("training_queue.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("training queue has production source before tests");
-        for compatibility_call in [
-            concat!("build_local_teacher_fixture_with_coordination", "("),
-            concat!("LiveLocalTeacher::", "new("),
-        ] {
-            assert!(
-                !production.contains(compatibility_call),
-                "server teacher path retained compatibility constructor {compatibility_call}"
-            );
-        }
-        assert!(production.contains("build_local_teacher_fixture_with_coordination_and_policy("));
-        assert!(production.contains("LiveLocalTeacher::new_with_streaming_prefill_policy("));
-    }
-
-    #[test]
     fn sft_worker_requires_explicit_fail_closed_mtp_policy() {
         let implicit = SftConfig::default();
         let explicit_true = SftConfig {

@@ -252,6 +252,13 @@
       "description": "The boundary between inexpensive hosted checks and local accelerator evidence."
     },
     {
+      "source": "docs/VERIFICATION_POLICY.md",
+      "slug": "verification-policy",
+      "title": "Verification Policy",
+      "section": "operations",
+      "description": "Behavioral, typed, structured, and hardware evidence boundaries, plus the zero source-text-test rule."
+    },
+    {
       "source": "docs/release-version-policy.md",
       "slug": "release-version-policy",
       "title": "Release Version Policy",

@@ -83,6 +83,56 @@ fn direct_read_is_inventoried() {
         self.assertEqual(entries[0]["classification"], "implementation_source_text")
         self.assertEqual(entries[0]["read_sites"][0]["api"], "read_to_string")
 
+    def test_workspace_reader_helper_indirection_is_classified(self) -> None:
+        entries = self.rust_entries(
+            r'''
+fn workspace_root() -> PathBuf { PathBuf::from("workspace") }
+fn read(path: &str) -> String {
+    std::fs::read_to_string(workspace_root().join(path)).unwrap()
+}
+
+#[test]
+fn helper_read_is_inventoried() {
+    let source = read("crates/demo/src/lib.rs");
+    assert!(source.contains("contract"));
+}
+'''
+        )
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["test_name"], "helper_read_is_inventoried")
+        self.assertEqual(entries[0]["classification"], "implementation_source_text")
+
+    def test_dynamic_path_read_uses_implementation_targets_from_test_body(self) -> None:
+        entries = self.rust_entries(
+            r'''
+#[test]
+fn dynamic_reads_are_inventoried() {
+    for relative in ["crates/demo/src/lib.rs", "crates/demo/src/runtime.rs"] {
+        let path = root.join(relative);
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(source.contains("contract"));
+    }
+}
+'''
+        )
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(
+            entries[0]["read_sites"][0]["target"],
+            "crates/demo/src/lib.rs, crates/demo/src/runtime.rs",
+        )
+
+    def test_generated_output_reader_is_not_misclassified(self) -> None:
+        entries = self.rust_entries(
+            r'''
+#[test]
+fn generated_output_is_behavioral_evidence() {
+    let output = std::fs::read_to_string(root.join("target/result.json")).unwrap();
+    assert!(output.contains("passed"));
+}
+'''
+        )
+        self.assertEqual(entries, [])
+
     def test_python_driver_read_is_classified(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

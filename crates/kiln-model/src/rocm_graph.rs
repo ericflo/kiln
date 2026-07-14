@@ -5919,29 +5919,6 @@ mod tests {
     }
 
     #[test]
-    fn graph_runtime_has_no_process_environment_policy_reads() {
-        let source = include_str!("rocm_graph.rs");
-        let runtime_source = source
-            .split_once("#[cfg(test)]\nmod tests")
-            .map(|(runtime, _)| runtime)
-            .expect("ROCm graph unit-test boundary");
-        let direct_env_read = ["std", "env", "var"].join("::");
-        assert!(!runtime_source.contains(&direct_env_read));
-        for key in [
-            ["KILN", "ROCM", "GRAPHS"].join("_"),
-            ["KILN", "ROCM", "GRAPH", "CAPTURE"].join("_"),
-            ["KILN", "ROCM", "GRAPH", "STABLE", "PAGED", "METADATA"].join("_"),
-            ["KILN", "ROCM", "GRAPH", "CACHE", "MAX"].join("_"),
-            ["KILN", "FORCE", "EAGER", "DECODE"].join("_"),
-        ] {
-            assert!(
-                !runtime_source.contains(&key),
-                "ROCm graph runtime must receive {key} through typed policy"
-            );
-        }
-    }
-
-    #[test]
     fn runner_derives_requested_state_from_typed_mode() {
         let device = Device::Rocm(0);
 

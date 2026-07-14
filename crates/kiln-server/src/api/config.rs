@@ -1357,35 +1357,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn speculative_config_api_reports_only_immutable_policy_and_backend_facts() {
-        let source = include_str!("config.rs");
-        let section = source
-            .split("fn build_speculative_config")
-            .nth(1)
-            .unwrap()
-            .split("fn build_vram_config")
-            .next()
-            .unwrap();
-
-        assert!(section.contains("state.speculative_config"));
-        assert!(section.contains("state.speculative_runtime_policy"));
-        assert!(section.contains("serving_effective_method: SpecMethod::Off"));
-        assert!(section.contains("serving_routable: false"));
-        assert!(section.contains("SPECULATIVE_SERVING_UNAVAILABLE_REASON"));
-        assert!(
-            section.contains("draft_token_ceiling: crate::config::MAX_SPECULATIVE_DRAFT_TOKENS")
-        );
-        assert!(!section.contains("runtime.decode_policy"));
-        assert!(!section.contains("mtp_max_prompt_tokens"));
-        assert!(!section.contains("long_prompt_skip_layer"));
-        assert!(!section.contains("std::env"));
-        assert!(!section.contains("backend_health_handle()"));
-        assert!(!section.contains("available_permits()"));
-        assert!(!section.contains("try_global_cached_available_bytes()"));
-        assert!(!section.contains("runner"));
-    }
-
     #[tokio::test]
     async fn disabled_checkpointing_reports_zero_effective_segments() {
         let mut state = make_test_state();

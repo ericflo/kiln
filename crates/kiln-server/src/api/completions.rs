@@ -15196,22 +15196,6 @@ mod tests {
     }
 
     #[test]
-    fn real_prompt_logprob_scoring_is_bound_to_the_runner_streaming_prefill_policy() {
-        let source = include_str!("completions.rs");
-        let scorer = source
-            .split_once("fn score_real_prompt_logprob_rows(")
-            .expect("real prompt-logprob scorer must remain present")
-            .1
-            .split_once("\nasync fn real_prompt_logprobs(")
-            .expect("real prompt-logprob scorer boundary must remain present")
-            .0;
-
-        assert!(scorer.contains("model_forward_no_head_with_policy("));
-        assert!(scorer.contains("runner.streaming_prefill_policy()"));
-        assert!(!scorer.contains("model_forward_no_head("));
-    }
-
-    #[test]
     fn prompt_logprob_panic_fence_releases_settled_ownership() {
         let backend_health = kiln_model::BackendHealthHandle::default();
         let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
