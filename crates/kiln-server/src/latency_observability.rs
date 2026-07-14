@@ -455,30 +455,39 @@ mod tests {
         );
         tracker.record_token(first, start + Duration::from_millis(21));
 
-        let second_ready = start + Duration::from_millis(320);
-        let mut second = EngineTokenTiming::ready(
-            second_ready,
+        for offset_ms in [30, 40] {
+            let ready_at = start + Duration::from_millis(offset_ms);
+            tracker.record_token(
+                EngineTokenTiming::ready(ready_at, TokenPhaseDurations::default()),
+                ready_at,
+            );
+        }
+
+        let stalled_ready = start + Duration::from_millis(340);
+        let mut stalled = EngineTokenTiming::ready(
+            stalled_ready,
             TokenPhaseDurations {
                 actor_prefill: Duration::from_millis(280),
                 actor_decode: Duration::from_millis(20),
                 ..TokenPhaseDurations::default()
             },
         );
-        second.mark_actor_delivered(second_ready + Duration::from_millis(2));
+        stalled.mark_actor_delivered(stalled_ready + Duration::from_millis(2));
         let gap = tracker
-            .record_token(second, second_ready + Duration::from_millis(4))
+            .record_token(stalled, stalled_ready + Duration::from_millis(4))
             .unwrap();
         tracker.record_client_delivery(
-            second_ready + Duration::from_millis(4),
-            second_ready + Duration::from_millis(7),
+            stalled_ready + Duration::from_millis(4),
+            stalled_ready + Duration::from_millis(7),
         );
 
         assert_eq!(gap.reason, LatencyStallReason::ActorPrefill);
         let diagnostics = tracker.diagnostics();
-        assert_eq!(diagnostics.emitted_tokens, 2);
-        assert_eq!(diagnostics.gap_samples, 1);
+        assert_eq!(diagnostics.emitted_tokens, 4);
+        assert_eq!(diagnostics.gap_samples, 3);
         assert_eq!(diagnostics.ttft_ms, Some(20.0));
-        assert_eq!(diagnostics.itl_ms_p999, Some(300.0));
+        assert_eq!(diagnostics.max_itl_ms, Some(300.0));
+        assert_eq!(diagnostics.stall_threshold_ms, Some(250.0));
         assert_eq!(diagnostics.stall_count, 1);
         assert_eq!(diagnostics.stall_reasons.actor_prefill, 1);
         assert_eq!(diagnostics.unexplained_stall_count, 0);
@@ -497,6 +506,13 @@ mod tests {
             EngineTokenTiming::ready(start, TokenPhaseDurations::default()),
             start,
         );
+        for offset_ms in [10, 20] {
+            let ready_at = start + Duration::from_millis(offset_ms);
+            tracker.record_token(
+                EngineTokenTiming::ready(ready_at, TokenPhaseDurations::default()),
+                ready_at,
+            );
+        }
         let observation = tracker
             .record_token(
                 EngineTokenTiming::ready(

@@ -426,7 +426,10 @@ impl DeliveryState {
                 for lane in self.lanes.values_mut() {
                     if let Some(pending) = &mut lane.pending {
                         pending.terminate(error.clone());
-                        while let Some(event) = pending.events.pop_front() {
+                        while let Some(mut event) = pending.events.pop_front() {
+                            if let EngineEvent::Token { timing, .. } = &mut event {
+                                timing.mark_actor_delivered(Instant::now());
+                            }
                             if lane.response_tx.try_send(event).is_err() {
                                 break;
                             }
