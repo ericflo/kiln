@@ -333,14 +333,14 @@
         <div class="label mb-3">Dataset &rarr; suite</div>
         <h2 id="synthesize" class="text-2xl font-semibold mb-4">Turn an SFT or GRPO file into a graded suite</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          Upload your training data once, then synthesize a suite from it. The same JSONL that taught the model becomes the held-out grader. Reservoir-sampled <code>max_examples</code> caps keep suites runnable in seconds even on hundreds of thousands of rows.
+          Upload one corpus and Kiln persists content-addressed, group-aware <code>train</code>, <code>validation</code>, and <code>holdout</code> views. Named training defaults to <code>train</code>; synthesis defaults to <code>holdout</code>. The training rows never become a held-out grader merely because they came from the same JSONL. Reservoir-sampled <code>max_examples</code> caps keep suites runnable in seconds even on hundreds of thousands of rows.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">1. Upload a JSONL dataset</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/datasets/upload \
   -F "file=@/tmp/sft-trajectories.jsonl" \
   -F "name=trajectories-v1" \
-  -F "format=sft" \
+  -F "format=sft_chat" \
   | python3 -m json.tool</code></pre>
         </section>
         <section class="endpoint mt-4">
@@ -349,6 +349,7 @@
   -H "Content-Type: application/json" \
   -d '{
     "suite_name": "trajectories-suite",
+    "source_split": "holdout",
     "strategy": "tool_call_predict",
     "scorer": {"kind": "auto_detect"},
     "sampling": {"max_examples": 256}
@@ -372,6 +373,9 @@
             </p>
           </div>
         </div>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          The persisted split manifest keeps normalized duplicates and declared groups/sessions together. Inspect or replace it through <code>GET/PUT /v1/eval/datasets/{name}/split</code>. The complete identity, migration, contamination, and provenance contract is in <a href="docs/dataset-splits/">Dataset Splits and Train/Eval Separation</a>.
+        </p>
       </article>
 
       <article class="card p-6">
@@ -428,19 +432,21 @@
 
       <article class="card p-6">
         <div class="label mb-3">Post-training auto-eval</div>
-        <h2 id="post-eval" class="text-2xl font-semibold mb-4">Every training run grades itself</h2>
+        <h2 id="post-eval" class="text-2xl font-semibold mb-4">Grade training against declared held-out data</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          Any <code>SftRequest</code> or <code>GrpoRequest</code> can carry a <code>post_eval</code> block. When the training job completes, Kiln immediately queues one eval against the newly trained adapter, and (optionally) a second baseline eval with no adapter, so the UI can render the delta side-by-side without a second round-trip. Eval IDs are linked on the training-detail panel at queue time, not after completion, so the dashboard shows the in-flight grading the moment it appears.
+          An SFT or GRPO request can carry a <code>post_eval</code> block whose <code>data_scope</code> defaults to <code>held-out</code>. Before publishing the training job, Kiln rejects exact, normalized, source-row, group, or session overlap with the admitted corpus. After training, it queues the adapter eval and optional baseline comparison and links both from training detail.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">SFT request with auto-eval</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/sft \
   -H "Content-Type: application/json" \
   -d '{
-    "examples": [...],
+    "dataset": "trajectories-v1",
+    "dataset_split": "train",
     "config": { "output_name": "my-coder-v4" },
     "post_eval": {
       "suite": "trajectories-suite",
+      "data_scope": "held-out",
       "include_baseline": true,
       "generation": { "temperature": 0.0, "max_tokens": 256, "seed": 42 }
     }
@@ -448,7 +454,7 @@
   | python3 -m json.tool</code></pre>
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
-          The same <code>post_eval</code> shape is supported on <code>/v1/train/grpo</code>. See <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">EVAL_GUIDE.md</a> for the full request schema.
+          The same <code>post_eval</code> shape is supported on <code>/v1/train/grpo</code>. Intentional training-data measurement must use <code>data_scope: "train-set-eval"</code>; that diagnostic label cannot be combined with <code>min_accuracy</code>. See <a href="docs/dataset-splits/">Dataset Splits and Train/Eval Separation</a> and the generated <a href="docs/control-plane-api-schema/">control-plane schema</a> for the full contract.
         </p>
       </article>
 

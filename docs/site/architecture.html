@@ -885,11 +885,11 @@ kiln adapters list</code></pre>
           </div>
           <div class="card p-4" style="background: var(--bg-soft-2);">
             <h3 class="font-semibold mb-2" style="color: var(--fg);">Dataset → suite</h3>
-            <p>Upload an SFT or GRPO JSONL, then synthesize a graded suite via <code>final_assistant</code>, <code>every_assistant_turn</code>, or <code>tool_call_predict</code>. Scorer auto-detected from target shape.</p>
+            <p>Upload an SFT or GRPO JSONL to persist content-addressed, group-aware train/validation/holdout views. Training defaults to train; synthesis defaults to holdout before applying <code>final_assistant</code>, <code>every_assistant_turn</code>, or <code>tool_call_predict</code>.</p>
           </div>
           <div class="card p-4" style="background: var(--bg-soft-2);">
             <h3 class="font-semibold mb-2" style="color: var(--fg);">Post-training auto-eval</h3>
-            <p>Any <code>SftRequest</code> or <code>GrpoRequest</code> may carry <code>post_eval: { suite, include_baseline: true }</code> &mdash; the eval queues one or two jobs the moment training succeeds and links them on the training-detail panel.</p>
+            <p>SFT and GRPO may carry a held-out <code>post_eval</code>. Admission rejects exact, normalized, row, group, or session overlap before training; explicit <code>train-set-eval</code> runs are diagnostic-only.</p>
           </div>
           <div class="card p-4" style="background: var(--bg-soft-2);">
             <h3 class="font-semibold mb-2" style="color: var(--fg);">Judgment flywheel</h3>
