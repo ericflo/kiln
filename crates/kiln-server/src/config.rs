@@ -4189,7 +4189,7 @@ impl PublicEnvField {
         // precedence. Parse every present alias strictly. Without a canonical
         // spelling, the last alias retains its historical precedence; when a
         // canonical spelling is present, every alias must agree with it.
-        let mut legacy_values = Vec::new();
+        let mut legacy_values: Vec<(&'static str, String)> = Vec::new();
         for alias in self.supported_aliases {
             if alias.name == canonical_name {
                 // Future registry rows whose old spelling was already
