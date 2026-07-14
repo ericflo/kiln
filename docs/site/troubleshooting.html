@@ -486,7 +486,9 @@ curl -s http://localhost:8420/health \
 curl -s http://localhost:8420/v1/debug/model-state \
   | jq '.accelerator_runtime, .rocm_synchronization'
 curl -s http://localhost:8420/metrics \
-  | grep -E 'kiln_rocm_(cleanup_quarantined|synchronization|synchronizations)'</code></pre>
+  | grep -E 'kiln_rocm_(cleanup_quarantined|synchronization|synchronizations)'
+# Require cleanup_quarantined=false and kiln_rocm_cleanup_quarantined 0.
+# Any other value or missing telemetry is a hard safety fault.</code></pre>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Trusted debug must already be enabled; do not expose it merely to collect this comparison. The
           synchronization snapshot is a fixed 22-reason atomic read and does not wait on the device or probe
