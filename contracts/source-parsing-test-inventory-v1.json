@@ -1,0 +1,1177 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "scope": "Rust #[test]/#[...::test] functions and Python qualification test methods that read production or qualification-driver implementation source as text.",
+    "interpretation": "An inventory entry is a migration obligation, not evidence that the asserted behavior is correct. Counts may decrease but may not exceed the ratchet.",
+    "classifications": {
+      "generated_artifact_text": "Parse the canonical JSON/schema and assert typed fields; reserve rendered-text checks for the documentation renderer.",
+      "implementation_source_text": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production.",
+      "qualification_driver_source_text": "Exercise a public helper or CLI preflight and assert its structured output instead of matching the driver's Python source."
+    }
+  },
+  "ratchet": {
+    "max_test_count": 67,
+    "max_read_site_count": 114,
+    "max_text_assertion_count": 946
+  },
+  "summary": {
+    "test_count": 67,
+    "read_site_count": 114,
+    "text_assertion_count": 946,
+    "by_classification": {
+      "generated_artifact_text": 3,
+      "implementation_source_text": 60,
+      "qualification_driver_source_text": 4
+    },
+    "by_language": {
+      "python": 6,
+      "rust": 61
+    },
+    "by_owner": {
+      "crates/kiln-gdn-kernel/tests/frozen_weight_backward_contract.rs": 3,
+      "crates/kiln-model/src/generate.rs": 4,
+      "crates/kiln-model/src/rocm_graph.rs": 1,
+      "crates/kiln-model/tests/backend_capability_contract.rs": 33,
+      "crates/kiln-model/tests/tape_scope_routing_contract.rs": 13,
+      "crates/kiln-rmsnorm-kernel/tests/rmsnorm_stream_contract.rs": 1,
+      "crates/kiln-server/src/api/completions.rs": 1,
+      "crates/kiln-server/src/api/config.rs": 1,
+      "crates/kiln-server/src/bench.rs": 1,
+      "crates/kiln-server/src/training_queue.rs": 1,
+      "crates/kiln-train/src/trainer.rs": 2,
+      "scripts/qualification/tests/test_serve_mixed_load.py": 1,
+      "scripts/qualification/tests/test_serve_rocm_graph_resilience.py": 1,
+      "scripts/qualification/tests/test_serve_rocm_public_mutation_lifecycle.py": 1,
+      "scripts/qualification/tests/test_serve_rocm_sync_ab.py": 1,
+      "scripts/qualification/tests/test_serve_vulkan_baseline.py": 2
+    }
+  },
+  "entries": [
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-gdn-kernel/tests/frozen_weight_backward_contract.rs",
+      "test_name": "frozen_ffi_symbols_have_no_dweight_parameter",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-gdn-kernel/csrc/gdn_gated_rms_norm.h"
+        }
+      ],
+      "text_assertion_count": 3,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-gdn-kernel/tests/frozen_weight_backward_contract.rs",
+      "test_name": "frozen_kernel_instantiations_compile_out_dweight_atomics",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-gdn-kernel/csrc/gdn_gated_rms_norm.cu"
+        }
+      ],
+      "text_assertion_count": 5,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-gdn-kernel/tests/frozen_weight_backward_contract.rs",
+      "test_name": "rust_api_exposes_activation_only_results_for_both_weight_dtypes",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-gdn-kernel/src/kt_api.rs"
+        },
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-gdn-kernel/src/lib.rs"
+        }
+      ],
+      "text_assertion_count": 8,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/src/generate.rs",
+      "test_name": "cuda_compatibility_constructor_does_not_select_rocm_graphs",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "include_str",
+          "target": "crates/kiln-model/src/generate.rs"
+        }
+      ],
+      "text_assertion_count": 4,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/src/generate.rs",
+      "test_name": "legacy_mutable_paged_stream_has_one_settlement_epilogue",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "include_str",
+          "target": "crates/kiln-model/src/generate.rs"
+        }
+      ],
+      "text_assertion_count": 8,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/src/generate.rs",
+      "test_name": "public_speculative_generation_entry_points_guard_before_work",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "include_str",
+          "target": "crates/kiln-model/src/generate.rs"
+        }
+      ],
+      "text_assertion_count": 2,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/src/generate.rs",
+      "test_name": "shared_block_reservation_runner_sync_is_panic_fenced",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "include_str",
+          "target": "crates/kiln-model/src/generate.rs"
+        }
+      ],
+      "text_assertion_count": 6,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/src/rocm_graph.rs",
+      "test_name": "graph_runtime_has_no_process_environment_policy_reads",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "include_str",
+          "target": "crates/kiln-model/src/rocm_graph.rs"
+        }
+      ],
+      "text_assertion_count": 3,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "capability_queries_consume_focused_backend_facets",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/capability.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/mod.rs\")"
+        }
+      ],
+      "text_assertion_count": 5,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "cuda_graph_replay_hidden_routes_through_replay_plan_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/cuda_graph.rs\")"
+        }
+      ],
+      "text_assertion_count": 14,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "cuda_rocm_blaslt_request_conversion_stays_shared",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "&helper_path"
+        }
+      ],
+      "text_assertion_count": 9,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "cuda_rocm_forward_in_projection_gates_use_rocm_names",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "&forward_path"
+        },
+        {
+          "api": "read_to_string",
+          "target": "manifest_dir().join(\"src/backend/cuda.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "manifest_dir().join(\"src/backend/rocm.rs\")"
+        }
+      ],
+      "text_assertion_count": 6,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "cuda_rocm_resident_membership_stays_in_shared_helper",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "backend_dir.join(\"metal_residency.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "backend_dir.join(\"vulkan.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "backend_dir.join(\"vulkan_residency.rs\")"
+        }
+      ],
+      "text_assertion_count": 19,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "external_yield_synchronization_is_backend_owned",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "backend_dir.join(name)"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-vulkan-kernel/src/device.rs\")"
+        }
+      ],
+      "text_assertion_count": 21,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "forward_full_attn_qkv_combined_routes_through_linear_backend_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 3,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "forward_gdn_ab_in_proj_routes_through_gdn_backend_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 2,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "forward_gqa_sdpa_matmuls_route_through_matmul_ops_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 3,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "forward_lm_head_argmax_fallbacks_keep_backend_linear_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 4,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "forward_lm_head_matmul_routes_through_matmul_op_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 5,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "forward_lora_delta_routes_through_device_ops_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 3,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "forward_mtp_matmuls_route_through_linear_backend_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 2,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "forward_nonpaged_full_attention_mlp_routes_inference_through_backend",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 2,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "forward_packed_mlp_prefill_routes_gate_up_through_matmul_request_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 2,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "forward_weight_kt_accessors_are_device_agnostic_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 2,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "generated_capability_report_lists_focused_backend_facets",
+      "classification": "generated_artifact_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/mod.rs\")"
+        }
+      ],
+      "text_assertion_count": 17,
+      "replacement": "Parse the canonical JSON/schema and assert typed fields; reserve rendered-text checks for the documentation renderer."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "generated_capability_report_tracks_hardware_latency_fixture_contract",
+      "classification": "generated_artifact_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"scripts/check_backend_latency_fixtures.py\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"scripts/check_unification_gates.sh\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"scripts/import_backend_latency_artifact.py\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"scripts/lock_backend_latency_thresholds.py\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"scripts/plan_backend_latency_fixture_dispatch.py\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"scripts/run_backend_latency_fixture.py\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"scripts/write_backend_latency_result_artifact.py\")"
+        }
+      ],
+      "text_assertion_count": 31,
+      "replacement": "Parse the canonical JSON/schema and assert typed fields; reserve rendered-text checks for the documentation renderer."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "generated_capability_report_tracks_migration_phase_status",
+      "classification": "generated_artifact_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"scripts/generate_backend_capability_report.py\")"
+        }
+      ],
+      "text_assertion_count": 49,
+      "replacement": "Parse the canonical JSON/schema and assert typed fields; reserve rendered-text checks for the documentation renderer."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "lora_residency_call_sites_consume_residency_backend_facet",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/lora_loader.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-train/src/trainer.rs\")"
+        }
+      ],
+      "text_assertion_count": 5,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "matmul_transposed_ops_route_through_deviceop_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-tensor/src/ops/matmul.rs\")"
+        }
+      ],
+      "text_assertion_count": 2,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "metal_graph_icb_replay_routes_through_replay_plan_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/metal_icb.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/forward.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/metal_graph.rs\")"
+        }
+      ],
+      "text_assertion_count": 10,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "residency_facade_delegates_to_authoritative_registries",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/mod.rs\")"
+        }
+      ],
+      "text_assertion_count": 3,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "rocm_graph_replay_hidden_routes_through_replay_plan_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/rocm_graph.rs\")"
+        }
+      ],
+      "text_assertion_count": 15,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "rocm_model_handoffs_use_typed_synchronization_policy",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 8,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "runtime_policy_call_sites_consume_focused_capability_surfaces",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "&opd_path"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/capability.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/mod.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/cuda_graph.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/forward.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/generate.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/lora_loader.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/metal_graph.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/rocm_graph.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/sampling.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/speculative.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/tape_forward.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-server/src/api/completions.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-server/src/batching_engine.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-server/src/bench.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-server/src/kv_autoscaler.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-server/src/main.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-server/src/state.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-train/src/grpo_tape_shim.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-train/src/trainer.rs\")"
+        }
+      ],
+      "text_assertion_count": 431,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "sft_loss_route_is_bound_from_admission_through_artifacts",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-train/src/train_receipt.rs\")"
+        }
+      ],
+      "text_assertion_count": 15,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "tape_routing_is_owned_only_by_the_active_training_scope_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "&source_path"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/forward.rs\")"
+        }
+      ],
+      "text_assertion_count": 6,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "trainer_optimizer_updates_consume_optimizer_backend_facet",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-train/src/trainer.rs\")"
+        }
+      ],
+      "text_assertion_count": 3,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "training_optimizer_capability_is_bound_before_admission_and_allocation",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/capability.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/mod.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-server/src/api/training.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-server/src/training_queue.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-train/src/checkpoint.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-train/src/cuda_train.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-train/src/opd.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-train/src/trainer.rs\")"
+        }
+      ],
+      "text_assertion_count": 55,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "vulkan_decode_weight_prewarm_is_nondestructive",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/mod.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/vulkan.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/vulkan_weights.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/generate.rs\")"
+        }
+      ],
+      "text_assertion_count": 5,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "vulkan_mixed_matmul_capability_is_bound_to_the_resident_dispatch_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/vulkan.rs\")"
+        },
+        {
+          "api": "read_to_string",
+          "target": "root.join(\"crates/kiln-model/src/backend/vulkan_linear.rs\")"
+        }
+      ],
+      "text_assertion_count": 8,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/backend_capability_contract.rs",
+      "test_name": "vulkan_resident_decode_routes_command_batch_through_replay_plan_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_to_string",
+          "target": "workspace_root().join(\"crates/kiln-model/src/vk_decode_resident.rs\")"
+        }
+      ],
+      "text_assertion_count": 9,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "active_scope_rejects_projection_fast_leaves",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/forward.rs"
+        }
+      ],
+      "text_assertion_count": 6,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "flash_recorder_admits_only_one_exact_cuda_or_rocm_device",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/tape_forward.rs"
+        }
+      ],
+      "text_assertion_count": 7,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "full_attention_terminal_routes_require_every_recorder",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/forward.rs"
+        }
+      ],
+      "text_assertion_count": 5,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "fused_rope_leaves_are_inference_only",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/forward.rs"
+        }
+      ],
+      "text_assertion_count": 7,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "gdn_gate_recorder_exposes_only_projection_activations",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/tape_forward.rs"
+        }
+      ],
+      "text_assertion_count": 7,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "gdn_gated_rmsnorm_fused_backward_treats_weight_as_frozen",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/tape_forward.rs"
+        }
+      ],
+      "text_assertion_count": 4,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "gdn_gated_rmsnorm_portable_backward_treats_weight_as_frozen",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/tape_forward.rs"
+        }
+      ],
+      "text_assertion_count": 5,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "gdn_terminal_recorders_are_required",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/forward.rs"
+        }
+      ],
+      "text_assertion_count": 4,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "metal_swiglu_records_before_forward_only_leaves",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/forward.rs"
+        }
+      ],
+      "text_assertion_count": 5,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "primitive_and_projection_routes_fail_closed_before_inference",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/forward.rs"
+        }
+      ],
+      "text_assertion_count": 1,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "rmsnorm_scope_precedes_switches_and_fails_closed_on_every_gpu",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/forward.rs"
+        }
+      ],
+      "text_assertion_count": 2,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "split_lora_records_original_parameter_before_inference_slicing",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/forward.rs"
+        }
+      ],
+      "text_assertion_count": 3,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-model/tests/tape_scope_routing_contract.rs",
+      "test_name": "unused_prefill_helpers_fail_closed_in_training_scope",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-model/src/forward.rs"
+        }
+      ],
+      "text_assertion_count": 3,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-rmsnorm-kernel/tests/rmsnorm_stream_contract.rs",
+      "test_name": "backward_preserves_rocm_context_and_orders_only_cross_stream_inputs",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "module_include_str",
+          "target": "crates/kiln-rmsnorm-kernel/src/kt_api.rs"
+        }
+      ],
+      "text_assertion_count": 14,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-server/src/api/completions.rs",
+      "test_name": "real_prompt_logprob_scoring_is_bound_to_the_runner_streaming_prefill_policy",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "include_str",
+          "target": "crates/kiln-server/src/api/completions.rs"
+        }
+      ],
+      "text_assertion_count": 5,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-server/src/api/config.rs",
+      "test_name": "speculative_config_api_reports_only_immutable_policy_and_backend_facts",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "include_str",
+          "target": "crates/kiln-server/src/api/config.rs"
+        }
+      ],
+      "text_assertion_count": 16,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-server/src/bench.rs",
+      "test_name": "benchmark_training_execution_policies_are_startup_bound",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "include_str",
+          "target": "crates/kiln-server/src/bench.rs"
+        }
+      ],
+      "text_assertion_count": 6,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-server/src/training_queue.rs",
+      "test_name": "production_server_teacher_paths_reject_compatibility_policy_constructors",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "include_str",
+          "target": "crates/kiln-server/src/training_queue.rs"
+        }
+      ],
+      "text_assertion_count": 4,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-train/src/trainer.rs",
+      "test_name": "frozen_final_rmsnorm_backward_never_requests_a_weight_gradient",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "include_str",
+          "target": "crates/kiln-train/src/trainer.rs"
+        }
+      ],
+      "text_assertion_count": 2,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "rust",
+      "test_path": "crates/kiln-train/src/trainer.rs",
+      "test_name": "production_training_blocks_use_explicit_streaming_policy",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "include_str",
+          "target": "crates/kiln-train/src/trainer.rs"
+        }
+      ],
+      "text_assertion_count": 2,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "python",
+      "test_path": "scripts/qualification/tests/test_serve_mixed_load.py",
+      "test_name": "test_all_rocm_serving_drivers_launch_through_the_typed_file",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_text",
+          "target": "QUALIFICATION_DIR / name"
+        }
+      ],
+      "text_assertion_count": 6,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "python",
+      "test_path": "scripts/qualification/tests/test_serve_rocm_graph_resilience.py",
+      "test_name": "test_launch_source_uses_generated_config_not_public_runtime_env",
+      "classification": "qualification_driver_source_text",
+      "read_sites": [
+        {
+          "api": "read_text",
+          "target": "QUALIFICATION_DIR / 'serve_rocm_graph_resilience.py'"
+        }
+      ],
+      "text_assertion_count": 4,
+      "replacement": "Exercise a public helper or CLI preflight and assert its structured output instead of matching the driver's Python source."
+    },
+    {
+      "language": "python",
+      "test_path": "scripts/qualification/tests/test_serve_rocm_public_mutation_lifecycle.py",
+      "test_name": "test_driver_uses_typed_config_and_one_binary_for_both_arms",
+      "classification": "qualification_driver_source_text",
+      "read_sites": [
+        {
+          "api": "read_text",
+          "target": "QUALIFICATION_DIR / 'serve_rocm_public_mutation_lifecycle.py'"
+        }
+      ],
+      "text_assertion_count": 6,
+      "replacement": "Exercise a public helper or CLI preflight and assert its structured output instead of matching the driver's Python source."
+    },
+    {
+      "language": "python",
+      "test_path": "scripts/qualification/tests/test_serve_rocm_sync_ab.py",
+      "test_name": "test_reason_dimensions_exactly_match_rocm_core_contract",
+      "classification": "implementation_source_text",
+      "read_sites": [
+        {
+          "api": "read_text",
+          "target": "ROOT / 'crates/kiln-hip/src/lib.rs'"
+        }
+      ],
+      "text_assertion_count": 0,
+      "replacement": "Replace with compile-time trait/type constraints, injected runtime behavior, property tests, or structured ownership metadata consumed by production."
+    },
+    {
+      "language": "python",
+      "test_path": "scripts/qualification/tests/test_serve_vulkan_baseline.py",
+      "test_name": "test_result_writer_uses_atomic_shared_protocol",
+      "classification": "qualification_driver_source_text",
+      "read_sites": [
+        {
+          "api": "read_text",
+          "target": "QUALIFICATION_DIR / 'serve_vulkan_baseline.py'"
+        }
+      ],
+      "text_assertion_count": 4,
+      "replacement": "Exercise a public helper or CLI preflight and assert its structured output instead of matching the driver's Python source."
+    },
+    {
+      "language": "python",
+      "test_path": "scripts/qualification/tests/test_serve_vulkan_baseline.py",
+      "test_name": "test_source_build_is_vulkan_only_bounded_and_timeout_separated",
+      "classification": "qualification_driver_source_text",
+      "read_sites": [
+        {
+          "api": "read_text",
+          "target": "QUALIFICATION_DIR / 'serve_vulkan_baseline.py'"
+        }
+      ],
+      "text_assertion_count": 5,
+      "replacement": "Exercise a public helper or CLI preflight and assert its structured output instead of matching the driver's Python source."
+    }
+  ]
+}

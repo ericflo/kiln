@@ -87,6 +87,20 @@ cargo deny check --all-features
 
 This validates that any new dependency satisfies the workspace's MIT/Apache-compatible license allowlist and other policy rules in `deny.toml`. CI pins cargo-deny to a specific action SHA (see `.github/workflows/ci.yml`); local runs with the latest version are fine for catching gross violations before pushing.
 
+Tests that read implementation source and assert substrings are tracked as migration
+obligations, not correctness evidence. Check the exact inventory and monotonic limits
+before pushing:
+
+```bash
+python3 scripts/check_source_parsing_tests.py
+```
+
+Replace an inventoried test with a compile-time constraint, runtime behavior test,
+property test, or structured metadata assertion, then regenerate with `--write`.
+The command lowers the checked-in limits and refuses to bless an increase. See the
+[verification test inventory](docs/VERIFICATION_TEST_INVENTORY.md) for ownership and
+the complete queue.
+
 ## Running the server locally
 
 See [`QUICKSTART.md`](QUICKSTART.md) for the full zero-to-running walkthrough — model download, config, first chat completion, first SFT POST. The default port is `8420` and the embedded web dashboard lives at `/ui`.

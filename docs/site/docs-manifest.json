@@ -231,6 +231,13 @@
       "description": "Checked-in evidence boundaries, raw artifact retention, size limits, hash-bound exceptions, historical recovery, and the lightweight all-push guard."
     },
     {
+      "source": "docs/VERIFICATION_TEST_INVENTORY.md",
+      "slug": "verification-test-inventory",
+      "title": "Verification Test Inventory",
+      "section": "operations",
+      "description": "Generated migration queue and monotonic ratchet for tests that inspect implementation source as text instead of proving behavior."
+    },
+    {
       "source": "CONTRIBUTING.md",
       "slug": "contributing",
       "title": "Contributing",

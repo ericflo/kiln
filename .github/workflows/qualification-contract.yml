@@ -10,8 +10,10 @@ on:
       - 'crates/**'
       - 'contracts/repository-artifact-policy-v1.json'
       - 'contracts/runtime-env-direct-reads-v1.json'
+      - 'contracts/source-parsing-test-inventory-v1.json'
       - 'scripts/check_repository_artifacts.py'
       - 'scripts/check_runtime_env_contract.py'
+      - 'scripts/check_source_parsing_tests.py'
       - 'scripts/qualification/**'
       - 'scripts/bench-concurrent-batch.py'
       - 'qualification/**'
@@ -22,8 +24,10 @@ on:
       - 'crates/**'
       - 'contracts/repository-artifact-policy-v1.json'
       - 'contracts/runtime-env-direct-reads-v1.json'
+      - 'contracts/source-parsing-test-inventory-v1.json'
       - 'scripts/check_repository_artifacts.py'
       - 'scripts/check_runtime_env_contract.py'
+      - 'scripts/check_source_parsing_tests.py'
       - 'scripts/qualification/**'
       - 'scripts/bench-concurrent-batch.py'
       - 'qualification/**'
@@ -40,6 +44,9 @@ jobs:
 
       - name: Ratchet direct environment access
         run: python3 scripts/check_runtime_env_contract.py --check
+
+      - name: Ratchet implementation-source parsing tests
+        run: python3 scripts/check_source_parsing_tests.py
 
       - name: Validate tooling and receipts
         shell: bash
