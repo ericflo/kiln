@@ -6999,6 +6999,7 @@ function sparkSvg(values, width = 64, height = 18) {
 /* ---------- Datasets ---------- */
 
 let activeSynthDataset = null;
+let activeSynthManifest = null;
 async function refreshDatasets() {
   try {
     const d = await api('/v1/eval/datasets');
@@ -7033,17 +7034,19 @@ async function refreshDatasets() {
     // role-pattern column, the assistant/tool_calls counts, and the
     // recommendStrategy badge (derived solely from stats).
     const listKey = 'list:' + JSON.stringify(datasets.map(m =>
-      [m.name, m.format, m.description, m.num_rows, m.size_bytes, m.stats]));
+      [m.name, m.format, m.description, m.num_rows, m.size_bytes, m.split_counts, m.stats]));
     const listHtml = datasets.map(m => {
       const stats = m.stats || {};
       const pattern = (stats.sample_role_patterns || []).slice(0, 1).join(' · ') || '';
       const recommendation = recommendStrategy(stats);
+      const splits = m.split_counts || {};
+      const splitSummary = `train ${(splits.train || 0).toLocaleString()} · validation ${(splits.validation || 0).toLocaleString()} · holdout ${(splits.holdout || 0).toLocaleString()}`;
       return `<div class="eval-row eval-row-datasets">
         <div>
           <div class="row-title">${escapeHtml(m.name)}</div>
           <div class="row-sub">${escapeHtml(m.format)} · ${escapeHtml(m.description || 'No description')}</div>
         </div>
-        <div class="tabular-nums">${m.num_rows.toLocaleString()} rows · ${fmtBytes(m.size_bytes)}</div>
+        <div class="tabular-nums" title="${escapeHtml(splitSummary)}">${m.num_rows.toLocaleString()} rows · ${fmtBytes(m.size_bytes)}<div class="row-sub">T ${splits.train || 0} · V ${splits.validation || 0} · H ${splits.holdout || 0}</div></div>
         <div class="row-sub" title="Detected from the first ${stats.num_assistant_turns ? '1000' : 0} rows">
           ${stats.num_assistant_turns ? stats.num_assistant_turns.toLocaleString() + ' assistant · ' + (stats.num_with_tool_calls || 0) + ' tool_calls' : '—'}
           ${recommendation ? `<div style="margin-top:2px;"><span class="scorer-badge" title="Recommended synthesis strategy">${escapeHtml(recommendation)}</span></div>` : ''}
@@ -7065,7 +7068,7 @@ async function refreshDatasets() {
       } else if (b.dataset.action === 'train-grpo') {
         b.addEventListener('click', () => trainFromDataset(name, 'grpo'));
       } else if (b.dataset.action === 'synth') {
-        b.addEventListener('click', () => openSynthPanel(name));
+        b.addEventListener('click', () => openSynthPanel(name, datasets.find(item => item.name === name)));
       } else if (b.dataset.action === 'del') {
         b.addEventListener('click', async () => {
           if (!confirm(`Delete dataset "${name}"?`)) return;
@@ -7113,11 +7116,22 @@ function updateSynthAggregationControls() {
   if (temperature && kind !== 'single' && Number(temperature.value) === 0) temperature.value = '0.7';
 }
 
-function openSynthPanel(name) {
+function openSynthPanel(name, manifest = null) {
   activeSynthDataset = name;
+  activeSynthManifest = manifest;
   document.getElementById('synth-dataset-name').textContent = name;
   document.getElementById('synth-suite-name').value = name + '-eval';
   document.getElementById('synth-preview-output').innerHTML = '';
+  const source = document.getElementById('synth-source-split');
+  const counts = manifest?.split_counts || {};
+  if (source) {
+    for (const option of source.options) {
+      const count = Number(counts[option.value] || 0);
+      option.disabled = count === 0;
+      option.textContent = `${option.value === 'train' ? 'Train-set diagnostic' : option.value[0].toUpperCase() + option.value.slice(1)} (${count.toLocaleString()})`;
+    }
+    source.value = counts.holdout > 0 ? 'holdout' : counts.validation > 0 ? 'validation' : 'train';
+  }
   document.getElementById('synthesize-panel').hidden = false;
   document.getElementById('synthesize-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
@@ -7125,6 +7139,7 @@ function openSynthPanel(name) {
 document.getElementById('synth-close')?.addEventListener('click', () => {
   document.getElementById('synthesize-panel').hidden = true;
   activeSynthDataset = null;
+  activeSynthManifest = null;
 });
 document.getElementById('synth-aggregation')?.addEventListener('change', updateSynthAggregationControls);
 
@@ -7202,6 +7217,7 @@ function readSynthConfig() {
     scorer,
     generation: { temperature, top_p: 1.0, top_k: 0, max_tokens: 256, n: k, stop: [], seed: null },
     aggregation,
+    source_split: document.getElementById('synth-source-split')?.value || 'holdout',
     sampling,
     strip_system_prompt: document.getElementById('synth-strip-system').checked,
   };
@@ -7247,6 +7263,10 @@ function renderSynthPreview(container, preview) {
   }).join('');
   container.innerHTML = `
     <div style="margin-bottom:8px; padding:10px; background:var(--surface-2); border-radius:6px; display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
+      <div>
+        <div class="hint" style="font-size:11px; color:var(--text-muted);">source partition</div>
+        <div style="font-size:13px; font-weight:600;">${escapeHtml(preview.source_split || 'holdout')}</div>
+      </div>
       <div>
         <div class="hint" style="font-size:11px; color:var(--text-muted);">examples generated</div>
         <div style="font-size:18px; font-weight:700; font-variant-numeric:tabular-nums;">${(s.examples_generated || 0).toLocaleString()}</div>

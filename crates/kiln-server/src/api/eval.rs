@@ -19,7 +19,8 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use kiln_eval::synthesis::{SynthesisConfig, SynthesisStats};
 use kiln_eval::{
-    EvalCompareSpec, EvalGenerationParams, EvalJobState, EvalResult, EvalSuite, EvalSuiteSummary,
+    DatasetSplit, DatasetSplitConfig, DatasetSplitManifest, EvalCompareSpec, EvalGenerationParams,
+    EvalJobState, EvalResult, EvalSuite, EvalSuiteSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -590,6 +591,41 @@ async fn get_dataset(
     Ok(Json(m))
 }
 
+async fn get_dataset_split(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<DatasetSplitManifest>, ApiError> {
+    let registry = state
+        .dataset_registry
+        .as_ref()
+        .ok_or_else(ApiError::dataset_registry_unavailable)?;
+    registry
+        .load_split(&name)
+        .map(Json)
+        .map_err(|error| match error {
+            crate::eval::DatasetError::NotFound(_) => ApiError::dataset_not_found(&name),
+            other => ApiError::dataset_invalid(format!("{other}")),
+        })
+}
+
+async fn update_dataset_split(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    Json(config): Json<DatasetSplitConfig>,
+) -> Result<Json<DatasetSplitManifest>, ApiError> {
+    let registry = state
+        .dataset_registry
+        .as_ref()
+        .ok_or_else(ApiError::dataset_registry_unavailable)?;
+    registry
+        .set_split(&name, config)
+        .map(Json)
+        .map_err(|error| match error {
+            crate::eval::DatasetError::NotFound(_) => ApiError::dataset_not_found(&name),
+            other => ApiError::dataset_invalid(format!("{other}")),
+        })
+}
+
 /// `GET /v1/eval/datasets/:name/rows?limit=N` — returns the first `limit`
 /// rows of an uploaded SFT dataset as a JSON array. Used by the Training
 /// tab's dataset picker so users can train directly off an uploaded
@@ -765,10 +801,18 @@ struct SynthesisPreviewBody {
     /// Defaults to 5 — enough to render a quick "what'll come out" panel.
     #[serde(default = "default_preview_head")]
     head_n: usize,
+    /// Persisted partition to synthesize. Defaults to holdout so the UI does
+    /// not quietly grade on the default training partition.
+    #[serde(default = "default_synthesis_source_split")]
+    source_split: DatasetSplit,
 }
 
 fn default_preview_head() -> usize {
     5
+}
+
+fn default_synthesis_source_split() -> DatasetSplit {
+    DatasetSplit::Holdout
 }
 
 async fn synthesize_dataset_preview(
@@ -780,13 +824,19 @@ async fn synthesize_dataset_preview(
         .dataset_registry
         .as_ref()
         .ok_or_else(ApiError::dataset_registry_unavailable)?;
-    let preview =
-        preview_synthesis(datasets, &name, &body.config, body.head_n).map_err(|e| match e {
-            crate::eval::SynthesisDriverError::Dataset(crate::eval::DatasetError::NotFound(_)) => {
-                ApiError::dataset_not_found(&name)
-            }
-            other => ApiError::dataset_invalid(format!("{other}")),
-        })?;
+    let preview = preview_synthesis(
+        datasets,
+        &name,
+        &body.config,
+        body.source_split,
+        body.head_n,
+    )
+    .map_err(|e| match e {
+        crate::eval::SynthesisDriverError::Dataset(crate::eval::DatasetError::NotFound(_)) => {
+            ApiError::dataset_not_found(&name)
+        }
+        other => ApiError::dataset_invalid(format!("{other}")),
+    })?;
     Ok(Json(preview))
 }
 
@@ -801,6 +851,11 @@ struct SynthesizeBody {
     /// well — turning a 3-click flow into a 1-click flow.
     #[serde(default)]
     run_against: Option<Vec<String>>,
+    /// Persisted partition to synthesize. Defaults to holdout. Selecting
+    /// `train` is allowed for diagnostics, but post-training admission will
+    /// require an explicit `train_set_eval` label before it can be linked.
+    #[serde(default = "default_synthesis_source_split")]
+    source_split: DatasetSplit,
 }
 
 #[derive(Debug, Serialize)]
@@ -826,8 +881,15 @@ async fn synthesize_dataset(
     if datasets.load_manifest(&name).is_err() {
         return Err(ApiError::dataset_not_found(&name));
     }
-    let outcome = synthesize_and_save(datasets, suites, &name, &body.config, body.force)
-        .map_err(|e| ApiError::dataset_invalid(format!("{e}")))?;
+    let outcome = synthesize_and_save(
+        datasets,
+        suites,
+        &name,
+        &body.config,
+        body.source_split,
+        body.force,
+    )
+    .map_err(|e| ApiError::dataset_invalid(format!("{e}")))?;
     // Optional auto-run: queue eval jobs against each requested adapter.
     let queued_jobs: Vec<String> = body
         .run_against
@@ -1221,6 +1283,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/v1/eval/datasets/{name}",
             get(get_dataset).delete(delete_dataset),
+        )
+        .route(
+            "/v1/eval/datasets/{name}/split",
+            get(get_dataset_split).put(update_dataset_split),
         )
         .route("/v1/eval/datasets/{name}/rows", get(dataset_rows))
         .route(

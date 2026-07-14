@@ -13,6 +13,8 @@
     "CreateJudgmentBody",
     "DatasetListResponse",
     "DatasetManifest",
+    "DatasetSplitConfig",
+    "DatasetSplitManifest",
     "DatasetUploadMultipart",
     "DeleteDatasetResponse",
     "DeleteJudgmentResponse",
@@ -64,6 +66,12 @@
     },
     {
       "$ref": "#/$defs/DatasetManifest"
+    },
+    {
+      "$ref": "#/$defs/DatasetSplitConfig"
+    },
+    {
+      "$ref": "#/$defs/DatasetSplitManifest"
     },
     {
       "$ref": "#/$defs/DatasetUploadMultipart"
@@ -805,6 +813,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "schema_version",
         "name",
         "format",
         "description",
@@ -812,9 +821,19 @@
         "size_bytes",
         "created_at",
         "updated_at",
+        "corpus_sha256",
+        "normalized_corpus_sha256",
+        "split_manifest_sha256",
+        "split_config",
+        "split_counts",
+        "num_groups",
+        "num_sessions",
         "stats"
       ],
       "properties": {
+        "schema_version": {
+          "const": 2
+        },
         "name": {
           "$ref": "#/$defs/EvalResourceName"
         },
@@ -843,12 +862,173 @@
         "updated_at": {
           "$ref": "#/$defs/Rfc3339Timestamp"
         },
+        "corpus_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "normalized_corpus_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "split_manifest_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "split_config": {
+          "$ref": "#/$defs/DatasetSplitConfig"
+        },
+        "split_counts": {
+          "$ref": "#/$defs/DatasetSplitCounts"
+        },
+        "num_groups": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "num_sessions": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
         "stats": {
           "$ref": "#/$defs/DatasetStats"
         }
       },
-      "description": "Persisted dataset identity and structural summary.",
+      "description": "Persisted content-addressed dataset identity and partition summary.",
       "x-kiln-rust-type": "DatasetManifest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DatasetSplit": {
+      "type": "string",
+      "enum": [
+        "train",
+        "validation",
+        "holdout"
+      ],
+      "description": "Persisted dataset partition.",
+      "x-kiln-rust-type": "kiln_eval::DatasetSplit",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DatasetSplitConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seed",
+        "train_percent",
+        "validation_percent"
+      ],
+      "properties": {
+        "seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "train_percent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 98
+        },
+        "validation_percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 98
+        }
+      },
+      "x-kiln-semantic-constraints": [
+        "train_percent + validation_percent < 100"
+      ],
+      "description": "Deterministic group-aware split policy. Train plus validation must be below 100.",
+      "x-kiln-rust-type": "DatasetSplitConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DatasetSplitCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "train",
+        "validation",
+        "holdout"
+      ],
+      "properties": {
+        "train": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "validation": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "holdout": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Row counts in each persisted partition.",
+      "x-kiln-rust-type": "kiln_eval::DatasetSplitCounts",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DatasetSplitManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "dataset_name",
+        "corpus_sha256",
+        "normalized_corpus_sha256",
+        "config",
+        "counts",
+        "rows"
+      ],
+      "properties": {
+        "schema": {
+          "const": "kiln.dataset-split.v1"
+        },
+        "dataset_name": {
+          "$ref": "#/$defs/EvalResourceName"
+        },
+        "corpus_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "normalized_corpus_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "config": {
+          "$ref": "#/$defs/DatasetSplitConfig"
+        },
+        "counts": {
+          "$ref": "#/$defs/DatasetSplitCounts"
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DatasetSplitRow"
+          },
+          "minItems": 1
+        }
+      },
+      "description": "Persisted deterministic split manifest; normalized duplicates and connected group/session rows share one partition.",
+      "x-kiln-rust-type": "DatasetSplitManifest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "DatasetSplitRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row_number",
+        "content_sha256",
+        "normalized_sha256",
+        "split"
+      ],
+      "properties": {
+        "row_number": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "normalized_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "split": {
+          "$ref": "#/$defs/DatasetSplit"
+        },
+        "group_id": {
+          "$ref": "#/$defs/String"
+        },
+        "session_id": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Content-addressed row assignment with preserved group/session identity.",
+      "x-kiln-rust-type": "kiln_eval::DatasetSplitRow",
       "x-kiln-field-schema-status": "complete"
     },
     "DatasetStats": {
@@ -2616,6 +2796,13 @@
       "x-kiln-rust-type": "kiln_eval::synthesis::ScorerChoice",
       "x-kiln-field-schema-status": "complete"
     },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "A lowercase SHA-256 identity with an explicit algorithm prefix.",
+      "x-kiln-rust-type": "String",
+      "x-kiln-field-schema-status": "complete"
+    },
     "String": {
       "type": "string",
       "description": "A serialized UTF-8 Rust string.",
@@ -2738,7 +2925,8 @@
         "suite_name",
         "default_scorer_kind",
         "aggregation",
-        "completions_per_example"
+        "completions_per_example",
+        "source_split"
       ],
       "properties": {
         "examples": {
@@ -2763,9 +2951,12 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 128
+        },
+        "source_split": {
+          "$ref": "#/$defs/DatasetSplit"
         }
       },
-      "description": "Non-persisted synthesis preview including the completion reduction that would be persisted.",
+      "description": "Non-persisted synthesis preview including its persisted source partition and completion reduction.",
       "x-kiln-rust-type": "SynthesisPreview",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2825,10 +3016,13 @@
         },
         "head_n": {
           "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "source_split": {
+          "$ref": "#/$defs/DatasetSplit"
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Preview a synthesized suite without persisting it.",
+      "description": "Preview a suite synthesized from one persisted partition without saving it. Source defaults to holdout.",
       "x-kiln-rust-type": "SynthesisPreviewBody",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2973,10 +3167,13 @@
               "type": "null"
             }
           ]
+        },
+        "source_split": {
+          "$ref": "#/$defs/DatasetSplit"
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Persist a synthesized suite and optionally queue it against adapters.",
+      "description": "Persist a suite synthesized from one partition and optionally queue it against adapters. Source defaults to holdout.",
       "x-kiln-rust-type": "SynthesizeBody",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3190,6 +3387,7 @@
         "holdout_n": 1,
         "train_validation_split": 1,
         "dataset": {
+          "schema_version": 2,
           "name": "math-sft",
           "format": "sft_chat",
           "description": "Arithmetic conversations",
@@ -3197,6 +3395,21 @@
           "size_bytes": 64,
           "created_at": "2026-07-14T12:00:00Z",
           "updated_at": "2026-07-14T12:00:00Z",
+          "corpus_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "normalized_corpus_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "split_manifest_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "split_config": {
+            "seed": "0",
+            "train_percent": 80,
+            "validation_percent": 10
+          },
+          "split_counts": {
+            "train": 1,
+            "validation": 0,
+            "holdout": 0
+          },
+          "num_groups": 0,
+          "num_sessions": 0,
           "stats": {
             "num_assistant_turns": 1,
             "num_tool_messages": 0,
@@ -3222,6 +3435,7 @@
       {
         "datasets": [
           {
+            "schema_version": 2,
             "name": "math-sft",
             "format": "sft_chat",
             "description": "Arithmetic conversations",
@@ -3229,6 +3443,21 @@
             "size_bytes": 64,
             "created_at": "2026-07-14T12:00:00Z",
             "updated_at": "2026-07-14T12:00:00Z",
+            "corpus_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "normalized_corpus_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "split_manifest_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "split_config": {
+              "seed": "0",
+              "train_percent": 80,
+              "validation_percent": 10
+            },
+            "split_counts": {
+              "train": 1,
+              "validation": 0,
+              "holdout": 0
+            },
+            "num_groups": 0,
+            "num_sessions": 0,
             "stats": {
               "num_assistant_turns": 1,
               "num_tool_messages": 0,
@@ -3246,6 +3475,7 @@
     ],
     "DatasetManifest": [
       {
+        "schema_version": 2,
         "name": "math-sft",
         "format": "sft_chat",
         "description": "Arithmetic conversations",
@@ -3253,6 +3483,21 @@
         "size_bytes": 64,
         "created_at": "2026-07-14T12:00:00Z",
         "updated_at": "2026-07-14T12:00:00Z",
+        "corpus_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "normalized_corpus_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "split_manifest_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "split_config": {
+          "seed": "0",
+          "train_percent": 80,
+          "validation_percent": 10
+        },
+        "split_counts": {
+          "train": 1,
+          "validation": 0,
+          "holdout": 0
+        },
+        "num_groups": 0,
+        "num_sessions": 0,
         "stats": {
           "num_assistant_turns": 1,
           "num_tool_messages": 0,
@@ -3264,6 +3509,39 @@
             "user>assistant"
           ]
         }
+      }
+    ],
+    "DatasetSplitConfig": [
+      {
+        "seed": "0",
+        "train_percent": 80,
+        "validation_percent": 10
+      }
+    ],
+    "DatasetSplitManifest": [
+      {
+        "schema": "kiln.dataset-split.v1",
+        "dataset_name": "math-sft",
+        "corpus_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "normalized_corpus_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "config": {
+          "seed": "0",
+          "train_percent": 80,
+          "validation_percent": 10
+        },
+        "counts": {
+          "train": 1,
+          "validation": 0,
+          "holdout": 0
+        },
+        "rows": [
+          {
+            "row_number": 1,
+            "content_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "normalized_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "split": "train"
+          }
+        ]
       }
     ],
     "DatasetUploadMultipart": [
@@ -3711,7 +3989,8 @@
         "aggregation": {
           "kind": "single"
         },
-        "completions_per_example": 1
+        "completions_per_example": 1,
+        "source_split": "holdout"
       }
     ],
     "SynthesisPreviewBody": [
@@ -3731,6 +4010,7 @@
           "max_examples": 100,
           "seed": 42
         },
+        "source_split": "holdout",
         "head_n": 5
       }
     ],
@@ -3751,6 +4031,7 @@
           "max_examples": 100,
           "seed": 42
         },
+        "source_split": "holdout",
         "force": true,
         "run_against": [
           ""

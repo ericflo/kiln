@@ -23,6 +23,8 @@ ENTRYPOINTS = (
     "CreateJudgmentBody",
     "DatasetListResponse",
     "DatasetManifest",
+    "DatasetSplitConfig",
+    "DatasetSplitManifest",
     "DatasetUploadMultipart",
     "DeleteDatasetResponse",
     "DeleteJudgmentResponse",
@@ -163,6 +165,7 @@ def build_primitives() -> None:
         "An exact unsigned 64-bit value serialized as a base-10 string for JavaScript safety.",
     )
     add_definition("Rfc3339Timestamp", "String", {"type": "string", "format": "date-time"}, "An RFC 3339 timestamp.")
+    add_definition("Sha256Digest", "String", {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "A lowercase SHA-256 identity with an explicit algorithm prefix.")
     add_definition(
         "EvalResourceName",
         "String",
@@ -484,8 +487,13 @@ def synthesis_fields() -> dict[str, dict[str, Any]]:
 
 
 def build_dataset_and_synthesis_types() -> None:
+    add_enum("DatasetSplit", "kiln_eval::DatasetSplit", ["train", "validation", "holdout"], "Persisted dataset partition.")
+    add_object("DatasetSplitConfig", "DatasetSplitConfig", {"seed": ref("DecimalU64"), "train_percent": {"type": "integer", "minimum": 1, "maximum": 98}, "validation_percent": {"type": "integer", "minimum": 0, "maximum": 98}}, "Deterministic group-aware split policy. Train plus validation must be below 100.", extra={"x-kiln-semantic-constraints": ["train_percent + validation_percent < 100"]})
+    add_object("DatasetSplitCounts", "kiln_eval::DatasetSplitCounts", {"train": ref("NonNegativeInteger"), "validation": ref("NonNegativeInteger"), "holdout": ref("NonNegativeInteger")}, "Row counts in each persisted partition.")
+    add_object("DatasetSplitRow", "kiln_eval::DatasetSplitRow", {"row_number": ref("PositiveInteger"), "content_sha256": ref("Sha256Digest"), "normalized_sha256": ref("Sha256Digest"), "split": ref("DatasetSplit"), "group_id": ref("String"), "session_id": ref("String")}, "Content-addressed row assignment with preserved group/session identity.", optional=("group_id", "session_id"))
+    add_object("DatasetSplitManifest", "DatasetSplitManifest", {"schema": {"const": "kiln.dataset-split.v1"}, "dataset_name": ref("EvalResourceName"), "corpus_sha256": ref("Sha256Digest"), "normalized_corpus_sha256": ref("Sha256Digest"), "config": ref("DatasetSplitConfig"), "counts": ref("DatasetSplitCounts"), "rows": array(ref("DatasetSplitRow"), min_items=1)}, "Persisted deterministic split manifest; normalized duplicates and connected group/session rows share one partition.")
     add_object("DatasetStats", "DatasetStats", {"num_assistant_turns": ref("NonNegativeInteger"), "num_tool_messages": ref("NonNegativeInteger"), "num_with_tool_calls": ref("NonNegativeInteger"), "max_messages_per_conv": ref("NonNegativeInteger"), "max_content_chars": ref("NonNegativeInteger"), "avg_messages_per_conv": ref("FiniteNumber"), "sample_role_patterns": array(ref("String"))}, "Bounded structural statistics computed from an uploaded dataset.")
-    add_object("DatasetManifest", "DatasetManifest", {"name": ref("EvalResourceName"), "format": ref("DatasetFormat"), "description": nullable(ref("String")), "num_rows": ref("NonNegativeInteger"), "size_bytes": ref("NonNegativeInteger"), "created_at": ref("Rfc3339Timestamp"), "updated_at": ref("Rfc3339Timestamp"), "stats": ref("DatasetStats")}, "Persisted dataset identity and structural summary.")
+    add_object("DatasetManifest", "DatasetManifest", {"schema_version": {"const": 2}, "name": ref("EvalResourceName"), "format": ref("DatasetFormat"), "description": nullable(ref("String")), "num_rows": ref("NonNegativeInteger"), "size_bytes": ref("NonNegativeInteger"), "created_at": ref("Rfc3339Timestamp"), "updated_at": ref("Rfc3339Timestamp"), "corpus_sha256": ref("Sha256Digest"), "normalized_corpus_sha256": ref("Sha256Digest"), "split_manifest_sha256": ref("Sha256Digest"), "split_config": ref("DatasetSplitConfig"), "split_counts": ref("DatasetSplitCounts"), "num_groups": ref("NonNegativeInteger"), "num_sessions": ref("NonNegativeInteger"), "stats": ref("DatasetStats")}, "Persisted content-addressed dataset identity and partition summary.")
     add_object("DatasetListResponse", "DatasetListResponse", {"datasets": array(ref("DatasetManifest"))}, "All uploaded eval/training datasets.")
     add_object("DatasetUploadMultipart", "DatasetUploadMultipart", {"name": ref("EvalResourceName"), "format": ref("DatasetUploadFormat"), "description": ref("String"), "file": {"type": "string", "format": "binary", "contentMediaType": "application/jsonl"}}, "Multipart dataset upload. Unknown parts are drained and ignored.", optional=("format", "description"), open_input=True, extra={"x-kiln-default-format": "sft_chat"})
     add_object("DeleteDatasetResponse", "DeleteDatasetResponse", {"status": {"const": "deleted"}, "name": ref("EvalResourceName")}, "Confirmation that a dataset was deleted.")
@@ -495,12 +503,12 @@ def build_dataset_and_synthesis_types() -> None:
         {"oneOf": [tagged_variant("auto_detect"), tagged_variant("fixed", {"scorer": ref("Scorer")}), tagged_variant("judge", {"judge_adapter": nullable(ref("String"))}, optional=("judge_adapter",))]},
         "Synthesis scorer policy. Fixed scorers use a nested scorer field so both tagged unions remain unambiguous.",
     )
-    preview_optional = tuple(field for field in synthesis_fields() if field != "suite_name") + ("head_n",)
-    add_object("SynthesisPreviewBody", "SynthesisPreviewBody", {**synthesis_fields(), "head_n": ref("NonNegativeInteger")}, "Preview a synthesized suite without persisting it.", optional=preview_optional, open_input=True)
-    synth_optional = tuple(field for field in synthesis_fields() if field != "suite_name") + ("force", "run_against")
-    add_object("SynthesizeBody", "SynthesizeBody", {**synthesis_fields(), "force": ref("Boolean"), "run_against": nullable(array(ref("String")))}, "Persist a synthesized suite and optionally queue it against adapters.", optional=synth_optional, open_input=True)
+    preview_optional = tuple(field for field in synthesis_fields() if field != "suite_name") + ("head_n", "source_split")
+    add_object("SynthesisPreviewBody", "SynthesisPreviewBody", {**synthesis_fields(), "head_n": ref("NonNegativeInteger"), "source_split": ref("DatasetSplit")}, "Preview a suite synthesized from one persisted partition without saving it. Source defaults to holdout.", optional=preview_optional, open_input=True)
+    synth_optional = tuple(field for field in synthesis_fields() if field != "suite_name") + ("force", "run_against", "source_split")
+    add_object("SynthesizeBody", "SynthesizeBody", {**synthesis_fields(), "force": ref("Boolean"), "run_against": nullable(array(ref("String"))), "source_split": ref("DatasetSplit")}, "Persist a suite synthesized from one partition and optionally queue it against adapters. Source defaults to holdout.", optional=synth_optional, open_input=True)
     add_object("SynthesisStats", "kiln_eval::synthesis::SynthesisStats", {"trajectories_seen": ref("NonNegativeInteger"), "trajectories_used": ref("NonNegativeInteger"), "examples_generated": ref("NonNegativeInteger"), "skipped_no_target": ref("NonNegativeInteger"), "skipped_prompt_too_long": ref("NonNegativeInteger"), "skipped_target_too_long": ref("NonNegativeInteger"), "skipped_duplicate": ref("NonNegativeInteger"), "skipped_strategy_match": ref("NonNegativeInteger"), "sample_kept": ref("NonNegativeInteger"), "effective_seed": ref("DecimalU64"), "auto_scorer_histogram": mapping(ref("NonNegativeInteger"))}, "Complete synthesis filtering and deterministic seed statistics. The u64 seed is emitted as an exact decimal string.")
-    add_object("SynthesisPreview", "SynthesisPreview", {"examples": array(ref("EvalExample")), "stats": ref("SynthesisStats"), "suite_name": ref("EvalResourceName"), "default_scorer_kind": ref("NonEmptyString"), "aggregation": ref("EvalAggregation"), "completions_per_example": {"type": "integer", "minimum": 1, "maximum": 128}}, "Non-persisted synthesis preview including the completion reduction that would be persisted.")
+    add_object("SynthesisPreview", "SynthesisPreview", {"examples": array(ref("EvalExample")), "stats": ref("SynthesisStats"), "suite_name": ref("EvalResourceName"), "default_scorer_kind": ref("NonEmptyString"), "aggregation": ref("EvalAggregation"), "completions_per_example": {"type": "integer", "minimum": 1, "maximum": 128}, "source_split": ref("DatasetSplit")}, "Non-persisted synthesis preview including its persisted source partition and completion reduction.")
     add_object("SynthesizeDatasetResponse", "SynthesizeDatasetResponse", {"suite": ref("EvalSuiteSummary"), "stats": ref("SynthesisStats"), "queued_eval_job_ids": array(ref("String"))}, "Persisted suite summary plus any auto-queued eval job IDs.")
 
 
@@ -547,7 +555,9 @@ def suite_example() -> dict[str, Any]:
 
 
 def dataset_example() -> dict[str, Any]:
-    return {"name": "math-sft", "format": "sft_chat", "description": "Arithmetic conversations", "num_rows": 1, "size_bytes": 64, "created_at": "2026-07-14T12:00:00Z", "updated_at": "2026-07-14T12:00:00Z", "stats": {"num_assistant_turns": 1, "num_tool_messages": 0, "num_with_tool_calls": 0, "max_messages_per_conv": 2, "max_content_chars": 8, "avg_messages_per_conv": 2.0, "sample_role_patterns": ["user>assistant"]}}
+    split_config = {"seed": "0", "train_percent": 80, "validation_percent": 10}
+    split_counts = {"train": 1, "validation": 0, "holdout": 0}
+    return {"schema_version": 2, "name": "math-sft", "format": "sft_chat", "description": "Arithmetic conversations", "num_rows": 1, "size_bytes": 64, "created_at": "2026-07-14T12:00:00Z", "updated_at": "2026-07-14T12:00:00Z", "corpus_sha256": "sha256:" + "1" * 64, "normalized_corpus_sha256": "sha256:" + "2" * 64, "split_manifest_sha256": "sha256:" + "3" * 64, "split_config": split_config, "split_counts": split_counts, "num_groups": 0, "num_sessions": 0, "stats": {"num_assistant_turns": 1, "num_tool_messages": 0, "num_with_tool_calls": 0, "max_messages_per_conv": 2, "max_content_chars": 8, "avg_messages_per_conv": 2.0, "sample_role_patterns": ["user>assistant"]}}
 
 
 def judgment_example() -> dict[str, Any]:
@@ -568,7 +578,9 @@ def build_examples() -> dict[str, list[Any]]:
     run = {"suite_name": "math-smoke", "adapter": None, "aggregation": {"kind": "single"}, "metrics": metrics_example(), "aggregated_outcomes": [aggregated], "outcomes": [outcome], "started_at": "2026-07-14T12:00:00Z", "finished_at": "2026-07-14T12:00:01Z", "suite_hash": "suite-sha256"}
     job = {"schema_version": 2, "job_id": "eval-1", "suite_name": "math-smoke", "adapters": [None], "submission_kind": "on_demand", "effective_seed": "42", "state": "completed", "progress": {"examples_completed": 1, "examples_total": 1, "running_accuracy": 1.0, "running_mean_score": 1.0}, "finished_runs": [run], "headline_accuracy": 1.0, "error": None, "source_training_job_id": None, "submitted_at_iso": "2026-07-14T12:00:00Z", "started_at_iso": "2026-07-14T12:00:00Z", "finished_at_iso": "2026-07-14T12:00:01Z"}
     append = {"prompt": [{"role": "user", "content": "Explain the answer."}], "adapter_a": None, "adapter_b": "concise-v1", "response_a": "A long answer", "response_b": "A concise answer", "winner": "b", "tags": ["style"]}
-    synth_body = {"suite_name": "math-smoke", "strategy": "final_assistant", "scorer": {"kind": "fixed", "scorer": {"kind": "exact_match"}}, "aggregation": {"kind": "single"}, "sampling": {"max_examples": 100, "seed": 42}, "force": True, "run_against": [""]}
+    split_config = {"seed": "0", "train_percent": 80, "validation_percent": 10}
+    split_manifest = {"schema": "kiln.dataset-split.v1", "dataset_name": "math-sft", "corpus_sha256": dataset["corpus_sha256"], "normalized_corpus_sha256": dataset["normalized_corpus_sha256"], "config": split_config, "counts": dataset["split_counts"], "rows": [{"row_number": 1, "content_sha256": "sha256:" + "4" * 64, "normalized_sha256": "sha256:" + "5" * 64, "split": "train"}]}
+    synth_body = {"suite_name": "math-smoke", "strategy": "final_assistant", "scorer": {"kind": "fixed", "scorer": {"kind": "exact_match"}}, "aggregation": {"kind": "single"}, "sampling": {"max_examples": 100, "seed": 42}, "source_split": "holdout", "force": True, "run_against": [""]}
     examples: dict[str, list[Any]] = {
         "AppendJudgmentBody": [append],
         "AppendJudgmentResponse": [{"judgment_id": "judgment-1", **judgment}],
@@ -578,6 +590,8 @@ def build_examples() -> dict[str, list[Any]]:
         "CreateJudgmentBody": [{"name": "style-prefs", "description": "Concise-answer preferences"}],
         "DatasetListResponse": [{"datasets": [dataset]}],
         "DatasetManifest": [dataset],
+        "DatasetSplitConfig": [split_config],
+        "DatasetSplitManifest": [split_manifest],
         "DatasetUploadMultipart": [{"name": "math-sft", "format": "sft_chat", "description": "Arithmetic", "file": "<binary JSONL body>"}],
         "DeleteDatasetResponse": [{"status": "deleted", "name": "math-sft"}],
         "DeleteJudgmentResponse": [{"status": "deleted", "name": "style-prefs"}],
@@ -595,7 +609,7 @@ def build_examples() -> dict[str, list[Any]]:
         "RerunBody": [{"adapter": "math-v2", "outcome_kinds": ["fail", "invalid", "error"], "include_pass": False, "seed": 42}],
         "SuiteListResponse": [{"suites": [summary]}],
         "SuiteSaveResponse": [{"name": "math-smoke", "path": "/srv/kiln/.eval/suites/math-smoke.json", "status": "created"}],
-        "SynthesisPreview": [{"examples": suite["examples"], "stats": stats_example(), "suite_name": "math-smoke", "default_scorer_kind": "exact_match", "aggregation": {"kind": "single"}, "completions_per_example": 1}],
+        "SynthesisPreview": [{"examples": suite["examples"], "stats": stats_example(), "suite_name": "math-smoke", "default_scorer_kind": "exact_match", "aggregation": {"kind": "single"}, "completions_per_example": 1, "source_split": "holdout"}],
         "SynthesisPreviewBody": [{key: value for key, value in synth_body.items() if key not in {"force", "run_against"}} | {"head_n": 5}],
         "SynthesizeBody": [synth_body],
         "SynthesizeDatasetResponse": [{"suite": summary, "stats": stats_example(), "queued_eval_job_ids": ["eval-1"]}],

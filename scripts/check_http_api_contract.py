@@ -93,6 +93,8 @@ EVAL_ENTRYPOINTS = (
     "CreateJudgmentBody",
     "DatasetListResponse",
     "DatasetManifest",
+    "DatasetSplitConfig",
+    "DatasetSplitManifest",
     "DatasetUploadMultipart",
     "DeleteDatasetResponse",
     "DeleteJudgmentResponse",
@@ -175,17 +177,17 @@ CONTROL_COMPONENT_TYPES = {name: name for name in CONTROL_ENTRYPOINTS}
 CONTROL_COMPONENT_TYPES["CorrectionRowInput"] = "CorrectionRow"
 CONTROL_COMPONENT_TYPES["Vec_TrainingStatus"] = "Vec<TrainingStatus>"
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
-    "complete": 131,
+    "complete": 133,
     "migration_pending": 0,
-    "total": 131,
+    "total": 133,
 }
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
-EXPECTED_METHOD_COUNTS = {"DELETE": 12, "GET": 53, "POST": 47}
+EXPECTED_METHOD_COUNTS = {"DELETE": 12, "GET": 54, "POST": 47, "PUT": 1}
 EXPECTED_TAG_COUNTS = {
     "adapters": 9,
     "agents": 16,
     "corrections": 5,
-    "evals": 25,
+    "evals": 27,
     "hf-trl": 7,
     "inference": 3,
     "library": 3,
@@ -302,8 +304,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     expected_root = {
         "openapi": "3.1.1",
         "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
-        "x-kiln-path-count": 101,
-        "x-kiln-operation-count": 112,
+        "x-kiln-path-count": 102,
+        "x-kiln-operation-count": 114,
         "x-kiln-method-counts": EXPECTED_METHOD_COUNTS,
         "x-kiln-tag-counts": EXPECTED_TAG_COUNTS,
         "x-kiln-field-schema-status": "complete",
@@ -351,8 +353,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     if not isinstance(paths, dict):
         errors.append("paths must be an object")
         return errors
-    if len(paths) != 101:
-        errors.append(f"paths must contain 101 entries, got {len(paths)}")
+    if len(paths) != 102:
+        errors.append(f"paths must contain 102 entries, got {len(paths)}")
     if list(paths) != sorted(paths):
         errors.append("paths must be sorted lexicographically")
 
@@ -443,11 +445,11 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         signature_has_body = isinstance(signature, str) and any(
             marker in signature for marker in ("Json<", "Json(mut ", "Multipart", "body: Body")
         )
-        expects_body = method == "post" and path not in NO_BODY_POSTS and signature_has_body
+        expects_body = method in {"post", "put", "patch"} and path not in NO_BODY_POSTS and signature_has_body
         if expects_body != isinstance(request_body, dict):
             errors.append(f"{label}: requestBody presence does not match the handler contract")
-        if method != "post" and request_body is not None:
-            errors.append(f"{label}: only POST operations may declare requestBody")
+        if method not in {"post", "put", "patch"} and request_body is not None:
+            errors.append(f"{label}: only POST, PUT, or PATCH operations may declare requestBody")
         if isinstance(request_body, dict):
             if request_body.get("required") is not True:
                 errors.append(f"{label}: declared request bodies must be required")
@@ -515,8 +517,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         if path in EXPLICIT_ERROR_PATHS and "default" in responses:
             errors.append(f"{label}: explicit error responses must not retain a fictitious default error")
 
-    if operation_count != 112:
-        errors.append(f"operation count must be 112, got {operation_count}")
+    if operation_count != 114:
+        errors.append(f"operation count must be 114, got {operation_count}")
     if dict(sorted(method_counts.items())) != EXPECTED_METHOD_COUNTS:
         errors.append(f"observed method counts drifted: {dict(sorted(method_counts.items()))}")
     if dict(sorted(tag_counts.items())) != EXPECTED_TAG_COUNTS:
@@ -632,6 +634,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         ("post", "/v1/eval/datasets/upload"): ("DatasetUploadMultipart", "DatasetManifest"),
         ("delete", "/v1/eval/datasets/{name}"): (None, "DeleteDatasetResponse"),
         ("get", "/v1/eval/datasets/{name}"): (None, "DatasetManifest"),
+        ("get", "/v1/eval/datasets/{name}/split"): (None, "DatasetSplitManifest"),
+        ("put", "/v1/eval/datasets/{name}/split"): ("DatasetSplitConfig", "DatasetSplitManifest"),
         ("post", "/v1/eval/datasets/{name}/preview"): ("SynthesisPreviewBody", "SynthesisPreview"),
         ("get", "/v1/eval/datasets/{name}/rows"): (None, "JsonValueArray"),
         ("post", "/v1/eval/datasets/{name}/synthesize"): ("SynthesizeBody", "SynthesizeDatasetResponse"),
@@ -1264,8 +1268,8 @@ def validate_eval_schema(
     if not isinstance(definitions, dict):
         errors.append("eval schema $defs must be an object")
         return errors
-    if len(definitions) != 76:
-        errors.append(f"eval schema must contain 76 definitions, got {len(definitions)}")
+    if len(definitions) != 82:
+        errors.append(f"eval schema must contain 82 definitions, got {len(definitions)}")
     if list(definitions) != sorted(definitions):
         errors.append("eval schema definitions must be sorted")
 

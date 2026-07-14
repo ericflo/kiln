@@ -2098,6 +2098,93 @@
         }
       }
     },
+    "/v1/eval/datasets/{name}/split": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Get dataset split manifest",
+        "operationId": "eval_get_dataset_split_get_v1_eval_datasets_name_split",
+        "x-kiln-handler": "eval::get_dataset_split",
+        "x-kiln-rust-signature": "async fn get_dataset_split( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DatasetSplitManifest>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetSplitManifest"
+                }
+              }
+            },
+            "x-kiln-rust-type": "DatasetSplitManifest"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Replace dataset split policy",
+        "operationId": "eval_update_dataset_split_put_v1_eval_datasets_name_split",
+        "x-kiln-handler": "eval::update_dataset_split",
+        "x-kiln-rust-signature": "async fn update_dataset_split( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(config): Json<DatasetSplitConfig>, ) -> Result<Json<DatasetSplitManifest>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetSplitConfig"
+              }
+            }
+          },
+          "x-kiln-rust-type": "DatasetSplitConfig"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetSplitManifest"
+                }
+              }
+            },
+            "x-kiln-rust-type": "DatasetSplitManifest"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/v1/eval/datasets/{name}/synthesize": {
       "post": {
         "tags": [
@@ -4427,6 +4514,16 @@
         "x-kiln-rust-type": "DatasetManifest",
         "x-kiln-field-schema-status": "complete"
       },
+      "DatasetSplitConfig": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/DatasetSplitConfig",
+        "x-kiln-rust-type": "DatasetSplitConfig",
+        "x-kiln-field-schema-status": "complete"
+      },
+      "DatasetSplitManifest": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/DatasetSplitManifest",
+        "x-kiln-rust-type": "DatasetSplitManifest",
+        "x-kiln-field-schema-status": "complete"
+      },
       "DatasetUploadMultipart": {
         "$ref": "kiln-evals-v1.schema.json#/$defs/DatasetUploadMultipart",
         "x-kiln-rust-type": "DatasetUploadMultipart",
@@ -4928,18 +5025,19 @@
       }
     }
   },
-  "x-kiln-path-count": 101,
-  "x-kiln-operation-count": 112,
+  "x-kiln-path-count": 102,
+  "x-kiln-operation-count": 114,
   "x-kiln-method-counts": {
     "DELETE": 12,
-    "GET": 53,
-    "POST": 47
+    "GET": 54,
+    "POST": 47,
+    "PUT": 1
   },
   "x-kiln-tag-counts": {
     "adapters": 9,
     "agents": 16,
     "corrections": 5,
-    "evals": 25,
+    "evals": 27,
     "hf-trl": 7,
     "inference": 3,
     "library": 3,
@@ -4952,8 +5050,8 @@
   },
   "x-kiln-field-schema-status": "complete",
   "x-kiln-component-schema-counts": {
-    "complete": 131,
+    "complete": 133,
     "migration_pending": 0,
-    "total": 131
+    "total": 133
   }
 }

@@ -24,6 +24,7 @@
 //! over HTTP, the CLI, or the post-training auto-eval hook.
 
 pub mod builtin;
+pub mod data_identity;
 pub mod production_trace;
 pub mod qwen3;
 pub mod result;
@@ -35,6 +36,13 @@ pub mod trajectory;
 pub use builtin::{
     AGENT_BENCH_SUITE_NAMES, PI_MINI_MCPATLAS, QWEN3_AGENTIC_CORE, REPO_GROUNDED_TASKS,
     SWE_BENCH_MINI, TERMINAL_BENCH_MINI, qwen3_agentic_core,
+};
+pub use data_identity::{
+    DATASET_IDENTITY_SCHEMA_V1, DATASET_PROVENANCE_METADATA_KEY, DATASET_SPLIT_SCHEMA_V1,
+    DatasetExampleIdentity, DatasetExampleProvenance, DatasetIdentityIndex, DatasetRowIdentity,
+    DatasetSplit, DatasetSplitConfig, DatasetSplitCounts, DatasetSplitManifest, DatasetSplitRow,
+    build_identity_index, build_identity_index_from_rows, build_split_manifest, example_identity,
+    normalized_sha256_json, row_identity, sha256_json,
 };
 pub use production_trace::{
     ProductionTraceError, ProductionTraceFormat, ProductionTraceInputLine,

@@ -823,6 +823,14 @@
               </select>
             </div>
             <div class="form-group">
+              <label for="synth-source-split">Source partition</label>
+              <select id="synth-source-split">
+                <option value="holdout" selected>Holdout</option>
+                <option value="validation">Validation</option>
+                <option value="train">Train-set diagnostic</option>
+              </select>
+            </div>
+            <div class="form-group">
               <label for="synth-scorer">Scorer</label>
               <select id="synth-scorer">
                 <option value="auto">Auto-detect (per example)</option>

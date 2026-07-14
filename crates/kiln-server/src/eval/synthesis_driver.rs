@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use kiln_eval::synthesis::{SynthesisConfig, SynthesisError, SynthesisStats, synthesize_suite};
-use kiln_eval::{EvalAggregation, EvalExample, EvalSuiteSummary};
+use kiln_eval::{DatasetSplit, EvalAggregation, EvalExample, EvalSuiteSummary};
 use serde::Serialize;
 
 use crate::eval::datasets::{DatasetError, DatasetRegistry};
@@ -43,6 +43,8 @@ pub struct SynthesisPreview {
     /// Completion reduction and cardinality that will be persisted.
     pub aggregation: EvalAggregation,
     pub completions_per_example: usize,
+    /// The persisted partition used to produce these examples.
+    pub source_split: DatasetSplit,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,15 +57,17 @@ pub fn preview_synthesis(
     datasets: &DatasetRegistry,
     dataset_name: &str,
     config: &SynthesisConfig,
+    source_split: DatasetSplit,
     head_n: usize,
 ) -> Result<SynthesisPreview, SynthesisDriverError> {
-    let convs = datasets.head_sft(dataset_name, head_n.max(1))?;
+    let convs = datasets.head_sft_split(dataset_name, source_split, head_n.max(1))?;
     let (suite, stats) = synthesize_suite(convs, config)?;
     // Truncate examples for preview UI — the SUIte file itself is
     // already small at this stage but the front-end only renders 5.
     let preview = SynthesisPreview {
         aggregation: suite.aggregation,
         completions_per_example: suite.aggregation.k(),
+        source_split,
         examples: suite.examples.into_iter().take(10).collect(),
         stats,
         suite_name: config.suite_name.clone(),
@@ -77,9 +81,10 @@ pub fn synthesize_and_save(
     suites: &SuiteRegistry,
     dataset_name: &str,
     config: &SynthesisConfig,
+    source_split: DatasetSplit,
     force: bool,
 ) -> Result<SynthesisOutcome, SynthesisDriverError> {
-    let convs = datasets.iter_sft(dataset_name)?;
+    let convs = datasets.iter_sft_split(dataset_name, source_split)?;
     let (mut suite, stats) = synthesize_suite(convs, config)?;
     // Tag the suite metadata with where it came from so users can audit
     // later.
@@ -88,8 +93,8 @@ pub fn synthesize_and_save(
         description.push_str("\n\n");
     }
     description.push_str(&format!(
-        "Synthesized from dataset `{dataset_name}` using strategy `{:?}` ({} examples from {} trajectories, seed={}).",
-        config.strategy, stats.examples_generated, stats.trajectories_used, stats.effective_seed
+        "Synthesized from the `{}` split of dataset `{dataset_name}` using strategy `{:?}` ({} examples from {} trajectories, seed={}). This provenance does not by itself prove the split was excluded from every training run.",
+        source_split.as_str(), config.strategy, stats.examples_generated, stats.trajectories_used, stats.effective_seed
     ));
     suite.description = Some(description);
     suites.save(&suite, force)?;
@@ -161,7 +166,14 @@ mod tests {
         datasets
             .create("math", DatasetFormat::SftChat, None, rows().as_bytes())
             .unwrap();
-        let preview = preview_synthesis(&datasets, "math", &cfg("preview-suite"), 2).unwrap();
+        let preview = preview_synthesis(
+            &datasets,
+            "math",
+            &cfg("preview-suite"),
+            DatasetSplit::Holdout,
+            2,
+        )
+        .unwrap();
         // Preview head_n=2 + 2 example conversations → 2 examples
         assert_eq!(preview.examples.len(), 2);
         assert_eq!(preview.suite_name, "preview-suite");
@@ -174,8 +186,15 @@ mod tests {
         datasets
             .create("math", DatasetFormat::SftChat, None, rows().as_bytes())
             .unwrap();
-        let outcome =
-            synthesize_and_save(&datasets, &suites, "math", &cfg("real-suite"), false).unwrap();
+        let outcome = synthesize_and_save(
+            &datasets,
+            &suites,
+            "math",
+            &cfg("real-suite"),
+            DatasetSplit::Holdout,
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome.suite.name, "real-suite");
         assert!(outcome.stats.examples_generated >= 1);
         let listed = suites.list();
@@ -189,9 +208,33 @@ mod tests {
         datasets
             .create("math", DatasetFormat::SftChat, None, rows().as_bytes())
             .unwrap();
-        synthesize_and_save(&datasets, &suites, "math", &cfg("once"), false).unwrap();
-        let err = synthesize_and_save(&datasets, &suites, "math", &cfg("once"), false).unwrap_err();
+        synthesize_and_save(
+            &datasets,
+            &suites,
+            "math",
+            &cfg("once"),
+            DatasetSplit::Holdout,
+            false,
+        )
+        .unwrap();
+        let err = synthesize_and_save(
+            &datasets,
+            &suites,
+            "math",
+            &cfg("once"),
+            DatasetSplit::Holdout,
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(err, SynthesisDriverError::Registry(_)));
-        synthesize_and_save(&datasets, &suites, "math", &cfg("once"), true).unwrap();
+        synthesize_and_save(
+            &datasets,
+            &suites,
+            "math",
+            &cfg("once"),
+            DatasetSplit::Holdout,
+            true,
+        )
+        .unwrap();
     }
 }
