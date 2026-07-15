@@ -1165,6 +1165,12 @@ impl DecodeForward for RealDecodeForward {
             Some(cancel),
         );
         let synchronized = runner_guard.synchronize_external_yield("batched prefill quantum");
+        if progress.is_err()
+            && let Some(prefill) = state.as_ref()
+            && prefill.resident_token_prefill_started()
+        {
+            runner_guard.release_paged_batched_prefill_state(prefill);
+        }
         drop(runner_guard);
         if let Err(error) = synchronized {
             std::mem::forget(progress);
@@ -3320,6 +3326,29 @@ impl BatchingEngineActor {
             self.forward
                 .resident_prefill_batch_required(&self.active[idx].slot)
         });
+        let invalid_required_indices: Vec<usize> = ready_prefill_indices
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                self.forward
+                    .resident_prefill_batch_required(&self.active[idx].slot)
+                    && !self.forward.resident_prefill_batch_candidate(
+                        &self.active[idx].slot,
+                        &self.active[idx].req.sampling,
+                    )
+            })
+            .collect();
+        if !invalid_required_indices.is_empty() {
+            let error = "resident token-prefill row lost native-route eligibility".to_string();
+            for idx in invalid_required_indices.iter().copied().rev() {
+                let active = self.active.remove(idx);
+                self.forward.discard_request(active.slot);
+                self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                self.terminate_delivery(active.delivery_key, error.clone());
+            }
+            self.refresh_snapshot();
+            return Some(true);
+        }
         let every_prefill_is_candidate = ready_prefill_indices.iter().all(|&idx| {
             self.forward.resident_prefill_batch_candidate(
                 &self.active[idx].slot,
@@ -3346,6 +3375,31 @@ impl BatchingEngineActor {
                 }
             }
         }
+        let next_prefill_index = indices
+            .last()
+            .map(|idx| (idx + 1) % active_len)
+            .unwrap_or(round_robin_start);
+        if required
+            && !indices.iter().any(|&idx| {
+                self.forward
+                    .resident_prefill_batch_required(&self.active[idx].slot)
+            })
+        {
+            let required_idx = (0..active_len)
+                .map(|offset| (round_robin_start + offset) % active_len)
+                .find(|&idx| {
+                    self.forward
+                        .resident_prefill_batch_required(&self.active[idx].slot)
+                })
+                .expect("at least one required resident prefill row was observed");
+            if indices.len() == max_rows {
+                if let Some(last) = indices.last_mut() {
+                    *last = required_idx;
+                }
+            } else {
+                indices.push(required_idx);
+            }
+        }
         if indices.is_empty()
             || (indices.len() == 1
                 && !self
@@ -3354,7 +3408,6 @@ impl BatchingEngineActor {
         {
             return None;
         }
-        let next_prefill_index = (indices[indices.len() - 1] + 1) % active_len;
         indices.sort_unstable();
 
         let sampling: Vec<SamplingParams> = indices
@@ -3381,7 +3434,18 @@ impl BatchingEngineActor {
         let elapsed = started.elapsed();
         let progress = match result {
             Ok(Some(progress)) => progress,
-            Ok(None) => return None,
+            Ok(None) if !required => return None,
+            Ok(None) => {
+                let error = "resident token-prefill native route declined an owned row".to_string();
+                for idx in indices.iter().copied().rev() {
+                    let active = self.active.remove(idx);
+                    self.forward.discard_request(active.slot);
+                    self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                    self.terminate_delivery(active.delivery_key, error.clone());
+                }
+                self.refresh_snapshot();
+                return Some(true);
+            }
             Err(error) => {
                 for idx in indices.iter().copied().rev() {
                     let active = self.active.remove(idx);
@@ -5145,7 +5209,7 @@ mod tests {
             events,
             vec![
                 SchedulingEvent::ResidentPrefill(vec![1, 2]),
-                SchedulingEvent::ResidentPrefill(vec![3, 4]),
+                SchedulingEvent::ResidentPrefill(vec![1, 3]),
                 SchedulingEvent::ResidentPrefill(vec![1, 5]),
             ]
         );
@@ -5227,6 +5291,97 @@ mod tests {
         assert_eq!(forward.remaining.lock().unwrap().get(&32), Some(&2));
         assert!(forward.resident_rows.lock().unwrap().is_empty());
         assert!(forward.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resident_prefill_decline_after_entry_fails_closed() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(SyntheticPrefillForward {
+            resident_prefill_enabled: true,
+            ..SyntheticPrefillForward::default()
+        });
+        forward.resident_batch_outcomes.lock().unwrap().extend([
+            ResidentBatchOutcome::Progress,
+            ResidentBatchOutcome::Decline,
+        ]);
+        let mut actor = test_actor(
+            rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let _receivers = push_synthetic_prefill_rows(&mut actor, &forward, &[(35, 3), (36, 3)]);
+
+        let mut first_budget = 2;
+        assert_eq!(
+            actor.run_resident_prefill_batch(&mut first_budget),
+            Some(true)
+        );
+        let mut second_budget = 2;
+        assert_eq!(
+            actor.run_resident_prefill_batch(&mut second_budget),
+            Some(true)
+        );
+
+        assert!(actor.active.is_empty());
+        assert_eq!(actor.snapshot.total_errors, 2);
+        assert!(forward.remaining.lock().unwrap().is_empty());
+        assert!(forward.resident_rows.lock().unwrap().is_empty());
+        assert_eq!(
+            forward.events.lock().unwrap().as_slice(),
+            &[
+                SchedulingEvent::ResidentPrefill(vec![35, 36]),
+                SchedulingEvent::Discard(36),
+                SchedulingEvent::Discard(35),
+            ]
+        );
+    }
+
+    #[test]
+    fn resident_prefill_owned_row_losing_eligibility_is_discarded() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(SyntheticPrefillForward {
+            resident_prefill_enabled: true,
+            ..SyntheticPrefillForward::default()
+        });
+        let mut actor = test_actor(
+            rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let _receivers = push_synthetic_prefill_rows(&mut actor, &forward, &[(37, 3), (38, 3)]);
+        let mut first_budget = 2;
+        assert_eq!(
+            actor.run_resident_prefill_batch(&mut first_budget),
+            Some(true)
+        );
+        forward.pending_layers.lock().unwrap().insert(37, 1);
+
+        let mut second_budget = 2;
+        assert_eq!(
+            actor.run_resident_prefill_batch(&mut second_budget),
+            Some(true)
+        );
+
+        assert_eq!(actor.active.len(), 1);
+        assert_eq!(SyntheticPrefillForward::slot_key(&actor.active[0].slot), 38);
+        assert_eq!(actor.snapshot.total_errors, 1);
+        assert!(!forward.resident_rows.lock().unwrap().contains(&37));
+        assert!(forward.resident_rows.lock().unwrap().contains(&38));
+        assert!(
+            forward
+                .events
+                .lock()
+                .unwrap()
+                .contains(&SchedulingEvent::Discard(37))
+        );
     }
 
     #[test]

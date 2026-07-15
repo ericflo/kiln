@@ -4895,6 +4895,10 @@ impl ModelRunner {
             .as_mut()
             .context("paged batched prefill state was already consumed")?;
         anyhow::ensure!(
+            !state.resident_token_prefill_started,
+            "resident token-prefill row cannot resume through the generic paged KV path"
+        );
+        anyhow::ensure!(
             state.next_position < state.prompt_tokens.len(),
             "paged batched prefill has no remaining prompt tokens"
         );
