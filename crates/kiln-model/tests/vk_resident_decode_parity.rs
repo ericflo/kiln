@@ -34,6 +34,9 @@ use kiln_model::{LoadModelOptions, PagedKvCacheKt as PagedKvCache, load_model_wi
 use kiln_tensor::{DType, Device};
 
 const MODEL_ENV: &str = "KILN_QUALIFICATION_MODEL_PATH";
+const HF_LOGITS_ENV: &str = "KILN_QUALIFICATION_HF_LOGITS_PATH";
+const HF_ORACLE_SCHEMA: &str = "kiln.qwen35-hf-full-logits.v1";
+const HF_INPUT_TOKEN_IDS: [u32; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 100];
 
 #[test]
 fn vk_resident_decode_matches_nonresident_on_qwen35_4b() {
@@ -207,7 +210,170 @@ fn run(model_dir: &std::path::Path) -> Result<()> {
         "KILN_VULKAN_RESIDENT_LOGIT_PARITY_PASS max_abs={max_abs:e} max_rel={max_rel:e} vocab={}",
         legacy_v.len()
     );
+    if let Some(reference_path) = std::env::var_os(HF_LOGITS_ENV).map(PathBuf::from) {
+        compare_hf_full_logits(&reference_path, &resident_v)?;
+    }
     Ok(())
+}
+
+fn compare_hf_full_logits(reference_path: &std::path::Path, kiln_logits: &[f32]) -> Result<()> {
+    let data = std::fs::read(reference_path)
+        .with_context(|| format!("read HF reference {}", reference_path.display()))?;
+    let (_, metadata) =
+        safetensors::SafeTensors::read_metadata(&data).context("parse HF reference metadata")?;
+    let user_metadata = metadata
+        .metadata()
+        .as_ref()
+        .context("HF reference has no user metadata")?;
+    anyhow::ensure!(
+        user_metadata.get("schema").map(String::as_str) == Some(HF_ORACLE_SCHEMA),
+        "HF reference schema is not {HF_ORACLE_SCHEMA}"
+    );
+    anyhow::ensure!(
+        user_metadata
+            .get("linear_attention_implementation")
+            .map(String::as_str)
+            == Some("transformers_torch_fallback"),
+        "HF reference did not use the pinned Transformers torch fallback"
+    );
+    anyhow::ensure!(
+        user_metadata
+            .get("attention_implementation")
+            .map(String::as_str)
+            == Some("eager"),
+        "HF reference did not use eager full attention"
+    );
+
+    let tensors = safetensors::SafeTensors::deserialize(&data)
+        .context("deserialize HF reference safetensors")?;
+    anyhow::ensure!(
+        tensors.names().len() == 2
+            && tensors.names().contains(&"input_ids")
+            && tensors.names().contains(&"logits"),
+        "HF reference must contain exactly input_ids and logits"
+    );
+    let input_ids = tensors.tensor("input_ids").context("HF input_ids tensor")?;
+    anyhow::ensure!(
+        input_ids.dtype() == safetensors::Dtype::I64,
+        "HF input_ids must be I64"
+    );
+    anyhow::ensure!(
+        input_ids.shape() == [1, HF_INPUT_TOKEN_IDS.len()],
+        "HF input_ids shape mismatch: {:?}",
+        input_ids.shape()
+    );
+    let input_values: Vec<u32> = input_ids
+        .data()
+        .chunks_exact(8)
+        .map(|bytes| {
+            let value = i64::from_le_bytes(bytes.try_into().expect("exact I64 chunk"));
+            u32::try_from(value).context("HF input token does not fit u32")
+        })
+        .collect::<Result<_>>()?;
+    anyhow::ensure!(
+        input_values == HF_INPUT_TOKEN_IDS,
+        "HF reference input IDs do not match the Vulkan test: {input_values:?}"
+    );
+
+    let logits = tensors.tensor("logits").context("HF logits tensor")?;
+    anyhow::ensure!(
+        logits.dtype() == safetensors::Dtype::F32,
+        "HF logits must be F32"
+    );
+    anyhow::ensure!(
+        logits.shape() == [kiln_logits.len()],
+        "HF logits shape {:?} does not match Kiln vocab {}",
+        logits.shape(),
+        kiln_logits.len()
+    );
+    let hf_logits: Vec<f32> = logits
+        .data()
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("exact F32 chunk")))
+        .collect();
+    anyhow::ensure!(
+        hf_logits.iter().all(|value| value.is_finite())
+            && kiln_logits.iter().all(|value| value.is_finite()),
+        "HF or Kiln logits contain non-finite values"
+    );
+
+    let mut max_abs = 0.0_f64;
+    let mut abs_sum = 0.0_f64;
+    let mut dot = 0.0_f64;
+    let mut hf_norm = 0.0_f64;
+    let mut kiln_norm = 0.0_f64;
+    for (&hf, &kiln) in hf_logits.iter().zip(kiln_logits) {
+        let hf = f64::from(hf);
+        let kiln = f64::from(kiln);
+        let abs = (hf - kiln).abs();
+        max_abs = max_abs.max(abs);
+        abs_sum += abs;
+        dot += hf * kiln;
+        hf_norm += hf * hf;
+        kiln_norm += kiln * kiln;
+    }
+    let mean_abs = abs_sum / hf_logits.len() as f64;
+    let cosine = dot / (hf_norm.sqrt() * kiln_norm.sqrt());
+    let hf_argmax = argmax(&hf_logits);
+    let kiln_argmax = argmax(kiln_logits);
+    let argmax_equal = usize::from(hf_argmax == kiln_argmax);
+    let hf_top10 = top_k(&hf_logits, 10);
+    let kiln_top10 = top_k(kiln_logits, 10);
+    let top10_overlap = hf_top10
+        .iter()
+        .filter(|index| kiln_top10.contains(index))
+        .count();
+
+    eprintln!(
+        "KILN_VULKAN_HF_FULL_LOGIT_PASS vocab={} argmax_equal={argmax_equal} \
+         hf_argmax={hf_argmax} kiln_argmax={kiln_argmax} top10_overlap={top10_overlap} \
+         max_abs={max_abs:e} mean_abs={mean_abs:e} cosine={cosine:.12}",
+        hf_logits.len()
+    );
+    anyhow::ensure!(
+        argmax_equal == 1,
+        "Vulkan argmax {kiln_argmax} differs from HF argmax {hf_argmax}"
+    );
+    anyhow::ensure!(
+        top10_overlap >= 9,
+        "Vulkan/HF top-10 overlap {top10_overlap} is below 9: HF={hf_top10:?} Kiln={kiln_top10:?}"
+    );
+    anyhow::ensure!(
+        max_abs <= 0.5,
+        "Vulkan/HF maximum absolute logit error {max_abs:e} exceeds 0.5"
+    );
+    anyhow::ensure!(
+        mean_abs <= 0.05,
+        "Vulkan/HF mean absolute logit error {mean_abs:e} exceeds 0.05"
+    );
+    anyhow::ensure!(
+        cosine >= 0.9999,
+        "Vulkan/HF full-logit cosine {cosine:.12} is below 0.9999"
+    );
+    Ok(())
+}
+
+fn argmax(values: &[f32]) -> usize {
+    values
+        .iter()
+        .enumerate()
+        .max_by(|(left_index, left), (right_index, right)| {
+            left.total_cmp(right)
+                .then_with(|| right_index.cmp(left_index))
+        })
+        .map(|(index, _)| index)
+        .expect("non-empty logits")
+}
+
+fn top_k(values: &[f32], count: usize) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..values.len()).collect();
+    indices.sort_unstable_by(|&left, &right| {
+        values[right]
+            .total_cmp(&values[left])
+            .then_with(|| left.cmp(&right))
+    });
+    indices.truncate(count);
+    indices
 }
 
 fn build_cache(

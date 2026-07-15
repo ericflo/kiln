@@ -224,6 +224,7 @@ else
         # manifest. Product/runtime KILN_* settings remain excluded.
         closed_source_build_environment+=(
             KILN_QUALIFICATION
+            KILN_QUALIFICATION_HF_LOGITS_PATH
             KILN_QUALIFICATION_MODEL_PATH
         )
     fi

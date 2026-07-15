@@ -7362,6 +7362,19 @@
     },
     {
       "api": "var_os",
+      "argument": "KILN_QUALIFICATION_HF_LOGITS_PATH",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "integration-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-model/tests/vk_resident_decode_parity.rs",
+      "phase": "runtime",
+      "surface": "integration-test"
+    },
+    {
+      "api": "var_os",
       "argument": "KILN_QUALIFICATION_MODEL_PATH",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -10676,13 +10689,13 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 528,
-    "literal_kiln_read_names": 365,
+    "literal_kiln_read_call_sites": 529,
+    "literal_kiln_read_names": 366,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
       "experimental_debug": 325,
       "public_stable": 1,
-      "test_only": 40
+      "test_only": 41
     },
     "process_mutation_call_sites": 361,
     "process_mutation_call_sites_by_classification": {
@@ -10690,13 +10703,13 @@
       "test_only": 353
     },
     "process_mutation_entries": 205,
-    "read_call_sites": 903,
+    "read_call_sites": 904,
     "read_call_sites_by_classification": {
       "build_time": 328,
       "experimental_debug": 432,
       "public_stable": 9,
-      "test_only": 134
+      "test_only": 135
     },
-    "read_entries": 615
+    "read_entries": 616
   }
 }

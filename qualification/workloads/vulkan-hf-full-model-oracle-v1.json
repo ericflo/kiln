@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "workload_id": "vulkan-hf-full-model-oracle-v1",
+  "kind": "correctness",
+  "description": "Compare every Qwen3.5-4B next-token logit and output ranking between pinned Hugging Face Transformers/PyTorch ROCm and the production Kiln Vulkan resident/nonresident paths.",
+  "determinism": {
+    "seed": 20260715,
+    "seed_delivery": "fixed_fixture",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [
+    {
+      "name": "trainer_python",
+      "description": "Python executable containing the exact requirements-sft.lock ROCm Torch, Transformers, and safetensors environment.",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "constraints": {
+        "allowed_values": [],
+        "minimum": null,
+        "maximum": null,
+        "pattern": "^.+$"
+      }
+    }
+  ],
+  "variants": [
+    {
+      "id": "vulkan",
+      "description": "Generate an independent full-vocabulary HF reference on pinned ROCm Torch, release it, then compare the source-pinned model through required RADV Vulkan execution.",
+      "backend": "vulkan",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "hf_attention": "eager",
+        "hf_linear_attention": "torch_fallback",
+        "hf_memory_max_gib": 16,
+        "input_token_count": 9,
+        "kiln_backend": "vulkan",
+        "kiln_memory_max_gib": 17,
+        "network": "forbidden"
+      },
+      "cases": [
+        {
+          "id": "hf-full-model-logit-parity",
+          "description": "Run the pinned HF torch-fallback forward in a private 16 GiB zero-swap service, release it, require 24 GiB host headroom, then compare all 248,320 logits, argmax, and top-10 ranking in a 17 GiB zero-swap Vulkan service.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/vulkan_hf_model_oracle.py",
+            "--model",
+            "${model_path}",
+            "--trainer-python",
+            "${trainer_python}"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 2700,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "KILN_VULKAN_HF_MODEL_ORACLE_PASS vocab=248320 argmax_equal=1 top10_overlap=(?:9|10) max_abs=\\S+ mean_abs=\\S+ cosine=\\S+ hf_peak_bytes=[1-9][0-9]* hf_swap_bytes=0"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "test result: ok\\. 1 passed; 0 failed; 0 ignored"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(vulkan device.*(?:unavailable|not available)|skipp(?:ed|ing).*(?:vulkan|hardware|full.model)|test result: FAILED|HF full-logit oracle failed)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "argmax_equal",
+              "cosine_similarity",
+              "hf_peak_memory_bytes",
+              "hf_swap_bytes",
+              "max_abs_error",
+              "mean_abs_error",
+              "top10_overlap",
+              "vocab_logits"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  }
+}
