@@ -27,6 +27,7 @@ class BoundedCargoTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("aggregate", completed.stdout)
         self.assertIn("CARGO", completed.stdout)
+        self.assertIn("KILN_CARGO_CPU_QUOTA_PERCENT", completed.stdout)
         self.assertIn("KILN_CARGO_MAX_MEMORY_GIB", completed.stdout)
         self.assertIn("closed-qualification-test-v1", completed.stdout)
 
@@ -38,6 +39,7 @@ class BoundedCargoTests(unittest.TestCase):
             "KILN_CARGO_ENVIRONMENT_POLICY=closed-qualification-test-v1",
             "KILN_CARGO_EXECUTION_MODE=transient-service",
             "KILN_CARGO_JOBS=1",
+            "KILN_CARGO_CPU_QUOTA_PERCENT=400",
             "KILN_CARGO_MIN_AVAILABLE_GIB=15",
             "KILN_CARGO_PRIVATE_NETWORK=1",
             "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS=1740",
@@ -101,7 +103,9 @@ class BoundedCargoTests(unittest.TestCase):
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$KILN_TEST_SYSTEMD_RUN_ARGS\"\n",
                 encoding="utf-8",
             )
-            (tool_dir / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (tool_dir / "systemctl").write_text(
+                "#!/bin/sh\nexit 0\n", encoding="utf-8"
+            )
             (tool_dir / "systemd-run").chmod(0o755)
             (tool_dir / "systemctl").chmod(0o755)
             environment = dict(os.environ)
@@ -109,6 +113,7 @@ class BoundedCargoTests(unittest.TestCase):
                 {
                     "CARGO": "/bin/true",
                     "KILN_CARGO_EXECUTION_MODE": "transient-service",
+                    "KILN_CARGO_CPU_QUOTA_PERCENT": "400",
                     "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
                     "KILN_CARGO_PRIVATE_NETWORK": "1",
                     "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": "300",
@@ -130,12 +135,14 @@ class BoundedCargoTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("cpu_quota=400%", completed.stderr)
             arguments = arguments_path.read_text(encoding="utf-8").splitlines()
             for expected in (
                 "--wait",
                 "--collect",
                 "--pipe",
                 "--setenv=PATH",
+                "CPUQuota=400%",
                 "MemorySwapMax=0",
                 "KillMode=control-group",
                 "RuntimeMaxSec=300s",
@@ -167,6 +174,68 @@ class BoundedCargoTests(unittest.TestCase):
             self.assertIn("--setenv=KILN_QUALIFICATION_HF_LOGITS_PATH", arguments)
             self.assertIn("--setenv=KILN_QUALIFICATION_MODEL_PATH", arguments)
             self.assertNotIn("--setenv=KILN_TEST_SECRET_TOKEN", arguments)
+
+    def test_scope_applies_aggregate_cpu_quota(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tool_dir = root / "tools"
+            tool_dir.mkdir()
+            arguments_path = root / "systemd-run.args"
+            (tool_dir / "systemd-run").write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$KILN_TEST_SYSTEMD_RUN_ARGS\"\n",
+                encoding="utf-8",
+            )
+            (tool_dir / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (tool_dir / "systemd-run").chmod(0o755)
+            (tool_dir / "systemctl").chmod(0o755)
+            empty_hwmon = root / "hwmon"
+            empty_hwmon.mkdir()
+            environment = dict(os.environ)
+            environment.update(
+                {
+                    "CARGO": "/bin/true",
+                    "KILN_CARGO_CPU_QUOTA_PERCENT": "250",
+                    "KILN_CARGO_HWMON_ROOT": str(empty_hwmon),
+                    "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
+                    "KILN_TEST_SYSTEMD_RUN_ARGS": str(arguments_path),
+                    "PATH": f"{tool_dir}:{environment['PATH']}",
+                }
+            )
+            completed = subprocess.run(
+                [str(SCRIPT), "check"],
+                cwd=ROOT,
+                check=False,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            arguments = arguments_path.read_text(encoding="utf-8").splitlines()
+            self.assertIn("--scope", arguments)
+            self.assertIn("CPUQuota=250%", arguments)
+            self.assertIn("cpu_quota=250%", completed.stderr)
+
+    def test_invalid_cpu_quota_is_rejected_before_launch(self) -> None:
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "CARGO": "/bin/true",
+                "KILN_CARGO_CPU_QUOTA_PERCENT": "0",
+                "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
+            }
+        )
+        completed = subprocess.run(
+            [str(SCRIPT), "check"],
+            cwd=ROOT,
+            check=False,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn("must be in 1..=10000", completed.stderr)
 
     def test_private_network_requires_transient_service(self) -> None:
         environment = dict(os.environ)

@@ -15,6 +15,7 @@ disabled. It also refuses to overlap another Cargo or rustc process.
 Overrides:
   CARGO                           Cargo executable/name (default: PATH, then ~/.cargo/bin/cargo)
   KILN_CARGO_JOBS                 Build jobs (default: 1)
+  KILN_CARGO_CPU_QUOTA_PERCENT    Aggregate CPU quota; 100 is one logical CPU (default: disabled)
   KILN_CARGO_MIN_AVAILABLE_GIB    Preflight floor (default: 2/3 host RAM, min 8)
   KILN_CARGO_HOST_RESERVE_GIB     Memory kept outside each child (default: 1/4 host RAM, min 4)
   KILN_CARGO_MAX_MEMORY_GIB       Explicit aggregate ceiling (default: available minus reserve)
@@ -108,6 +109,7 @@ default_reserve_gib=$((total_gib / 4))
 (( default_reserve_gib < 4 )) && default_reserve_gib=4
 
 jobs="${KILN_CARGO_JOBS:-1}"
+cpu_quota_percent="${KILN_CARGO_CPU_QUOTA_PERCENT:-}"
 min_available_gib="${KILN_CARGO_MIN_AVAILABLE_GIB:-$default_min_gib}"
 reserve_gib="${KILN_CARGO_HOST_RESERVE_GIB:-$default_reserve_gib}"
 for pair in \
@@ -121,6 +123,13 @@ for pair in \
         exit 2
     fi
 done
+if [[ -n "$cpu_quota_percent" ]]; then
+    if [[ ! "$cpu_quota_percent" =~ ^[1-9][0-9]*$ ]] \
+        || (( cpu_quota_percent > 10000 )); then
+        echo "error: KILN_CARGO_CPU_QUOTA_PERCENT must be in 1..=10000, got '$cpu_quota_percent'" >&2
+        exit 2
+    fi
+fi
 
 if (( available_gib < min_available_gib )); then
     echo "error: refusing Cargo with ${available_gib} GiB available; require at least ${min_available_gib} GiB" >&2
@@ -248,7 +257,13 @@ thermal_summary="disabled"
 if [[ -n "$thermal_sensor_path" ]]; then
     thermal_summary="${thermal_config_source}:${thermal_sensor_name}/${thermal_sensor_label}:${thermal_limit_millicelsius}mC@${thermal_poll_milliseconds}ms"
 fi
-echo "bounded-cargo: mode=$execution_mode jobs=$jobs available=${available_gib}GiB reserve=${reserve_gib}GiB aggregate_limit=${limit_gib}GiB swap_limit=0 private_network=$private_network environment_policy=$environment_policy thermal=$thermal_summary" >&2
+cpu_quota_args=()
+cpu_quota_summary="disabled"
+if [[ -n "$cpu_quota_percent" ]]; then
+    cpu_quota_args=(-p "CPUQuota=${cpu_quota_percent}%")
+    cpu_quota_summary="${cpu_quota_percent}%"
+fi
+echo "bounded-cargo: mode=$execution_mode jobs=$jobs cpu_quota=$cpu_quota_summary available=${available_gib}GiB reserve=${reserve_gib}GiB aggregate_limit=${limit_gib}GiB swap_limit=0 private_network=$private_network environment_policy=$environment_policy thermal=$thermal_summary" >&2
 read -r bounded_uuid < /proc/sys/kernel/random/uuid
 if [[ "$execution_mode" == "scope" ]]; then
     bounded_unit="kiln-cargo-bounded-${bounded_uuid//-/}.scope"
@@ -323,6 +338,7 @@ if [[ "$execution_mode" == "scope" ]]; then
         --scope \
         --quiet \
         --unit "$bounded_unit" \
+        "${cpu_quota_args[@]}" \
         -p "MemoryMax=${limit_gib}G" \
         -p MemorySwapMax=0 \
         -p OOMPolicy=kill \
@@ -401,6 +417,7 @@ systemd-run \
     --same-dir \
     --unit "$bounded_unit" \
     "${environment_args[@]}" \
+    "${cpu_quota_args[@]}" \
     -p Type=exec \
     -p "MemoryMax=${limit_gib}G" \
     -p MemorySwapMax=0 \

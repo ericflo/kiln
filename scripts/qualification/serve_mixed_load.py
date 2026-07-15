@@ -44,6 +44,7 @@ BUILD_ROCM_PATH = "/opt/rocm"
 BUILD_ROCM_ARCHS = "gfx1151"
 BUILD_CARGO_WRAPPER = "scripts/cargo-bounded.sh"
 BUILD_CARGO_JOBS = 1
+BUILD_CARGO_CPU_QUOTA_PERCENT = 400
 BUILD_CARGO_MIN_AVAILABLE_GIB = 15
 BUILD_CARGO_MEMORY_SCOPE = "systemd_user_transient_service_memory_max_no_swap"
 BUILD_CARGO_EXECUTION_MODE = "transient-service"
@@ -110,6 +111,7 @@ class SourceBuildSpec:
     profile: str = BUILD_PROFILE
     cargo_wrapper: str = BUILD_CARGO_WRAPPER
     cargo_jobs: int = BUILD_CARGO_JOBS
+    cargo_cpu_quota_percent: int | None = None
     cargo_min_available_gib: int = BUILD_CARGO_MIN_AVAILABLE_GIB
     cargo_memory_scope: str = BUILD_CARGO_MEMORY_SCOPE
     cargo_execution_mode: str = BUILD_CARGO_EXECUTION_MODE
@@ -124,6 +126,13 @@ class SourceBuildSpec:
     environment: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
+        quota = self.cargo_cpu_quota_percent
+        if quota is not None and (
+            isinstance(quota, bool)
+            or not isinstance(quota, int)
+            or not 1 <= quota <= 10_000
+        ):
+            raise ValueError("source-build Cargo CPU quota must be in 1..=10000")
         thermal = (
             self.cargo_host_thermal_sensor_name,
             self.cargo_host_thermal_sensor_label,
@@ -164,6 +173,11 @@ class SourceBuildSpec:
         config: dict[str, Any] = {
             "binary": self.binary,
             "cargo_jobs": self.cargo_jobs,
+            **(
+                {"cargo_cpu_quota_percent": self.cargo_cpu_quota_percent}
+                if self.cargo_cpu_quota_percent is not None
+                else {}
+            ),
             "cargo_execution_mode": self.cargo_execution_mode,
             "cargo_environment_policy": self.cargo_environment_policy,
             **(
@@ -200,6 +214,7 @@ class SourceBuildSpec:
 ROCM_BUILD_SPEC = SourceBuildSpec(
     backend="ROCm",
     features=BUILD_FEATURES,
+    cargo_cpu_quota_percent=BUILD_CARGO_CPU_QUOTA_PERCENT,
     cargo_host_thermal_sensor_name=BUILD_CARGO_HOST_THERMAL_SENSOR_NAME,
     cargo_host_thermal_sensor_label=BUILD_CARGO_HOST_THERMAL_SENSOR_LABEL,
     cargo_host_thermal_limit_millicelsius=BUILD_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS,
@@ -212,6 +227,7 @@ ROCM_BUILD_SPEC = SourceBuildSpec(
 VULKAN_BUILD_SPEC = SourceBuildSpec(
     backend="Vulkan",
     features="vulkan",
+    cargo_cpu_quota_percent=BUILD_CARGO_CPU_QUOTA_PERCENT,
     cargo_service_runtime_max_seconds=840,
     cargo_host_thermal_sensor_name=BUILD_CARGO_HOST_THERMAL_SENSOR_NAME,
     cargo_host_thermal_sensor_label=BUILD_CARGO_HOST_THERMAL_SENSOR_LABEL,
@@ -2124,6 +2140,10 @@ def source_bound_build_environment(
             ),
         }
     )
+    if spec.cargo_cpu_quota_percent is not None:
+        environment["KILN_CARGO_CPU_QUOTA_PERCENT"] = str(
+            spec.cargo_cpu_quota_percent
+        )
     if spec.cargo_host_thermal_sensor_name is not None:
         environment.update(
             {

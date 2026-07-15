@@ -37,6 +37,7 @@ class FailureContainmentError(RuntimeError):
 EFFECTIVE_CONFIG: dict[str, Any] = {
     "build": {
         "cargo_jobs": mixed.BUILD_CARGO_JOBS,
+        "cargo_cpu_quota_percent": mixed.BUILD_CARGO_CPU_QUOTA_PERCENT,
         "cargo_execution_mode": mixed.BUILD_CARGO_EXECUTION_MODE,
         "cargo_environment_policy": mixed.BUILD_CARGO_ENVIRONMENT_POLICY,
         "cargo_host_thermal_limit_millicelsius": (

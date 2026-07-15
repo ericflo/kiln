@@ -871,6 +871,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         expected_build = {
             "binary": "kiln",
             "cargo_jobs": 1,
+            "cargo_cpu_quota_percent": 400,
             "cargo_execution_mode": "transient-service",
             "cargo_environment_policy": "closed-source-build-v1",
             "cargo_host_thermal_limit_millicelsius": 97_000,
@@ -1038,6 +1039,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         )
         self.assertEqual(environment["KILN_CARGO_EXECUTION_MODE"], "transient-service")
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
+        self.assertEqual(environment["KILN_CARGO_CPU_QUOTA_PERCENT"], "400")
         self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
         self.assertEqual(environment["KILN_CARGO_PRIVATE_NETWORK"], "1")
         self.assertEqual(environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "840")
@@ -1072,6 +1074,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(environment["CARGO"], str(cargo))
         self.assertEqual(environment["CARGO_NET_OFFLINE"], "true")
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
+        self.assertEqual(environment["KILN_CARGO_CPU_QUOTA_PERCENT"], "400")
         self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
         self.assertEqual(environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "840")
         self.assertEqual(
@@ -1091,6 +1094,7 @@ class ServeMixedLoadTests(unittest.TestCase):
             {
                 "binary": "kiln",
                 "cargo_jobs": 1,
+                "cargo_cpu_quota_percent": 400,
                 "cargo_execution_mode": "transient-service",
                 "cargo_environment_policy": "closed-source-build-v1",
                 "cargo_host_thermal_limit_millicelsius": 97_000,
@@ -1138,6 +1142,23 @@ class ServeMixedLoadTests(unittest.TestCase):
                 cargo_host_thermal_limit_millicelsius=97_000,
                 cargo_host_thermal_poll_milliseconds=0,
             )
+
+    def test_source_build_cpu_quota_is_typed_and_optional(self) -> None:
+        self.assertNotIn(
+            "cargo_cpu_quota_percent",
+            serve.SourceBuildSpec(
+                backend="test", features="test"
+            ).effective_config(),
+        )
+        for invalid in (True, 0, 10_001, "400"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError, "CPU quota"
+            ):
+                serve.SourceBuildSpec(
+                    backend="test",
+                    features="test",
+                    cargo_cpu_quota_percent=invalid,
+                )
 
     def test_vulkan_server_environment_cannot_inherit_rocm_toolchain(self) -> None:
         with mock.patch.dict(
@@ -1715,14 +1736,16 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         )
         self.assertEqual(sanitized, {"PATH": "/bin", "HOME": "/tmp"})
 
-    def test_environment_sanitizer_rejects_ambient_server_controls(self) -> None:
+    def test_environment_sanitizer_rejects_ambient_kiln_controls(self) -> None:
         with self.assertRaisesRegex(
             serve.QualificationError,
-            "KILN_MAX_DECODE_BATCH, KILN_MODEL_PATH, KILN_ROCM_GRAPHS",
+            "KILN_CARGO_CPU_QUOTA_PERCENT, KILN_MAX_DECODE_BATCH, "
+            "KILN_MODEL_PATH, KILN_ROCM_GRAPHS",
         ):
             serve.sanitized_environment(
                 {
                     "PATH": "/bin",
+                    "KILN_CARGO_CPU_QUOTA_PERCENT": "9999",
                     "KILN_MODEL_PATH": "wrong",
                     "KILN_ROCM_GRAPHS": "0",
                     "KILN_MAX_DECODE_BATCH": "12",

@@ -55,7 +55,8 @@ source-bound evidence.
 
 No checked-in qualification case may invoke Cargo directly. Workload validation
 rejects `cargo` by basename, including an absolute path. Standalone Rust test
-cases use `scripts/qualification/cargo-test-bounded.sh`, which pins one job, the
+cases use `scripts/qualification/cargo-test-bounded.sh`, which pins one job, a
+400% aggregate CPU quota (at most four fully utilized logical CPUs), the
 unchanged 15 GiB admission floor, offline Cargo, transient-service execution,
 zero service swap, private networking, and a 1,740-second service cap. Its
 `closed-qualification-test-v1` environment is the source-build allowlist plus
@@ -68,7 +69,9 @@ Source-building ROCm and Vulkan serving drivers likewise select an immutable
 backend build specification, resolve the
 requested toolchain, then execute the exact package, binary, feature, locked,
 and offline build through `scripts/cargo-bounded.sh` with one job and a 15 GiB
-`MemAvailable` floor. ROCm alone receives `ROCM_PATH` and
+`MemAvailable` floor. A systemd `CPUQuota=400%` bounds aggregate compiler,
+linker, and helper CPU consumption even when a single Cargo job fans out inside
+LLVM. ROCm alone receives `ROCM_PATH` and
 `KILN_ROCM_ARCHS`; the Vulkan build strips ambient ROCm toolchain variables and
 uses only the `vulkan` feature. The wrapper refuses overlapping
 Cargo/rustc processes. Because the case retains bubblewrap PID isolation, the
@@ -86,14 +89,15 @@ timeout; the real-ROCm fault corpus uses 1140 and 1200 seconds respectively. Thi
 60-second ordering ensures systemd can stop and collect the complete cgroup
 before an outer qualification timeout can kill the wrapper. The measured server
 still runs inside the case's separate network and PID namespaces. The committed
-effective build config records the wrapper, job count, floor, execution mode,
-private-network requirement, versioned environment policy, both deadlines,
-memory policy, and all four thermal-selector fields. The driver derives the
-wrapper's `KILN_CARGO_HOST_THERMAL_*` controls from those typed fields; ambient
-values cannot alter the selector or limit. `closed-source-build-v1` retains only Cargo/Rustup homes, the
-pinned PATH and ROCm architecture/path, locale, user/home, temporary-directory,
-and user-systemd connection variables. It excludes ambient compiler flags,
-target directories, credentials, and API tokens before invoking the wrapper;
+effective build config records the wrapper, job count, CPU quota, floor,
+execution mode, private-network requirement, versioned environment policy, both
+deadlines, memory policy, and all four thermal-selector fields. The driver mechanically
+derives both `KILN_CARGO_CPU_QUOTA_PERCENT` and the wrapper's
+`KILN_CARGO_HOST_THERMAL_*` controls from those typed fields; ambient values
+cannot alter the quota, selector, or limit. `closed-source-build-v1` retains
+only Cargo/Rustup homes, the pinned PATH and ROCm architecture/path, locale,
+user/home, temporary-directory, and user-systemd connection variables. It
+excludes ambient compiler flags, target directories, credentials, and API tokens before invoking the wrapper;
 the wrapper independently applies the same policy when constructing the
 service environment. Bounded stderr records the machine-specific
 available/reserve/limit values. Do not lower the floor or bypass the wrapper to
@@ -111,6 +115,13 @@ builds do not accept that fallback because their four explicit typed fields make
 missing or ambiguous telemetry a preflight failure. Operators may explicitly
 configure a different stable selector only by setting all four documented
 `KILN_CARGO_HOST_THERMAL_*` wrapper controls together.
+
+For non-qualification use, `KILN_CARGO_CPU_QUOTA_PERCENT` optionally applies
+the same aggregate systemd CPU limit in either execution mode; `100` represents
+one logical CPU and values through `10000` are accepted. It is independent of
+`KILN_CARGO_JOBS`: the latter limits Cargo's build graph concurrency, while the
+quota contains all descendant threads. The wrapper reports the effective quota
+in its preamble and rejects malformed or out-of-range values before launch.
 
 Every serving driver creates a collision-resistant mode-0700 workspace below
 `.qualification/serving` (the pressure driver uses
@@ -377,8 +388,9 @@ The six required cases are sequential and network-isolated:
    Vulkan runtime, or resident pool is unavailable.
 
 Every Rust case enters `scripts/qualification/cargo-test-bounded.sh`: offline,
-one job, private network, zero service swap, 17 GiB aggregate ceiling, 1,740
-second deadline, and the unchanged 15 GiB host-admission floor. The runner
+one job, a 400% aggregate CPU quota, private network, zero service swap, 17 GiB
+aggregate ceiling, 1,740 second deadline, and the unchanged 15 GiB host-admission
+floor. The runner
 derives `KILN_QUALIFICATION_MODEL_PATH` from the manifest's `${model_path}` and
 the inner closed Cargo policy forwards only that test binding plus
 `KILN_QUALIFICATION`; it is not a product runtime setting. Ordinary source
@@ -513,9 +525,9 @@ never holds the model in ROCm and Vulkan at the same time:
    missing, malformed, swapped, or OOM-bearing telemetry record fails closed.
 3. After HF exits, the driver requires 24 GiB `MemAvailable` before Vulkan can
    start. The Rust test runs through `cargo-test-bounded.sh` with offline Cargo,
-   private networking, `MemoryMax=17G`, zero service swap, a 1,740-second cap,
-   and a seven-GiB host reserve. The closed qualification environment forwards
-   only the runner-owned model and HF-reference paths plus the hardware gate.
+   private networking, `CPUQuota=400%`, `MemoryMax=17G`, zero service swap, a
+   1,740-second cap, and a seven-GiB host reserve. The closed qualification
+   environment forwards only the runner-owned model and HF-reference paths plus the hardware gate.
 4. Kiln loads the same weights and input IDs through both its production
    resident and nonresident Vulkan paths. Those two paths must remain
    bit-identical. The resident result is then compared with every HF logit;

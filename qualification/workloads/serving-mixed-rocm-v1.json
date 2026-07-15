@@ -23,6 +23,7 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
+          "cargo_cpu_quota_percent": 400,
           "cargo_execution_mode": "transient-service",
           "cargo_environment_policy": "closed-source-build-v1",
           "cargo_host_thermal_limit_millicelsius": 97000,
@@ -257,6 +258,7 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
+          "cargo_cpu_quota_percent": 400,
           "cargo_execution_mode": "transient-service",
           "cargo_environment_policy": "closed-source-build-v1",
           "cargo_host_thermal_limit_millicelsius": 97000,
@@ -491,6 +493,7 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
+          "cargo_cpu_quota_percent": 400,
           "cargo_execution_mode": "transient-service",
           "cargo_environment_policy": "closed-source-build-v1",
           "cargo_host_thermal_limit_millicelsius": 97000,
@@ -725,6 +728,7 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
+          "cargo_cpu_quota_percent": 400,
           "cargo_execution_mode": "transient-service",
           "cargo_environment_policy": "closed-source-build-v1",
           "cargo_host_thermal_limit_millicelsius": 97000,
@@ -959,6 +963,7 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
+          "cargo_cpu_quota_percent": 400,
           "cargo_execution_mode": "transient-service",
           "cargo_environment_policy": "closed-source-build-v1",
           "cargo_host_thermal_limit_millicelsius": 97000,
