@@ -325,6 +325,66 @@ about tokenizer behavior, model logits, sampling, paged-cache lifecycle,
 cancellation, eval, public serving, or throughput. Those remain separate
 source-bound Vulkan gates.
 
+### Vulkan inference oracles
+
+Run the model-level deterministic oracle workload from a clean pushed tree:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant vulkan \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen/Qwen3.5-4B \
+  qualification/workloads/vulkan-inference-oracles-v1.json
+```
+
+The six required cases are sequential and network-isolated:
+
+1. A headless `vulkaninfo` probe must enumerate a physical device.
+2. Rows4 and rows8 BF16 fused argmax, including tail rows, must match CPU
+   projection and tie-breaking expectations.
+3. Greedy and non-greedy fused sampling must match a separate CPU contract
+   across temperature, top-k, top-p, min-p, repetition/presence/frequency
+   penalties, six fixed seeds, F32, BF16, and batched paths.
+4. F32/BF16 selected log-probs, FLCE/GRPO losses, and backward gradients must
+   match analytical CPU, finite-difference, and pinned TRL/PyTorch references.
+5. Six source-pinned HF-derived Qwen chat-rendering, token-ID,
+   assistant-mask, label, and tokenizer/config/template-hash cases must match
+   exactly.
+6. After identical Qwen prefill and decode state, all full-vocabulary logits
+   from the production resident and nonresident Vulkan paths must satisfy the
+   declared `1e-4` relative tolerance. Qualification fails if the model,
+   Vulkan runtime, or resident pool is unavailable.
+
+Every Rust case enters `scripts/qualification/cargo-test-bounded.sh`: offline,
+one job, private network, zero service swap, 17 GiB aggregate ceiling, 1,740
+second deadline, and the unchanged 15 GiB host-admission floor. The runner
+derives `KILN_QUALIFICATION_MODEL_PATH` from the manifest's `${model_path}` and
+the inner closed Cargo policy forwards only that test binding plus
+`KILN_QUALIFICATION`; it is not a product runtime setting. Ordinary source
+builds, credentials, compiler flags, backend controls, and unrelated
+`KILN_*` values remain excluded.
+
+#### Current Vulkan inference-oracle result
+
+The source-bound 2026-07-15 run passed from clean commit `8a1edd250` and tree
+hash `sha256:1ac91d8cea7f50eeaa53875fc7fe2559a99a1e1b7703e3110d2e94693e2d1c1a`.
+Its retained receipt is
+`qualification/receipts/vulkan/strix-halo/20260715t002226653824z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1.json`.
+All six cases passed with zero ignored tests or output-assertion failures. The
+real Qwen case took 368.881 seconds and returned bit-identical logits across
+all 248,320 entries (`max_abs=0`, `max_rel=0`); total workload time was 382.453
+seconds. Systemd recorded a 17 GiB service-memory peak. Live cgroup monitoring
+observed ceiling events but zero OOM/OOM-kill and zero service swap, and host
+availability returned to 25 GiB after teardown.
+
+This receipt closes deterministic tokenizer, lower-level CPU/TRL sampling and
+selected-logprob math, and resident/nonresident Qwen equivalence. The Qwen
+full-vocabulary comparison uses two Kiln Vulkan paths, not an independent HF
+forward. It therefore does not close the independent public-model HF-logit,
+broader prefix-cache/cancellation, eval-execution, soak, or throughput gates.
+
 Model-serving workloads additionally require `--model` with the exact local
 model directory and `--model-id` with its public identity. Select each declared
 A/B arm explicitly; the manifest, not an ambient environment variable, owns
