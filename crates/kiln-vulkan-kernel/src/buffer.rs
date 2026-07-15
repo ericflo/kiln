@@ -22,8 +22,9 @@ impl std::fmt::Debug for VulkanBuffer {
 impl Drop for VulkanBuffer {
     fn drop(&mut self) {
         unsafe {
-            self.device.free_memory(self.memory, None);
+            // Bound resources must be destroyed before their memory is freed.
             self.device.destroy_buffer(self.buffer, None);
+            self.device.free_memory(self.memory, None);
         }
     }
 }
