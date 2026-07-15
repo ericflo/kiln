@@ -7,7 +7,7 @@
 //! logits must be within `≤ 1e-4` relative error of the non-resident
 //! logits.
 //!
-//! Activation: gated on `KILN_RESIDENT_DECODE_PARITY_MODEL`, which
+//! Activation: gated on `KILN_QUALIFICATION_MODEL_PATH`, which
 //! must point at a Qwen3.5-4B checkpoint directory. Normal developer
 //! runs without the model skip with a diagnostic; `KILN_QUALIFICATION=1`
 //! makes a missing model, runtime, or resident pool fail closed. The
@@ -33,7 +33,7 @@ use kiln_model::forward::{
 use kiln_model::{LoadModelOptions, PagedKvCacheKt as PagedKvCache, load_model_with_options};
 use kiln_tensor::{DType, Device};
 
-const MODEL_ENV: &str = "KILN_RESIDENT_DECODE_PARITY_MODEL";
+const MODEL_ENV: &str = "KILN_QUALIFICATION_MODEL_PATH";
 
 #[test]
 fn vk_resident_decode_matches_nonresident_on_qwen35_4b() {

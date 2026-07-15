@@ -220,7 +220,12 @@ else
         XDG_RUNTIME_DIR
     )
     if [[ "$environment_policy" == "closed-qualification-test-v1" ]]; then
-        closed_source_build_environment+=(KILN_QUALIFICATION)
+        # Runner-owned test controls derived from the committed qualification
+        # manifest. Product/runtime KILN_* settings remain excluded.
+        closed_source_build_environment+=(
+            KILN_QUALIFICATION
+            KILN_QUALIFICATION_MODEL_PATH
+        )
     fi
     for name in "${closed_source_build_environment[@]}"; do
         if [[ -v "$name" ]]; then

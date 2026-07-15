@@ -477,7 +477,7 @@ const generatedDocsPages = [
     terms: [
       '911 direct read call sites',
       '361 process-mutation call sites',
-      '366 distinct literal KILN_*',
+      '365 distinct literal KILN_*',
       'Experimental/debug migration',
       '432',
       'Production migration owners',

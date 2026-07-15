@@ -111,6 +111,7 @@ class BoundedCargoTests(unittest.TestCase):
                     "KILN_CARGO_PRIVATE_NETWORK": "1",
                     "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": "300",
                     "KILN_QUALIFICATION": "1",
+                    "KILN_QUALIFICATION_MODEL_PATH": "/models/source-pinned",
                     "KILN_TEST_SECRET_TOKEN": "must-not-enter-service",
                     "KILN_TEST_SYSTEMD_RUN_ARGS": str(arguments_path),
                     "PATH": f"{tool_dir}:{environment['PATH']}",
@@ -142,6 +143,7 @@ class BoundedCargoTests(unittest.TestCase):
                 self.assertIn(expected, arguments)
             self.assertNotIn("--setenv=KILN_TEST_SECRET_TOKEN", arguments)
             self.assertNotIn("--setenv=KILN_QUALIFICATION", arguments)
+            self.assertNotIn("--setenv=KILN_QUALIFICATION_MODEL_PATH", arguments)
 
             environment["KILN_CARGO_ENVIRONMENT_POLICY"] = (
                 "closed-qualification-test-v1"
@@ -158,6 +160,7 @@ class BoundedCargoTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             arguments = arguments_path.read_text(encoding="utf-8").splitlines()
             self.assertIn("--setenv=KILN_QUALIFICATION", arguments)
+            self.assertIn("--setenv=KILN_QUALIFICATION_MODEL_PATH", arguments)
             self.assertNotIn("--setenv=KILN_TEST_SECRET_TOKEN", arguments)
 
     def test_private_network_requires_transient_service(self) -> None:

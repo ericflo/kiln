@@ -7362,7 +7362,7 @@
     },
     {
       "api": "var_os",
-      "argument": "KILN_RESIDENT_DECODE_PARITY_MODEL",
+      "argument": "KILN_QUALIFICATION_MODEL_PATH",
       "argument_kind": "literal",
       "classification": "test_only",
       "classification_basis": "unit-test source surface",
@@ -9585,7 +9585,7 @@
     },
     {
       "api": "var_os",
-      "argument": "KILN_QWEN35_MODEL_PATH",
+      "argument": "KILN_QUALIFICATION_MODEL_PATH",
       "argument_kind": "literal",
       "classification": "test_only",
       "classification_basis": "integration-test source surface",
@@ -10690,12 +10690,12 @@
   "source_root": "crates",
   "summary": {
     "literal_kiln_read_call_sites": 536,
-    "literal_kiln_read_names": 366,
+    "literal_kiln_read_names": 365,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
       "experimental_debug": 325,
       "public_stable": 1,
-      "test_only": 41
+      "test_only": 40
     },
     "process_mutation_call_sites": 361,
     "process_mutation_call_sites_by_classification": {

@@ -1,0 +1,415 @@
+{
+  "artifacts": [
+    {
+      "bytes": 6322,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/environment.json",
+      "sha256": "sha256:d357ce60f4af5eab06f7e383ce60fb753cde3c44c77c6996053613c543eba772"
+    },
+    {
+      "bytes": 3012,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/001-device-probe-r001/stdout.log",
+      "sha256": "sha256:13620326f6fed22af90aff249a546b1f8184a4476925f8a8c58f46fdff1d4ccf"
+    },
+    {
+      "bytes": 64,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/001-device-probe-r001/stderr.log",
+      "sha256": "sha256:9b8ce0d5aabd827937d81f2e3a130958edf27c3abe507ce8c54ed6cef9c82b27"
+    },
+    {
+      "bytes": 642,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/001-device-probe-r001/case-result.json",
+      "sha256": "sha256:574f05eddb593740e72f25d475bf5b26f1ca066f684841a7563ed4d55533f268"
+    },
+    {
+      "bytes": 243,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/002-argmax-cpu-oracle-r001/stdout.log",
+      "sha256": "sha256:240c851bf32cf651d24a8fa58fa40372815bc56ea56c5a3b3ca36280010348a7"
+    },
+    {
+      "bytes": 1181,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/002-argmax-cpu-oracle-r001/stderr.log",
+      "sha256": "sha256:3cd0ffa59a848e7133ef8d6a1fd3cadb62775644edbd6da1153cd55f118cca12"
+    },
+    {
+      "bytes": 644,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/002-argmax-cpu-oracle-r001/case-result.json",
+      "sha256": "sha256:fdaedcdda3ecf66606731f47f088acf078326909a42c41f0f14438b1226da460"
+    },
+    {
+      "bytes": 507,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/003-sampling-cpu-oracle-r001/stdout.log",
+      "sha256": "sha256:9b97acd780eec91c012cb29166c95b0e48dfa6bacabac33c81a14b0fb6c0d3f6"
+    },
+    {
+      "bytes": 1251,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/003-sampling-cpu-oracle-r001/stderr.log",
+      "sha256": "sha256:cde9eaba1d9aaa85241ca97fb96114204bedef3ea9ed13e43077d0a59fd6672e"
+    },
+    {
+      "bytes": 648,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/003-sampling-cpu-oracle-r001/case-result.json",
+      "sha256": "sha256:964882a1d1893a36bfc7829f82a43691df746cbbbb1b506c3dd427363b0ee0b2"
+    },
+    {
+      "bytes": 456,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/004-selected-logprob-cpu-trl-oracle-r001/stdout.log",
+      "sha256": "sha256:f42677dad69f7fa851edf5d67918654d35112028bd263c111d4f13a7fbeb30ef"
+    },
+    {
+      "bytes": 1169,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/004-selected-logprob-cpu-trl-oracle-r001/stderr.log",
+      "sha256": "sha256:e4c550d44727bc3e5956f2a44352113f0b5042df3ea160cd464a34cf05ac8b12"
+    },
+    {
+      "bytes": 660,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/004-selected-logprob-cpu-trl-oracle-r001/case-result.json",
+      "sha256": "sha256:380a06eaed61ef67748cbcaaf87da48caa59a5f676cd5c2671864250c9b70f85"
+    },
+    {
+      "bytes": 168,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/005-hf-tokenizer-oracle-r001/stdout.log",
+      "sha256": "sha256:bd843f0002ccd545647f4c784c6e5494d027222bbebd5ec899589a7843ad7baf"
+    },
+    {
+      "bytes": 33963,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/005-hf-tokenizer-oracle-r001/stderr.log",
+      "sha256": "sha256:0e32b6ec4aa1749d620162f92b981da14d55bc2c8683296ae80c799753c93747"
+    },
+    {
+      "bytes": 647,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/005-hf-tokenizer-oracle-r001/case-result.json",
+      "sha256": "sha256:60c97d41301300b542544ec891620559bcf0cec6597cc38890f4ab4606aeaefa"
+    },
+    {
+      "bytes": 262,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/006-resident-model-logit-parity-r001/stdout.log",
+      "sha256": "sha256:30ab702e562277424f50c09dc094c9ce0fd57d3423183710a3ec8d996fd1edb3"
+    },
+    {
+      "bytes": 12671,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/006-resident-model-logit-parity-r001/stderr.log",
+      "sha256": "sha256:db80e6fcaeafc6ec91fee100f245d707be1f4bf71a6ebab93272b9a7701b2a3b"
+    },
+    {
+      "bytes": 1015,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/cases/006-resident-model-logit-parity-r001/case-result.json",
+      "sha256": "sha256:be0b2c8b46de26261c65fbee3733f0215be0e7c1b2b2cabbeb38e1e6ae9ceb3c"
+    },
+    {
+      "bytes": 16903,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1/run-config.json",
+      "sha256": "sha256:8c977db119f5c130329080d4f2c2342a75725bac8bf589b2362ae426fb4074fc"
+    }
+  ],
+  "created_at_utc": "2026-07-15T00:18:20.222Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+      "shader": "2026.2"
+    },
+    "device": {
+      "architecture": "strix_halo",
+      "driver": "radv Mesa 26.1.3-arch1.2",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "driver": "Mesa 26.1.3-arch1.2",
+      "execution_environment_sha256": "sha256:4e2f59070351a66c62498c8952245ba078b66548fd1f7b7b4083b32b2ab41a93",
+      "vulkan_device": "1.4.348",
+      "vulkan_instance": "1.4.350"
+    }
+  },
+  "metrics": [],
+  "model": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "id": "Qwen/Qwen3.5-4B",
+    "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "notes": [],
+  "qualification": {
+    "backend": "vulkan",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "--variant",
+      "vulkan",
+      "--host-id",
+      "strix-halo",
+      "--model",
+      "Qwen3.5-4B",
+      "--model-id",
+      "Qwen/Qwen3.5-4B",
+      "qualification/workloads/vulkan-inference-oracles-v1.json"
+    ],
+    "duration_seconds": 11.777397164998547,
+    "finished_at_utc": "2026-07-15T00:18:20.222Z",
+    "kind": "correctness",
+    "profile": "vulkan-inference-oracles-v1",
+    "started_at_utc": "2026-07-15T00:18:08.445Z",
+    "verdict": "failed"
+  },
+  "receipt_id": "20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.020714551999844844,
+      "id": "device-probe",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.282311931001459,
+      "id": "argmax-cpu-oracle",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.34230737300094916,
+      "id": "sampling-cpu-oracle",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.40247537100003683,
+      "id": "selected-logprob-cpu-trl-oracle",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 1.4341694209979323,
+      "id": "hf-tokenizer-oracle",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": "exit code 101 not in [0]; required combined pattern did not match: KILN_VULKAN_RESIDENT_LOGIT_PARITY_PASS max_abs=[^ ]+ max_rel=[^ ]+ vocab=[1-9][0-9]*; required combined pattern did not match: test result: ok\\. 1 passed; 0 failed; 0 ignored; forbidden combined pattern matched: (?i)(resident decode.*unavailable|skipp(?:ed|ing).*resident|test result: FAILED)",
+      "duration_seconds": 0.5429436029990029,
+      "id": "resident-model-logit-parity",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 101
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 3
+        }
+      ],
+      "required": true,
+      "status": "failed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "0ee25599e67b16d95706749cfdd896135b3d0a16",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:420c8e4f3cfd9f1da2bded38d603787a562cfa345ec59ba19ff0f9eecff0f3ac",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "vulkan-inference-oracles-v1",
+    "parameters": {
+      "variant_id": "vulkan"
+    },
+    "seed": 20260715,
+    "sha256": "sha256:b04685d4c8705c58b9b8b87396a746d4f803f3579d71e955dc41c794a9316259"
+  }
+}

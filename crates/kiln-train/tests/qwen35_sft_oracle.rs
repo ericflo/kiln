@@ -50,7 +50,7 @@ fn sha256(data: &[u8]) -> String {
 }
 
 fn model_path() -> PathBuf {
-    std::env::var_os("KILN_QWEN35_MODEL_PATH").map_or_else(
+    std::env::var_os("KILN_QUALIFICATION_MODEL_PATH").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Qwen3.5-4B"),
         PathBuf::from,
     )
@@ -69,7 +69,7 @@ fn qwen35_hf_token_and_assistant_label_goldens() -> Result<()> {
     let model_path = model_path();
     let tokenizer_bytes = std::fs::read(model_path.join("tokenizer.json")).with_context(|| {
         format!(
-            "read source-pinned tokenizer from {}; set KILN_QWEN35_MODEL_PATH if needed",
+            "read source-pinned tokenizer from {}; set KILN_QUALIFICATION_MODEL_PATH if needed",
             model_path.display()
         )
     })?;

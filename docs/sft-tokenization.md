@@ -90,8 +90,8 @@ uv run \
   --model-path /path/to/Qwen3.5-4B \
   --check
 
-KILN_QWEN35_MODEL_PATH=/path/to/Qwen3.5-4B \
-  cargo test --locked -p kiln-train \
+KILN_QUALIFICATION_MODEL_PATH=/path/to/Qwen3.5-4B \
+  scripts/qualification/cargo-test-bounded.sh test --locked --offline -p kiln-train \
   --test qwen35_sft_oracle -- --ignored
 ```
 

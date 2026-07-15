@@ -451,7 +451,7 @@ These are described for the human operator, NOT executed by the implementer
    — proves the tape walked + deposited nonzero LoRA grads on Vulkan.
 3. Full Vulkan OPD soak (once PR4 backward families, if any, land).
 4. End-to-end real Qwen3.5-4B checkpoint forward parity
-   (`vk_resident_decode_parity.rs` style, set `KILN_RESIDENT_DECODE_PARITY_MODEL`).
+   (`vk_resident_decode_parity.rs` style, set `KILN_QUALIFICATION_MODEL_PATH`).
 5. Steady-state throughput regression vs. the fork baseline
    (`bench-results/vulkan-strix-halo-baseline.md`) — confirms PR3 zero-copy held.
 

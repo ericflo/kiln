@@ -220,7 +220,7 @@
           "working_directory": ".",
           "environment": {
             "CARGO_NET_OFFLINE": "true",
-            "KILN_QWEN35_MODEL_PATH": "${model_path}"
+            "KILN_QUALIFICATION_MODEL_PATH": "${model_path}"
           },
           "timeout_seconds": 1800,
           "expected_exit_codes": [0],
@@ -273,7 +273,7 @@
           "environment": {
             "CARGO_NET_OFFLINE": "true",
             "KILN_QUALIFICATION": "1",
-            "KILN_RESIDENT_DECODE_PARITY_MODEL": "${model_path}"
+            "KILN_QUALIFICATION_MODEL_PATH": "${model_path}"
           },
           "timeout_seconds": 1800,
           "expected_exit_codes": [0],
