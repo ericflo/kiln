@@ -457,6 +457,95 @@ independent Hugging Face forward, measure public-model eval quality, exercise a
 public HTTP eval job, establish long-duration stability, or make a throughput
 claim. Those remain separate qualification gates.
 
+### Vulkan independent Hugging Face full-model oracle
+
+Run the independent full-model oracle only from a clean pushed tree. Prepare a
+Python executable with the exact ROCm PyTorch and package versions in
+`scripts/hf_trl/requirements-sft.lock` as described in
+[HF/TRL Interoperability](HF_TRL_INTEROP.md). The oracle additionally pins the
+PyTorch commit and hashes the installed Qwen3.5 Transformers modeling and
+configuration modules. Optional fused linear-attention packages must be absent:
+the reference deliberately uses Transformers' independent torch fallback.
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant vulkan \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen/Qwen3.5-4B \
+  --var trainer_python=/absolute/path/to/pinned-venv/bin/python \
+  qualification/workloads/vulkan-hf-full-model-oracle-v1.json
+```
+
+The single required case executes two accelerator stages sequentially. It
+never holds the model in ROCm and Vulkan at the same time:
+
+1. The HF stage requires at least 23 GiB `MemAvailable`, then runs eager BF16
+   Qwen3.5-4B in a private-network systemd service with `MemoryMax=16G`, zero
+   service swap, a 600-second cap, deterministic algorithms, TF32 disabled, and
+   fixed input IDs `[1,2,3,4,5,6,7,8,100]`. It writes one safetensors artifact
+   containing the input IDs and all 248,320 final-position F32 logits.
+2. The pinned HF process reads its own cgroup-v2 memory peak, swap, and
+   OOM/limit events before it exits. This self-report is intentional: the
+   qualification runner's bubblewrap PID/network namespace can launch and wait
+   for a user service, but a post-exit `systemctl --user show` cannot reconnect
+   to the host user bus. `systemd-run --wait` remains the exit verdict, and a
+   missing, malformed, swapped, or OOM-bearing telemetry record fails closed.
+3. After HF exits, the driver requires 24 GiB `MemAvailable` before Vulkan can
+   start. The Rust test runs through `cargo-test-bounded.sh` with offline Cargo,
+   private networking, `MemoryMax=17G`, zero service swap, a 1,740-second cap,
+   and a seven-GiB host reserve. The closed qualification environment forwards
+   only the runner-owned model and HF-reference paths plus the hardware gate.
+4. Kiln loads the same weights and input IDs through both its production
+   resident and nonresident Vulkan paths. Those two paths must remain
+   bit-identical. The resident result is then compared with every HF logit;
+   argmax must match exactly, top-10 overlap must be at least 9/10, maximum
+   absolute error at most `0.5`, mean absolute error at most `0.05`, and cosine
+   similarity at least `0.9999`. Non-finite values, a missing device, an ignored
+   test, an incomplete result, or any threshold failure rejects the workload.
+
+The compact result records the comparison metrics, HF cgroup peak and service
+swap, the deterministic raw-logit tensor hash, the independently computed
+reference-artifact hash, memory ceilings, attention routes, and exact input
+IDs. Raw model output remains below the ignored `.qualification/` run tree.
+Validate a new receipt before changing documentation:
+
+```bash
+python3 scripts/qualification/receipt.py \
+  --require-current-source \
+  --require-local-artifacts \
+  --require-known-commit \
+  qualification/receipts/vulkan/<host>/<receipt>.json
+```
+
+#### Current Vulkan/HF full-model result
+
+The source-bound 2026-07-15 run passed from clean commit `4d6697c52` and tree
+hash `sha256:b21d95b47650ee831d27a678e85b3842d369b6bc78e0f21ec84c9a9da65bcfa4`.
+Its retained receipt is
+`qualification/receipts/vulkan/strix-halo/20260715t013710403012z-vulkan-strix-halo-vulkan-hf-full-model-ora-39c1bc8042-v1.json`.
+The 390.443-second workload compared all 248,320 logits and passed with exact
+argmax 1, 10/10 top-token overlap, maximum absolute error `0.12433958`, mean
+absolute error `0.020353988`, and cosine similarity `0.999941539769`. The HF
+stage reported a 9,254,346,752-byte cgroup peak, zero service swap, zero high,
+limit, OOM, and OOM-kill events, and deterministic raw-logit hash
+`sha256:0b902c0d74a8ed54aefefcdab50adeb6fedd7adb3e45a2338c27276e90abeeaf`.
+Kiln's resident and nonresident Vulkan results were bit-identical.
+
+Live host monitoring observed the Vulkan service contact its 17 GiB cgroup
+ceiling without OOM or service swap; system-wide swap rose by roughly 0.4 GiB
+while host available memory remained above the reserved floor, then 24 GiB was
+available after teardown. This is retained as a host-pressure signal for the
+development soak rather than hidden behind the passing numerical verdict.
+
+This receipt closes the Phase 6 independent CPU/HF full-model comparison when
+combined with the tokenizer, sampling, selected-logprob, cache, cancellation,
+and live-eval receipts above. It covers one deterministic next-token
+full-vocabulary forward. It does not establish multi-token public-model output
+parity, public HTTP eval quality, long-duration stability, large-batch
+throughput, or competitive performance against vLLM.
+
 Model-serving workloads additionally require `--model` with the exact local
 model directory and `--model-id` with its public identity. Select each declared
 A/B arm explicitly; the manifest, not an ambient environment variable, owns

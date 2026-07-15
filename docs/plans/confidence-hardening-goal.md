@@ -948,7 +948,7 @@ and exact resume. Cross-backend agreement alone is insufficient.
 
 ## Phase 6: Vulkan Qualification On Strix Halo
 
-- [ ] Run the same tokenizer, logit, sampling, cache, cancellation, and eval
+- [x] Run the same tokenizer, logit, sampling, cache, cancellation, and eval
   correctness corpus under Vulkan.
   The clean `ea4c0775f` core receipt now covers 16 tensor/autograd/transfer/
   reduction and nine matmul CPU-parity tests with zero ignored cases. It does
@@ -963,9 +963,13 @@ and exact resume. Cross-backend agreement alone is insufficient.
   proves retained-prefill cancellation and discard cleanup, block-aligned
   multi-turn prefix reuse with lease retirement, nonbatched KV-plus-GDN split
   replay with token-identical output, and one exact-match eval through the real
-  `LiveEvalGenerator`, batching actor, and Vulkan model runner. The independent
-  HF full-model logit/output comparison still keeps this aggregate checkbox
-  open.
+  `LiveEvalGenerator`, batching actor, and Vulkan model runner. The clean
+  `4d6697c52` independent-oracle receipt now compares the same Qwen weights and
+  fixed input through pinned eager Transformers/PyTorch ROCm and Kiln Vulkan
+  across all 248,320 logits. It passes exact argmax, 10/10 top-token overlap,
+  `0.12433958` maximum and `0.020353988` mean absolute error, and
+  `0.999941539769` cosine similarity. Together these receipts close the
+  declared Phase 6 correctness corpus.
 - [x] Run SFT and GRPO oracle fixtures supported by the declared Vulkan scope.
   The source-pinned AdamW fixture and complete pinned HF/TRL SFT plus recorded-
   GRPO production round trip have clean Strix Halo Vulkan receipts.
@@ -980,16 +984,24 @@ and exact resume. Cross-backend agreement alone is insufficient.
 - [ ] Run a final 8-hour Vulkan mixed-load soak.
 - [ ] Require zero silent hardware skips and zero unexplained ITL outliers by the
   ROCm attribution rule.
-- [ ] Compare Vulkan outputs to CPU/HF oracles, not merely to another Kiln GPU
+- [x] Compare Vulkan outputs to CPU/HF oracles, not merely to another Kiln GPU
   backend.
   The paired HF/TRL route receipts prove lifecycle and structural integrity,
   not this item: seed 42 sampled `Understood.` on ROCm versus `Understood.'` on
   Vulkan, and behavior log-probabilities differ even for shared sampled tokens.
   The `8a1edd250` receipt now supplies exact HF tokenizer goldens plus independent
   CPU/TRL sampling, selected-logprob, loss, and gradient oracles. Its full-model
-  Qwen result compares two Vulkan execution paths, however, so an independent
-  HF full-model logit/output fixture is still required before closing this item.
-- [ ] Check in compact Vulkan receipts, update this document, commit, and push.
+  Qwen result compares two Vulkan execution paths. The clean `4d6697c52`
+  workload adds the required independent full-model comparison through pinned
+  Transformers eager attention and torch-fallback linear attention. Its
+  deterministic HF tensor hash is
+  `sha256:0b902c0d74a8ed54aefefcdab50adeb6fedd7adb3e45a2338c27276e90abeeaf`;
+  every logit is compared and the declared ranking/error/cosine gates pass.
+- [x] Check in compact Vulkan receipts, update this document, commit, and push.
+  The current-source independent-oracle receipt is retained under
+  `qualification/receipts/vulkan/strix-halo/`; the remaining Vulkan artifacts
+  are the 30-minute development soak and final eight-hour soak rather than a
+  missing correctness receipt.
 
 ## Phase 7: CUDA And Metal Handoffs
 
@@ -2077,6 +2089,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-15 | Vulkan inference-oracle model-path counterexample | `sha256:420c8e4f3cfd9f1da2bded38d603787a562cfa345ec59ba19ff0f9eecff0f3ac` | `0ee25599e` + this receipt/fix commit | Strix Halo Vulkan/RADV under nested closed case and Cargo environments | `qualification/receipts/vulkan/strix-halo/20260715t001808445031z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1.json`; strict current-source/local-artifact/known-commit validation; 453 qualification tests; 10/10 docs-builder tests; runtime/source/artifact ratchets and shell syntax; no-process/unit residue and 24 GiB availability check | failed as designed; delivery boundary repaired | The required device probe, two BF16 argmax CPU cases, six-row non-greedy sampling CPU oracle, six FLCE/selected-logprob/gradient CPU-and-TRL cases, and six source-pinned HF tokenizer cases all passed. The final Qwen resident-logit case failed closed before loading weights because the outer manifest supplied its model path but `closed-qualification-test-v1` intentionally forwarded only `KILN_QUALIFICATION` into the inner bounded Cargo service. The two legacy per-test activation variables are now consolidated into manifest-derived `KILN_QUALIFICATION_MODEL_PATH`; that binding is forwarded only by the qualification policy, while ordinary source builds and arbitrary product/secret `KILN_*` values remain excluded. The clean pushed-source acceptance rerun remains required. |
 | 2026-07-15 | Accepted Vulkan tokenizer, sampling, selected-logprob, and resident-logit oracles | `sha256:1ac91d8cea7f50eeaa53875fc7fe2559a99a1e1b7703e3110d2e94693e2d1c1a` | `8a1edd250` + this receipt commit | Strix Halo Vulkan/RADV and source-pinned `Qwen/Qwen3.5-4B` | `qualification/receipts/vulkan/strix-halo/20260715t002226653824z-vulkan-strix-halo-vulkan-inference-oracles-bfc6c14dd8-v1.json`; strict current-source/local-artifact/known-commit validation before documentation mutation; six required cases; hosted Pages, CPU CI, qualification, and repository runs `29378841190`, `29378841168`, `29378841146`, and `29378841154` green; post-run no-process/unit residue and 25 GiB availability check | passed bounded correctness; memory ceiling contact retained | The headless RADV probe passed; two BF16 tail-row argmax tests matched CPU; all six sampler tests passed, including six non-greedy rows spanning temperature, top-k, top-p, min-p, repetition/presence/frequency penalties, and seeded categorical choices; six FLCE/GRPO cases matched analytical CPU, finite difference, and pinned TRL/PyTorch references; and six HF-derived Qwen rendering/token/mask/label cases matched exact artifact hashes. The 368.881-second public-model case produced bit-identical resident/nonresident logits across all 248,320 vocabulary entries (`max_abs=0`, `max_rel=0`). The complete workload took 382.453 seconds with zero failures, ignored tests, or output-assertion failures. Systemd recorded 17 GiB peak memory over 368.836 seconds; live cgroup inspection observed cap events but zero OOM/OOM-kill and zero service swap, followed by complete reclamation. This closes the named tokenizer/sampling/selected-logprob and resident-path subsets, not independent HF full-model logits, broader cache/cancellation/eval, or performance gates. |
 | 2026-07-15 | Accepted Vulkan cache, cancellation, and live-eval model routes | `sha256:7cd165f542fba1e855a4a915516952b02038e2001fc1ef028d149e04fac54d16` | `bcb245ac7` + this receipt commit | Strix Halo Vulkan/RADV deterministic BF16 hybrid fixture | `qualification/receipts/vulkan/strix-halo/20260715t004650723123z-vulkan-strix-halo-vulkan-model-routes-v1-e2287dab6c-v1.json`; strict current-source/local-artifact/known-commit validation before documentation mutation; required device probe plus one fail-closed model-route case; all 453 qualification tests and Vulkan all-target compile check green; post-run no-process/unit residue and 24 GiB availability check | passed bounded correctness | Three production-runtime contracts proved retained-prefill cancel/discard ownership reclamation, batching-engine multi-turn prefix hits with safe block alignment and lease retirement, and nonbatched KV-plus-GDN split-entry replay with token-identical output. A fourth route ran a one-example, two-token exact-match suite through `LiveEvalGenerator`, the real eval executor, production batching actor, `RealDecodeForward`, and native Vulkan runner; it passed with six prompt tokens, completion `t1 t1`, and no failed, invalid, or errored examples. The route exposed and fixed a product bug where base-model eval falsely requested a content mutation and stable profile rejected it; named adapters still force reload to protect retrained-same-name correctness. The initial Pages run `29379957820` then exposed a stale duplicated `911`-read smoke expectation after the inventory ratcheted to 903; this receipt commit derives all checked inventory counts from the versioned contract and passes the exact assembled-site smoke locally. The 2.760-second workload had zero skips or assertion failures and retained the closed execution identity. This closes the named cache/cancellation/eval subset, not independent HF full-model logits, public-model eval quality, soak, or throughput gates. |
+| 2026-07-15 | Accepted independent Vulkan/HF full-model logit oracle | `sha256:b21d95b47650ee831d27a678e85b3842d369b6bc78e0f21ec84c9a9da65bcfa4` | `4d6697c52` + this receipt commit | Strix Halo pinned PyTorch ROCm reference plus Kiln Vulkan/RADV | `qualification/receipts/vulkan/strix-halo/20260715t013710403012z-vulkan-strix-halo-vulkan-hf-full-model-ora-39c1bc8042-v1.json`; strict current-source/local-artifact/known-commit validation before documentation mutation; all 462 qualification tests; bounded Vulkan all-target compile check; exact bubblewrap namespace probe; post-run no-process/unit residue and 24 GiB availability check | passed bounded correctness; ceiling and host-pressure observations retained | A private-network 16 GiB zero-swap HF service pinned Torch 2.13.0 commit `cf30153`, Transformers 5.13.1 Qwen module hashes, safetensors 0.8.0, eager full attention, and the independent torch linear-attention fallback. Its raw F32 logit tensor was bit-identical across diagnostic runs at `sha256:0b902c0d74a8ed54aefefcdab50adeb6fedd7adb3e45a2338c27276e90abeeaf`; cgroup peak was 9,254,346,752 bytes with zero high/max/OOM/OOM-kill events and zero service swap. The 17 GiB zero-swap Vulkan stage kept resident/nonresident Kiln logits bit-identical, then matched HF across all 248,320 values with exact argmax, 10/10 top-token overlap, `0.12433958` maximum and `0.020353988` mean absolute error, and `0.999941539769` cosine. An initial 16 GiB Vulkan diagnostic was OOM-killed and established the invalid lower ceiling. The first runner attempt then exposed that post-exit `systemctl` cannot reconnect from the bubblewrap namespace; service-owned cgroup telemetry and `systemd-run --wait` repaired that boundary and passed the exact namespace probe. The accepted Vulkan service contacted its 17 GiB ceiling without swap/OOM; system-wide swap rose roughly 0.4 GiB while the host stayed above reserve, so soak pressure remains open. This closes the independent Phase 6 CPU/HF oracle gate, not multi-token parity, public HTTP eval quality, soak, throughput, or vLLM competitiveness. |
 
 ## Known Starting Defects
 
