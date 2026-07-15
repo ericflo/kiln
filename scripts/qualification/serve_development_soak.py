@@ -1623,10 +1623,10 @@ def resident_prefill_contract_failures(
         )
     if forwards < 1:
         failures.append("soak completed without a measured resident prefill forward")
-    if rows < forwards:
+    if rows <= forwards:
         failures.append(
-            "resident prefill row count was below its forward count: "
-            f"{rows} < {forwards}"
+            "resident prefill row count did not prove a measured multi-row forward: "
+            f"{rows} <= {forwards}"
         )
     if completed_rows < 1 or completed_rows > rows:
         failures.append(

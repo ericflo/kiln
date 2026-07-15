@@ -458,10 +458,10 @@ curl -s http://localhost:8420/metrics \
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
           For a Vulkan prompt-throughput incident, capture two health snapshots around the affected interval and
           retain the server log. Do not infer that the native path ran from request shape alone. Require a positive
-          delta in <code>total_resident_prefill_forwards</code> and
-          <code>total_resident_prefill_rows</code>; require
-          <code>max_resident_prefill_batch_size &gt;= 2</code> to prove multi-row execution. A maximum of one
-          records only a resident single-row tail.
+          delta in <code>total_resident_prefill_forwards</code> and a strictly larger delta in
+          <code>total_resident_prefill_rows</code> to prove that the interval contained a multi-row forward.
+          <code>max_resident_prefill_batch_size &gt;= 2</code> proves multi-row execution somewhere in the
+          process lifetime; a maximum of one records only a resident single-row tail.
         </p>
         <pre class="mt-5"><code>curl -s http://localhost:8420/health \
   | jq '.decode_runtime.batching_engine | with_entries(select(.key | contains("resident_prefill")))'

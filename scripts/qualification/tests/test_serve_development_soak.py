@@ -633,6 +633,19 @@ class ServeRocmSoakTests(unittest.TestCase):
             [],
         )
 
+        single_row_only = dict(values)
+        single_row_only["resident_prefill_row_count"] = single_row_only[
+            "resident_prefill_forward_count"
+        ]
+        self.assertTrue(
+            any(
+                "did not prove a measured multi-row forward" in failure
+                for failure in soak.resident_prefill_contract_failures(
+                    single_row_only, max_configured_rows=8
+                )
+            )
+        )
+
         broken = dict(values)
         broken.update(
             resident_prefill_active_rows_end=1,

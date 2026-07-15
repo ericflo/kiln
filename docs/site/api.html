@@ -768,10 +768,11 @@
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Rows count all request rows advanced by successful calls, completed rows count the subset whose
                 prompt ended on those calls, and last/maximum batch size report successful cohort width. A rising
-                forward count with maximum width at least two proves that multi-row resident prefill ran. A maximum
-                of one proves only the single-row tail. Counters are process-lifetime monotonic values; compare two
-                snapshots for an interval. Last and maximum batch sizes are gauges, with maximum monotonic for the
-                process lifetime.
+                forward-count delta and a row-count delta strictly greater than it prove that the measured interval
+                contained a multi-row forward. Maximum width at least two proves multi-row execution somewhere in
+                the process lifetime; a maximum of one proves only the single-row tail. Counters are process-lifetime
+                monotonic values; compare two snapshots for an interval. Last and maximum batch sizes are gauges,
+                with maximum monotonic for the process lifetime.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Prometheus exports the same state as
