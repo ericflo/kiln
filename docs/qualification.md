@@ -1183,6 +1183,14 @@ so its `comparison_policy` is null. Do not use it to claim relative throughput
 or latency; use the serving benchmark protocol for those claims. The 30-minute
 receipt also does not replace the final 24-hour ROCm phase soak.
 
+Setup and measurement use independent absolute deadlines. The ROCm setup
+envelope is 1,200 seconds for build, startup, warmup, and stabilization. Only
+after stabilization passes does a fresh 1,920-second measurement envelope
+begin: 1,800 required seconds plus one 120-second request deadline so the last
+admitted wave can settle. The outer 3,300-second case timeout adds a separate
+180-second teardown margin. A setup failure records
+`soak_duration_seconds=0`; it cannot be mistaken for measured performance.
+
 ### Vulkan Development Soak
 
 Run the Vulkan peer on a clean, pushed source tree after the serving baseline
@@ -1210,6 +1218,17 @@ the exact same prompt remained correct in isolation. The soak therefore binds
 128 explicitly and fails if health/debug reports another value or provenance.
 This is a qualification operating point, not yet the product-wide default or a
 claim that larger Vulkan quanta are correct.
+
+Its timing envelopes are likewise independent and explicit in the effective
+configuration. Build, startup, warmup, and stabilization get 1,800 seconds.
+After those gates pass, the 30-minute measurement gets a fresh 2,400-second
+absolute deadline: 1,800 required seconds plus the unchanged 600-second
+per-request containment window. The outer case timeout is 4,380 seconds,
+leaving 180 seconds for cancellation, server join, private-snapshot cleanup,
+and result publication. Setup time is never reported as measured soak time.
+Raw stdout and stderr artifacts are flushed after every captured chunk, so a
+monitor can follow structured progress while the case is still running rather
+than waiting for a user-space file buffer to fill.
 
 ROCm's device-global memory counter cannot isolate another desktop process.
 The Vulkan driver therefore sums the server process's `drm-memory-vram`,

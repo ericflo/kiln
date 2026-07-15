@@ -124,10 +124,10 @@ fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
 credential. Of the 101 fixed fields:
 
 - 96 implement the canonical mechanical environment name;
-- 66 also retain one or more deprecated compatibility spellings (69 aliases
+- 66 also retain one or more deprecated compatibility spellings (70 aliases
   total);
 - 5 are config-file-only and have no environment override;
-- the 69 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+- the 70 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
 The tables below cover all 101 fixed fields and both dynamic credential fields.

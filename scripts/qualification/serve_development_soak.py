@@ -36,6 +36,7 @@ CANCEL_EVERY_WAVES = 5
 CANCELLATION_MAX_TOKENS = 512
 CANCELLATION_PROMPT_WORDS = 48
 QUALIFICATION_DURATION_SECONDS = 1800.0
+CASE_TEARDOWN_GRACE_SECONDS = 180.0
 MAX_STEADY_STATE_WARMUP_WAVES = 16
 GRAPH_CACHE_MAX = 12
 MIN_STABILIZATION_CYCLES = 4
@@ -208,6 +209,37 @@ def runtime_for_variant(variant: str) -> SoakRuntime:
         raise SoakError(
             f"{VARIANT_ENV} must name one of {sorted(RUNTIMES)}, got {variant!r}"
         ) from exc
+
+
+def setup_phase_deadline(started: float, runtime: SoakRuntime) -> float:
+    return started + runtime.setup_deadline_seconds
+
+
+def measurement_phase_deadline(
+    started: float,
+    minimum_duration_seconds: float,
+    runtime: SoakRuntime,
+) -> float:
+    return started + minimum_duration_seconds + runtime.request_timeout_seconds
+
+
+def qualification_case_timeout_seconds(
+    minimum_duration_seconds: float,
+    runtime: SoakRuntime,
+) -> int:
+    return math.ceil(
+        runtime.setup_deadline_seconds
+        + minimum_duration_seconds
+        + runtime.request_timeout_seconds
+        + CASE_TEARDOWN_GRACE_SECONDS
+    )
+
+
+def phase_elapsed_seconds(started: float | None, now: float | None = None) -> float:
+    if started is None:
+        return 0.0
+    finished = time.monotonic() if now is None else now
+    return max(0.0, finished - started)
 
 METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "attributed_itl_outlier_count": ("count", "sum", True),
@@ -440,7 +472,15 @@ def effective_config(
             "response_oracle": mixed.RESPONSE_ORACLE,
             "response_oracle_integer_width": mixed.RESPONSE_ORACLE_INTEGER_WIDTH,
             "request_ignore_eos": True,
+            "deadline_policy": "independent_setup_and_measurement",
+            "measurement_deadline_seconds": int(
+                minimum_duration_seconds + runtime.request_timeout_seconds
+            ),
+            "qualification_case_timeout_seconds": qualification_case_timeout_seconds(
+                minimum_duration_seconds, runtime
+            ),
             "setup_deadline_seconds": int(runtime.setup_deadline_seconds),
+            "teardown_grace_seconds": int(CASE_TEARDOWN_GRACE_SECONDS),
             "stabilization_gpu_delta_limit_bytes": (
                 runtime.stabilization_gpu_delta_limit_bytes
             ),
@@ -1737,6 +1777,9 @@ def run_wave(
     abort = threading.Event()
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
     futures: list[concurrent.futures.Future[mixed.StreamResult]] = []
+    results: list[mixed.StreamResult] | None = None
+    primary_error: Exception | None = None
+    unfinished: set[concurrent.futures.Future[mixed.StreamResult]] = set()
     try:
         for slot in range(concurrency):
             role = f"soak-{phase}-w{wave:05d}-r{slot:02d}"
@@ -1759,10 +1802,14 @@ def run_wave(
                     request_timeout_seconds=runtime.request_timeout_seconds,
                 )
             )
-        return [
-            future.result(timeout=mixed.remaining_until(deadline, "soak wave"))
+        results = [
+            future.result(
+                timeout=mixed.remaining_until(deadline, f"soak {phase} wave")
+            )
             for future in futures
         ]
+    except Exception as exc:
+        primary_error = exc
     finally:
         abort.set()
         for future in futures:
@@ -1772,8 +1819,17 @@ def run_wave(
             timeout=max(0.0, min(10.0, deadline - time.monotonic())),
         )
         pool.shutdown(wait=False, cancel_futures=True)
+    if primary_error is not None:
         if unfinished:
-            raise SoakError(f"{len(unfinished)} request workers survived wave cleanup")
+            raise SoakError(
+                f"{type(primary_error).__name__}: {primary_error}; "
+                f"{len(unfinished)} request workers survived wave cleanup"
+            ) from primary_error
+        raise primary_error
+    if unfinished:
+        raise SoakError(f"{len(unfinished)} request workers survived wave cleanup")
+    assert results is not None
+    return results
 
 
 def invalid_stream_result_summary(
@@ -2019,8 +2075,10 @@ def execute(
     runtime: SoakRuntime = ROCM_RUNTIME,
 ) -> tuple[list[dict[str, Any]], str | None]:
     started = time.monotonic()
-    deadline = started + minimum_duration_seconds + runtime.setup_deadline_seconds
-    binary, binary_hash, build_seconds = mixed.build_binary(deadline, runtime.build_spec)
+    setup_deadline = setup_phase_deadline(started, runtime)
+    binary, binary_hash, build_seconds = mixed.build_binary(
+        setup_deadline, runtime.build_spec
+    )
     mixed.trace(
         "soak_binary_built",
         build_seconds=build_seconds,
@@ -2068,6 +2126,7 @@ def execute(
     shutdown: mixed.ShutdownOutcome | None = None
     snapshot_residue: list[str] = []
     values: dict[str, float | int] | None = None
+    measurement_started: float | None = None
     failures: list[str] = []
     stabilization_requests = 0
     stabilization_cancellations = 0
@@ -2088,8 +2147,10 @@ def execute(
     observed_process_mappings_start: ProcessMemoryMappingSnapshot | None = None
     observed_process_mappings_end: ProcessMemoryMappingSnapshot | None = None
     try:
-        mixed.wait_ready(port, process, server_log, deadline)
-        health_startup = mixed.read_stable_health(port, deadline, "soak startup health")
+        mixed.wait_ready(port, process, server_log, setup_deadline)
+        health_startup = mixed.read_stable_health(
+            port, setup_deadline, "soak startup health"
+        )
         debug_start = mixed.json_request(port, "GET", "/v1/debug/model-state")
         batched_state_cache_snapshot(debug_start, runtime)
         failures.extend(
@@ -2110,7 +2171,7 @@ def execute(
                 prompt_words=16 + attempt * 8,
                 max_tokens=mixed.WARMUP_MAX_TOKENS,
                 seed=seed + attempt,
-                absolute_deadline=deadline,
+                absolute_deadline=setup_deadline,
                 request_timeout_seconds=runtime.request_timeout_seconds,
             )
             if not valid_stream_result(warmup, mixed.WARMUP_MAX_TOKENS):
@@ -2120,7 +2181,7 @@ def execute(
                         warmup, mixed.WARMUP_MAX_TOKENS
                     )
                 )
-            health_start = wait_drained(port, deadline, "soak warmup")
+            health_start = wait_drained(port, setup_deadline, "soak warmup")
             graph = mixed.graph_snapshot(health_start)
             if graph_warmup_ready(graph, runtime):
                 break
@@ -2156,7 +2217,7 @@ def execute(
                 port,
                 wave=steady_state_warmup_waves,
                 base_seed=seed + 1_000_000,
-                deadline=deadline,
+                deadline=setup_deadline,
                 phase="warmup",
                 prompt_epoch=steady_state_warmup_waves,
                 runtime=runtime,
@@ -2172,7 +2233,9 @@ def execute(
                     + invalid_stream_results_summary(bad_warm, runtime.max_tokens)
                 )
             health_start = wait_drained(
-                port, deadline, f"steady-state warmup {steady_state_warmup_waves}"
+                port,
+                setup_deadline,
+                f"steady-state warmup {steady_state_warmup_waves}",
             )
             graph_warm = mixed.graph_snapshot(health_start)
             batching_warm = mixed.batching_snapshot(health_start)
@@ -2253,7 +2316,7 @@ def execute(
                     port,
                     wave=stabilization_wave,
                     base_seed=seed,
-                    deadline=deadline,
+                    deadline=setup_deadline,
                     phase="stabilize",
                     runtime=runtime,
                 )
@@ -2276,7 +2339,7 @@ def execute(
                         wave=stabilization_wave,
                         base_seed=seed + 2_000_000,
                         phase="stabilize",
-                        deadline=deadline,
+                        deadline=setup_deadline,
                         runtime=runtime,
                     )
                     if cancellation_failure is None:
@@ -2285,7 +2348,9 @@ def execute(
                         cycle_failures.append(cancellation_failure)
 
                 health_start = wait_drained(
-                    port, deadline, f"stabilization wave {stabilization_wave}"
+                    port,
+                    setup_deadline,
+                    f"stabilization wave {stabilization_wave}",
                 )
                 graph_stable = mixed.graph_snapshot(health_start)
                 batching_stable = mixed.batching_snapshot(health_start)
@@ -2578,6 +2643,16 @@ def execute(
         rss_start = process_memory_snapshot(process.pid).rss_bytes
         sampler.start()
         measurement_started = time.monotonic()
+        measurement_deadline = measurement_phase_deadline(
+            measurement_started, minimum_duration_seconds, runtime
+        )
+        mixed.trace(
+            "soak_measurement_started",
+            deadline_seconds=minimum_duration_seconds
+            + runtime.request_timeout_seconds,
+            minimum_duration_seconds=minimum_duration_seconds,
+            setup_elapsed_seconds=measurement_started - started,
+        )
         all_results: list[mixed.StreamResult] = []
         rss_samples = [rss_start]
         wave = 0
@@ -2586,7 +2661,11 @@ def execute(
         while wave == 0 or time.monotonic() - measurement_started < minimum_duration_seconds:
             wave_failures: list[str] = []
             wave_results = run_wave(
-                port, wave=wave, base_seed=seed, deadline=deadline, runtime=runtime
+                port,
+                wave=wave,
+                base_seed=seed,
+                deadline=measurement_deadline,
+                runtime=runtime,
             )
             all_results.extend(wave_results)
             bad = [
@@ -2606,7 +2685,7 @@ def execute(
                     wave=wave,
                     base_seed=seed,
                     phase="measured",
-                    deadline=deadline,
+                    deadline=measurement_deadline,
                     runtime=runtime,
                 )
                 if cancellation_failure is not None:
@@ -2614,7 +2693,9 @@ def execute(
                 else:
                     cancellations += 1
 
-            health = wait_drained(port, deadline, f"soak wave {wave}")
+            health = wait_drained(
+                port, measurement_deadline, f"soak wave {wave}"
+            )
             debug = mixed.json_request(port, "GET", "/v1/debug/model-state")
             batched_state = batched_state_cache_snapshot(debug, runtime)
             observed_batched_state_end = batched_state
@@ -2787,7 +2868,9 @@ def execute(
                 break
 
         sampler.close()
-        health_end = wait_drained(port, deadline, "soak final health")
+        health_end = wait_drained(
+            port, measurement_deadline, "soak final health"
+        )
         graph_end = mixed.graph_snapshot(health_end)
         batching_end = mixed.batching_snapshot(health_end)
         if batching_end["prefix_cache_enabled"] != prefix_cache_enabled:
@@ -2833,7 +2916,7 @@ def execute(
             result.error is not None and "non-finite" in result.error.lower()
             for result in all_results
         )
-        duration = time.monotonic() - measurement_started
+        duration = phase_elapsed_seconds(measurement_started)
         itls = [gap for result in successes for gap in result.itl_ms]
         ttfts = [result.ttft_ms for result in successes]
         prompt_tokens = [result.prompt_tokens for result in successes]
@@ -3204,7 +3287,7 @@ def execute(
 
     if values is None:
         values = {name: 0 for name in metric_definitions(runtime)}
-        values["soak_duration_seconds"] = max(0.0, time.monotonic() - started)
+        values["soak_duration_seconds"] = phase_elapsed_seconds(measurement_started)
         values["stabilization_cancellation_count"] = stabilization_cancellations
         values["stabilization_cycle_count"] = stabilization_cycles
         values["stabilization_final_gpu_delta_bytes"] = stabilization_final_gpu_delta

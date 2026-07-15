@@ -127,10 +127,10 @@ const generatedDocsPages = [
     terms: [
       'KILN_<SECTION>_<FIELD>',
       'Strict failure behavior',
-      '15 top-level sections and 98 fixed leaf fields',
-      '93 implement the canonical mechanical environment name',
+      '15 top-level sections and 101 fixed leaf fields',
+      '96 implement the canonical mechanical environment name',
       '66 also retain one or more deprecated compatibility spellings',
-      '69 aliases total',
+      '70 aliases total',
       '5 are config-file-only',
       'KILN_BATCHING_MODE',
       'KILN_BATCHING_ROWWISE_DECODE',

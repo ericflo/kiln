@@ -8,6 +8,7 @@ import math
 import signal
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -160,6 +161,13 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(vulkan["build"]["features"], "vulkan")
         self.assertFalse(vulkan["runtime"]["rocm_graphs_enabled"])
         self.assertEqual(vulkan["server"]["request_timeout_seconds"], 600)
+        self.assertEqual(
+            vulkan["soak"]["deadline_policy"],
+            "independent_setup_and_measurement",
+        )
+        self.assertEqual(vulkan["soak"]["measurement_deadline_seconds"], 2400)
+        self.assertEqual(vulkan["soak"]["qualification_case_timeout_seconds"], 4380)
+        self.assertEqual(vulkan["soak"]["teardown_grace_seconds"], 180)
         self.assertEqual(vulkan["soak"]["gpu_memory_scope"], "server_process")
         self.assertEqual(vulkan["soak"]["stabilization_min_cycles"], 4)
         self.assertEqual(vulkan["soak"]["stabilization_max_cycles"], 8)
@@ -929,6 +937,44 @@ class ServeRocmSoakTests(unittest.TestCase):
             )
         )
 
+    def test_wave_cleanup_preserves_the_primary_deadline_failure(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def blocked_stream(*_args: object, **_kwargs: object) -> object:
+            entered.set()
+            try:
+                release.wait(timeout=2.0)
+                return object()
+            finally:
+                finished.set()
+
+        def expired(*_args: object, **_kwargs: object) -> float:
+            self.assertTrue(entered.wait(timeout=1.0))
+            raise TimeoutError("soak stabilize wave exceeded the setup deadline")
+
+        with (
+            mock.patch.object(soak.mixed, "run_stream", side_effect=blocked_stream),
+            mock.patch.object(soak.mixed, "remaining_until", side_effect=expired),
+        ):
+            try:
+                with self.assertRaisesRegex(
+                    soak.SoakError,
+                    "TimeoutError: soak stabilize wave exceeded the setup deadline; "
+                    "1 request workers survived wave cleanup",
+                ):
+                    soak.run_wave(
+                        8420,
+                        wave=0,
+                        base_seed=7,
+                        deadline=time.monotonic() - 1.0,
+                        phase="stabilize",
+                    )
+            finally:
+                release.set()
+        self.assertTrue(finished.wait(timeout=1.0))
+
     def test_cancellation_markers_are_unique_and_confirmation_is_required(self) -> None:
         def result(*_args: object, **kwargs: object) -> mock.Mock:
             return mock.Mock(
@@ -1036,6 +1082,12 @@ class ServeRocmSoakTests(unittest.TestCase):
         case = variant["cases"][0]
         self.assertEqual(case["id"], soak.CASE_ID)
         self.assertEqual(
+            case["timeout_seconds"],
+            soak.qualification_case_timeout_seconds(
+                soak.QUALIFICATION_DURATION_SECONDS, soak.ROCM_RUNTIME
+            ),
+        )
+        self.assertEqual(
             case["result_protocol"]["declared_metrics"],
             sorted(soak.METRIC_DEFINITIONS),
         )
@@ -1112,11 +1164,39 @@ class ServeRocmSoakTests(unittest.TestCase):
                 str(soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES),
             ],
         )
-        self.assertGreaterEqual(
+        self.assertEqual(
             case["timeout_seconds"],
-            soak.QUALIFICATION_DURATION_SECONDS
-            + soak.VULKAN_RUNTIME.setup_deadline_seconds,
+            soak.qualification_case_timeout_seconds(
+                soak.QUALIFICATION_DURATION_SECONDS, soak.VULKAN_RUNTIME
+            ),
         )
+
+    def test_phase_deadlines_and_case_timeout_are_independent(self) -> None:
+        started = 100.0
+        self.assertEqual(
+            soak.setup_phase_deadline(started, soak.VULKAN_RUNTIME), 1900.0
+        )
+        self.assertEqual(
+            soak.measurement_phase_deadline(
+                started, soak.QUALIFICATION_DURATION_SECONDS, soak.VULKAN_RUNTIME
+            ),
+            2500.0,
+        )
+        self.assertEqual(
+            soak.qualification_case_timeout_seconds(
+                soak.QUALIFICATION_DURATION_SECONDS, soak.VULKAN_RUNTIME
+            ),
+            4380,
+        )
+        self.assertEqual(
+            soak.qualification_case_timeout_seconds(
+                soak.QUALIFICATION_DURATION_SECONDS, soak.ROCM_RUNTIME
+            ),
+            3300,
+        )
+        self.assertEqual(soak.phase_elapsed_seconds(None, 500.0), 0.0)
+        self.assertEqual(soak.phase_elapsed_seconds(475.0, 500.0), 25.0)
+        self.assertEqual(soak.phase_elapsed_seconds(501.0, 500.0), 0.0)
 
     def test_host_memory_guard_terminates_below_the_floor_and_records_pressure(
         self,

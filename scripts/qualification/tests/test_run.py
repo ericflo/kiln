@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -618,6 +619,51 @@ class RunnerTests(unittest.TestCase):
             time.sleep(0.05)
         self.assertFalse(process_running(child_pid), f"child {child_pid} survived timeout cleanup")
         self.assert_valid(outcome, repository.root)
+
+    def test_command_output_is_visible_before_the_process_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            release = root / "release"
+            stderr_path = root / "stderr.log"
+            outcome: list[run_module.Execution] = []
+            code = (
+                "import pathlib,sys,time; "
+                "sys.stderr.write('ready\\n'); sys.stderr.flush(); "
+                f"release=pathlib.Path({str(release)!r}); "
+                "\nwhile not release.exists(): time.sleep(0.01)"
+            )
+
+            thread = threading.Thread(
+                target=lambda: outcome.append(
+                    run_module.execute_argv(
+                        [sys.executable, "-c", code],
+                        cwd=root,
+                        environment=dict(os.environ),
+                        stdout_path=root / "stdout.log",
+                        stderr_path=stderr_path,
+                        timeout_seconds=5,
+                        termination_grace_seconds=0.1,
+                    )
+                )
+            )
+            thread.start()
+            try:
+                deadline = time.monotonic() + 2.0
+                captured = b""
+                while time.monotonic() < deadline:
+                    if stderr_path.exists():
+                        captured = stderr_path.read_bytes()
+                    if captured:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(captured, b"ready\n")
+                self.assertTrue(thread.is_alive())
+            finally:
+                release.write_text("release\n", encoding="utf-8")
+                thread.join(timeout=3.0)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(outcome), 1)
+            self.assertEqual(outcome[0].returncode, 0)
 
     def test_success_waits_for_short_lived_descendant_settlement(self) -> None:
         code = (

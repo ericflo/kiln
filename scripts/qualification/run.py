@@ -974,6 +974,7 @@ def execute_argv(
                     kept = chunk[:remaining]
                     destination.write(kept)
                     capture.bytes_written += len(kept)
+                    destination.flush()
                 if capture.bytes_seen > output_limit_bytes:
                     capture.truncated = True
                     limit_reached.set()
