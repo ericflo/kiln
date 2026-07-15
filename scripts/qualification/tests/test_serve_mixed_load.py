@@ -871,7 +871,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         expected_build = {
             "binary": "kiln",
             "cargo_jobs": 1,
-            "cargo_cpu_quota_percent": 400,
+            "cargo_cpu_quota_percent": 50,
             "cargo_execution_mode": "transient-service",
             "cargo_environment_policy": "closed-source-build-v1",
             "cargo_host_thermal_limit_millicelsius": 97_000,
@@ -1039,7 +1039,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         )
         self.assertEqual(environment["KILN_CARGO_EXECUTION_MODE"], "transient-service")
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
-        self.assertEqual(environment["KILN_CARGO_CPU_QUOTA_PERCENT"], "400")
+        self.assertEqual(environment["KILN_CARGO_CPU_QUOTA_PERCENT"], "50")
         self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
         self.assertEqual(environment["KILN_CARGO_PRIVATE_NETWORK"], "1")
         self.assertEqual(environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "840")
@@ -1074,7 +1074,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(environment["CARGO"], str(cargo))
         self.assertEqual(environment["CARGO_NET_OFFLINE"], "true")
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
-        self.assertEqual(environment["KILN_CARGO_CPU_QUOTA_PERCENT"], "400")
+        self.assertEqual(environment["KILN_CARGO_CPU_QUOTA_PERCENT"], "50")
         self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
         self.assertEqual(environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "840")
         self.assertEqual(
@@ -1094,7 +1094,7 @@ class ServeMixedLoadTests(unittest.TestCase):
             {
                 "binary": "kiln",
                 "cargo_jobs": 1,
-                "cargo_cpu_quota_percent": 400,
+                "cargo_cpu_quota_percent": 50,
                 "cargo_execution_mode": "transient-service",
                 "cargo_environment_policy": "closed-source-build-v1",
                 "cargo_host_thermal_limit_millicelsius": 97_000,

@@ -56,7 +56,7 @@ source-bound evidence.
 No checked-in qualification case may invoke Cargo directly. Workload validation
 rejects `cargo` by basename, including an absolute path. Standalone Rust test
 cases use `scripts/qualification/cargo-test-bounded.sh`, which pins one job, a
-400% aggregate CPU quota (at most four fully utilized logical CPUs), the
+50% aggregate CPU quota (at most half of one logical CPU on average), the
 unchanged 15 GiB admission floor, offline Cargo, transient-service execution,
 zero service swap, private networking, and a 1,740-second service cap. Its
 `closed-qualification-test-v1` environment is the source-build allowlist plus
@@ -69,7 +69,7 @@ Source-building ROCm and Vulkan serving drivers likewise select an immutable
 backend build specification, resolve the
 requested toolchain, then execute the exact package, binary, feature, locked,
 and offline build through `scripts/cargo-bounded.sh` with one job and a 15 GiB
-`MemAvailable` floor. A systemd `CPUQuota=400%` bounds aggregate compiler,
+`MemAvailable` floor. A systemd `CPUQuota=50%` bounds aggregate compiler,
 linker, and helper CPU consumption even when a single Cargo job fans out inside
 LLVM. ROCm alone receives `ROCM_PATH` and
 `KILN_ROCM_ARCHS`; the Vulkan build strips ambient ROCm toolchain variables and
@@ -388,7 +388,7 @@ The six required cases are sequential and network-isolated:
    Vulkan runtime, or resident pool is unavailable.
 
 Every Rust case enters `scripts/qualification/cargo-test-bounded.sh`: offline,
-one job, a 400% aggregate CPU quota, private network, zero service swap, 17 GiB
+one job, a 50% aggregate CPU quota, private network, zero service swap, 17 GiB
 aggregate ceiling, 1,740 second deadline, and the unchanged 15 GiB host-admission
 floor. The runner
 derives `KILN_QUALIFICATION_MODEL_PATH` from the manifest's `${model_path}` and
@@ -525,7 +525,7 @@ never holds the model in ROCm and Vulkan at the same time:
    missing, malformed, swapped, or OOM-bearing telemetry record fails closed.
 3. After HF exits, the driver requires 24 GiB `MemAvailable` before Vulkan can
    start. The Rust test runs through `cargo-test-bounded.sh` with offline Cargo,
-   private networking, `CPUQuota=400%`, `MemoryMax=17G`, zero service swap, a
+   private networking, `CPUQuota=50%`, `MemoryMax=17G`, zero service swap, a
    1,740-second cap, and a seven-GiB host reserve. The closed qualification
    environment forwards only the runner-owned model and HF-reference paths plus the hardware gate.
 4. Kiln loads the same weights and input IDs through both its production

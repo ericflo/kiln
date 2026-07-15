@@ -62,7 +62,7 @@ class ServeRocmGraphFailureContainmentTests(unittest.TestCase):
         self.assertEqual(environment["KILN_QUALIFICATION"], "1")
         self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
-        self.assertEqual(environment["KILN_CARGO_CPU_QUOTA_PERCENT"], "400")
+        self.assertEqual(environment["KILN_CARGO_CPU_QUOTA_PERCENT"], "50")
         self.assertEqual(
             environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "1140"
         )

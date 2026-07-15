@@ -39,7 +39,7 @@ class BoundedCargoTests(unittest.TestCase):
             "KILN_CARGO_ENVIRONMENT_POLICY=closed-qualification-test-v1",
             "KILN_CARGO_EXECUTION_MODE=transient-service",
             "KILN_CARGO_JOBS=1",
-            "KILN_CARGO_CPU_QUOTA_PERCENT=400",
+            "KILN_CARGO_CPU_QUOTA_PERCENT=50",
             "KILN_CARGO_MIN_AVAILABLE_GIB=15",
             "KILN_CARGO_PRIVATE_NETWORK=1",
             "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS=1740",
@@ -113,7 +113,7 @@ class BoundedCargoTests(unittest.TestCase):
                 {
                     "CARGO": "/bin/true",
                     "KILN_CARGO_EXECUTION_MODE": "transient-service",
-                    "KILN_CARGO_CPU_QUOTA_PERCENT": "400",
+                    "KILN_CARGO_CPU_QUOTA_PERCENT": "50",
                     "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
                     "KILN_CARGO_PRIVATE_NETWORK": "1",
                     "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": "300",
@@ -135,14 +135,14 @@ class BoundedCargoTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertIn("cpu_quota=400%", completed.stderr)
+            self.assertIn("cpu_quota=50%", completed.stderr)
             arguments = arguments_path.read_text(encoding="utf-8").splitlines()
             for expected in (
                 "--wait",
                 "--collect",
                 "--pipe",
                 "--setenv=PATH",
-                "CPUQuota=400%",
+                "CPUQuota=50%",
                 "MemorySwapMax=0",
                 "KillMode=control-group",
                 "RuntimeMaxSec=300s",
