@@ -265,6 +265,29 @@ python3 scripts/qualification/run.py \
   qualification/workloads/prefill-scheduling-v1.json
 ```
 
+#### Current Vulkan prefill result
+
+The source-bound 2026-07-15 run on RADV Strix Halo passed from clean commit
+`d6d14bfaf` and tree hash
+`sha256:0a135f0ad1eca6ccc1bfa6df503b9d1f7c9a0f684a993600417135f439fc0f5b`.
+Its retained receipt is
+`qualification/receipts/vulkan/strix-halo/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1.json`.
+The headless probe enumerated `GPU0`; the literal short-decode/1K/16K actor
+case passed its token-budget fairness and cancellation-cleanup contract; and
+the production Vulkan hybrid-model case matched monolithic prefill across
+quanta `[17, 17, 17, 17, 12, 1]`, six layer yields, block-aligned recurrent
+state and prefix cache, first token 13, following decode token 13, and final
+KV-block release. Both Rust cases ran through the bounded private-network
+service with no ignored tests or output-assertion failures.
+
+The receipt's execution identity is `closed-qualification-case-v1` hash
+`sha256:4e2f59070351a66c62498c8952245ba078b66548fd1f7b7b4083b32b2ab41a93`.
+Its effective-run artifact proves that neither `ROCM_PATH` nor
+`KILN_ROCM_ARCHS` entered the Vulkan base environment. This fixture uses a
+small deterministic hybrid model; it proves the named scheduling and state
+transitions, not public-model tokenizer/logit/sampling parity or serving
+performance.
+
 Vulkan core correctness:
 
 ```bash

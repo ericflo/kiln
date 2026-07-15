@@ -1,0 +1,240 @@
+{
+  "artifacts": [
+    {
+      "bytes": 6320,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1/environment.json",
+      "sha256": "sha256:304e3145dbfc7baf3c7217276d4b4e06d6eb73013a4635c959c2aa2937aa8619"
+    },
+    {
+      "bytes": 3012,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1/cases/001-device-probe-r001/stdout.log",
+      "sha256": "sha256:13620326f6fed22af90aff249a546b1f8184a4476925f8a8c58f46fdff1d4ccf"
+    },
+    {
+      "bytes": 64,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1/cases/001-device-probe-r001/stderr.log",
+      "sha256": "sha256:9b8ce0d5aabd827937d81f2e3a130958edf27c3abe507ce8c54ed6cef9c82b27"
+    },
+    {
+      "bytes": 642,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1/cases/001-device-probe-r001/case-result.json",
+      "sha256": "sha256:066fcf4fad5b183647dd297b380d6533c544bd834063e8ae9cc6e4da616ae6c4"
+    },
+    {
+      "bytes": 209,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1/cases/002-mixed-admission-fairness-r001/stdout.log",
+      "sha256": "sha256:178e7371fe0f2feff8e1be1370ad061ed8265a474bc525dace2d892e0ee335ec"
+    },
+    {
+      "bytes": 22680,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1/cases/002-mixed-admission-fairness-r001/stderr.log",
+      "sha256": "sha256:fc6f32c847573fe5f246b9135b93d61691cbad106861b59a723151bd37078976"
+    },
+    {
+      "bytes": 653,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1/cases/002-mixed-admission-fairness-r001/case-result.json",
+      "sha256": "sha256:f5b79c2aa66fee7fdc9b5dbc76470f9f3f0b45aaf037a5de892dc731f7c96627"
+    },
+    {
+      "bytes": 175,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1/cases/003-resumable-prefill-parity-r001/stdout.log",
+      "sha256": "sha256:36d2c356a0d3bf50ffe1ff07514565257d5603351c028eac55a38055a3190e02"
+    },
+    {
+      "bytes": 27680,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1/cases/003-resumable-prefill-parity-r001/stderr.log",
+      "sha256": "sha256:f3a5ebc6fbf46fa85707f50556cf733cffe8f1ac27d6555dc62bf775822725d7"
+    },
+    {
+      "bytes": 652,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1/cases/003-resumable-prefill-parity-r001/case-result.json",
+      "sha256": "sha256:6ab268eb2d57b0e0e21193b921c8fe418049cbd0efba40091aa5447e206b2b72"
+    },
+    {
+      "bytes": 8994,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1/run-config.json",
+      "sha256": "sha256:0842359a674d1e7d76e5e6f84be5ee5710396da889f9602cf61e47932fce90f1"
+    }
+  ],
+  "created_at_utc": "2026-07-15T00:01:04.950Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+      "shader": "2026.2"
+    },
+    "device": {
+      "architecture": "strix_halo",
+      "driver": "radv Mesa 26.1.3-arch1.2",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "driver": "Mesa 26.1.3-arch1.2",
+      "execution_environment_sha256": "sha256:4e2f59070351a66c62498c8952245ba078b66548fd1f7b7b4083b32b2ab41a93",
+      "vulkan_device": "1.4.348",
+      "vulkan_instance": "1.4.350"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "vulkan",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/prefill-scheduling-v1.json",
+      "--variant",
+      "vulkan",
+      "--host-id",
+      "strix-halo"
+    ],
+    "duration_seconds": 0.8166009369997482,
+    "finished_at_utc": "2026-07-15T00:01:04.950Z",
+    "kind": "correctness",
+    "profile": "prefill-scheduling-v1",
+    "started_at_utc": "2026-07-15T00:01:04.133Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260715t000104133598z-vulkan-strix-halo-prefill-scheduling-v1-6899c96516-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.020732377000967972,
+      "id": "device-probe",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.28160666600160766,
+      "id": "mixed-admission-fairness",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.3222772310000437,
+      "id": "resumable-prefill-parity",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "d6d14bfafb5cab791d7e2b6d6911942cd9a0608a",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:0a135f0ad1eca6ccc1bfa6df503b9d1f7c9a0f684a993600417135f439fc0f5b",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "prefill-scheduling-v1",
+    "parameters": {
+      "variant_id": "vulkan"
+    },
+    "seed": 20260710,
+    "sha256": "sha256:863e17b4119dbf629be291281ffcb7341e37ffc8ad9b2cf681e19c8242b11969"
+  }
+}
