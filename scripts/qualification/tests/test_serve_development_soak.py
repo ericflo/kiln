@@ -52,6 +52,7 @@ def batched_state_debug(**overrides: int | bool) -> dict:
         "capacity_rows": 8,
         "logical_rows": 8,
         "resident": True,
+        "resident_prefix_views_enabled": False,
         "active_leases": 0,
         "max_active_leases": 1,
         **{field: 0 for field in soak.BATCHED_STATE_CACHE_COUNTER_FIELDS},
@@ -603,6 +604,7 @@ class ServeRocmSoakTests(unittest.TestCase):
         assert snapshot is not None
         self.assertEqual(set(snapshot), set(soak.BATCHED_STATE_CACHE_FIELDS))
         self.assertTrue(snapshot["entry_present"])
+        self.assertFalse(snapshot["resident_prefix_views_enabled"])
         self.assertEqual(snapshot["capacity_rows"], 8)
         self.assertIsNone(
             soak.batched_state_cache_snapshot(
@@ -643,7 +645,7 @@ class ServeRocmSoakTests(unittest.TestCase):
                 take_hit_count=7,
                 take_miss_count=3,
                 take_miss_while_leased_count=2,
-                resident_prefix_view_count=4,
+                rejected_prefix_view_quarantine_count=4,
                 resident_prefix_snapshot_suppression_count=3,
                 fresh_assembly_count=1,
                 park_count=8,
@@ -658,6 +660,12 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(trace["batched_state_cache_take_hit_count_delta"], 7)
         self.assertEqual(
             trace["batched_state_cache_park_replacement_eviction_count_delta"], 2
+        )
+        self.assertEqual(
+            trace[
+                "batched_state_cache_rejected_prefix_view_quarantine_count_delta"
+            ],
+            4,
         )
         self.assertEqual(
             trace[
@@ -683,6 +691,15 @@ class ServeRocmSoakTests(unittest.TestCase):
         )
         self.assertEqual(
             metrics["batched_state_cache_park_replacement_eviction_count"], 2
+        )
+        self.assertEqual(
+            metrics[
+                "batched_state_cache_rejected_prefix_view_quarantine_count"
+            ],
+            4,
+        )
+        self.assertEqual(
+            metrics["batched_state_cache_resident_prefix_views_enabled"], 0
         )
 
         regressed = dict(after)

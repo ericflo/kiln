@@ -1193,6 +1193,18 @@ emits one structured `slow_batching_actor_phase` event with the bounded phase
 name and work size, which lets qualification correlate a token gap without
 logging ordinary forwards or request content.
 
+Native batched decode retains recurrent GDN state across actor cycles. Vulkan
+keeps exact-width cache reuse but currently quarantines reuse of a larger
+resident allocation through a smaller logical prefix: local q256 qualification
+proved that route fast but semantically unsafe. Trusted debug state exposes the
+effective `resident_prefix_views_enabled` capability plus a dedicated
+`rejected_prefix_view_quarantine_count`; Prometheus exports
+`kiln_batched_recurrent_state_cache_prefix_views_enabled` and the
+`prefix_view_quarantine` rejection reason. The Vulkan qualification contract
+requires the capability and prefix-view use count to remain zero. See
+[qualification](docs/qualification.md#batched-recurrent-state-cache-telemetry)
+for the complete ownership and counter contract.
+
 Device-pool reclaim is disabled by default because CUDA and ROCm reclaim hooks
 may synchronize the accelerator. `on-demand` permits explicit startup and
 training reclaim calls but does not start a timer. `automatic` also enables the
