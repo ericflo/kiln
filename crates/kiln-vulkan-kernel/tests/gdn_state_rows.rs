@@ -66,3 +66,58 @@ fn gdn_state_batch_copies_recycle_every_output_buffer() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn gdn_state_batch_scatter_reuses_existing_row_buffers() -> Result<()> {
+    let Some(dev) = support::vulkan_device(SUITE) else {
+        return Ok(());
+    };
+    let device_handle = dev.device().handle();
+    let before = buffer_pool::pool_stats_for_device(device_handle);
+
+    let mut source_rows = Vec::new();
+    for values in [[31_u32, 32], [41_u32, 42]] {
+        let row = buffer_pool::pool_alloc_device_local(&dev, 8)?;
+        VulkanBuffer::upload_data(
+            dev.device(),
+            dev.host_visible_mem_type(),
+            dev.queue(),
+            dev.queue_family_index(),
+            row.as_ref(),
+            bytemuck::cast_slice(&values),
+        )?;
+        source_rows.push(row);
+    }
+    let batch = kernels::copy_device_buffer_rows_to_batch(&dev, &source_rows, 8)?;
+    let destination_rows = vec![
+        buffer_pool::pool_alloc_device_local(&dev, 8)?,
+        buffer_pool::pool_alloc_device_local(&dev, 8)?,
+    ];
+    let before_scatter = buffer_pool::pool_stats_for_device(device_handle);
+
+    kernels::copy_device_buffer_batch_to_rows(&dev, batch.as_ref(), &destination_rows, 8)?;
+    assert_eq!(
+        buffer_pool::pool_stats_for_device(device_handle).borrowed_buffer_count(),
+        before_scatter.borrowed_buffer_count(),
+        "in-place scatter must not acquire or replace a state-row buffer"
+    );
+    for (row, expected) in destination_rows.iter().zip([[31_u32, 32], [41_u32, 42]]) {
+        let bytes = VulkanBuffer::read_back(
+            dev.device(),
+            dev.host_visible_mem_type(),
+            dev.queue(),
+            dev.queue_family_index(),
+            row.as_ref(),
+        )?;
+        assert_eq!(&bytes[..8], bytemuck::cast_slice(&expected));
+    }
+
+    drop(destination_rows);
+    drop(batch);
+    drop(source_rows);
+    assert_eq!(
+        buffer_pool::pool_stats_for_device(device_handle).borrowed_buffer_count(),
+        before.borrowed_buffer_count()
+    );
+    Ok(())
+}

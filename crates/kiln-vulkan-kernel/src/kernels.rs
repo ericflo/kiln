@@ -8898,42 +8898,42 @@ pub fn copy_device_buffer_rows_to_batch(
     Ok(batch_buf)
 }
 
-/// Split a contiguous device-local batch buffer into same-sized row buffers.
+/// Copy one contiguous device-local batch buffer into existing row buffers.
 ///
-/// `batch_buffer` is interpreted as `batch` byte rows of logical `row_size`;
-/// its physical capacity may include recycler bucket padding.
-pub fn split_device_buffer_batch_rows(
+/// This is the steady-state GDN scatter path: request-owned row buffers retain
+/// their identity while only their logical bytes are overwritten.
+pub fn copy_device_buffer_batch_to_rows(
     vk_device: &VulkanDevice,
     batch_buffer: &VulkanBuffer,
-    batch: usize,
+    rows: &[Arc<VulkanBuffer>],
     row_size: u64,
-) -> Result<Vec<Arc<VulkanBuffer>>> {
+) -> Result<()> {
     anyhow::ensure!(
-        batch > 0,
-        "split_device_buffer_batch_rows requires a non-zero batch"
+        !rows.is_empty(),
+        "copy_device_buffer_batch_to_rows requires at least one row"
     );
     anyhow::ensure!(
         row_size > 0,
-        "split_device_buffer_batch_rows row size must be non-zero"
+        "copy_device_buffer_batch_to_rows row size must be non-zero"
     );
     let logical_batch_size = row_size
-        .checked_mul(batch as u64)
-        .context("split_device_buffer_batch_rows byte count overflow")?;
+        .checked_mul(rows.len() as u64)
+        .context("copy_device_buffer_batch_to_rows byte count overflow")?;
     anyhow::ensure!(
         batch_buffer.size() >= logical_batch_size,
-        "split_device_buffer_batch_rows buffer size {} < logical batch size {logical_batch_size}",
+        "copy_device_buffer_batch_to_rows buffer size {} < logical batch size {logical_batch_size}",
         batch_buffer.size()
     );
+    for (idx, row) in rows.iter().enumerate() {
+        anyhow::ensure!(
+            row.size() >= row_size,
+            "copy_device_buffer_batch_to_rows row {idx} size {} < logical row size {row_size}",
+            row.size()
+        );
+    }
 
     let device = vk_device.device();
     let queue = vk_device.queue();
-    let mut rows = Vec::with_capacity(batch);
-    for _ in 0..batch {
-        rows.push(crate::buffer_pool::pool_alloc_device_local(
-            vk_device, row_size,
-        )?);
-    }
-
     let cmd_pool = vk_device.transient_command_pool()?;
     let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
     let command_buffers =
@@ -8994,6 +8994,43 @@ pub fn split_device_buffer_batch_rows(
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
 
+    Ok(())
+}
+
+/// Split a contiguous device-local batch buffer into same-sized row buffers.
+///
+/// `batch_buffer` is interpreted as `batch` byte rows of logical `row_size`;
+/// its physical capacity may include recycler bucket padding.
+pub fn split_device_buffer_batch_rows(
+    vk_device: &VulkanDevice,
+    batch_buffer: &VulkanBuffer,
+    batch: usize,
+    row_size: u64,
+) -> Result<Vec<Arc<VulkanBuffer>>> {
+    anyhow::ensure!(
+        batch > 0,
+        "split_device_buffer_batch_rows requires a non-zero batch"
+    );
+    anyhow::ensure!(
+        row_size > 0,
+        "split_device_buffer_batch_rows row size must be non-zero"
+    );
+    let logical_batch_size = row_size
+        .checked_mul(batch as u64)
+        .context("split_device_buffer_batch_rows byte count overflow")?;
+    anyhow::ensure!(
+        batch_buffer.size() >= logical_batch_size,
+        "split_device_buffer_batch_rows buffer size {} < logical batch size {logical_batch_size}",
+        batch_buffer.size()
+    );
+
+    let mut rows = Vec::with_capacity(batch);
+    for _ in 0..batch {
+        rows.push(crate::buffer_pool::pool_alloc_device_local(
+            vk_device, row_size,
+        )?);
+    }
+    copy_device_buffer_batch_to_rows(vk_device, batch_buffer, &rows, row_size)?;
     Ok(rows)
 }
 

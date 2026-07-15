@@ -236,21 +236,26 @@ impl VulkanBackend {
             };
             Arc::clone(buf)
         };
-        let row_buffers = kiln_vulkan_kernel::kernels::split_device_buffer_batch_rows(
+        let row_buffers = {
+            let g = state_map
+                .lock()
+                .map_err(|_| anyhow::anyhow!("kt {label} state mutex poisoned"))?;
+            let mut out = Vec::with_capacity(row_keys.len());
+            for key in row_keys {
+                let Some(buf) = g.get(key) else {
+                    return Ok(false);
+                };
+                out.push(Arc::clone(buf));
+            }
+            out
+        };
+        kiln_vulkan_kernel::kernels::copy_device_buffer_batch_to_rows(
             vk_device,
             &batch_buffer,
-            row_keys.len(),
+            &row_buffers,
             row_bytes,
         )
         .with_context(|| format!("scatter kt {label} state batch rows"))?;
-        {
-            let mut g = state_map
-                .lock()
-                .map_err(|_| anyhow::anyhow!("kt {label} state mutex poisoned"))?;
-            for (key, buf) in row_keys.iter().copied().zip(row_buffers.into_iter()) {
-                g.insert(key, buf);
-            }
-        }
         Ok(true)
     }
 
