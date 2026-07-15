@@ -1,0 +1,313 @@
+{
+  "schema_version": 1,
+  "workload_id": "vulkan-inference-oracles-v1",
+  "kind": "correctness",
+  "description": "Prove source-pinned HF-derived Qwen tokenizer behavior, full-vocabulary resident/nonresident Qwen logit equivalence, and Vulkan argmax, stochastic sampling, selected-logprob, loss, and gradient parity against CPU/TRL oracles.",
+  "determinism": {
+    "seed": 20260715,
+    "seed_delivery": "fixed_fixture",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "vulkan",
+      "description": "Run fail-closed inference-oracle cases on the required RADV Strix Halo Vulkan device and source-pinned Qwen3.5-4B artifacts.",
+      "backend": "vulkan",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require a concrete headless Vulkan physical device without mistaking skipped presentation-surface reporting for a device skip.",
+          "required": true,
+          "command": ["vulkaninfo", "--summary"],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "(?m)^GPU[0-9]+:$"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no vulkan device|skipp(?:ed|ing).*(?:vulkan|physical device))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "argmax-cpu-oracle",
+          "description": "Compare rows4 and rows8 BF16 fused linear argmax, including tail rows, to deterministic CPU matmul and tie-breaking expectations.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-vulkan-kernel",
+            "--test",
+            "linear_decode_argmax",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "test result: ok\\. 2 passed; 0 failed; 0 ignored"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(vulkan device.*(?:unavailable|not available)|skipp(?:ed|ing).*(?:vulkan|hardware)|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "sampling-cpu-oracle",
+          "description": "Compare greedy and true seeded categorical Vulkan sampling to a separate CPU contract across temperature, top-k, top-p, min-p, row penalties, F32, BF16, and batched tail-row paths.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-vulkan-kernel",
+            "--test",
+            "linear_decode_sample",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "KILN_VULKAN_SAMPLING_CPU_ORACLE_PASS rows=6 tokens=\\[[0-9, ]+\\]"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "test result: ok\\. 6 passed; 0 failed; 0 ignored"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(vulkan device.*(?:unavailable|not available)|skipp(?:ed|ing).*(?:vulkan|hardware)|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "selected-logprob-cpu-trl-oracle",
+          "description": "Compare Vulkan F32/BF16 selected log-probs, FLCE/GRPO losses, and backward gradients with analytical CPU, finite-difference, and pinned TRL/PyTorch references.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-vulkan-kernel",
+            "--test",
+            "vk_flce_parity",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "vk_selected_logprob_and_grpo_parity_small \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "vk_selected_logprob_and_grpo_parity_bf16_lm_head \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "vk_grpo_cispo_policy_term_matches_pinned_trl_pytorch_oracle \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "test result: ok\\. 6 passed; 0 failed; 0 ignored"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(vulkan device.*(?:unavailable|not available)|skipp(?:ed|ing).*(?:vulkan|hardware)|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "hf-tokenizer-oracle",
+          "description": "Require exact Qwen3.5 HF-derived chat rendering, token IDs, assistant-only mask, labels, and tokenizer/config/template hashes from the source-pinned model artifacts.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-train",
+            "--test",
+            "qwen35_sft_oracle",
+            "qwen35_hf_token_and_assistant_label_goldens",
+            "--",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QWEN35_MODEL_PATH": "${model_path}"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "KILN_QWEN35_HF_TOKENIZER_ORACLE_PASS cases=[1-9][0-9]*"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "test result: ok\\. 1 passed; 0 failed; 0 ignored"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "test result: FAILED"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "resident-model-logit-parity",
+          "description": "Load the source-pinned Qwen3.5-4B weights and compare full-vocabulary logits after identical prefill and decode state through resident and nonresident production Vulkan paths.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-model",
+            "--no-default-features",
+            "--features",
+            "vulkan",
+            "--test",
+            "vk_resident_decode_parity",
+            "vk_resident_decode_matches_nonresident_on_qwen35_4b",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1",
+            "KILN_RESIDENT_DECODE_PARITY_MODEL": "${model_path}"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "KILN_VULKAN_RESIDENT_LOGIT_PARITY_PASS max_abs=[^ ]+ max_rel=[^ ]+ vocab=[1-9][0-9]*"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "test result: ok\\. 1 passed; 0 failed; 0 ignored"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(resident decode.*unavailable|skipp(?:ed|ing).*resident|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  }
+}

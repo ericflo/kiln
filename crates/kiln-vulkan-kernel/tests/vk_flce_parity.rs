@@ -23,11 +23,10 @@ use kiln_vulkan_kernel::vk_ops::flce::{
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
 use std::sync::Arc;
 
+mod support;
+
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
-    if !VulkanDevice::probe() {
-        return None;
-    }
-    VulkanDevice::new().ok().map(Arc::new)
+    support::vulkan_device_arc("vk_flce_parity")
 }
 
 #[test]

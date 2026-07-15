@@ -16,10 +16,10 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **909 direct read call sites** and
+The scanner records **911 direct read call sites** and
 **361 process-mutation call sites**. It can
 statically name **366 distinct literal `KILN_*`
-read names** across **534 call sites**.
+read names** across **536 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
@@ -28,7 +28,7 @@ boundary.
 | Public stable | 9 | 1 | 0 |
 | Experimental/debug migration | 432 | 325 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
-| Test only | 140 | 41 | 353 |
+| Test only | 142 | 41 | 353 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -379,7 +379,7 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_PROFILE_GDN_STAGE_LAYER` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_PROFILE_METAL_GRAPH_STAGES` | Experimental/debug migration | 1 | `crates/kiln-model/src/metal_graph.rs` |
 | `KILN_PROFILE_PAGED_SECTIONS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_QUALIFICATION` | Experimental/debug migration, Test only | 34 | `crates/kiln-model/src/rocm_graph.rs`, `crates/kiln-model/tests/adamw_pytorch_oracle.rs`, `crates/kiln-model/tests/rocm_kv_physical_resize.rs`, `crates/kiln-server/src/bench.rs`, `crates/kiln-server/tests/real_model_integration.rs`, `crates/kiln-tensor/src/ops/log_softmax.rs`, `crates/kiln-tensor/tests/log_softmax_backend_stability.rs`, `crates/kiln-tensor/tests/metal_ops_parity.rs`, `crates/kiln-tensor/tests/rocm_matmul_parity.rs`, `crates/kiln-tensor/tests/rocm_storage_smoke.rs`, `crates/kiln-train/src/grpo_tape_shim.rs`, `crates/kiln-train/src/opd.rs`, `crates/kiln-train/src/trainer.rs`, `crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` |
+| `KILN_QUALIFICATION` | Experimental/debug migration, Test only | 36 | `crates/kiln-model/src/rocm_graph.rs`, `crates/kiln-model/tests/adamw_pytorch_oracle.rs`, `crates/kiln-model/tests/rocm_kv_physical_resize.rs`, `crates/kiln-model/tests/vk_resident_decode_parity.rs`, `crates/kiln-server/src/bench.rs`, `crates/kiln-server/tests/real_model_integration.rs`, `crates/kiln-tensor/src/ops/log_softmax.rs`, `crates/kiln-tensor/tests/log_softmax_backend_stability.rs`, `crates/kiln-tensor/tests/metal_ops_parity.rs`, `crates/kiln-tensor/tests/rocm_matmul_parity.rs`, `crates/kiln-tensor/tests/rocm_storage_smoke.rs`, `crates/kiln-train/src/grpo_tape_shim.rs`, `crates/kiln-train/src/opd.rs`, `crates/kiln-train/src/trainer.rs`, `crates/kiln-vulkan-kernel/tests/support/mod.rs`, `crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` |
 | `KILN_QUALIFICATION_CASE_RESULT` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
 | `KILN_QWEN35_MODEL_PATH` | Test only | 1 | `crates/kiln-train/tests/qwen35_sft_oracle.rs` |
 | `KILN_QWEN_TOKENIZER_PATH` | Test only | 1 | `crates/kiln-train/src/trajectory_mask.rs` |

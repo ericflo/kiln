@@ -83,6 +83,7 @@ fn qwen35_hf_token_and_assistant_label_goldens() -> Result<()> {
         .map_err(|error| anyhow::anyhow!("load Qwen tokenizer: {error}"))?
         .with_chat_template(template);
 
+    let case_count = fixture.cases.len();
     for case in fixture.cases {
         let rendered = tokenizer
             .apply_chat_template_for_training(&case.messages)
@@ -115,6 +116,8 @@ fn qwen35_hf_token_and_assistant_label_goldens() -> Result<()> {
             .collect::<Vec<_>>();
         assert_eq!(labels, case.labels, "{} labels", case.name);
     }
+
+    eprintln!("KILN_QWEN35_HF_TOKENIZER_ORACLE_PASS cases={case_count}");
 
     Ok(())
 }

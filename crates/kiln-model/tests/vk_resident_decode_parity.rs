@@ -8,10 +8,10 @@
 //! logits.
 //!
 //! Activation: gated on `KILN_RESIDENT_DECODE_PARITY_MODEL`, which
-//! must point at a Qwen3.5-4B checkpoint directory. Without the env
-//! var the test is skipped silently, so workspace `cargo test` on a
-//! host without the model still passes. The non-Vulkan workspace
-//! build skips at the `cfg(feature = "vulkan")` gate.
+//! must point at a Qwen3.5-4B checkpoint directory. Normal developer
+//! runs without the model skip with a diagnostic; `KILN_QUALIFICATION=1`
+//! makes a missing model, runtime, or resident pool fail closed. The
+//! non-Vulkan workspace build skips at the `cfg(feature = "vulkan")` gate.
 //!
 //! The resident entry point is a strict superset of the non-resident fn
 //! today: when the per-layer resident wiring lands, this test gates
@@ -38,12 +38,19 @@ const MODEL_ENV: &str = "KILN_RESIDENT_DECODE_PARITY_MODEL";
 #[test]
 fn vk_resident_decode_matches_nonresident_on_qwen35_4b() {
     let Some(model_dir) = std::env::var_os(MODEL_ENV).map(PathBuf::from) else {
+        if qualification_required() {
+            panic!("{MODEL_ENV} is required while KILN_QUALIFICATION=1");
+        }
         eprintln!(
-            "[vk_resident_decode_parity] skipped — set {MODEL_ENV}=/path/to/Qwen3.5-4B to enable"
+            "[vk_resident_decode_parity] skipped - set {MODEL_ENV}=/path/to/Qwen3.5-4B to enable"
         );
         return;
     };
     run(&model_dir).expect("vk-resident decode parity failed");
+}
+
+fn qualification_required() -> bool {
+    std::env::var("KILN_QUALIFICATION").ok().as_deref() == Some("1")
 }
 
 fn run(model_dir: &std::path::Path) -> Result<()> {
@@ -55,8 +62,11 @@ fn run(model_dir: &std::path::Path) -> Result<()> {
     let runtime = backend::for_device_kt(&device);
 
     if !ReplayBackend::runtime_supports_resident_decode(runtime.as_ref()) {
+        if qualification_required() {
+            anyhow::bail!("Vulkan resident decode runtime unavailable while KILN_QUALIFICATION=1");
+        }
         eprintln!(
-            "[vk_resident_decode_parity] skipped — ReplayBackend::runtime_supports_resident_decode() is false; \
+            "[vk_resident_decode_parity] skipped - ReplayBackend::runtime_supports_resident_decode() is false; \
              this build doesn't include the Vulkan backend"
         );
         return Ok(());
@@ -67,8 +77,11 @@ fn run(model_dir: &std::path::Path) -> Result<()> {
         config.intermediate_size,
         64,
     ) {
+        if qualification_required() {
+            anyhow::bail!("Vulkan resident decode pool unavailable while KILN_QUALIFICATION=1");
+        }
         eprintln!(
-            "[vk_resident_decode_parity] skipped — decode_resident_pool_ready returned false; \
+            "[vk_resident_decode_parity] skipped - decode_resident_pool_ready returned false; \
              not enough device-local memory for the resident ring"
         );
         return Ok(());
@@ -189,6 +202,10 @@ fn run(model_dir: &std::path::Path) -> Result<()> {
     assert!(
         max_rel <= 1e-4,
         "vk-resident logits diverge: max relative error {max_rel:e} > 1e-4 at index {worst_idx}"
+    );
+    eprintln!(
+        "KILN_VULKAN_RESIDENT_LOGIT_PARITY_PASS max_abs={max_abs:e} max_rel={max_rel:e} vocab={}",
+        legacy_v.len()
     );
     Ok(())
 }

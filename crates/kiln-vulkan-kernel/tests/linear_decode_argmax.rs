@@ -1,6 +1,10 @@
 use anyhow::Result;
 use half::bf16;
-use kiln_vulkan_kernel::{VulkanDevice, kernels};
+use kiln_vulkan_kernel::kernels;
+
+mod support;
+
+const SUITE: &str = "linear_decode_argmax";
 
 fn expected_argmax(
     x: &[f32],
@@ -30,8 +34,7 @@ fn expected_argmax(
 
 #[test]
 fn batched_bf16_argmax_rows4_matches_cpu_with_tail_rows() -> Result<()> {
-    let Ok(dev) = VulkanDevice::new() else {
-        eprintln!("skipping: Vulkan device unavailable");
+    let Some(dev) = support::vulkan_device(SUITE) else {
         return Ok(());
     };
 
@@ -61,8 +64,7 @@ fn batched_bf16_argmax_rows4_matches_cpu_with_tail_rows() -> Result<()> {
 
 #[test]
 fn batched_bf16_argmax_rows8_matches_cpu_with_tail_rows() -> Result<()> {
-    let Ok(dev) = VulkanDevice::new() else {
-        eprintln!("skipping: Vulkan device unavailable");
+    let Some(dev) = support::vulkan_device(SUITE) else {
         return Ok(());
     };
 
