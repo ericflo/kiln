@@ -3235,7 +3235,6 @@ pub fn dispatch_linear_decode_sample_bytes(
     seed: u64,
 ) -> Result<u32> {
     let device = vk_device.device();
-    let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
     anyhow::ensure!(out_dim > 0, "linear_decode_sample: out_dim must be nonzero");
@@ -3258,13 +3257,12 @@ pub fn dispatch_linear_decode_sample_bytes(
     );
 
     // ---- Allocate the device-local buffers ----
-    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+    let x_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, x_data.len() as u64)
         .context("failed to create linear_decode_sample x buffer")?;
     // Logits buffer is `[out_dim]` f32. Stays on device for the entire
     // pipeline — never copied back to host.
-    let logits_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, (out_dim * 4) as u64)
-            .context("failed to create linear_decode_sample logits buffer")?;
+    let logits_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, (out_dim * 4) as u64)
+        .context("failed to create linear_decode_sample logits buffer")?;
 
     // ---- Step 2: prepare optional penalty buffers before recording ----
     let penalties_active = !history_indices.is_empty()
@@ -3276,15 +3274,13 @@ pub fn dispatch_linear_decode_sample_bytes(
     let mut upload_segments = Vec::with_capacity(if penalties_active { 3 } else { 1 });
     upload_segments.push(x_data);
     if penalties_active {
-        let idx_buf = VulkanBuffer::create_device_local(
-            device,
-            device_local_mt,
+        let idx_buf = crate::buffer_pool::pool_alloc_device_local(
+            vk_device,
             (history_indices.len() * 4) as u64,
         )
         .context("failed to create penalty history-index buffer")?;
-        let cnt_buf = VulkanBuffer::create_device_local(
-            device,
-            device_local_mt,
+        let cnt_buf = crate::buffer_pool::pool_alloc_device_local(
+            vk_device,
             (history_counts.len() * 4) as u64,
         )
         .context("failed to create penalty history-count buffer")?;
@@ -3303,9 +3299,9 @@ pub fn dispatch_linear_decode_sample_bytes(
             .context("failed to stage linear_decode_sample uploads")?;
 
     // ---- Step 3: record lm_head + optional penalties + sample + readback ----
-    let out_token_buf = VulkanBuffer::create_device_local(device, device_local_mt, 4)
+    let out_token_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, 4)
         .context("failed to create linear_decode_sample out-token buffer")?;
-    let out_staging = VulkanBuffer::create_host_visible(device, host_visible_mt, 4)
+    let out_staging = crate::buffer_pool::pool_alloc_host_visible(device, host_visible_mt, 4)
         .context("failed to create linear_decode_sample output staging buffer")?;
 
     let lm_glsl = if packed_bf16_weights {
@@ -3315,10 +3311,11 @@ pub fn dispatch_linear_decode_sample_bytes(
     };
     let mut batch =
         crate::CommandBatch::new(vk_device).context("linear_decode_sample: create CommandBatch")?;
-    let mut upload_copies = Vec::with_capacity(if penalties_active { 3 } else { 1 });
+    let mut upload_copies: Vec<(&VulkanBuffer, &VulkanBuffer, u64, u64, u64)> =
+        Vec::with_capacity(if penalties_active { 3 } else { 1 });
     upload_copies.push((
         upload_stage.as_ref(),
-        &x_buf,
+        x_buf.as_ref(),
         upload_offsets[0],
         0,
         x_data.len() as u64,
@@ -3326,14 +3323,14 @@ pub fn dispatch_linear_decode_sample_bytes(
     if let (Some(idx_buf), Some(cnt_buf)) = (&_history_idx_buf, &_history_cnt_buf) {
         upload_copies.push((
             upload_stage.as_ref(),
-            idx_buf,
+            idx_buf.as_ref(),
             upload_offsets[1],
             0,
             (history_indices.len() * 4) as u64,
         ));
         upload_copies.push((
             upload_stage.as_ref(),
-            cnt_buf,
+            cnt_buf.as_ref(),
             upload_offsets[2],
             0,
             (history_counts.len() * 4) as u64,
@@ -3428,7 +3425,6 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
     seeds: &[u64],
 ) -> Result<Vec<u32>> {
     let device = vk_device.device();
-    let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
     anyhow::ensure!(
@@ -3490,45 +3486,38 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
         .collect();
     let seed_hi: Vec<u32> = seeds.iter().map(|seed| (*seed >> 32) as u32).collect();
 
-    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+    let x_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, x_data.len() as u64)
         .context("failed to create linear_decode_sample_batch x buffer")?;
     let logits_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, (batch * out_dim * 4) as u64)
+        crate::buffer_pool::pool_alloc_device_local(vk_device, (batch * out_dim * 4) as u64)
             .context("failed to create linear_decode_sample_batch logits buffer")?;
-    let top_k_buf = VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+    let top_k_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, (batch * 4) as u64)
         .context("failed to create linear_decode_sample_batch top_k buffer")?;
     let temperature_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+        crate::buffer_pool::pool_alloc_device_local(vk_device, (batch * 4) as u64)
             .context("failed to create linear_decode_sample_batch temperature buffer")?;
-    let top_p_buf = VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+    let top_p_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, (batch * 4) as u64)
         .context("failed to create linear_decode_sample_batch top_p buffer")?;
-    let min_p_buf = VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+    let min_p_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, (batch * 4) as u64)
         .context("failed to create linear_decode_sample_batch min_p buffer")?;
-    let seed_lo_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
-            .context("failed to create linear_decode_sample_batch seed_lo buffer")?;
-    let seed_hi_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
-            .context("failed to create linear_decode_sample_batch seed_hi buffer")?;
+    let seed_lo_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, (batch * 4) as u64)
+        .context("failed to create linear_decode_sample_batch seed_lo buffer")?;
+    let seed_hi_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, (batch * 4) as u64)
+        .context("failed to create linear_decode_sample_batch seed_hi buffer")?;
 
     let penalties_active = !history_indices.is_empty();
     let history_row_buf = if penalties_active {
         Some(
-            VulkanBuffer::create_device_local(
-                device,
-                device_local_mt,
-                (history_rows.len() * 4) as u64,
-            )
-            .context("failed to create batched penalty row buffer")?,
+            crate::buffer_pool::pool_alloc_device_local(vk_device, (history_rows.len() * 4) as u64)
+                .context("failed to create batched penalty row buffer")?,
         )
     } else {
         None
     };
     let history_idx_buf = if penalties_active {
         Some(
-            VulkanBuffer::create_device_local(
-                device,
-                device_local_mt,
+            crate::buffer_pool::pool_alloc_device_local(
+                vk_device,
                 (history_indices.len() * 4) as u64,
             )
             .context("failed to create batched penalty index buffer")?,
@@ -3538,9 +3527,8 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
     };
     let history_cnt_buf = if penalties_active {
         Some(
-            VulkanBuffer::create_device_local(
-                device,
-                device_local_mt,
+            crate::buffer_pool::pool_alloc_device_local(
+                vk_device,
                 (history_counts.len() * 4) as u64,
             )
             .context("failed to create batched penalty count buffer")?,
@@ -3550,7 +3538,7 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
     };
     let repetition_buf = if penalties_active {
         Some(
-            VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+            crate::buffer_pool::pool_alloc_device_local(vk_device, (batch * 4) as u64)
                 .context("failed to create batched repetition buffer")?,
         )
     } else {
@@ -3558,7 +3546,7 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
     };
     let presence_buf = if penalties_active {
         Some(
-            VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+            crate::buffer_pool::pool_alloc_device_local(vk_device, (batch * 4) as u64)
                 .context("failed to create batched presence buffer")?,
         )
     } else {
@@ -3566,7 +3554,7 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
     };
     let frequency_buf = if penalties_active {
         Some(
-            VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+            crate::buffer_pool::pool_alloc_device_local(vk_device, (batch * 4) as u64)
                 .context("failed to create batched frequency buffer")?,
         )
     } else {
@@ -3612,11 +3600,10 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
         VulkanBuffer::create_host_visible_with_segments(device, host_visible_mt, &upload_segments)
             .context("failed to stage linear_decode_sample_batch uploads")?;
 
-    let out_token_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
-            .context("failed to create linear_decode_sample_batch out-token buffer")?;
+    let out_token_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, (batch * 4) as u64)
+        .context("failed to create linear_decode_sample_batch out-token buffer")?;
     let out_staging =
-        VulkanBuffer::create_host_visible(device, host_visible_mt, (batch * 4) as u64)
+        crate::buffer_pool::pool_alloc_host_visible(device, host_visible_mt, (batch * 4) as u64)
             .context("failed to create linear_decode_sample_batch output staging buffer")?;
 
     let rows8 = packed_bf16_weights
