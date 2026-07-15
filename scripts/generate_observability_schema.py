@@ -980,6 +980,14 @@ def build_definitions() -> None:
             "host_visible_frees", "host_visible_freed_bytes",
         ]
     }, "Process-lifetime live and cumulative VulkanBuffer allocation accounting by memory route.")
+    add_object("VulkanBufferPoolInfo", "VulkanBufferPoolInfo", {
+        field: ref("NonNegativeInteger") for field in [
+            "max_retained_bytes", "bucket_count", "buffer_count", "retained_bytes",
+            "free_buffer_count", "free_bytes", "borrowed_buffer_count", "borrowed_bytes",
+            "cache_hits", "cache_misses", "eviction_count", "evicted_bytes",
+            "uncached_allocation_count", "uncached_allocated_bytes",
+        ]
+    }, "Bounded Vulkan scratch-recycler ownership, effectiveness, eviction, and overflow accounting.")
     add_object("RequestMetrics", "RequestMetrics", {
         field: ref("NonNegativeInteger") for field in ["total", "ok", "error", "timeout", "rejected", "active", "active_peak"]
     }, "Lifetime request outcome and concurrency counters.")
@@ -1062,12 +1070,13 @@ def build_definitions() -> None:
         "requests": ref("RequestMetrics"), "recent_requests": ref("RecentRequestMetrics"),
         "scheduler": nullable(ref("SchedulerStats")), "self_improve_scheduler": ref("SelfImproveSchedulerStatus"),
         "gpu_memory": nullable(ref("GpuMemoryInfo")), "vulkan_buffers": ref("VulkanBufferInfo"),
+        "vulkan_buffer_pool": ref("VulkanBufferPoolInfo"),
         "prefix_cache": ref("PrefixCacheHealthInfo"),
         "prompt_caches": ref("PromptCachesInfo"), "decode_runtime": ref("DecodeRuntimeInfo"),
         "prefill_runtime": ref("PrefillRuntimeInfo"), "training": ref("TrainingInfo"),
         "checks": array(ref("HealthCheck"), min_items=6, max_items=6),
     }, "Complete readiness and runtime diagnostic response returned with HTTP 200 or 503.",
-        optional=("self_improve_scheduler", "vulkan_buffers"))
+        optional=("self_improve_scheduler", "vulkan_buffers", "vulkan_buffer_pool"))
 
     add_object("BatchingConfigResponse", "BatchingConfigResponse", {
         "configuration": ref("BatchingRuntimeConfig"), "actor_active": ref("Boolean"),
@@ -1109,6 +1118,15 @@ def build_definitions() -> None:
         "reclaim_mode_effective": ref("String"), "reclaim_mode_source": ref("ConfigValueSource"),
         "reclaim_disabled_by_serving_profile": ref("Boolean"),
     }, "Resolved memory-governor floor, capacity, probe, and reclaim state.")
+    add_object("VulkanBufferPoolConfig", "VulkanBufferPoolConfig", {
+        **{field: ref("NonNegativeInteger") for field in [
+            "max_retained_bytes", "retained_bytes", "free_bytes", "borrowed_bytes",
+            "eviction_count", "evicted_bytes", "uncached_allocation_count",
+            "uncached_allocated_bytes",
+        ]},
+        "max_retained_gib": ref("NonNegativeNumber"),
+        "retained_gib": ref("NonNegativeNumber"),
+    }, "Resolved Vulkan scratch-recycler cap, live retention, and pressure-release state.")
     add_object("VramConfig", "VramConfig", {
         "probe_selector": ref("String"), "unified": ref("Boolean"),
         "physical_capacity_bytes": ref("NonNegativeInteger"), "physical_capacity_gib": ref("NonNegativeNumber"),
@@ -1117,7 +1135,9 @@ def build_definitions() -> None:
         "effective_capacity_bytes": ref("NonNegativeInteger"), "effective_capacity_gib": ref("NonNegativeNumber"),
         "effective_capacity_source": ref("String"), "configured_capacity_clamped": ref("Boolean"),
         "live": ref("LiveMemoryConfig"), "governor": ref("MemoryGovernorConfig"),
-    }, "Physical, configured, effective, and live VRAM capacity report.")
+        "vulkan_buffer_pool": ref("VulkanBufferPoolConfig"),
+    }, "Physical, configured, effective, and live VRAM capacity report.",
+        optional=("vulkan_buffer_pool",))
     add_object("KvCacheConfig", "KvCacheConfig", {
         "num_blocks": ref("NonNegativeInteger"), "num_blocks_source": ref("String"),
         "fp8_enabled": ref("Boolean"), "autoscaler": ref("KvAutoscalerState"),
@@ -1492,6 +1512,22 @@ def build_schema() -> dict[str, Any]:
         "host_visible_allocated_bytes": 201_326_592,
         "host_visible_frees": 64,
         "host_visible_freed_bytes": 134_217_728,
+    }
+    health["vulkan_buffer_pool"] = {
+        "max_retained_bytes": 3_221_225_472,
+        "bucket_count": 48,
+        "buffer_count": 180,
+        "retained_bytes": 2_148_204_544,
+        "free_buffer_count": 176,
+        "free_bytes": 2_080_768_000,
+        "borrowed_buffer_count": 4,
+        "borrowed_bytes": 67_436_544,
+        "cache_hits": 981_000,
+        "cache_misses": 180,
+        "eviction_count": 0,
+        "evicted_bytes": 0,
+        "uncached_allocation_count": 0,
+        "uncached_allocated_bytes": 0,
     }
     health["backend_runtime"].update({"healthy": True, "quarantined": False, "restart_required": False})
     health["serving_profile"].update({"profile": "stable", "immutable_after_startup": True})

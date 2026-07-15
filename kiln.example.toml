@@ -211,6 +211,9 @@ model_id = "Qwen/Qwen3.5-4B"
                                       # KILN_MEMORY_GPU_MEMORY_GB is the canonical override.
 inference_memory_fraction = 0.7       # Fraction of VRAM for inference (rest for training)
 # training_memory_gb = 4.0           # Optional cap on the remaining training budget
+vulkan_buffer_pool_gb = 3.0           # Vulkan scratch bytes retained for reuse. Zero disables
+                                      # retention; active overflow is freed on drop. Override via
+                                      # KILN_MEMORY_VULKAN_BUFFER_POOL_GB.
 floor_gb = 1.0                        # Additional GiB of live free memory the process-wide governor
                                       # withholds from allocation admission. It must be strictly
                                       # smaller than effective accelerator capacity. This is

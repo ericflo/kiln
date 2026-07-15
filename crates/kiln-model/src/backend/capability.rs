@@ -892,6 +892,7 @@ pub enum GpuMemoryReclaimer {
     None,
     CudaTrimPool,
     RocmTrimPool,
+    VulkanTrimPool,
     LoggedNoop { log_message: &'static str },
 }
 
@@ -2358,9 +2359,6 @@ impl GpuAllocatorMemoryProbePolicy {
 impl GpuMemoryReclaimPolicy {
     pub const METAL_LOGGED_NOOP_MESSAGE: &'static str =
         "metal reclaimer: UMA, no pool to trim (no-op)";
-    pub const VULKAN_LOGGED_NOOP_MESSAGE: &'static str =
-        "vulkan reclaimer: cache-drain not yet implemented (no-op)";
-
     pub const NONE: Self = Self {
         reclaimer: GpuMemoryReclaimer::None,
     };
@@ -2372,9 +2370,7 @@ impl GpuMemoryReclaimPolicy {
             kiln_tensor::Backend::Metal => GpuMemoryReclaimer::LoggedNoop {
                 log_message: Self::METAL_LOGGED_NOOP_MESSAGE,
             },
-            kiln_tensor::Backend::Vulkan => GpuMemoryReclaimer::LoggedNoop {
-                log_message: Self::VULKAN_LOGGED_NOOP_MESSAGE,
-            },
+            kiln_tensor::Backend::Vulkan => GpuMemoryReclaimer::VulkanTrimPool,
             kiln_tensor::Backend::Cpu => GpuMemoryReclaimer::None,
             _ => GpuMemoryReclaimer::None,
         };

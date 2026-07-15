@@ -64,6 +64,22 @@ struct VramConfig {
     configured_capacity_clamped: bool,
     live: LiveMemoryConfig,
     governor: MemoryGovernorConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vulkan_buffer_pool: Option<VulkanBufferPoolConfig>,
+}
+
+#[derive(Serialize)]
+struct VulkanBufferPoolConfig {
+    max_retained_bytes: u64,
+    max_retained_gib: f64,
+    retained_bytes: u64,
+    retained_gib: f64,
+    free_bytes: u64,
+    borrowed_bytes: u64,
+    eviction_count: u64,
+    evicted_bytes: u64,
+    uncached_allocation_count: u64,
+    uncached_allocated_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -712,6 +728,20 @@ fn build_vram_config(state: &AppState, observation: CachedMemoryGovernorObservat
             reclaim_mode_source: state.memory_config.reclaim_mode.source(),
             reclaim_disabled_by_serving_profile: !reclaim_enabled,
         },
+        vulkan_buffer_pool: kiln_model::vulkan_buffer_pool_stats().map(|pool| {
+            VulkanBufferPoolConfig {
+                max_retained_bytes: pool.max_retained_bytes,
+                max_retained_gib: gib(pool.max_retained_bytes),
+                retained_bytes: pool.total_bytes,
+                retained_gib: gib(pool.total_bytes),
+                free_bytes: pool.free_bytes,
+                borrowed_bytes: pool.borrowed_bytes(),
+                eviction_count: pool.eviction_count,
+                evicted_bytes: pool.evicted_bytes,
+                uncached_allocation_count: pool.uncached_allocation_count,
+                uncached_allocated_bytes: pool.uncached_allocated_bytes,
+            }
+        }),
     }
 }
 

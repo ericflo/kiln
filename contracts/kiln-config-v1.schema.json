@@ -613,6 +613,17 @@
           "x-kiln-environment": "KILN_TRAINING_MEMORY_GB (deprecated compatibility)",
           "x-kiln-validation": "Must be finite, greater than zero, and representable as bytes when set. Optional training-budget cap in GiB; it can reduce but never expand the capacity remaining after resident model and KV allocations."
         },
+        "vulkan_buffer_pool_gb": {
+          "type": "number",
+          "minimum": 0,
+          "default": 3.0,
+          "description": "Vulkan-only process-wide cap, in GiB, on idle scratch buffers retained for reuse. Must be finite, non-negative, and representable as bytes; 0 disables retention. Active operations may allocate beyond the cap, but overflow buffers are freed when their final caller drops. A new cache entry evicts the oldest idle buffers before admission, and pressure reclaim releases idle entries under exclusive GPU coordination. /v1/config, /health, and Prometheus expose the cap, retained/free/borrowed bytes, hits/misses, evictions, and uncached overflow.",
+          "x-kiln-path": "memory.vulkan_buffer_pool_gb",
+          "x-kiln-type-and-default": "finite number; 3.0",
+          "x-kiln-canonical-env": "KILN_MEMORY_VULKAN_BUFFER_POOL_GB (implemented)",
+          "x-kiln-environment": "KILN_VULKAN_BUFFER_POOL_GB (deprecated compatibility)",
+          "x-kiln-validation": "Vulkan-only process-wide cap, in GiB, on idle scratch buffers retained for reuse. Must be finite, non-negative, and representable as bytes; 0 disables retention. Active operations may allocate beyond the cap, but overflow buffers are freed when their final caller drops. A new cache entry evicts the oldest idle buffers before admission, and pressure reclaim releases idle entries under exclusive GPU coordination. /v1/config, /health, and Prometheus expose the cap, retained/free/borrowed bytes, hits/misses, evictions, and uncached overflow."
+        },
         "floor_gb": {
           "type": "number",
           "minimum": 0,
@@ -1544,11 +1555,11 @@
       }
     }
   ],
-  "x-kiln-field-count": 98,
+  "x-kiln-field-count": 99,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 93,
+  "x-kiln-canonical-environment-count": 94,
   "x-kiln-config-file-only-count": 5,
-  "x-kiln-compatibility-field-count": 66,
-  "x-kiln-compatibility-alias-count": 69,
+  "x-kiln-compatibility-field-count": 67,
+  "x-kiln-compatibility-alias-count": 70,
   "x-kiln-toml-compatibility-field-count": 1
 }

@@ -484,6 +484,17 @@ async fn main() -> Result<()> {
     // --- Server startup ---
     let mut config = KilnConfig::load(args.config.as_deref())?;
     config.apply_serve_cli_overrides(serve_cli_overrides.0.as_deref(), serve_cli_overrides.1)?;
+    #[cfg(feature = "vulkan")]
+    {
+        let max_retained_bytes = config.memory.vulkan_buffer_pool_bytes();
+        let reclaimed_bytes = kiln_model::configure_vulkan_buffer_pool(max_retained_bytes);
+        tracing::info!(
+            max_retained_bytes,
+            reclaimed_bytes,
+            immutable_after_startup = true,
+            "Vulkan buffer recycler policy resolved"
+        );
+    }
     let gradient_checkpoint_policy = kiln_train::GradientCheckpointPolicy::from_parts(
         config.training.grad_checkpoint_segments,
         config.training.no_grad_checkpoint,

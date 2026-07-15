@@ -1253,9 +1253,7 @@ fn gpu_memory_reclaim_policy_routes_backend_hooks() {
     );
     assert_eq!(
         GpuMemoryReclaimPolicy::for_backend("vulkan", Device::Vulkan(0)).reclaimer,
-        GpuMemoryReclaimer::LoggedNoop {
-            log_message: GpuMemoryReclaimPolicy::VULKAN_LOGGED_NOOP_MESSAGE,
-        }
+        GpuMemoryReclaimer::VulkanTrimPool
     );
     assert_eq!(
         GpuMemoryReclaimPolicy::for_backend("cpu", Device::Cpu).reclaimer,

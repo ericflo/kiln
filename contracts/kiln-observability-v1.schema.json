@@ -1202,6 +1202,22 @@
           "host_visible_allocated_bytes": 201326592,
           "host_visible_frees": 64,
           "host_visible_freed_bytes": 134217728
+        },
+        "vulkan_buffer_pool": {
+          "max_retained_bytes": 3221225472,
+          "bucket_count": 48,
+          "buffer_count": 180,
+          "retained_bytes": 2148204544,
+          "free_buffer_count": 176,
+          "free_bytes": 2080768000,
+          "borrowed_buffer_count": 4,
+          "borrowed_bytes": 67436544,
+          "cache_hits": 981000,
+          "cache_misses": 180,
+          "eviction_count": 0,
+          "evicted_bytes": 0,
+          "uncached_allocation_count": 0,
+          "uncached_allocated_bytes": 0
         }
       }
     ],
@@ -4121,6 +4137,9 @@
         },
         "vulkan_buffers": {
           "$ref": "#/$defs/VulkanBufferInfo"
+        },
+        "vulkan_buffer_pool": {
+          "$ref": "#/$defs/VulkanBufferPoolInfo"
         },
         "prefix_cache": {
           "$ref": "#/$defs/PrefixCacheHealthInfo"
@@ -8669,6 +8688,9 @@
         },
         "governor": {
           "$ref": "#/$defs/MemoryGovernorConfig"
+        },
+        "vulkan_buffer_pool": {
+          "$ref": "#/$defs/VulkanBufferPoolConfig"
         }
       },
       "description": "Physical, configured, effective, and live VRAM capacity report.",
@@ -8736,6 +8758,124 @@
       },
       "description": "Process-lifetime live and cumulative VulkanBuffer allocation accounting by memory route.",
       "x-kiln-rust-type": "VulkanBufferInfo",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "VulkanBufferPoolConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_retained_bytes",
+        "retained_bytes",
+        "free_bytes",
+        "borrowed_bytes",
+        "eviction_count",
+        "evicted_bytes",
+        "uncached_allocation_count",
+        "uncached_allocated_bytes",
+        "max_retained_gib",
+        "retained_gib"
+      ],
+      "properties": {
+        "max_retained_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "retained_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "free_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "borrowed_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "eviction_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "evicted_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "uncached_allocation_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "uncached_allocated_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_retained_gib": {
+          "$ref": "#/$defs/NonNegativeNumber"
+        },
+        "retained_gib": {
+          "$ref": "#/$defs/NonNegativeNumber"
+        }
+      },
+      "description": "Resolved Vulkan scratch-recycler cap, live retention, and pressure-release state.",
+      "x-kiln-rust-type": "VulkanBufferPoolConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "VulkanBufferPoolInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_retained_bytes",
+        "bucket_count",
+        "buffer_count",
+        "retained_bytes",
+        "free_buffer_count",
+        "free_bytes",
+        "borrowed_buffer_count",
+        "borrowed_bytes",
+        "cache_hits",
+        "cache_misses",
+        "eviction_count",
+        "evicted_bytes",
+        "uncached_allocation_count",
+        "uncached_allocated_bytes"
+      ],
+      "properties": {
+        "max_retained_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "bucket_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "buffer_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "retained_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "free_buffer_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "free_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "borrowed_buffer_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "borrowed_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "cache_hits": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "cache_misses": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "eviction_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "evicted_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "uncached_allocation_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "uncached_allocated_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Bounded Vulkan scratch-recycler ownership, effectiveness, eviction, and overflow accounting.",
+      "x-kiln-rust-type": "VulkanBufferPoolInfo",
       "x-kiln-field-schema-status": "complete"
     }
   }

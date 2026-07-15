@@ -2090,6 +2090,7 @@ def write_server_config(
         f"reclaim_mode = {_toml_string(runtime['memory_reclaim_requested_mode'])}",
         f"kv_autoscale = {'true' if runtime['kv_autoscale_requested'] else 'false'}",
         f"kv_force_blocks = {kv_force_blocks}",
+        f"vulkan_buffer_pool_gb = {float(runtime.get('vulkan_buffer_pool_gb', 3.0))}",
         "",
         "[logging]",
         'format = "json"',

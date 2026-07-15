@@ -1155,6 +1155,12 @@ impl VulkanBuffer {
         self.size
     }
 
+    /// Exact bytes bound by Vulkan for this buffer, including driver-required
+    /// alignment beyond the logical buffer size.
+    pub fn allocation_size(&self) -> u64 {
+        self.allocation_size
+    }
+
     /// Map this buffer's memory and `memcpy` `bytes` into it. Only
     /// valid for buffers created with host-visible memory
     /// (`create_host_visible`). No GPU submission; the GPU pulls the

@@ -2191,6 +2191,106 @@ impl Metrics {
             );
         }
 
+        if let Some(stats) = gauges.vulkan_buffer_pool {
+            out.push_str("# HELP kiln_vulkan_buffer_pool_limit_bytes Configured maximum bytes retained by the Vulkan scratch recycler.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_pool_limit_bytes gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_vulkan_buffer_pool_limit_bytes {}",
+                    stats.max_retained_bytes
+                ),
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_pool_bytes Vulkan scratch bytes retained by ownership state.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_pool_bytes gauge\n");
+            for (state, value) in [
+                ("retained", stats.total_bytes),
+                ("free", stats.free_bytes),
+                ("borrowed", stats.borrowed_bytes()),
+            ] {
+                prom_counter(
+                    &mut out,
+                    "kiln_vulkan_buffer_pool_bytes",
+                    "state",
+                    state,
+                    value,
+                );
+            }
+            out.push_str("# HELP kiln_vulkan_buffer_pool_buffers Vulkan scratch buffers retained by ownership state.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_pool_buffers gauge\n");
+            for (state, value) in [
+                ("retained", stats.buffer_count),
+                ("free", stats.free_buffer_count),
+                ("borrowed", stats.borrowed_buffer_count()),
+            ] {
+                prom_counter(
+                    &mut out,
+                    "kiln_vulkan_buffer_pool_buffers",
+                    "state",
+                    state,
+                    value as u64,
+                );
+            }
+            out.push_str("# HELP kiln_vulkan_buffer_pool_buckets Number of retained Vulkan recycler buckets.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_pool_buckets gauge\n");
+            push_line(
+                &mut out,
+                &format!("kiln_vulkan_buffer_pool_buckets {}", stats.bucket_count),
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_pool_requests_total Vulkan recycler lookups by result.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_pool_requests_total counter\n");
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_pool_requests_total",
+                "result",
+                "hit",
+                stats.cache_hits,
+            );
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_pool_requests_total",
+                "result",
+                "miss",
+                stats.cache_misses,
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_pool_evictions_total Idle Vulkan recycler buffers released for capacity or pressure.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_pool_evictions_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_vulkan_buffer_pool_evictions_total {}",
+                    stats.eviction_count
+                ),
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_pool_evicted_bytes_total Vulkan recycler bytes cumulatively released for capacity or pressure.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_pool_evicted_bytes_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_vulkan_buffer_pool_evicted_bytes_total {}",
+                    stats.evicted_bytes
+                ),
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_pool_uncached_allocations_total Vulkan scratch allocations not retained because the recycler cap had no room.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_pool_uncached_allocations_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_vulkan_buffer_pool_uncached_allocations_total {}",
+                    stats.uncached_allocation_count
+                ),
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_pool_uncached_allocated_bytes_total Vulkan scratch bytes cumulatively allocated outside the retained recycler.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_pool_uncached_allocated_bytes_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_vulkan_buffer_pool_uncached_allocated_bytes_total {}",
+                    stats.uncached_allocated_bytes
+                ),
+            );
+        }
+
         // --- Prefix cache ---
         out.push_str("# HELP kiln_prefix_cache_lookups_total Total prefix cache lookups.\n");
         out.push_str("# TYPE kiln_prefix_cache_lookups_total counter\n");
@@ -2691,6 +2791,7 @@ pub struct SnapshotGauges {
     pub vram_kv_cache: u64,
     pub vram_training_budget: u64,
     pub vulkan_buffers: Option<kiln_model::VulkanBufferAllocationStats>,
+    pub vulkan_buffer_pool: Option<kiln_model::VulkanBufferPoolStats>,
     pub prefix_cache: PrefixCacheStats,
     pub rendered_prompt_cache_hits: u64,
     pub rendered_prompt_cache_misses: u64,
@@ -3227,6 +3328,20 @@ mod tests {
                 host_visible_frees: 10,
                 host_visible_freed_bytes: 100,
             }),
+            vulkan_buffer_pool: Some(kiln_model::VulkanBufferPoolStats {
+                max_retained_bytes: 4096,
+                bucket_count: 3,
+                buffer_count: 8,
+                total_bytes: 3072,
+                free_buffer_count: 5,
+                free_bytes: 2048,
+                cache_hits: 100,
+                cache_misses: 9,
+                eviction_count: 2,
+                evicted_bytes: 512,
+                uncached_allocation_count: 1,
+                uncached_allocated_bytes: 256,
+            }),
             prefix_cache: PrefixCacheStats {
                 lookup_hits: 7,
                 lookup_misses: 3,
@@ -3675,6 +3790,7 @@ mod tests {
             vram_kv_cache: 0,
             vram_training_budget: 0,
             vulkan_buffers: None,
+            vulkan_buffer_pool: None,
             prefix_cache: PrefixCacheStats::default(),
             rendered_prompt_cache_hits: 0,
             rendered_prompt_cache_misses: 0,

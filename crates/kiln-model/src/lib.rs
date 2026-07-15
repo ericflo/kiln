@@ -106,6 +106,8 @@ pub use weights::{ModelSnapshotCleanup, ModelWeights};
 
 #[cfg(feature = "vulkan")]
 pub use kiln_vulkan_kernel::buffer::VulkanBufferAllocationStats;
+#[cfg(feature = "vulkan")]
+pub use kiln_vulkan_kernel::buffer_pool::BufferPoolStats as VulkanBufferPoolStats;
 
 #[cfg(not(feature = "vulkan"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -125,6 +127,34 @@ pub struct VulkanBufferAllocationStats {
     pub host_visible_freed_bytes: u64,
 }
 
+#[cfg(not(feature = "vulkan"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VulkanBufferPoolStats {
+    pub max_retained_bytes: u64,
+    pub bucket_count: usize,
+    pub buffer_count: usize,
+    pub total_bytes: u64,
+    pub free_buffer_count: usize,
+    pub free_bytes: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub eviction_count: u64,
+    pub evicted_bytes: u64,
+    pub uncached_allocation_count: u64,
+    pub uncached_allocated_bytes: u64,
+}
+
+#[cfg(not(feature = "vulkan"))]
+impl VulkanBufferPoolStats {
+    pub fn borrowed_buffer_count(self) -> usize {
+        self.buffer_count.saturating_sub(self.free_buffer_count)
+    }
+
+    pub fn borrowed_bytes(self) -> u64 {
+        self.total_bytes.saturating_sub(self.free_bytes)
+    }
+}
+
 pub fn vulkan_buffer_allocation_stats() -> Option<VulkanBufferAllocationStats> {
     #[cfg(feature = "vulkan")]
     {
@@ -133,5 +163,40 @@ pub fn vulkan_buffer_allocation_stats() -> Option<VulkanBufferAllocationStats> {
     #[cfg(not(feature = "vulkan"))]
     {
         None
+    }
+}
+
+pub fn vulkan_buffer_pool_stats() -> Option<VulkanBufferPoolStats> {
+    #[cfg(feature = "vulkan")]
+    {
+        Some(kiln_vulkan_kernel::buffer_pool::pool_stats())
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        None
+    }
+}
+
+pub fn configure_vulkan_buffer_pool(max_retained_bytes: u64) -> u64 {
+    #[cfg(feature = "vulkan")]
+    {
+        kiln_vulkan_kernel::buffer_pool::pool_configure_max_retained_bytes(max_retained_bytes)
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = max_retained_bytes;
+        0
+    }
+}
+
+pub fn trim_vulkan_buffer_pool(target_bytes: u64) -> u64 {
+    #[cfg(feature = "vulkan")]
+    {
+        kiln_vulkan_kernel::buffer_pool::pool_trim_free(target_bytes)
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = target_bytes;
+        0
     }
 }

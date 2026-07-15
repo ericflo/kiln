@@ -394,18 +394,19 @@ curl -s http://localhost:8420/v1/chat/completions \
             <div class="label mb-2">Check</div>
             <ul class="list-disc pl-5">
               <li>Inspect <code>/v1/config</code> at <code>vram.live</code>, including sample age, staleness, sampler health, and <code>raw_observations.host_backed</code>.</li>
+              <li>For Vulkan, inspect <code>vram.vulkan_buffer_pool</code> and <code>/health</code> at <code>vulkan_buffer_pool</code>. Growing retained bytes indicate recycler working-set growth; flat retention with growing RSS indicates a different ownership or page-residency mechanism.</li>
               <li>On Linux Vulkan, compare primary VRAM with the host-backed GTT tier. A 96 GiB firmware VRAM carveout does not mean Linux can safely allocate a 96 GiB host-resident KV cache.</li>
               <li>Check host <code>MemAvailable</code> and every applicable cgroup <code>memory.max</code>/<code>memory.high</code> ancestor.</li>
             </ul>
           </div>
           <div>
             <div class="label mb-2">Fix</div>
-            <p>Reduce <code>memory.num_blocks</code> or <code>memory.inference_memory_fraction</code> in <code>kiln.toml</code>, reduce <code>prefix_cache.max_entries</code>, or disable the prefix cache. Free host memory or raise the deliberate cgroup limit. Do not bypass a missing, stale, or unhealthy sample: Kiln treats it as zero headroom so a zero-filled allocation cannot take down the process or host.</p>
+            <p>Reduce <code>memory.num_blocks</code> or <code>memory.inference_memory_fraction</code> in <code>kiln.toml</code>, reduce <code>prefix_cache.max_entries</code>, lower <code>memory.vulkan_buffer_pool_gb</code>, or disable the prefix cache. A zero Vulkan pool cap disables scratch retention; active operations may still need temporary memory. Free host memory or raise the deliberate cgroup limit. Do not bypass a missing, stale, or unhealthy sample: Kiln treats it as zero headroom so a zero-filled allocation cannot take down the process or host.</p>
           </div>
         </div>
         <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config | jq '.vram.live'
-curl -s http://localhost:8420/health | jq '.gpu_memory.live, .decode_runtime.memory_governor'
-curl -s http://localhost:8420/metrics | grep -E 'kiln_gpu_memory_(probe_failed|sample_|sampler_)|kiln_gpu_host_backed_memory_bytes'</code></pre>
+curl -s http://localhost:8420/health | jq '.gpu_memory.live, .vulkan_buffer_pool, .decode_runtime.memory_governor'
+curl -s http://localhost:8420/metrics | grep -E 'kiln_gpu_memory_(probe_failed|sample_|sampler_)|kiln_gpu_host_backed_memory_bytes|kiln_vulkan_buffer_pool'</code></pre>
       </article>
 
       <article class="card p-6">

@@ -2662,6 +2662,9 @@ pub struct MemoryConfig {
     pub gpu_memory_gb: Option<f64>,
     pub inference_memory_fraction: f64,
     pub training_memory_gb: Option<f64>,
+    /// Process-wide Vulkan scratch recycler cap. Active operations may exceed
+    /// this amount, but idle buffers beyond it are not retained.
+    pub vulkan_buffer_pool_gb: f64,
     /// GiB withheld by the process-wide memory governor after live probing.
     pub floor_gb: f64,
     /// Minimum interval between live OS/driver memory probes.
@@ -4997,6 +5000,11 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         memory.training_memory_gb,
         "KILN_TRAINING_MEMORY_GB"
     ),
+    public_env_field!(
+        f64,
+        memory.vulkan_buffer_pool_gb,
+        "KILN_VULKAN_BUFFER_POOL_GB"
+    ),
     public_env_field!(f64, memory.floor_gb, "KILN_MEMORY_FLOOR_GB"),
     public_env_field!(u64, memory.probe_ms, "KILN_MEMORY_PROBE_MS"),
     public_env_field!(
@@ -5245,6 +5253,7 @@ impl Default for MemoryConfig {
             gpu_memory_gb: None,
             inference_memory_fraction: 0.7,
             training_memory_gb: None,
+            vulkan_buffer_pool_gb: 3.0,
             floor_gb: 1.0,
             probe_ms: 500,
             reclaim_mode: MemoryReclaimModeSetting::default(),
@@ -5262,6 +5271,11 @@ impl Default for MemoryConfig {
 }
 
 impl MemoryConfig {
+    /// Configured Vulkan recycler cap in bytes.
+    pub fn vulkan_buffer_pool_bytes(&self) -> u64 {
+        (self.vulkan_buffer_pool_gb * 1024.0 * 1024.0 * 1024.0).round() as u64
+    }
+
     /// Configured governor floor in bytes, using the same GiB conversion and
     /// rounding as the installed runtime policy.
     pub fn floor_bytes(&self) -> u64 {
@@ -5763,6 +5777,12 @@ impl KilnConfig {
                 "memory.floor_gb must be finite, non-negative, and representable as bytes, got {floor_gb}"
             );
         }
+        let vulkan_pool_gb = self.memory.vulkan_buffer_pool_gb;
+        if !vulkan_pool_gb.is_finite() || vulkan_pool_gb < 0.0 || vulkan_pool_gb > max_floor_gb {
+            anyhow::bail!(
+                "memory.vulkan_buffer_pool_gb must be finite, non-negative, and representable as bytes, got {vulkan_pool_gb}"
+            );
+        }
         if self.memory.probe_ms == 0 {
             anyhow::bail!("memory.probe_ms must be > 0, got 0");
         }
@@ -6216,6 +6236,7 @@ mod tests {
         "KILN_MEMORY_PROBE_MS",
         "KILN_MEMORY_RECLAIM_MODE",
         "KILN_MEMORY_TRAINING_MEMORY_GB",
+        "KILN_MEMORY_VULKAN_BUFFER_POOL_GB",
         "KILN_MODEL_ADAPTER_DIR",
         "KILN_MODEL_MODEL_ID",
         "KILN_MODEL_PATH",
@@ -6538,6 +6559,11 @@ mod tests {
         assert!(config.model.adapter_dir.is_none());
         assert!(config.memory.num_blocks.is_none());
         assert_eq!(config.memory.inference_memory_fraction, 0.7);
+        assert_eq!(config.memory.vulkan_buffer_pool_gb, 3.0);
+        assert_eq!(
+            config.memory.vulkan_buffer_pool_bytes(),
+            3 * 1024 * 1024 * 1024
+        );
         assert_eq!(config.memory.floor_gb, 1.0);
         assert_eq!(config.memory.probe_ms, 500);
         assert_eq!(
@@ -6999,7 +7025,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 93);
+        assert_eq!(original_len, 94);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -7034,8 +7060,8 @@ rocm_graph_cache_max_bytes = 17179869184
             })
             .count();
         assert_eq!(canonical_only_aliases, 22);
-        assert_eq!(compatibility_aliases, 69);
-        assert_eq!(compatibility_alias_fields, 66);
+        assert_eq!(compatibility_aliases, 70);
+        assert_eq!(compatibility_alias_fields, 67);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(
@@ -7070,7 +7096,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 98);
+        assert_eq!(serialized_leaves.len(), 99);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -7113,7 +7139,7 @@ rocm_graph_cache_max_bytes = 17179869184
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_ninety_three_public_fields() {
+    fn public_env_canonical_only_loads_all_ninety_four_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
@@ -7166,6 +7192,7 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_MEMORY_GPU_MEMORY_GB", "64"),
             ("KILN_MEMORY_INFERENCE_MEMORY_FRACTION", "0.6"),
             ("KILN_MEMORY_TRAINING_MEMORY_GB", "8"),
+            ("KILN_MEMORY_VULKAN_BUFFER_POOL_GB", "1.75"),
             ("KILN_MEMORY_FLOOR_GB", "2.5"),
             ("KILN_MEMORY_PROBE_MS", "750"),
             ("KILN_MEMORY_RECLAIM_MODE", "on-demand"),
@@ -7322,6 +7349,7 @@ rocm_graph_cache_max_bytes = 17179869184
         assert_eq!(config.memory.gpu_memory_gb, Some(64.0));
         assert_eq!(config.memory.inference_memory_fraction, 0.6);
         assert_eq!(config.memory.training_memory_gb, Some(8.0));
+        assert_eq!(config.memory.vulkan_buffer_pool_gb, 1.75);
         assert_eq!(config.memory.floor_gb, 2.5);
         assert_eq!(config.memory.probe_ms, 750);
         assert_eq!(
@@ -9167,6 +9195,7 @@ num_blocks = 128
 gpu_memory_gb = 24.0
 inference_memory_fraction = 0.5
 training_memory_gb = 6.0
+vulkan_buffer_pool_gb = 1.5
 floor_gb = 2.0
 probe_ms = 250
 reclaim_mode = "automatic"
@@ -9284,6 +9313,7 @@ composed_cache_max_entries = 8
         assert_eq!(config.memory.gpu_memory_gb, Some(24.0));
         assert_eq!(config.memory.inference_memory_fraction, 0.5);
         assert_eq!(config.memory.training_memory_gb, Some(6.0));
+        assert_eq!(config.memory.vulkan_buffer_pool_gb, 1.5);
         assert_eq!(config.memory.floor_gb, 2.0);
         assert_eq!(config.memory.probe_ms, 250);
         assert_eq!(
@@ -9738,6 +9768,14 @@ port = 3000
         let mut non_finite_floor = KilnConfig::default();
         non_finite_floor.memory.floor_gb = f64::INFINITY;
         assert!(non_finite_floor.validate().is_err());
+
+        let mut negative_vulkan_pool = KilnConfig::default();
+        negative_vulkan_pool.memory.vulkan_buffer_pool_gb = -0.1;
+        assert!(negative_vulkan_pool.validate().is_err());
+
+        let mut non_finite_vulkan_pool = KilnConfig::default();
+        non_finite_vulkan_pool.memory.vulkan_buffer_pool_gb = f64::INFINITY;
+        assert!(non_finite_vulkan_pool.validate().is_err());
 
         let mut zero_probe = KilnConfig::default();
         zero_probe.memory.probe_ms = 0;

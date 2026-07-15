@@ -133,6 +133,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         vram_kv_cache: state.memory_budget.kv_cache_bytes,
         vram_training_budget: state.memory_budget.training_budget_bytes,
         vulkan_buffers: kiln_model::vulkan_buffer_allocation_stats(),
+        vulkan_buffer_pool: kiln_model::vulkan_buffer_pool_stats(),
         prefix_cache,
         rendered_prompt_cache_hits,
         rendered_prompt_cache_misses,

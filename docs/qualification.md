@@ -1156,13 +1156,25 @@ new swap is a failure even when the 8 GiB floor was not crossed.
 
 Vulkan stabilization runs complete concurrency 1, 4, 8, and 4 cycles with
 16-token outputs and a cancellation every fourth wave. It first fills the
-prefix cache and then requires two consecutive cycles below both 64 MiB of
-process-scoped DRM growth and 16 MiB of RSS growth. It cannot accept before
-four cycles and fails after eight. The measured phase runs the same fixed-slot
-prompt set for at least 30 minutes, retains the 512 MiB post-warmup GPU/RSS
-peak limits, and applies the same response, drain, cache-ownership, pause,
-device-fault, shutdown, and residue gates as the ROCm arm. Vulkan graphs must
-remain disabled: any graph capture, replay, slot, or fallback activity fails.
+prefix cache and then requires two consecutive cycles with no positive live
+`VulkanBuffer` ownership growth and at most 64 MiB of process-scoped DRM
+growth. It cannot accept before four cycles and fails after eight. RSS is a
+separate cumulative host-safety signal on unified memory: stabilization fails
+if process RSS grows by more than 512 MiB from its baseline, while the host
+guard independently enforces the 8 GiB `MemAvailable` floor and 512 MiB swap
+growth ceiling. This distinction is intentional because an already-live fixed
+Vulkan mapping can become resident without a new buffer or DRM allocation.
+The measured phase runs the same fixed-slot prompt set for at least 30 minutes.
+At every drained wave boundary, process DRM and RSS may grow by at most 512 MiB
+from the post-stabilization baseline. The 250 ms DRM sampler separately permits
+at most 1 GiB of active-workload growth, bounding concurrent scratch without
+misclassifying buffers that are allocated during a wave and fully freed at
+drain as retained growth. The receipt records both peak bytes and peak growth,
+plus the exact `VulkanBuffer` live high-water mark. Pool retention and total live
+buffer ownership must return to their measurement baselines. The same response,
+drain, cache-ownership, pause, device-fault, shutdown, and residue gates apply
+as in the ROCm arm. Vulkan graphs must remain disabled: any graph capture,
+replay, slot, or fallback activity fails.
 
 #### Vulkan buffer ownership telemetry
 
@@ -1185,6 +1197,23 @@ cover memory owned through `VulkanBuffer`. Driver-private allocations and
 memory not created by that wrapper remain visible only through DRM, RSS, swap,
 and host-availability evidence.
 
+The same response adds `vulkan_buffer_pool`, which separates recycler
+retention from all other live buffers:
+
+| Field group | Meaning |
+|---|---|
+| `max_retained_bytes` | Immutable typed cap derived from `memory.vulkan_buffer_pool_gb`. |
+| `bucket_count`, `buffer_count`, `retained_bytes` | Current exact cache inventory. |
+| `free_*`, `borrowed_*` | Idle versus caller-owned portions; each pair must reconcile to the inventory total. |
+| `cache_hits`, `cache_misses` | Process-lifetime recycler lookup outcomes. |
+| `eviction_count`, `evicted_bytes` | Idle entries released to admit a newer working set or satisfy pressure reclaim. |
+| `uncached_allocation_count`, `uncached_allocated_bytes` | Overflow scratch allocations returned without a cache owner and freed on normal drop. |
+
+Retained bytes may never exceed the cap. Eviction is oldest-idle-first and
+never removes a borrowed buffer. Pressure reclaim runs only while the batching
+actor is idle, after exclusive GPU coordination and a second health/activity
+check.
+
 Prometheus exports the same state as:
 
 ```text
@@ -1195,18 +1224,32 @@ kiln_vulkan_buffer_allocations_total{memory="device_local|host_visible"}
 kiln_vulkan_buffer_allocated_bytes_total{memory="device_local|host_visible"}
 kiln_vulkan_buffer_frees_total{memory="device_local|host_visible"}
 kiln_vulkan_buffer_freed_bytes_total{memory="device_local|host_visible"}
+kiln_vulkan_buffer_pool_limit_bytes
+kiln_vulkan_buffer_pool_bytes{state="retained|free|borrowed"}
+kiln_vulkan_buffer_pool_buffers{state="retained|free|borrowed"}
+kiln_vulkan_buffer_pool_buckets
+kiln_vulkan_buffer_pool_requests_total{result="hit|miss"}
+kiln_vulkan_buffer_pool_evictions_total
+kiln_vulkan_buffer_pool_evicted_bytes_total
+kiln_vulkan_buffer_pool_uncached_allocations_total
+kiln_vulkan_buffer_pool_uncached_allocated_bytes_total
 ```
 
 The soak validates that allocation/free deltas reconcile exactly with the
-change in live count and bytes. After warmup, positive live-byte growth is an
-ownership leak and fails the run. Allocation and free deltas that match while
+change in live count and bytes, that pool free plus borrowed ownership equals
+retention, that the cap never changes or overflows, and that every cache
+counter remains monotonic. Initial stabilization cycles may fill the
+fixed-shape recycler working set. Two later cycles must show no positive live
+ownership growth before measurement begins; any measurement-phase live or pool
+retention growth fails the run. Allocation and free deltas that match while
 live bytes stay flat indicate temporary buffer churn; if RSS continues to grow
-in that case, investigate driver or unified-memory page residency rather than
-mislabeling it as retained Rust ownership. Flat allocation/free counters and
-flat live bytes with growing RSS instead point to pages becoming resident in
-already-live allocations. The stabilization trace records these deltas per
-cycle. A run that fails before measurement retains the observed stabilization
-window in the Vulkan allocation metrics instead of replacing it with zeroes.
+within the cumulative host limit, investigate driver or unified-memory page
+residency rather than mislabeling it as retained Rust ownership. Flat
+allocation/free counters and flat live bytes with growing RSS instead point to
+pages becoming resident in already-live allocations. The stabilization trace
+records buffer, pool, DRM, RSS, and swap deltas per cycle. A run that fails
+before measurement retains the observed stabilization window in the Vulkan
+allocation and pool metrics instead of replacing it with zeroes.
 
 Never edit a receipt to make it pass. A failed receipt is useful evidence: keep
 it when it identifies a reproducible product defect, fix the defect in a new

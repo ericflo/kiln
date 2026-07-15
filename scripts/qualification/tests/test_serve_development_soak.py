@@ -70,6 +70,9 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(vulkan["soak"]["stabilization_min_cycles"], 4)
         self.assertEqual(vulkan["soak"]["stabilization_max_cycles"], 8)
         self.assertEqual(
+            vulkan["soak"]["active_gpu_peak_growth_limit_bytes"], 1024**3
+        )
+        self.assertEqual(
             vulkan["soak"]["host_mem_available_floor_bytes"], 8 * 1024**3
         )
         self.assertNotIn(
@@ -78,6 +81,12 @@ class ServeRocmSoakTests(unittest.TestCase):
                 soak.QUALIFICATION_DURATION_SECONDS,
                 soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
             )["soak"],
+        )
+        self.assertEqual(
+            soak.effective_config(60.0, 123)["soak"][
+                "active_gpu_peak_growth_limit_bytes"
+            ],
+            123,
         )
 
     def test_process_memory_snapshot_requires_and_converts_linux_fields(self) -> None:

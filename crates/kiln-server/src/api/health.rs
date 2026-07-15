@@ -53,6 +53,8 @@ struct HealthResponse {
     gpu_memory: Option<GpuMemoryInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     vulkan_buffers: Option<VulkanBufferInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vulkan_buffer_pool: Option<VulkanBufferPoolInfo>,
     prefix_cache: PrefixCacheInfo,
     prompt_caches: PromptCachesInfo,
     decode_runtime: DecodeRuntimeInfo,
@@ -210,6 +212,45 @@ impl From<kiln_model::VulkanBufferAllocationStats> for VulkanBufferInfo {
             host_visible_allocated_bytes: stats.host_visible_allocated_bytes,
             host_visible_frees: stats.host_visible_frees,
             host_visible_freed_bytes: stats.host_visible_freed_bytes,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct VulkanBufferPoolInfo {
+    max_retained_bytes: u64,
+    bucket_count: usize,
+    buffer_count: usize,
+    retained_bytes: u64,
+    free_buffer_count: usize,
+    free_bytes: u64,
+    borrowed_buffer_count: usize,
+    borrowed_bytes: u64,
+    cache_hits: u64,
+    cache_misses: u64,
+    eviction_count: u64,
+    evicted_bytes: u64,
+    uncached_allocation_count: u64,
+    uncached_allocated_bytes: u64,
+}
+
+impl From<kiln_model::VulkanBufferPoolStats> for VulkanBufferPoolInfo {
+    fn from(stats: kiln_model::VulkanBufferPoolStats) -> Self {
+        Self {
+            max_retained_bytes: stats.max_retained_bytes,
+            bucket_count: stats.bucket_count,
+            buffer_count: stats.buffer_count,
+            retained_bytes: stats.total_bytes,
+            free_buffer_count: stats.free_buffer_count,
+            free_bytes: stats.free_bytes,
+            borrowed_buffer_count: stats.borrowed_buffer_count(),
+            borrowed_bytes: stats.borrowed_bytes(),
+            cache_hits: stats.cache_hits,
+            cache_misses: stats.cache_misses,
+            eviction_count: stats.eviction_count,
+            evicted_bytes: stats.evicted_bytes,
+            uncached_allocation_count: stats.uncached_allocation_count,
+            uncached_allocated_bytes: stats.uncached_allocated_bytes,
         }
     }
 }
@@ -1028,6 +1069,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         self_improve_scheduler: state.self_improve_scheduler.read().unwrap().clone(),
         gpu_memory,
         vulkan_buffers: kiln_model::vulkan_buffer_allocation_stats().map(VulkanBufferInfo::from),
+        vulkan_buffer_pool: kiln_model::vulkan_buffer_pool_stats().map(VulkanBufferPoolInfo::from),
         prefix_cache,
         prompt_caches,
         decode_runtime,

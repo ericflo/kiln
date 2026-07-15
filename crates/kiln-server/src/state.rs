@@ -5170,6 +5170,102 @@ fn register_backend_memory_reclaimer(
                 }
             }
         }
+        GpuMemoryReclaimer::VulkanTrimPool =>
+        {
+            #[cfg(feature = "vulkan")]
+            if matches!(device, kiln_tensor::Device::Vulkan(_)) {
+                kiln_memory::MemoryGovernor::global().register_reclaimer(move |target| {
+                    let stats = kiln_model::vulkan_buffer_pool_stats().unwrap_or_default();
+                    let (active_decode, active_prefill) = batching_engine
+                        .as_ref()
+                        .map(|engine| {
+                            let snapshot = engine.cached_snapshot();
+                            (snapshot.active_decode, snapshot.active_prefill)
+                        })
+                        .unwrap_or_default();
+                    if stats.free_bytes == 0 || active_decode > 0 || active_prefill > 0 {
+                        tracing::debug!(
+                            reason = if stats.free_bytes == 0 {
+                                "no_releasable_bytes"
+                            } else {
+                                "active_requests"
+                            },
+                            target,
+                            active_decode,
+                            active_prefill,
+                            retained_bytes = stats.total_bytes,
+                            free_bytes = stats.free_bytes,
+                            "Vulkan buffer-pool reclaim deferred"
+                        );
+                        return 0;
+                    }
+                    if let Err(error) = backend_health.ensure_healthy() {
+                        tracing::warn!(
+                            %error,
+                            reason = "backend_unhealthy",
+                            target,
+                            "Vulkan buffer-pool reclaim skipped"
+                        );
+                        return 0;
+                    }
+                    let coordination_started = std::time::Instant::now();
+                    let Ok(_gpu_guard) = gpu_lock.clone().try_write_owned() else {
+                        tracing::debug!(
+                            reason = "gpu_coordination_busy",
+                            target,
+                            "Vulkan buffer-pool reclaim deferred"
+                        );
+                        return 0;
+                    };
+                    if let Err(error) = backend_health.ensure_healthy() {
+                        tracing::warn!(
+                            %error,
+                            reason = "backend_became_unhealthy",
+                            target,
+                            "Vulkan buffer-pool reclaim skipped after coordination"
+                        );
+                        return 0;
+                    }
+                    let (active_decode, active_prefill) = batching_engine
+                        .as_ref()
+                        .map(|engine| {
+                            let snapshot = engine.cached_snapshot();
+                            (snapshot.active_decode, snapshot.active_prefill)
+                        })
+                        .unwrap_or_default();
+                    let before = kiln_model::vulkan_buffer_pool_stats().unwrap_or_default();
+                    if before.free_bytes == 0 || active_decode > 0 || active_prefill > 0 {
+                        return 0;
+                    }
+
+                    let requested = target.min(before.free_bytes);
+                    let started = std::time::Instant::now();
+                    let reclaimed = kiln_model::trim_vulkan_buffer_pool(requested);
+                    let coordination_acquire_ms =
+                        coordination_started.elapsed().as_secs_f64() * 1000.0;
+                    tracing::info!(
+                        event = "gpu_memory_operation",
+                        operation = "trim",
+                        reason = "memory_governor",
+                        outcome = if reclaimed > 0 {
+                            "reclaimed"
+                        } else {
+                            "zero_yield"
+                        },
+                        target,
+                        target_bytes = requested,
+                        actual_bytes = reclaimed,
+                        retained_before = before.total_bytes,
+                        free_before = before.free_bytes,
+                        coordination_acquire_ms,
+                        wait_ms = coordination_acquire_ms,
+                        duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                        "Vulkan buffer-pool reclaim completed"
+                    );
+                    reclaimed
+                });
+            }
+        }
         GpuMemoryReclaimer::CudaTrimPool => {
             #[cfg(feature = "cuda")]
             if let kiln_tensor::Device::Cuda(idx) = device {
