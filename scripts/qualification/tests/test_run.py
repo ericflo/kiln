@@ -355,6 +355,34 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn("CODEX_AUTH_JSON", run_config["case_base_environment"])
         self.assert_valid(outcome, repository.root)
 
+    def test_vulkan_device_probes_allow_headless_surface_skip_only(self) -> None:
+        for name in ("correctness-core-v1.json", "prefill-scheduling-v1.json"):
+            with self.subTest(name=name):
+                workload = json.loads(
+                    (run_module.ROOT / "qualification" / "workloads" / name).read_text()
+                )
+                variant = next(
+                    item for item in workload["variants"] if item["id"] == "vulkan"
+                )
+                case = next(item for item in variant["cases"] if item["id"] == "device-probe")
+                stdout = "Devices:\n========\nGPU0:\n\tdeviceName = Test Vulkan Device\n"
+                surface_stderr = (
+                    "'DISPLAY' environment variable not set... skipping surface info\n"
+                )
+                self.assertEqual(
+                    run_module._assert_output(case, stdout, surface_stderr), []
+                )
+                self.assertTrue(
+                    run_module._assert_output(
+                        case, stdout + "skipping Vulkan physical device\n", ""
+                    )
+                )
+                self.assertTrue(
+                    run_module._assert_output(
+                        case, "Devices:\n========\n", surface_stderr
+                    )
+                )
+
     def fake_environment(
         self, backend: str, host_id: str, root: Path
     ) -> run_module.EnvironmentCapture:

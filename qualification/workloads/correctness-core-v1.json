@@ -147,12 +147,12 @@
             {
               "stream": "combined",
               "match": "required",
-              "pattern": "Devices:"
+              "pattern": "(?m)^GPU[0-9]+:$"
             },
             {
               "stream": "combined",
               "match": "forbidden",
-              "pattern": "(?i)(no vulkan device|skipp(?:ed|ing))"
+              "pattern": "(?i)(no vulkan device|skipp(?:ed|ing).*(?:vulkan|physical device))"
             }
           ],
           "result_protocol": {

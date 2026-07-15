@@ -275,6 +275,13 @@ python3 scripts/qualification/run.py \
   qualification/workloads/correctness-core-v1.json
 ```
 
+Both lower-level Vulkan workloads run `vulkaninfo --summary` without inheriting
+`DISPLAY`. Presentation and surface discovery may therefore report that their
+headless-only information was skipped. That is not a device skip: the probe
+must still exit zero and emit a concrete `GPU<n>:` entry. Missing entries, “no
+Vulkan device,” or an explicitly skipped Vulkan or physical device fail the
+case.
+
 ### Current Vulkan core result
 
 The source-bound 2026-07-14 run on RADV Strix Halo passed from clean commit
