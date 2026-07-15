@@ -565,6 +565,22 @@ mod tests {
         );
 
         drop(recycled);
+        {
+            let _durable = crate::buffer_pool::durable_allocation_scope();
+            let durable_via_recycler = VkTensor::from_f32_slice_recycled(
+                &[9.0_f32, 10.0, 11.0, 12.0],
+                vec![2, 2],
+                Arc::clone(&dev),
+            )
+            .unwrap();
+            let scoped_stats = crate::buffer_pool::pool_stats_for_device(device_handle);
+            assert_eq!(
+                scoped_stats.borrowed_buffer_count(),
+                before.borrowed_buffer_count(),
+                "durable scope must bypass the recycler even at a recycled call site"
+            );
+            drop(durable_via_recycler);
+        }
         drop(durable);
         let after = crate::buffer_pool::pool_stats_for_device(device_handle);
         assert_eq!(

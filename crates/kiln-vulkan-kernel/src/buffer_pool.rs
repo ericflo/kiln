@@ -28,7 +28,7 @@ use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Default process-wide retained scratch budget. Active work may allocate
@@ -36,6 +36,35 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub const DEFAULT_MAX_RETAINED_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 
 static MAX_RETAINED_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_MAX_RETAINED_BYTES);
+static DURABLE_ALLOCATION_SCOPE_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+/// Process-wide guard for model-lifetime Vulkan allocation phases.
+///
+/// Model preparation may fan out across worker threads, so this cannot be a
+/// thread-local flag. Callers must hold their startup or exclusive GPU gate
+/// while the guard is alive. Recycler entry points allocate directly until
+/// the last guard drops, preventing durable weights from permanently
+/// borrowing the bounded scratch budget.
+#[must_use = "the durable allocation scope ends when its guard is dropped"]
+pub struct DurableAllocationScope {
+    _private: (),
+}
+
+pub fn durable_allocation_scope() -> DurableAllocationScope {
+    DURABLE_ALLOCATION_SCOPE_DEPTH.fetch_add(1, Ordering::AcqRel);
+    DurableAllocationScope { _private: () }
+}
+
+impl Drop for DurableAllocationScope {
+    fn drop(&mut self) {
+        let previous = DURABLE_ALLOCATION_SCOPE_DEPTH.fetch_sub(1, Ordering::AcqRel);
+        assert!(previous > 0, "durable Vulkan allocation scope underflow");
+    }
+}
+
+fn durable_allocation_scope_active() -> bool {
+    DURABLE_ALLOCATION_SCOPE_DEPTH.load(Ordering::Acquire) != 0
+}
 
 #[derive(Debug)]
 struct PooledBuffer {
@@ -90,6 +119,16 @@ impl PoolInner {
 /// pool; when the caller's last clone drops, an admitted buffer is
 /// recycled. Buffers beyond the configured cap are freed normally.
 pub fn pool_alloc_device_local(device: &VulkanDevice, bytes: u64) -> Result<Arc<VulkanBuffer>> {
+    if durable_allocation_scope_active() {
+        return VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            bytes.max(1),
+        )
+        .map(Arc::new)
+        .context("pool_alloc_device_local: durable direct allocation");
+    }
+
     // Round to the next power-of-two-ish bucket to reduce fragmentation.
     // Buckets: round up to multiples of 64 KB at small sizes, larger
     // multiples for big buffers. Empirically the GDN training step has
@@ -156,6 +195,12 @@ pub fn pool_alloc_host_visible(
     host_mem_type: u32,
     bytes: u64,
 ) -> Result<Arc<VulkanBuffer>> {
+    if durable_allocation_scope_active() {
+        return VulkanBuffer::create_host_visible(device, host_mem_type, bytes.max(1))
+            .map(Arc::new)
+            .context("pool_alloc_host_visible: durable direct allocation");
+    }
+
     // `bucket_for` always rounds UP (and floors at 4 bytes), so the buffer
     // we hand back is always >= `bytes`. Callers (`read_back`) rely on this:
     // they copy/read only the logical bytes, so a bucket-larger buffer is

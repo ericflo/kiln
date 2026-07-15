@@ -7404,6 +7404,10 @@ impl GpuWeights {
         config: &kiln_core::config::ModelConfig,
         device: &Device,
     ) -> Result<Self> {
+        #[cfg(feature = "vulkan")]
+        let _durable_vulkan_allocations = matches!(device, Device::Vulkan(_))
+            .then(kiln_vulkan_kernel::buffer_pool::durable_allocation_scope);
+
         let w8a16_enabled = crate::rocm_w8_proj::env_enabled();
         // On Metal and on Vulkan-active processes, `embed_tokens` itself
         // is never read past `embedding_lookup_from_weights` (which falls
