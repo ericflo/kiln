@@ -46,6 +46,8 @@ struct PoolInner {
     /// decode-weight prewarm — hundreds of weights × one fresh staging
     /// BO apiece.
     host_by_device_bytes: HashMap<(vk::Device, u32, u64), Vec<Arc<VulkanBuffer>>>,
+    /// Last 256 MiB high-water bucket emitted for each logical device.
+    reported_high_water_buckets: HashMap<vk::Device, u64>,
 }
 
 static POOL: OnceLock<Mutex<PoolInner>> = OnceLock::new();
@@ -93,6 +95,7 @@ pub fn pool_alloc_device_local(
         .entry(key)
         .or_default()
         .push(Arc::clone(&arc));
+    maybe_report_pool_growth(&mut inner, dev_handle);
     Ok(arc)
 }
 
@@ -158,7 +161,87 @@ pub fn pool_alloc_host_visible(
         .entry(key)
         .or_default()
         .push(Arc::clone(&arc));
+    maybe_report_pool_growth(&mut inner, dev_handle);
     Ok(arc)
+}
+
+const POOL_HIGH_WATER_REPORT_STEP_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BufferPoolStats {
+    pub bucket_count: usize,
+    pub buffer_count: usize,
+    pub total_bytes: u64,
+    pub free_buffer_count: usize,
+    pub free_bytes: u64,
+}
+
+impl BufferPoolStats {
+    pub fn borrowed_buffer_count(self) -> usize {
+        self.buffer_count.saturating_sub(self.free_buffer_count)
+    }
+
+    pub fn borrowed_bytes(self) -> u64 {
+        self.total_bytes.saturating_sub(self.free_bytes)
+    }
+}
+
+fn stats_for_device(inner: &PoolInner, device: vk::Device) -> BufferPoolStats {
+    let mut stats = BufferPoolStats::default();
+    for ((entry_device, size), slots) in &inner.by_device_bytes {
+        if *entry_device != device {
+            continue;
+        }
+        stats.bucket_count += 1;
+        stats.buffer_count += slots.len();
+        stats.total_bytes = stats
+            .total_bytes
+            .saturating_add(size.saturating_mul(slots.len() as u64));
+        for slot in slots {
+            if Arc::strong_count(slot) == 1 {
+                stats.free_buffer_count += 1;
+                stats.free_bytes = stats.free_bytes.saturating_add(*size);
+            }
+        }
+    }
+    for ((entry_device, _memory_type, size), slots) in &inner.host_by_device_bytes {
+        if *entry_device != device {
+            continue;
+        }
+        stats.bucket_count += 1;
+        stats.buffer_count += slots.len();
+        stats.total_bytes = stats
+            .total_bytes
+            .saturating_add(size.saturating_mul(slots.len() as u64));
+        for slot in slots {
+            if Arc::strong_count(slot) == 1 {
+                stats.free_buffer_count += 1;
+                stats.free_bytes = stats.free_bytes.saturating_add(*size);
+            }
+        }
+    }
+    stats
+}
+
+fn maybe_report_pool_growth(inner: &mut PoolInner, device: vk::Device) {
+    let stats = stats_for_device(inner, device);
+    let high_water_bucket = stats.total_bytes / POOL_HIGH_WATER_REPORT_STEP_BYTES;
+    let reported = inner.reported_high_water_buckets.entry(device).or_default();
+    if high_water_bucket == 0 || high_water_bucket <= *reported {
+        return;
+    }
+    *reported = high_water_bucket;
+    tracing::info!(
+        event = "vulkan_buffer_pool_high_water",
+        bucket_count = stats.bucket_count,
+        buffer_count = stats.buffer_count,
+        total_bytes = stats.total_bytes,
+        free_buffer_count = stats.free_buffer_count,
+        free_bytes = stats.free_bytes,
+        borrowed_buffer_count = stats.borrowed_buffer_count(),
+        borrowed_bytes = stats.borrowed_bytes(),
+        "Vulkan recycling buffer pool reached a new high-water mark"
+    );
 }
 
 fn bucket_for(bytes: u64) -> u64 {
@@ -199,12 +282,18 @@ pub fn pool_stats() -> (usize, usize, u64) {
     (buckets, total_bufs, total_bytes)
 }
 
+/// Return recycling-pool ownership telemetry for one logical Vulkan device.
+pub fn pool_stats_for_device(device: vk::Device) -> BufferPoolStats {
+    stats_for_device(&pool().lock().unwrap(), device)
+}
+
 /// Drop all pooled buffers. Calls vkFreeMemory on each via the
 /// `VulkanBuffer::Drop`. Use at end of training to release VRAM.
 pub fn pool_drain() {
     let mut inner = pool().lock().unwrap();
     inner.by_device_bytes.clear();
     inner.host_by_device_bytes.clear();
+    inner.reported_high_water_buckets.clear();
 }
 
 /// Drop all pooled buffers belonging to a specific Vulkan device.
@@ -217,4 +306,38 @@ pub fn pool_drop_for_device(dev: vk::Device) {
     let mut inner = pool().lock().unwrap();
     inner.by_device_bytes.retain(|(d, _), _| *d != dev);
     inner.host_by_device_bytes.retain(|(d, _, _), _| *d != dev);
+    inner.reported_high_water_buckets.remove(&dev);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detailed_stats_derive_borrowed_ownership_without_underflow() {
+        let stats = BufferPoolStats {
+            bucket_count: 3,
+            buffer_count: 8,
+            total_bytes: 1024,
+            free_buffer_count: 5,
+            free_bytes: 640,
+        };
+        assert_eq!(stats.borrowed_buffer_count(), 3);
+        assert_eq!(stats.borrowed_bytes(), 384);
+
+        let inconsistent = BufferPoolStats {
+            free_buffer_count: 2,
+            free_bytes: 2,
+            ..BufferPoolStats::default()
+        };
+        assert_eq!(inconsistent.borrowed_buffer_count(), 0);
+        assert_eq!(inconsistent.borrowed_bytes(), 0);
+    }
+
+    #[test]
+    fn allocation_buckets_never_round_down() {
+        for bytes in [0, 1, 65_536, 65_537, 4 * 1024 * 1024, 4 * 1024 * 1024 + 1] {
+            assert!(bucket_for(bytes) >= bytes.max(4));
+        }
+    }
 }
