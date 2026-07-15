@@ -1,0 +1,957 @@
+{
+  "artifacts": [
+    {
+      "bytes": 6319,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t055032942821z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1/environment.json",
+      "sha256": "sha256:d7333b2dab2e84961435c40cc0ed520d2c3d248cf31b914d7a5d8e58cb57e304"
+    },
+    {
+      "bytes": 481337,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t055032942821z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1/cases/001-continuous-mixed-load-r001/stdout.log",
+      "sha256": "sha256:2d7cc8c6777d404fca6e4acc18b06e9b03b96e6db4baa8752207efb786ada565"
+    },
+    {
+      "bytes": 2045149,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t055032942821z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1/cases/001-continuous-mixed-load-r001/stderr.log",
+      "sha256": "sha256:766a63a69946751c2c55e9aecb0a99f4edadd140edbda99490c8410562b4c2fb"
+    },
+    {
+      "bytes": 20065,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t055032942821z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1/cases/001-continuous-mixed-load-r001/case-result.json",
+      "sha256": "sha256:18be386cf2736e0d073a9d87b05727d3bd5edee29c1d3e2d793fb2c1de95938d"
+    },
+    {
+      "bytes": 14138,
+      "kind": "command_case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t055032942821z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1/cases/001-continuous-mixed-load-r001/command-result.json",
+      "sha256": "sha256:ce2b7fadc9cc3895e81524f2f6d435b23fe6160641bc1e50d1ceddb79fe0553b"
+    },
+    {
+      "bytes": 8717,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t055032942821z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1/run-config.json",
+      "sha256": "sha256:f291323ca474d78ed62d69642ef5fdf356a8a1f0078a96c6f8bdb54943935188"
+    }
+  ],
+  "created_at_utc": "2026-07-15T06:15:23.396Z",
+  "effective_config": {
+    "build": {
+      "binary": "kiln",
+      "cargo_environment_policy": "closed-source-build-v1",
+      "cargo_execution_mode": "transient-service",
+      "cargo_jobs": 1,
+      "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
+      "cargo_min_available_gib": 15,
+      "cargo_private_network": true,
+      "cargo_service_runtime_max_seconds": 840,
+      "cargo_wrapper": "scripts/cargo-bounded.sh",
+      "features": "vulkan",
+      "locked": true,
+      "no_default_features": true,
+      "offline": true,
+      "package": "kiln-server",
+      "profile": "release",
+      "timeout_seconds": 900
+    },
+    "runtime": {
+      "kv_autoscale_enabled": false,
+      "kv_autoscale_requested": false,
+      "memory_reclaim_mode": "off",
+      "memory_reclaim_requested_mode": "off",
+      "rocm_graphs_enabled": false,
+      "rocm_graphs_requested": false,
+      "serving_profile": "experimental"
+    },
+    "server": {
+      "chat_performance_metadata_enabled": true,
+      "debug_endpoints_enabled": true,
+      "default_thinking_enabled": false,
+      "http_send_buffer_bytes": 4096,
+      "log_format": "json",
+      "max_active_requests": 12,
+      "max_decode_batch": 8,
+      "max_prefill_layers_per_cycle": 4,
+      "max_prefill_staging_priority_burst": 4,
+      "max_prefill_staging_slots": 4,
+      "max_prefill_tokens_per_cycle": 64,
+      "request_timeout_seconds": 600,
+      "stream_stall_grace_ms": 2000
+    },
+    "soak": {
+      "active_gpu_peak_growth_limit_bytes": 1073741824,
+      "cancel_every_waves": 4,
+      "cancellation_after_semantic_deltas": 4,
+      "cancellation_max_tokens": 256,
+      "cancellation_prompt_words": 48,
+      "gpu_memory_scope": "server_process",
+      "gpu_memory_source": "linux_proc_drm_fdinfo:vram+gtt+cpu",
+      "host_mem_available_floor_bytes": 8589934592,
+      "host_memory_poll_interval_ms": 250,
+      "host_swap_growth_limit_bytes": 536870912,
+      "max_tokens": 16,
+      "memory_growth_limit_bytes": 536870912,
+      "minimum_duration_seconds": 1800.0,
+      "outlier_absolute_ms": 250,
+      "outlier_history_size": 64,
+      "outlier_multiplier": 5,
+      "prompt_identity": "fixed_by_slot_measured_unique_by_epoch_warmup",
+      "prompt_words": {
+        "slot_0": 16,
+        "slot_1": 32,
+        "slot_2": 64,
+        "slot_3": 96,
+        "slot_4": 128,
+        "slot_5": 192,
+        "slot_6": 256,
+        "slot_7": 384
+      },
+      "request_ignore_eos": true,
+      "rocm_graph_cache_entries": 12,
+      "setup_deadline_seconds": 1800,
+      "stabilization_gpu_delta_limit_bytes": 67108864,
+      "stabilization_max_cycles": 8,
+      "stabilization_memory_boundary": "process_drm_and_owned_buffers",
+      "stabilization_min_cycles": 4,
+      "stabilization_required_stable_cycles": 2,
+      "stabilization_rss_delta_limit_bytes": null,
+      "stabilization_rss_growth_limit_bytes": 536870912,
+      "steady_state_warmup_max_waves": 12,
+      "vulkan_buffer_pool_gb": 3.0,
+      "wave_concurrency": {
+        "wave_0": 1,
+        "wave_1": 4,
+        "wave_2": 8,
+        "wave_3": 4
+      }
+    }
+  },
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+      "shader": "2026.2"
+    },
+    "device": {
+      "architecture": "strix_halo",
+      "driver": "radv Mesa 26.1.3-arch1.2",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "driver": "Mesa 26.1.3-arch1.2",
+      "execution_environment_sha256": "sha256:4e2f59070351a66c62498c8952245ba078b66548fd1f7b7b4083b32b2ab41a93",
+      "vulkan_device": "1.4.348",
+      "vulkan_instance": "1.4.350"
+    }
+  },
+  "metrics": [],
+  "model": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "id": "Qwen3.5-4B",
+    "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "notes": [],
+  "qualification": {
+    "backend": "vulkan",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "--variant",
+      "vulkan-development-soak",
+      "--host-id",
+      "strix-halo",
+      "--model",
+      "/home/ericflo/Development/kiln/Qwen3.5-4B",
+      "--model-id",
+      "Qwen3.5-4B",
+      "qualification/workloads/serving-vulkan-development-soak-v1.json"
+    ],
+    "duration_seconds": 1490.4532609809976,
+    "finished_at_utc": "2026-07-15T06:15:23.396Z",
+    "kind": "soak",
+    "profile": "serving-vulkan-development-soak-v1",
+    "started_at_utc": "2026-07-15T05:50:32.942Z",
+    "verdict": "failed"
+  },
+  "receipt_id": "20260715t055032942821z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1",
+  "results": [
+    {
+      "details": "RSS grew by 546590720 bytes after warmup | soak duration 576.420s was below 1800.000s | peak RSS exceeded the post-warmup growth limit; exit code 1 not in [0]",
+      "duration_seconds": 1476.6262989500028,
+      "id": "continuous-mixed-load",
+      "metrics": [
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "attributed_itl_outlier_count",
+          "unit": "count",
+          "value": 17
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batching_error_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": false,
+          "name": "batching_max_observed_active_requests",
+          "unit": "requests",
+          "value": 8
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": false,
+          "name": "batching_max_observed_batch_size",
+          "unit": "rows",
+          "value": 5
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "cancellation_confirmed_count",
+          "unit": "count",
+          "value": 9
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "completion_token_count",
+          "unit": "tokens",
+          "value": 2656
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "device_fault_event_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "external_yield_sync_max_ms",
+          "unit": "ms",
+          "value": 0.05
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_slow_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "gpu_memory_baseline_bytes",
+          "unit": "bytes",
+          "value": 51857997824
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "gpu_memory_end_bytes",
+          "unit": "bytes",
+          "value": 51857993728
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "gpu_memory_growth_bytes",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "gpu_memory_peak_bytes",
+          "unit": "bytes",
+          "value": 52692275200
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "gpu_memory_peak_growth_bytes",
+          "unit": "bytes",
+          "value": 834277376
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_capture_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "graph_capture_success_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_fallback_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_replay_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "graph_replay_success_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_retained_count_end",
+          "unit": "graphs",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_retained_count_start",
+          "unit": "graphs",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "graph_slot_active_count_end",
+          "unit": "slots",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_slot_count_end",
+          "unit": "slots",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_slot_count_start",
+          "unit": "slots",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_slot_create_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_slot_idle_count_end",
+          "unit": "slots",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "graph_slot_reuse_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "host_mem_available_end_bytes",
+          "unit": "bytes",
+          "value": 25981386752
+        },
+        {
+          "aggregation": "min",
+          "lower_is_better": false,
+          "name": "host_mem_available_min_bytes",
+          "unit": "bytes",
+          "value": 23485243392
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "host_mem_available_start_bytes",
+          "unit": "bytes",
+          "value": 29186621440
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "host_memory_guard_trip_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "host_swap_growth_bytes",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "host_swap_used_end_bytes",
+          "unit": "bytes",
+          "value": 1138667520
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "host_swap_used_peak_bytes",
+          "unit": "bytes",
+          "value": 1144483840
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "host_swap_used_start_bytes",
+          "unit": "bytes",
+          "value": 1144483840
+        },
+        {
+          "aggregation": "p50",
+          "lower_is_better": true,
+          "name": "itl_ms_p50",
+          "unit": "ms",
+          "value": 313.96255800063955
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "itl_ms_p99",
+          "unit": "ms",
+          "value": 801.2315652724648
+        },
+        {
+          "aggregation": "p99.9",
+          "lower_is_better": true,
+          "name": "itl_ms_p999",
+          "unit": "ms",
+          "value": 1100.6540573106176
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_blocks_end",
+          "unit": "blocks",
+          "value": 5383
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_blocks_start",
+          "unit": "blocks",
+          "value": 5383
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_blocks_used_end",
+          "unit": "blocks",
+          "value": 75
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_unaccounted_blocks_end",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "non_finite_response_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_active_leases_end",
+          "unit": "leases",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_baseline_cached_entries",
+          "unit": "entries",
+          "value": 15
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_baseline_state_bytes",
+          "unit": "bytes",
+          "value": 412876800
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_cached_blocks_end",
+          "unit": "blocks",
+          "value": 75
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_cached_entries_end",
+          "unit": "entries",
+          "value": 15
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_hit_blocks",
+          "unit": "blocks",
+          "value": 887
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_hit_tokens",
+          "unit": "tokens",
+          "value": 56768
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_lookup_hit_count",
+          "unit": "count",
+          "value": 166
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "prefix_cache_lookup_miss_count",
+          "unit": "count",
+          "value": 9
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_pending_release_entries_end",
+          "unit": "entries",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_state_bytes_end",
+          "unit": "bytes",
+          "value": 412876800
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": false,
+          "name": "prompt_tokens_max",
+          "unit": "tokens",
+          "value": 1240
+        },
+        {
+          "aggregation": "min",
+          "lower_is_better": false,
+          "name": "prompt_tokens_min",
+          "unit": "tokens",
+          "value": 136
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "request_count",
+          "unit": "count",
+          "value": 166
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "request_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "rss_baseline_bytes",
+          "unit": "bytes",
+          "value": 1128468480
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "rss_end_bytes",
+          "unit": "bytes",
+          "value": 1675059200
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "rss_growth_bytes",
+          "unit": "bytes",
+          "value": 546590720
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "rss_peak_bytes",
+          "unit": "bytes",
+          "value": 1675059200
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_forced_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_nonzero_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "snapshot_residue_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "soak_duration_seconds",
+          "unit": "s",
+          "value": 576.4203103710024
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "stabilization_cancellation_count",
+          "unit": "count",
+          "value": 5
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "stabilization_cycle_count",
+          "unit": "count",
+          "value": 5
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "stabilization_final_gpu_delta_bytes",
+          "unit": "bytes",
+          "value": 8192
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "stabilization_final_rss_delta_bytes",
+          "unit": "bytes",
+          "value": 54943744
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "stabilization_max_gpu_delta_bytes",
+          "unit": "bytes",
+          "value": 98631680
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "stabilization_max_rss_delta_bytes",
+          "unit": "bytes",
+          "value": 192561152
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "stabilization_request_count",
+          "unit": "count",
+          "value": 85
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "stabilization_rss_growth_bytes",
+          "unit": "bytes",
+          "value": 418054144
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "stabilization_stable_cycle_count",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "steady_state_warmup_request_count",
+          "unit": "count",
+          "value": 13
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "steady_state_warmup_wave_count",
+          "unit": "count",
+          "value": 3
+        },
+        {
+          "aggregation": "p50",
+          "lower_is_better": true,
+          "name": "ttft_ms_p50",
+          "unit": "ms",
+          "value": 8313.71768399913
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "ttft_ms_p99",
+          "unit": "ms",
+          "value": 19238.589185899764
+        },
+        {
+          "aggregation": "p99.9",
+          "lower_is_better": true,
+          "name": "ttft_ms_p999",
+          "unit": "ms",
+          "value": 19575.884583682495
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "unexplained_itl_outlier_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_allocated_bytes",
+          "unit": "bytes",
+          "value": 721808052288
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_allocation_count",
+          "unit": "count",
+          "value": 925712
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "vulkan_buffer_free_count",
+          "unit": "count",
+          "value": 925712
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "vulkan_buffer_freed_bytes",
+          "unit": "bytes",
+          "value": 721808052288
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_live_bytes_end",
+          "unit": "bytes",
+          "value": 51840421840
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_live_bytes_growth",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_live_bytes_start",
+          "unit": "bytes",
+          "value": 51840421840
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_peak_live_bytes",
+          "unit": "bytes",
+          "value": 52680593360
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "vulkan_buffer_pool_cache_hit_count",
+          "unit": "count",
+          "value": 609635
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_pool_cache_miss_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_pool_evicted_bytes",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_pool_eviction_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_pool_limit_bytes",
+          "unit": "bytes",
+          "value": 3221225472
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_pool_retained_bytes_end",
+          "unit": "bytes",
+          "value": 2275606528
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_pool_retained_bytes_growth",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_pool_retained_bytes_start",
+          "unit": "bytes",
+          "value": 2275606528
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_pool_uncached_allocated_bytes",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_pool_uncached_allocation_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "vulkan_buffer_stabilization_growth_cycle_count",
+          "unit": "count",
+          "value": 3
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "wave_count",
+          "unit": "count",
+          "value": 39
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "zero_token_response_count",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "failed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "5a6f8039e1959c33bdee43a1599f8c8a84e8ad22",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:51b070b3dcba093b95d651062b8eef7bab5b139261553656293d164305abdc25",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "serving-vulkan-development-soak-v1",
+    "parameters": {
+      "variant_id": "vulkan-development-soak"
+    },
+    "seed": 20260715,
+    "sha256": "sha256:aaf0a7daf3b74145d6f080e83effa19debe56f20590ee8f76b750adf07835afa"
+  }
+}
