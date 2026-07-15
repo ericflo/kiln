@@ -58,6 +58,7 @@ PROCESS_MEMORY_MAPPING_FIELDS = (
     "Rss",
     "Pss",
     "Anonymous",
+    "AnonHugePages",
     "Private_Dirty",
     "Swap",
 )
@@ -319,6 +320,11 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
         for category in PROCESS_MEMORY_MAPPING_CATEGORIES
     },
     "vulkan_process_smaps_anonymous_growth_bytes": ("bytes", "exact", True),
+    "vulkan_process_smaps_anonymous_huge_pages_growth_bytes": (
+        "bytes",
+        "exact",
+        True,
+    ),
     "vulkan_process_smaps_private_dirty_growth_bytes": ("bytes", "exact", True),
     "vulkan_process_smaps_rss_end_bytes": ("bytes", "exact", True),
     "vulkan_process_smaps_rss_start_bytes": ("bytes", "exact", True),
@@ -334,8 +340,10 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "vulkan_buffer_stabilization_growth_cycle_count": ("count", "sum", True),
     "vulkan_buffer_pool_cache_hit_count": ("count", "sum", False),
     "vulkan_buffer_pool_cache_miss_count": ("count", "sum", True),
+    "vulkan_buffer_pool_device_local_cache_miss_count": ("count", "sum", True),
     "vulkan_buffer_pool_evicted_bytes": ("bytes", "sum", True),
     "vulkan_buffer_pool_eviction_count": ("count", "sum", True),
+    "vulkan_buffer_pool_host_visible_cache_miss_count": ("count", "sum", True),
     "vulkan_buffer_pool_limit_bytes": ("bytes", "exact", True),
     "vulkan_buffer_pool_retained_bytes_end": ("bytes", "exact", True),
     "vulkan_buffer_pool_retained_bytes_growth": ("bytes", "exact", True),
@@ -445,6 +453,7 @@ class ProcessMemoryMappingUsage:
     rss_bytes: int
     pss_bytes: int
     anonymous_bytes: int
+    anonymous_huge_pages_bytes: int
     private_dirty_bytes: int
     swap_bytes: int
 
@@ -529,7 +538,13 @@ def process_memory_mapping_snapshot(
             raise SoakError(
                 f"{smaps} mapping {address_range} omitted required fields: {missing}"
             )
-        for field in ("Rss", "Pss", "Anonymous", "Private_Dirty"):
+        for field in (
+            "Rss",
+            "Pss",
+            "Anonymous",
+            "AnonHugePages",
+            "Private_Dirty",
+        ):
             if values[field] > values["Size"]:
                 raise SoakError(
                     f"{smaps} mapping {address_range} has {field}="
@@ -545,6 +560,11 @@ def process_memory_mapping_snapshot(
                 f"{smaps} mapping {address_range} has Private_Dirty="
                 f"{values['Private_Dirty']} above Rss={values['Rss']}"
             )
+        if values["AnonHugePages"] > values["Anonymous"]:
+            raise SoakError(
+                f"{smaps} mapping {address_range} has AnonHugePages="
+                f"{values['AnonHugePages']} above Anonymous={values['Anonymous']}"
+            )
         category = process_memory_mapping_category(pathname)
         label = pathname or "[anonymous]"
         mappings.append(
@@ -556,6 +576,7 @@ def process_memory_mapping_snapshot(
                 rss_bytes=values["Rss"],
                 pss_bytes=values["Pss"],
                 anonymous_bytes=values["Anonymous"],
+                anonymous_huge_pages_bytes=values["AnonHugePages"],
                 private_dirty_bytes=values["Private_Dirty"],
                 swap_bytes=values["Swap"],
             )
@@ -593,6 +614,7 @@ def process_memory_mapping_totals(
         "rss_bytes": 0,
         "pss_bytes": 0,
         "anonymous_bytes": 0,
+        "anonymous_huge_pages_bytes": 0,
         "private_dirty_bytes": 0,
         "swap_bytes": 0,
         **{f"{category}_rss_bytes": 0 for category in PROCESS_MEMORY_MAPPING_CATEGORIES},
@@ -603,6 +625,7 @@ def process_memory_mapping_totals(
         totals["rss_bytes"] += mapping.rss_bytes
         totals["pss_bytes"] += mapping.pss_bytes
         totals["anonymous_bytes"] += mapping.anonymous_bytes
+        totals["anonymous_huge_pages_bytes"] += mapping.anonymous_huge_pages_bytes
         totals["private_dirty_bytes"] += mapping.private_dirty_bytes
         totals["swap_bytes"] += mapping.swap_bytes
         totals[f"{mapping.category}_rss_bytes"] += mapping.rss_bytes
@@ -629,6 +652,7 @@ def process_memory_mapping_trace(
         top_growth.append(
             {
                 "anonymous_bytes": mapping.anonymous_bytes,
+                "anonymous_huge_pages_bytes": mapping.anonymous_huge_pages_bytes,
                 "category": mapping.category,
                 "identity": mapping.identity,
                 "private_dirty_bytes": mapping.private_dirty_bytes,
@@ -641,6 +665,10 @@ def process_memory_mapping_trace(
     return {
         "smaps_anonymous_delta_bytes": (
             after_totals["anonymous_bytes"] - before_totals["anonymous_bytes"]
+        ),
+        "smaps_anonymous_huge_pages_delta_bytes": (
+            after_totals["anonymous_huge_pages_bytes"]
+            - before_totals["anonymous_huge_pages_bytes"]
         ),
         "smaps_private_dirty_delta_bytes": (
             after_totals["private_dirty_bytes"]
@@ -670,6 +698,11 @@ def process_memory_mapping_metric_values(
     before_totals = process_memory_mapping_totals(before)
     after_totals = process_memory_mapping_totals(after)
     values = {
+        "vulkan_process_smaps_anonymous_huge_pages_growth_bytes": max(
+            0,
+            after_totals["anonymous_huge_pages_bytes"]
+            - before_totals["anonymous_huge_pages_bytes"],
+        ),
         "vulkan_process_smaps_anonymous_growth_bytes": max(
             0, after_totals["anonymous_bytes"] - before_totals["anonymous_bytes"]
         ),
@@ -1071,7 +1104,7 @@ def vulkan_buffer_accounting_failures(
     return failures
 
 
-VULKAN_BUFFER_POOL_FIELDS = (
+VULKAN_BUFFER_POOL_NUMERIC_FIELDS = (
     "max_retained_bytes",
     "bucket_count",
     "buffer_count",
@@ -1082,14 +1115,27 @@ VULKAN_BUFFER_POOL_FIELDS = (
     "borrowed_bytes",
     "cache_hits",
     "cache_misses",
+    "device_local_cache_misses",
+    "host_visible_cache_misses",
     "eviction_count",
     "evicted_bytes",
     "uncached_allocation_count",
     "uncached_allocated_bytes",
 )
+VULKAN_BUFFER_POOL_FIELDS = (*VULKAN_BUFFER_POOL_NUMERIC_FIELDS, "last_cache_miss")
+VULKAN_BUFFER_POOL_LAST_MISS_FIELDS = (
+    "sequence",
+    "route",
+    "requested_bytes",
+    "bucket_bytes",
+    "caller_file",
+    "caller_line",
+)
 VULKAN_BUFFER_POOL_COUNTER_FIELDS = (
     "cache_hits",
     "cache_misses",
+    "device_local_cache_misses",
+    "host_visible_cache_misses",
     "eviction_count",
     "evicted_bytes",
     "uncached_allocation_count",
@@ -1231,7 +1277,7 @@ def batched_state_cache_metric_values(
 
 def vulkan_buffer_pool_snapshot(
     health: dict[str, Any], runtime: SoakRuntime = ROCM_RUNTIME
-) -> dict[str, int] | None:
+) -> dict[str, Any] | None:
     if runtime.backend != "vulkan":
         return None
     raw = health.get("vulkan_buffer_pool")
@@ -1244,8 +1290,8 @@ def vulkan_buffer_pool_snapshot(
             "health.vulkan_buffer_pool field mismatch: "
             f"missing={missing}, extra={extra}"
         )
-    snapshot: dict[str, int] = {}
-    for field in VULKAN_BUFFER_POOL_FIELDS:
+    snapshot: dict[str, Any] = {}
+    for field in VULKAN_BUFFER_POOL_NUMERIC_FIELDS:
         value = raw[field]
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise SoakError(
@@ -1253,6 +1299,50 @@ def vulkan_buffer_pool_snapshot(
                 f"got {value!r}"
             )
         snapshot[field] = value
+    last_miss = raw["last_cache_miss"]
+    if last_miss is None:
+        if snapshot["cache_misses"] != 0:
+            raise SoakError("Vulkan buffer pool omitted its last cache miss")
+        snapshot["last_cache_miss"] = None
+    else:
+        if not isinstance(last_miss, dict):
+            raise SoakError("Vulkan buffer-pool last_cache_miss must be an object")
+        if set(last_miss) != set(VULKAN_BUFFER_POOL_LAST_MISS_FIELDS):
+            missing = sorted(set(VULKAN_BUFFER_POOL_LAST_MISS_FIELDS) - set(last_miss))
+            extra = sorted(set(last_miss) - set(VULKAN_BUFFER_POOL_LAST_MISS_FIELDS))
+            raise SoakError(
+                "Vulkan buffer-pool last_cache_miss field mismatch: "
+                f"missing={missing}, extra={extra}"
+            )
+        for field in ("sequence", "requested_bytes", "bucket_bytes", "caller_line"):
+            value = last_miss[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise SoakError(
+                    f"Vulkan buffer-pool last_cache_miss.{field} must be a positive "
+                    f"integer, got {value!r}"
+                )
+        if last_miss["route"] not in {"device_local", "host_visible"}:
+            raise SoakError(
+                "Vulkan buffer-pool last_cache_miss.route must be device_local or "
+                f"host_visible, got {last_miss['route']!r}"
+            )
+        if not isinstance(last_miss["caller_file"], str) or not last_miss["caller_file"]:
+            raise SoakError(
+                "Vulkan buffer-pool last_cache_miss.caller_file must be non-empty"
+            )
+        if last_miss["sequence"] != snapshot["cache_misses"]:
+            raise SoakError(
+                "Vulkan buffer-pool last cache-miss sequence does not match its counter"
+            )
+        if last_miss["requested_bytes"] > last_miss["bucket_bytes"]:
+            raise SoakError("Vulkan buffer-pool last cache-miss bucket rounded down")
+        snapshot["last_cache_miss"] = dict(last_miss)
+    if (
+        snapshot["device_local_cache_misses"]
+        + snapshot["host_visible_cache_misses"]
+        != snapshot["cache_misses"]
+    ):
+        raise SoakError("Vulkan buffer-pool route miss counters do not reconcile")
     if snapshot["retained_bytes"] > snapshot["max_retained_bytes"]:
         raise SoakError(
             "Vulkan buffer pool exceeds its configured cap: "
@@ -1269,17 +1359,42 @@ def vulkan_buffer_pool_snapshot(
 
 
 def vulkan_buffer_pool_counter_delta(
-    before: dict[str, int], after: dict[str, int], field: str
+    before: dict[str, Any], after: dict[str, Any], field: str
 ) -> int:
-    start = before[field]
-    end = after[field]
+    start = int(before[field])
+    end = int(after[field])
     if end < start:
         raise SoakError(f"Vulkan buffer-pool counter {field} regressed: {start} -> {end}")
     return end - start
 
 
+def vulkan_buffer_pool_miss_trace_values(
+    before: dict[str, Any], after: dict[str, Any]
+) -> dict[str, Any]:
+    total = vulkan_buffer_pool_counter_delta(before, after, "cache_misses")
+    device_local = vulkan_buffer_pool_counter_delta(
+        before, after, "device_local_cache_misses"
+    )
+    host_visible = vulkan_buffer_pool_counter_delta(
+        before, after, "host_visible_cache_misses"
+    )
+    if device_local + host_visible != total:
+        raise SoakError("Vulkan buffer-pool interval route misses do not reconcile")
+    values: dict[str, Any] = {
+        "vulkan_pool_cache_miss_count": total,
+        "vulkan_pool_device_local_cache_miss_count": device_local,
+        "vulkan_pool_host_visible_cache_miss_count": host_visible,
+    }
+    if total != 0:
+        last_miss = after["last_cache_miss"]
+        if not isinstance(last_miss, dict):
+            raise SoakError("Vulkan buffer-pool miss interval lacks last-miss attribution")
+        values["vulkan_pool_last_cache_miss"] = dict(last_miss)
+    return values
+
+
 def vulkan_buffer_pool_metric_values(
-    before: dict[str, int], after: dict[str, int]
+    before: dict[str, Any], after: dict[str, Any]
 ) -> dict[str, int]:
     if before["max_retained_bytes"] != after["max_retained_bytes"]:
         raise SoakError("Vulkan buffer-pool limit changed after startup")
@@ -1290,18 +1405,28 @@ def vulkan_buffer_pool_metric_values(
         "vulkan_buffer_pool_cache_miss_count": vulkan_buffer_pool_counter_delta(
             before, after, "cache_misses"
         ),
+        "vulkan_buffer_pool_device_local_cache_miss_count": (
+            vulkan_buffer_pool_counter_delta(
+                before, after, "device_local_cache_misses"
+            )
+        ),
         "vulkan_buffer_pool_evicted_bytes": vulkan_buffer_pool_counter_delta(
             before, after, "evicted_bytes"
         ),
         "vulkan_buffer_pool_eviction_count": vulkan_buffer_pool_counter_delta(
             before, after, "eviction_count"
         ),
-        "vulkan_buffer_pool_limit_bytes": after["max_retained_bytes"],
-        "vulkan_buffer_pool_retained_bytes_end": after["retained_bytes"],
-        "vulkan_buffer_pool_retained_bytes_growth": max(
-            0, after["retained_bytes"] - before["retained_bytes"]
+        "vulkan_buffer_pool_host_visible_cache_miss_count": (
+            vulkan_buffer_pool_counter_delta(
+                before, after, "host_visible_cache_misses"
+            )
         ),
-        "vulkan_buffer_pool_retained_bytes_start": before["retained_bytes"],
+        "vulkan_buffer_pool_limit_bytes": int(after["max_retained_bytes"]),
+        "vulkan_buffer_pool_retained_bytes_end": int(after["retained_bytes"]),
+        "vulkan_buffer_pool_retained_bytes_growth": max(
+            0, int(after["retained_bytes"]) - int(before["retained_bytes"])
+        ),
+        "vulkan_buffer_pool_retained_bytes_start": int(before["retained_bytes"]),
         "vulkan_buffer_pool_uncached_allocated_bytes": vulkan_buffer_pool_counter_delta(
             before, after, "uncached_allocated_bytes"
         ),
@@ -1520,8 +1645,8 @@ def execute(
     stabilization_vulkan_growth_cycles = 0
     observed_vulkan_buffers_start: dict[str, int] | None = None
     observed_vulkan_buffers_end: dict[str, int] | None = None
-    observed_vulkan_pool_start: dict[str, int] | None = None
-    observed_vulkan_pool_end: dict[str, int] | None = None
+    observed_vulkan_pool_start: dict[str, Any] | None = None
+    observed_vulkan_pool_end: dict[str, Any] | None = None
     observed_batched_state_start: dict[str, int | bool] | None = None
     observed_batched_state_end: dict[str, int | bool] | None = None
     observed_process_mappings_start: ProcessMemoryMappingSnapshot | None = None
@@ -1897,6 +2022,11 @@ def execute(
                         previous_vulkan_pool, current_vulkan_pool, field
                     )
                 cycle_trace.update(
+                    vulkan_buffer_pool_miss_trace_values(
+                        previous_vulkan_pool, current_vulkan_pool
+                    )
+                )
+                cycle_trace.update(
                     vulkan_pool_borrowed_bytes=current_vulkan_pool["borrowed_bytes"],
                     vulkan_pool_evicted_bytes=vulkan_buffer_pool_counter_delta(
                         previous_vulkan_pool, current_vulkan_pool, "evicted_bytes"
@@ -2093,6 +2223,7 @@ def execute(
             current_gpu = gpu_memory_bytes(port, process.pid, runtime)
             current_memory = process_memory_snapshot(process.pid)
             current_vulkan_buffers = vulkan_buffer_snapshot(health, runtime)
+            current_vulkan_pool = vulkan_buffer_pool_snapshot(health, runtime)
             current_rss = current_memory.rss_bytes
             rss_samples.append(current_rss)
             if current_gpu > gpu_start + memory_growth_limit_bytes:
@@ -2160,6 +2291,12 @@ def execute(
                 wave_trace.update(
                     batched_state_cache_trace_values(
                         batched_state_start, batched_state
+                    )
+                )
+            if vulkan_pool_start is not None and current_vulkan_pool is not None:
+                wave_trace.update(
+                    vulkan_buffer_pool_miss_trace_values(
+                        vulkan_pool_start, current_vulkan_pool
                     )
                 )
             mixed.trace("soak_wave_complete", **wave_trace)

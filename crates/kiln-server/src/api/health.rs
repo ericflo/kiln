@@ -228,14 +228,36 @@ struct VulkanBufferPoolInfo {
     borrowed_bytes: u64,
     cache_hits: u64,
     cache_misses: u64,
+    device_local_cache_misses: u64,
+    host_visible_cache_misses: u64,
+    last_cache_miss: Option<VulkanBufferPoolCacheMissInfo>,
     eviction_count: u64,
     evicted_bytes: u64,
     uncached_allocation_count: u64,
     uncached_allocated_bytes: u64,
 }
 
+#[derive(Serialize)]
+struct VulkanBufferPoolCacheMissInfo {
+    sequence: u64,
+    route: &'static str,
+    requested_bytes: u64,
+    bucket_bytes: u64,
+    caller_file: &'static str,
+    caller_line: u32,
+}
+
 impl From<kiln_model::VulkanBufferPoolStats> for VulkanBufferPoolInfo {
     fn from(stats: kiln_model::VulkanBufferPoolStats) -> Self {
+        let last_cache_miss =
+            (stats.last_cache_miss.sequence != 0).then_some(VulkanBufferPoolCacheMissInfo {
+                sequence: stats.last_cache_miss.sequence,
+                route: stats.last_cache_miss.route.as_str(),
+                requested_bytes: stats.last_cache_miss.requested_bytes,
+                bucket_bytes: stats.last_cache_miss.bucket_bytes,
+                caller_file: stats.last_cache_miss.caller_file,
+                caller_line: stats.last_cache_miss.caller_line,
+            });
         Self {
             max_retained_bytes: stats.max_retained_bytes,
             bucket_count: stats.bucket_count,
@@ -247,6 +269,9 @@ impl From<kiln_model::VulkanBufferPoolStats> for VulkanBufferPoolInfo {
             borrowed_bytes: stats.borrowed_bytes(),
             cache_hits: stats.cache_hits,
             cache_misses: stats.cache_misses,
+            device_local_cache_misses: stats.device_local_cache_misses,
+            host_visible_cache_misses: stats.host_visible_cache_misses,
+            last_cache_miss,
             eviction_count: stats.eviction_count,
             evicted_bytes: stats.evicted_bytes,
             uncached_allocation_count: stats.uncached_allocation_count,
@@ -1396,6 +1421,43 @@ mod tests {
             300,
             "Qwen3.5-4B".to_string(),
         )
+    }
+
+    #[test]
+    fn vulkan_buffer_pool_health_retains_bounded_miss_attribution() {
+        let stats = kiln_model::VulkanBufferPoolStats {
+            cache_misses: 9,
+            device_local_cache_misses: 7,
+            host_visible_cache_misses: 2,
+            last_cache_miss: kiln_model::VulkanBufferPoolCacheMiss {
+                sequence: 9,
+                route: kiln_model::VulkanBufferPoolCacheMissRoute::DeviceLocal,
+                requested_bytes: 20_000_000,
+                bucket_bytes: 20_971_520,
+                caller_file: "crates/kiln-tensor/src/vulkan_storage.rs",
+                caller_line: 1234,
+            },
+            ..kiln_model::VulkanBufferPoolStats::default()
+        };
+        let value = serde_json::to_value(VulkanBufferPoolInfo::from(stats)).unwrap();
+        assert_eq!(value["cache_misses"], 9);
+        assert_eq!(value["device_local_cache_misses"], 7);
+        assert_eq!(value["host_visible_cache_misses"], 2);
+        assert_eq!(value["last_cache_miss"]["sequence"], 9);
+        assert_eq!(value["last_cache_miss"]["route"], "device_local");
+        assert_eq!(value["last_cache_miss"]["requested_bytes"], 20_000_000);
+        assert_eq!(value["last_cache_miss"]["bucket_bytes"], 20_971_520);
+        assert_eq!(
+            value["last_cache_miss"]["caller_file"],
+            "crates/kiln-tensor/src/vulkan_storage.rs"
+        );
+        assert_eq!(value["last_cache_miss"]["caller_line"], 1234);
+
+        let empty = serde_json::to_value(VulkanBufferPoolInfo::from(
+            kiln_model::VulkanBufferPoolStats::default(),
+        ))
+        .unwrap();
+        assert!(empty["last_cache_miss"].is_null());
     }
 
     #[test]

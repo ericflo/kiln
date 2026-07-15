@@ -1157,8 +1157,10 @@ new swap is a failure even when the 8 GiB floor was not crossed.
 At the drained warmup baseline and after each of the at most eight Vulkan
 stabilization cycles, the driver also reads `/proc/<pid>/smaps`. This is bounded
 diagnostic work, not a hot-loop sampler. Every mapping must contain Linux's
-`Size`, `Rss`, `Pss`, `Anonymous`, `Private_Dirty`, and `Swap` fields or the run
-fails closed. Mappings are assigned to a fixed, low-cardinality set:
+`Size`, `Rss`, `Pss`, `Anonymous`, `AnonHugePages`, `Private_Dirty`, and `Swap`
+fields or the run fails closed. `AnonHugePages` must not exceed `Anonymous`, and
+the remaining page-accounting fields are checked against mapping size and RSS.
+Mappings are assigned to a fixed, low-cardinality set:
 
 - `anonymous`: unnamed and `[anon:*]` mappings;
 - `heap`: the process `[heap]` mapping;
@@ -1169,14 +1171,18 @@ fails closed. Mappings are assigned to a fixed, low-cardinality set:
 - `kernel`: kernel pseudo-mappings such as `[vdso]` and `[vvar]`.
 
 Each cycle trace records signed RSS deltas for every category, total PSS,
-anonymous-page, private-dirty, and swap deltas, plus the eight largest positive
-mapping-level RSS changes. A mapping identity includes its path (or
-`[anonymous]`) and virtual address range, so a fixed mapping becoming resident
-can be distinguished from a newly mapped object. The bounded case-result
+anonymous-page, anonymous-huge-page, private-dirty, and swap deltas, plus the
+eight largest positive mapping-level RSS changes. Each retained mapping row
+includes its current anonymous-huge-page bytes. A mapping identity includes its
+path (or `[anonymous]`) and virtual address range, so a fixed mapping becoming
+resident can be distinguished from a newly mapped object. The bounded case-result
 metrics retain start/end `smaps` RSS, positive growth by category, and positive
-anonymous, private-dirty, and swap growth across the complete observed
-stabilization-through-measurement window. These diagnostics attribute a safety
-failure; they do not weaken, replace, or exempt it from the RSS gate.
+anonymous, anonymous-huge-page, private-dirty, and swap growth across the
+complete observed stabilization-through-measurement window. The exact metric
+for huge-page growth is
+`vulkan_process_smaps_anonymous_huge_pages_growth_bytes`. These diagnostics
+attribute a safety failure; they do not weaken, replace, or exempt it from the
+RSS gate.
 
 Vulkan stabilization runs complete concurrency 1, 4, 8, and 4 cycles with
 16-token outputs and a cancellation every fourth wave. It first fills the
@@ -1235,13 +1241,18 @@ retention from all other live buffers:
 | `bucket_count`, `buffer_count`, `retained_bytes` | Current exact cache inventory. |
 | `free_*`, `borrowed_*` | Idle versus caller-owned portions; each pair must reconcile to the inventory total. |
 | `cache_hits`, `cache_misses` | Process-lifetime recycler lookup outcomes. |
+| `device_local_cache_misses`, `host_visible_cache_misses` | Process-lifetime miss attribution by allocation route. Their sum must equal `cache_misses`. |
+| `last_cache_miss` | One bounded diagnostic record, or `null` before the first miss. A record contains the miss `sequence`, allocation `route`, requested and bucket-rounded bytes, and the Rust caller file and line. Its sequence equals `cache_misses`. |
 | `eviction_count`, `evicted_bytes` | Idle entries released to admit a newer working set or satisfy pressure reclaim. |
 | `uncached_allocation_count`, `uncached_allocated_bytes` | Overflow scratch allocations returned without a cache owner and freed on normal drop. |
 
 Retained bytes may never exceed the cap. Eviction is oldest-idle-first and
 never removes a borrowed buffer. Pressure reclaim runs only while the batching
 actor is idle, after exclusive GPU coordination and a second health/activity
-check.
+check. `GET /v1/config` exposes the pool limit, inventory, free and borrowed
+bytes, both lookup outcomes, both route-specific miss counters, eviction totals,
+and uncached overflow totals. It deliberately omits the source-level last-miss
+record; use `GET /health` for that live diagnostic.
 
 Prometheus exports the same state as:
 
@@ -1258,6 +1269,7 @@ kiln_vulkan_buffer_pool_bytes{state="retained|free|borrowed"}
 kiln_vulkan_buffer_pool_buffers{state="retained|free|borrowed"}
 kiln_vulkan_buffer_pool_buckets
 kiln_vulkan_buffer_pool_requests_total{result="hit|miss"}
+kiln_vulkan_buffer_pool_misses_total{route="device_local|host_visible"}
 kiln_vulkan_buffer_pool_evictions_total
 kiln_vulkan_buffer_pool_evicted_bytes_total
 kiln_vulkan_buffer_pool_uncached_allocations_total
@@ -1361,8 +1373,13 @@ live bytes stay flat indicate temporary buffer churn; if RSS continues to grow
 within the cumulative host limit, investigate driver or unified-memory page
 residency rather than mislabeling it as retained Rust ownership. Flat
 allocation/free counters and flat live bytes with growing RSS instead point to
-pages becoming resident in already-live allocations. The stabilization trace
-records buffer, pool, DRM, RSS, swap, fixed-category `smaps`, and bounded
+pages becoming resident in already-live allocations. The stabilization and
+measured-wave traces record total and route-specific pool miss deltas. They
+include the single `vulkan_pool_last_cache_miss` record only for an interval
+that made at least one miss, so an unexpected warmed-path allocation identifies
+its final request size, pool bucket, route, and source callsite without
+unbounded event capture. The stabilization trace also records buffer, pool,
+DRM, RSS, swap, fixed-category `smaps`, anonymous huge-page, and bounded
 per-mapping deltas per cycle. A run that fails
 before measurement retains the observed stabilization window in the Vulkan
 allocation, pool, cache-lifecycle, and mapping metrics instead of replacing it

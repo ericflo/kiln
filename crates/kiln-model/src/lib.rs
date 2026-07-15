@@ -108,7 +108,11 @@ pub use weights::{ModelSnapshotCleanup, ModelWeights};
 #[cfg(feature = "vulkan")]
 pub use kiln_vulkan_kernel::buffer::VulkanBufferAllocationStats;
 #[cfg(feature = "vulkan")]
-pub use kiln_vulkan_kernel::buffer_pool::BufferPoolStats as VulkanBufferPoolStats;
+pub use kiln_vulkan_kernel::buffer_pool::{
+    BufferPoolCacheMiss as VulkanBufferPoolCacheMiss,
+    BufferPoolCacheMissRoute as VulkanBufferPoolCacheMissRoute,
+    BufferPoolStats as VulkanBufferPoolStats,
+};
 
 #[cfg(not(feature = "vulkan"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -130,6 +134,37 @@ pub struct VulkanBufferAllocationStats {
 
 #[cfg(not(feature = "vulkan"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VulkanBufferPoolCacheMissRoute {
+    #[default]
+    None,
+    DeviceLocal,
+    HostVisible,
+}
+
+#[cfg(not(feature = "vulkan"))]
+impl VulkanBufferPoolCacheMissRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::DeviceLocal => "device_local",
+            Self::HostVisible => "host_visible",
+        }
+    }
+}
+
+#[cfg(not(feature = "vulkan"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VulkanBufferPoolCacheMiss {
+    pub sequence: u64,
+    pub route: VulkanBufferPoolCacheMissRoute,
+    pub requested_bytes: u64,
+    pub bucket_bytes: u64,
+    pub caller_file: &'static str,
+    pub caller_line: u32,
+}
+
+#[cfg(not(feature = "vulkan"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VulkanBufferPoolStats {
     pub max_retained_bytes: u64,
     pub bucket_count: usize,
@@ -139,6 +174,9 @@ pub struct VulkanBufferPoolStats {
     pub free_bytes: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
+    pub device_local_cache_misses: u64,
+    pub host_visible_cache_misses: u64,
+    pub last_cache_miss: VulkanBufferPoolCacheMiss,
     pub eviction_count: u64,
     pub evicted_bytes: u64,
     pub uncached_allocation_count: u64,

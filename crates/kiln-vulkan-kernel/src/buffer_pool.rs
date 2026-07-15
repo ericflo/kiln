@@ -28,6 +28,7 @@ use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
+use std::panic::Location;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -72,6 +73,34 @@ struct PooledBuffer {
     last_used: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BufferPoolCacheMissRoute {
+    #[default]
+    None,
+    DeviceLocal,
+    HostVisible,
+}
+
+impl BufferPoolCacheMissRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::DeviceLocal => "device_local",
+            Self::HostVisible => "host_visible",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BufferPoolCacheMiss {
+    pub sequence: u64,
+    pub route: BufferPoolCacheMissRoute,
+    pub requested_bytes: u64,
+    pub bucket_bytes: u64,
+    pub caller_file: &'static str,
+    pub caller_line: u32,
+}
+
 #[derive(Default)]
 struct PoolInner {
     /// Per-(device, byte-size) FIFO of recycled buffers. Keying by the
@@ -94,6 +123,9 @@ struct PoolInner {
     use_clock: u64,
     cache_hits: u64,
     cache_misses: u64,
+    device_local_cache_misses: u64,
+    host_visible_cache_misses: u64,
+    last_cache_miss: BufferPoolCacheMiss,
     eviction_count: u64,
     evicted_bytes: u64,
     uncached_allocation_count: u64,
@@ -113,11 +145,42 @@ impl PoolInner {
     }
 }
 
+#[track_caller]
+fn record_cache_miss(
+    inner: &mut PoolInner,
+    route: BufferPoolCacheMissRoute,
+    requested_bytes: u64,
+    bucket_bytes: u64,
+) {
+    match route {
+        BufferPoolCacheMissRoute::DeviceLocal => {
+            inner.device_local_cache_misses = inner.device_local_cache_misses.saturating_add(1);
+        }
+        BufferPoolCacheMissRoute::HostVisible => {
+            inner.host_visible_cache_misses = inner.host_visible_cache_misses.saturating_add(1);
+        }
+        BufferPoolCacheMissRoute::None => {
+            unreachable!("a cache miss must have an allocation route");
+        }
+    }
+    inner.cache_misses = inner.cache_misses.saturating_add(1);
+    let caller = Location::caller();
+    inner.last_cache_miss = BufferPoolCacheMiss {
+        sequence: inner.cache_misses,
+        route,
+        requested_bytes,
+        bucket_bytes,
+        caller_file: caller.file(),
+        caller_line: caller.line(),
+    };
+}
+
 /// Allocate (or recycle) a device-local buffer of `bytes` bytes.
 ///
 /// The returned `Arc<VulkanBuffer>` shares storage with the internal
 /// pool; when the caller's last clone drops, an admitted buffer is
 /// recycled. Buffers beyond the configured cap are freed normally.
+#[track_caller]
 pub fn pool_alloc_device_local(device: &VulkanDevice, bytes: u64) -> Result<Arc<VulkanBuffer>> {
     if durable_allocation_scope_active() {
         return VulkanBuffer::create_device_local(
@@ -149,7 +212,12 @@ pub fn pool_alloc_device_local(device: &VulkanDevice, bytes: u64) -> Result<Arc<
             }
         }
     }
-    inner.cache_misses = inner.cache_misses.saturating_add(1);
+    record_cache_miss(
+        &mut inner,
+        BufferPoolCacheMissRoute::DeviceLocal,
+        bytes,
+        bucket,
+    );
     drop(inner); // release lock before vkAllocateMemory
 
     let buf =
@@ -190,6 +258,7 @@ pub fn pool_alloc_device_local(device: &VulkanDevice, bytes: u64) -> Result<Arc<
 /// `bytes` (bucket-rounded); callers must copy/read only the bytes
 /// they need (`read_back` already does — it copies `src.size` and maps
 /// `WHOLE_SIZE` but reads only `src.size`).
+#[track_caller]
 pub fn pool_alloc_host_visible(
     device: &Arc<ash::Device>,
     host_mem_type: u32,
@@ -232,7 +301,12 @@ pub fn pool_alloc_host_visible(
             }
         }
     }
-    inner.cache_misses = inner.cache_misses.saturating_add(1);
+    record_cache_miss(
+        &mut inner,
+        BufferPoolCacheMissRoute::HostVisible,
+        bytes,
+        bucket,
+    );
     drop(inner); // release lock before vkAllocateMemory
 
     let buf = VulkanBuffer::create_host_visible(device, host_mem_type, bucket)
@@ -276,6 +350,9 @@ pub struct BufferPoolStats {
     pub free_bytes: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
+    pub device_local_cache_misses: u64,
+    pub host_visible_cache_misses: u64,
+    pub last_cache_miss: BufferPoolCacheMiss,
     pub eviction_count: u64,
     pub evicted_bytes: u64,
     pub uncached_allocation_count: u64,
@@ -297,6 +374,9 @@ fn stats_for_device(inner: &PoolInner, device: vk::Device) -> BufferPoolStats {
         max_retained_bytes: MAX_RETAINED_BYTES.load(Ordering::Relaxed),
         cache_hits: inner.cache_hits,
         cache_misses: inner.cache_misses,
+        device_local_cache_misses: inner.device_local_cache_misses,
+        host_visible_cache_misses: inner.host_visible_cache_misses,
+        last_cache_miss: inner.last_cache_miss,
         eviction_count: inner.eviction_count,
         evicted_bytes: inner.evicted_bytes,
         uncached_allocation_count: inner.uncached_allocation_count,
@@ -531,6 +611,7 @@ fn free_retained_bytes(inner: &PoolInner) -> u64 {
 }
 
 /// Convenience wrapper: allocate `n` F32 elements (`n * 4` bytes).
+#[track_caller]
 pub fn pool_alloc_f32(device: &VulkanDevice, n: usize) -> Result<Arc<VulkanBuffer>> {
     let bytes = (n as u64).saturating_mul(4).max(4);
     pool_alloc_device_local(device, bytes)
@@ -544,6 +625,9 @@ pub fn pool_stats() -> BufferPoolStats {
         bucket_count: inner.by_device_bytes.len() + inner.host_by_device_bytes.len(),
         cache_hits: inner.cache_hits,
         cache_misses: inner.cache_misses,
+        device_local_cache_misses: inner.device_local_cache_misses,
+        host_visible_cache_misses: inner.host_visible_cache_misses,
+        last_cache_miss: inner.last_cache_miss,
         eviction_count: inner.eviction_count,
         evicted_bytes: inner.evicted_bytes,
         uncached_allocation_count: inner.uncached_allocation_count,
@@ -674,6 +758,50 @@ mod tests {
         };
         assert_eq!(inconsistent.borrowed_buffer_count(), 0);
         assert_eq!(inconsistent.borrowed_bytes(), 0);
+    }
+
+    #[test]
+    fn cache_miss_attribution_is_bounded_and_route_specific() {
+        let mut inner = PoolInner::default();
+        let device_line = line!() + 1;
+        record_cache_miss(
+            &mut inner,
+            BufferPoolCacheMissRoute::DeviceLocal,
+            65_537,
+            262_144,
+        );
+        assert_eq!(inner.cache_misses, 1);
+        assert_eq!(inner.device_local_cache_misses, 1);
+        assert_eq!(inner.host_visible_cache_misses, 0);
+        assert_eq!(inner.last_cache_miss.sequence, 1);
+        assert_eq!(
+            inner.last_cache_miss.route,
+            BufferPoolCacheMissRoute::DeviceLocal
+        );
+        assert_eq!(inner.last_cache_miss.requested_bytes, 65_537);
+        assert_eq!(inner.last_cache_miss.bucket_bytes, 262_144);
+        assert_eq!(inner.last_cache_miss.caller_file, file!());
+        assert_eq!(inner.last_cache_miss.caller_line, device_line);
+
+        let host_line = line!() + 1;
+        record_cache_miss(
+            &mut inner,
+            BufferPoolCacheMissRoute::HostVisible,
+            4_194_305,
+            8_388_608,
+        );
+        assert_eq!(inner.cache_misses, 2);
+        assert_eq!(inner.device_local_cache_misses, 1);
+        assert_eq!(inner.host_visible_cache_misses, 1);
+        assert_eq!(inner.last_cache_miss.sequence, 2);
+        assert_eq!(
+            inner.last_cache_miss.route,
+            BufferPoolCacheMissRoute::HostVisible
+        );
+        assert_eq!(inner.last_cache_miss.requested_bytes, 4_194_305);
+        assert_eq!(inner.last_cache_miss.bucket_bytes, 8_388_608);
+        assert_eq!(inner.last_cache_miss.caller_file, file!());
+        assert_eq!(inner.last_cache_miss.caller_line, host_line);
     }
 
     #[test]

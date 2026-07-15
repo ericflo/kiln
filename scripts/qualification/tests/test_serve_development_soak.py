@@ -153,6 +153,7 @@ class ServeRocmSoakTests(unittest.TestCase):
             rss: int,
             pss: int,
             anonymous: int,
+            anonymous_huge: int,
             private_dirty: int,
             swap: int,
         ) -> str:
@@ -164,6 +165,7 @@ class ServeRocmSoakTests(unittest.TestCase):
                 f"Pss: {pss} kB\n"
                 f"Private_Dirty: {private_dirty} kB\n"
                 f"Anonymous: {anonymous} kB\n"
+                f"AnonHugePages: {anonymous_huge} kB\n"
                 f"Swap: {swap} kB\n"
                 "VmFlags: rd wr mr mw me ac sd\n"
             )
@@ -175,6 +177,7 @@ class ServeRocmSoakTests(unittest.TestCase):
             rss=16,
             pss=16,
             anonymous=16,
+            anonymous_huge=8,
             private_dirty=12,
             swap=0,
         ) + mapping(
@@ -184,6 +187,7 @@ class ServeRocmSoakTests(unittest.TestCase):
             rss=32,
             pss=30,
             anonymous=32,
+            anonymous_huge=0,
             private_dirty=32,
             swap=0,
         )
@@ -194,6 +198,7 @@ class ServeRocmSoakTests(unittest.TestCase):
             rss=48,
             pss=48,
             anonymous=48,
+            anonymous_huge=40,
             private_dirty=44,
             swap=4,
         ) + mapping(
@@ -203,6 +208,7 @@ class ServeRocmSoakTests(unittest.TestCase):
             rss=40,
             pss=38,
             anonymous=40,
+            anonymous_huge=0,
             private_dirty=40,
             swap=0,
         )
@@ -228,6 +234,9 @@ class ServeRocmSoakTests(unittest.TestCase):
         trace = soak.process_memory_mapping_trace(before, after, top_limit=1)
         self.assertEqual(trace["smaps_anonymous_delta_bytes"], 40 * 1024)
         self.assertEqual(
+            trace["smaps_anonymous_huge_pages_delta_bytes"], 32 * 1024
+        )
+        self.assertEqual(
             trace["smaps_rss_delta_bytes_by_category"]["anonymous"], 32 * 1024
         )
         self.assertEqual(len(trace["smaps_top_rss_growth"]), 1)
@@ -245,6 +254,10 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(
             metrics["vulkan_process_smaps_private_dirty_growth_bytes"], 40 * 1024
         )
+        self.assertEqual(
+            metrics["vulkan_process_smaps_anonymous_huge_pages_growth_bytes"],
+            32 * 1024,
+        )
 
     def test_process_memory_mapping_snapshot_fails_on_incomplete_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -259,6 +272,96 @@ class ServeRocmSoakTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(soak.SoakError, "omitted required fields"):
                 soak.process_memory_mapping_snapshot(42, root)
+
+    def test_vulkan_pool_miss_attribution_is_closed_and_interval_exact(self) -> None:
+        def pool_health(
+            *,
+            cache_misses: int,
+            device_misses: int,
+            host_misses: int,
+            last_miss: dict | None,
+        ) -> dict:
+            return {
+                "vulkan_buffer_pool": {
+                    "max_retained_bytes": 4096,
+                    "bucket_count": 2,
+                    "buffer_count": 3,
+                    "retained_bytes": 3072,
+                    "free_buffer_count": 2,
+                    "free_bytes": 2048,
+                    "borrowed_buffer_count": 1,
+                    "borrowed_bytes": 1024,
+                    "cache_hits": 100,
+                    "cache_misses": cache_misses,
+                    "device_local_cache_misses": device_misses,
+                    "host_visible_cache_misses": host_misses,
+                    "last_cache_miss": last_miss,
+                    "eviction_count": 4,
+                    "evicted_bytes": 1024,
+                    "uncached_allocation_count": 0,
+                    "uncached_allocated_bytes": 0,
+                }
+            }
+
+        before_last = {
+            "sequence": 9,
+            "route": "host_visible",
+            "requested_bytes": 1024,
+            "bucket_bytes": 65_536,
+            "caller_file": "crates/kiln-vulkan-kernel/src/buffer.rs",
+            "caller_line": 484,
+        }
+        after_last = {
+            "sequence": 10,
+            "route": "device_local",
+            "requested_bytes": 20_000_000,
+            "bucket_bytes": 20_971_520,
+            "caller_file": "crates/kiln-tensor/src/vulkan_storage.rs",
+            "caller_line": 1234,
+        }
+        before = soak.vulkan_buffer_pool_snapshot(
+            pool_health(
+                cache_misses=9,
+                device_misses=7,
+                host_misses=2,
+                last_miss=before_last,
+            ),
+            soak.VULKAN_RUNTIME,
+        )
+        after = soak.vulkan_buffer_pool_snapshot(
+            pool_health(
+                cache_misses=10,
+                device_misses=8,
+                host_misses=2,
+                last_miss=after_last,
+            ),
+            soak.VULKAN_RUNTIME,
+        )
+        assert before is not None and after is not None
+        trace = soak.vulkan_buffer_pool_miss_trace_values(before, after)
+        self.assertEqual(trace["vulkan_pool_cache_miss_count"], 1)
+        self.assertEqual(trace["vulkan_pool_device_local_cache_miss_count"], 1)
+        self.assertEqual(trace["vulkan_pool_host_visible_cache_miss_count"], 0)
+        self.assertEqual(trace["vulkan_pool_last_cache_miss"], after_last)
+        metrics = soak.vulkan_buffer_pool_metric_values(before, after)
+        self.assertEqual(metrics["vulkan_buffer_pool_cache_miss_count"], 1)
+        self.assertEqual(
+            metrics["vulkan_buffer_pool_device_local_cache_miss_count"], 1
+        )
+        self.assertEqual(
+            metrics["vulkan_buffer_pool_host_visible_cache_miss_count"], 0
+        )
+
+        with self.assertRaisesRegex(soak.SoakError, "route miss counters"):
+            soak.vulkan_buffer_pool_snapshot(
+                pool_health(
+                    cache_misses=10,
+                    device_misses=7,
+                    host_misses=2,
+                    last_miss=after_last,
+                ),
+                soak.VULKAN_RUNTIME,
+            )
 
     def test_process_drm_memory_deduplicates_client_ids_and_regions(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

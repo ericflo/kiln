@@ -2425,6 +2425,22 @@ impl Metrics {
                 "miss",
                 stats.cache_misses,
             );
+            out.push_str("# HELP kiln_vulkan_buffer_pool_misses_total Vulkan recycler cache misses by allocation route.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_pool_misses_total counter\n");
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_pool_misses_total",
+                "route",
+                "device_local",
+                stats.device_local_cache_misses,
+            );
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_pool_misses_total",
+                "route",
+                "host_visible",
+                stats.host_visible_cache_misses,
+            );
             out.push_str("# HELP kiln_vulkan_buffer_pool_evictions_total Idle Vulkan recycler buffers released for capacity or pressure.\n");
             out.push_str("# TYPE kiln_vulkan_buffer_pool_evictions_total counter\n");
             push_line(
@@ -3510,6 +3526,16 @@ mod tests {
                 free_bytes: 2048,
                 cache_hits: 100,
                 cache_misses: 9,
+                device_local_cache_misses: 7,
+                host_visible_cache_misses: 2,
+                last_cache_miss: kiln_model::VulkanBufferPoolCacheMiss {
+                    sequence: 9,
+                    route: kiln_model::VulkanBufferPoolCacheMissRoute::DeviceLocal,
+                    requested_bytes: 20_000_000,
+                    bucket_bytes: 20_971_520,
+                    caller_file: "crates/kiln-tensor/src/vulkan_storage.rs",
+                    caller_line: 1234,
+                },
                 eviction_count: 2,
                 evicted_bytes: 512,
                 uncached_allocation_count: 1,
@@ -3803,6 +3829,8 @@ mod tests {
         assert!(
             output.contains("kiln_vulkan_buffer_freed_bytes_total{memory=\"host_visible\"} 100")
         );
+        assert!(output.contains("kiln_vulkan_buffer_pool_misses_total{route=\"device_local\"} 7"));
+        assert!(output.contains("kiln_vulkan_buffer_pool_misses_total{route=\"host_visible\"} 2"));
         for expected in [
             "kiln_batched_recurrent_state_cache_entry 1",
             "kiln_batched_recurrent_state_cache_rows{kind=\"capacity\"} 8",
