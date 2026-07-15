@@ -158,6 +158,10 @@ successful native multi-row resident-prefill forward, `false` when a batching
 request never entered that route, and `null` on direct paths that cannot use
 it. This is request-scoped route evidence, not an inference from process-global
 counters; a native decline that performs no mutation leaves it `false`.
+Production currently publishes `resident_prefill_enabled=false` and therefore
+must emit `false` for every batching request: guarded Vulkan model runs found
+semantic corruption on this optimization. Health, trusted debug state, and the
+Prometheus capability gauge expose that quarantine explicitly.
 
 The batching engine measures `gpu_lock_wait_ms` and `synchronization_ms` on the
 owned decode invocation and propagates those observations only to requests

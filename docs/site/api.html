@@ -740,33 +740,38 @@
               </p>
               <h5 class="font-semibold mt-4 mb-2">Resident Vulkan prefill telemetry</h5>
               <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
-  "active_resident_prefill": 4,
-  "total_resident_prefill_attempts": 21,
-  "total_resident_prefill_forwards": 20,
-  "total_resident_prefill_initial_declines": 1,
+  "resident_prefill_enabled": false,
+  "active_resident_prefill": 0,
+  "total_resident_prefill_attempts": 0,
+  "total_resident_prefill_forwards": 0,
+  "total_resident_prefill_initial_declines": 0,
   "total_resident_prefill_route_failures": 0,
-  "total_resident_prefill_rows": 138,
-  "total_resident_prefill_completed_rows": 8,
-  "last_resident_prefill_batch_size": 6,
-  "max_resident_prefill_batch_size": 8
+  "total_resident_prefill_rows": 0,
+  "total_resident_prefill_completed_rows": 0,
+  "last_resident_prefill_batch_size": 0,
+  "max_resident_prefill_batch_size": 0
 }</code></pre>
               <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 These fields are part of <code>decode_runtime.batching_engine</code> on
                 <code>GET /health</code> and <code>GET /v1/health</code>, and of the trusted debug
-                <code>batching_engine</code> snapshot. They are always present when the actor is active; on
-                non-Vulkan backends or a process that has not used this route, they remain zero.
+                <code>batching_engine</code> snapshot. They are always present when the actor is active.
+                Production currently reports <code>resident_prefill_enabled=false</code> because guarded Vulkan
+                model runs found semantic corruption on the optimization. While false, every route counter and
+                batch-size gauge must remain zero, and every batching request reports
+                <code>resident_prefill_used=false</code>.
                 <code>active_resident_prefill</code> is the live count of prefill rows whose newest native
                 positions cannot fall back to generic prefill. It must return to zero after request drain.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                An attempt is one actor call into the native route. A forward is a successful call, while an
+                If a future correctness-qualified build enables the route, an attempt is one actor call into the
+                native route. A forward is a successful call, while an
                 initial decline is a mutation-free decision made before any selected row enters native authority.
                 In a healthy interval with no route failure, attempt delta equals forward delta plus initial-decline
                 delta. Route failures count fail-closed native errors, post-entry declines, eligibility loss, and
                 progress-contract violations; any increase is an inference error, not a generic fallback.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Rows count all request rows advanced by successful calls, completed rows count the subset whose
+                When enabled, rows count all request rows advanced by successful calls, completed rows count the subset whose
                 prompt ended on those calls, and last/maximum batch size report successful cohort width. A rising
                 forward-count delta and a row-count delta strictly greater than it prove that the measured interval
                 contained a multi-row forward. Maximum width at least two proves multi-row execution somewhere in
@@ -776,6 +781,7 @@
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Prometheus exports the same state as
+                <code>kiln_batching_engine_resident_prefill_enabled</code>,
                 <code>kiln_batching_engine_active_resident_prefill</code>,
                 <code>kiln_batching_engine_resident_prefill_attempts_total</code>,
                 <code>kiln_batching_engine_resident_prefill_forwards_total</code>,
@@ -1575,7 +1581,9 @@ kiln serve --config kiln.toml</code></pre>
           <code>true</code> only after a successful native multi-row resident-prefill forward included
           that request, <code>false</code> for batching requests that never entered the route, and
           <code>null</code> for direct paths. It is not inferred from process-global counters, and a
-          mutation-free native decline remains <code>false</code>. Non-batching paths return the actor
+          mutation-free native decline remains <code>false</code>. Production currently advertises
+          <code>resident_prefill_enabled=false</code>, so all batching requests must report
+          <code>resident_prefill_used=false</code>. Non-batching paths return the actor
           fields as <code>null</code>. Both real-model
           streaming paths publish a performance object on the terminal chat chunk; explicit opt-in
           also emits a separate <code>kiln.token_timing</code> SSE object for each model token with a

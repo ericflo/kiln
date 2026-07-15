@@ -272,6 +272,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
 }
 VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     **METRIC_DEFINITIONS,
+    "resident_prefill_enabled": ("bool", "exact", False),
     "batched_state_cache_active_leases_end": ("leases", "exact", True),
     "batched_state_cache_capacity_rows_end": ("rows", "exact", False),
     "batched_state_cache_completed_row_eviction_count": ("count", "sum", True),
@@ -1827,12 +1828,19 @@ def metric_definitions(
 
 
 def resident_prefill_metric_values(
-    before: dict[str, int], after: dict[str, int]
+    before: dict[str, int | bool], after: dict[str, int | bool]
 ) -> dict[str, int]:
+    enabled_before = before["resident_prefill_enabled"]
+    enabled_after = after["resident_prefill_enabled"]
+    if not isinstance(enabled_before, bool) or not isinstance(enabled_after, bool):
+        raise SoakError("resident prefill enabled capability is not boolean")
+    if enabled_before != enabled_after:
+        raise SoakError("resident prefill enabled capability changed during the run")
     max_batch_size = after["max_resident_prefill_batch_size"]
     if max_batch_size < before["max_resident_prefill_batch_size"]:
         raise SoakError("resident prefill maximum batch size regressed")
     return {
+        "resident_prefill_enabled": int(enabled_after),
         "resident_prefill_active_rows_end": after["active_resident_prefill"],
         "resident_prefill_attempt_count": mixed.counter_delta(
             before, after, "total_resident_prefill_attempts"
@@ -1875,6 +1883,19 @@ def resident_prefill_contract_failures(
     rows = values["resident_prefill_row_count"]
     completed_rows = values["resident_prefill_completed_row_count"]
     max_batch_size = values["resident_prefill_max_batch_size"]
+    if values["resident_prefill_enabled"] == 0:
+        for name in (
+            "resident_prefill_attempt_count",
+            "resident_prefill_completed_row_count",
+            "resident_prefill_forward_count",
+            "resident_prefill_initial_decline_count",
+            "resident_prefill_max_batch_size",
+            "resident_prefill_route_failure_count",
+            "resident_prefill_row_count",
+        ):
+            if values[name] != 0:
+                failures.append(f"{name}={values[name]} while resident prefill is disabled")
+        return failures
     if route_failures == 0 and attempts != forwards + declines:
         failures.append(
             "resident prefill attempts do not reconcile with forwards and declines: "

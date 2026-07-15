@@ -694,6 +694,7 @@ class ServeRocmSoakTests(unittest.TestCase):
         self,
     ) -> None:
         before = {
+            "resident_prefill_enabled": True,
             "active_resident_prefill": 0,
             "total_resident_prefill_attempts": 2,
             "total_resident_prefill_completed_rows": 1,
@@ -704,6 +705,7 @@ class ServeRocmSoakTests(unittest.TestCase):
             "total_resident_prefill_rows": 4,
         }
         after = {
+            "resident_prefill_enabled": True,
             "active_resident_prefill": 0,
             "total_resident_prefill_attempts": 5,
             "total_resident_prefill_completed_rows": 3,
@@ -717,6 +719,7 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(
             values,
             {
+                "resident_prefill_enabled": 1,
                 "resident_prefill_active_rows_end": 0,
                 "resident_prefill_attempt_count": 3,
                 "resident_prefill_completed_row_count": 2,
@@ -769,6 +772,36 @@ class ServeRocmSoakTests(unittest.TestCase):
         regressed["max_resident_prefill_batch_size"] = 1
         with self.assertRaisesRegex(soak.SoakError, "maximum batch size regressed"):
             soak.resident_prefill_metric_values(after, regressed)
+
+    def test_disabled_resident_prefill_requires_zero_route_activity(self) -> None:
+        before = {
+            "resident_prefill_enabled": False,
+            "active_resident_prefill": 0,
+            "total_resident_prefill_attempts": 0,
+            "total_resident_prefill_completed_rows": 0,
+            "total_resident_prefill_forwards": 0,
+            "total_resident_prefill_initial_declines": 0,
+            "max_resident_prefill_batch_size": 0,
+            "total_resident_prefill_route_failures": 0,
+            "total_resident_prefill_rows": 0,
+        }
+        values = soak.resident_prefill_metric_values(before, dict(before))
+        self.assertEqual(values["resident_prefill_enabled"], 0)
+        self.assertEqual(
+            soak.resident_prefill_contract_failures(values, max_configured_rows=8),
+            [],
+        )
+
+        active = dict(values)
+        active["resident_prefill_attempt_count"] = 1
+        self.assertTrue(
+            any(
+                "while resident prefill is disabled" in failure
+                for failure in soak.resident_prefill_contract_failures(
+                    active, max_configured_rows=8
+                )
+            )
+        )
 
     def test_graph_warmup_contract_depends_on_runtime(self) -> None:
         graph = {"capture_successes": 1, "replay_successes": 1, "failures": 0}

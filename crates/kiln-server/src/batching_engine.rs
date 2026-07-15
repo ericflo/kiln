@@ -309,6 +309,9 @@ pub struct BatchingEngineSnapshot {
     pub queue_depth: usize,
     pub active_decode: usize,
     pub active_prefill: usize,
+    /// Whether the production forward has admitted native resident token
+    /// prefill as a correctness-qualified route.
+    pub resident_prefill_enabled: bool,
     /// Prefill rows whose newest KV positions are owned only by the resident
     /// Vulkan route and therefore cannot fall back to generic prefill.
     pub active_resident_prefill: usize,
@@ -551,6 +554,12 @@ pub trait DecodeForward: Send + Sync + 'static {
     /// row on the ordinary round-robin path.
     fn remaining_prefill_tokens(&self, _slot: &DecodeSlot) -> Option<usize> {
         None
+    }
+    /// Whether the resident token-prefill optimization is admitted for this
+    /// forward. The actor does not probe candidates or mutate counters while
+    /// this capability is withdrawn.
+    fn resident_prefill_enabled(&self) -> bool {
+        false
     }
     /// Whether this row can enter the resident one-token Vulkan prefill batch.
     /// The classification must be mutation-free; the batch method revalidates
@@ -882,6 +891,14 @@ impl DecodeForward for RealDecodeForward {
         true
     }
 
+    fn resident_prefill_enabled(&self) -> bool {
+        // Guarded production-model runs demonstrated plausible but incorrect
+        // tokens from this route, including on its first use in a fresh
+        // process. Keep generic layer-resumable prefill authoritative until
+        // resident KV/GDN parity is proven across changing actor cohorts.
+        false
+    }
+
     fn grow_for_decode(&self, slots: &mut [&mut DecodeSlot]) -> Result<Vec<usize>> {
         self.grow_for_decode_per_slot(slots)
     }
@@ -928,13 +945,14 @@ impl DecodeForward for RealDecodeForward {
         slot: &DecodeSlot,
         sampling: &SamplingParams,
     ) -> bool {
-        matches!(
-            slot,
-            DecodeSlot::RealPrefill {
-                state: Some(state),
-                ..
-            } if state.resident_token_prefill_candidate(sampling)
-        )
+        self.resident_prefill_enabled()
+            && matches!(
+                slot,
+                DecodeSlot::RealPrefill {
+                    state: Some(state),
+                    ..
+                } if state.resident_token_prefill_candidate(sampling)
+            )
     }
 
     fn resident_prefill_batch_required(&self, slot: &DecodeSlot) -> bool {
@@ -2356,6 +2374,7 @@ impl BatchingEngineActor {
         let max_prefill_layers_per_cycle = max_prefill_layers_per_cycle.layers();
         let snapshot = BatchingEngineSnapshot {
             accepting: true,
+            resident_prefill_enabled: forward.resident_prefill_enabled(),
             max_batch_tokens: max_batch_tokens.tokens(),
             max_batch_tokens_source: max_batch_tokens.source(),
             max_prefill_tokens_per_cycle,
@@ -3325,7 +3344,7 @@ impl BatchingEngineActor {
     /// charge. Rows that already entered the resident route remain eligible as
     /// a single-row tail because their newer KV positions are resident-only.
     fn run_resident_prefill_batch(&mut self, budget: &mut usize) -> Option<bool> {
-        if *budget == 0 || self.active.is_empty() {
+        if !self.snapshot.resident_prefill_enabled || *budget == 0 || self.active.is_empty() {
             return None;
         }
         let active_len = self.active.len();
@@ -4495,6 +4514,10 @@ mod tests {
             true
         }
 
+        fn resident_prefill_enabled(&self) -> bool {
+            self.resident_prefill_enabled
+        }
+
         fn prepare_request_chunked(
             &self,
             req: &EngineRequest,
@@ -5220,6 +5243,31 @@ mod tests {
     }
 
     #[test]
+    fn disabled_resident_prefill_capability_never_attempts_the_route() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(SyntheticPrefillForward::default());
+        let mut actor = test_actor(
+            rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let _receivers = push_synthetic_prefill_rows(&mut actor, &forward, &[(11, 3), (22, 3)]);
+
+        let mut budget = 2;
+        assert!(!actor.snapshot.resident_prefill_enabled);
+        assert_eq!(actor.run_resident_prefill_batch(&mut budget), None);
+        assert_eq!(budget, 2);
+        assert_eq!(actor.snapshot.total_resident_prefill_attempts, 0);
+        assert_eq!(actor.snapshot.total_resident_prefill_forwards, 0);
+        assert!(forward.events.lock().unwrap().is_empty());
+        assert!(forward.resident_rows.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn resident_prefill_waits_for_every_row_to_reach_a_committed_boundary() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(SyntheticPrefillForward {
@@ -5236,6 +5284,7 @@ mod tests {
             ResponseDeliveryPolicy::default(),
         );
         let _receivers = push_synthetic_prefill_rows(&mut actor, &forward, &[(11, 3), (22, 3)]);
+        assert!(actor.snapshot.resident_prefill_enabled);
         forward.pending_layers.lock().unwrap().insert(22, 1);
 
         let mut budget = 2;

@@ -1448,9 +1448,12 @@ introduces a hidden device readback on the prefill or decode hot path.
 `resident_prefix_snapshot_suppression_count` and
 `kiln_prefix_cache_snapshot_suppressions_total` prove that guard fired. The
 counter is expected to rise when an otherwise eligible capture encounters
-native resident prefill or decode authority. It must be monotonic; a zero delta
-is meaningful only when the workload also proves that an eligible capture and
-resident execution occurred.
+native resident decode authority. The resident token-prefill optimization is
+currently correctness-quarantined, so qualification requires its advertised
+capability and all activity counters to remain zero. If that route is later
+requalified, its captures remain subject to the same gate. The suppression
+counter must be monotonic; a zero delta is meaningful only when the workload
+also proves that an eligible capture and resident execution occurred.
 Qualification retains its delta but does not treat a positive value as an
 error.
 

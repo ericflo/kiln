@@ -290,6 +290,7 @@ def health_fixture(
                 "max_prefill_layers_per_cycle_source": "config_file",
                 "active_decode": 0,
                 "active_prefill": 0,
+                "resident_prefill_enabled": False,
                 "active_resident_prefill": 0,
                 "active_staged_requests": 0,
                 "queue_depth": 0,

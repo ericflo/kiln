@@ -456,23 +456,21 @@ curl -s http://localhost:8420/metrics \
         </p>
         <h3 id="vulkan-resident-prefill-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan resident-prefill diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-          For a Vulkan prompt-throughput incident, capture two health snapshots around the affected interval and
-          retain the server log. Do not infer that the native path ran from request shape alone. Require a positive
-          delta in <code>total_resident_prefill_forwards</code> and a strictly larger delta in
-          <code>total_resident_prefill_rows</code> to prove that the interval contained a multi-row forward.
-          <code>max_resident_prefill_batch_size &gt;= 2</code> proves multi-row execution somewhere in the
-          process lifetime; a maximum of one records only a resident single-row tail.
+          Production currently correctness-quarantines the native token-prefill optimization after guarded Vulkan
+          runs returned semantically wrong tokens. Start every incident check by requiring
+          <code>resident_prefill_enabled=false</code>. Every attempt, forward, decline, route-failure, row,
+          completion, and batch-size field must remain zero; <code>active_resident_prefill</code> must also remain
+          zero. Any activity means the running artifact does not implement the current production contract.
         </p>
         <pre class="mt-5"><code>curl -s http://localhost:8420/health \
   | jq '.decode_runtime.batching_engine | with_entries(select(.key | contains("resident_prefill")))'
 curl -s http://localhost:8420/metrics \
   | grep '^kiln_batching_engine_.*resident_prefill'</code></pre>
         <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-          <li>With no route failures, attempt delta must equal forward delta plus initial-decline delta. A mismatch means the interval is incomplete or the accounting contract was violated.</li>
-          <li>An initial decline is safe only before native mutation and means the selected rows stayed on generic prefill. Repeated declines mean the expected native optimization is not being exercised.</li>
-          <li>Any route-failure increase is fail-closed: the affected requests terminate instead of resuming from stale generic KV. Correlate it with the request error and server event before retrying.</li>
-          <li><code>active_resident_prefill</code> must be zero after cancellation or full drain. A nonzero value is retained native ownership, not queued generic prefill.</li>
-          <li>Resident-prefill requests deliberately do not register prompt, split-prefix, or rolling-prefix cache entries after native authority begins. A lower prefix-hit rate can therefore be an expected correctness tradeoff, not a cache leak.</li>
+          <li>The generic layer-resumable prefill route remains authoritative. There is no supported environment variable, config field, or request override that enables resident token-prefill.</li>
+          <li><code>kiln_batching_engine_resident_prefill_enabled 0</code> is the Prometheus equivalent of the health capability.</li>
+          <li>A request-level <code>resident_prefill_used=true</code> is impossible in a conforming production process and should be treated as artifact or contract drift.</li>
+          <li>Re-enablement requires production-model semantic parity across changing cohorts and repeated process history. Scheduler counters or a successful HTTP response are not sufficient evidence.</li>
         </ul>
       </article>
 

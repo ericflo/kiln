@@ -2968,7 +2968,7 @@ def attest_runtime(
     return failures
 
 
-def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int]:
+def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int | bool]:
     runtime = health.get("decode_runtime")
     batching = runtime.get("batching_engine") if isinstance(runtime, dict) else None
     scheduler = health.get("scheduler")
@@ -2976,7 +2976,15 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int]:
         raise QualificationError("health batching-engine snapshot is missing")
     if not isinstance(scheduler, dict):
         raise QualificationError("health scheduler snapshot is missing")
-    snapshot: dict[str, float | int] = {}
+    resident_prefill_enabled = batching.get("resident_prefill_enabled")
+    if not isinstance(resident_prefill_enabled, bool):
+        raise QualificationError(
+            "batching-engine field resident_prefill_enabled must be boolean, "
+            f"got {resident_prefill_enabled!r}"
+        )
+    snapshot: dict[str, float | int | bool] = {
+        "resident_prefill_enabled": resident_prefill_enabled
+    }
     for field in (
         "max_decode_batch",
         "max_prefill_staging_slots",

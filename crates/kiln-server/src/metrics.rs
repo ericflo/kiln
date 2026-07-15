@@ -1496,6 +1496,16 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_resident_prefill_enabled Whether native resident token-prefill is correctness-qualified and admitted.\n");
+        out.push_str("# TYPE kiln_batching_engine_resident_prefill_enabled gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_resident_prefill_enabled {}",
+                u8::from(gauges.batching_engine.resident_prefill_enabled)
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_active_resident_prefill Prefill rows whose newest KV positions require the resident Vulkan route.\n");
         out.push_str("# TYPE kiln_batching_engine_active_resident_prefill gauge\n");
         push_line(
@@ -3702,6 +3712,7 @@ mod tests {
                 queue_depth: 2,
                 active_decode: 3,
                 active_prefill: 2,
+                resident_prefill_enabled: true,
                 active_resident_prefill: 1,
                 max_batch_tokens: 256,
                 max_prefill_tokens_per_cycle: 64,
@@ -3991,6 +4002,7 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_queue_depth 2"));
         assert!(output.contains("kiln_batching_engine_active_decode 3"));
         assert!(output.contains("kiln_batching_engine_active_prefill 2"));
+        assert!(output.contains("kiln_batching_engine_resident_prefill_enabled 1"));
         assert!(output.contains("kiln_batching_engine_active_resident_prefill 1"));
         assert!(output.contains("kiln_batching_engine_max_batch_tokens 256"));
         assert!(output.contains("kiln_batching_engine_max_prefill_tokens_per_cycle 64"));
