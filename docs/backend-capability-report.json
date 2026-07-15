@@ -1401,10 +1401,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1525,
+          "line": 1529,
           "paired_method": "runtime_decode_resident_pool_ready",
           "paired_method_always_declines": false,
-          "paired_method_line": 1512,
+          "paired_method_line": 1516,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         }
@@ -3039,12 +3039,13 @@
         "VulkanBackend"
       ],
       "forwarding_impl": "concrete_authoritative",
-      "method_count": 18,
+      "method_count": 19,
       "methods": [
         "runtime_assemble_gdn_recurrent_resident_batch_rows",
         "runtime_assemble_linear_attn_gdn_state_batch_kt",
         "runtime_enter_gdn_recurrent_resident_state_scope",
         "runtime_evict_gdn_recurrent_resident_state",
+        "runtime_evict_linear_attn_gdn_state_kt",
         "runtime_evict_resident_activation",
         "runtime_exit_gdn_recurrent_resident_state_scope",
         "runtime_has_gdn_recurrent_resident_state",
