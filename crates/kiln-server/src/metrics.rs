@@ -1496,6 +1496,16 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_active_resident_prefill Prefill rows whose newest KV positions require the resident Vulkan route.\n");
+        out.push_str("# TYPE kiln_batching_engine_active_resident_prefill gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_active_resident_prefill {}",
+                gauges.batching_engine.active_resident_prefill
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_max_batch_tokens Effective combined decode-plus-prefill token budget per actor cycle.\n");
         out.push_str("# TYPE kiln_batching_engine_max_batch_tokens gauge\n");
         push_line(
@@ -1807,6 +1817,83 @@ impl Metrics {
             &format!(
                 "kiln_batching_engine_prefill_forwards_total {}",
                 gauges.batching_engine.total_prefill_forwards
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_resident_prefill_attempts_total Native resident token-prefill calls attempted by the batching actor.\n");
+        out.push_str("# TYPE kiln_batching_engine_resident_prefill_attempts_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_resident_prefill_attempts_total {}",
+                gauges.batching_engine.total_resident_prefill_attempts
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_resident_prefill_forwards_total Successful native resident token-prefill forwards.\n");
+        out.push_str("# TYPE kiln_batching_engine_resident_prefill_forwards_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_resident_prefill_forwards_total {}",
+                gauges.batching_engine.total_resident_prefill_forwards
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_resident_prefill_initial_declines_total Mutation-free native declines before any selected row entered resident authority.\n");
+        out.push_str(
+            "# TYPE kiln_batching_engine_resident_prefill_initial_declines_total counter\n",
+        );
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_resident_prefill_initial_declines_total {}",
+                gauges
+                    .batching_engine
+                    .total_resident_prefill_initial_declines
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_resident_prefill_route_failures_total Fail-closed native errors, post-entry declines, or progress-contract violations.\n");
+        out.push_str("# TYPE kiln_batching_engine_resident_prefill_route_failures_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_resident_prefill_route_failures_total {}",
+                gauges.batching_engine.total_resident_prefill_route_failures
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_resident_prefill_rows_total Prompt rows advanced by successful native resident forwards.\n");
+        out.push_str("# TYPE kiln_batching_engine_resident_prefill_rows_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_resident_prefill_rows_total {}",
+                gauges.batching_engine.total_resident_prefill_rows
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_resident_prefill_completed_rows_total Prompt rows completed by native resident forwards.\n");
+        out.push_str("# TYPE kiln_batching_engine_resident_prefill_completed_rows_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_resident_prefill_completed_rows_total {}",
+                gauges.batching_engine.total_resident_prefill_completed_rows
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_resident_prefill_last_batch_size Rows in the most recent successful native resident prefill forward.\n");
+        out.push_str("# TYPE kiln_batching_engine_resident_prefill_last_batch_size gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_resident_prefill_last_batch_size {}",
+                gauges.batching_engine.last_resident_prefill_batch_size
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_resident_prefill_max_batch_size Largest successful native resident prefill cohort since process start.\n");
+        out.push_str("# TYPE kiln_batching_engine_resident_prefill_max_batch_size gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_resident_prefill_max_batch_size {}",
+                gauges.batching_engine.max_resident_prefill_batch_size
             ),
         );
 
@@ -3605,6 +3692,7 @@ mod tests {
                 queue_depth: 2,
                 active_decode: 3,
                 active_prefill: 2,
+                active_resident_prefill: 1,
                 max_batch_tokens: 256,
                 max_prefill_tokens_per_cycle: 64,
                 max_prefill_layers_per_cycle: 4,
@@ -3637,6 +3725,14 @@ mod tests {
                 total_decode_rows: 48,
                 total_prefill_admission_cycles: 6,
                 total_prefill_forwards: 12,
+                total_resident_prefill_attempts: 11,
+                total_resident_prefill_forwards: 9,
+                total_resident_prefill_initial_declines: 2,
+                total_resident_prefill_route_failures: 0,
+                total_resident_prefill_rows: 61,
+                total_resident_prefill_completed_rows: 7,
+                last_resident_prefill_batch_size: 6,
+                max_resident_prefill_batch_size: 8,
                 total_decode_tokens: 128,
                 total_prefill_tokens: 8192,
                 total_prefill_layers: 48,
@@ -3884,6 +3980,7 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_queue_depth 2"));
         assert!(output.contains("kiln_batching_engine_active_decode 3"));
         assert!(output.contains("kiln_batching_engine_active_prefill 2"));
+        assert!(output.contains("kiln_batching_engine_active_resident_prefill 1"));
         assert!(output.contains("kiln_batching_engine_max_batch_tokens 256"));
         assert!(output.contains("kiln_batching_engine_max_prefill_tokens_per_cycle 64"));
         assert!(output.contains("kiln_batching_engine_max_prefill_layers_per_cycle 4"));
@@ -3923,6 +4020,14 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_prefill_staging_priority_forwards_total 3"));
         assert!(output.contains("kiln_batching_engine_prefill_staging_admissions_total 4"));
         assert!(output.contains("kiln_batching_engine_prefill_forwards_total 12"));
+        assert!(output.contains("kiln_batching_engine_resident_prefill_attempts_total 11"));
+        assert!(output.contains("kiln_batching_engine_resident_prefill_forwards_total 9"));
+        assert!(output.contains("kiln_batching_engine_resident_prefill_initial_declines_total 2"));
+        assert!(output.contains("kiln_batching_engine_resident_prefill_route_failures_total 0"));
+        assert!(output.contains("kiln_batching_engine_resident_prefill_rows_total 61"));
+        assert!(output.contains("kiln_batching_engine_resident_prefill_completed_rows_total 7"));
+        assert!(output.contains("kiln_batching_engine_resident_prefill_last_batch_size 6"));
+        assert!(output.contains("kiln_batching_engine_resident_prefill_max_batch_size 8"));
         assert!(output.contains("kiln_batching_engine_decode_tokens_total 128"));
         assert!(output.contains("kiln_batching_engine_prefill_tokens_total 8192"));
         assert!(output.contains("kiln_batching_engine_prefill_layers_total 48"));

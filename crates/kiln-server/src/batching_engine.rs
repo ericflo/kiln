@@ -306,6 +306,9 @@ pub struct BatchingEngineSnapshot {
     pub queue_depth: usize,
     pub active_decode: usize,
     pub active_prefill: usize,
+    /// Prefill rows whose newest KV positions are owned only by the resident
+    /// Vulkan route and therefore cannot fall back to generic prefill.
+    pub active_resident_prefill: usize,
     pub max_batch_tokens: usize,
     pub max_batch_tokens_source: ConfigValueSource,
     pub max_prefill_tokens_per_cycle: usize,
@@ -347,6 +350,14 @@ pub struct BatchingEngineSnapshot {
     pub total_decode_rows: u64,
     pub total_prefill_admission_cycles: u64,
     pub total_prefill_forwards: u64,
+    pub total_resident_prefill_attempts: u64,
+    pub total_resident_prefill_forwards: u64,
+    pub total_resident_prefill_initial_declines: u64,
+    pub total_resident_prefill_route_failures: u64,
+    pub total_resident_prefill_rows: u64,
+    pub total_resident_prefill_completed_rows: u64,
+    pub last_resident_prefill_batch_size: usize,
+    pub max_resident_prefill_batch_size: usize,
     pub total_prefill_layers: u64,
     pub total_prefill_layer_yields: u64,
     pub total_short_prefill_priority_forwards: u64,
@@ -1165,7 +1176,8 @@ impl DecodeForward for RealDecodeForward {
             Some(cancel),
         );
         let synchronized = runner_guard.synchronize_external_yield("batched prefill quantum");
-        if progress.is_err()
+        if synchronized.is_ok()
+            && progress.is_err()
             && let Some(prefill) = state.as_ref()
             && prefill.resident_token_prefill_started()
         {
@@ -3339,6 +3351,10 @@ impl BatchingEngineActor {
             })
             .collect();
         if !invalid_required_indices.is_empty() {
+            self.snapshot.total_resident_prefill_route_failures = self
+                .snapshot
+                .total_resident_prefill_route_failures
+                .saturating_add(1);
             let error = "resident token-prefill row lost native-route eligibility".to_string();
             for idx in invalid_required_indices.iter().copied().rev() {
                 let active = self.active.remove(idx);
@@ -3419,6 +3435,10 @@ impl BatchingEngineActor {
             .map(|&idx| self.active[idx].req.cancel.clone())
             .collect();
         let started = Instant::now();
+        self.snapshot.total_resident_prefill_attempts = self
+            .snapshot
+            .total_resident_prefill_attempts
+            .saturating_add(1);
         let result = {
             let mut selected = self
                 .active
@@ -3434,8 +3454,18 @@ impl BatchingEngineActor {
         let elapsed = started.elapsed();
         let progress = match result {
             Ok(Some(progress)) => progress,
-            Ok(None) if !required => return None,
+            Ok(None) if !required => {
+                self.snapshot.total_resident_prefill_initial_declines = self
+                    .snapshot
+                    .total_resident_prefill_initial_declines
+                    .saturating_add(1);
+                return None;
+            }
             Ok(None) => {
+                self.snapshot.total_resident_prefill_route_failures = self
+                    .snapshot
+                    .total_resident_prefill_route_failures
+                    .saturating_add(1);
                 let error = "resident token-prefill native route declined an owned row".to_string();
                 for idx in indices.iter().copied().rev() {
                     let active = self.active.remove(idx);
@@ -3447,6 +3477,10 @@ impl BatchingEngineActor {
                 return Some(true);
             }
             Err(error) => {
+                self.snapshot.total_resident_prefill_route_failures = self
+                    .snapshot
+                    .total_resident_prefill_route_failures
+                    .saturating_add(1);
                 for idx in indices.iter().copied().rev() {
                     let active = self.active.remove(idx);
                     self.forward.discard_request(active.slot);
@@ -3458,6 +3492,10 @@ impl BatchingEngineActor {
             }
         };
         if progress.len() != indices.len() {
+            self.snapshot.total_resident_prefill_route_failures = self
+                .snapshot
+                .total_resident_prefill_route_failures
+                .saturating_add(1);
             let error = format!(
                 "resident prefill batch returned {} rows for {} requests",
                 progress.len(),
@@ -3481,6 +3519,10 @@ impl BatchingEngineActor {
                     && row.layers_processed == layers_processed
             });
         if !progress_valid {
+            self.snapshot.total_resident_prefill_route_failures = self
+                .snapshot
+                .total_resident_prefill_route_failures
+                .saturating_add(1);
             let error =
                 "resident prefill batch violated its one-token/full-stack progress contract"
                     .to_string();
@@ -3505,6 +3547,23 @@ impl BatchingEngineActor {
         );
         self.snapshot.total_prefill_forwards =
             self.snapshot.total_prefill_forwards.saturating_add(1);
+        self.snapshot.total_resident_prefill_forwards = self
+            .snapshot
+            .total_resident_prefill_forwards
+            .saturating_add(1);
+        self.snapshot.total_resident_prefill_rows = self
+            .snapshot
+            .total_resident_prefill_rows
+            .saturating_add(indices.len() as u64);
+        self.snapshot.total_resident_prefill_completed_rows = self
+            .snapshot
+            .total_resident_prefill_completed_rows
+            .saturating_add(progress.iter().filter(|row| row.ready).count() as u64);
+        self.snapshot.last_resident_prefill_batch_size = indices.len();
+        self.snapshot.max_resident_prefill_batch_size = self
+            .snapshot
+            .max_resident_prefill_batch_size
+            .max(indices.len());
         self.snapshot.last_prefill_layers = layers_processed;
         self.snapshot.total_prefill_layers = self
             .snapshot
@@ -4279,6 +4338,11 @@ impl BatchingEngineActor {
             .active
             .iter()
             .filter(|active| self.forward.is_prefilling(&active.slot))
+            .count();
+        self.snapshot.active_resident_prefill = self
+            .active
+            .iter()
+            .filter(|active| self.forward.resident_prefill_batch_required(&active.slot))
             .count();
         self.snapshot.active_decode = self
             .active
@@ -5174,6 +5238,10 @@ mod tests {
             forward.events.lock().unwrap().as_slice(),
             &[SchedulingEvent::ResidentPrefill(vec![11, 22])]
         );
+        assert_eq!(actor.snapshot.active_resident_prefill, 2);
+        assert_eq!(actor.snapshot.total_resident_prefill_attempts, 1);
+        assert_eq!(actor.snapshot.total_resident_prefill_forwards, 1);
+        assert_eq!(actor.snapshot.total_resident_prefill_rows, 2);
     }
 
     #[test]
@@ -5216,6 +5284,11 @@ mod tests {
         assert_eq!(actor.next_prefill_index, 1);
         assert_eq!(actor.snapshot.total_prefill_forwards, 3);
         assert_eq!(actor.snapshot.total_prefill_tokens, 6);
+        assert_eq!(actor.snapshot.total_resident_prefill_attempts, 3);
+        assert_eq!(actor.snapshot.total_resident_prefill_forwards, 3);
+        assert_eq!(actor.snapshot.total_resident_prefill_rows, 6);
+        assert_eq!(actor.snapshot.last_resident_prefill_batch_size, 2);
+        assert_eq!(actor.snapshot.max_resident_prefill_batch_size, 2);
     }
 
     #[test]
@@ -5291,6 +5364,9 @@ mod tests {
         assert_eq!(forward.remaining.lock().unwrap().get(&32), Some(&2));
         assert!(forward.resident_rows.lock().unwrap().is_empty());
         assert!(forward.events.lock().unwrap().is_empty());
+        assert_eq!(actor.snapshot.total_resident_prefill_attempts, 1);
+        assert_eq!(actor.snapshot.total_resident_prefill_initial_declines, 1);
+        assert_eq!(actor.snapshot.total_resident_prefill_route_failures, 0);
     }
 
     #[test]
@@ -5330,6 +5406,9 @@ mod tests {
         assert_eq!(actor.snapshot.total_errors, 2);
         assert!(forward.remaining.lock().unwrap().is_empty());
         assert!(forward.resident_rows.lock().unwrap().is_empty());
+        assert_eq!(actor.snapshot.total_resident_prefill_attempts, 2);
+        assert_eq!(actor.snapshot.total_resident_prefill_forwards, 1);
+        assert_eq!(actor.snapshot.total_resident_prefill_route_failures, 1);
         assert_eq!(
             forward.events.lock().unwrap().as_slice(),
             &[
@@ -5373,6 +5452,8 @@ mod tests {
         assert_eq!(actor.active.len(), 1);
         assert_eq!(SyntheticPrefillForward::slot_key(&actor.active[0].slot), 38);
         assert_eq!(actor.snapshot.total_errors, 1);
+        assert_eq!(actor.snapshot.total_resident_prefill_attempts, 1);
+        assert_eq!(actor.snapshot.total_resident_prefill_route_failures, 1);
         assert!(!forward.resident_rows.lock().unwrap().contains(&37));
         assert!(forward.resident_rows.lock().unwrap().contains(&38));
         assert!(
@@ -5411,6 +5492,8 @@ mod tests {
         assert_eq!(actor.run_resident_prefill_batch(&mut budget), Some(true));
         assert_eq!(actor.active.len(), 0);
         assert_eq!(actor.snapshot.total_errors, 2);
+        assert_eq!(actor.snapshot.total_resident_prefill_attempts, 1);
+        assert_eq!(actor.snapshot.total_resident_prefill_route_failures, 1);
         assert_eq!(
             forward.events.lock().unwrap().as_slice(),
             &[SchedulingEvent::Discard(42), SchedulingEvent::Discard(41)]
@@ -5444,6 +5527,8 @@ mod tests {
         assert_eq!(actor.run_resident_prefill_batch(&mut budget), Some(true));
         assert_eq!(actor.active.len(), 0);
         assert_eq!(actor.snapshot.total_errors, 2);
+        assert_eq!(actor.snapshot.total_resident_prefill_attempts, 1);
+        assert_eq!(actor.snapshot.total_resident_prefill_route_failures, 1);
         assert!(forward.remaining.lock().unwrap().is_empty());
         assert!(forward.resident_rows.lock().unwrap().is_empty());
         assert_eq!(

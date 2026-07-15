@@ -681,6 +681,7 @@ struct BatchingEngineInfo {
     queue_depth: usize,
     active_decode: usize,
     active_prefill: usize,
+    active_resident_prefill: usize,
     max_batch_tokens: usize,
     max_batch_tokens_source: ConfigValueSource,
     max_prefill_tokens_per_cycle: usize,
@@ -717,6 +718,14 @@ struct BatchingEngineInfo {
     total_decode_rows: u64,
     total_prefill_admission_cycles: u64,
     total_prefill_forwards: u64,
+    total_resident_prefill_attempts: u64,
+    total_resident_prefill_forwards: u64,
+    total_resident_prefill_initial_declines: u64,
+    total_resident_prefill_route_failures: u64,
+    total_resident_prefill_rows: u64,
+    total_resident_prefill_completed_rows: u64,
+    last_resident_prefill_batch_size: usize,
+    max_resident_prefill_batch_size: usize,
     total_decode_tokens: u64,
     total_prefill_tokens: u64,
     total_prefill_layers: u64,
@@ -1324,6 +1333,7 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             queue_depth: snapshot.queue_depth,
             active_decode: snapshot.active_decode,
             active_prefill: snapshot.active_prefill,
+            active_resident_prefill: snapshot.active_resident_prefill,
             max_batch_tokens: snapshot.max_batch_tokens,
             max_batch_tokens_source: snapshot.max_batch_tokens_source,
             max_prefill_tokens_per_cycle: snapshot.max_prefill_tokens_per_cycle,
@@ -1360,6 +1370,15 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             total_decode_rows: snapshot.total_decode_rows,
             total_prefill_admission_cycles: snapshot.total_prefill_admission_cycles,
             total_prefill_forwards: snapshot.total_prefill_forwards,
+            total_resident_prefill_attempts: snapshot.total_resident_prefill_attempts,
+            total_resident_prefill_forwards: snapshot.total_resident_prefill_forwards,
+            total_resident_prefill_initial_declines: snapshot
+                .total_resident_prefill_initial_declines,
+            total_resident_prefill_route_failures: snapshot.total_resident_prefill_route_failures,
+            total_resident_prefill_rows: snapshot.total_resident_prefill_rows,
+            total_resident_prefill_completed_rows: snapshot.total_resident_prefill_completed_rows,
+            last_resident_prefill_batch_size: snapshot.last_resident_prefill_batch_size,
+            max_resident_prefill_batch_size: snapshot.max_resident_prefill_batch_size,
             total_decode_tokens: snapshot.total_decode_tokens,
             total_prefill_tokens: snapshot.total_prefill_tokens,
             total_prefill_layers: snapshot.total_prefill_layers,
@@ -1719,6 +1738,7 @@ mod tests {
             stream_stall_grace_ms: 750,
             stream_stall_grace_source: ConfigValueSource::Environment,
             active_prefill: 2,
+            active_resident_prefill: 1,
             max_batch_tokens: 256,
             max_batch_tokens_source: ConfigValueSource::ConfigFile,
             max_prefill_tokens_per_cycle: 64,
@@ -1744,6 +1764,14 @@ mod tests {
             total_admission_calls: 4,
             slow_admission_count: 1,
             total_prefill_forwards: 9,
+            total_resident_prefill_attempts: 8,
+            total_resident_prefill_forwards: 7,
+            total_resident_prefill_initial_declines: 1,
+            total_resident_prefill_route_failures: 0,
+            total_resident_prefill_rows: 41,
+            total_resident_prefill_completed_rows: 5,
+            last_resident_prefill_batch_size: 4,
+            max_resident_prefill_batch_size: 8,
             total_prefill_layers: 36,
             total_prefill_layer_yields: 27,
             total_short_prefill_priority_forwards: 7,
@@ -1764,6 +1792,7 @@ mod tests {
         assert_eq!(json["stream_stall_grace_ms"], 750);
         assert_eq!(json["stream_stall_grace_source"], "environment");
         assert_eq!(json["active_prefill"], 2);
+        assert_eq!(json["active_resident_prefill"], 1);
         assert_eq!(json["max_batch_tokens"], 256);
         assert_eq!(json["max_batch_tokens_source"], "config_file");
         assert_eq!(json["max_prefill_tokens_per_cycle"], 64);
@@ -1789,6 +1818,14 @@ mod tests {
         assert_eq!(json["total_admission_calls"], 4);
         assert_eq!(json["slow_admission_count"], 1);
         assert_eq!(json["total_prefill_forwards"], 9);
+        assert_eq!(json["total_resident_prefill_attempts"], 8);
+        assert_eq!(json["total_resident_prefill_forwards"], 7);
+        assert_eq!(json["total_resident_prefill_initial_declines"], 1);
+        assert_eq!(json["total_resident_prefill_route_failures"], 0);
+        assert_eq!(json["total_resident_prefill_rows"], 41);
+        assert_eq!(json["total_resident_prefill_completed_rows"], 5);
+        assert_eq!(json["last_resident_prefill_batch_size"], 4);
+        assert_eq!(json["max_resident_prefill_batch_size"], 8);
         assert_eq!(json["total_prefill_layers"], 36);
         assert_eq!(json["total_prefill_layer_yields"], 27);
         assert_eq!(json["total_short_prefill_priority_forwards"], 7);

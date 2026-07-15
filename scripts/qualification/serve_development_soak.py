@@ -311,6 +311,14 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "host_swap_used_end_bytes": ("bytes", "exact", True),
     "host_swap_used_peak_bytes": ("bytes", "max", True),
     "host_swap_used_start_bytes": ("bytes", "exact", True),
+    "resident_prefill_active_rows_end": ("rows", "exact", True),
+    "resident_prefill_attempt_count": ("count", "sum", False),
+    "resident_prefill_completed_row_count": ("rows", "sum", False),
+    "resident_prefill_forward_count": ("count", "sum", False),
+    "resident_prefill_initial_decline_count": ("count", "sum", True),
+    "resident_prefill_max_batch_size": ("rows", "max", False),
+    "resident_prefill_route_failure_count": ("count", "sum", True),
+    "resident_prefill_row_count": ("rows", "sum", False),
     **{
         f"vulkan_process_mapping_{category}_rss_growth_bytes": (
             "bytes",
@@ -1559,6 +1567,84 @@ def metric_definitions(
     )
 
 
+def resident_prefill_metric_values(
+    before: dict[str, int], after: dict[str, int]
+) -> dict[str, int]:
+    max_batch_size = after["max_resident_prefill_batch_size"]
+    if max_batch_size < before["max_resident_prefill_batch_size"]:
+        raise SoakError("resident prefill maximum batch size regressed")
+    return {
+        "resident_prefill_active_rows_end": after["active_resident_prefill"],
+        "resident_prefill_attempt_count": mixed.counter_delta(
+            before, after, "total_resident_prefill_attempts"
+        ),
+        "resident_prefill_completed_row_count": mixed.counter_delta(
+            before, after, "total_resident_prefill_completed_rows"
+        ),
+        "resident_prefill_forward_count": mixed.counter_delta(
+            before, after, "total_resident_prefill_forwards"
+        ),
+        "resident_prefill_initial_decline_count": mixed.counter_delta(
+            before, after, "total_resident_prefill_initial_declines"
+        ),
+        "resident_prefill_max_batch_size": max_batch_size,
+        "resident_prefill_route_failure_count": mixed.counter_delta(
+            before, after, "total_resident_prefill_route_failures"
+        ),
+        "resident_prefill_row_count": mixed.counter_delta(
+            before, after, "total_resident_prefill_rows"
+        ),
+    }
+
+
+def resident_prefill_contract_failures(
+    values: dict[str, int], *, max_configured_rows: int
+) -> list[str]:
+    failures: list[str] = []
+    for name in (
+        "resident_prefill_active_rows_end",
+        "resident_prefill_initial_decline_count",
+        "resident_prefill_route_failure_count",
+    ):
+        if values[name] != 0:
+            failures.append(f"{name}={values[name]}, expected 0")
+
+    attempts = values["resident_prefill_attempt_count"]
+    forwards = values["resident_prefill_forward_count"]
+    declines = values["resident_prefill_initial_decline_count"]
+    route_failures = values["resident_prefill_route_failure_count"]
+    rows = values["resident_prefill_row_count"]
+    completed_rows = values["resident_prefill_completed_row_count"]
+    max_batch_size = values["resident_prefill_max_batch_size"]
+    if route_failures == 0 and attempts != forwards + declines:
+        failures.append(
+            "resident prefill attempts do not reconcile with forwards and declines: "
+            f"{attempts} != {forwards} + {declines}"
+        )
+    if forwards < 1:
+        failures.append("soak completed without a measured resident prefill forward")
+    if rows < forwards:
+        failures.append(
+            "resident prefill row count was below its forward count: "
+            f"{rows} < {forwards}"
+        )
+    if completed_rows < 1 or completed_rows > rows:
+        failures.append(
+            "resident prefill completed rows were outside the measured row range: "
+            f"completed={completed_rows}, rows={rows}"
+        )
+    if max_batch_size < 2:
+        failures.append(
+            "soak completed without a measured multi-row resident prefill batch"
+        )
+    if max_batch_size > max_configured_rows:
+        failures.append(
+            "resident prefill maximum batch size exceeded configured concurrency: "
+            f"{max_batch_size} > {max_configured_rows}"
+        )
+    return failures
+
+
 def metrics_from_values(
     values: dict[str, float | int], runtime: SoakRuntime = ROCM_RUNTIME
 ) -> list[dict[str, Any]]:
@@ -2460,6 +2546,16 @@ def execute(
             "wave_count": wave,
             "zero_token_response_count": zero_tokens,
         }
+        if runtime.backend == "vulkan":
+            values.update(
+                resident_prefill_metric_values(batching_start, batching_end)
+            )
+            failures.extend(
+                resident_prefill_contract_failures(
+                    values,
+                    max_configured_rows=max(runtime.wave_concurrency),
+                )
+            )
         if vulkan_buffers_start is not None and vulkan_buffers_end is not None:
             vulkan_live_start = vulkan_buffer_live_bytes(vulkan_buffers_start)
             vulkan_live_end = vulkan_buffer_live_bytes(vulkan_buffers_end)

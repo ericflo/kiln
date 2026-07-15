@@ -589,6 +589,73 @@ class ServeRocmSoakTests(unittest.TestCase):
         with self.assertRaisesRegex(soak.SoakError, "regressed"):
             soak.batched_state_cache_metric_values(after, regressed)
 
+    def test_resident_prefill_metrics_prove_multi_row_execution_and_drain(
+        self,
+    ) -> None:
+        before = {
+            "active_resident_prefill": 0,
+            "total_resident_prefill_attempts": 2,
+            "total_resident_prefill_completed_rows": 1,
+            "total_resident_prefill_forwards": 2,
+            "total_resident_prefill_initial_declines": 0,
+            "max_resident_prefill_batch_size": 2,
+            "total_resident_prefill_route_failures": 0,
+            "total_resident_prefill_rows": 4,
+        }
+        after = {
+            "active_resident_prefill": 0,
+            "total_resident_prefill_attempts": 5,
+            "total_resident_prefill_completed_rows": 3,
+            "total_resident_prefill_forwards": 5,
+            "total_resident_prefill_initial_declines": 0,
+            "max_resident_prefill_batch_size": 4,
+            "total_resident_prefill_route_failures": 0,
+            "total_resident_prefill_rows": 10,
+        }
+        values = soak.resident_prefill_metric_values(before, after)
+        self.assertEqual(
+            values,
+            {
+                "resident_prefill_active_rows_end": 0,
+                "resident_prefill_attempt_count": 3,
+                "resident_prefill_completed_row_count": 2,
+                "resident_prefill_forward_count": 3,
+                "resident_prefill_initial_decline_count": 0,
+                "resident_prefill_max_batch_size": 4,
+                "resident_prefill_route_failure_count": 0,
+                "resident_prefill_row_count": 6,
+            },
+        )
+        self.assertEqual(
+            soak.resident_prefill_contract_failures(
+                values, max_configured_rows=8
+            ),
+            [],
+        )
+
+        broken = dict(values)
+        broken.update(
+            resident_prefill_active_rows_end=1,
+            resident_prefill_attempt_count=4,
+            resident_prefill_completed_row_count=7,
+            resident_prefill_initial_decline_count=1,
+            resident_prefill_max_batch_size=9,
+            resident_prefill_route_failure_count=1,
+        )
+        failures = soak.resident_prefill_contract_failures(
+            broken, max_configured_rows=8
+        )
+        self.assertTrue(any("active_rows_end=1" in failure for failure in failures))
+        self.assertTrue(any("initial_decline_count=1" in failure for failure in failures))
+        self.assertTrue(any("route_failure_count=1" in failure for failure in failures))
+        self.assertTrue(any("completed rows" in failure for failure in failures))
+        self.assertTrue(any("configured concurrency" in failure for failure in failures))
+
+        regressed = dict(after)
+        regressed["max_resident_prefill_batch_size"] = 1
+        with self.assertRaisesRegex(soak.SoakError, "maximum batch size regressed"):
+            soak.resident_prefill_metric_values(after, regressed)
+
     def test_graph_warmup_contract_depends_on_runtime(self) -> None:
         graph = {"capture_successes": 1, "replay_successes": 1, "failures": 0}
         self.assertTrue(soak.graph_warmup_ready(graph, soak.ROCM_RUNTIME))
@@ -603,6 +670,7 @@ class ServeRocmSoakTests(unittest.TestCase):
                 "batching_engine": {
                     "active_decode": 0,
                     "active_prefill": 0,
+                    "active_resident_prefill": 0,
                     "active_staged_requests": 0,
                     "queue_depth": 0,
                 }

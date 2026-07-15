@@ -258,6 +258,7 @@ def health_fixture(
                 "max_prefill_layers_per_cycle_source": "config_file",
                 "active_decode": 0,
                 "active_prefill": 0,
+                "active_resident_prefill": 0,
                 "active_staged_requests": 0,
                 "queue_depth": 0,
                 "max_decode_batch": serve.MAX_DECODE_BATCH,
@@ -276,6 +277,14 @@ def health_fixture(
                 "max_decode_forward_ms": 0.0,
                 "slow_decode_forward_count": 0,
                 "total_prefill_forwards": 0,
+                "total_resident_prefill_attempts": 0,
+                "total_resident_prefill_forwards": 0,
+                "total_resident_prefill_initial_declines": 0,
+                "total_resident_prefill_route_failures": 0,
+                "total_resident_prefill_rows": 0,
+                "total_resident_prefill_completed_rows": 0,
+                "last_resident_prefill_batch_size": 0,
+                "max_resident_prefill_batch_size": 0,
                 "total_prefill_layers": 0,
                 "total_prefill_layer_yields": 0,
                 "total_short_prefill_priority_forwards": 0,
@@ -2110,6 +2119,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         drained = {
             "active_decode": 0,
             "active_prefill": 0,
+            "active_resident_prefill": 0,
             "active_staged_requests": 0,
             "queue_depth": 0,
         }
@@ -2118,6 +2128,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         )
         self.assertFalse(
             serve.batching_engine_drained({**drained, "active_prefill": 1})
+        )
+        self.assertFalse(
+            serve.batching_engine_drained({**drained, "active_resident_prefill": 1})
         )
         self.assertFalse(
             serve.batching_engine_drained({**drained, "active_staged_requests": 1})

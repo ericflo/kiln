@@ -738,6 +738,53 @@
                 grammar and the eight deprecated aliases. In particular, malformed legacy
                 <code>KILN_DECODE_BATCH_WAIT_US</code> now fails startup instead of silently selecting zero.
               </p>
+              <h5 class="font-semibold mt-4 mb-2">Resident Vulkan prefill telemetry</h5>
+              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
+  "active_resident_prefill": 4,
+  "total_resident_prefill_attempts": 21,
+  "total_resident_prefill_forwards": 20,
+  "total_resident_prefill_initial_declines": 1,
+  "total_resident_prefill_route_failures": 0,
+  "total_resident_prefill_rows": 138,
+  "total_resident_prefill_completed_rows": 8,
+  "last_resident_prefill_batch_size": 6,
+  "max_resident_prefill_batch_size": 8
+}</code></pre>
+              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                These fields are part of <code>decode_runtime.batching_engine</code> on
+                <code>GET /health</code> and <code>GET /v1/health</code>, and of the trusted debug
+                <code>batching_engine</code> snapshot. They are always present when the actor is active; on
+                non-Vulkan backends or a process that has not used this route, they remain zero.
+                <code>active_resident_prefill</code> is the live count of prefill rows whose newest native
+                positions cannot fall back to generic prefill. It must return to zero after request drain.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                An attempt is one actor call into the native route. A forward is a successful call, while an
+                initial decline is a mutation-free decision made before any selected row enters native authority.
+                In a healthy interval with no route failure, attempt delta equals forward delta plus initial-decline
+                delta. Route failures count fail-closed native errors, post-entry declines, eligibility loss, and
+                progress-contract violations; any increase is an inference error, not a generic fallback.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Rows count all request rows advanced by successful calls, completed rows count the subset whose
+                prompt ended on those calls, and last/maximum batch size report successful cohort width. A rising
+                forward count with maximum width at least two proves that multi-row resident prefill ran. A maximum
+                of one proves only the single-row tail. Counters are process-lifetime monotonic values; compare two
+                snapshots for an interval. Last and maximum batch sizes are gauges, with maximum monotonic for the
+                process lifetime.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Prometheus exports the same state as
+                <code>kiln_batching_engine_active_resident_prefill</code>,
+                <code>kiln_batching_engine_resident_prefill_attempts_total</code>,
+                <code>kiln_batching_engine_resident_prefill_forwards_total</code>,
+                <code>kiln_batching_engine_resident_prefill_initial_declines_total</code>,
+                <code>kiln_batching_engine_resident_prefill_route_failures_total</code>,
+                <code>kiln_batching_engine_resident_prefill_rows_total</code>,
+                <code>kiln_batching_engine_resident_prefill_completed_rows_total</code>,
+                <code>kiln_batching_engine_resident_prefill_last_batch_size</code>, and
+                <code>kiln_batching_engine_resident_prefill_max_batch_size</code>.
+              </p>
             </section>
             <section id="streaming-prefill-runtime" class="pt-4" style="border-top: 1px solid var(--line);">
               <h4 class="font-semibold mb-2"><code>streaming_prefill</code>: immutable tiled-prefill policy</h4>

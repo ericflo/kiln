@@ -1030,6 +1030,7 @@
             "queue_depth": 0,
             "active_decode": 0,
             "active_prefill": 0,
+            "active_resident_prefill": 0,
             "max_batch_tokens": 0,
             "max_prefill_tokens_per_cycle": 0,
             "max_prefill_layers_per_cycle": 0,
@@ -1054,6 +1055,14 @@
             "total_decode_rows": 0,
             "total_prefill_admission_cycles": 0,
             "total_prefill_forwards": 0,
+            "total_resident_prefill_attempts": 0,
+            "total_resident_prefill_forwards": 0,
+            "total_resident_prefill_initial_declines": 0,
+            "total_resident_prefill_route_failures": 0,
+            "total_resident_prefill_rows": 0,
+            "total_resident_prefill_completed_rows": 0,
+            "last_resident_prefill_batch_size": 0,
+            "max_resident_prefill_batch_size": 0,
             "total_decode_tokens": 0,
             "total_prefill_tokens": 0,
             "total_prefill_layers": 0,
@@ -1651,6 +1660,7 @@
             "queue_depth": 0,
             "active_decode": 0,
             "active_prefill": 0,
+            "active_resident_prefill": 0,
             "max_batch_tokens": 0,
             "max_prefill_tokens_per_cycle": 0,
             "max_prefill_layers_per_cycle": 0,
@@ -1675,6 +1685,14 @@
             "total_decode_rows": 0,
             "total_prefill_admission_cycles": 0,
             "total_prefill_forwards": 0,
+            "total_resident_prefill_attempts": 0,
+            "total_resident_prefill_forwards": 0,
+            "total_resident_prefill_initial_declines": 0,
+            "total_resident_prefill_route_failures": 0,
+            "total_resident_prefill_rows": 0,
+            "total_resident_prefill_completed_rows": 0,
+            "last_resident_prefill_batch_size": 0,
+            "max_resident_prefill_batch_size": 0,
             "total_decode_tokens": 0,
             "total_prefill_tokens": 0,
             "total_prefill_layers": 0,
@@ -2311,6 +2329,7 @@
         "queue_depth",
         "active_decode",
         "active_prefill",
+        "active_resident_prefill",
         "max_batch_tokens",
         "max_prefill_tokens_per_cycle",
         "max_prefill_layers_per_cycle",
@@ -2335,6 +2354,14 @@
         "total_decode_rows",
         "total_prefill_admission_cycles",
         "total_prefill_forwards",
+        "total_resident_prefill_attempts",
+        "total_resident_prefill_forwards",
+        "total_resident_prefill_initial_declines",
+        "total_resident_prefill_route_failures",
+        "total_resident_prefill_rows",
+        "total_resident_prefill_completed_rows",
+        "last_resident_prefill_batch_size",
+        "max_resident_prefill_batch_size",
         "total_decode_tokens",
         "total_prefill_tokens",
         "total_prefill_layers",
@@ -2382,6 +2409,9 @@
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "active_prefill": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "active_resident_prefill": {
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "max_batch_tokens": {
@@ -2454,6 +2484,30 @@
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "total_prefill_forwards": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_resident_prefill_attempts": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_resident_prefill_forwards": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_resident_prefill_initial_declines": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_resident_prefill_route_failures": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_resident_prefill_rows": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_resident_prefill_completed_rows": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "last_resident_prefill_batch_size": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_resident_prefill_batch_size": {
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "total_decode_tokens": {
