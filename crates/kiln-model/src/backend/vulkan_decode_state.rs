@@ -32,10 +32,11 @@ impl VulkanBackend {
         }
     }
 
-    /// Reset the seeded-layer set. Tests / multi-session callers call
-    /// this when the kt paged cache may have been reset between
-    /// resident decode calls; otherwise the resident path keeps reusing
-    /// stale K/V state.
+    /// Reset the session-global full-attention seed set. Tests and
+    /// multi-session callers use this when the kt paged cache may have been
+    /// reset between resident decode calls; otherwise the resident path keeps
+    /// reusing stale K/V state. Tensor-keyed linear-attention state has an
+    /// independent owner and is never part of this reset.
     pub fn reset_full_attn_seeded(&self) {
         if let Ok(mut g) = self.seeded_full_attn_layers.lock() {
             g.clear();
@@ -101,15 +102,8 @@ impl VulkanBackend {
         drop(last);
         if is_new_session {
             self.reset_full_attn_seeded();
-            self.reset_linear_attn_seeded();
         }
         is_new_session
-    }
-
-    pub fn reset_linear_attn_seeded(&self) {
-        if let Ok(mut g) = self.seeded_linear_attn_layers_kt.lock() {
-            g.clear();
-        }
     }
 
     pub fn linear_attn_recurrent_state_buffer_kt(
@@ -483,6 +477,12 @@ mod tests {
         assert!(backend.has_linear_attn_gdn_state_kt(recurrent.id()));
         assert_eq!(backend.linear_attn_gdn_state_entry_counts(), (1, 1, 1));
 
+        backend.mark_full_attn_layer_seeded(0);
+        assert!(backend.note_resident_session(17));
+        assert!(!backend.full_attn_layer_seeded(0));
+        assert!(backend.has_linear_attn_gdn_state_kt(recurrent.id()));
+        assert_eq!(backend.linear_attn_gdn_state_entry_counts(), (1, 1, 1));
+
         backend.evict_linear_attn_gdn_state_kt(recurrent.id());
         assert!(!backend.has_linear_attn_gdn_state_kt(recurrent.id()));
         assert_eq!(backend.linear_attn_gdn_state_entry_counts(), (0, 0, 0));
@@ -491,6 +491,27 @@ mod tests {
         // and cancellation fences cannot resurrect or double-own state.
         backend.evict_linear_attn_gdn_state_kt(recurrent.id());
         assert_eq!(backend.linear_attn_gdn_state_entry_counts(), (0, 0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn session_boundaries_reset_kv_seeds_without_revoking_tensor_owned_gdn_state() -> Result<()> {
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
+        let recurrent = kiln_tensor::Tensor::from_vec(vec![1.0f32], (1, 1, 1, 1))?;
+
+        backend.mark_full_attn_layer_seeded(0);
+        backend.mark_linear_attn_layer_seeded_kt(recurrent.id());
+        assert!(backend.note_resident_session(10));
+        assert!(!backend.full_attn_layer_seeded(0));
+        assert_eq!(backend.linear_attn_gdn_state_entry_counts(), (0, 0, 1));
+
+        backend.mark_full_attn_layer_seeded(0);
+        assert!(!backend.note_resident_session(10));
+        assert!(!backend.note_resident_session(11));
+        assert!(backend.full_attn_layer_seeded(0));
+        assert!(backend.note_resident_session(3));
+        assert!(!backend.full_attn_layer_seeded(0));
+        assert_eq!(backend.linear_attn_gdn_state_entry_counts(), (0, 0, 1));
         Ok(())
     }
 }

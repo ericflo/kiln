@@ -1301,6 +1301,17 @@ without overlap identifies legitimate high-water growth. Increasing
 `lease_drop_eviction_count` without a rejection requires an accompanying
 forward/error investigation.
 
+Vulkan full-attention KV seed flags and recurrent GDN state have different
+lifetimes. The former are indexed by layer and reset when an unidentified
+single-request decode crosses a start-position session boundary, so a new
+request cannot read the prior request's KV contents. GDN buffers are indexed
+by tensor ID and remain owned by that request row or the batched-state cache;
+a session boundary must not clear their initialization markers. Only explicit
+eviction of the same tensor ID may remove its recurrent buffer, convolution
+buffer, and initialization marker. A rising
+`rejected_nonresident_cache_count` with live buffers still present indicates a
+violation of this lifetime split, not buffer-pool eviction.
+
 The Vulkan development soak treats this snapshot as a closed qualification
 contract. It validates the exact field set and types at startup, after warmup,
 after every drained stabilization cycle, after every measured wave, and at

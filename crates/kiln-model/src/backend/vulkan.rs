@@ -123,9 +123,11 @@ pub struct VulkanBackend {
     /// token with monotonically incrementing `start_pos`; a jump
     /// (the first call after server start, or any new request whose
     /// first decode step doesn't land at `last + 1`) marks a session
-    /// boundary, and `note_resident_session()` clears the per-layer
-    /// seeded sets so the next call re-seeds the resident
-    /// `VkPagedKvCache` from this request's prefill. Cheap because
+    /// boundary, and `note_resident_session()` clears only the
+    /// session-global full-attention seed set so the next call re-seeds the
+    /// resident `VkPagedKvCache` from this request's prefill. Tensor-keyed GDN
+    /// state has an independent request or batch-cache lifetime. Re-seeding is
+    /// cheap because
     /// the re-seed is now slot-range-aware (see
     /// `vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_kt`).
     pub(super) last_resident_start_pos: Mutex<Option<usize>>,
