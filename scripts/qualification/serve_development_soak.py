@@ -275,6 +275,11 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batched_state_cache_active_leases_end": ("leases", "exact", True),
     "batched_state_cache_capacity_rows_end": ("rows", "exact", False),
     "batched_state_cache_completed_row_eviction_count": ("count", "sum", True),
+    "batched_state_cache_completed_row_preservation_count": (
+        "count",
+        "sum",
+        False,
+    ),
     "batched_state_cache_entry_present_end": ("entries", "exact", False),
     "batched_state_cache_exact_reuse_count": ("count", "sum", False),
     "batched_state_cache_explicit_invalidation_count": ("count", "sum", True),
@@ -293,9 +298,18 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
         "sum",
         True,
     ),
+    "batched_state_cache_rejected_insufficient_capacity_count": (
+        "count",
+        "sum",
+        True,
+    ),
     "batched_state_cache_rejected_missing_row_ids_count": ("count", "sum", True),
+    "batched_state_cache_rejected_nonresident_cache_count": ("count", "sum", True),
+    "batched_state_cache_rejected_nonresident_rows_count": ("count", "sum", True),
+    "batched_state_cache_resident_capacity_reuse_count": ("count", "sum", False),
     "batched_state_cache_resident_end": ("count", "exact", False),
-    "batched_state_cache_row_set_mismatch_eviction_count": ("count", "sum", True),
+    "batched_state_cache_resident_prefix_view_count": ("count", "sum", False),
+    "batched_state_cache_resident_refresh_count": ("count", "sum", False),
     "batched_state_cache_take_hit_count": ("count", "sum", False),
     "batched_state_cache_take_miss_count": ("count", "sum", True),
     "batched_state_cache_take_miss_while_leased_count": ("count", "sum", True),
@@ -1336,13 +1350,19 @@ BATCHED_STATE_CACHE_COUNTER_FIELDS = (
     "take_miss_count",
     "take_miss_while_leased_count",
     "exact_reuse_count",
+    "resident_capacity_reuse_count",
+    "resident_prefix_view_count",
+    "resident_refresh_count",
     "fresh_assembly_count",
     "rejected_missing_row_ids_count",
-    "row_set_mismatch_eviction_count",
+    "rejected_nonresident_rows_count",
+    "rejected_nonresident_cache_count",
+    "rejected_insufficient_capacity_count",
     "park_count",
     "park_replacement_eviction_count",
     "explicit_invalidation_count",
     "explicit_invalidation_eviction_count",
+    "completed_row_preservation_count",
     "completed_row_eviction_count",
     "lease_drop_eviction_count",
 )
@@ -1388,10 +1408,8 @@ def batched_state_cache_snapshot(
                 f"integer, got {value!r}"
             )
         snapshot[field] = value
-    if snapshot["entry_present"] and snapshot["capacity_rows"] != snapshot["logical_rows"]:
-        raise SoakError(
-            "batched recurrent-state cache capacity rows differ from exact owner rows"
-        )
+    if snapshot["capacity_rows"] < snapshot["logical_rows"]:
+        raise SoakError("batched recurrent-state cache logical rows exceed capacity")
     if not snapshot["entry_present"] and (
         snapshot["capacity_rows"] != 0
         or snapshot["logical_rows"] != 0

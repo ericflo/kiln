@@ -618,7 +618,7 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.batched_state_cache_snapshot(
                 batched_state_debug(entry_present=1), soak.VULKAN_RUNTIME
             )
-        with self.assertRaisesRegex(soak.SoakError, "differ from exact owner rows"):
+        with self.assertRaisesRegex(soak.SoakError, "logical rows exceed capacity"):
             soak.batched_state_cache_snapshot(
                 batched_state_debug(capacity_rows=7), soak.VULKAN_RUNTIME
             )
@@ -638,12 +638,12 @@ class ServeRocmSoakTests(unittest.TestCase):
         after = soak.batched_state_cache_snapshot(
             batched_state_debug(
                 capacity_rows=16,
-                logical_rows=16,
+                logical_rows=6,
                 max_active_leases=2,
                 take_hit_count=7,
                 take_miss_count=3,
                 take_miss_while_leased_count=2,
-                row_set_mismatch_eviction_count=4,
+                resident_prefix_view_count=4,
                 fresh_assembly_count=1,
                 park_count=8,
                 park_replacement_eviction_count=2,

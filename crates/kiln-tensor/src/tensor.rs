@@ -35,8 +35,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
-    CpuStorage, DType, Device, Element, Error, Layout, Result, Shape, Storage, TensorId, cpu_zeros,
-    profile,
+    CpuStorage, DType, Device, Element, Error, Layout, Result, Shape, Storage, StorageBackend,
+    TensorId, cpu_zeros, profile,
 };
 
 /// kiln-tensor's production tensor handle.
@@ -573,6 +573,23 @@ impl Tensor {
             storage: Arc::clone(&self.storage),
             layout: self.layout.narrow_axis(axis, offset, length)?,
             id: TensorId::next(),
+            version: Arc::clone(&self.version),
+        })
+    }
+
+    /// Take an axis-0 prefix while preserving its storage identity.
+    ///
+    /// This is restricted to resident backend registries that key an
+    /// oversized physical allocation by [`TensorId`] and need a smaller
+    /// logical prefix view of that same allocation. General tensor operations
+    /// must use [`Self::narrow`] so distinct operation results retain distinct
+    /// identities.
+    #[doc(hidden)]
+    pub fn batch_prefix_preserving_identity_for_residency(&self, length: usize) -> Result<Self> {
+        Ok(Tensor {
+            storage: Arc::clone(&self.storage),
+            layout: self.layout.narrow_axis(0, 0, length)?,
+            id: self.id,
             version: Arc::clone(&self.version),
         })
     }
@@ -1277,6 +1294,18 @@ mod tests {
         let t = Tensor::zeros_cpu(vec![3, 4], DType::F32);
         let n = t.narrow(0, 0, 2).unwrap();
         assert_ne!(t.id(), n.id());
+    }
+
+    #[test]
+    fn residency_batch_prefix_preserves_storage_identity_and_version() {
+        let t = Tensor::zeros_cpu(vec![4, 5], DType::F32);
+        let view = t.batch_prefix_preserving_identity_for_residency(2).unwrap();
+        assert_eq!(view.shape(), &[2, 5]);
+        assert_eq!(view.id(), t.id());
+        assert!(Arc::ptr_eq(view.storage(), t.storage()));
+        t.bump_version();
+        assert_eq!(view.current_version(), t.current_version());
+        assert!(t.batch_prefix_preserving_identity_for_residency(5).is_err());
     }
 
     #[test]

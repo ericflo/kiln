@@ -2356,13 +2356,20 @@ impl Metrics {
         );
         out.push_str("# HELP kiln_batched_recurrent_state_cache_reuses_total Batched recurrent-state cache reuse operations by kind.\n");
         out.push_str("# TYPE kiln_batched_recurrent_state_cache_reuses_total counter\n");
-        prom_counter(
-            &mut out,
-            "kiln_batched_recurrent_state_cache_reuses_total",
-            "kind",
-            "exact",
-            stats.exact_reuse_count,
-        );
+        for (kind, value) in [
+            ("exact", stats.exact_reuse_count),
+            ("resident_capacity", stats.resident_capacity_reuse_count),
+            ("prefix_view", stats.resident_prefix_view_count),
+            ("refresh", stats.resident_refresh_count),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_batched_recurrent_state_cache_reuses_total",
+                "kind",
+                kind,
+                value,
+            );
+        }
         out.push_str("# HELP kiln_batched_recurrent_state_cache_assemblies_total Fresh batched recurrent-state assemblies.\n");
         out.push_str("# TYPE kiln_batched_recurrent_state_cache_assemblies_total counter\n");
         push_line(
@@ -2376,7 +2383,12 @@ impl Metrics {
         out.push_str("# TYPE kiln_batched_recurrent_state_cache_rejections_total counter\n");
         for (reason, value) in [
             ("missing_row_ids", stats.rejected_missing_row_ids_count),
-            ("row_set_mismatch", stats.row_set_mismatch_eviction_count),
+            ("nonresident_rows", stats.rejected_nonresident_rows_count),
+            ("nonresident_cache", stats.rejected_nonresident_cache_count),
+            (
+                "insufficient_capacity",
+                stats.rejected_insufficient_capacity_count,
+            ),
         ] {
             prom_counter(
                 &mut out,
@@ -2404,15 +2416,20 @@ impl Metrics {
                 stats.explicit_invalidation_count
             ),
         );
-        out.push_str("# HELP kiln_batched_recurrent_state_cache_completed_rows_total Completed rows that evicted their exact-owner cache entry.\n");
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_completed_rows_total Completed cached rows by ownership action.\n");
         out.push_str("# TYPE kiln_batched_recurrent_state_cache_completed_rows_total counter\n");
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_batched_recurrent_state_cache_completed_rows_total {}",
-                stats.completed_row_eviction_count
-            ),
-        );
+        for (action, value) in [
+            ("preserve", stats.completed_row_preservation_count),
+            ("evict", stats.completed_row_eviction_count),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_batched_recurrent_state_cache_completed_rows_total",
+                "action",
+                action,
+                value,
+            );
+        }
         out.push_str("# HELP kiln_batched_recurrent_state_cache_evictions_total Batched recurrent-state ownership releases by reason.\n");
         out.push_str("# TYPE kiln_batched_recurrent_state_cache_evictions_total counter\n");
         for (reason, value) in [
@@ -3622,13 +3639,19 @@ mod tests {
                 take_miss_count: 5,
                 take_miss_while_leased_count: 4,
                 exact_reuse_count: 7,
+                resident_capacity_reuse_count: 8,
+                resident_prefix_view_count: 6,
+                resident_refresh_count: 5,
                 fresh_assembly_count: 5,
                 rejected_missing_row_ids_count: 1,
-                row_set_mismatch_eviction_count: 4,
+                rejected_nonresident_rows_count: 2,
+                rejected_nonresident_cache_count: 3,
+                rejected_insufficient_capacity_count: 4,
                 park_count: 20,
                 park_replacement_eviction_count: 4,
                 explicit_invalidation_count: 2,
                 explicit_invalidation_eviction_count: 1,
+                completed_row_preservation_count: 11,
                 completed_row_eviction_count: 1,
                 lease_drop_eviction_count: 6,
             },
@@ -3915,12 +3938,18 @@ mod tests {
             "kiln_batched_recurrent_state_cache_takes_total{result=\"miss\"} 5",
             "kiln_batched_recurrent_state_cache_misses_while_leased_total 4",
             "kiln_batched_recurrent_state_cache_reuses_total{kind=\"exact\"} 7",
+            "kiln_batched_recurrent_state_cache_reuses_total{kind=\"resident_capacity\"} 8",
+            "kiln_batched_recurrent_state_cache_reuses_total{kind=\"prefix_view\"} 6",
+            "kiln_batched_recurrent_state_cache_reuses_total{kind=\"refresh\"} 5",
             "kiln_batched_recurrent_state_cache_assemblies_total 5",
             "kiln_batched_recurrent_state_cache_rejections_total{reason=\"missing_row_ids\"} 1",
-            "kiln_batched_recurrent_state_cache_rejections_total{reason=\"row_set_mismatch\"} 4",
+            "kiln_batched_recurrent_state_cache_rejections_total{reason=\"nonresident_rows\"} 2",
+            "kiln_batched_recurrent_state_cache_rejections_total{reason=\"nonresident_cache\"} 3",
+            "kiln_batched_recurrent_state_cache_rejections_total{reason=\"insufficient_capacity\"} 4",
             "kiln_batched_recurrent_state_cache_parks_total 20",
             "kiln_batched_recurrent_state_cache_invalidations_total 2",
-            "kiln_batched_recurrent_state_cache_completed_rows_total 1",
+            "kiln_batched_recurrent_state_cache_completed_rows_total{action=\"preserve\"} 11",
+            "kiln_batched_recurrent_state_cache_completed_rows_total{action=\"evict\"} 1",
             "kiln_batched_recurrent_state_cache_evictions_total{reason=\"park_replacement\"} 4",
             "kiln_batched_recurrent_state_cache_evictions_total{reason=\"explicit_invalidation\"} 1",
             "kiln_batched_recurrent_state_cache_evictions_total{reason=\"completed_row\"} 1",
