@@ -484,6 +484,8 @@ fn gdn_gates_cached_bytes_matches_cpu_reference() -> Result<()> {
         nv,
         &[batch, seq_len, nv],
     )?;
+    assert_eq!(beta_bytes.len(), total * 4);
+    assert_eq!(g_bytes.len(), total * 4);
     let beta = create_tensor_from_data(&beta_bytes, &[batch, seq_len, nv], DType::F32)?;
     let g = create_tensor_from_data(&g_bytes, &[batch, seq_len, nv], DType::F32)?;
     let (expected_beta, expected_g) =
@@ -584,6 +586,11 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
             .with_context(|| {
                 format!("dispatch_causal_conv1d_prefill_cached_weight_bytes seq_len={seq_len}")
             })?;
+        assert_eq!(got_cached_out_bytes.len(), batch * channels * seq_len * 4);
+        assert_eq!(
+            got_cached_state_bytes.len(),
+            batch * channels * (kernel_size - 1) * 4
+        );
         let got_cached_out = create_tensor_from_data(
             &got_cached_out_bytes,
             &[batch, channels, seq_len],

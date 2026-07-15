@@ -3428,6 +3428,16 @@ mod tests {
             &[batch, t, nv],
         )
         .unwrap();
+        assert_eq!(
+            beta_bytes.len(),
+            elem_count * 4,
+            "nonresident beta readback must expose its logical byte length"
+        );
+        assert_eq!(
+            g_bytes.len(),
+            elem_count * 4,
+            "nonresident g readback must expose its logical byte length"
+        );
         let beta_exp = bytes_to_f32(&beta_bytes);
         let g_exp = bytes_to_f32(&g_bytes);
 

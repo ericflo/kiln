@@ -5187,7 +5187,7 @@ pub fn dispatch_paged_attn_decode_batch_paged_splitk_f32_bytes(
                 (&bt_buf, &bt_bytes),
                 (&seq_buf, &seq_bytes),
             ],
-            &[&out_buf],
+            &[(&out_buf, out_size)],
             &split_spirv,
             &split_handles,
             &split_push_constants,
@@ -6702,7 +6702,10 @@ fn dispatch_gdn_gates_cached_bytes_core(
     drop(beta_buf);
     drop(g_buf);
 
-    Ok((beta_data, g_data))
+    Ok((
+        logical_readback(beta_data, output_size, "gdn_gates beta")?,
+        logical_readback(g_data, output_size, "gdn_gates g")?,
+    ))
 }
 
 pub fn dispatch_gdn_gated_rms_norm_cached_bytes(
@@ -6830,7 +6833,7 @@ fn dispatch_gdn_gated_rms_norm_cached_bytes_core(
     drop(z_buf);
     drop(out_buf);
 
-    Ok(output_data)
+    logical_readback(output_data, output_size, "gdn_gated_rms_norm output")
 }
 
 pub fn dispatch_causal_conv1d_update_bytes(
@@ -6930,7 +6933,7 @@ fn dispatch_causal_conv1d_update_bytes_core(
                 (&weight_buf, weight_data),
                 (&state_buf, state_data),
             ],
-            &[&out_buf, &state_buf],
+            &[(&out_buf, out_size), (&state_buf, state_data.len() as u64)],
             &spirv_output,
             &output_handles,
             &output_push,
@@ -7101,7 +7104,7 @@ pub fn dispatch_causal_conv1d_prefill_bytes(
                 (&weight_buf, &weight_data),
                 (&state_buf, &state_data),
             ],
-            &[&out_buf, &state_buf],
+            &[(&out_buf, out_size), (&state_buf, state_data.len() as u64)],
             &spirv_output,
             &output_handles,
             &output_push,
@@ -7250,7 +7253,7 @@ pub fn dispatch_causal_conv1d_prefill_cached_weight_bytes(
     let readbacks = run_two_stage_compute_pipeline_with_transfers(
         vk_device,
         &[(&x_buf, &x_data), (&state_buf, &state_data)],
-        &[&out_buf, &state_buf],
+        &[(&out_buf, out_size), (&state_buf, state_data.len() as u64)],
         &spirv_output,
         &output_handles,
         &output_push,
@@ -7698,6 +7701,18 @@ fn create_packed_upload_stage(
     Ok((Some(stage), offsets))
 }
 
+fn logical_readback(mut data: Vec<u8>, logical_size: u64, context: &str) -> Result<Vec<u8>> {
+    let logical_size = usize::try_from(logical_size)
+        .with_context(|| format!("{context}: logical size exceeds usize"))?;
+    anyhow::ensure!(
+        data.len() >= logical_size,
+        "{context}: readback returned {} bytes, expected at least {logical_size}",
+        data.len()
+    );
+    data.truncate(logical_size);
+    Ok(data)
+}
+
 /// Single-submit multi-upload + dispatch + multi-readback. Variant of
 /// `run_compute_pipeline_with_transfer_readback` for kernels that take
 /// several disjoint input buffers AND produce several disjoint output
@@ -8055,17 +8070,9 @@ fn run_compute_pipeline_with_transfers_readback(
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
 
-    let mut output = VulkanBuffer::read_host_visible(device, &readback_stage)
+    let output = VulkanBuffer::read_host_visible(device, &readback_stage)
         .context("failed to read transfers-readback output")?;
-    let logical_size =
-        usize::try_from(readback_size).context("transfers-readback logical size exceeds usize")?;
-    anyhow::ensure!(
-        output.len() >= logical_size,
-        "transfers-readback staging buffer returned {} bytes, expected at least {logical_size}",
-        output.len()
-    );
-    output.truncate(logical_size);
-    Ok(output)
+    logical_readback(output, readback_size, "transfers-readback staging buffer")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8449,7 +8456,7 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
 fn run_two_stage_compute_pipeline_with_transfers(
     vk_device: &VulkanDevice,
     uploads: &[(&VulkanBuffer, &[u8])],
-    readbacks: &[&VulkanBuffer],
+    readbacks: &[(&VulkanBuffer, u64)],
     first_spirv: &[u8],
     first_handles: &[vk::Buffer],
     first_push_constants: &[u32],
@@ -8467,13 +8474,19 @@ fn run_two_stage_compute_pipeline_with_transfers(
 
     let mut readback_offsets = Vec::with_capacity(readbacks.len());
     let mut readback_total = 0u64;
-    for (idx, buffer) in readbacks.iter().enumerate() {
+    for (idx, (buffer, logical_size)) in readbacks.iter().enumerate() {
         anyhow::ensure!(
-            buffer.size() > 0,
+            *logical_size > 0,
             "run_two_stage_compute_pipeline_with_transfers[{idx}]: readback size must be non-zero"
         );
+        anyhow::ensure!(
+            *logical_size <= buffer.size(),
+            "run_two_stage_compute_pipeline_with_transfers[{idx}]: logical readback size \
+             {logical_size} exceeds buffer size {}",
+            buffer.size()
+        );
         readback_offsets.push(readback_total);
-        readback_total = readback_total.checked_add(buffer.size()).ok_or_else(|| {
+        readback_total = readback_total.checked_add(*logical_size).ok_or_else(|| {
             anyhow::anyhow!("run_two_stage_compute_pipeline_with_transfers: readback size overflow")
         })?;
     }
@@ -8655,10 +8668,10 @@ fn run_two_stage_compute_pipeline_with_transfers(
         );
 
         if let Some(stage) = &readback_stage {
-            for (idx, src) in readbacks.iter().enumerate() {
+            for (idx, (src, logical_size)) in readbacks.iter().enumerate() {
                 let copy = vk::BufferCopy::default()
                     .dst_offset(readback_offsets[idx])
-                    .size(src.size());
+                    .size(*logical_size);
                 device.cmd_copy_buffer(cmd, src.handle(), stage.handle(), &[copy]);
             }
         }
@@ -8683,10 +8696,10 @@ fn run_two_stage_compute_pipeline_with_transfers(
         Vec::new()
     };
     let mut outputs = Vec::with_capacity(readbacks.len());
-    for (idx, src) in readbacks.iter().enumerate() {
+    for (idx, (_, logical_size)) in readbacks.iter().enumerate() {
         let start = usize::try_from(readback_offsets[idx])
             .context("run_two_stage_compute_pipeline_with_transfers: offset exceeds usize")?;
-        let len = usize::try_from(src.size())
+        let len = usize::try_from(*logical_size)
             .context("run_two_stage_compute_pipeline_with_transfers: size exceeds usize")?;
         let end = start.checked_add(len).ok_or_else(|| {
             anyhow::anyhow!("run_two_stage_compute_pipeline_with_transfers[{idx}]: slice overflow")
