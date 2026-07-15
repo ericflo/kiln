@@ -679,6 +679,14 @@ pub(crate) struct CachedBatchedState {
     pub(crate) row_ids: Vec<u64>,
 }
 
+fn completed_row_invalidates_batched_state_cache(
+    cached_row_ids: &[u64],
+    completed_row_id: u64,
+    cache_is_resident: bool,
+) -> bool {
+    cached_row_ids.contains(&completed_row_id) && !cache_is_resident
+}
+
 /// Owns a temporary assembled state until it is explicitly parked in the
 /// persistent cache. Any early return after partial assembly or forward work
 /// releases backend-resident buffers instead of orphaning their tensor IDs.
@@ -2948,30 +2956,31 @@ impl ModelRunner {
 
     fn release_batched_decode_state(&self, row_id: u64, state: &LinearAttentionState) {
         state.evict_gdn_state_resident_kt(self.backend.as_ref());
+        // A resident cache owns reusable allocation capacity; its row IDs are
+        // only a content fingerprint. Completing one of those rows makes the
+        // fingerprint stale, but the next batch safely refreshes the same
+        // buffers in place. Nonresident caches cannot do that and are released
+        // eagerly as before.
+        let take_nonresident_cache = |cache: &mut Option<CachedBatchedState>| {
+            let should_take = cache.as_ref().is_some_and(|cached| {
+                completed_row_invalidates_batched_state_cache(
+                    &cached.row_ids,
+                    row_id,
+                    cached
+                        .state
+                        .has_all_gdn_state_resident_kt(self.backend.as_ref()),
+                )
+            });
+            if should_take { cache.take() } else { None }
+        };
         let cached = match self.batched_state_cache.lock() {
-            Ok(mut cache) => {
-                if cache
-                    .as_ref()
-                    .is_some_and(|cached| cached.row_ids.contains(&row_id))
-                {
-                    cache.take()
-                } else {
-                    None
-                }
-            }
+            Ok(mut cache) => take_nonresident_cache(&mut cache),
             Err(poisoned) => {
                 tracing::warn!(
                     "recovering poisoned batched-state cache while releasing decode row"
                 );
                 let mut cache = poisoned.into_inner();
-                if cache
-                    .as_ref()
-                    .is_some_and(|cached| cached.row_ids.contains(&row_id))
-                {
-                    cache.take()
-                } else {
-                    None
-                }
+                take_nonresident_cache(&mut cache)
             }
         };
         if let Some(cached) = cached {
@@ -10570,6 +10579,26 @@ mod tests {
             RocmGraphExecutionPolicy::disabled(),
             "lazy ROCm capture must require an explicit product policy"
         );
+    }
+
+    #[test]
+    fn completed_row_preserves_only_resident_batched_state_capacity() {
+        let cached_rows = [11, 12, 13];
+        assert!(completed_row_invalidates_batched_state_cache(
+            &cached_rows,
+            12,
+            false
+        ));
+        assert!(!completed_row_invalidates_batched_state_cache(
+            &cached_rows,
+            12,
+            true
+        ));
+        assert!(!completed_row_invalidates_batched_state_cache(
+            &cached_rows,
+            99,
+            false
+        ));
     }
 
     #[test]
