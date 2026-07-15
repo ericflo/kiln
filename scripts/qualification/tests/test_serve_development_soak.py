@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import math
+import signal
 import sys
 import time
 import unittest
@@ -16,8 +17,8 @@ QUALIFICATION_DIR = Path(__file__).resolve().parents[1]
 ROOT = QUALIFICATION_DIR.parents[1]
 sys.path.insert(0, str(QUALIFICATION_DIR))
 SPEC = importlib.util.spec_from_file_location(
-    "qualification_serve_rocm_soak",
-    QUALIFICATION_DIR / "serve_rocm_soak.py",
+    "qualification_serve_development_soak",
+    QUALIFICATION_DIR / "serve_development_soak.py",
 )
 assert SPEC is not None and SPEC.loader is not None
 soak = importlib.util.module_from_spec(SPEC)
@@ -45,6 +46,44 @@ def prefix_health(**overrides: int) -> dict:
 
 
 class ServeRocmSoakTests(unittest.TestCase):
+    def test_runtime_profiles_are_closed_and_backend_specific(self) -> None:
+        self.assertIs(
+            soak.runtime_for_variant(soak.ROCM_RUNTIME.variant_id), soak.ROCM_RUNTIME
+        )
+        self.assertIs(
+            soak.runtime_for_variant(soak.VULKAN_RUNTIME.variant_id),
+            soak.VULKAN_RUNTIME,
+        )
+        with self.assertRaisesRegex(soak.SoakError, "must name one of"):
+            soak.runtime_for_variant("unknown")
+
+        vulkan = soak.effective_config(
+            soak.QUALIFICATION_DURATION_SECONDS,
+            soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+            soak.VULKAN_RUNTIME,
+        )
+        self.assertEqual(vulkan["build"]["features"], "vulkan")
+        self.assertFalse(vulkan["runtime"]["rocm_graphs_enabled"])
+        self.assertEqual(vulkan["server"]["request_timeout_seconds"], 600)
+        self.assertEqual(
+            vulkan["soak"]["host_mem_available_floor_bytes"], 8 * 1024**3
+        )
+        self.assertNotIn(
+            "host_mem_available_floor_bytes",
+            soak.effective_config(
+                soak.QUALIFICATION_DURATION_SECONDS,
+                soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+            )["soak"],
+        )
+
+    def test_graph_warmup_contract_depends_on_runtime(self) -> None:
+        graph = {"capture_successes": 1, "replay_successes": 1, "failures": 0}
+        self.assertTrue(soak.graph_warmup_ready(graph, soak.ROCM_RUNTIME))
+        self.assertFalse(soak.graph_warmup_ready(graph, soak.VULKAN_RUNTIME))
+        self.assertTrue(
+            soak.graph_warmup_ready({name: 0 for name in graph}, soak.VULKAN_RUNTIME)
+        )
+
     def test_wait_drained_reads_the_nested_runtime_snapshot(self) -> None:
         health = {
             "decode_runtime": {
@@ -104,6 +143,25 @@ class ServeRocmSoakTests(unittest.TestCase):
             )
             warm = run.call_args.kwargs
         self.assertNotEqual(first["marker"], warm["marker"])
+
+        with mock.patch.object(soak.mixed, "run_stream", return_value=object()) as run:
+            soak.run_wave(
+                8420,
+                wave=2,
+                base_seed=7,
+                deadline=time.monotonic() + 1.0,
+                runtime=soak.VULKAN_RUNTIME,
+            )
+        self.assertEqual(run.call_count, 8)
+        self.assertTrue(
+            all(call.kwargs["max_tokens"] == 16 for call in run.call_args_list)
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["request_timeout_seconds"] == 600.0
+                for call in run.call_args_list
+            )
+        )
 
     def test_cancellation_markers_are_unique_and_confirmation_is_required(self) -> None:
         def result(*_args: object, **kwargs: object) -> mock.Mock:
@@ -200,6 +258,74 @@ class ServeRocmSoakTests(unittest.TestCase):
             ],
         )
 
+    def test_checked_in_vulkan_workload_exactly_matches_driver_contract(self) -> None:
+        path = ROOT / "qualification/workloads/serving-vulkan-development-soak-v1.json"
+        workload = json.loads(path.read_text())
+        self.assertEqual(workload["kind"], "soak")
+        self.assertIsNone(workload["comparison_policy"])
+        self.assertEqual(len(workload["variants"]), 1)
+        variant = workload["variants"][0]
+        self.assertEqual(variant["id"], soak.VULKAN_RUNTIME.variant_id)
+        self.assertEqual(variant["backend"], "vulkan")
+        self.assertEqual(
+            variant["effective_config"],
+            soak.effective_config(
+                soak.QUALIFICATION_DURATION_SECONDS,
+                soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+                soak.VULKAN_RUNTIME,
+            ),
+        )
+        case = variant["cases"][0]
+        self.assertEqual(case["id"], soak.CASE_ID)
+        self.assertEqual(
+            case["result_protocol"]["declared_metrics"],
+            sorted(soak.metric_definitions(soak.VULKAN_RUNTIME)),
+        )
+        self.assertEqual(
+            case["command"],
+            [
+                "python3",
+                "scripts/qualification/serve_development_soak.py",
+                "--model-path",
+                "${model_path}",
+                "--seed",
+                "${seed}",
+                "--minimum-duration-seconds",
+                "1800",
+                "--memory-growth-limit-bytes",
+                str(soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES),
+            ],
+        )
+        self.assertGreaterEqual(
+            case["timeout_seconds"],
+            soak.QUALIFICATION_DURATION_SECONDS
+            + soak.VULKAN_RUNTIME.setup_deadline_seconds,
+        )
+
+    def test_host_memory_guard_terminates_below_the_floor_and_records_pressure(
+        self,
+    ) -> None:
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = None
+        guard = soak.HostMemoryGuard(process, 8 * 1024**3)
+        with (
+            mock.patch.object(
+                soak,
+                "host_memory_snapshot",
+                side_effect=[(10 * 1024**3, 100), (7 * 1024**3, 250)],
+            ),
+            mock.patch.object(soak.os, "killpg") as killpg,
+        ):
+            guard._sample()
+            guard._sample()
+        killpg.assert_called_once_with(1234, signal.SIGTERM)
+        self.assertIn("below", guard.trip_reason or "")
+        self.assertEqual(guard.metric_values()["host_memory_guard_trip_count"], 1)
+        self.assertEqual(guard.metric_values()["host_swap_growth_bytes"], 150)
+        self.assertEqual(
+            guard.metric_values()["host_mem_available_min_bytes"], 7 * 1024**3
+        )
+
     def test_metric_contract_is_closed_sorted_and_finite(self) -> None:
         values = {name: 0 for name in soak.METRIC_DEFINITIONS}
         metrics = soak.metrics_from_values(values)
@@ -217,6 +343,16 @@ class ServeRocmSoakTests(unittest.TestCase):
                 malformed["request_count"] = invalid
                 with self.assertRaises(soak.SoakError):
                     soak.metrics_from_values(malformed)
+
+        vulkan_values = {
+            name: 0 for name in soak.metric_definitions(soak.VULKAN_RUNTIME)
+        }
+        vulkan_metrics = soak.metrics_from_values(
+            vulkan_values, soak.VULKAN_RUNTIME
+        )
+        self.assertEqual(
+            [metric["name"] for metric in vulkan_metrics], sorted(vulkan_values)
+        )
 
     def test_arguments_enforce_bounded_duration_and_growth(self) -> None:
         args = soak.parse_args(
