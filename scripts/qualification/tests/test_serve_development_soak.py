@@ -7,6 +7,7 @@ import json
 import math
 import signal
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -65,6 +66,9 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(vulkan["build"]["features"], "vulkan")
         self.assertFalse(vulkan["runtime"]["rocm_graphs_enabled"])
         self.assertEqual(vulkan["server"]["request_timeout_seconds"], 600)
+        self.assertEqual(vulkan["soak"]["gpu_memory_scope"], "server_process")
+        self.assertEqual(vulkan["soak"]["stabilization_min_cycles"], 4)
+        self.assertEqual(vulkan["soak"]["stabilization_max_cycles"], 8)
         self.assertEqual(
             vulkan["soak"]["host_mem_available_floor_bytes"], 8 * 1024**3
         )
@@ -75,6 +79,97 @@ class ServeRocmSoakTests(unittest.TestCase):
                 soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
             )["soak"],
         )
+
+    def test_process_memory_snapshot_requires_and_converts_linux_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            status = root / "42" / "status"
+            status.parent.mkdir(parents=True)
+            status.write_text(
+                "Name:\tkiln\n"
+                "VmRSS:\t1000 kB\n"
+                "RssAnon:\t700 kB\n"
+                "RssFile:\t250 kB\n"
+                "RssShmem:\t50 kB\n"
+                "VmSwap:\t25 kB\n",
+                encoding="utf-8",
+            )
+            snapshot = soak.process_memory_snapshot(42, root)
+        self.assertEqual(snapshot.rss_bytes, 1000 * 1024)
+        self.assertEqual(snapshot.rss_anon_bytes, 700 * 1024)
+        self.assertEqual(snapshot.rss_file_bytes, 250 * 1024)
+        self.assertEqual(snapshot.rss_shmem_bytes, 50 * 1024)
+        self.assertEqual(snapshot.swap_bytes, 25 * 1024)
+
+    def test_process_drm_memory_deduplicates_client_ids_and_regions(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            fdinfo = root / "42" / "fdinfo"
+            fdinfo.mkdir(parents=True)
+            (fdinfo / "9").write_text(
+                "drm-client-id:\t7\n"
+                "drm-memory-vram:\t100 KiB\n"
+                "drm-memory-gtt:\t20 KiB\n"
+                "drm-memory-cpu:\t0 KiB\n",
+                encoding="utf-8",
+            )
+            (fdinfo / "11").write_text(
+                "drm-client-id:\t7\n"
+                "drm-memory-vram:\t101 KiB\n"
+                "drm-memory-gtt:\t19 KiB\n"
+                "drm-memory-cpu:\t0 KiB\n",
+                encoding="utf-8",
+            )
+            (fdinfo / "12").write_text(
+                "drm-client-id:\t8\n"
+                "drm-memory-vram:\t3 KiB\n"
+                "drm-memory-gtt:\t4 KiB\n"
+                "drm-memory-cpu:\t5 KiB\n",
+                encoding="utf-8",
+            )
+            (fdinfo / "13").write_text("pos:\t0\n", encoding="utf-8")
+            observed = soak.process_drm_memory_bytes(42, root)
+        self.assertEqual(observed, (101 + 20 + 3 + 4 + 5) * 1024)
+
+    def test_process_drm_memory_fails_closed_without_accounting(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            fdinfo = root / "42" / "fdinfo"
+            fdinfo.mkdir(parents=True)
+            (fdinfo / "1").write_text("pos:\t0\n", encoding="utf-8")
+            with self.assertRaisesRegex(soak.SoakError, "no DRM memory accounting"):
+                soak.process_drm_memory_bytes(42, root)
+
+    def test_gpu_memory_scope_selects_process_or_device_accounting(self) -> None:
+        with (
+            mock.patch.object(soak, "process_drm_memory_bytes", return_value=123) as drm,
+            mock.patch.object(soak.mixed, "text_request", return_value="") as metrics,
+        ):
+            self.assertEqual(
+                soak.gpu_memory_bytes(8420, 42, soak.VULKAN_RUNTIME), 123
+            )
+        drm.assert_called_once_with(42)
+        metrics.assert_not_called()
+
+        with (
+            mock.patch.object(
+                soak.mixed,
+                "text_request",
+                return_value='kiln_gpu_memory_bytes{kind="used"} 456\n',
+            ),
+            mock.patch.object(
+                soak.mixed, "parse_prometheus_used_bytes", return_value=456
+            ),
+        ):
+            self.assertEqual(soak.gpu_memory_bytes(8420, 42, soak.ROCM_RUNTIME), 456)
+
+    def test_gpu_memory_sampler_uses_the_declared_runtime_scope(self) -> None:
+        sampler = soak.GpuMemorySampler(8420, 42, soak.VULKAN_RUNTIME)
+        with mock.patch.object(soak, "gpu_memory_bytes", return_value=789) as sample:
+            sampler._sample()
+        self.assertEqual(sampler.samples, [789])
+        self.assertEqual(sampler.errors, [])
+        sample.assert_called_once_with(8420, 42, soak.VULKAN_RUNTIME)
 
     def test_graph_warmup_contract_depends_on_runtime(self) -> None:
         graph = {"capture_successes": 1, "replay_successes": 1, "failures": 0}

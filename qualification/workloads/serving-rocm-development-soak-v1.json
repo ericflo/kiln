@@ -69,6 +69,8 @@
           "cancellation_max_tokens": 512,
           "cancellation_prompt_words": 48,
           "cancel_every_waves": 5,
+          "gpu_memory_scope": "device_global",
+          "gpu_memory_source": "server_metrics:kiln_gpu_memory_bytes{kind=\"used\"}",
           "max_tokens": 32,
           "rocm_graph_cache_entries": 12,
           "memory_growth_limit_bytes": 536870912,

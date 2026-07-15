@@ -67,6 +67,8 @@ class SoakRuntime:
     variant_id: str
     backend: str
     build_spec: mixed.SourceBuildSpec
+    gpu_memory_scope: str
+    gpu_memory_source: str
     graph_execution_required: bool
     wave_concurrency: tuple[int, ...]
     prompt_words: tuple[int, ...]
@@ -91,6 +93,8 @@ ROCM_RUNTIME = SoakRuntime(
     variant_id=RUNTIME_VARIANT,
     backend="rocm",
     build_spec=mixed.ROCM_BUILD_SPEC,
+    gpu_memory_scope="device_global",
+    gpu_memory_source='server_metrics:kiln_gpu_memory_bytes{kind="used"}',
     graph_execution_required=True,
     wave_concurrency=WAVE_CONCURRENCY,
     prompt_words=PROMPT_WORDS,
@@ -112,6 +116,8 @@ VULKAN_RUNTIME = SoakRuntime(
     variant_id=VULKAN_RUNTIME_VARIANT,
     backend="vulkan",
     build_spec=mixed.VULKAN_BUILD_SPEC,
+    gpu_memory_scope="server_process",
+    gpu_memory_source="linux_proc_drm_fdinfo:vram+gtt+cpu",
     graph_execution_required=False,
     wave_concurrency=(1, 4, 8, 4),
     prompt_words=(16, 32, 64, 96, 128, 192, 256, 384),
@@ -122,8 +128,8 @@ VULKAN_RUNTIME = SoakRuntime(
     request_timeout_seconds=600.0,
     max_steady_state_warmup_waves=12,
     graph_cache_max=12,
-    min_stabilization_cycles=2,
-    max_stabilization_cycles=4,
+    min_stabilization_cycles=4,
+    max_stabilization_cycles=8,
     required_stable_cycles=2,
     stabilization_gpu_delta_limit_bytes=64 * 1024 * 1024,
     stabilization_rss_delta_limit_bytes=16 * 1024 * 1024,
@@ -252,6 +258,8 @@ def effective_config(
             "cancellation_max_tokens": runtime.cancellation_max_tokens,
             "cancellation_prompt_words": runtime.cancellation_prompt_words,
             "cancel_every_waves": runtime.cancel_every_waves,
+            "gpu_memory_scope": runtime.gpu_memory_scope,
+            "gpu_memory_source": runtime.gpu_memory_source,
             "max_tokens": runtime.max_tokens,
             "rocm_graph_cache_entries": runtime.graph_cache_max,
             "memory_growth_limit_bytes": memory_growth_limit_bytes,
@@ -293,30 +301,59 @@ def effective_config(
     return effective
 
 
-def rss_bytes(pid: int) -> int:
-    status = Path(f"/proc/{pid}/status")
+@dataclasses.dataclass(frozen=True)
+class ProcessMemorySnapshot:
+    rss_bytes: int
+    rss_anon_bytes: int
+    rss_file_bytes: int
+    rss_shmem_bytes: int
+    swap_bytes: int
+
+
+def parse_memory_kib(path: Path, name: str, raw: str, unit: str) -> int:
+    fields = raw.split()
+    if len(fields) != 2 or fields[1] != unit:
+        raise SoakError(f"{path} has an invalid {name} value: {raw!r}")
+    try:
+        value = int(fields[0]) * 1024
+    except ValueError as exc:
+        raise SoakError(f"{path} has an invalid {name} value: {raw!r}") from exc
+    if value < 0:
+        raise SoakError(f"{path} has a negative {name} value")
+    return value
+
+
+def process_memory_snapshot(
+    pid: int, proc_root: Path = Path("/proc")
+) -> ProcessMemorySnapshot:
+    status = proc_root / str(pid) / "status"
+    names = {"VmRSS", "RssAnon", "RssFile", "RssShmem", "VmSwap"}
+    values: dict[str, int] = {}
     for line in status.read_text(encoding="utf-8").splitlines():
-        if not line.startswith("VmRSS:"):
+        name, separator, raw = line.partition(":")
+        if not separator or name not in names:
             continue
-        fields = line.split()
-        if len(fields) != 3 or fields[2] != "kB":
-            break
-        value = int(fields[1]) * 1024
-        if value >= 0:
-            return value
-    raise SoakError(f"cannot read a valid VmRSS value for server pid {pid}")
+        values[name] = parse_memory_kib(status, name, raw, "kB")
+    missing = sorted(names - set(values))
+    if missing:
+        raise SoakError(f"{status} omitted required fields: {missing}")
+    return ProcessMemorySnapshot(
+        rss_bytes=values["VmRSS"],
+        rss_anon_bytes=values["RssAnon"],
+        rss_file_bytes=values["RssFile"],
+        rss_shmem_bytes=values["RssShmem"],
+        swap_bytes=values["VmSwap"],
+    )
 
 
 def host_memory_snapshot() -> tuple[int, int]:
+    meminfo = Path("/proc/meminfo")
     fields: dict[str, int] = {}
-    for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+    for line in meminfo.read_text(encoding="utf-8").splitlines():
         name, separator, raw = line.partition(":")
         if not separator or name not in {"MemAvailable", "SwapTotal", "SwapFree"}:
             continue
-        parts = raw.split()
-        if len(parts) != 2 or parts[1] != "kB":
-            raise SoakError(f"/proc/meminfo {name} has an invalid value: {raw!r}")
-        fields[name] = int(parts[0]) * 1024
+        fields[name] = parse_memory_kib(meminfo, name, raw, "kB")
     missing = sorted({"MemAvailable", "SwapTotal", "SwapFree"} - set(fields))
     if missing:
         raise SoakError(f"/proc/meminfo omitted required fields: {missing}")
@@ -416,11 +453,106 @@ class HostMemoryGuard:
                 return
 
 
-def gpu_memory_bytes(port: int) -> int:
+DRM_MEMORY_FIELDS = (
+    "drm-memory-vram",
+    "drm-memory-gtt",
+    "drm-memory-cpu",
+)
+
+
+def process_drm_memory_bytes(pid: int, proc_root: Path = Path("/proc")) -> int:
+    fdinfo_dir = proc_root / str(pid) / "fdinfo"
+    clients: dict[str, dict[str, int]] = {}
+    saw_memory_record = False
+    try:
+        paths = sorted(fdinfo_dir.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        raise SoakError(f"cannot enumerate {fdinfo_dir}: {exc}") from exc
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            # File descriptors can close between directory enumeration and
+            # read. A live DRM client remains visible through its other fd.
+            continue
+        client_id: str | None = None
+        memory: dict[str, int] = {}
+        for line in lines:
+            name, separator, raw = line.partition(":")
+            if not separator:
+                continue
+            if name == "drm-client-id":
+                value = raw.strip()
+                if not value:
+                    raise SoakError(f"{path} has an empty drm-client-id")
+                if client_id is not None and client_id != value:
+                    raise SoakError(f"{path} reports multiple DRM client IDs")
+                client_id = value
+            elif name in DRM_MEMORY_FIELDS:
+                memory[name] = parse_memory_kib(path, name, raw, "KiB")
+        if not memory and client_id is None:
+            continue
+        if client_id is None:
+            raise SoakError(f"{path} reports DRM memory without drm-client-id")
+        observed = clients.setdefault(client_id, {})
+        for name, value in memory.items():
+            # One DRM client is commonly exposed by both render and card fds.
+            # Use the largest contemporaneous value per region so duplicates
+            # are not counted twice and small read-time races are conservative.
+            observed[name] = max(observed.get(name, 0), value)
+            saw_memory_record = True
+    if not clients or not saw_memory_record:
+        raise SoakError(f"server pid {pid} exposes no DRM memory accounting")
+    return sum(sum(regions.values()) for regions in clients.values())
+
+
+def gpu_memory_bytes(port: int, pid: int, runtime: SoakRuntime) -> int:
+    if runtime.gpu_memory_scope == "server_process":
+        return process_drm_memory_bytes(pid)
+    if runtime.gpu_memory_scope != "device_global":
+        raise SoakError(f"unsupported GPU memory scope {runtime.gpu_memory_scope!r}")
     value = mixed.parse_prometheus_used_bytes(mixed.text_request(port, "/metrics"))
     if value is None:
         raise SoakError("server metrics omitted kiln_gpu_memory_bytes{kind=\"used\"}")
     return value
+
+
+class GpuMemorySampler:
+    def __init__(self, port: int, pid: int, runtime: SoakRuntime) -> None:
+        self.port = port
+        self.pid = pid
+        self.runtime = runtime
+        self.stop = threading.Event()
+        self.samples: list[int] = []
+        self.errors: list[str] = []
+        self.thread = threading.Thread(
+            target=self._run, name="qualification-gpu-memory-sampler"
+        )
+        self._started = False
+
+    def start(self) -> None:
+        self._sample()
+        self.thread.start()
+        self._started = True
+
+    def close(self) -> None:
+        self.stop.set()
+        if not self._started:
+            return
+        self.thread.join(timeout=10.0)
+        if self.thread.is_alive() and len(self.errors) < 8:
+            self.errors.append("GPU memory sampler thread did not stop within 10 seconds")
+
+    def _sample(self) -> None:
+        try:
+            self.samples.append(gpu_memory_bytes(self.port, self.pid, self.runtime))
+        except Exception as exc:
+            if len(self.errors) < 8:
+                self.errors.append(f"{type(exc).__name__}: {exc}")
+
+    def _run(self) -> None:
+        while not self.stop.wait(mixed.MEMORY_POLL_INTERVAL_SECONDS):
+            self._sample()
 
 
 def wait_drained(port: int, deadline: float, label: str) -> dict[str, Any]:
@@ -660,7 +792,7 @@ def execute(
     process, server_log = mixed.start_server(
         binary, config_path, runtime.variant_id, runtime.build_spec
     )
-    sampler = mixed.MemorySampler(port)
+    sampler = GpuMemorySampler(port, process.pid, runtime)
     host_guard = (
         HostMemoryGuard(process, runtime.host_mem_available_floor_bytes)
         if runtime.host_mem_available_floor_bytes is not None
@@ -787,8 +919,8 @@ def execute(
                 waves=steady_state_warmup_waves,
             )
 
-        previous_gpu = gpu_memory_bytes(port)
-        previous_rss = rss_bytes(process.pid)
+        previous_gpu = gpu_memory_bytes(port, process.pid, runtime)
+        previous_memory = process_memory_snapshot(process.pid)
         stabilization_started = time.monotonic()
         while stabilization_cycles < runtime.max_stabilization_cycles:
             cycle_failures: list[str] = []
@@ -898,10 +1030,10 @@ def execute(
 
             if cycle_failures:
                 raise SoakError("; ".join(dict.fromkeys(cycle_failures)))
-            current_gpu = gpu_memory_bytes(port)
-            current_rss = rss_bytes(process.pid)
+            current_gpu = gpu_memory_bytes(port, process.pid, runtime)
+            current_memory = process_memory_snapshot(process.pid)
             gpu_delta = max(0, current_gpu - previous_gpu)
-            rss_delta = max(0, current_rss - previous_rss)
+            rss_delta = max(0, current_memory.rss_bytes - previous_memory.rss_bytes)
             stabilization_final_gpu_delta = gpu_delta
             stabilization_final_rss_delta = rss_delta
             stabilization_max_gpu_delta = max(stabilization_max_gpu_delta, gpu_delta)
@@ -918,11 +1050,24 @@ def execute(
                 "soak_stabilization_cycle",
                 cycle=stabilization_cycles,
                 gpu_delta_bytes=gpu_delta,
+                rss_anon_delta_bytes=max(
+                    0, current_memory.rss_anon_bytes - previous_memory.rss_anon_bytes
+                ),
                 rss_delta_bytes=rss_delta,
+                rss_file_delta_bytes=max(
+                    0, current_memory.rss_file_bytes - previous_memory.rss_file_bytes
+                ),
+                rss_shmem_delta_bytes=max(
+                    0,
+                    current_memory.rss_shmem_bytes - previous_memory.rss_shmem_bytes,
+                ),
                 stable_cycles=stabilization_stable_cycles,
+                swap_delta_bytes=max(
+                    0, current_memory.swap_bytes - previous_memory.swap_bytes
+                ),
             )
             previous_gpu = current_gpu
-            previous_rss = current_rss
+            previous_memory = current_memory
             if (
                 stabilization_cycles >= runtime.min_stabilization_cycles
                 and stabilization_stable_cycles >= runtime.required_stable_cycles
@@ -937,8 +1082,8 @@ def execute(
         graph_start = mixed.graph_snapshot(health_start)
         batching_start = mixed.batching_snapshot(health_start)
         prefix_start = prefix_cache_snapshot(health_start)
-        gpu_start = gpu_memory_bytes(port)
-        rss_start = rss_bytes(process.pid)
+        gpu_start = gpu_memory_bytes(port, process.pid, runtime)
+        rss_start = process_memory_snapshot(process.pid).rss_bytes
         sampler.start()
         measurement_started = time.monotonic()
         all_results: list[mixed.StreamResult] = []
@@ -1037,8 +1182,9 @@ def execute(
                     f"{device_faults[-1].message}"
                 )
 
-            current_gpu = gpu_memory_bytes(port)
-            current_rss = rss_bytes(process.pid)
+            current_gpu = gpu_memory_bytes(port, process.pid, runtime)
+            current_memory = process_memory_snapshot(process.pid)
+            current_rss = current_memory.rss_bytes
             rss_samples.append(current_rss)
             if current_gpu > gpu_start + memory_growth_limit_bytes:
                 wave_failures.append(
@@ -1054,7 +1200,11 @@ def execute(
                 elapsed_seconds=time.monotonic() - measurement_started,
                 gpu_memory_bytes=current_gpu,
                 requests=len(wave_results),
+                rss_anon_bytes=current_memory.rss_anon_bytes,
                 rss_bytes=current_rss,
+                rss_file_bytes=current_memory.rss_file_bytes,
+                rss_shmem_bytes=current_memory.rss_shmem_bytes,
+                swap_bytes=current_memory.swap_bytes,
                 wave=wave,
             )
             wave += 1
@@ -1076,8 +1226,8 @@ def execute(
             warmup.itl_ms, successes, events
         )
         all_server_events = server_log.events_since(started)
-        gpu_end = gpu_memory_bytes(port)
-        rss_end = rss_bytes(process.pid)
+        gpu_end = gpu_memory_bytes(port, process.pid, runtime)
+        rss_end = process_memory_snapshot(process.pid).rss_bytes
         if host_guard is not None:
             host_guard.close()
         gpu_peak = max([gpu_start, gpu_end, *sampler.samples])
