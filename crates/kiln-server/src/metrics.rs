@@ -2333,15 +2333,6 @@ impl Metrics {
                 u8::from(stats.resident)
             ),
         );
-        out.push_str("# HELP kiln_batched_recurrent_state_cache_prefix_views_enabled Whether the selected backend may reuse a larger resident allocation through a smaller logical batch view.\n");
-        out.push_str("# TYPE kiln_batched_recurrent_state_cache_prefix_views_enabled gauge\n");
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_batched_recurrent_state_cache_prefix_views_enabled {}",
-                u8::from(stats.resident_prefix_views_enabled)
-            ),
-        );
         out.push_str("# HELP kiln_batched_recurrent_state_cache_leases Batched recurrent-state leases by kind.\n");
         out.push_str("# TYPE kiln_batched_recurrent_state_cache_leases gauge\n");
         prom_counter(
@@ -2417,10 +2408,6 @@ impl Metrics {
             (
                 "insufficient_capacity",
                 stats.rejected_insufficient_capacity_count,
-            ),
-            (
-                "prefix_view_quarantine",
-                stats.rejected_prefix_view_quarantine_count,
             ),
         ] {
             prom_counter(
@@ -3675,7 +3662,6 @@ mod tests {
                 capacity_rows: 8,
                 logical_rows: 4,
                 resident: true,
-                resident_prefix_views_enabled: true,
                 active_leases: 1,
                 max_active_leases: 3,
                 take_hit_count: 19,
@@ -3690,7 +3676,6 @@ mod tests {
                 rejected_nonresident_rows_count: 2,
                 rejected_nonresident_cache_count: 3,
                 rejected_insufficient_capacity_count: 4,
-                rejected_prefix_view_quarantine_count: 5,
                 park_count: 20,
                 park_replacement_eviction_count: 4,
                 explicit_invalidation_count: 2,
@@ -3979,7 +3964,6 @@ mod tests {
             "kiln_batched_recurrent_state_cache_rows{kind=\"capacity\"} 8",
             "kiln_batched_recurrent_state_cache_rows{kind=\"logical\"} 4",
             "kiln_batched_recurrent_state_cache_resident 1",
-            "kiln_batched_recurrent_state_cache_prefix_views_enabled 1",
             "kiln_batched_recurrent_state_cache_leases{kind=\"active\"} 1",
             "kiln_batched_recurrent_state_cache_leases{kind=\"max\"} 3",
             "kiln_batched_recurrent_state_cache_takes_total{result=\"hit\"} 19",
@@ -3994,7 +3978,6 @@ mod tests {
             "kiln_batched_recurrent_state_cache_rejections_total{reason=\"nonresident_rows\"} 2",
             "kiln_batched_recurrent_state_cache_rejections_total{reason=\"nonresident_cache\"} 3",
             "kiln_batched_recurrent_state_cache_rejections_total{reason=\"insufficient_capacity\"} 4",
-            "kiln_batched_recurrent_state_cache_rejections_total{reason=\"prefix_view_quarantine\"} 5",
             "kiln_batched_recurrent_state_cache_parks_total 20",
             "kiln_batched_recurrent_state_cache_invalidations_total 2",
             "kiln_batched_recurrent_state_cache_completed_rows_total{action=\"preserve\"} 11",

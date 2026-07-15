@@ -688,9 +688,6 @@ pub struct BatchedStateCacheStats {
     pub capacity_rows: usize,
     pub logical_rows: usize,
     pub resident: bool,
-    /// Whether the selected backend may reuse a larger resident allocation
-    /// through a smaller logical batch view.
-    pub resident_prefix_views_enabled: bool,
     pub active_leases: u64,
     pub max_active_leases: u64,
     pub take_hit_count: u64,
@@ -705,7 +702,6 @@ pub struct BatchedStateCacheStats {
     pub rejected_nonresident_rows_count: u64,
     pub rejected_nonresident_cache_count: u64,
     pub rejected_insufficient_capacity_count: u64,
-    pub rejected_prefix_view_quarantine_count: u64,
     pub park_count: u64,
     pub park_replacement_eviction_count: u64,
     pub explicit_invalidation_count: u64,
@@ -735,7 +731,6 @@ struct BatchedStateCacheCounters {
     rejected_nonresident_rows_count: AtomicU64,
     rejected_nonresident_cache_count: AtomicU64,
     rejected_insufficient_capacity_count: AtomicU64,
-    rejected_prefix_view_quarantine_count: AtomicU64,
     park_count: AtomicU64,
     park_replacement_eviction_count: AtomicU64,
     explicit_invalidation_count: AtomicU64,
@@ -783,9 +778,6 @@ impl BatchedStateCacheCounters {
             rejected_insufficient_capacity_count: self
                 .rejected_insufficient_capacity_count
                 .load(Ordering::Relaxed),
-            rejected_prefix_view_quarantine_count: self
-                .rejected_prefix_view_quarantine_count
-                .load(Ordering::Relaxed),
             park_count: self.park_count.load(Ordering::Relaxed),
             park_replacement_eviction_count: self
                 .park_replacement_eviction_count
@@ -814,14 +806,6 @@ fn completed_row_invalidates_batched_state_cache(
     cache_is_resident: bool,
 ) -> bool {
     cached_row_ids.contains(&completed_row_id) && !cache_is_resident
-}
-
-fn resident_batched_state_prefix_views_enabled(backend_name: &str) -> bool {
-    // Vulkan prefix views share a maximum-capacity resident allocation. Local
-    // q256 qualification found deterministic semantic corruption after batch
-    // shrink/reuse, so this capability remains fail-closed until a backend fix
-    // passes the exact-output development soak.
-    backend_name != "vulkan"
 }
 
 /// Owns a temporary assembled state until it is explicitly parked in the
@@ -3063,8 +3047,6 @@ impl ModelRunner {
     /// Snapshot batched recurrent-state cache ownership without changing it.
     pub fn batched_state_cache_stats(&self) -> BatchedStateCacheStats {
         let mut stats = self.batched_state_cache_counters.snapshot();
-        stats.resident_prefix_views_enabled =
-            resident_batched_state_prefix_views_enabled(self.backend_name());
         let cache = self
             .batched_state_cache
             .lock()
@@ -3202,14 +3184,7 @@ impl ModelRunner {
                 return Ok((cached_lease, true));
             }
 
-            let prefix_view_quarantined = capacity > batch
-                && !resident_batched_state_prefix_views_enabled(self.backend_name());
-            if row_ids.is_some()
-                && all_rows_resident
-                && cached_is_resident
-                && capacity >= batch
-                && !prefix_view_quarantined
-            {
+            if row_ids.is_some() && all_rows_resident && cached_is_resident && capacity >= batch {
                 self.batched_state_cache_counters
                     .resident_capacity_reuse_count
                     .fetch_add(1, Ordering::Relaxed);
@@ -3264,10 +3239,6 @@ impl ModelRunner {
                 &self
                     .batched_state_cache_counters
                     .rejected_nonresident_cache_count
-            } else if prefix_view_quarantined {
-                &self
-                    .batched_state_cache_counters
-                    .rejected_prefix_view_quarantine_count
             } else {
                 debug_assert!(capacity < batch);
                 &self
@@ -11285,17 +11256,6 @@ mod tests {
             99,
             false
         ));
-    }
-
-    #[test]
-    fn resident_batched_state_prefix_views_are_quarantined_only_on_vulkan() {
-        assert!(!resident_batched_state_prefix_views_enabled("vulkan"));
-        for backend in ["cpu", "cuda", "metal", "rocm"] {
-            assert!(
-                resident_batched_state_prefix_views_enabled(backend),
-                "{backend} should retain resident batched-state prefix views"
-            );
-        }
     }
 
     #[test]

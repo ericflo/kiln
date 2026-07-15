@@ -312,11 +312,6 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
         "sum",
         True,
     ),
-    "batched_state_cache_rejected_prefix_view_quarantine_count": (
-        "count",
-        "sum",
-        False,
-    ),
     "batched_state_cache_rejected_missing_row_ids_count": ("count", "sum", True),
     "batched_state_cache_rejected_nonresident_cache_count": ("count", "sum", True),
     "batched_state_cache_rejected_nonresident_rows_count": ("count", "sum", True),
@@ -327,7 +322,6 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     ),
     "batched_state_cache_resident_capacity_reuse_count": ("count", "sum", False),
     "batched_state_cache_resident_end": ("count", "exact", False),
-    "batched_state_cache_resident_prefix_views_enabled": ("bool", "exact", True),
     "batched_state_cache_resident_prefix_view_count": ("count", "sum", False),
     "batched_state_cache_resident_refresh_count": ("count", "sum", False),
     "batched_state_cache_take_hit_count": ("count", "sum", False),
@@ -1396,11 +1390,7 @@ VULKAN_BUFFER_POOL_COUNTER_FIELDS = (
     "uncached_allocated_bytes",
 )
 
-BATCHED_STATE_CACHE_BOOL_FIELDS = (
-    "entry_present",
-    "resident",
-    "resident_prefix_views_enabled",
-)
+BATCHED_STATE_CACHE_BOOL_FIELDS = ("entry_present", "resident")
 BATCHED_STATE_CACHE_GAUGE_FIELDS = (
     "capacity_rows",
     "logical_rows",
@@ -1420,7 +1410,6 @@ BATCHED_STATE_CACHE_COUNTER_FIELDS = (
     "rejected_nonresident_rows_count",
     "rejected_nonresident_cache_count",
     "rejected_insufficient_capacity_count",
-    "rejected_prefix_view_quarantine_count",
     "park_count",
     "park_replacement_eviction_count",
     "explicit_invalidation_count",
@@ -1507,9 +1496,6 @@ def batched_state_cache_trace_values(
         "batched_state_cache_capacity_rows": after["capacity_rows"],
         "batched_state_cache_logical_rows": after["logical_rows"],
         "batched_state_cache_resident": after["resident"],
-        "batched_state_cache_resident_prefix_views_enabled": after[
-            "resident_prefix_views_enabled"
-        ],
         "batched_state_cache_active_leases": after["active_leases"],
         "batched_state_cache_max_active_leases": after["max_active_leases"],
     }
@@ -1530,9 +1516,6 @@ def batched_state_cache_metric_values(
         "batched_state_cache_logical_rows_end": int(after["logical_rows"]),
         "batched_state_cache_max_active_leases": int(after["max_active_leases"]),
         "batched_state_cache_resident_end": int(after["resident"]),
-        "batched_state_cache_resident_prefix_views_enabled": int(
-            after["resident_prefix_views_enabled"]
-        ),
     }
     for field in BATCHED_STATE_CACHE_COUNTER_FIELDS:
         values[f"batched_state_cache_{field}"] = batched_state_cache_counter_delta(
@@ -3028,16 +3011,6 @@ def execute(
                 failures.append("batched recurrent-state capacity was not parked at final drain")
             if values["batched_state_cache_resident_end"] != 1:
                 failures.append("final batched recurrent-state capacity was not resident")
-            if values["batched_state_cache_resident_prefix_views_enabled"] != 0:
-                failures.append(
-                    "Vulkan resident batched-state prefix views were not quarantined"
-                )
-            if values["batched_state_cache_resident_prefix_view_count"] != 0:
-                failures.append(
-                    "batched_state_cache_resident_prefix_view_count="
-                    f"{values['batched_state_cache_resident_prefix_view_count']}, "
-                    "expected 0 while Vulkan prefix views are quarantined"
-                )
         if (
             observed_process_mappings_start is not None
             and observed_process_mappings_end is not None

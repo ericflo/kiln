@@ -1370,19 +1370,10 @@ Native batched decode also owns a persistent `LinearAttentionState` cache for
 the recurrent GDN layers. Trusted `GET /v1/debug/model-state` exposes its full
 snapshot at `caches.batched_recurrent_state` on every backend. The four current
 ownership fields are `entry_present`, `capacity_rows`, `logical_rows`, and
-`resident`. The `resident_prefix_views_enabled` capability field reports
-whether the selected backend may expose a smaller logical batch through a
-larger resident allocation. An entry is temporarily absent while a forward
+`resident`. A parked resident entry may have more capacity rows than logical
+rows because smaller batches use an identity-preserving prefix view of the
+maximum observed allocation. An entry is temporarily absent while a forward
 call owns its lease.
-
-Vulkan currently reports `resident_prefix_views_enabled=false`. A Strix Halo
-q256 qualification probe reproduced deterministic output corruption only when
-the cache reused a larger resident allocation through a smaller prefix view.
-Kiln therefore fails closed on that exact route: equal-capacity exact reuse and
-row refresh remain enabled, while a larger-than-needed cached allocation is
-rejected, evicted by the lease owner, and replaced with a fresh exact-width
-assembly. CPU, CUDA, Metal, and ROCm retain prefix views. This is a compiled
-backend correctness policy, not a mutable environment or request option.
 
 The remaining fields are process-lifetime monotonic counters:
 
@@ -1393,10 +1384,10 @@ The remaining fields are process-lifetime monotonic counters:
 | `take_miss_while_leased_count` | Misses observed while another state lease is active. This is the direct signal for concurrent checkout of a single-slot cache. |
 | `exact_reuse_count` | Reuse with the same ordered request-ID fingerprint; no state-row refresh is needed. |
 | `resident_capacity_reuse_count` | Reuse of backend-resident allocation capacity. This includes same-width and smaller-prefix reuse. |
-| `resident_prefix_view_count` | Capacity reuse through a smaller logical axis-0 prefix. This must remain zero while the effective capability is disabled. |
+| `resident_prefix_view_count` | Capacity reuse through a smaller logical axis-0 prefix. |
 | `resident_refresh_count` | In-place row refresh because the ordered request IDs changed. |
 | `fresh_assembly_count` | New batched state assembled after a miss or rejected entry. |
-| `rejected_*_count` | A checked-out entry could not be reused because row IDs were absent, input rows were nonresident, the cache was nonresident, capacity was insufficient, or the backend quarantined prefix views. Exactly one rejection reason is recorded for each rejected entry. |
+| `rejected_*_count` | A checked-out entry could not be reused because row IDs were absent, input rows were nonresident, the cache was nonresident, or capacity was insufficient. Exactly one rejection reason is recorded for each rejected entry. |
 | `park_count` | A forward returned its state to the persistent cache. |
 | `park_replacement_eviction_count` | A returning lease found another parked entry and evicted it. This should remain zero when one cache owner cannot overlap another. |
 | `explicit_invalidation_count`, `explicit_invalidation_eviction_count` | Adapter/model lifecycle invalidations requested, and those that actually removed a parked entry. |
@@ -1410,13 +1401,12 @@ Prometheus exports the same bounded-cardinality state as:
 kiln_batched_recurrent_state_cache_entry
 kiln_batched_recurrent_state_cache_rows{kind="capacity|logical"}
 kiln_batched_recurrent_state_cache_resident
-kiln_batched_recurrent_state_cache_prefix_views_enabled
 kiln_batched_recurrent_state_cache_leases{kind="active|max"}
 kiln_batched_recurrent_state_cache_takes_total{result="hit|miss"}
 kiln_batched_recurrent_state_cache_misses_while_leased_total
 kiln_batched_recurrent_state_cache_reuses_total{kind="exact|resident_capacity|prefix_view|refresh"}
 kiln_batched_recurrent_state_cache_assemblies_total
-kiln_batched_recurrent_state_cache_rejections_total{reason="missing_row_ids|nonresident_rows|nonresident_cache|insufficient_capacity|prefix_view_quarantine"}
+kiln_batched_recurrent_state_cache_rejections_total{reason="missing_row_ids|nonresident_rows|nonresident_cache|insufficient_capacity"}
 kiln_batched_recurrent_state_cache_parks_total
 kiln_batched_recurrent_state_cache_invalidations_total
 kiln_batched_recurrent_state_cache_completed_rows_total{action="preserve|evict"}
@@ -1436,14 +1426,6 @@ not allocator pressure. Increasing `rejected_insufficient_capacity_count`
 without overlap identifies legitimate high-water growth. Increasing
 `lease_drop_eviction_count` without a rejection requires an accompanying
 forward/error investigation.
-
-The Vulkan development soak additionally requires
-`resident_prefix_views_enabled=false` and `resident_prefix_view_count=0` for
-the entire observed process. `rejected_prefix_view_quarantine_count` may grow
-when the active batch shrinks below retained capacity; each increment proves
-that Kiln took the correctness-preserving fresh-assembly route. Enabling the
-capability or observing even one prefix view fails qualification rather than
-silently weakening the semantic oracle.
 
 Vulkan full-attention KV seed flags and recurrent GDN state have different
 lifetimes. The former are indexed by layer and reset when an unidentified
