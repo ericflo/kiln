@@ -56,6 +56,38 @@ def http_fixture() -> dict:
     }
 
 
+def stream_result_with_deltas(
+    deltas: list[dict], *, name: str = "oracle-fixture"
+) -> object:
+    return serve.StreamResult(
+        name=name,
+        marker="QUAL-7-oracle-fixture",
+        started=1.0,
+        finished=2.0,
+        semantic_times=[1.1] * len(deltas),
+        token_ready_times=[1.1, 1.2],
+        token_queue_delays_ms=[0.0, 0.0],
+        prompt_tokens=32,
+        completion_tokens=2,
+        usage_records=1,
+        finish_reason="length",
+        done=True,
+        cancelled=False,
+        error=None,
+        semantic_deltas=deltas,
+    )
+
+
+def stream_result_with_text(*fragments: str, name: str = "oracle-fixture") -> object:
+    return stream_result_with_deltas(
+        [
+            {"choices": [{"index": 0, "delta": {"content": fragment}}]}
+            for fragment in fragments
+        ],
+        name=name,
+    )
+
+
 def health_fixture(
     *,
     kv_autoscale: bool,
@@ -437,6 +469,58 @@ def debug_fixture(
 
 
 class ServeMixedLoadTests(unittest.TestCase):
+    def test_response_oracle_accepts_plain_text_prefix_across_delta_splits(self) -> None:
+        result = stream_result_with_text("000", "000 000", "001 00")
+
+        self.assertTrue(result.success)
+        self.assertIsNone(serve.deterministic_response_oracle_failure(result))
+        self.assertTrue(serve.qualified_stream_success(result))
+        self.assertEqual(serve.streamed_plain_text(result), ("000000 000001 00", None))
+
+    def test_response_oracle_rejects_semantic_corruption(self) -> None:
+        corrupt = (
+            "000000 000000 00",
+            "000>0:0:5:5:5:5:",
+            "000\n0\n0\n0",
+            "The",
+        )
+        for output in corrupt:
+            with self.subTest(output=output):
+                result = stream_result_with_text(output)
+                self.assertIn(
+                    "not a prefix",
+                    serve.deterministic_response_oracle_failure(result),
+                )
+                self.assertFalse(serve.qualified_stream_success(result))
+                self.assertEqual(serve.bounded_response_text(result), ascii(output))
+
+    def test_response_oracle_rejects_non_content_semantic_events(self) -> None:
+        invalid_deltas = (
+            {"choices": [{"delta": {"reasoning_content": "hidden"}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0}]}}]},
+            {
+                "choices": [
+                    {"delta": {"content": "000000"}},
+                    {"delta": {"content": "000001"}},
+                ]
+            },
+        )
+        for delta in invalid_deltas:
+            with self.subTest(delta=delta):
+                result = stream_result_with_deltas([delta])
+                failure = serve.deterministic_response_oracle_failure(result)
+                self.assertIsNotNone(failure)
+                self.assertFalse(serve.qualified_stream_success(result))
+                self.assertIn(failure, serve.bounded_response_text(result))
+
+    def test_response_diagnostic_is_bounded_and_escaped(self) -> None:
+        output = "000000\n" + "x" * 400
+        rendered = serve.bounded_response_text(stream_result_with_text(output))
+
+        self.assertIn("\\n", rendered)
+        self.assertIn("...(+151 chars)", rendered)
+        self.assertLess(len(rendered), 300)
+
     def test_serving_run_directories_are_private_and_namespace_collision_safe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             parent = Path(tmp) / "serving"
@@ -657,9 +741,26 @@ class ServeMixedLoadTests(unittest.TestCase):
             "X-Kiln-Loaded-Adapter-Revision": "a" * 64,
         }.get(name, default)
         response.fp.peek.return_value = b"data"
+        timing = {
+            "object": "kiln.token_timing",
+            "source": "batching_engine",
+            "token_index": 1,
+            "token_id": 4242,
+            "ready_ms": 12.0,
+            "producer_delivered_ms": 14.0,
+            "handler_received_ms": 17.0,
+            "body_enqueued_ms": 20.0,
+            "response_delivery_ms": 2.0,
+            "handler_queue_ms": 3.0,
+            "queue_delay_ms": 5.0,
+            "client_delivery_ms": 3.0,
+            "blocking_phase": None,
+            "blocking_phase_ms": None,
+        }
         response.read1.return_value = (
-            b'data: {"choices":[{"delta":{"content":"token"}}]}\n\n'
-        )
+            f"data: {json.dumps(timing)}\n\n"
+            'data: {"choices":[{"delta":{"content":"token"}}]}\n\n'
+        ).encode()
         connection.getresponse.return_value = response
 
         with (
@@ -683,6 +784,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertTrue(result.cancelled)
         self.assertEqual(len(result.semantic_times), 1)
         self.assertEqual(len(result.semantic_deltas), 1)
+        self.assertEqual(result.token_ids, [4242])
         self.assertEqual(result.loaded_adapter, "fixture-adapter")
         self.assertEqual(result.loaded_adapter_revision, "a" * 64)
         sock.setblocking.assert_called_once_with(False)
@@ -807,6 +909,8 @@ class ServeMixedLoadTests(unittest.TestCase):
             "pressure_peer_seed_offset": serve.PRESSURE_PEER_SEED_OFFSET,
             "prompt_identity": serve.PROMPT_IDENTITY,
             "prompt_marker_format": serve.PROMPT_MARKER_FORMAT,
+            "response_oracle": serve.RESPONSE_ORACLE,
+            "response_oracle_integer_width": serve.RESPONSE_ORACLE_INTEGER_WIDTH,
             "request_timeout_seconds": int(serve.REQUEST_TIMEOUT_SECONDS),
             "slow_socket_buffer_bytes": serve.SLOW_SOCKET_BUFFER_BYTES,
             "slow_max_tokens": serve.SLOW_MAX_TOKENS,
@@ -1497,6 +1601,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 actor_queue_ms=100.0,
                 actor_admission_ms=10.0,
                 actor_prefill_wall_ms=200.0,
+                semantic_deltas=[
+                    {"choices": [{"delta": {"content": "000000"}}]}
+                ],
             )
 
         self.assertFalse(
@@ -2179,6 +2286,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             done=True,
             cancelled=False,
             error=None,
+            semantic_deltas=[
+                {"choices": [{"delta": {"content": "000000"}}]}
+            ],
         )
         inside = serve.ObservedEvent(0.5, "memory_reclaim", "trim")
         outside = serve.ObservedEvent(0.8, "kv_resize", "resize")
@@ -2219,6 +2329,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             done=True,
             cancelled=False,
             error=None,
+            semantic_deltas=[
+                {"choices": [{"delta": {"content": "000000"}}]}
+            ],
         )
         warmup = serve.StreamResult(
             name="warmup",
@@ -2590,6 +2703,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 done=True,
                 cancelled=False,
                 error=None,
+                semantic_deltas=[
+                    {"choices": [{"delta": {"content": "000000"}}]}
+                ],
             )
 
         measured = [

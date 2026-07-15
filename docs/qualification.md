@@ -568,6 +568,23 @@ the ordinary tracing filter. Qualification rejects every other ambient runtime
 control, including the deprecated `KILN_KV_AUTOSCALE` and
 `KILN_KV_FORCE_BLOCKS` aliases.
 
+The mixed-load and development-soak drivers bind the response policy
+`ascending_zero_padded_integers_prefix_v1` in their effective configurations.
+For every ordinary, warmup, stabilization, measured, and intentionally
+cancelled request, the client concatenates streamed `delta.content` fragments
+in order and requires the result to be a nonempty prefix of `000000 000001
+000002 ...`. Tokenizer-dependent fragment boundaries and a final partial
+integer are allowed; repeated numbers, punctuation, newlines, commentary,
+reasoning content, tool calls, empty special-token output, multiple choices,
+and malformed semantic events are not. Protocol success, positive usage, and
+exact length termination are therefore necessary but not sufficient for a
+passing request. A row that fails this oracle is excluded from successful
+latency and throughput aggregates and increments the request-failure count.
+Failure details retain the oracle reason, exact accepted token IDs when
+performance metadata is enabled, and an escaped output excerpt capped at 256
+characters. This bound preserves actionable corruption evidence without
+allowing model output to exhaust the result-detail envelope.
+
 ### Vulkan serving baseline
 
 Run this only after the required ROCm receipts have passed on the same clean,
@@ -1108,7 +1125,14 @@ runtime/debug policy attestations to remain consistent. Idle slots and their
 native graphs remain resident for reuse. The final drain requires every
 retained slot to be idle, and the measured phase must exercise slot reuse.
 
-The result fails on any request or cancellation error, graph capture/replay
+Every response in graph warmup, prefix-cache warmup, stabilization, and
+measurement must also satisfy the declared ascending-sequence oracle. A
+cancellation is confirmed only when its first four semantic deltas form the
+same valid prefix before the client disconnects and the server proves drain;
+disconnect cleanup cannot mask already-corrupt output.
+
+The result fails on any request, deterministic-response-oracle, or cancellation
+error, graph capture/replay
 failure, typed eager fallback, backend synchronization failure or 100 ms slow
 sync, device-fault signature in either a log message or structured error,
 non-finite response error, unexplained ITL outlier, capacity change,

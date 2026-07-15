@@ -413,6 +413,8 @@ def effective_config(
                 f"slot_{index}": words
                 for index, words in enumerate(runtime.prompt_words)
             },
+            "response_oracle": mixed.RESPONSE_ORACLE,
+            "response_oracle_integer_width": mixed.RESPONSE_ORACLE_INTEGER_WIDTH,
             "request_ignore_eos": True,
             "setup_deadline_seconds": int(runtime.setup_deadline_seconds),
             "stabilization_gpu_delta_limit_bytes": (
@@ -1712,15 +1714,8 @@ def run_wave(
 def invalid_stream_result_summary(
     result: mixed.StreamResult, expected_completion_tokens: int
 ) -> str:
-    violations: list[str] = []
-    if not result.success:
-        violations.append("success=false")
-    if result.finish_reason != "length":
-        violations.append("finish_reason!=length")
-    if result.completion_tokens != expected_completion_tokens:
-        violations.append(
-            f"completion_tokens!={expected_completion_tokens}"
-        )
+    violations = stream_result_violations(result, expected_completion_tokens)
+    oracle_failure = mixed.deterministic_response_oracle_failure(result)
     return (
         f"{result.name}(violations={'+'.join(violations) or 'none'},"
         f"error={result.error!r},finish_reason={result.finish_reason!r},"
@@ -1731,10 +1726,33 @@ def invalid_stream_result_summary(
         f"token_ids={result.token_ids!r},"
         f"resident_prefill_used={result.resident_prefill_used!r},"
         f"semantic_events={len(result.semantic_times)},done={result.done},"
-        f"cancelled={result.cancelled},actor_queue_ms={result.actor_queue_ms!r},"
+        f"cancelled={result.cancelled},response_oracle_failure={oracle_failure!r},"
+        f"response_text={mixed.bounded_response_text(result)},"
+        f"actor_queue_ms={result.actor_queue_ms!r},"
         f"actor_admission_ms={result.actor_admission_ms!r},"
         f"actor_prefill_wall_ms={result.actor_prefill_wall_ms!r})"
     )
+
+
+def stream_result_violations(
+    result: mixed.StreamResult, expected_completion_tokens: int
+) -> list[str]:
+    violations: list[str] = []
+    if not result.success:
+        violations.append("success=false")
+    if result.finish_reason != "length":
+        violations.append("finish_reason!=length")
+    if result.completion_tokens != expected_completion_tokens:
+        violations.append(f"completion_tokens!={expected_completion_tokens}")
+    if mixed.deterministic_response_oracle_failure(result) is not None:
+        violations.append("response_oracle_failed")
+    return violations
+
+
+def valid_stream_result(
+    result: mixed.StreamResult, expected_completion_tokens: int
+) -> bool:
+    return not stream_result_violations(result, expected_completion_tokens)
 
 
 def invalid_stream_results_summary(
@@ -1771,13 +1789,25 @@ def run_cancellation(
     confirmed, _ = mixed.wait_for_cancellation_and_drain(
         port, cancelled.marker, deadline
     )
+    failures: list[str] = []
     if (
         not cancelled.cancelled
         or len(cancelled.semantic_times) < mixed.CANCELLATION_AFTER_DELTAS
         or not confirmed
     ):
-        return f"cancellation was not confirmed in {phase} wave {wave}"
-    return None
+        failures.append(f"cancellation was not confirmed in {phase} wave {wave}")
+    oracle_failure = mixed.deterministic_response_oracle_failure(cancelled)
+    if oracle_failure is not None:
+        failures.append(
+            f"cancellation failed {mixed.RESPONSE_ORACLE} in {phase} wave {wave}: "
+            f"{oracle_failure}"
+        )
+    if not failures:
+        return None
+    return (
+        "; ".join(failures)
+        + f"; response_text={mixed.bounded_response_text(cancelled)}"
+    )
 
 
 def metric_definitions(
@@ -1998,8 +2028,13 @@ def execute(
                 absolute_deadline=deadline,
                 request_timeout_seconds=runtime.request_timeout_seconds,
             )
-            if not warmup.success:
-                raise SoakError(f"warmup failed: {warmup.error or warmup.finish_reason}")
+            if not valid_stream_result(warmup, mixed.WARMUP_MAX_TOKENS):
+                raise SoakError(
+                    "warmup failed: "
+                    + invalid_stream_result_summary(
+                        warmup, mixed.WARMUP_MAX_TOKENS
+                    )
+                )
             health_start = wait_drained(port, deadline, "soak warmup")
             graph = mixed.graph_snapshot(health_start)
             if graph_warmup_ready(graph, runtime):
@@ -2032,9 +2067,7 @@ def execute(
             bad_warm = [
                 result
                 for result in warm_results
-                if not result.success
-                or result.finish_reason != "length"
-                or result.completion_tokens != runtime.max_tokens
+                if not valid_stream_result(result, runtime.max_tokens)
             ]
             if bad_warm:
                 raise SoakError(
@@ -2123,9 +2156,7 @@ def execute(
                 bad_stable = [
                     result
                     for result in stable_results
-                    if not result.success
-                    or result.finish_reason != "length"
-                    or result.completion_tokens != runtime.max_tokens
+                    if not valid_stream_result(result, runtime.max_tokens)
                 ]
                 if bad_stable:
                     cycle_failures.append(
@@ -2434,9 +2465,7 @@ def execute(
             bad = [
                 result
                 for result in wave_results
-                if not result.success
-                or result.finish_reason != "length"
-                or result.completion_tokens != runtime.max_tokens
+                if not valid_stream_result(result, runtime.max_tokens)
             ]
             if bad:
                 wave_failures.append(
@@ -2639,7 +2668,11 @@ def execute(
             mixed.attest_runtime_execution(runtime.variant_id, health_start, health_end)
         )
         events = server_log.events_since(measurement_started)
-        successes = [result for result in all_results if result.success]
+        successes = [
+            result
+            for result in all_results
+            if valid_stream_result(result, runtime.max_tokens)
+        ]
         attributed, unexplained = mixed.classify_itl_outliers(
             warmup.itl_ms, successes, events
         )

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workload_id": "serving-rocm-development-soak-v1",
   "kind": "soak",
-  "description": "Keep one ROCm server process under mixed graph-backed streaming load for at least 30 minutes and fail on late faults, unexplained ITL gaps, leaked KV blocks, or post-warm memory growth.",
+  "description": "Keep one ROCm server process under mixed graph-backed streaming load for at least 30 minutes and fail on deterministic response corruption, late faults, unexplained ITL gaps, leaked KV blocks, or post-warm memory growth.",
   "determinism": {
     "seed": 20260712,
     "seed_delivery": "argv",
@@ -94,6 +94,8 @@
             "slot_10": 1024,
             "slot_11": 48
           },
+          "response_oracle": "ascending_zero_padded_integers_prefix_v1",
+          "response_oracle_integer_width": 6,
           "request_ignore_eos": true,
           "setup_deadline_seconds": 1200,
           "stabilization_gpu_delta_limit_bytes": 67108864,

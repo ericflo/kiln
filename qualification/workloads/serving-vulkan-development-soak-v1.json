@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workload_id": "serving-vulkan-development-soak-v1",
   "kind": "soak",
-  "description": "Keep one Vulkan server process under mixed streaming load for at least 30 minutes and fail on late faults, unexplained ITL gaps, leaked KV blocks, graph activity, host-memory pressure, swap growth, package-temperature pressure, or post-warm memory growth.",
+  "description": "Keep one Vulkan server process under mixed streaming load for at least 30 minutes and fail on deterministic response corruption, late faults, unexplained ITL gaps, leaked KV blocks, graph activity, host-memory pressure, swap growth, package-temperature pressure, or post-warm memory growth.",
   "determinism": {
     "seed": 20260715,
     "seed_delivery": "argv",
@@ -88,6 +88,8 @@
             "slot_6": 256,
             "slot_7": 384
           },
+          "response_oracle": "ascending_zero_padded_integers_prefix_v1",
+          "response_oracle_integer_width": 6,
           "request_ignore_eos": true,
           "setup_deadline_seconds": 1800,
           "stabilization_gpu_delta_limit_bytes": 67108864,

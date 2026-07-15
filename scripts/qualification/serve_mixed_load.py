@@ -90,6 +90,9 @@ MEASURED_EXPECTED_COMPLETION_TOKENS = (
 )
 PROMPT_IDENTITY = "variant_invariant_fixed_output_v2"
 PROMPT_MARKER_FORMAT = "QUAL-{seed}-{role}"
+RESPONSE_ORACLE = "ascending_zero_padded_integers_prefix_v1"
+RESPONSE_ORACLE_INTEGER_WIDTH = 6
+RESPONSE_DIAGNOSTIC_MAX_CHARACTERS = 256
 
 
 @dataclasses.dataclass(frozen=True)
@@ -211,6 +214,8 @@ def _variant_config(
             "pressure_peer_seed_offset": PRESSURE_PEER_SEED_OFFSET,
             "prompt_identity": PROMPT_IDENTITY,
             "prompt_marker_format": PROMPT_MARKER_FORMAT,
+            "response_oracle": RESPONSE_ORACLE,
+            "response_oracle_integer_width": RESPONSE_ORACLE_INTEGER_WIDTH,
             "request_timeout_seconds": int(REQUEST_TIMEOUT_SECONDS),
             "slow_socket_buffer_bytes": SLOW_SOCKET_BUFFER_BYTES,
             "slow_max_tokens": SLOW_MAX_TOKENS,
@@ -1017,6 +1022,98 @@ class StreamResult:
         ]
 
 
+def streamed_plain_text(result: StreamResult) -> tuple[str, str | None]:
+    """Reconstruct the one-choice plain-text stream required by this workload."""
+    fragments: list[str] = []
+    for event_index, value in enumerate(result.semantic_deltas):
+        if not isinstance(value, dict):
+            return (
+                "".join(fragments),
+                f"semantic event {event_index} is not an object",
+            )
+        choices = value.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1:
+            return (
+                "".join(fragments),
+                f"semantic event {event_index} must contain exactly one choice",
+            )
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return (
+                "".join(fragments),
+                f"semantic event {event_index} choice is not an object",
+            )
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            return (
+                "".join(fragments),
+                f"semantic event {event_index} delta is not an object",
+            )
+        reasoning = delta.get("reasoning_content")
+        tool_calls = delta.get("tool_calls")
+        if reasoning is not None and reasoning != "":
+            return (
+                "".join(fragments),
+                f"semantic event {event_index} emitted reasoning content",
+            )
+        if tool_calls is not None and tool_calls != []:
+            return (
+                "".join(fragments),
+                f"semantic event {event_index} emitted tool calls",
+            )
+        content = delta.get("content")
+        if not isinstance(content, str) or not content:
+            return (
+                "".join(fragments),
+                f"semantic event {event_index} did not emit non-empty text content",
+            )
+        fragments.append(content)
+    return "".join(fragments), None
+
+
+def ascending_integer_sequence_prefix(character_count: int) -> str:
+    if character_count <= 0:
+        return ""
+    parts: list[str] = []
+    length = 0
+    value = 0
+    while length < character_count:
+        part = f"{value:0{RESPONSE_ORACLE_INTEGER_WIDTH}d}"
+        if parts:
+            length += 1
+        parts.append(part)
+        length += len(part)
+        value += 1
+    return " ".join(parts)[:character_count]
+
+
+def deterministic_response_oracle_failure(result: StreamResult) -> str | None:
+    output, structural_failure = streamed_plain_text(result)
+    if structural_failure is not None:
+        return structural_failure
+    if not output:
+        return "response contained no plain-text semantic output"
+    expected = ascending_integer_sequence_prefix(len(output))
+    if output != expected:
+        return "plain-text output is not a prefix of the required ascending sequence"
+    return None
+
+
+def qualified_stream_success(result: StreamResult) -> bool:
+    return result.success and deterministic_response_oracle_failure(result) is None
+
+
+def bounded_response_text(result: StreamResult) -> str:
+    output, structural_failure = streamed_plain_text(result)
+    excerpt = output[:RESPONSE_DIAGNOSTIC_MAX_CHARACTERS]
+    suffix = ""
+    if len(output) > len(excerpt):
+        suffix = f"...(+{len(output) - len(excerpt)} chars)"
+    if structural_failure is not None:
+        suffix += f" [{structural_failure}]"
+    return ascii(excerpt) + suffix
+
+
 def request_body(
     prompt: str,
     max_tokens: int,
@@ -1325,6 +1422,7 @@ def run_stream(
                             done=False,
                             cancelled=True,
                             error=None,
+                            token_ids=token_ids,
                             semantic_deltas=semantic_deltas,
                             loaded_adapter=loaded_adapter,
                             loaded_adapter_revision=loaded_adapter_revision,
@@ -1734,7 +1832,7 @@ def healthy_peer_overlaps_pressure(
     if pressure is None:
         return False
     return (
-        result.success
+        qualified_stream_success(result)
         and result.started <= pressure.timed_out
         and result.finished >= pressure.started
         and timing["pressure_peer_ready_before_count"] > 0
@@ -3342,7 +3440,9 @@ def metric_values(
     health_end: dict[str, Any],
     events: list[ObservedEvent],
 ) -> dict[str, float | int]:
-    successes = [result for result in measured if result.success]
+    successes = [
+        result for result in measured if qualified_stream_success(result)
+    ]
     ttfts = [result.ttft_ms for result in successes]
     e2es = [result.e2e_ms for result in successes]
     itls = [gap for result in successes for gap in result.itl_ms]
@@ -3641,12 +3741,22 @@ def fixed_output_contract_failures(measured: list[StreamResult]) -> list[str]:
     for name in sorted(set(expected_limits) & set(observed)):
         result = observed[name]
         expected = expected_limits[name]
+        oracle_failure = deterministic_response_oracle_failure(result)
+        if oracle_failure is not None:
+            failures.append(
+                f"{name} failed {RESPONSE_ORACLE}: {oracle_failure}; "
+                f"response_text={bounded_response_text(result)}"
+            )
         if result.finish_reason != "length" or result.completion_tokens != expected:
             failures.append(
                 f"{name} must finish by length with {expected} completion tokens, got "
                 f"finish_reason={result.finish_reason!r} and {result.completion_tokens} tokens"
             )
-    if sum(result.completion_tokens for result in measured if result.success) != (
+    if sum(
+        result.completion_tokens
+        for result in measured
+        if qualified_stream_success(result)
+    ) != (
         MEASURED_EXPECTED_COMPLETION_TOKENS
     ):
         failures.append(
@@ -3729,10 +3839,18 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 seed=seed + attempt,
                 absolute_deadline=overall_deadline,
             )
-            if not warmup.success:
+            warmup_oracle_failure = deterministic_response_oracle_failure(warmup)
+            if (
+                not warmup.success
+                or warmup.finish_reason != "length"
+                or warmup.completion_tokens != WARMUP_MAX_TOKENS
+                or warmup_oracle_failure is not None
+            ):
                 raise QualificationError(
                     f"warmup request {attempt + 1} failed: "
-                    f"{warmup.error or warmup.finish_reason}"
+                    f"{warmup.error or warmup.finish_reason}; "
+                    f"response_oracle_failure={warmup_oracle_failure!r}; "
+                    f"response_text={bounded_response_text(warmup)}"
                 )
             health_measurement_start = read_stable_health(
                 port, overall_deadline, "post-warmup graph snapshot"
@@ -3880,13 +3998,24 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         sampler.close()
         if slow.error is not None:
             raise QualificationError(f"slow consumer failed: {slow.error}")
+        cancellation_oracle_failure = deterministic_response_oracle_failure(
+            cancellation
+        )
         if (
             not cancellation.cancelled
             or len(cancellation.semantic_times) < CANCELLATION_AFTER_DELTAS
         ):
             raise QualificationError(
                 "cancellation client did not abort after "
-                f"{CANCELLATION_AFTER_DELTAS} deltas: {cancellation}"
+                f"{CANCELLATION_AFTER_DELTAS} deltas: {cancellation}; "
+                f"response_oracle_failure={cancellation_oracle_failure!r}; "
+                f"response_text={bounded_response_text(cancellation)}"
+            )
+        if cancellation_oracle_failure is not None:
+            raise QualificationError(
+                f"cancellation request failed {RESPONSE_ORACLE}: "
+                f"{cancellation_oracle_failure}; "
+                f"response_text={bounded_response_text(cancellation)}"
             )
         cancellation_confirmed, _ = wait_for_cancellation_and_drain(
             port, cancellation_marker, overall_deadline
@@ -4057,6 +4186,8 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 actor_queue_ms=result.actor_queue_ms,
                 prompt_tokens=result.prompt_tokens,
                 semantic_events=len(result.semantic_times),
+                response_oracle_failure=deterministic_response_oracle_failure(result),
+                response_text=bounded_response_text(result),
                 ttft_ms=result.ttft_ms,
             )
         details = " | ".join(status_failures) if status_failures else None

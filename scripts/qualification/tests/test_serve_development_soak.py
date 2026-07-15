@@ -82,13 +82,16 @@ class ServeRocmSoakTests(unittest.TestCase):
             actor_queue_ms=1.25,
             actor_admission_ms=2.5,
             actor_prefill_wall_ms=3.75,
+            semantic_deltas=[
+                {"choices": [{"delta": {"content": "000>0:0:5"}}]}
+            ],
         )
 
         summary = soak.invalid_stream_results_summary([result], 16)
 
         for expected in (
             "soak-stabilize-w00010-r01",
-            "success=false+finish_reason!=length+completion_tokens!=16",
+            "success=false+finish_reason!=length+completion_tokens!=16+response_oracle_failed",
             "QualificationError: timing mismatch",
             "finish_reason='stop'",
             "prompt_tokens=191",
@@ -100,11 +103,43 @@ class ServeRocmSoakTests(unittest.TestCase):
             "semantic_events=0",
             "done=False",
             "cancelled=True",
+            "response_oracle_failure='plain-text output is not a prefix",
+            "response_text='000>0:0:5'",
             "actor_queue_ms=1.25",
             "actor_admission_ms=2.5",
             "actor_prefill_wall_ms=3.75",
         ):
             self.assertIn(expected, summary)
+
+    def test_stream_result_contract_requires_the_deterministic_oracle(self) -> None:
+        def result(content: str) -> soak.mixed.StreamResult:
+            return soak.mixed.StreamResult(
+                name="soak-measured-w00005-r02",
+                marker="QUAL-7-soak-shared-r02",
+                started=1.0,
+                finished=2.0,
+                semantic_times=[1.1],
+                token_ready_times=[1.1] * 16,
+                token_queue_delays_ms=[0.0] * 16,
+                prompt_tokens=191,
+                completion_tokens=16,
+                usage_records=1,
+                finish_reason="length",
+                done=True,
+                cancelled=False,
+                error=None,
+                semantic_deltas=[
+                    {"choices": [{"delta": {"content": content}}]}
+                ],
+            )
+
+        self.assertTrue(soak.valid_stream_result(result("000000 000001 00"), 16))
+        corrupt = result("000000 000000 00")
+        self.assertFalse(soak.valid_stream_result(corrupt, 16))
+        self.assertEqual(
+            soak.stream_result_violations(corrupt, 16),
+            ["response_oracle_failed"],
+        )
 
     def test_runtime_profiles_are_closed_and_backend_specific(self) -> None:
         self.assertIs(
@@ -815,6 +850,10 @@ class ServeRocmSoakTests(unittest.TestCase):
             return mock.Mock(
                 cancelled=True,
                 semantic_times=[0.0] * soak.mixed.CANCELLATION_AFTER_DELTAS,
+                semantic_deltas=[
+                    {"choices": [{"delta": {"content": fragment}}]}
+                    for fragment in ("000", "000 ", "000", "001")
+                ],
                 marker=kwargs["marker"],
             )
 
@@ -866,6 +905,33 @@ class ServeRocmSoakTests(unittest.TestCase):
                     deadline=time.monotonic() + 1.0,
                 ),
             )
+
+        def corrupt_result(*_args: object, **kwargs: object) -> mock.Mock:
+            value = result(*_args, **kwargs)
+            value.semantic_deltas[-1] = {
+                "choices": [{"delta": {"content": "000"}}]
+            }
+            return value
+
+        with (
+            mock.patch.object(
+                soak.mixed, "run_stream", side_effect=corrupt_result
+            ),
+            mock.patch.object(
+                soak.mixed,
+                "wait_for_cancellation_and_drain",
+                return_value=(True, {}),
+            ),
+        ):
+            failure = soak.run_cancellation(
+                8420,
+                wave=4,
+                base_seed=7,
+                phase="measured",
+                deadline=time.monotonic() + 1.0,
+            )
+        self.assertIn("failed ascending_zero_padded_integers_prefix_v1", failure)
+        self.assertIn("response_text=", failure)
 
     def test_checked_in_workload_exactly_matches_driver_contract(self) -> None:
         path = ROOT / "qualification/workloads/serving-rocm-development-soak-v1.json"
