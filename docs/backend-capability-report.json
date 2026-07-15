@@ -1401,10 +1401,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1529,
+          "line": 1560,
           "paired_method": "runtime_decode_resident_pool_ready",
           "paired_method_always_declines": false,
-          "paired_method_line": 1516,
+          "paired_method_line": 1547,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         }
