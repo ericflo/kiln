@@ -1331,10 +1331,9 @@ Native batched decode also owns a persistent `LinearAttentionState` cache for
 the recurrent GDN layers. Trusted `GET /v1/debug/model-state` exposes its full
 snapshot at `caches.batched_recurrent_state` on every backend. The four current
 ownership fields are `entry_present`, `capacity_rows`, `logical_rows`, and
-`resident`. A parked resident entry may have more capacity rows than logical
-rows because smaller batches use an identity-preserving prefix view of the
-maximum observed allocation. An entry is temporarily absent while a forward
-call owns its lease.
+`resident`. A parked entry belongs to one exact ordered request-ID set, so
+`capacity_rows` and `logical_rows` must be equal whenever `entry_present` is
+true. An entry is temporarily absent while a forward call owns its lease.
 
 The remaining fields are process-lifetime monotonic counters:
 
@@ -1344,16 +1343,14 @@ The remaining fields are process-lifetime monotonic counters:
 | `take_hit_count`, `take_miss_count` | Cache checkout outcomes. The first eligible forward normally misses. |
 | `take_miss_while_leased_count` | Misses observed while another state lease is active. This is the direct signal for concurrent checkout of a single-slot cache. |
 | `exact_reuse_count` | Reuse with the same ordered request-ID fingerprint; no state-row refresh is needed. |
-| `resident_capacity_reuse_count` | Reuse of backend-resident allocation capacity. This includes same-width and smaller-prefix reuse. |
-| `resident_prefix_view_count` | Capacity reuse through a smaller logical axis-0 prefix. |
-| `resident_refresh_count` | In-place row refresh because the ordered request IDs changed. |
 | `fresh_assembly_count` | New batched state assembled after a miss or rejected entry. |
-| `rejected_*_count` | A checked-out entry could not be reused because row IDs were absent, input rows were nonresident, the cache was nonresident, or capacity was insufficient. Exactly one rejection reason is recorded for each rejected entry. |
+| `rejected_missing_row_ids_count` | A caller without stable row IDs checked out and evicted an entry. Such callers may not reuse persistent state. |
+| `row_set_mismatch_eviction_count` | A checked-out entry named a different ordered row set or width and was evicted before a fresh assembly. Resident buffers are never refreshed or repurposed across request owners. |
 | `park_count` | A forward returned its state to the persistent cache. |
 | `park_replacement_eviction_count` | A returning lease found another parked entry and evicted it. This should remain zero when one cache owner cannot overlap another. |
 | `explicit_invalidation_count`, `explicit_invalidation_eviction_count` | Adapter/model lifecycle invalidations requested, and those that actually removed a parked entry. |
-| `completed_row_preservation_count`, `completed_row_eviction_count` | Completed request rows that appeared in the cache fingerprint and caused resident preservation or nonresident eviction. |
-| `lease_drop_eviction_count` | Checked-out capacity released instead of parked, including rejected entries and forward/error exits. Use the rejection counters and request failures to distinguish expected capacity replacement from errors. |
+| `completed_row_eviction_count` | Completed request rows that appeared in the cache fingerprint and therefore evicted the complete entry. |
+| `lease_drop_eviction_count` | Checked-out state released instead of parked after a forward/error exit. |
 
 Prometheus exports the same bounded-cardinality state as:
 
@@ -1364,27 +1361,23 @@ kiln_batched_recurrent_state_cache_resident
 kiln_batched_recurrent_state_cache_leases{kind="active|max"}
 kiln_batched_recurrent_state_cache_takes_total{result="hit|miss"}
 kiln_batched_recurrent_state_cache_misses_while_leased_total
-kiln_batched_recurrent_state_cache_reuses_total{kind="exact|resident_capacity|prefix_view|refresh"}
+kiln_batched_recurrent_state_cache_reuses_total{kind="exact"}
 kiln_batched_recurrent_state_cache_assemblies_total
-kiln_batched_recurrent_state_cache_rejections_total{reason="missing_row_ids|nonresident_rows|nonresident_cache|insufficient_capacity"}
+kiln_batched_recurrent_state_cache_rejections_total{reason="missing_row_ids|row_set_mismatch"}
 kiln_batched_recurrent_state_cache_parks_total
 kiln_batched_recurrent_state_cache_invalidations_total
-kiln_batched_recurrent_state_cache_completed_rows_total{action="preserve|evict"}
+kiln_batched_recurrent_state_cache_completed_rows_total
 kiln_batched_recurrent_state_cache_evictions_total{reason="park_replacement|explicit_invalidation|completed_row|lease_drop"}
 ```
 
-The reuse counters deliberately describe overlapping properties: an exact
-fingerprint can also reuse resident capacity and a prefix view. Rejection
-reasons, by contrast, are mutually exclusive. In a warmed, serialized,
-fixed-maximum-capacity workload, fresh assemblies and insufficient-capacity
-rejections stop increasing after the largest batch is seen;
+The two rejection reasons are mutually exclusive. In a warmed, serialized,
+fixed-row-set workload, exact reuse rises while fresh assembly and row-set
+mismatch eviction remain flat. A scheduler width or membership transition must
+raise `row_set_mismatch_eviction_count` and `fresh_assembly_count` together.
 `take_miss_while_leased_count`, `park_replacement_eviction_count`, and
-`max_active_leases - 1` remain zero. Growth in those three concurrency signals
-alongside flat semantic/device error counters identifies ownership overlap,
-not allocator pressure. Increasing `rejected_insufficient_capacity_count`
-without overlap identifies legitimate high-water growth. Increasing
-`lease_drop_eviction_count` without a rejection requires an accompanying
-forward/error investigation.
+`max_active_leases - 1` remain zero without ownership overlap. Increasing
+`lease_drop_eviction_count` requires an accompanying forward/error
+investigation.
 
 Vulkan full-attention KV seed flags and recurrent GDN state have different
 lifetimes. The former are indexed by layer and reset when an unidentified
@@ -1394,8 +1387,9 @@ by tensor ID and remain owned by that request row or the batched-state cache;
 a session boundary must not clear their initialization markers. Only explicit
 eviction of the same tensor ID may remove its recurrent buffer, convolution
 buffer, and initialization marker. A rising
-`rejected_nonresident_cache_count` with live buffers still present indicates a
-violation of this lifetime split, not buffer-pool eviction.
+`row_set_mismatch_eviction_count` without a corresponding scheduler row-set or
+width transition indicates an ownership-attribution defect, not buffer-pool
+eviction.
 
 The Vulkan development soak treats this snapshot as a closed qualification
 contract. It validates the exact field set and types at startup, after warmup,

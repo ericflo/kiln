@@ -4703,49 +4703,6 @@ impl LinearAttentionState {
         })
     }
 
-    /// Return a logical prefix of a resident batched state without changing
-    /// the tensor IDs used by the backend residency registry.
-    ///
-    /// The returned tensors share CPU storage and mutation versions with this
-    /// state. The backend may therefore keep one maximum-capacity physical
-    /// state while decode executes a smaller logical batch. This view is valid
-    /// only while `self` remains owned by the caller.
-    pub(crate) fn resident_batch_prefix_view(&self, batch: usize) -> Result<Self> {
-        let capacity = self.batch_size()?;
-        anyhow::ensure!(batch > 0, "resident batch prefix must be non-zero");
-        anyhow::ensure!(
-            batch <= capacity,
-            "resident batch prefix {batch} exceeds capacity {capacity}"
-        );
-        anyhow::ensure!(
-            self.recurrent_states.len() == self.conv_states.len(),
-            "resident batch prefix recurrent/conv layer count mismatch"
-        );
-
-        let recurrent_states = self
-            .recurrent_states
-            .iter()
-            .map(|state| {
-                state
-                    .batch_prefix_preserving_identity_for_residency(batch)
-                    .map_err(anyhow::Error::from)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let conv_states = self
-            .conv_states
-            .iter()
-            .map(|state| {
-                state
-                    .batch_prefix_preserving_identity_for_residency(batch)
-                    .map_err(anyhow::Error::from)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self {
-            recurrent_states,
-            conv_states,
-        })
-    }
-
     /// Split a batched state into one-row states in batch order.
     pub fn split_batch_rows(&self) -> Result<Vec<Self>> {
         let batch = self.batch_size()?;
@@ -38445,27 +38402,6 @@ mod tests {
         assert_eq!(batched.recurrent_states[0].dims(), &[2, 4, 4, 4]);
         assert_eq!(batched.conv_states[0].dims(), &[2, 32, 3]);
         assert!(LinearAttentionState::from_batch_rows(&[&batched]).is_err());
-
-        let resident_prefix = batched.resident_batch_prefix_view(1)?;
-        assert_eq!(resident_prefix.batch_size()?, 1);
-        assert_eq!(
-            resident_prefix.recurrent_states[0].id(),
-            batched.recurrent_states[0].id()
-        );
-        assert_eq!(
-            resident_prefix.conv_states[0].id(),
-            batched.conv_states[0].id()
-        );
-        assert!(std::sync::Arc::ptr_eq(
-            resident_prefix.recurrent_states[0].storage(),
-            batched.recurrent_states[0].storage()
-        ));
-        assert!(std::sync::Arc::ptr_eq(
-            resident_prefix.conv_states[0].storage(),
-            batched.conv_states[0].storage()
-        ));
-        assert!(batched.resident_batch_prefix_view(0).is_err());
-        assert!(batched.resident_batch_prefix_view(3).is_err());
 
         let split = batched.split_batch_rows()?;
         assert_eq!(split.len(), 2);

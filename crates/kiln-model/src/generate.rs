@@ -334,12 +334,10 @@ pub struct ModelRunner {
     /// shapes that decode hasn't asked for yet.
     decode_buffer_config: OnceLock<DecodeBufferConfig>,
     /// Cached batched `LinearAttentionState` carried across consecutive
-    /// paged-decode invocations. Exact row-ID matches reuse the state without
-    /// a copy. A Vulkan-resident cache also retains its maximum observed batch
-    /// capacity across row-set and width changes, refreshing the same backend
-    /// buffers through a smaller identity-preserving prefix view. This avoids
-    /// allocator churn without retaining one host/device state per width.
-    /// The cache is invalidated on adapter transitions with graph state.
+    /// paged-decode invocations. Only an exact ordered row-ID match may reuse
+    /// the state. Row-set and width changes evict it before fresh assembly so
+    /// backend-resident mutable state never changes request ownership. The
+    /// cache is invalidated on row completion and adapter transitions.
     batched_state_cache: Mutex<Option<CachedBatchedState>>,
     batched_state_cache_counters: BatchedStateCacheCounters,
     backend: Arc<dyn BackendRuntime>,
@@ -671,10 +669,10 @@ impl BackendHealthHandle {
     }
 }
 
-/// Persistent batched-state cache entry. `state.batch_size()` is its retained
-/// capacity, while `row_ids` names the logical prefix whose device bytes are
-/// currently valid. Stable request IDs survive batching-actor `Vec::remove`
-/// shifts that invalidate pointer fingerprints.
+/// Persistent batched-state cache entry owned by one exact ordered row set.
+/// Stable request IDs survive batching-actor `Vec::remove` shifts that
+/// invalidate pointer fingerprints. A width or row-set change evicts this
+/// entry instead of repurposing its backend-resident buffers across requests.
 pub(crate) struct CachedBatchedState {
     pub(crate) state: crate::forward::LinearAttentionState,
     pub(crate) row_ids: Vec<u64>,
@@ -694,19 +692,13 @@ pub struct BatchedStateCacheStats {
     pub take_miss_count: u64,
     pub take_miss_while_leased_count: u64,
     pub exact_reuse_count: u64,
-    pub resident_capacity_reuse_count: u64,
-    pub resident_prefix_view_count: u64,
-    pub resident_refresh_count: u64,
     pub fresh_assembly_count: u64,
     pub rejected_missing_row_ids_count: u64,
-    pub rejected_nonresident_rows_count: u64,
-    pub rejected_nonresident_cache_count: u64,
-    pub rejected_insufficient_capacity_count: u64,
+    pub row_set_mismatch_eviction_count: u64,
     pub park_count: u64,
     pub park_replacement_eviction_count: u64,
     pub explicit_invalidation_count: u64,
     pub explicit_invalidation_eviction_count: u64,
-    pub completed_row_preservation_count: u64,
     pub completed_row_eviction_count: u64,
     pub lease_drop_eviction_count: u64,
 }
@@ -719,19 +711,13 @@ struct BatchedStateCacheCounters {
     take_miss_count: AtomicU64,
     take_miss_while_leased_count: AtomicU64,
     exact_reuse_count: AtomicU64,
-    resident_capacity_reuse_count: AtomicU64,
-    resident_prefix_view_count: AtomicU64,
-    resident_refresh_count: AtomicU64,
     fresh_assembly_count: AtomicU64,
     rejected_missing_row_ids_count: AtomicU64,
-    rejected_nonresident_rows_count: AtomicU64,
-    rejected_nonresident_cache_count: AtomicU64,
-    rejected_insufficient_capacity_count: AtomicU64,
+    row_set_mismatch_eviction_count: AtomicU64,
     park_count: AtomicU64,
     park_replacement_eviction_count: AtomicU64,
     explicit_invalidation_count: AtomicU64,
     explicit_invalidation_eviction_count: AtomicU64,
-    completed_row_preservation_count: AtomicU64,
     completed_row_eviction_count: AtomicU64,
     lease_drop_eviction_count: AtomicU64,
 }
@@ -755,23 +741,12 @@ impl BatchedStateCacheCounters {
             take_miss_count: self.take_miss_count.load(Ordering::Relaxed),
             take_miss_while_leased_count: self.take_miss_while_leased_count.load(Ordering::Relaxed),
             exact_reuse_count: self.exact_reuse_count.load(Ordering::Relaxed),
-            resident_capacity_reuse_count: self
-                .resident_capacity_reuse_count
-                .load(Ordering::Relaxed),
-            resident_prefix_view_count: self.resident_prefix_view_count.load(Ordering::Relaxed),
-            resident_refresh_count: self.resident_refresh_count.load(Ordering::Relaxed),
             fresh_assembly_count: self.fresh_assembly_count.load(Ordering::Relaxed),
             rejected_missing_row_ids_count: self
                 .rejected_missing_row_ids_count
                 .load(Ordering::Relaxed),
-            rejected_nonresident_rows_count: self
-                .rejected_nonresident_rows_count
-                .load(Ordering::Relaxed),
-            rejected_nonresident_cache_count: self
-                .rejected_nonresident_cache_count
-                .load(Ordering::Relaxed),
-            rejected_insufficient_capacity_count: self
-                .rejected_insufficient_capacity_count
+            row_set_mismatch_eviction_count: self
+                .row_set_mismatch_eviction_count
                 .load(Ordering::Relaxed),
             park_count: self.park_count.load(Ordering::Relaxed),
             park_replacement_eviction_count: self
@@ -780,9 +755,6 @@ impl BatchedStateCacheCounters {
             explicit_invalidation_count: self.explicit_invalidation_count.load(Ordering::Relaxed),
             explicit_invalidation_eviction_count: self
                 .explicit_invalidation_eviction_count
-                .load(Ordering::Relaxed),
-            completed_row_preservation_count: self
-                .completed_row_preservation_count
                 .load(Ordering::Relaxed),
             completed_row_eviction_count: self.completed_row_eviction_count.load(Ordering::Relaxed),
             lease_drop_eviction_count: self.lease_drop_eviction_count.load(Ordering::Relaxed),
@@ -795,9 +767,8 @@ impl BatchedStateCacheCounters {
 fn completed_row_invalidates_batched_state_cache(
     cached_row_ids: &[u64],
     completed_row_id: u64,
-    cache_is_resident: bool,
 ) -> bool {
-    cached_row_ids.contains(&completed_row_id) && !cache_is_resident
+    cached_row_ids.contains(&completed_row_id)
 }
 
 /// Owns a temporary assembled state until it is explicitly parked in the
@@ -805,10 +776,6 @@ fn completed_row_invalidates_batched_state_cache(
 /// releases backend-resident buffers instead of orphaning their tensor IDs.
 struct ResidentBatchedStateLease<'a> {
     state: Option<LinearAttentionState>,
-    /// Maximum-capacity owner when `state` is a smaller identity-preserving
-    /// prefix view. Both name the same backend buffers, so cleanup must evict
-    /// exactly once through this owner.
-    capacity_state: Option<LinearAttentionState>,
     backend: &'a dyn BackendRuntime,
     counters: &'a BatchedStateCacheCounters,
     tracked: bool,
@@ -826,26 +793,9 @@ impl<'a> ResidentBatchedStateLease<'a> {
         }
         Self {
             state,
-            capacity_state: None,
             backend,
             counters,
             tracked,
-        }
-    }
-
-    fn with_capacity_view(
-        state: LinearAttentionState,
-        capacity_state: LinearAttentionState,
-        backend: &'a dyn BackendRuntime,
-        counters: &'a BatchedStateCacheCounters,
-    ) -> Self {
-        counters.acquire_lease();
-        Self {
-            state: Some(state),
-            capacity_state: Some(capacity_state),
-            backend,
-            counters,
-            tracked: true,
         }
     }
 
@@ -873,13 +823,7 @@ impl<'a> ResidentBatchedStateLease<'a> {
     }
 
     fn take_for_cache(&mut self) -> Option<LinearAttentionState> {
-        let state = match self.capacity_state.take() {
-            Some(capacity_state) => {
-                self.state.take();
-                Some(capacity_state)
-            }
-            None => self.state.take(),
-        };
+        let state = self.state.take();
         if state.is_some() {
             self.release_tracking();
         }
@@ -889,8 +833,7 @@ impl<'a> ResidentBatchedStateLease<'a> {
 
 impl Drop for ResidentBatchedStateLease<'_> {
     fn drop(&mut self) {
-        let state = self.capacity_state.take().or_else(|| self.state.take());
-        self.state.take();
+        let state = self.state.take();
         if let Some(state) = state {
             self.release_tracking();
             self.counters
@@ -3112,98 +3055,39 @@ impl ModelRunner {
                 ids.len()
             );
         }
-        let state_refs: Vec<&LinearAttentionState> =
-            linear_states.iter().map(|state| &**state).collect();
-
         if let Some(cached) = self.take_batched_state_cache()? {
             let CachedBatchedState {
                 state,
                 row_ids: cached_row_ids,
             } = cached;
-            let mut cached_lease = ResidentBatchedStateLease::new(
-                Some(state),
-                self.backend.as_ref(),
-                &self.batched_state_cache_counters,
-            );
             let exact_match = row_ids.is_some_and(|ids| cached_row_ids == ids);
-            let capacity = cached_lease
-                .as_ref()
-                .expect("cached batched-state lease was just initialized")
-                .batch_size()?;
-            let cached_is_resident = cached_lease
-                .as_ref()
-                .expect("cached batched-state lease was just initialized")
-                .has_all_gdn_state_resident_kt(self.backend.as_ref());
-
-            if exact_match && capacity == batch {
+            let cached_batch = state.batch_size()?;
+            if exact_match && cached_batch == batch {
                 self.batched_state_cache_counters
                     .exact_reuse_count
                     .fetch_add(1, Ordering::Relaxed);
-                return Ok((cached_lease, true));
-            }
-
-            if row_ids.is_some() && all_rows_resident && cached_is_resident && capacity >= batch {
-                self.batched_state_cache_counters
-                    .resident_capacity_reuse_count
-                    .fetch_add(1, Ordering::Relaxed);
-                let lease = if capacity == batch {
-                    cached_lease
-                } else {
-                    self.batched_state_cache_counters
-                        .resident_prefix_view_count
-                        .fetch_add(1, Ordering::Relaxed);
-                    let view = cached_lease
-                        .as_ref()
-                        .expect("cached batched-state lease was just initialized")
-                        .resident_batch_prefix_view(batch)?;
-                    let capacity_state = cached_lease
-                        .take()
-                        .expect("cached batched-state lease still owns capacity state");
-                    ResidentBatchedStateLease::with_capacity_view(
-                        view,
-                        capacity_state,
+                return Ok((
+                    ResidentBatchedStateLease::new(
+                        Some(state),
                         self.backend.as_ref(),
                         &self.batched_state_cache_counters,
-                    )
-                };
-                if exact_match {
-                    self.batched_state_cache_counters
-                        .exact_reuse_count
-                        .fetch_add(1, Ordering::Relaxed);
-                } else {
-                    self.batched_state_cache_counters
-                        .resident_refresh_count
-                        .fetch_add(1, Ordering::Relaxed);
-                    lease
-                        .as_ref()
-                        .expect("resident capacity lease was just initialized")
-                        .assemble_gdn_state_resident_batch_rows_kt(
-                            self.backend.as_ref(),
-                            &state_refs,
-                        )?;
-                }
-                return Ok((lease, exact_match));
+                    ),
+                    true,
+                ));
             }
-
-            let rejection_counter = if row_ids.is_none() {
-                &self
-                    .batched_state_cache_counters
+            if row_ids.is_none() {
+                self.batched_state_cache_counters
                     .rejected_missing_row_ids_count
-            } else if !all_rows_resident {
-                &self
-                    .batched_state_cache_counters
-                    .rejected_nonresident_rows_count
-            } else if !cached_is_resident {
-                &self
-                    .batched_state_cache_counters
-                    .rejected_nonresident_cache_count
+                    .fetch_add(1, Ordering::Relaxed);
             } else {
-                debug_assert!(capacity < batch);
-                &self
-                    .batched_state_cache_counters
-                    .rejected_insufficient_capacity_count
-            };
-            rejection_counter.fetch_add(1, Ordering::Relaxed);
+                self.batched_state_cache_counters
+                    .row_set_mismatch_eviction_count
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            self.evict_cached_batched_state(CachedBatchedState {
+                state,
+                row_ids: cached_row_ids,
+            });
         }
 
         self.batched_state_cache_counters
@@ -3253,41 +3137,29 @@ impl ModelRunner {
         {
             vk_backend.evict_resident_decode_row(row_id);
         }
-        // A resident cache owns reusable allocation capacity; its row IDs are
-        // only a content fingerprint. Completing one of those rows makes the
-        // fingerprint stale, but the next batch safely refreshes the same
-        // buffers in place. Nonresident caches cannot do that and are released
-        // eagerly as before.
-        let take_nonresident_cache = |cache: &mut Option<CachedBatchedState>| {
+        // The cache is owned by one exact ordered row set. Once any named row
+        // completes, retaining the entry would let a later request repurpose
+        // backend-resident state across ownership boundaries.
+        let take_completed_cache = |cache: &mut Option<CachedBatchedState>| {
             let Some(cached) = cache.as_ref() else {
                 return None;
             };
             if !cached.row_ids.contains(&row_id) {
                 return None;
             }
-            if cached
-                .state
-                .has_all_gdn_state_resident_kt(self.backend.as_ref())
-            {
-                self.batched_state_cache_counters
-                    .completed_row_preservation_count
-                    .fetch_add(1, Ordering::Relaxed);
-                None
-            } else {
-                self.batched_state_cache_counters
-                    .completed_row_eviction_count
-                    .fetch_add(1, Ordering::Relaxed);
-                cache.take()
-            }
+            self.batched_state_cache_counters
+                .completed_row_eviction_count
+                .fetch_add(1, Ordering::Relaxed);
+            cache.take()
         };
         let cached = match self.batched_state_cache.lock() {
-            Ok(mut cache) => take_nonresident_cache(&mut cache),
+            Ok(mut cache) => take_completed_cache(&mut cache),
             Err(poisoned) => {
                 tracing::warn!(
                     "recovering poisoned batched-state cache while releasing decode row"
                 );
                 let mut cache = poisoned.into_inner();
-                take_nonresident_cache(&mut cache)
+                take_completed_cache(&mut cache)
             }
         };
         if let Some(cached) = cached {
@@ -11137,22 +11009,15 @@ mod tests {
     }
 
     #[test]
-    fn completed_row_preserves_only_resident_batched_state_capacity() {
+    fn completed_row_invalidates_exact_owner_batched_state() {
         let cached_rows = [11, 12, 13];
         assert!(completed_row_invalidates_batched_state_cache(
             &cached_rows,
-            12,
-            false
+            12
         ));
         assert!(!completed_row_invalidates_batched_state_cache(
             &cached_rows,
-            12,
-            true
-        ));
-        assert!(!completed_row_invalidates_batched_state_cache(
-            &cached_rows,
-            99,
-            false
+            99
         ));
     }
 
