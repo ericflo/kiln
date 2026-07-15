@@ -109,6 +109,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Free disk space for the workspace test suite
+        # The full workspace build plus test binaries can exhaust the hosted
+        # runner's small root volume. Remove preinstalled SDKs this CPU-only
+        # job never uses before Cargo populates target/.
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/node_modules || true
+          df -h /
+
       - name: Install Rust stable
         # Use the rustup that's pre-installed on every GitHub-hosted runner
         # (Linux + macOS) instead of an external action — no third-party
