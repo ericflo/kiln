@@ -13,6 +13,16 @@ const staticOnly = process.env.KILN_DOCS_SMOKE_STATIC_ONLY === 'true';
 const mobileViewport = { width: 390, height: 844, deviceScaleFactor: 2, isMobile: true };
 const desktopViewport = { width: 1440, height: 900, deviceScaleFactor: 1 };
 const mobileOverflowTolerancePx = 2;
+const runtimeEnvironmentContract = JSON.parse(
+  readFileSync(resolve(repoRoot, 'contracts/runtime-env-direct-reads-v1.json'), 'utf8'),
+);
+const runtimeEnvironmentSummary = runtimeEnvironmentContract.summary;
+
+function runtimeMigrationReadCount(path) {
+  return runtimeEnvironmentContract.reads
+    .filter((entry) => entry.path === path && entry.classification === 'experimental_debug')
+    .reduce((total, entry) => total + entry.count, 0);
+}
 
 function publishedPath(relativePath) {
   const path = relative(repoRoot, resolve(siteRoot, relativePath)).split(sep).join('/');
@@ -475,14 +485,14 @@ const generatedDocsPages = [
       'migration-rule',
     ],
     terms: [
-      '911 direct read call sites',
-      '361 process-mutation call sites',
-      '365 distinct literal KILN_*',
+      `${runtimeEnvironmentSummary.read_call_sites} direct read call sites`,
+      `${runtimeEnvironmentSummary.process_mutation_call_sites} process-mutation call sites`,
+      `${runtimeEnvironmentSummary.literal_kiln_read_names} distinct literal KILN_*`,
       'Experimental/debug migration',
-      '432',
+      `${runtimeEnvironmentSummary.read_call_sites_by_classification.experimental_debug}`,
       'Production migration owners',
       'crates/kiln-model/src/forward.rs',
-      '136',
+      `${runtimeMigrationReadCount('crates/kiln-model/src/forward.rs')}`,
       'Process-environment mutation is forbidden in production execution',
       'KILN_<SECTION>_<FIELD>',
       'do not edit by hand',

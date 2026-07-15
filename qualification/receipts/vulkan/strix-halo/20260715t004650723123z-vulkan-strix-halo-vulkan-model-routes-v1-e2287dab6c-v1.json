@@ -1,0 +1,189 @@
+{
+  "artifacts": [
+    {
+      "bytes": 6321,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t004650723123z-vulkan-strix-halo-vulkan-model-routes-v1-e2287dab6c-v1/environment.json",
+      "sha256": "sha256:65d15860d744627f081ffc494130d9439e977586f4750c696a8d3b8b2d4fe080"
+    },
+    {
+      "bytes": 3012,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t004650723123z-vulkan-strix-halo-vulkan-model-routes-v1-e2287dab6c-v1/cases/001-device-probe-r001/stdout.log",
+      "sha256": "sha256:13620326f6fed22af90aff249a546b1f8184a4476925f8a8c58f46fdff1d4ccf"
+    },
+    {
+      "bytes": 64,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t004650723123z-vulkan-strix-halo-vulkan-model-routes-v1-e2287dab6c-v1/cases/001-device-probe-r001/stderr.log",
+      "sha256": "sha256:9b8ce0d5aabd827937d81f2e3a130958edf27c3abe507ce8c54ed6cef9c82b27"
+    },
+    {
+      "bytes": 641,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t004650723123z-vulkan-strix-halo-vulkan-model-routes-v1-e2287dab6c-v1/cases/001-device-probe-r001/case-result.json",
+      "sha256": "sha256:ae2dac9bdbeadfb94f98df189011c8bcd631dffd854cc35ddb305fed63ff8c4b"
+    },
+    {
+      "bytes": 186,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t004650723123z-vulkan-strix-halo-vulkan-model-routes-v1-e2287dab6c-v1/cases/002-prefix-cache-cancellation-live-eval-r001/stdout.log",
+      "sha256": "sha256:417018d53cd92f7c28c035687f6c5ede64a320a53ddb3a694bc88560e5659a0a"
+    },
+    {
+      "bytes": 27749,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t004650723123z-vulkan-strix-halo-vulkan-model-routes-v1-e2287dab6c-v1/cases/002-prefix-cache-cancellation-live-eval-r001/stderr.log",
+      "sha256": "sha256:ce4eccd5a72d3e347c6526b124de6dc8e5787067b2758eebcf263ac68599f649"
+    },
+    {
+      "bytes": 663,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t004650723123z-vulkan-strix-halo-vulkan-model-routes-v1-e2287dab6c-v1/cases/002-prefix-cache-cancellation-live-eval-r001/case-result.json",
+      "sha256": "sha256:fd4384b30e5006b7a7cc2e07b7ca618c5c8f6a8ba76e0f3976e5492c43c61647"
+    },
+    {
+      "bytes": 6966,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260715t004650723123z-vulkan-strix-halo-vulkan-model-routes-v1-e2287dab6c-v1/run-config.json",
+      "sha256": "sha256:63d077b04e3d3ad384f9e546f3d532c9c508d60fe053291eb79cfc37c5be8e3a"
+    }
+  ],
+  "created_at_utc": "2026-07-15T00:46:53.483Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+      "shader": "2026.2"
+    },
+    "device": {
+      "architecture": "strix_halo",
+      "driver": "radv Mesa 26.1.3-arch1.2",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "driver": "Mesa 26.1.3-arch1.2",
+      "execution_environment_sha256": "sha256:4e2f59070351a66c62498c8952245ba078b66548fd1f7b7b4083b32b2ab41a93",
+      "vulkan_device": "1.4.348",
+      "vulkan_instance": "1.4.350"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "vulkan",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "--variant",
+      "vulkan",
+      "--host-id",
+      "strix-halo",
+      "qualification/workloads/vulkan-model-routes-v1.json"
+    ],
+    "duration_seconds": 2.7603210489978665,
+    "finished_at_utc": "2026-07-15T00:46:53.483Z",
+    "kind": "correctness",
+    "profile": "vulkan-model-routes-v1",
+    "started_at_utc": "2026-07-15T00:46:50.723Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260715t004650723123z-vulkan-strix-halo-vulkan-model-routes-v1-e2287dab6c-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.04079617000024882,
+      "id": "device-probe",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 2.5426090370019665,
+      "id": "prefix-cache-cancellation-live-eval",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "bcb245ac7a9917c5ecebfd2825c544161b4d4a8e",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:7cd165f542fba1e855a4a915516952b02038e2001fc1ef028d149e04fac54d16",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "vulkan-model-routes-v1",
+    "parameters": {
+      "variant_id": "vulkan"
+    },
+    "seed": 20260715,
+    "sha256": "sha256:9b1314803305427d2332d5922d20900501e90d874ad0e2e2aad33414c6415d89"
+  }
+}

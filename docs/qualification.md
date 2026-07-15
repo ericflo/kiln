@@ -385,6 +385,78 @@ full-vocabulary comparison uses two Kiln Vulkan paths, not an independent HF
 forward. It therefore does not close the independent public-model HF-logit,
 broader prefix-cache/cancellation, eval-execution, soak, or throughput gates.
 
+### Vulkan cache, cancellation, and live eval
+
+Run the model-route workload from a clean pushed tree. It uses a deterministic
+small BF16 hybrid model and therefore does not need `--model` or network
+access:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant vulkan \
+  --host-id strix-halo \
+  qualification/workloads/vulkan-model-routes-v1.json
+```
+
+The manifest runs a required headless physical-device probe followed by one
+contained, sequential Rust case. Qualification mode makes a missing Vulkan
+device, a skipped hardware test, a missing pass marker, a test failure, or any
+output-assertion mismatch fail the workload. The Rust case proves four routes:
+
+1. A cancelled retained prefill and an explicitly discarded retained prefill
+   release every KV block, prefix-cache lease, recurrent-state entry, and
+   pending-release record.
+2. The production batching forward retains only a safe block-aligned strict
+   prefix. An identical request and a longer second turn both hit that entry,
+   reuse its blocks, and retire all leases without mutating a shared partial
+   block.
+3. The nonbatched generation path restores both paged KV state and the hybrid
+   model's GDN linear state from a split entry. Its generated token IDs must be
+   identical to an uncached full prefill; a plumbing-only cache hit is not
+   sufficient.
+4. `LiveEvalGenerator` and the real eval executor send a one-example exact-match
+   suite through the production batching actor, `RealDecodeForward`, and the
+   native Vulkan model runner. The deterministic fixture must consume six
+   prompt tokens, emit exactly two completion tokens decoding to `t1 t1`, and
+   report one pass with zero failed, invalid, or errored examples.
+
+The focused eval fixture starts with `AppState`'s dependency-complete mock
+construction and replaces only its inference backend with the real bounded
+Vulkan runner, cache objects, forward implementation, and batching actor. This
+avoids attempting a second process-global production memory admission inside
+one test process; token generation, scoring, cache ownership, and backend
+execution are not mocked. The test also requires `ModelRunner::backend_name()`
+to be `vulkan` for each exercised model path and explicitly stops the batching
+actor before returning.
+
+This qualification route exposed a serving-profile bug in the eval adapter
+transition. Base-model eval previously marked a base-to-base selection as
+changed content, so stable serving correctly rejected it as a live weight
+mutation. Base eval now performs a non-mutating selection. A nonempty named
+adapter still always requests content reload because an adapter may have been
+retrained under the same serving name and name equality cannot prove that its
+weights are current.
+
+#### Current Vulkan model-route result
+
+The source-bound 2026-07-15 run passed from clean commit `bcb245ac7` and tree
+hash `sha256:7cd165f542fba1e855a4a915516952b02038e2001fc1ef028d149e04fac54d16`.
+Its retained receipt is
+`qualification/receipts/vulkan/strix-halo/20260715t004650723123z-vulkan-strix-halo-vulkan-model-routes-v1-e2287dab6c-v1.json`.
+Both required cases passed with zero output-assertion failures on AMD Radeon
+8060S Graphics, RADV Mesa 26.1.3. The model-route case took 2.543 seconds and
+the complete workload took 2.760 seconds. The receipt and all eight local
+artifact hashes validated against the known current commit before this
+documentation mutation; teardown left no qualification service or build
+process and host availability returned to 24 GiB.
+
+This receipt closes the named deterministic cache lifecycle, cancellation, and
+live eval execution subsets. It does not compare full-model logits against an
+independent Hugging Face forward, measure public-model eval quality, exercise a
+public HTTP eval job, establish long-duration stability, or make a throughput
+claim. Those remain separate qualification gates.
+
 Model-serving workloads additionally require `--model` with the exact local
 model directory and `--model-id` with its public identity. Select each declared
 A/B arm explicitly; the manifest, not an ambient environment variable, owns
