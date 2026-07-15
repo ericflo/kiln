@@ -385,4 +385,76 @@ impl VulkanBackend {
             .unwrap_or(false);
         recurrent_present && conv_present
     }
+
+    /// Release both halves of one kt-resident linear-attention state.
+    ///
+    /// The recurrent tensor ID is the shared ownership key for the recurrent
+    /// and convolution maps. Keeping either entry after its request or cached
+    /// assembled batch is dropped retains device memory indefinitely.
+    pub fn evict_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) {
+        self.linear_attn_recurrent_state_kt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+        self.linear_attn_conv_state_kt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+        self.seeded_linear_attn_layers_kt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+    }
+
+    #[cfg(test)]
+    fn linear_attn_gdn_state_entry_counts(&self) -> (usize, usize, usize) {
+        let recurrent = self
+            .linear_attn_recurrent_state_kt
+            .lock()
+            .map(|states| states.len())
+            .unwrap_or_default();
+        let conv = self
+            .linear_attn_conv_state_kt
+            .lock()
+            .map(|states| states.len())
+            .unwrap_or_default();
+        let seeded = self
+            .seeded_linear_attn_layers_kt
+            .lock()
+            .map(|states| states.len())
+            .unwrap_or_default();
+        (recurrent, conv, seeded)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::VulkanBackend;
+
+    #[test]
+    fn evict_linear_attention_state_releases_both_buffers_and_seed_marker() -> Result<()> {
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping live state-lifecycle test");
+            return Ok(());
+        }
+
+        let recurrent = kiln_tensor::Tensor::from_vec(vec![1.0f32; 16], (1, 2, 2, 4))?;
+        let conv = kiln_tensor::Tensor::from_vec(vec![2.0f32; 8], (1, 4, 2))?;
+        assert!(backend.seed_linear_attn_gdn_state_kt(&recurrent, &conv)?);
+        assert!(backend.has_linear_attn_gdn_state_kt(recurrent.id()));
+        assert_eq!(backend.linear_attn_gdn_state_entry_counts(), (1, 1, 1));
+
+        backend.evict_linear_attn_gdn_state_kt(recurrent.id());
+        assert!(!backend.has_linear_attn_gdn_state_kt(recurrent.id()));
+        assert_eq!(backend.linear_attn_gdn_state_entry_counts(), (0, 0, 0));
+
+        // Terminal cleanup is intentionally idempotent so overlapping error
+        // and cancellation fences cannot resurrect or double-own state.
+        backend.evict_linear_attn_gdn_state_kt(recurrent.id());
+        assert_eq!(backend.linear_attn_gdn_state_entry_counts(), (0, 0, 0));
+        Ok(())
+    }
 }

@@ -5061,6 +5061,16 @@ impl LinearAttentionState {
         Ok(seeded_any)
     }
 
+    /// Release kt-resident recurrent and convolution buffers owned by this
+    /// state. This is separate from the decode-step resident-state eviction:
+    /// the kt maps intentionally survive between tokens and are released only
+    /// when the request or assembled-batch owner is retired.
+    pub fn evict_gdn_state_resident_kt(&self, backend: &dyn BackendRuntime) {
+        for state in &self.recurrent_states {
+            ResidencyBackend::runtime_evict_linear_attn_gdn_state_kt(backend, state.id());
+        }
+    }
+
     /// Capture the current GDN recurrent + conv state into a fresh shadow
     /// `LinearAttentionState`. Used by speculative decoding to preserve the
     /// base model's O(1) GDN state before advancing into a draft: if any

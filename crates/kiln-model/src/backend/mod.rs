@@ -1587,6 +1587,11 @@ pub trait ResidencyBackend:
     fn runtime_has_linear_attn_gdn_state_kt(&self, _key: kiln_tensor::TensorId) -> bool {
         false
     }
+
+    /// Release backend-owned recurrent and convolution buffers associated
+    /// with one kt linear-attention state key. Request and assembled-batch
+    /// owners call this at their terminal lifecycle boundary.
+    fn runtime_evict_linear_attn_gdn_state_kt(&self, _key: kiln_tensor::TensorId) {}
 }
 
 /// Focused `OptimizerBackend` facet for on-device optimizer updates.

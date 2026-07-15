@@ -1494,6 +1494,10 @@ impl ResidencyBackend for VulkanBackend {
     fn runtime_has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool {
         VulkanBackend::has_linear_attn_gdn_state_kt(self, key)
     }
+
+    fn runtime_evict_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) {
+        VulkanBackend::evict_linear_attn_gdn_state_kt(self, key);
+    }
 }
 
 impl TrainingLossBackend for VulkanBackend {
