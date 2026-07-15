@@ -223,9 +223,13 @@ impl VkTensor {
     ) -> Result<Self> {
         let nelem: usize = shape.iter().product();
         let bytes = nelem * dtype.byte_size();
-        let buffer = crate::buffer_pool::pool_alloc_device_local(&device, bytes.max(1) as u64)
-            .context("VkTensor::alloc_uninit: acquire device-local buffer")?;
-        Ok(Self::from_buffer(buffer, shape, dtype, device))
+        let buffer = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            bytes.max(1) as u64,
+        )
+        .context("VkTensor::alloc_uninit: device-local buffer")?;
+        Ok(Self::from_buffer(Arc::new(buffer), shape, dtype, device))
     }
 
     /// Upload an f32 slice as a fresh F32 VkTensor leaf. Candle-free
@@ -246,11 +250,12 @@ impl VkTensor {
             nelem
         );
         let bytes: &[u8] = bytemuck::cast_slice(data);
-        let buffer = crate::buffer_pool::pool_alloc_device_local(
-            &device,
+        let buffer = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
             device_buffer_bytes(nelem, VkDType::F32) as u64,
         )
-        .context("VkTensor::from_f32_slice: acquire device-local buffer")?;
+        .context("VkTensor::from_f32_slice: device-local buffer")?;
         VulkanBuffer::upload_data(
             device.device(),
             device.host_visible_mem_type(),
@@ -260,6 +265,48 @@ impl VkTensor {
             bytes,
         )
         .context("VkTensor::from_f32_slice: upload")?;
+        Ok(Self::from_buffer(
+            Arc::new(buffer),
+            shape,
+            VkDType::F32,
+            device,
+        ))
+    }
+
+    /// Upload a request-scoped F32 leaf through the bounded recycler.
+    ///
+    /// Generic constructors stay direct because parameter and model-loading
+    /// callers may retain their buffers for the lifetime of the model. Use
+    /// this explicit form only for scratch tensors whose final owner drops at
+    /// an operation or request boundary.
+    pub fn from_f32_slice_recycled(
+        data: &[f32],
+        shape: Vec<usize>,
+        device: Arc<VulkanDevice>,
+    ) -> Result<Self> {
+        let nelem: usize = shape.iter().product();
+        anyhow::ensure!(
+            data.len() == nelem,
+            "VkTensor::from_f32_slice_recycled: {} elements for shape {:?} (expected {})",
+            data.len(),
+            shape,
+            nelem
+        );
+        let bytes: &[u8] = bytemuck::cast_slice(data);
+        let buffer = crate::buffer_pool::pool_alloc_device_local(
+            &device,
+            device_buffer_bytes(nelem, VkDType::F32) as u64,
+        )
+        .context("VkTensor::from_f32_slice_recycled: acquire device-local buffer")?;
+        VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &buffer,
+            bytes,
+        )
+        .context("VkTensor::from_f32_slice_recycled: upload")?;
         Ok(Self::from_buffer(buffer, shape, VkDType::F32, device))
     }
 
@@ -486,6 +533,44 @@ mod tests {
         assert_eq!(vt.dtype(), VkDType::F32);
         let back = vt.to_vec_f32().unwrap();
         assert_eq!(back, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn generic_tensor_upload_does_not_borrow_the_scratch_pool() {
+        let Some(dev) = vk_dev() else { return };
+        let device_handle = dev.device().handle();
+        let before = crate::buffer_pool::pool_stats_for_device(device_handle);
+
+        let durable =
+            VkTensor::from_f32_slice(&[1.0_f32, 2.0, 3.0, 4.0], vec![2, 2], Arc::clone(&dev))
+                .unwrap();
+        let durable_stats = crate::buffer_pool::pool_stats_for_device(device_handle);
+        assert_eq!(
+            durable_stats.borrowed_buffer_count(),
+            before.borrowed_buffer_count(),
+            "generic tensor upload must not pin the transient recycler"
+        );
+
+        let recycled = VkTensor::from_f32_slice_recycled(
+            &[5.0_f32, 6.0, 7.0, 8.0],
+            vec![2, 2],
+            Arc::clone(&dev),
+        )
+        .unwrap();
+        let recycled_stats = crate::buffer_pool::pool_stats_for_device(device_handle);
+        assert_eq!(
+            recycled_stats.borrowed_buffer_count(),
+            before.borrowed_buffer_count() + 1,
+            "explicit recycled upload must borrow exactly one scratch buffer"
+        );
+
+        drop(recycled);
+        drop(durable);
+        let after = crate::buffer_pool::pool_stats_for_device(device_handle);
+        assert_eq!(
+            after.borrowed_buffer_count(),
+            before.borrowed_buffer_count()
+        );
     }
 
     #[test]

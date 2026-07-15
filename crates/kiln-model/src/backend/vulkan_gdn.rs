@@ -219,7 +219,11 @@ pub(super) fn gdn_solve_tri_transpose(
     let load = |t: &kiln_tensor::Tensor| -> Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
         let (bytes, shape) = kt_tensor_to_f32_bytes_with_shape(t)?;
         let data: &[f32] = bytemuck::cast_slice(&bytes);
-        kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice(data, shape, vk_device.clone())
+        kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice_recycled(
+            data,
+            shape,
+            vk_device.clone(),
+        )
     };
 
     let a_vk = load(a_strict)?;
@@ -278,7 +282,7 @@ pub(super) fn gdn_chunkwise_forward(
                         .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: flatten: {e}"))?
                         .to_vec1::<f32>()
                         .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: to_vec1 f32: {e}"))?;
-                    kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice(
+                    kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice_recycled(
                         &data,
                         shape,
                         vk_device.clone(),

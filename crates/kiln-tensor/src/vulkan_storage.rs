@@ -1458,9 +1458,20 @@ pub fn host_to_vulkan_copy(cpu: &crate::Tensor, device_index: usize) -> Result<c
     let vulkan_device = primary_vulkan_device(device_index)?;
     // Allocate at least 1 byte: a zero-length Vulkan buffer is invalid.
     let alloc_len = byte_len.max(1) as u64;
-    let buffer =
-        kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(&vulkan_device, alloc_len)
-            .map_err(|e| Error::Msg(format!("host_to_vulkan_copy: allocation failed: {e}")))?;
+    // This is the general CPU -> Vulkan ownership boundary and is used for
+    // long-lived model weights as well as activations. Do not retain these
+    // buffers in the transient recycler: a model load would otherwise pin the
+    // entire scratch budget with permanently borrowed weight buffers.
+    let buffer = VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        alloc_len,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "host_to_vulkan_copy: create_device_local({alloc_len}) failed: {e}"
+        ))
+    })?;
     // H2D: stage `src` and copy into the device-local buffer. `src` may
     // be empty (a zero-element tensor); skip the transfer in that case
     // since the buffer was allocated at the 1-byte floor purely to be
@@ -1477,13 +1488,8 @@ pub fn host_to_vulkan_copy(cpu: &crate::Tensor, device_index: usize) -> Result<c
         .map_err(|e| Error::Msg(format!("host_to_vulkan_copy: H2D upload failed: {e}")))?;
     }
 
-    let storage = VulkanStorage::from_arc_buffer(
-        vulkan_device,
-        device_index,
-        dtype,
-        buffer,
-        byte_len as u64,
-    )?;
+    let storage =
+        VulkanStorage::from_buffer(vulkan_device, device_index, dtype, buffer, byte_len as u64)?;
     crate::Tensor::from_parts(
         Arc::new(storage),
         crate::Layout::contiguous(contig.shape().to_vec()),
