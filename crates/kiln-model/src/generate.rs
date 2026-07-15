@@ -1650,6 +1650,14 @@ fn greedy_batch_route(
     }
 }
 
+fn should_use_unidentified_single_row_greedy_route(
+    batch: usize,
+    stable_row_ids_present: bool,
+    resident_decode_supported: bool,
+) -> bool {
+    batch == 1 && !(stable_row_ids_present && resident_decode_supported)
+}
+
 fn decode_hot_path_fallback_disabled_context(
     backend: &dyn BackendRuntime,
     operation: &'static str,
@@ -6394,7 +6402,9 @@ impl ModelRunner {
     /// model/LoRA state for every row. Qwen-style GDN models must pass one
     /// mutable one-row `LinearAttentionState` per row; the method assembles
     /// those into batch state before the forward pass and scatters the updated
-    /// rows back afterward.
+    /// rows back afterward. A resident backend must preserve supplied stable
+    /// row IDs even for a one-row cohort so backend-private KV seed ownership
+    /// and the retained batched recurrent-state cache remain request-scoped.
     pub fn decode_next_tokens_paged_contiguous_batch_greedy(
         &self,
         input_tokens: &[TokenId],
@@ -6433,6 +6443,13 @@ impl ModelRunner {
             block_tables.len() == batch && seq_lens.len() == batch,
             "batched decode metadata length mismatch"
         );
+        if let Some(ids) = row_ids {
+            anyhow::ensure!(
+                ids.len() == batch,
+                "batched decode row-id count mismatch ({} vs {batch})",
+                ids.len()
+            );
+        }
 
         let has_linear_layers = self.has_linear_attention_layers();
         if has_linear_layers {
@@ -6447,7 +6464,13 @@ impl ModelRunner {
             );
         }
 
-        if batch == 1 {
+        let resident_decode_supported =
+            ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref());
+        if should_use_unidentified_single_row_greedy_route(
+            batch,
+            row_ids.is_some(),
+            resident_decode_supported,
+        ) {
             let stage_start = profile_stages.then(std::time::Instant::now);
             let pc_guard = lock_paged_cache(paged_cache)?;
             #[cfg(feature = "metal")]
@@ -11768,6 +11791,22 @@ mod tests {
             GreedyBatchRoute::Later,
             "sampled single-row decode is handled by the later HIP graph branch"
         );
+    }
+
+    #[test]
+    fn resident_single_row_greedy_preserves_stable_row_identity() {
+        assert!(should_use_unidentified_single_row_greedy_route(
+            1, false, true
+        ));
+        assert!(should_use_unidentified_single_row_greedy_route(
+            1, true, false
+        ));
+        assert!(!should_use_unidentified_single_row_greedy_route(
+            1, true, true
+        ));
+        assert!(!should_use_unidentified_single_row_greedy_route(
+            2, false, true
+        ));
     }
 
     #[derive(Debug)]

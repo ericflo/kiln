@@ -228,8 +228,9 @@ direct stream uses the batching actor.
 `token_id` is the exact accepted model token represented by this timing row.
 It remains present when the tokenizer decodes a special token to an empty text
 fragment, allowing an opted-in client to distinguish hidden-token generation
-from a missing delivery event. It discloses no token that was not already part
-of the response and does not enable logprob or behavior-policy capture.
+from a missing delivery event. This is additional diagnostic disclosure: it can
+identify a special token that produced no visible response text. It does not
+include logprobs, candidate tokens, or behavior-policy capture.
 
 `blocking_phase` and `blocking_phase_ms` are `null` for the first token because
 there is no preceding token gap. They can also be `null` when no gap
