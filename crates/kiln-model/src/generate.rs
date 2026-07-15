@@ -709,9 +709,9 @@ pub struct BatchedStateCacheStats {
     pub completed_row_preservation_count: u64,
     pub completed_row_eviction_count: u64,
     pub lease_drop_eviction_count: u64,
-    /// Block-aligned prefix snapshots deliberately not captured because a
-    /// backend-resident GDN buffer, rather than the logical tensors, owned the
-    /// current recurrent and convolution state.
+    /// Whole-prompt, strict-prefix, or rolling snapshots deliberately not
+    /// captured because a backend-resident GDN buffer, rather than the logical
+    /// tensors, owned the current recurrent and convolution state.
     pub resident_prefix_snapshot_suppression_count: u64,
 }
 
@@ -1032,6 +1032,29 @@ pub struct PagedBatchedDecodeState {
     pub id: u64,
 }
 
+fn capture_authoritative_prefix_snapshot(
+    backend: &dyn BackendRuntime,
+    resident_prefix_snapshot_suppression_count: &AtomicU64,
+    linear_state: &LinearAttentionState,
+    snapshot_kind: &'static str,
+    position: usize,
+) -> Result<Option<LinearAttentionState>> {
+    // Vulkan's native prefill and decode stacks can advance recurrent/conv
+    // state in backend-private storage without updating these logical tensors.
+    // A snapshot is useful only while the logical representation is the
+    // authority; publishing it otherwise poisons a later prefix-cache hit.
+    if linear_state.has_any_gdn_state_resident_kt(backend) {
+        resident_prefix_snapshot_suppression_count.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(
+            snapshot_kind,
+            position,
+            "suppressed stale prefix snapshot while backend-resident GDN state is authoritative"
+        );
+        return Ok(None);
+    }
+    Ok(Some(linear_state.snapshot()?))
+}
+
 fn complete_paged_batched_decode_step(
     backend: &dyn BackendRuntime,
     resident_prefix_snapshot_suppression_count: &AtomicU64,
@@ -1044,29 +1067,25 @@ fn complete_paged_batched_decode_step(
         // A resident Vulkan decode advances backend-private recurrent, conv,
         // and KV buffers without writing the logical tensors or generic paged
         // cache. Copying those logical tensors here would publish an internally
-        // inconsistent prefix entry. Prefill-side snapshots remain eligible
-        // because they are captured before resident decode takes authority.
+        // inconsistent prefix entry.
         if state.prefix_cache_registration_allowed
             && state.block_size > 0
             && state.seq_len % state.block_size == 0
         {
-            if state.linear_state.has_any_gdn_state_resident_kt(backend) {
-                resident_prefix_snapshot_suppression_count.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(
-                    row_id = state.id,
-                    seq_len = state.seq_len,
-                    block_size = state.block_size,
-                    "suppressed stale rolling prefix snapshot while backend-resident GDN state is authoritative"
-                );
-                continue;
-            }
-            match state.linear_state.snapshot() {
-                Ok(snap) => {
+            match capture_authoritative_prefix_snapshot(
+                backend,
+                resident_prefix_snapshot_suppression_count,
+                &state.linear_state,
+                "rolling",
+                state.seq_len,
+            ) {
+                Ok(Some(snap)) => {
                     state.rolling_snapshot = Some(RollingPrefixSnapshot {
                         position: state.seq_len,
                         linear_state: snap,
                     });
                 }
+                Ok(None) => continue,
                 Err(err) => {
                     tracing::warn!(
                         seq_len = state.seq_len,
@@ -4542,12 +4561,17 @@ impl ModelRunner {
                         self.streaming_prefill,
                     )
                     .context("prefill forward pass (paged prefix cache, streaming head)")?;
-                    prefill_split_snapshot = Some(RollingPrefixSnapshot {
-                        position: split_pos,
-                        linear_state: linear_state
-                            .snapshot()
-                            .context("snapshot linear state at streaming prefill split")?,
-                    });
+                    prefill_split_snapshot = self
+                        .authoritative_prefix_snapshot(
+                            &linear_state,
+                            "streaming-prefill-split",
+                            split_pos,
+                        )
+                        .context("snapshot linear state at streaming prefill split")?
+                        .map(|linear_state| RollingPrefixSnapshot {
+                            position: split_pos,
+                            linear_state,
+                        });
 
                     let tail_tokens = &prompt_tokens[split_pos..];
                     let logits = model_forward_paged_streaming_with_progress_offset_and_policy(
@@ -4611,12 +4635,17 @@ impl ModelRunner {
                         cancel.report_prefill_tokens_completed(head_tokens.len() as u64);
                     }
                     check_cancelled(cancel)?;
-                    prefill_split_snapshot = Some(RollingPrefixSnapshot {
-                        position: split_pos,
-                        linear_state: linear_state
-                            .snapshot()
-                            .context("snapshot linear state at greedy prefill split")?,
-                    });
+                    prefill_split_snapshot = self
+                        .authoritative_prefix_snapshot(
+                            &linear_state,
+                            "greedy-prefill-split",
+                            split_pos,
+                        )
+                        .context("snapshot linear state at greedy prefill split")?
+                        .map(|linear_state| RollingPrefixSnapshot {
+                            position: split_pos,
+                            linear_state,
+                        });
 
                     let tail_tokens = &prompt_tokens[split_pos..];
                     let pc_guard = lock_paged_cache(paged_cache)?;
@@ -4677,12 +4706,13 @@ impl ModelRunner {
                     None,
                 )
                 .context("prefill forward pass (paged prefix cache, head) failed")?;
-                prefill_split_snapshot = Some(RollingPrefixSnapshot {
-                    position: split_pos,
-                    linear_state: linear_state
-                        .snapshot()
-                        .context("snapshot linear state at prefill split")?,
-                });
+                prefill_split_snapshot = self
+                    .authoritative_prefix_snapshot(&linear_state, "prefill-split", split_pos)
+                    .context("snapshot linear state at prefill split")?
+                    .map(|linear_state| RollingPrefixSnapshot {
+                        position: split_pos,
+                        linear_state,
+                    });
                 if let Some(cancel) = cancel {
                     cancel.report_prefill_tokens_completed(head_tokens.len() as u64);
                 }
@@ -5036,12 +5066,13 @@ impl ModelRunner {
             cancel.report_prefill_tokens_completed(state.processed_tokens() as u64);
         }
         if state.split_pos == Some(chunk_end) && state.prefill_split_snapshot.is_none() {
-            state.prefill_split_snapshot = Some(
-                state
-                    .linear_state
-                    .snapshot()
-                    .context("snapshot linear state at chunked prefill split")?,
-            );
+            state.prefill_split_snapshot = self
+                .authoritative_prefix_snapshot(
+                    &state.linear_state,
+                    "chunked-prefill-split",
+                    chunk_end,
+                )
+                .context("snapshot linear state at chunked prefill split")?;
         }
         check_cancelled(cancel)?;
 
@@ -6281,12 +6312,34 @@ impl ModelRunner {
         if num_prompt_blocks == 0 || block_table.blocks.len() < num_prompt_blocks {
             return Ok(None);
         }
+        let Some(linear_state) =
+            self.authoritative_prefix_snapshot(linear_state, "whole-prompt", prompt_tokens.len())?
+        else {
+            return Ok(None);
+        };
         Ok(Some(PagedPrefixRegistration {
             prompt_tokens: prompt_tokens.to_vec(),
             block_ids: block_table.blocks[..num_prompt_blocks].to_vec(),
-            linear_state: linear_state.snapshot()?,
+            linear_state,
             next_token,
         }))
+    }
+
+    fn authoritative_prefix_snapshot(
+        &self,
+        linear_state: &LinearAttentionState,
+        snapshot_kind: &'static str,
+        position: usize,
+    ) -> Result<Option<LinearAttentionState>> {
+        capture_authoritative_prefix_snapshot(
+            self.backend.as_ref(),
+            &self
+                .batched_state_cache_counters
+                .resident_prefix_snapshot_suppression_count,
+            linear_state,
+            snapshot_kind,
+            position,
+        )
     }
 
     fn decode_from_prefill_logits(
@@ -9984,12 +10037,19 @@ impl ModelRunner {
                                 .context(
                                     "prefill forward pass (streaming paged prefix cache head)",
                                 )?;
-                                prefill_split_snapshot = Some(RollingPrefixSnapshot {
-                                    position: split_pos,
-                                    linear_state: linear_state.snapshot().context(
+                                prefill_split_snapshot = runner_guard
+                                    .authoritative_prefix_snapshot(
+                                        &linear_state,
+                                        "streaming-prefix-cache-split",
+                                        split_pos,
+                                    )
+                                    .context(
                                         "snapshot linear state at streaming prefix-cache split",
-                                    )?,
-                                });
+                                    )?
+                                    .map(|linear_state| RollingPrefixSnapshot {
+                                        position: split_pos,
+                                        linear_state,
+                                    });
 
                                 let tail_tokens = &prompt_tokens[split_pos..];
                                 model_forward_paged_streaming_with_progress_offset_and_policy(
@@ -10427,12 +10487,17 @@ impl ModelRunner {
                         self.streaming_prefill,
                     )
                     .context("prefill forward pass (streaming paged prefix cache head)")?;
-                    prefill_split_snapshot = Some(RollingPrefixSnapshot {
-                        position: split_pos,
-                        linear_state: linear_state
-                            .snapshot()
-                            .context("snapshot linear state at streaming prefix-cache split")?,
-                    });
+                    prefill_split_snapshot = self
+                        .authoritative_prefix_snapshot(
+                            &linear_state,
+                            "streaming-prefix-cache-split",
+                            split_pos,
+                        )
+                        .context("snapshot linear state at streaming prefix-cache split")?
+                        .map(|linear_state| RollingPrefixSnapshot {
+                            position: split_pos,
+                            linear_state,
+                        });
 
                     let tail_tokens = &prompt_tokens[split_pos..];
                     model_forward_paged_streaming_with_policy(
@@ -12361,6 +12426,51 @@ mod tests {
             build_extended_registration(&[1, 2, 3, 4, 5], &[6, 7, 8], &bt, 4, None).is_none(),
             "no snapshot → no extended registration"
         );
+    }
+
+    #[test]
+    fn resident_authority_suppresses_prompt_snapshot_capture() {
+        let linear_state = LinearAttentionState {
+            recurrent_states: vec![kiln_tensor::Tensor::from_vec(vec![0.0_f32], vec![1]).unwrap()],
+            conv_states: vec![kiln_tensor::Tensor::from_vec(vec![0.0_f32], vec![1]).unwrap()],
+        };
+        let logical_backend = NamedTestBackend {
+            name: "logical-test",
+            device: kiln_tensor::Device::Cpu,
+            resident_linear_state: false,
+        };
+        let resident_backend = NamedTestBackend {
+            name: "resident-test",
+            device: kiln_tensor::Device::Cpu,
+            resident_linear_state: true,
+        };
+        let suppression_count = AtomicU64::new(0);
+
+        assert!(
+            capture_authoritative_prefix_snapshot(
+                &logical_backend,
+                &suppression_count,
+                &linear_state,
+                "whole-prompt",
+                64,
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(suppression_count.load(Ordering::Relaxed), 0);
+
+        assert!(
+            capture_authoritative_prefix_snapshot(
+                &resident_backend,
+                &suppression_count,
+                &linear_state,
+                "whole-prompt",
+                64,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(suppression_count.load(Ordering::Relaxed), 1);
     }
 
     #[test]

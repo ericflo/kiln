@@ -1387,7 +1387,7 @@ The remaining fields are process-lifetime monotonic counters:
 | `explicit_invalidation_count`, `explicit_invalidation_eviction_count` | Adapter/model lifecycle invalidations requested, and those that actually removed a parked entry. |
 | `completed_row_preservation_count`, `completed_row_eviction_count` | Completed request rows that appeared in the cache fingerprint and caused resident preservation or nonresident eviction. |
 | `lease_drop_eviction_count` | Checked-out capacity released instead of parked, including rejected entries and forward/error exits. Use the rejection counters and request failures to distinguish expected capacity replacement from errors. |
-| `resident_prefix_snapshot_suppression_count` | Block-aligned rolling prefix snapshots rejected because backend-resident recurrent/conv state, rather than the logical tensors, was authoritative. This is a correctness guard, not a cache or request failure. |
+| `resident_prefix_snapshot_suppression_count` | Whole-prompt, strict-prefix split, or rolling prefix snapshots rejected because backend-resident recurrent/conv state, rather than the logical tensors, was authoritative. This is a correctness guard, not a cache or request failure. |
 
 Prometheus exports the same bounded-cardinality state as:
 
@@ -1432,25 +1432,25 @@ buffer, and initialization marker. A rising
 `rejected_nonresident_cache_count` with live buffers still present indicates a
 violation of this lifetime split, not buffer-pool eviction.
 
-Prefix-cache snapshots have a related authority boundary. Generic prefill
-advances the logical GDN tensors and generic paged KV cache, so whole-prompt
-registrations and strict-prefix split snapshots captured before native decode
-are valid. Native resident decode then advances backend-private recurrent,
-convolution, and KV buffers without writing the corresponding logical tensors
-or generic decoded-token KV positions. A rolling snapshot copied from the
-logical tensors after that transition would combine stale GDN state with stale
-or absent generic KV and must never be registered. Kiln therefore suppresses a
-due block-aligned rolling snapshot whenever any layer of the row has resident
-GDN authority. It retains an older snapshot only if that snapshot was captured
-while logical state was authoritative. This does not disable prompt or
-strict-prefix caching, and it does not materialize a hidden device readback on
-the decode hot path.
+Prefix-cache snapshots have a related authority boundary. Generic execution
+does not by itself prove that logical GDN tensors remain authoritative: an
+accelerated prefill kernel may advance backend-private recurrent and
+convolution buffers without updating those logical tensors. Native resident
+decode can additionally advance backend-private KV without writing generic
+decoded-token KV positions. Copying the logical tensors in either state would
+publish an internally inconsistent cache entry. Kiln therefore puts every
+whole-prompt, strict-prefix split, and rolling snapshot through the same
+authority gate. It captures only while no layer reports backend-resident GDN
+authority; otherwise it omits the cache registration. This may deliberately
+forgo a prefix-cache hit, but never changes the live request state and never
+introduces a hidden device readback on the prefill or decode hot path.
 
 `resident_prefix_snapshot_suppression_count` and
 `kiln_prefix_cache_snapshot_suppressions_total` prove that guard fired. The
-counter is expected to rise when native resident decode crosses cache block
-boundaries. It must be monotonic; a zero delta is meaningful only when the
-workload also proves that an eligible boundary and resident decode occurred.
+counter is expected to rise when an otherwise eligible capture encounters
+native resident prefill or decode authority. It must be monotonic; a zero delta
+is meaningful only when the workload also proves that an eligible capture and
+resident execution occurred.
 Qualification retains its delta but does not treat a positive value as an
 error.
 
