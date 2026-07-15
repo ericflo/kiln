@@ -454,6 +454,22 @@ curl -s http://localhost:8420/metrics \
           decode width. Malformed canonical or deprecated values fail startup instead of silently selecting a
           fallback.
         </p>
+        <h3 id="vulkan-prefix-cache-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan prefix-cache diagnosis</h3>
+        <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+          Vulkan currently correctness-quarantines all cross-request prompt, KV, and recurrent-state reuse.
+          A conforming process reports the configured intent separately from an effective false capability and
+          fresh-prefills exact repeats. Do not interpret zero hits as a tuning or capacity problem on this backend.
+        </p>
+        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config | jq '.prefix_cache'
+curl -s http://localhost:8420/health | jq '.prefix_cache, .decode_runtime.batching_engine.prefix_cache_enabled'
+curl -s http://localhost:8420/metrics | grep '^kiln_.*prefix_cache'</code></pre>
+        <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
+          <li>Require <code>effective_enabled=false</code>, <code>effective_reason="vulkan_correctness_quarantine"</code>, health <code>prefix_cache.enabled=false</code>, and actor <code>prefix_cache_enabled=false</code>.</li>
+          <li>Every lookup, hit, miss, hit-token, hit-block, cached-block, maximum-block, cached-entry, maximum-entry, state-byte, lease, and pending-release value must be zero.</li>
+          <li>Changing <code>prefix_cache.max_blocks</code> or <code>max_entries</code> cannot enable the cache on Vulkan. No request field or environment alias bypasses the source-level gate.</li>
+          <li>A nonzero activity value, an exact repeat that takes a cache route, or an effective true capability means artifact drift and requires stopping the process before trusting output.</li>
+          <li>Re-enablement requires production-model oracle parity across first use, exact repeats, strict descendants, changing concurrency, cancellation, and repeated history.</li>
+        </ul>
         <h3 id="vulkan-resident-prefill-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan resident-prefill diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
           Production currently correctness-quarantines the native token-prefill optimization after guarded Vulkan

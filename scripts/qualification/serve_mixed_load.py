@@ -2976,15 +2976,14 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int | bool]:
         raise QualificationError("health batching-engine snapshot is missing")
     if not isinstance(scheduler, dict):
         raise QualificationError("health scheduler snapshot is missing")
-    resident_prefill_enabled = batching.get("resident_prefill_enabled")
-    if not isinstance(resident_prefill_enabled, bool):
-        raise QualificationError(
-            "batching-engine field resident_prefill_enabled must be boolean, "
-            f"got {resident_prefill_enabled!r}"
-        )
-    snapshot: dict[str, float | int | bool] = {
-        "resident_prefill_enabled": resident_prefill_enabled
-    }
+    snapshot: dict[str, float | int | bool] = {}
+    for field in ("prefix_cache_enabled", "resident_prefill_enabled"):
+        value = batching.get(field)
+        if not isinstance(value, bool):
+            raise QualificationError(
+                f"batching-engine field {field} must be boolean, got {value!r}"
+            )
+        snapshot[field] = value
     for field in (
         "max_decode_batch",
         "max_prefill_staging_slots",

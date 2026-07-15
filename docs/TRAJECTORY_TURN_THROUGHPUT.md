@@ -55,6 +55,13 @@ reused by the real prefix cache. This avoids duplicate long-prefill work for
 consecutive turns from the same trajectory while still admitting unrelated rows
 that can fill the decode batch.
 
+This optimization currently requires CPU, CUDA, ROCm, or Metal. Vulkan
+correctness-quarantines cross-request prefix restoration and reports
+`prefix_cache.effective_enabled=false` from `/v1/config`, even when the typed
+request above is true. On Vulkan, exact repeats and descendant turns use fresh
+generic prefill; do not use this guide to claim trajectory prefix reuse until
+the effective capability is true and the cache hit/block counters increase.
+
 Verify `batching.actor_active=true`, effective mode enabled, rowwise decode
 false, and prefix-aware admission true in the captured JSON. The automatic
 admission quantum is backend-owned: it is the effective decode width on CUDA

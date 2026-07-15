@@ -803,6 +803,44 @@ class ServeRocmSoakTests(unittest.TestCase):
             )
         )
 
+    def test_disabled_prefix_cache_requires_zero_activity_and_residency(self) -> None:
+        snapshot = {
+            "lookup_hits": 0,
+            "lookup_misses": 0,
+            "hit_tokens": 0,
+            "hit_blocks": 0,
+            "cached_blocks": 0,
+            "max_blocks": 0,
+            "cached_entries": 0,
+            "max_entries": 0,
+            "cached_state_bytes": 0,
+            "max_state_bytes": 0,
+            "active_leases": 0,
+            "pending_release_entries": 0,
+        }
+        self.assertEqual(
+            soak.disabled_prefix_cache_failures(snapshot, phase="test"), []
+        )
+        self.assertEqual(
+            soak.prefix_cache_capability_value(
+                {"prefix_cache_enabled": False},
+                {"prefix_cache_enabled": False},
+            ),
+            0,
+        )
+
+        active = dict(snapshot)
+        active["lookup_misses"] = 1
+        self.assertEqual(
+            soak.disabled_prefix_cache_failures(active, phase="test"),
+            ["test prefix-cache lookup_misses=1 while disabled"],
+        )
+        with self.assertRaisesRegex(soak.SoakError, "changed during the run"):
+            soak.prefix_cache_capability_value(
+                {"prefix_cache_enabled": False},
+                {"prefix_cache_enabled": True},
+            )
+
     def test_graph_warmup_contract_depends_on_runtime(self) -> None:
         graph = {"capture_successes": 1, "replay_successes": 1, "failures": 0}
         self.assertTrue(soak.graph_warmup_ready(graph, soak.ROCM_RUNTIME))

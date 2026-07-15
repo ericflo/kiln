@@ -32,6 +32,7 @@ struct ConfigResponse {
         Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
     decode_runtime: DecodeRuntimeConfig,
     batching: BatchingConfigResponse,
+    prefix_cache: PrefixCacheConfigResponse,
     streaming_prefill: StreamingPrefillRuntimeConfig,
     speculative: SpeculativeConfig,
     operational: OperationalRuntimeConfig,
@@ -47,6 +48,16 @@ struct BatchingConfigResponse {
     configuration: BatchingRuntimeConfig,
     actor_active: bool,
     direct_decode_rendezvous: DirectDecodeRendezvousRuntimeState,
+}
+
+#[derive(Serialize)]
+struct PrefixCacheConfigResponse {
+    configuration: crate::config::PrefixCacheConfig,
+    effective_enabled: bool,
+    effective_reason: &'static str,
+    effective_max_blocks: usize,
+    effective_max_entries: usize,
+    effective_max_state_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -302,6 +313,28 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             }
         }
     };
+    let (prefix_cache_effective_enabled, prefix_cache_stats) = match state.backend.as_ref() {
+        ModelBackend::Real { prefix_cache, .. } => {
+            let cache = prefix_cache.lock().unwrap();
+            (cache.is_enabled(), cache.stats())
+        }
+        ModelBackend::Mock { scheduler, .. } => match scheduler.try_lock() {
+            Ok(scheduler) => {
+                let stats = scheduler.prefix_cache_stats();
+                (stats.max_blocks > 0, stats)
+            }
+            Err(_) => (false, kiln_scheduler::PrefixCacheStats::default()),
+        },
+    };
+    let prefix_cache_effective_reason = if prefix_cache_effective_enabled {
+        "active"
+    } else if !state.prefix_cache_config.enabled {
+        "configuration"
+    } else if matches!(state.model_weight_device, kiln_tensor::Device::Vulkan(_)) {
+        "vulkan_correctness_quarantine"
+    } else {
+        "backend_unavailable"
+    };
 
     // Determine checkpoint segments
     let ckpt = kiln_train::CheckpointConfig::from_runtime(
@@ -375,6 +408,14 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
                 }
             ),
             direct_decode_rendezvous: state.direct_decode_rendezvous_runtime_state(),
+        },
+        prefix_cache: PrefixCacheConfigResponse {
+            configuration: state.prefix_cache_config.clone(),
+            effective_enabled: prefix_cache_effective_enabled,
+            effective_reason: prefix_cache_effective_reason,
+            effective_max_blocks: prefix_cache_stats.max_blocks,
+            effective_max_entries: prefix_cache_stats.max_entries,
+            effective_max_state_bytes: prefix_cache_stats.max_state_bytes,
         },
         streaming_prefill: state.streaming_prefill_runtime_config,
         speculative: build_speculative_config(&state),
@@ -888,6 +929,18 @@ mod tests {
             "backend_policy"
         );
         assert_eq!(json["batching"]["actor_active"], false);
+        assert_eq!(json["prefix_cache"]["configuration"]["enabled"], true);
+        assert!(json["prefix_cache"]["configuration"]["max_blocks"].is_null());
+        assert!(json["prefix_cache"]["configuration"]["max_entries"].is_null());
+        assert_eq!(json["prefix_cache"]["effective_enabled"], true);
+        assert_eq!(json["prefix_cache"]["effective_reason"], "active");
+        assert!(
+            json["prefix_cache"]["effective_max_blocks"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(json["prefix_cache"]["effective_max_entries"], 0);
         assert_eq!(
             json["batching"]["direct_decode_rendezvous"]["scope"],
             "direct_streaming_greedy_only"

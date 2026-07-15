@@ -309,6 +309,9 @@ pub struct BatchingEngineSnapshot {
     pub queue_depth: usize,
     pub active_decode: usize,
     pub active_prefill: usize,
+    /// Whether cross-request prompt/KV/GDN prefix reuse is admitted for the
+    /// active backend.
+    pub prefix_cache_enabled: bool,
     /// Whether the production forward has admitted native resident token
     /// prefill as a correctness-qualified route.
     pub resident_prefill_enabled: bool,
@@ -554,6 +557,9 @@ pub trait DecodeForward: Send + Sync + 'static {
     /// row on the ordinary round-robin path.
     fn remaining_prefill_tokens(&self, _slot: &DecodeSlot) -> Option<usize> {
         None
+    }
+    fn prefix_cache_enabled(&self) -> bool {
+        false
     }
     /// Whether the resident token-prefill optimization is admitted for this
     /// forward. The actor does not probe candidates or mutate counters while
@@ -889,6 +895,13 @@ impl RealDecodeForward {
 impl DecodeForward for RealDecodeForward {
     fn supports_resumable_prefill(&self) -> bool {
         true
+    }
+
+    fn prefix_cache_enabled(&self) -> bool {
+        self.prefix_cache
+            .lock()
+            .map(|cache| cache.is_enabled())
+            .unwrap_or(false)
     }
 
     fn resident_prefill_enabled(&self) -> bool {
@@ -2374,6 +2387,7 @@ impl BatchingEngineActor {
         let max_prefill_layers_per_cycle = max_prefill_layers_per_cycle.layers();
         let snapshot = BatchingEngineSnapshot {
             accepting: true,
+            prefix_cache_enabled: forward.prefix_cache_enabled(),
             resident_prefill_enabled: forward.resident_prefill_enabled(),
             max_batch_tokens: max_batch_tokens.tokens(),
             max_batch_tokens_source: max_batch_tokens.source(),

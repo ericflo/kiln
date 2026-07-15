@@ -1496,6 +1496,16 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_prefix_cache_enabled Whether cross-request prompt, KV, and recurrent-state prefix reuse is correctness-qualified and admitted.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefix_cache_enabled gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefix_cache_enabled {}",
+                u8::from(gauges.batching_engine.prefix_cache_enabled)
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_resident_prefill_enabled Whether native resident token-prefill is correctness-qualified and admitted.\n");
         out.push_str("# TYPE kiln_batching_engine_resident_prefill_enabled gauge\n");
         push_line(
@@ -3712,6 +3722,7 @@ mod tests {
                 queue_depth: 2,
                 active_decode: 3,
                 active_prefill: 2,
+                prefix_cache_enabled: true,
                 resident_prefill_enabled: true,
                 active_resident_prefill: 1,
                 max_batch_tokens: 256,
@@ -4002,6 +4013,7 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_queue_depth 2"));
         assert!(output.contains("kiln_batching_engine_active_decode 3"));
         assert!(output.contains("kiln_batching_engine_active_prefill 2"));
+        assert!(output.contains("kiln_batching_engine_prefix_cache_enabled 1"));
         assert!(output.contains("kiln_batching_engine_resident_prefill_enabled 1"));
         assert!(output.contains("kiln_batching_engine_active_resident_prefill 1"));
         assert!(output.contains("kiln_batching_engine_max_batch_tokens 256"));

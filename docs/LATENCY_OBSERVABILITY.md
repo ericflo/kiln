@@ -163,6 +163,18 @@ must emit `false` for every batching request: guarded Vulkan model runs found
 semantic corruption on this optimization. Health, trusted debug state, and the
 Prometheus capability gauge expose that quarantine explicitly.
 
+Vulkan also publishes `prefix_cache_enabled=false`. Guarded runs with resident
+token-prefill already disabled produced correct first-wave responses and
+semantically corrupt exact repeats after cross-request KV/GDN restoration.
+`GET /v1/config` distinguishes configured intent from this effective
+`vulkan_correctness_quarantine`; health and trusted debug expose the live
+capability, and Prometheus exports
+`kiln_batching_engine_prefix_cache_enabled`. While false, every prefix-cache
+lookup, hit, miss, residency, state-byte, lease, and pending-release value must
+remain zero. Exact repeats therefore pay fresh generic-prefill latency. This is
+an intentional correctness cost and must not be diagnosed as an undersized
+cache from the absence of hits.
+
 The batching engine measures `gpu_lock_wait_ms` and `synchronization_ms` on the
 owned decode invocation and propagates those observations only to requests
 active for that step. Direct streaming measures `tokenization_ms`, model-ready-to-bridge

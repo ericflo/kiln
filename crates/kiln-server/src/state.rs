@@ -519,6 +519,10 @@ const MAX_PREFIX_CACHE_STATE_BYTES: u64 = 1024 * 1024 * 1024;
 const PREFIX_CACHE_STATE_FRACTION_DIVISOR: u64 = 40;
 const REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS: usize = 64;
 
+fn effective_prefix_cache_enabled(requested: bool, device: &kiln_tensor::Device) -> bool {
+    requested && !matches!(device, kiln_tensor::Device::Vulkan(_))
+}
+
 pub struct RealPrefixCache {
     enabled: bool,
     max_blocks: usize,
@@ -1825,7 +1829,9 @@ impl RealPrefixCache {
     }
 
     pub fn disabled(block_size: usize) -> Self {
-        Self::new(false, block_size, 0, MIN_PREFIX_CACHE_MAX_ENTRIES, 0)
+        let mut cache = Self::new(false, block_size, 0, MIN_PREFIX_CACHE_MAX_ENTRIES, 0);
+        cache.max_entries = 0;
+        cache
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -2452,6 +2458,9 @@ pub struct AppState {
     /// Immutable streaming-prefill dispatch and tiling policy resolved against
     /// the selected backend during startup.
     pub streaming_prefill_runtime_config: crate::config::StreamingPrefillRuntimeConfig,
+    /// Requested cross-request prefix-cache policy. The live cache publishes
+    /// the backend-qualified effective capability separately.
+    pub prefix_cache_config: crate::config::PrefixCacheConfig,
     /// Versioned accelerator execution policy resolved before device context
     /// and model-runner construction.
     pub accelerator_runtime_policy: crate::config::ResolvedAcceleratorRuntimePolicy,
@@ -3288,6 +3297,7 @@ impl AppState {
             decode_runtime_config,
             batching_runtime_config,
             streaming_prefill_runtime_config,
+            prefix_cache_config: crate::config::PrefixCacheConfig::default(),
             accelerator_runtime_policy: crate::config::AcceleratorRuntimeConfig::default()
                 .resolved_policy(crate::config::ServingProfileSetting::default()),
             speculative_config,
@@ -3646,10 +3656,18 @@ impl AppState {
             );
         }
         let total_vram = vram_info.total_bytes;
+        let prefix_cache_enabled =
+            effective_prefix_cache_enabled(prefix_cache_cfg.enabled, &device_kt);
+        if prefix_cache_cfg.enabled && !prefix_cache_enabled {
+            tracing::warn!(
+                backend = "vulkan",
+                "cross-request prefix reuse is correctness-quarantined; using fresh prefill for every request"
+            );
+        }
         let host_prefix_cache_reserve_bytes = prefix_cache_host_reserve_bytes(
             host_backed_free_bytes_for_device(device_kt, snap),
             prefix_cache_state_bytes_per_entry,
-            prefix_cache_cfg.enabled,
+            prefix_cache_enabled,
             prefix_cache_cfg.max_entries,
         )?;
         if matches!(device_kt, kiln_tensor::Device::Vulkan(_)) {
@@ -4048,14 +4066,14 @@ impl AppState {
         log_backend_training_acceleration_profile(
             backend_capabilities.training.acceleration_profile,
         );
-        let prefix_cache_max_blocks = if prefix_cache_cfg.enabled {
+        let prefix_cache_max_blocks = if prefix_cache_enabled {
             prefix_cache_cfg
                 .max_blocks
                 .unwrap_or_else(|| default_prefix_cache_max_blocks(num_blocks))
         } else {
             0
         };
-        let prefix_cache_max_entries = if prefix_cache_cfg.enabled {
+        let prefix_cache_max_entries = if prefix_cache_enabled {
             prefix_cache_cfg.max_entries.unwrap_or_else(|| {
                 if matches!(device_kt, kiln_tensor::Device::Vulkan(_)) {
                     prefix_cache_entries_for_state_budget(
@@ -4078,14 +4096,18 @@ impl AppState {
             min_register_tokens = REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS,
             "prefix cache budget"
         );
-        let prefix_cache = RealPrefixCache::new_with_min_register_tokens(
-            prefix_cache_cfg.enabled,
-            block_size,
-            prefix_cache_max_blocks,
-            prefix_cache_max_entries,
-            prefix_cache_state_bytes_per_entry,
-            REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS,
-        );
+        let prefix_cache = if prefix_cache_enabled {
+            RealPrefixCache::new_with_min_register_tokens(
+                true,
+                block_size,
+                prefix_cache_max_blocks,
+                prefix_cache_max_entries,
+                prefix_cache_state_bytes_per_entry,
+                REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS,
+            )
+        } else {
+            RealPrefixCache::disabled(block_size)
+        };
 
         let model_weight_device = runner.weights.embed_tokens.device();
         let rocm_graph_telemetry = runner.rocm_graph_telemetry_handle();
@@ -4425,6 +4447,7 @@ impl AppState {
             decode_runtime_config,
             batching_runtime_config,
             streaming_prefill_runtime_config,
+            prefix_cache_config: prefix_cache_cfg.clone(),
             accelerator_runtime_policy: crate::config::AcceleratorRuntimeConfig::default()
                 .resolved_policy(serving_profile),
             speculative_config,
@@ -5475,6 +5498,27 @@ fn format_oom_remediation_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vulkan_prefix_cache_is_correctness_quarantined() {
+        assert!(effective_prefix_cache_enabled(
+            true,
+            &kiln_tensor::Device::Cpu
+        ));
+        assert!(!effective_prefix_cache_enabled(
+            true,
+            &kiln_tensor::Device::Vulkan(0)
+        ));
+        assert!(!effective_prefix_cache_enabled(
+            false,
+            &kiln_tensor::Device::Cpu
+        ));
+
+        let stats = RealPrefixCache::disabled(16).stats();
+        assert_eq!(stats.max_blocks, 0);
+        assert_eq!(stats.max_entries, 0);
+        assert_eq!(stats.max_state_bytes, 0);
+    }
 
     #[test]
     fn rocm_runtime_health_latch_is_inert_off_rocm_and_sticky_on_fault() {

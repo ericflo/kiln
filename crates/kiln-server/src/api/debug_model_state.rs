@@ -134,6 +134,7 @@ struct BatchingEngineSnapshotDebug {
     queue_depth: usize,
     active_decode: usize,
     active_prefill: usize,
+    prefix_cache_enabled: bool,
     resident_prefill_enabled: bool,
     active_resident_prefill: usize,
     max_batch_tokens: usize,
@@ -643,6 +644,7 @@ impl From<BatchingEngineSnapshot> for BatchingEngineSnapshotDebug {
             queue_depth: snapshot.queue_depth,
             active_decode: snapshot.active_decode,
             active_prefill: snapshot.active_prefill,
+            prefix_cache_enabled: snapshot.prefix_cache_enabled,
             resident_prefill_enabled: snapshot.resident_prefill_enabled,
             active_resident_prefill: snapshot.active_resident_prefill,
             max_batch_tokens: snapshot.max_batch_tokens,
@@ -1039,6 +1041,7 @@ mod tests {
             stream_stall_grace_ms: 500,
             stream_stall_grace_source: ConfigValueSource::ConfigFile,
             active_prefill: 3,
+            prefix_cache_enabled: true,
             resident_prefill_enabled: true,
             active_resident_prefill: 2,
             max_batch_tokens: 128,
@@ -1089,6 +1092,7 @@ mod tests {
         assert_eq!(json["stream_stall_grace_ms"], 500);
         assert_eq!(json["stream_stall_grace_source"], "config_file");
         assert_eq!(json["active_prefill"], 3);
+        assert_eq!(json["prefix_cache_enabled"], true);
         assert_eq!(json["resident_prefill_enabled"], true);
         assert_eq!(json["active_resident_prefill"], 2);
         assert_eq!(json["max_batch_tokens"], 128);

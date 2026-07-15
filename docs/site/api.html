@@ -738,6 +738,56 @@
                 grammar and the eight deprecated aliases. In particular, malformed legacy
                 <code>KILN_DECODE_BATCH_WAIT_US</code> now fails startup instead of silently selecting zero.
               </p>
+              <h5 class="font-semibold mt-4 mb-2">Cross-request prefix-cache policy and capability</h5>
+              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
+  "prefix_cache": {
+    "configuration": {
+      "enabled": true,
+      "max_blocks": null,
+      "max_entries": null
+    },
+    "effective_enabled": false,
+    "effective_reason": "vulkan_correctness_quarantine",
+    "effective_max_blocks": 0,
+    "effective_max_entries": 0,
+    "effective_max_state_bytes": 0
+  }
+}</code></pre>
+              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                This is the <code>GET /v1/config</code> shape. <code>configuration</code> is startup intent;
+                the remaining fields are the backend-qualified live allocation policy. Reasons are
+                <code>active</code>, <code>configuration</code>, <code>vulkan_correctness_quarantine</code>, or
+                <code>backend_unavailable</code>. CPU, CUDA, ROCm, and Metal currently honor an enabled request.
+                Vulkan forces it off after guarded production-model exact repeats proved semantic corruption.
+              </p>
+              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
+  "prefix_cache": {
+    "enabled": false,
+    "lookup_hits": 0,
+    "lookup_misses": 0,
+    "hit_tokens": 0,
+    "hit_blocks": 0,
+    "cached_blocks": 0,
+    "max_blocks": 0,
+    "cached_entries": 0,
+    "max_entries": 0,
+    "cached_state_bytes": 0,
+    "max_state_bytes": 0,
+    "active_leases": 0,
+    "pending_release_entries": 0
+  },
+  "decode_runtime": {
+    "batching_engine": { "prefix_cache_enabled": false }
+  }
+}</code></pre>
+              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                This is the relevant <code>GET /health</code> and <code>GET /v1/health</code> state on Vulkan.
+                Trusted debug state exposes the actor capability in its <code>batching_engine</code> snapshot and
+                the same counters under <code>caches.prefix_cache</code>. Prometheus publishes
+                <code>kiln_batching_engine_prefix_cache_enabled</code> plus the existing
+                <code>kiln_prefix_cache_*</code> activity and residency series. While the capability is false,
+                all activity and residency values must remain zero; exact repeats use fresh generic prefill.
+              </p>
               <h5 class="font-semibold mt-4 mb-2">Resident Vulkan prefill telemetry</h5>
               <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
   "resident_prefill_enabled": false,

@@ -1118,9 +1118,30 @@ Malformed or non-UTF-8 `RUST_LOG` is fatal.
 
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
 |---|---|---|---|---|
-| `prefix_cache.enabled` | boolean; `true` | `KILN_PREFIX_CACHE_ENABLED` (implemented) | `KILN_PREFIX_CACHE_ENABLED` | Enables reuse of KV blocks and recurrent-state snapshots for shared prompt prefixes. |
-| `prefix_cache.max_blocks` | optional unsigned integer; omitted (`None`) | `KILN_PREFIX_CACHE_MAX_BLOCKS` (implemented) | `KILN_PREFIX_CACHE_MAX_BLOCKS` | Must be greater than zero when set. `None` resolves to half of the allocated KV block pool. |
-| `prefix_cache.max_entries` | optional unsigned integer; omitted (`None`) | `KILN_PREFIX_CACHE_MAX_ENTRIES` (implemented) | `KILN_PREFIX_CACHE_MAX_ENTRIES` | Must be greater than zero when set. `None` resolves from the relevant safe allocation tier and per-entry recurrent-state bytes, with at least one entry. Vulkan reserves this state from the separately bounded host-backed tier before sizing its host-resident KV pool; an explicit count that cannot fit stops startup. |
+| `prefix_cache.enabled` | boolean; `true` | `KILN_PREFIX_CACHE_ENABLED` (implemented) | `KILN_PREFIX_CACHE_ENABLED` | Requests reuse of KV blocks and recurrent-state snapshots for shared prompt prefixes. CPU, CUDA, ROCm, and Metal honor the request. Vulkan currently forces the effective capability off because repeated production-model runs proved semantic corruption after cross-request restoration. This is a source-level correctness quarantine, not a second setting. |
+| `prefix_cache.max_blocks` | optional unsigned integer; omitted (`None`) | `KILN_PREFIX_CACHE_MAX_BLOCKS` (implemented) | `KILN_PREFIX_CACHE_MAX_BLOCKS` | Must be greater than zero when set. On an admitted backend, `None` resolves to half of the allocated KV block pool. It has no runtime allocation effect while the effective capability is off. |
+| `prefix_cache.max_entries` | optional unsigned integer; omitted (`None`) | `KILN_PREFIX_CACHE_MAX_ENTRIES` (implemented) | `KILN_PREFIX_CACHE_MAX_ENTRIES` | Must be greater than zero when set. On an admitted backend, `None` resolves from the relevant safe allocation tier and per-entry recurrent-state bytes, with at least one entry. It has no runtime allocation effect while the effective capability is off; quarantined Vulkan reserves no host-backed prefix state. |
+
+The TOML object records operator intent. `GET /v1/config` reports that object at
+`prefix_cache.configuration` and reports the backend-qualified result beside it:
+`effective_enabled`, `effective_reason`, `effective_max_blocks`,
+`effective_max_entries`, and `effective_max_state_bytes`. Reasons are `active`,
+`configuration`, `vulkan_correctness_quarantine`, or `backend_unavailable`.
+`GET /health` and `GET /v1/health` expose the live capability both as
+`prefix_cache.enabled` and, when the batching actor exists,
+`decode_runtime.batching_engine.prefix_cache_enabled`. Trusted debug state
+publishes the same two views. Prometheus publishes
+`kiln_batching_engine_prefix_cache_enabled` for the actor capability plus the
+existing `kiln_prefix_cache_*` activity and residency series.
+
+While Vulkan is quarantined, all prefix-cache lookup, hit, miss, retained-block,
+retained-entry, recurrent-state, lease, and pending-release values must remain
+zero. Requests use fresh generic prefill, including exact repeats. There is no
+request override or alternate environment flag that bypasses the quarantine.
+Re-enablement requires a source change and production-model semantic parity
+across first use, exact repeats, strict descendants, changing concurrency,
+cancellation, and repeated process history; cache mechanics tests alone are not
+sufficient.
 
 ## `[speculative]`
 

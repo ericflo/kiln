@@ -49,6 +49,9 @@
           "kv_autoscale_enabled": false,
           "memory_reclaim_requested_mode": "off",
           "memory_reclaim_mode": "off",
+          "prefix_cache_requested_enabled": true,
+          "prefix_cache_effective_enabled": false,
+          "prefix_cache_effective_reason": "vulkan_correctness_quarantine",
           "rocm_graphs_requested": false,
           "rocm_graphs_enabled": false
         },
@@ -243,6 +246,7 @@
               "prefix_cache_baseline_state_bytes",
               "prefix_cache_cached_blocks_end",
               "prefix_cache_cached_entries_end",
+              "prefix_cache_enabled",
               "prefix_cache_hit_blocks",
               "prefix_cache_hit_tokens",
               "prefix_cache_lookup_hit_count",

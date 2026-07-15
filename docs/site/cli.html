@@ -336,6 +336,20 @@ curl -s http://localhost:8420/v1/config | jq '.batching'</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>kiln config</code> validates and prints all eight startup values; restart to apply them. <code>auto</code> keeps backend-qualified actor, admission, and direct-rendezvous defaults. The runtime response reports configured source, backend policy, effective selection, decode-width clamping, <code>actor_active</code>, and worker versus route availability. The fallback route applies only to actor-absent direct streaming effectively-greedy requests; sampled and non-streaming work bypass it. A live worker can remain unroutable while the actor is active.</p>
       </div>
       <div class="card p-6 lg:col-span-2">
+        <p class="label mb-2">Prefix-cache policy</p>
+        <h2 class="text-2xl font-semibold tracking-tight mb-4">Separate requested policy from effective admission</h2>
+        <p class="mb-4" style="color: var(--fg-dim);">The three typed fields express startup intent. Omitted capacities are derived only when the active backend admits cross-request KV and recurrent-state reuse.</p>
+<pre class="text-sm"><code>[prefix_cache]
+enabled = true
+# max_blocks = 2048
+# max_entries = 16</code></pre>
+<pre class="text-sm mt-4"><code>kiln config --file kiln.toml
+kiln serve --config kiln.toml
+curl -s http://localhost:8420/v1/config | jq '.prefix_cache'
+curl -s http://localhost:8420/health | jq '.prefix_cache, .decode_runtime.batching_engine.prefix_cache_enabled'</code></pre>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>enabled</code> defaults to <code>true</code>; <code>max_blocks</code> and <code>max_entries</code> are optional positive integers. CPU, CUDA, ROCm, and Metal currently honor the request. Vulkan reports <code>effective_enabled=false</code> and <code>effective_reason="vulkan_correctness_quarantine"</code>, allocates no prefix-cache capacity, and fresh-prefills exact repeats. No request or environment override can bypass that source-level quarantine.</p>
+      </div>
+      <div class="card p-6 lg:col-span-2">
         <p class="label mb-2">Streaming-prefill policy</p>
         <h2 class="text-2xl font-semibold tracking-tight mb-4">Resolve long-prefill and training tiles once</h2>
         <p class="mb-4" style="color: var(--fg-dim);">Use typed TOML for the six process-lifetime controls. <code>auto</code> preserves backend dispatch and tile policy; every concrete tile must be a positive multiple of 64. A concrete base tile is inherited by <code>auto</code> tape and detached routes, including detached boundary and replay work.</p>

@@ -3123,7 +3123,7 @@ pub struct LoggingConfig {
 
 /// Prefix caching settings. Canonical startup overrides use
 /// `KILN_PREFIX_CACHE_<FIELD>`.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PrefixCacheConfig {
     /// Enable prefix caching for shared prompt prefixes (default: true).

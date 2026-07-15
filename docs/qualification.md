@@ -1258,10 +1258,15 @@ attribute a safety failure; they do not weaken, replace, or exempt it from the
 RSS gate.
 
 Vulkan stabilization runs complete concurrency 1, 4, 8, and 4 cycles with
-16-token outputs and a cancellation every fourth wave. It first fills the
-prefix cache and then requires two consecutive cycles with no positive live
-`VulkanBuffer` ownership growth and at most 64 MiB of process-scoped DRM
-growth. It cannot accept before four cycles and fails after eight. RSS is a
+16-token outputs and a cancellation every fourth wave. Cross-request prefix
+reuse is correctness-quarantined on this backend, so warmup does not try to
+fill the inert cache. Instead, the driver requires
+`prefix_cache_enabled=false` and zero lookups, hits, misses, retained blocks,
+retained entries, state bytes, leases, and pending releases at initial warmup,
+every stabilization and measured drain, and final drain. It then requires two
+consecutive cycles with no positive live `VulkanBuffer` ownership growth and
+at most 64 MiB of process-scoped DRM growth. It cannot accept before four
+cycles and fails after eight. RSS is a
 separate cumulative host-safety signal on unified memory: stabilization fails
 if process RSS grows by more than 512 MiB from its baseline, while the host
 guard independently enforces the 8 GiB `MemAvailable` floor and 512 MiB swap
@@ -1279,10 +1284,11 @@ drain, cache-ownership, pause, device-fault, shutdown, and residue gates apply
 as in the ROCm arm. Vulkan graphs must remain disabled: any graph capture,
 replay, slot, or fallback activity fails.
 
-The allocation counter must also remain unchanged after stabilization. Cache
-hits may continue, but even one new `VulkanBuffer` allocation fails the next
-measured wave. This catches allocator churn that has balanced ownership at
-drain yet still creates driver-side RSS growth or inference pauses.
+The allocation counter must also remain unchanged after stabilization. Prefix
+cache activity must remain zero, and even one new `VulkanBuffer` allocation
+fails the next measured wave. This catches allocator churn that has balanced
+ownership at drain yet still creates driver-side RSS growth or inference
+pauses.
 
 #### Vulkan buffer ownership telemetry
 
@@ -1447,15 +1453,16 @@ introduces a hidden device readback on the prefill or decode hot path.
 
 `resident_prefix_snapshot_suppression_count` and
 `kiln_prefix_cache_snapshot_suppressions_total` prove that guard fired. The
-counter is expected to rise when an otherwise eligible capture encounters
-native resident decode authority. The resident token-prefill optimization is
-currently correctness-quarantined, so qualification requires its advertised
-capability and all activity counters to remain zero. If that route is later
-requalified, its captures remain subject to the same gate. The suppression
-counter must be monotonic; a zero delta is meaningful only when the workload
-also proves that an eligible capture and resident execution occurred.
-Qualification retains its delta but does not treat a positive value as an
-error.
+counter is expected to rise only when an admitted cache encounters an otherwise
+eligible capture under native resident decode authority. Vulkan currently
+admits neither the cross-request prefix cache nor resident token-prefill, so its
+soak requires both advertised capabilities and every corresponding activity
+and residency counter to remain zero. If either route is later requalified,
+captures remain subject to the same authority gate. The suppression counter
+must be monotonic; a zero delta is meaningful only when the workload also proves
+that an eligible cache capture and resident execution occurred. Qualification
+retains its delta but does not treat a positive value as an error on an admitted
+backend.
 
 The Vulkan development soak treats this snapshot as a closed qualification
 contract. It validates the exact field set and types at startup, after warmup,

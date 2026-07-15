@@ -482,7 +482,7 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
           </div>
           <div class="feature feature--compact">
             <h3>Paged KV cache</h3>
-            <p>Block-allocated KV pages with a prefix cache that re-uses tokens across calls. Multi-tenant by default.</p>
+            <p>Block-allocated KV pages with backend-qualified cross-call prefix reuse. Vulkan currently fresh-prefills under an explicit correctness quarantine.</p>
           </div>
           <div class="feature feature--compact">
             <h3>W4A16 + Marlin</h3>

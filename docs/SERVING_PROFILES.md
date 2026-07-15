@@ -33,10 +33,13 @@ alias and emits a startup warning. Do not use it in new deployments.
 | Live graph capture | no | yes | no |
 | Exclusive GPU behavior | reject | writer priority | inference disabled, drain, then exclusive |
 
-The stable profile keeps ordinary logical scheduling available. Requests may
-be admitted, cancelled, evicted, and served from the prefix cache without
-moving live allocation pointers. It rejects training ownership and real
-adapter weight changes before either can wait for the actor-wide GPU writer.
+The stable profile keeps ordinary logical scheduling available. On a backend
+that admits cross-request prefix reuse, requests may be admitted, cancelled,
+evicted, and served from the prefix cache without moving live allocation
+pointers. Vulkan currently forces that effective capability off under a
+correctness quarantine and fresh-prefills every request. The profile rejects
+training ownership and real adapter weight changes before either can wait for
+the actor-wide GPU writer.
 A request that selects the adapter already active is a no-op and remains
 allowed.
 

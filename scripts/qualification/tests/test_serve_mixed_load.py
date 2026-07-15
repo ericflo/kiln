@@ -290,6 +290,7 @@ def health_fixture(
                 "max_prefill_layers_per_cycle_source": "config_file",
                 "active_decode": 0,
                 "active_prefill": 0,
+                "prefix_cache_enabled": True,
                 "resident_prefill_enabled": False,
                 "active_resident_prefill": 0,
                 "active_staged_requests": 0,
@@ -470,6 +471,17 @@ def debug_fixture(
 
 
 class ServeMixedLoadTests(unittest.TestCase):
+    def test_batching_snapshot_requires_explicit_prefix_cache_capability(self) -> None:
+        health = health_fixture(kv_autoscale=False, rocm_graphs=False)
+        snapshot = serve.batching_snapshot(health)
+        self.assertIs(snapshot["prefix_cache_enabled"], True)
+
+        health["decode_runtime"]["batching_engine"]["prefix_cache_enabled"] = 1
+        with self.assertRaisesRegex(
+            serve.QualificationError, "prefix_cache_enabled must be boolean"
+        ):
+            serve.batching_snapshot(health)
+
     def test_response_oracle_accepts_plain_text_prefix_across_delta_splits(self) -> None:
         result = stream_result_with_text("000", "000 000", "001 00")
 

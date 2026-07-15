@@ -85,6 +85,13 @@ def _vulkan_variant_config() -> dict[str, Any]:
         request_timeout_seconds=600,
     )
     config["build"] = mixed.VULKAN_BUILD_SPEC.effective_config()
+    config["runtime"].update(
+        {
+            "prefix_cache_requested_enabled": True,
+            "prefix_cache_effective_enabled": False,
+            "prefix_cache_effective_reason": "vulkan_correctness_quarantine",
+        }
+    )
     config["vulkan_buffer_pool_gb"] = 3.0
     return config
 
@@ -272,6 +279,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
 }
 VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     **METRIC_DEFINITIONS,
+    "prefix_cache_enabled": ("bool", "exact", True),
     "resident_prefill_enabled": ("bool", "exact", False),
     "batched_state_cache_active_leases_end": ("leases", "exact", True),
     "batched_state_cache_capacity_rows_end": ("rows", "exact", False),
@@ -1193,6 +1201,44 @@ def prefix_cache_snapshot(health: dict[str, Any]) -> dict[str, int]:
     return snapshot
 
 
+def disabled_prefix_cache_failures(
+    snapshot: dict[str, int], *, phase: str
+) -> list[str]:
+    failures: list[str] = []
+    for field in (
+        "lookup_hits",
+        "lookup_misses",
+        "hit_tokens",
+        "hit_blocks",
+        "cached_blocks",
+        "max_blocks",
+        "cached_entries",
+        "max_entries",
+        "cached_state_bytes",
+        "max_state_bytes",
+        "active_leases",
+        "pending_release_entries",
+    ):
+        if snapshot[field] != 0:
+            failures.append(
+                f"{phase} prefix-cache {field}={snapshot[field]} while disabled"
+            )
+    return failures
+
+
+def prefix_cache_capability_value(
+    before: dict[str, float | int | bool],
+    after: dict[str, float | int | bool],
+) -> int:
+    enabled_before = before["prefix_cache_enabled"]
+    enabled_after = after["prefix_cache_enabled"]
+    if not isinstance(enabled_before, bool) or not isinstance(enabled_after, bool):
+        raise SoakError("prefix cache enabled capability is not boolean")
+    if enabled_before != enabled_after:
+        raise SoakError("prefix cache enabled capability changed during the run")
+    return int(enabled_after)
+
+
 VULKAN_BUFFER_FIELDS = (
     "live_device_local_buffers",
     "live_device_local_bytes",
@@ -2075,8 +2121,20 @@ def execute(
 
         steady_state_warmup_requests = 0
         steady_state_warmup_waves = 0
+        batching_warm = mixed.batching_snapshot(health_start)
+        prefix_cache_enabled = batching_warm["prefix_cache_enabled"]
+        assert isinstance(prefix_cache_enabled, bool)
         prefix_warm = prefix_cache_snapshot(health_start)
-        while prefix_warm["cached_entries"] < prefix_warm["max_entries"]:
+        if not prefix_cache_enabled:
+            disabled_failures = disabled_prefix_cache_failures(
+                prefix_warm, phase="initial warmup"
+            )
+            if disabled_failures:
+                raise SoakError("; ".join(disabled_failures))
+        while (
+            prefix_cache_enabled
+            and prefix_warm["cached_entries"] < prefix_warm["max_entries"]
+        ):
             if steady_state_warmup_waves >= runtime.max_steady_state_warmup_waves:
                 raise SoakError(
                     "prefix cache did not reach steady-state capacity within "
@@ -2106,14 +2164,22 @@ def execute(
             )
             graph_warm = mixed.graph_snapshot(health_start)
             batching_warm = mixed.batching_snapshot(health_start)
+            if batching_warm["prefix_cache_enabled"] != prefix_cache_enabled:
+                warm_failures = [
+                    "prefix cache enabled capability changed during steady warmup"
+                ]
+            else:
+                warm_failures = []
             prefix_warm = prefix_cache_snapshot(health_start)
             debug_warm = mixed.json_request(port, "GET", "/v1/debug/model-state")
             batched_warm = batched_state_cache_snapshot(debug_warm, runtime)
-            warm_failures = mixed.attest_runtime(
-                runtime.variant_id,
-                health_start,
-                debug_warm,
-                rocm_graph_cache_entries=runtime.graph_cache_max,
+            warm_failures.extend(
+                mixed.attest_runtime(
+                    runtime.variant_id,
+                    health_start,
+                    debug_warm,
+                    rocm_graph_cache_entries=runtime.graph_cache_max,
+                )
             )
             if batched_warm is not None and batched_warm["active_leases"] != 0:
                 warm_failures.append("steady warmup retained a batched-state lease")
@@ -2212,6 +2278,10 @@ def execute(
                 graph_stable = mixed.graph_snapshot(health_start)
                 batching_stable = mixed.batching_snapshot(health_start)
                 prefix_stable = prefix_cache_snapshot(health_start)
+                if batching_stable["prefix_cache_enabled"] != prefix_cache_enabled:
+                    cycle_failures.append(
+                        "prefix cache enabled capability changed during stabilization"
+                    )
                 debug_stable = mixed.json_request(
                     port, "GET", "/v1/debug/model-state"
                 )
@@ -2264,13 +2334,21 @@ def execute(
                     cycle_failures.append(
                         "stabilization retained active or pending prefix ownership"
                     )
-                if (
-                    prefix_stable["cached_entries"] != prefix_stable["max_entries"]
-                    or prefix_stable["cached_state_bytes"]
-                    != prefix_stable["max_state_bytes"]
-                ):
-                    cycle_failures.append(
-                        "stabilization lost full prefix-cache residency"
+                if prefix_cache_enabled:
+                    if (
+                        prefix_stable["cached_entries"]
+                        != prefix_stable["max_entries"]
+                        or prefix_stable["cached_state_bytes"]
+                        != prefix_stable["max_state_bytes"]
+                    ):
+                        cycle_failures.append(
+                            "stabilization lost full prefix-cache residency"
+                        )
+                else:
+                    cycle_failures.extend(
+                        disabled_prefix_cache_failures(
+                            prefix_stable, phase="stabilization"
+                        )
                     )
                 if process.poll() is not None:
                     raise SoakError(
@@ -2465,7 +2543,17 @@ def execute(
 
         graph_start = mixed.graph_snapshot(health_start)
         batching_start = mixed.batching_snapshot(health_start)
+        if batching_start["prefix_cache_enabled"] != prefix_cache_enabled:
+            raise SoakError(
+                "prefix cache enabled capability changed before measurement"
+            )
         prefix_start = prefix_cache_snapshot(health_start)
+        if not prefix_cache_enabled:
+            disabled_failures = disabled_prefix_cache_failures(
+                prefix_start, phase="measurement baseline"
+            )
+            if disabled_failures:
+                raise SoakError("; ".join(disabled_failures))
         vulkan_buffers_start = vulkan_buffer_snapshot(health_start, runtime)
         vulkan_pool_start = vulkan_buffer_pool_snapshot(health_start, runtime)
         debug_measurement_start = mixed.json_request(
@@ -2529,6 +2617,16 @@ def execute(
             graph = mixed.graph_snapshot(health)
             batching = mixed.batching_snapshot(health)
             prefix = prefix_cache_snapshot(health)
+            if batching["prefix_cache_enabled"] != prefix_cache_enabled:
+                wave_failures.append(
+                    f"prefix cache enabled capability changed in wave {wave}"
+                )
+            if not prefix_cache_enabled:
+                wave_failures.extend(
+                    disabled_prefix_cache_failures(
+                        prefix, phase=f"measured wave {wave}"
+                    )
+                )
             if graph["failures"] != graph_start["failures"]:
                 wave_failures.append(f"graph failure counter changed in wave {wave}")
             if (
@@ -2680,6 +2778,8 @@ def execute(
         health_end = wait_drained(port, deadline, "soak final health")
         graph_end = mixed.graph_snapshot(health_end)
         batching_end = mixed.batching_snapshot(health_end)
+        if batching_end["prefix_cache_enabled"] != prefix_cache_enabled:
+            failures.append("prefix cache enabled capability changed before final drain")
         prefix_end = prefix_cache_snapshot(health_end)
         vulkan_buffers_end = vulkan_buffer_snapshot(health_end, runtime)
         vulkan_pool_end = vulkan_buffer_pool_snapshot(health_end, runtime)
@@ -2838,6 +2938,13 @@ def execute(
             "zero_token_response_count": zero_tokens,
         }
         if runtime.backend == "vulkan":
+            values["prefix_cache_enabled"] = prefix_cache_capability_value(
+                batching_start, batching_end
+            )
+            if values["prefix_cache_enabled"] != 0:
+                failures.append(
+                    "Vulkan cross-request prefix reuse must remain correctness-quarantined"
+                )
             values.update(
                 resident_prefill_metric_values(batching_start, batching_end)
             )
@@ -2973,16 +3080,45 @@ def execute(
             failures.append("graph-slot residency exceeded the graph cache bound")
         if values["graph_slot_idle_count_end"] != values["graph_slot_count_end"]:
             failures.append("not every retained graph slot was idle at final drain")
-        if values["prefix_cache_lookup_hit_count"] < 1:
-            failures.append("soak completed without a measured prefix-cache hit")
-        if values["prefix_cache_hit_blocks"] < 1:
-            failures.append("soak completed without reusing a cached KV block")
-        if prefix_start["cached_entries"] != prefix_start["max_entries"]:
-            failures.append("measurement began before the prefix cache reached capacity")
-        if prefix_end["cached_entries"] != prefix_start["cached_entries"]:
-            failures.append("prefix-cache entry residency changed during measured soak")
-        if prefix_end["cached_state_bytes"] != prefix_start["cached_state_bytes"]:
-            failures.append("prefix-cache state residency changed during measured soak")
+        if prefix_cache_enabled:
+            if values["prefix_cache_lookup_hit_count"] < 1:
+                failures.append("soak completed without a measured prefix-cache hit")
+            if values["prefix_cache_hit_blocks"] < 1:
+                failures.append("soak completed without reusing a cached KV block")
+            if prefix_start["cached_entries"] != prefix_start["max_entries"]:
+                failures.append(
+                    "measurement began before the prefix cache reached capacity"
+                )
+            if prefix_end["cached_entries"] != prefix_start["cached_entries"]:
+                failures.append(
+                    "prefix-cache entry residency changed during measured soak"
+                )
+            if prefix_end["cached_state_bytes"] != prefix_start["cached_state_bytes"]:
+                failures.append(
+                    "prefix-cache state residency changed during measured soak"
+                )
+        else:
+            failures.extend(
+                disabled_prefix_cache_failures(
+                    prefix_start, phase="measurement baseline"
+                )
+            )
+            failures.extend(
+                disabled_prefix_cache_failures(prefix_end, phase="final drain")
+            )
+            for name in (
+                "prefix_cache_baseline_cached_entries",
+                "prefix_cache_baseline_state_bytes",
+                "prefix_cache_cached_blocks_end",
+                "prefix_cache_cached_entries_end",
+                "prefix_cache_hit_blocks",
+                "prefix_cache_hit_tokens",
+                "prefix_cache_lookup_hit_count",
+                "prefix_cache_lookup_miss_count",
+                "prefix_cache_state_bytes_end",
+            ):
+                if values[name] != 0:
+                    failures.append(f"{name}={values[name]} while prefix cache is disabled")
         if batching_end["blocks_total"] != batching_start["blocks_total"]:
             failures.append("KV block capacity changed during soak")
         if sampler.errors:
