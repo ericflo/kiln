@@ -105,6 +105,14 @@ runtime remains in the original network/PID-isolated case. Qualification
 workloads must not overlap a separate Cargo build; build first, then run the
 device workload.
 
+The Strix Halo Vulkan development soak also has a committed thermal policy.
+After the source-bound build launches the server, the driver resolves Linux
+hwmon by `k10temp` plus `Tctl`, samples every 250 ms, and terminates the complete
+server process group at 97 C. Missing, duplicated, or malformed telemetry fails
+closed. The workload manifest and receipt bind the selector, interval, limit,
+start/peak/end readings, and trip count; no ambient environment variable can
+change them.
+
 ```bash
 scripts/cargo-bounded.sh check --locked -p kiln-server --lib
 scripts/cargo-bounded.sh test --locked -p kiln-server --lib config::tests -- --test-threads=1

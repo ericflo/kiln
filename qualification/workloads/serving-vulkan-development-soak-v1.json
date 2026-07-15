@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workload_id": "serving-vulkan-development-soak-v1",
   "kind": "soak",
-  "description": "Keep one Vulkan server process under mixed streaming load for at least 30 minutes and fail on late faults, unexplained ITL gaps, leaked KV blocks, graph activity, host-memory pressure, swap growth, or post-warm memory growth.",
+  "description": "Keep one Vulkan server process under mixed streaming load for at least 30 minutes and fail on late faults, unexplained ITL gaps, leaked KV blocks, graph activity, host-memory pressure, swap growth, package-temperature pressure, or post-warm memory growth.",
   "determinism": {
     "seed": 20260715,
     "seed_delivery": "argv",
@@ -15,7 +15,7 @@
   "variants": [
     {
       "id": "vulkan-development-soak",
-      "description": "Graph-disabled Vulkan development soak with fixed KV capacity and allocator reclaim disabled, bounded concurrency, periodic cancellation, and a fail-closed host-memory guard.",
+      "description": "Graph-disabled Vulkan development soak with fixed KV capacity and allocator reclaim disabled, bounded concurrency, periodic cancellation, and fail-closed host-memory and package-temperature guards.",
       "backend": "vulkan",
       "device_requirement": "required",
       "skip_policy": "fail",
@@ -108,7 +108,15 @@
           },
           "host_mem_available_floor_bytes": 8589934592,
           "host_swap_growth_limit_bytes": 536870912,
-          "host_memory_poll_interval_ms": 250
+          "host_memory_poll_interval_ms": 250,
+          "host_thermal_guard": {
+            "limit_millicelsius": 97000,
+            "poll_interval_ms": 250,
+            "sensor": {
+              "hwmon_name": "k10temp",
+              "label": "Tctl"
+            }
+          }
         }
       },
       "cases": [
@@ -210,6 +218,10 @@
               "host_swap_used_end_bytes",
               "host_swap_used_peak_bytes",
               "host_swap_used_start_bytes",
+              "host_temperature_end_millicelsius",
+              "host_temperature_peak_millicelsius",
+              "host_temperature_start_millicelsius",
+              "host_thermal_guard_trip_count",
               "itl_ms_p50",
               "itl_ms_p99",
               "itl_ms_p999",

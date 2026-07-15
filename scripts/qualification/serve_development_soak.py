@@ -44,6 +44,10 @@ STABILIZATION_GPU_DELTA_LIMIT_BYTES = 64 * 1024 * 1024
 STABILIZATION_RSS_DELTA_LIMIT_BYTES = 16 * 1024 * 1024
 VULKAN_ACTIVE_GPU_PEAK_GROWTH_LIMIT_BYTES = 1024 * 1024 * 1024
 SETUP_DEADLINE_SECONDS = 1200.0
+HOST_GUARD_POLL_INTERVAL_SECONDS = 0.25
+HOST_THERMAL_LIMIT_MILLICELSIUS = 97_000
+HOST_THERMAL_SENSOR_NAME = "k10temp"
+HOST_THERMAL_SENSOR_LABEL = "Tctl"
 PROCESS_MEMORY_MAPPING_CATEGORIES = (
     "anonymous",
     "device",
@@ -115,6 +119,9 @@ class SoakRuntime:
     setup_deadline_seconds: float
     host_mem_available_floor_bytes: int | None = None
     host_swap_growth_limit_bytes: int | None = None
+    host_thermal_limit_millicelsius: int | None = None
+    host_thermal_sensor_name: str | None = None
+    host_thermal_sensor_label: str | None = None
 
 
 ROCM_RUNTIME = SoakRuntime(
@@ -168,6 +175,9 @@ VULKAN_RUNTIME = SoakRuntime(
     setup_deadline_seconds=1800.0,
     host_mem_available_floor_bytes=8 * 1024 * 1024 * 1024,
     host_swap_growth_limit_bytes=512 * 1024 * 1024,
+    host_thermal_limit_millicelsius=HOST_THERMAL_LIMIT_MILLICELSIUS,
+    host_thermal_sensor_name=HOST_THERMAL_SENSOR_NAME,
+    host_thermal_sensor_label=HOST_THERMAL_SENSOR_LABEL,
 )
 RUNTIMES = {
     runtime.variant_id: runtime for runtime in (ROCM_RUNTIME, VULKAN_RUNTIME)
@@ -311,6 +321,10 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "host_swap_used_end_bytes": ("bytes", "exact", True),
     "host_swap_used_peak_bytes": ("bytes", "max", True),
     "host_swap_used_start_bytes": ("bytes", "exact", True),
+    "host_temperature_end_millicelsius": ("millicelsius", "exact", True),
+    "host_temperature_peak_millicelsius": ("millicelsius", "max", True),
+    "host_temperature_start_millicelsius": ("millicelsius", "exact", True),
+    "host_thermal_guard_trip_count": ("count", "sum", True),
     "resident_prefill_active_rows_end": ("rows", "exact", True),
     "resident_prefill_attempt_count": ("count", "sum", False),
     "resident_prefill_completed_row_count": ("rows", "sum", False),
@@ -435,7 +449,23 @@ def effective_config(
         effective["soak"]["host_swap_growth_limit_bytes"] = (
             runtime.host_swap_growth_limit_bytes
         )
-        effective["soak"]["host_memory_poll_interval_ms"] = 250
+        effective["soak"]["host_memory_poll_interval_ms"] = int(
+            HOST_GUARD_POLL_INTERVAL_SECONDS * 1000
+        )
+    if runtime.host_thermal_limit_millicelsius is not None:
+        if (
+            runtime.host_thermal_sensor_name is None
+            or runtime.host_thermal_sensor_label is None
+        ):
+            raise SoakError("thermal limit requires a complete hwmon sensor selector")
+        effective["soak"]["host_thermal_guard"] = {
+            "limit_millicelsius": runtime.host_thermal_limit_millicelsius,
+            "poll_interval_ms": int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
+            "sensor": {
+                "hwmon_name": runtime.host_thermal_sensor_name,
+                "label": runtime.host_thermal_sensor_label,
+            },
+        }
     if runtime.vulkan_allocation_growth_limit_count is not None:
         effective["soak"]["vulkan_allocation_growth_limit_count"] = (
             runtime.vulkan_allocation_growth_limit_count
@@ -770,6 +800,7 @@ class HostMemoryGuard:
             target=self._run, name="qualification-host-memory-guard"
         )
         self._started = False
+        self._closed = False
 
     def start(self) -> None:
         self._sample()
@@ -779,6 +810,9 @@ class HostMemoryGuard:
         self._started = True
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         if self.trip_reason is None:
             self._sample()
         self.stop.set()
@@ -839,7 +873,159 @@ class HostMemoryGuard:
             self._trip(f"host memory guard failed closed: {message}")
 
     def _run(self) -> None:
-        while not self.stop.wait(0.25):
+        while not self.stop.wait(HOST_GUARD_POLL_INTERVAL_SECONDS):
+            self._sample()
+            if self.trip_reason is not None:
+                return
+
+
+def resolve_hwmon_temperature_input(
+    hwmon_name: str,
+    label: str,
+    hwmon_root: Path = Path("/sys/class/hwmon"),
+) -> Path:
+    if not hwmon_name or not label:
+        raise SoakError("hwmon temperature selector requires nonempty name and label")
+    matches: list[Path] = []
+    for device in sorted(hwmon_root.glob("hwmon*")):
+        name_path = device / "name"
+        if not name_path.is_file():
+            continue
+        if name_path.read_text(encoding="utf-8").strip() != hwmon_name:
+            continue
+        for label_path in sorted(device.glob("temp*_label")):
+            if label_path.read_text(encoding="utf-8").strip() != label:
+                continue
+            input_path = label_path.with_name(
+                label_path.name.removesuffix("_label") + "_input"
+            )
+            if not input_path.is_file():
+                raise SoakError(
+                    f"hwmon sensor {hwmon_name}/{label} has no temperature input"
+                )
+            matches.append(input_path)
+    if len(matches) != 1:
+        raise SoakError(
+            f"hwmon sensor {hwmon_name}/{label} resolved to {len(matches)} inputs, "
+            "expected exactly one"
+        )
+    return matches[0]
+
+
+def read_hwmon_temperature_millicelsius(path: Path) -> int:
+    raw = path.read_text(encoding="utf-8").strip()
+    if re.fullmatch(r"[+-]?\d+", raw) is None:
+        raise SoakError(f"{path} contains a non-integer temperature {raw!r}")
+    value = int(raw)
+    if value < -100_000 or value > 250_000:
+        raise SoakError(f"{path} temperature {value} millicelsius is implausible")
+    return value
+
+
+class HostThermalGuard:
+    def __init__(
+        self,
+        process: subprocess.Popen[str],
+        *,
+        hwmon_name: str,
+        label: str,
+        limit_millicelsius: int,
+        hwmon_root: Path = Path("/sys/class/hwmon"),
+    ) -> None:
+        if limit_millicelsius <= 0:
+            raise SoakError("host thermal limit must be positive")
+        self.process = process
+        self.hwmon_name = hwmon_name
+        self.label = label
+        self.limit_millicelsius = limit_millicelsius
+        self.hwmon_root = hwmon_root
+        self.input_path: Path | None = None
+        self.stop = threading.Event()
+        self.samples: list[int] = []
+        self.errors: list[str] = []
+        self.trip_reason: str | None = None
+        self.thread = threading.Thread(
+            target=self._run, name="qualification-host-thermal-guard"
+        )
+        self._started = False
+        self._closed = False
+
+    def start(self) -> None:
+        self._sample()
+        if self.trip_reason is not None:
+            return
+        assert self.input_path is not None
+        mixed.trace(
+            "host_thermal_guard_armed",
+            sensor_name=self.hwmon_name,
+            sensor_label=self.label,
+            sensor_path=str(self.input_path),
+            limit_millicelsius=self.limit_millicelsius,
+            poll_interval_ms=int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
+        )
+        self.thread.start()
+        self._started = True
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self.trip_reason is None:
+            self._sample()
+        self.stop.set()
+        if not self._started:
+            return
+        self.thread.join(timeout=10.0)
+        if self.thread.is_alive() and len(self.errors) < 8:
+            self.errors.append("host-thermal-guard thread did not stop within 10 seconds")
+
+    def metric_values(self) -> dict[str, int]:
+        if not self.samples:
+            return {
+                "host_temperature_end_millicelsius": 0,
+                "host_temperature_peak_millicelsius": 0,
+                "host_temperature_start_millicelsius": 0,
+                "host_thermal_guard_trip_count": int(self.trip_reason is not None),
+            }
+        return {
+            "host_temperature_end_millicelsius": self.samples[-1],
+            "host_temperature_peak_millicelsius": max(self.samples),
+            "host_temperature_start_millicelsius": self.samples[0],
+            "host_thermal_guard_trip_count": int(self.trip_reason is not None),
+        }
+
+    def _trip(self, reason: str) -> None:
+        if self.trip_reason is not None:
+            return
+        self.trip_reason = reason
+        if self.process.poll() is None:
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+    def _sample(self) -> None:
+        try:
+            if self.input_path is None:
+                self.input_path = resolve_hwmon_temperature_input(
+                    self.hwmon_name, self.label, self.hwmon_root
+                )
+            temperature = read_hwmon_temperature_millicelsius(self.input_path)
+            self.samples.append(temperature)
+            if temperature >= self.limit_millicelsius:
+                self._trip(
+                    f"host {self.hwmon_name}/{self.label} reached {temperature} "
+                    f"millicelsius at or above the {self.limit_millicelsius}-millicelsius "
+                    "safety limit"
+                )
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            if len(self.errors) < 8:
+                self.errors.append(message)
+            self._trip(f"host thermal guard failed closed: {message}")
+
+    def _run(self) -> None:
+        while not self.stop.wait(HOST_GUARD_POLL_INTERVAL_SECONDS):
             self._sample()
             if self.trip_reason is not None:
                 return
@@ -1750,6 +1936,18 @@ def execute(
         if runtime.host_mem_available_floor_bytes is not None
         else None
     )
+    thermal_guard = (
+        HostThermalGuard(
+            process,
+            hwmon_name=runtime.host_thermal_sensor_name or "",
+            label=runtime.host_thermal_sensor_label or "",
+            limit_millicelsius=runtime.host_thermal_limit_millicelsius,
+        )
+        if runtime.host_thermal_limit_millicelsius is not None
+        else None
+    )
+    if thermal_guard is not None:
+        thermal_guard.start()
     if host_guard is not None:
         host_guard.start()
     shutdown: mixed.ShutdownOutcome | None = None
@@ -2448,6 +2646,8 @@ def execute(
         all_server_events = server_log.events_since(started)
         gpu_end = gpu_memory_bytes(port, process.pid, runtime)
         rss_end = process_memory_snapshot(process.pid).rss_bytes
+        if thermal_guard is not None:
+            thermal_guard.close()
         if host_guard is not None:
             host_guard.close()
         gpu_peak = max([gpu_start, gpu_end, *sampler.samples])
@@ -2656,6 +2856,8 @@ def execute(
             )
         if host_guard is not None:
             values.update(host_guard.metric_values())
+        if thermal_guard is not None:
+            values.update(thermal_guard.metric_values())
         if duration < minimum_duration_seconds:
             failures.append(
                 f"soak duration {duration:.3f}s was below {minimum_duration_seconds:.3f}s"
@@ -2758,6 +2960,8 @@ def execute(
         failures.append(f"{type(exc).__name__}: {exc}")
     finally:
         sampler.close()
+        if thermal_guard is not None:
+            thermal_guard.close()
         if host_guard is not None:
             host_guard.close()
         shutdown = mixed.terminate_process(process)
@@ -2779,6 +2983,17 @@ def execute(
                 f"{runtime.host_swap_growth_limit_bytes} bytes"
             )
 
+    if thermal_guard is not None:
+        if thermal_guard.trip_reason is not None:
+            failures.append(thermal_guard.trip_reason)
+        if thermal_guard.errors:
+            failures.append(
+                "host thermal guard errors: " + ", ".join(thermal_guard.errors)
+            )
+        observed_thermal = thermal_guard.metric_values()
+        if observed_thermal["host_thermal_guard_trip_count"] != 0:
+            failures.append("host thermal guard tripped during the soak")
+
     if values is None:
         values = {name: 0 for name in metric_definitions(runtime)}
         values["soak_duration_seconds"] = max(0.0, time.monotonic() - started)
@@ -2793,6 +3008,8 @@ def execute(
         values["stabilization_stable_cycle_count"] = stabilization_stable_cycles
         if host_guard is not None:
             values.update(host_guard.metric_values())
+        if thermal_guard is not None:
+            values.update(thermal_guard.metric_values())
         if (
             observed_vulkan_buffers_start is not None
             and observed_vulkan_buffers_end is not None

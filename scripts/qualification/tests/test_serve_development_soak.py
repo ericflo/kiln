@@ -135,6 +135,14 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(
             vulkan["soak"]["host_mem_available_floor_bytes"], 8 * 1024**3
         )
+        self.assertEqual(
+            vulkan["soak"]["host_thermal_guard"],
+            {
+                "limit_millicelsius": 97_000,
+                "poll_interval_ms": 250,
+                "sensor": {"hwmon_name": "k10temp", "label": "Tctl"},
+            },
+        )
         self.assertNotIn(
             "host_mem_available_floor_bytes",
             soak.effective_config(
@@ -964,6 +972,77 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(
             guard.metric_values()["host_mem_available_min_bytes"], 7 * 1024**3
         )
+
+    def test_hwmon_temperature_selector_uses_stable_name_and_label(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            unrelated = root / "hwmon0"
+            unrelated.mkdir()
+            (unrelated / "name").write_text("nvme\n", encoding="utf-8")
+            sensor = root / "hwmon7"
+            sensor.mkdir()
+            (sensor / "name").write_text("k10temp\n", encoding="utf-8")
+            (sensor / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            (sensor / "temp1_input").write_text("81250\n", encoding="utf-8")
+
+            resolved = soak.resolve_hwmon_temperature_input("k10temp", "Tctl", root)
+            self.assertEqual(resolved, sensor / "temp1_input")
+            self.assertEqual(soak.read_hwmon_temperature_millicelsius(resolved), 81250)
+
+    def test_host_thermal_guard_terminates_at_limit_and_records_peak(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sensor = root / "hwmon3"
+            sensor.mkdir()
+            (sensor / "name").write_text("k10temp\n", encoding="utf-8")
+            (sensor / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            temperature = sensor / "temp1_input"
+            temperature.write_text("95000\n", encoding="utf-8")
+            guard = soak.HostThermalGuard(
+                process,
+                hwmon_name="k10temp",
+                label="Tctl",
+                limit_millicelsius=97_000,
+                hwmon_root=root,
+            )
+            with mock.patch.object(soak.os, "killpg") as killpg:
+                guard._sample()
+                temperature.write_text("97000\n", encoding="utf-8")
+                guard._sample()
+
+        killpg.assert_called_once_with(4321, signal.SIGTERM)
+        self.assertIn("at or above", guard.trip_reason or "")
+        self.assertEqual(guard.metric_values()["host_thermal_guard_trip_count"], 1)
+        self.assertEqual(
+            guard.metric_values()["host_temperature_peak_millicelsius"], 97_000
+        )
+
+    def test_host_thermal_guard_fails_closed_on_ambiguous_sensor(self) -> None:
+        process = mock.Mock(pid=9876)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for index in range(2):
+                sensor = root / f"hwmon{index}"
+                sensor.mkdir()
+                (sensor / "name").write_text("k10temp\n", encoding="utf-8")
+                (sensor / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+                (sensor / "temp1_input").write_text("50000\n", encoding="utf-8")
+            guard = soak.HostThermalGuard(
+                process,
+                hwmon_name="k10temp",
+                label="Tctl",
+                limit_millicelsius=97_000,
+                hwmon_root=root,
+            )
+            with mock.patch.object(soak.os, "killpg") as killpg:
+                guard._sample()
+
+        killpg.assert_called_once_with(9876, signal.SIGTERM)
+        self.assertIn("failed closed", guard.trip_reason or "")
+        self.assertTrue(guard.errors)
 
     def test_metric_contract_is_closed_sorted_and_finite(self) -> None:
         values = {name: 0 for name in soak.METRIC_DEFINITIONS}

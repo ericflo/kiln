@@ -1154,6 +1154,22 @@ fails closed. The receipt records the starting, minimum, and ending available
 memory, starting/peak/ending swap use, and swap growth. More than 512 MiB of
 new swap is a failure even when the 8 GiB floor was not crossed.
 
+The same 250 ms safety loop independently monitors the Strix Halo package
+temperature from Linux hwmon. The committed workload selects the sensor by the
+stable pair `name=k10temp` and `label=Tctl`, never by a boot-dependent
+`hwmonN` path, and sets a 97,000 millicelsius limit. The driver resolves exactly
+one matching `temp*_input` after launching the server. A missing, ambiguous,
+non-integer, or implausible sensor reading fails closed and sends `SIGTERM` to
+the server process group; a valid reading at or above the limit does the same.
+The result retains starting, peak, and ending package temperature plus the
+thermal-trip count, including startup or pre-measurement failures. The effective
+configuration records the sensor name, label, limit, and poll interval, so a
+receipt cannot silently inherit a different sensor or threshold. This guard
+covers model load, native prewarm, warmup, stabilization, measurement, and final
+drain. The preceding source build remains separately bounded by
+`scripts/cargo-bounded.sh`; the thermal guard does not claim to control that
+transient build service.
+
 At the drained warmup baseline and after each of the at most eight Vulkan
 stabilization cycles, the driver also reads `/proc/<pid>/smaps`. This is bounded
 diagnostic work, not a hot-loop sampler. Every mapping must contain Linux's
