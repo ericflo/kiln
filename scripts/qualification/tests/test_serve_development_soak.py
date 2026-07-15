@@ -61,6 +61,47 @@ def batched_state_debug(**overrides: int | bool) -> dict:
 
 
 class ServeRocmSoakTests(unittest.TestCase):
+    def test_invalid_stream_diagnostic_names_every_contract_dimension(self) -> None:
+        result = soak.mixed.StreamResult(
+            name="soak-stabilize-w00010-r01",
+            marker="QUAL-7-soak-shared-r01",
+            started=1.0,
+            finished=2.0,
+            semantic_times=[],
+            token_ready_times=[1.5],
+            token_queue_delays_ms=[0.0],
+            prompt_tokens=191,
+            completion_tokens=1,
+            usage_records=0,
+            finish_reason="stop",
+            done=False,
+            cancelled=True,
+            error="QualificationError: timing mismatch",
+            actor_queue_ms=1.25,
+            actor_admission_ms=2.5,
+            actor_prefill_wall_ms=3.75,
+        )
+
+        summary = soak.invalid_stream_results_summary([result], 16)
+
+        for expected in (
+            "soak-stabilize-w00010-r01",
+            "success=false+finish_reason!=length+completion_tokens!=16",
+            "QualificationError: timing mismatch",
+            "finish_reason='stop'",
+            "prompt_tokens=191",
+            "completion_tokens=1",
+            "usage_records=0",
+            "token_timings=1",
+            "semantic_events=0",
+            "done=False",
+            "cancelled=True",
+            "actor_queue_ms=1.25",
+            "actor_admission_ms=2.5",
+            "actor_prefill_wall_ms=3.75",
+        ):
+            self.assertIn(expected, summary)
+
     def test_runtime_profiles_are_closed_and_backend_specific(self) -> None:
         self.assertIs(
             soak.runtime_for_variant(soak.ROCM_RUNTIME.variant_id), soak.ROCM_RUNTIME

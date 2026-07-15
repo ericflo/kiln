@@ -1523,6 +1523,41 @@ def run_wave(
             raise SoakError(f"{len(unfinished)} request workers survived wave cleanup")
 
 
+def invalid_stream_result_summary(
+    result: mixed.StreamResult, expected_completion_tokens: int
+) -> str:
+    violations: list[str] = []
+    if not result.success:
+        violations.append("success=false")
+    if result.finish_reason != "length":
+        violations.append("finish_reason!=length")
+    if result.completion_tokens != expected_completion_tokens:
+        violations.append(
+            f"completion_tokens!={expected_completion_tokens}"
+        )
+    return (
+        f"{result.name}(violations={'+'.join(violations) or 'none'},"
+        f"error={result.error!r},finish_reason={result.finish_reason!r},"
+        f"prompt_tokens={result.prompt_tokens},"
+        f"completion_tokens={result.completion_tokens},"
+        f"usage_records={result.usage_records},"
+        f"token_timings={len(result.token_ready_times)},"
+        f"semantic_events={len(result.semantic_times)},done={result.done},"
+        f"cancelled={result.cancelled},actor_queue_ms={result.actor_queue_ms!r},"
+        f"actor_admission_ms={result.actor_admission_ms!r},"
+        f"actor_prefill_wall_ms={result.actor_prefill_wall_ms!r})"
+    )
+
+
+def invalid_stream_results_summary(
+    results: list[mixed.StreamResult], expected_completion_tokens: int
+) -> str:
+    return ", ".join(
+        invalid_stream_result_summary(item, expected_completion_tokens)
+        for item in results[:8]
+    )
+
+
 def run_cancellation(
     port: int,
     *,
@@ -1804,11 +1839,7 @@ def execute(
             if bad_warm:
                 raise SoakError(
                     "steady-state warmup produced invalid responses: "
-                    + ", ".join(
-                        f"{item.name}({item.error or item.finish_reason},"
-                        f"tokens={item.completion_tokens})"
-                        for item in bad_warm[:8]
-                    )
+                    + invalid_stream_results_summary(bad_warm, runtime.max_tokens)
                 )
             health_start = wait_drained(
                 port, deadline, f"steady-state warmup {steady_state_warmup_waves}"
@@ -1899,7 +1930,9 @@ def execute(
                 if bad_stable:
                     cycle_failures.append(
                         "stabilization produced invalid responses: "
-                        + ", ".join(item.name for item in bad_stable[:8])
+                        + invalid_stream_results_summary(
+                            bad_stable, runtime.max_tokens
+                        )
                     )
                 if (stabilization_wave + 1) % runtime.cancel_every_waves == 0:
                     cancellation_failure = run_cancellation(
@@ -2208,11 +2241,7 @@ def execute(
             if bad:
                 wave_failures.append(
                     "wave produced invalid responses: "
-                    + ", ".join(
-                        f"{item.name}({item.error or item.finish_reason},"
-                        f"tokens={item.completion_tokens})"
-                        for item in bad[:8]
-                    )
+                    + invalid_stream_results_summary(bad, runtime.max_tokens)
                 )
 
             if (wave + 1) % runtime.cancel_every_waves == 0:
