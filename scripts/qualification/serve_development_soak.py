@@ -238,6 +238,47 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
 }
 VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     **METRIC_DEFINITIONS,
+    "batched_state_cache_active_leases_end": ("leases", "exact", True),
+    "batched_state_cache_capacity_rows_end": ("rows", "exact", False),
+    "batched_state_cache_completed_row_eviction_count": ("count", "sum", True),
+    "batched_state_cache_completed_row_preservation_count": (
+        "count",
+        "sum",
+        False,
+    ),
+    "batched_state_cache_entry_present_end": ("entries", "exact", False),
+    "batched_state_cache_exact_reuse_count": ("count", "sum", False),
+    "batched_state_cache_explicit_invalidation_count": ("count", "sum", True),
+    "batched_state_cache_explicit_invalidation_eviction_count": (
+        "count",
+        "sum",
+        True,
+    ),
+    "batched_state_cache_fresh_assembly_count": ("count", "sum", True),
+    "batched_state_cache_lease_drop_eviction_count": ("count", "sum", True),
+    "batched_state_cache_logical_rows_end": ("rows", "exact", False),
+    "batched_state_cache_max_active_leases": ("leases", "max", True),
+    "batched_state_cache_park_count": ("count", "sum", False),
+    "batched_state_cache_park_replacement_eviction_count": (
+        "count",
+        "sum",
+        True,
+    ),
+    "batched_state_cache_rejected_insufficient_capacity_count": (
+        "count",
+        "sum",
+        True,
+    ),
+    "batched_state_cache_rejected_missing_row_ids_count": ("count", "sum", True),
+    "batched_state_cache_rejected_nonresident_cache_count": ("count", "sum", True),
+    "batched_state_cache_rejected_nonresident_rows_count": ("count", "sum", True),
+    "batched_state_cache_resident_capacity_reuse_count": ("count", "sum", False),
+    "batched_state_cache_resident_end": ("count", "exact", False),
+    "batched_state_cache_resident_prefix_view_count": ("count", "sum", False),
+    "batched_state_cache_resident_refresh_count": ("count", "sum", False),
+    "batched_state_cache_take_hit_count": ("count", "sum", False),
+    "batched_state_cache_take_miss_count": ("count", "sum", True),
+    "batched_state_cache_take_miss_while_leased_count": ("count", "sum", True),
     "host_mem_available_end_bytes": ("bytes", "exact", False),
     "host_mem_available_min_bytes": ("bytes", "min", False),
     "host_mem_available_start_bytes": ("bytes", "exact", False),
@@ -794,6 +835,138 @@ VULKAN_BUFFER_POOL_COUNTER_FIELDS = (
     "uncached_allocated_bytes",
 )
 
+BATCHED_STATE_CACHE_BOOL_FIELDS = ("entry_present", "resident")
+BATCHED_STATE_CACHE_GAUGE_FIELDS = (
+    "capacity_rows",
+    "logical_rows",
+    "active_leases",
+    "max_active_leases",
+)
+BATCHED_STATE_CACHE_COUNTER_FIELDS = (
+    "take_hit_count",
+    "take_miss_count",
+    "take_miss_while_leased_count",
+    "exact_reuse_count",
+    "resident_capacity_reuse_count",
+    "resident_prefix_view_count",
+    "resident_refresh_count",
+    "fresh_assembly_count",
+    "rejected_missing_row_ids_count",
+    "rejected_nonresident_rows_count",
+    "rejected_nonresident_cache_count",
+    "rejected_insufficient_capacity_count",
+    "park_count",
+    "park_replacement_eviction_count",
+    "explicit_invalidation_count",
+    "explicit_invalidation_eviction_count",
+    "completed_row_preservation_count",
+    "completed_row_eviction_count",
+    "lease_drop_eviction_count",
+)
+BATCHED_STATE_CACHE_FIELDS = (
+    *BATCHED_STATE_CACHE_BOOL_FIELDS,
+    *BATCHED_STATE_CACHE_GAUGE_FIELDS,
+    *BATCHED_STATE_CACHE_COUNTER_FIELDS,
+)
+
+
+def batched_state_cache_snapshot(
+    debug: dict[str, Any], runtime: SoakRuntime = ROCM_RUNTIME
+) -> dict[str, int | bool] | None:
+    if runtime.backend != "vulkan":
+        return None
+    caches = debug.get("caches")
+    if not isinstance(caches, dict):
+        raise SoakError("debug model state is missing caches")
+    raw = caches.get("batched_recurrent_state")
+    if not isinstance(raw, dict):
+        raise SoakError("debug caches.batched_recurrent_state is missing")
+    if set(raw) != set(BATCHED_STATE_CACHE_FIELDS):
+        missing = sorted(set(BATCHED_STATE_CACHE_FIELDS) - set(raw))
+        extra = sorted(set(raw) - set(BATCHED_STATE_CACHE_FIELDS))
+        raise SoakError(
+            "batched recurrent-state cache field mismatch: "
+            f"missing={missing}, extra={extra}"
+        )
+    snapshot: dict[str, int | bool] = {}
+    for field in BATCHED_STATE_CACHE_BOOL_FIELDS:
+        value = raw[field]
+        if not isinstance(value, bool):
+            raise SoakError(
+                f"batched recurrent-state cache field {field} must be boolean, "
+                f"got {value!r}"
+            )
+        snapshot[field] = value
+    for field in (*BATCHED_STATE_CACHE_GAUGE_FIELDS, *BATCHED_STATE_CACHE_COUNTER_FIELDS):
+        value = raw[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SoakError(
+                f"batched recurrent-state cache field {field} must be a nonnegative "
+                f"integer, got {value!r}"
+            )
+        snapshot[field] = value
+    if snapshot["capacity_rows"] < snapshot["logical_rows"]:
+        raise SoakError("batched recurrent-state cache logical rows exceed capacity")
+    if not snapshot["entry_present"] and (
+        snapshot["capacity_rows"] != 0
+        or snapshot["logical_rows"] != 0
+        or snapshot["resident"]
+    ):
+        raise SoakError("absent batched recurrent-state cache carries parked ownership")
+    if snapshot["max_active_leases"] < snapshot["active_leases"]:
+        raise SoakError("batched recurrent-state active leases exceed the process peak")
+    return snapshot
+
+
+def batched_state_cache_counter_delta(
+    before: dict[str, int | bool], after: dict[str, int | bool], field: str
+) -> int:
+    start = before[field]
+    end = after[field]
+    if isinstance(start, bool) or isinstance(end, bool):
+        raise SoakError(f"batched recurrent-state cache counter {field} is boolean")
+    if end < start:
+        raise SoakError(
+            f"batched recurrent-state cache counter {field} regressed: {start} -> {end}"
+        )
+    return end - start
+
+
+def batched_state_cache_trace_values(
+    before: dict[str, int | bool], after: dict[str, int | bool]
+) -> dict[str, int | bool]:
+    values: dict[str, int | bool] = {
+        "batched_state_cache_entry_present": after["entry_present"],
+        "batched_state_cache_capacity_rows": after["capacity_rows"],
+        "batched_state_cache_logical_rows": after["logical_rows"],
+        "batched_state_cache_resident": after["resident"],
+        "batched_state_cache_active_leases": after["active_leases"],
+        "batched_state_cache_max_active_leases": after["max_active_leases"],
+    }
+    for field in BATCHED_STATE_CACHE_COUNTER_FIELDS:
+        values[f"batched_state_cache_{field}_delta"] = (
+            batched_state_cache_counter_delta(before, after, field)
+        )
+    return values
+
+
+def batched_state_cache_metric_values(
+    before: dict[str, int | bool], after: dict[str, int | bool]
+) -> dict[str, int]:
+    values = {
+        "batched_state_cache_active_leases_end": int(after["active_leases"]),
+        "batched_state_cache_capacity_rows_end": int(after["capacity_rows"]),
+        "batched_state_cache_entry_present_end": int(after["entry_present"]),
+        "batched_state_cache_logical_rows_end": int(after["logical_rows"]),
+        "batched_state_cache_max_active_leases": int(after["max_active_leases"]),
+        "batched_state_cache_resident_end": int(after["resident"]),
+    }
+    for field in BATCHED_STATE_CACHE_COUNTER_FIELDS:
+        values[f"batched_state_cache_{field}"] = batched_state_cache_counter_delta(
+            before, after, field
+        )
+    return values
+
 
 def vulkan_buffer_pool_snapshot(
     health: dict[str, Any], runtime: SoakRuntime = ROCM_RUNTIME
@@ -1088,10 +1261,13 @@ def execute(
     observed_vulkan_buffers_end: dict[str, int] | None = None
     observed_vulkan_pool_start: dict[str, int] | None = None
     observed_vulkan_pool_end: dict[str, int] | None = None
+    observed_batched_state_start: dict[str, int | bool] | None = None
+    observed_batched_state_end: dict[str, int | bool] | None = None
     try:
         mixed.wait_ready(port, process, server_log, deadline)
         health_startup = mixed.read_stable_health(port, deadline, "soak startup health")
         debug_start = mixed.json_request(port, "GET", "/v1/debug/model-state")
+        batched_state_cache_snapshot(debug_start, runtime)
         failures.extend(
             mixed.attest_runtime(
                 runtime.variant_id,
@@ -1166,12 +1342,16 @@ def execute(
             graph_warm = mixed.graph_snapshot(health_start)
             batching_warm = mixed.batching_snapshot(health_start)
             prefix_warm = prefix_cache_snapshot(health_start)
+            debug_warm = mixed.json_request(port, "GET", "/v1/debug/model-state")
+            batched_warm = batched_state_cache_snapshot(debug_warm, runtime)
             warm_failures = mixed.attest_runtime(
                 runtime.variant_id,
                 health_start,
-                mixed.json_request(port, "GET", "/v1/debug/model-state"),
+                debug_warm,
                 rocm_graph_cache_entries=runtime.graph_cache_max,
             )
+            if batched_warm is not None and batched_warm["active_leases"] != 0:
+                warm_failures.append("steady warmup retained a batched-state lease")
             if graph_warm["failures"] != 0 or graph_warm["fallback_total"] != 0:
                 warm_failures.append("graph failure or fallback occurred during steady warmup")
             leaked_warm = unaccounted_blocks(batching_warm, prefix_warm)
@@ -1204,6 +1384,14 @@ def execute(
         previous_vulkan_pool = vulkan_buffer_pool_snapshot(health_start, runtime)
         observed_vulkan_pool_start = previous_vulkan_pool
         observed_vulkan_pool_end = previous_vulkan_pool
+        debug_stabilization_start = mixed.json_request(
+            port, "GET", "/v1/debug/model-state"
+        )
+        previous_batched_state = batched_state_cache_snapshot(
+            debug_stabilization_start, runtime
+        )
+        observed_batched_state_start = previous_batched_state
+        observed_batched_state_end = previous_batched_state
         stabilization_started = time.monotonic()
         while stabilization_cycles < runtime.max_stabilization_cycles:
             cycle_failures: list[str] = []
@@ -1252,14 +1440,28 @@ def execute(
                 graph_stable = mixed.graph_snapshot(health_start)
                 batching_stable = mixed.batching_snapshot(health_start)
                 prefix_stable = prefix_cache_snapshot(health_start)
+                debug_stable = mixed.json_request(
+                    port, "GET", "/v1/debug/model-state"
+                )
+                current_batched_state = batched_state_cache_snapshot(
+                    debug_stable, runtime
+                )
+                observed_batched_state_end = current_batched_state
                 cycle_failures.extend(
                     mixed.attest_runtime(
                         runtime.variant_id,
                         health_start,
-                        mixed.json_request(port, "GET", "/v1/debug/model-state"),
+                        debug_stable,
                         rocm_graph_cache_entries=runtime.graph_cache_max,
                     )
                 )
+                if (
+                    current_batched_state is not None
+                    and current_batched_state["active_leases"] != 0
+                ):
+                    cycle_failures.append(
+                        "stabilization retained a batched-state lease after drain"
+                    )
                 if (
                     graph_stable["failures"] != 0
                     or graph_stable["fallback_total"] != 0
@@ -1349,14 +1551,6 @@ def execute(
                 )
                 if vulkan_live_bytes_delta > 0:
                     stabilization_vulkan_growth_cycles += 1
-            if (
-                runtime.backend == "vulkan"
-                and stabilization_rss_growth > memory_growth_limit_bytes
-            ):
-                raise SoakError(
-                    "Vulkan stabilization RSS growth exceeded the cumulative limit: "
-                    f"{stabilization_rss_growth} > {memory_growth_limit_bytes} bytes"
-                )
             stable_cycle = gpu_delta <= runtime.stabilization_gpu_delta_limit_bytes
             if runtime.backend == "vulkan":
                 stable_cycle = stable_cycle and vulkan_live_bytes_delta == 0
@@ -1444,11 +1638,26 @@ def execute(
                         "uncached_allocated_bytes",
                     ),
                 )
+            if previous_batched_state is not None and current_batched_state is not None:
+                cycle_trace.update(
+                    batched_state_cache_trace_values(
+                        previous_batched_state, current_batched_state
+                    )
+                )
             mixed.trace("soak_stabilization_cycle", **cycle_trace)
             previous_gpu = current_gpu
             previous_memory = current_memory
             previous_vulkan_buffers = current_vulkan_buffers
             previous_vulkan_pool = current_vulkan_pool
+            previous_batched_state = current_batched_state
+            if (
+                runtime.backend == "vulkan"
+                and stabilization_rss_growth > memory_growth_limit_bytes
+            ):
+                raise SoakError(
+                    "Vulkan stabilization RSS growth exceeded the cumulative limit: "
+                    f"{stabilization_rss_growth} > {memory_growth_limit_bytes} bytes"
+                )
             if (
                 stabilization_cycles >= runtime.min_stabilization_cycles
                 and stabilization_stable_cycles >= runtime.required_stable_cycles
@@ -1466,6 +1675,12 @@ def execute(
         prefix_start = prefix_cache_snapshot(health_start)
         vulkan_buffers_start = vulkan_buffer_snapshot(health_start, runtime)
         vulkan_pool_start = vulkan_buffer_pool_snapshot(health_start, runtime)
+        debug_measurement_start = mixed.json_request(
+            port, "GET", "/v1/debug/model-state"
+        )
+        batched_state_start = batched_state_cache_snapshot(
+            debug_measurement_start, runtime
+        )
         gpu_start = gpu_memory_bytes(port, process.pid, runtime)
         rss_start = process_memory_snapshot(process.pid).rss_bytes
         sampler.start()
@@ -1514,6 +1729,8 @@ def execute(
 
             health = wait_drained(port, deadline, f"soak wave {wave}")
             debug = mixed.json_request(port, "GET", "/v1/debug/model-state")
+            batched_state = batched_state_cache_snapshot(debug, runtime)
+            observed_batched_state_end = batched_state
             wave_failures.extend(
                 mixed.attest_runtime(
                     runtime.variant_id,
@@ -1553,6 +1770,27 @@ def execute(
                     f"wave {wave} retained {prefix['pending_release_entries']} "
                     "pending prefix releases"
                 )
+            if batched_state is not None and batched_state["active_leases"] != 0:
+                wave_failures.append(
+                    f"wave {wave} retained a batched-state lease after drain"
+                )
+            if batched_state_start is not None and batched_state is not None:
+                concurrent_misses = batched_state_cache_counter_delta(
+                    batched_state_start,
+                    batched_state,
+                    "take_miss_while_leased_count",
+                )
+                replacement_evictions = batched_state_cache_counter_delta(
+                    batched_state_start,
+                    batched_state,
+                    "park_replacement_eviction_count",
+                )
+                if concurrent_misses != 0 or replacement_evictions != 0:
+                    wave_failures.append(
+                        "batched recurrent-state ownership overlapped after "
+                        f"stabilization: misses_while_leased={concurrent_misses}, "
+                        f"park_replacements={replacement_evictions}"
+                    )
             if process.poll() is not None:
                 raise SoakError(f"server exited during wave {wave} ({process.returncode})")
             device_faults = [
@@ -1632,6 +1870,12 @@ def execute(
                         f"{vulkan_allocation_growth} > "
                         f"{runtime.vulkan_allocation_growth_limit_count}"
                     )
+            if batched_state_start is not None and batched_state is not None:
+                wave_trace.update(
+                    batched_state_cache_trace_values(
+                        batched_state_start, batched_state
+                    )
+                )
             mixed.trace("soak_wave_complete", **wave_trace)
             wave += 1
             if wave_failures:
@@ -1645,6 +1889,9 @@ def execute(
         prefix_end = prefix_cache_snapshot(health_end)
         vulkan_buffers_end = vulkan_buffer_snapshot(health_end, runtime)
         vulkan_pool_end = vulkan_buffer_pool_snapshot(health_end, runtime)
+        debug_end = mixed.json_request(port, "GET", "/v1/debug/model-state")
+        batched_state_end = batched_state_cache_snapshot(debug_end, runtime)
+        observed_batched_state_end = batched_state_end
         failures.extend(
             mixed.attest_runtime_execution(runtime.variant_id, health_start, health_end)
         )
@@ -1814,6 +2061,34 @@ def execute(
                     f"{vulkan_pool_start['retained_bytes']} -> "
                     f"{vulkan_pool_end['retained_bytes']} bytes"
                 )
+        if (
+            observed_batched_state_start is not None
+            and observed_batched_state_end is not None
+        ):
+            values.update(
+                batched_state_cache_metric_values(
+                    observed_batched_state_start, observed_batched_state_end
+                )
+            )
+            for name in (
+                "batched_state_cache_active_leases_end",
+                "batched_state_cache_completed_row_eviction_count",
+                "batched_state_cache_explicit_invalidation_count",
+                "batched_state_cache_explicit_invalidation_eviction_count",
+                "batched_state_cache_park_replacement_eviction_count",
+                "batched_state_cache_take_miss_while_leased_count",
+            ):
+                if values[name] != 0:
+                    failures.append(f"{name}={values[name]}, expected 0")
+            if values["batched_state_cache_max_active_leases"] > 1:
+                failures.append(
+                    "batched_state_cache_max_active_leases="
+                    f"{values['batched_state_cache_max_active_leases']}, expected <= 1"
+                )
+            if values["batched_state_cache_entry_present_end"] != 1:
+                failures.append("batched recurrent-state capacity was not parked at final drain")
+            if values["batched_state_cache_resident_end"] != 1:
+                failures.append("final batched recurrent-state capacity was not resident")
         if host_guard is not None:
             values.update(host_guard.metric_values())
         if duration < minimum_duration_seconds:
@@ -1972,6 +2247,15 @@ def execute(
             values.update(
                 vulkan_buffer_pool_metric_values(
                     observed_vulkan_pool_start, observed_vulkan_pool_end
+                )
+            )
+        if (
+            observed_batched_state_start is not None
+            and observed_batched_state_end is not None
+        ):
+            values.update(
+                batched_state_cache_metric_values(
+                    observed_batched_state_start, observed_batched_state_end
                 )
             )
     assert shutdown is not None

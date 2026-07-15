@@ -46,6 +46,20 @@ def prefix_health(**overrides: int) -> dict:
     return {"prefix_cache": values}
 
 
+def batched_state_debug(**overrides: int | bool) -> dict:
+    values: dict[str, int | bool] = {
+        "entry_present": True,
+        "capacity_rows": 8,
+        "logical_rows": 8,
+        "resident": True,
+        "active_leases": 0,
+        "max_active_leases": 1,
+        **{field: 0 for field in soak.BATCHED_STATE_CACHE_COUNTER_FIELDS},
+    }
+    values.update(overrides)
+    return {"caches": {"batched_recurrent_state": values}}
+
+
 class ServeRocmSoakTests(unittest.TestCase):
     def test_runtime_profiles_are_closed_and_backend_specific(self) -> None:
         self.assertIs(
@@ -252,6 +266,90 @@ class ServeRocmSoakTests(unittest.TestCase):
         regressed["device_local_allocations"] = 1
         with self.assertRaisesRegex(soak.SoakError, "regressed"):
             soak.vulkan_buffer_counter_delta(after, regressed, "allocations")
+
+    def test_batched_state_cache_snapshot_is_closed_typed_and_reconciled(
+        self,
+    ) -> None:
+        snapshot = soak.batched_state_cache_snapshot(
+            batched_state_debug(), soak.VULKAN_RUNTIME
+        )
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(set(snapshot), set(soak.BATCHED_STATE_CACHE_FIELDS))
+        self.assertTrue(snapshot["entry_present"])
+        self.assertEqual(snapshot["capacity_rows"], 8)
+        self.assertIsNone(
+            soak.batched_state_cache_snapshot(
+                batched_state_debug(), soak.ROCM_RUNTIME
+            )
+        )
+
+        malformed = batched_state_debug()
+        malformed["caches"]["batched_recurrent_state"]["future"] = 0
+        with self.assertRaisesRegex(soak.SoakError, "field mismatch"):
+            soak.batched_state_cache_snapshot(malformed, soak.VULKAN_RUNTIME)
+        with self.assertRaisesRegex(soak.SoakError, "must be boolean"):
+            soak.batched_state_cache_snapshot(
+                batched_state_debug(entry_present=1), soak.VULKAN_RUNTIME
+            )
+        with self.assertRaisesRegex(soak.SoakError, "logical rows exceed capacity"):
+            soak.batched_state_cache_snapshot(
+                batched_state_debug(capacity_rows=7), soak.VULKAN_RUNTIME
+            )
+        with self.assertRaisesRegex(soak.SoakError, "carries parked ownership"):
+            soak.batched_state_cache_snapshot(
+                batched_state_debug(entry_present=False), soak.VULKAN_RUNTIME
+            )
+        with self.assertRaisesRegex(soak.SoakError, "exceed the process peak"):
+            soak.batched_state_cache_snapshot(
+                batched_state_debug(active_leases=2), soak.VULKAN_RUNTIME
+            )
+
+    def test_batched_state_cache_deltas_retain_lifecycle_attribution(self) -> None:
+        before = soak.batched_state_cache_snapshot(
+            batched_state_debug(), soak.VULKAN_RUNTIME
+        )
+        after = soak.batched_state_cache_snapshot(
+            batched_state_debug(
+                capacity_rows=16,
+                logical_rows=6,
+                max_active_leases=2,
+                take_hit_count=7,
+                take_miss_count=3,
+                take_miss_while_leased_count=2,
+                resident_prefix_view_count=4,
+                fresh_assembly_count=1,
+                park_count=8,
+                park_replacement_eviction_count=2,
+            ),
+            soak.VULKAN_RUNTIME,
+        )
+        assert before is not None and after is not None
+
+        trace = soak.batched_state_cache_trace_values(before, after)
+        self.assertEqual(trace["batched_state_cache_capacity_rows"], 16)
+        self.assertEqual(trace["batched_state_cache_take_hit_count_delta"], 7)
+        self.assertEqual(
+            trace["batched_state_cache_park_replacement_eviction_count_delta"], 2
+        )
+
+        metrics = soak.batched_state_cache_metric_values(before, after)
+        expected = {
+            name
+            for name in soak.metric_definitions(soak.VULKAN_RUNTIME)
+            if name.startswith("batched_state_cache_")
+        }
+        self.assertEqual(set(metrics), expected)
+        self.assertEqual(metrics["batched_state_cache_max_active_leases"], 2)
+        self.assertEqual(metrics["batched_state_cache_take_miss_count"], 3)
+        self.assertEqual(
+            metrics["batched_state_cache_park_replacement_eviction_count"], 2
+        )
+
+        regressed = dict(after)
+        regressed["take_hit_count"] = 6
+        with self.assertRaisesRegex(soak.SoakError, "regressed"):
+            soak.batched_state_cache_metric_values(after, regressed)
 
     def test_graph_warmup_contract_depends_on_runtime(self) -> None:
         graph = {"capture_successes": 1, "replay_successes": 1, "failures": 0}

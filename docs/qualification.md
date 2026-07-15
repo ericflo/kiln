@@ -1301,6 +1301,20 @@ without overlap identifies legitimate high-water growth. Increasing
 `lease_drop_eviction_count` without a rejection requires an accompanying
 forward/error investigation.
 
+The Vulkan development soak treats this snapshot as a closed qualification
+contract. It validates the exact field set and types at startup, after warmup,
+after every drained stabilization cycle, after every measured wave, and at
+final drain. Per-cycle traces include the current ownership gauges and the
+delta of every lifecycle counter. The case result retains the complete
+observed stabilization-through-measurement delta, including runs that fail
+before measurement. A drained wave fails if it leaves an active lease; after
+stabilization, any new miss while leased or park-replacement eviction fails
+immediately. The final verdict also requires one resident parked entry, no
+active lease, a peak of at most one active lease, and zero completed-row,
+explicit-invalidation, replacement, or lease-overlap eviction in the observed
+window. These gates distinguish cache ownership overlap from buffer-pool
+pressure without inferring either from RSS alone.
+
 The soak validates that allocation/free deltas reconcile exactly with the
 change in live count and bytes, that pool free plus borrowed ownership equals
 retention, that the cap never changes or overflows, and that every cache
@@ -1316,6 +1330,10 @@ pages becoming resident in already-live allocations. The stabilization trace
 records buffer, pool, DRM, RSS, and swap deltas per cycle. A run that fails
 before measurement retains the observed stabilization window in the Vulkan
 allocation and pool metrics instead of replacing it with zeroes.
+The cumulative stabilization RSS gate runs only after the completed cycle's
+health, debug snapshot, lifecycle deltas, and memory deltas have been traced
+and stored, so the cycle that crosses the safety limit is not lost from the
+diagnostic evidence.
 
 Never edit a receipt to make it pass. A failed receipt is useful evidence: keep
 it when it identifies a reproducible product defect, fix the defect in a new
