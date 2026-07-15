@@ -10,11 +10,13 @@
 //!     The pool holds an internal `Arc` on admitted buffers, so when the
 //!     caller drops their `Arc` the buffer stays available for reuse
 //!     (refcount = 1, only-pool).
-//!   - The next `pool_alloc(device, bytes)` for the same byte-size
-//!     scans for an entry with `Arc::strong_count == 1` (only the
-//!     pool holds it = "free") and returns a clone. No vkAllocateMemory.
-//!   - Cache hit cost: lock contention + linear scan of the size
-//!     bucket. Both are tiny vs. vkAllocateMemory + vkBindBufferMemory.
+//!   - Device-local lookup reuses an exact size bucket. Host-visible lookup
+//!     selects the smallest sufficient bucket for the same device and memory
+//!     type. Both require `Arc::strong_count == 1` (only the pool holds it =
+//!     "free") before returning a clone. No vkAllocateMemory.
+//!   - Cache hit cost: lock contention plus an exact-bucket scan for
+//!     device-local memory or a retained host-bucket scan for best fit. Both
+//!     are tiny vs. vkAllocateMemory + vkBindBufferMemory.
 //!
 //! Memory: retention is capped process-wide. Admission evicts the
 //! oldest idle entries until the new buffer fits; a buffer that cannot
@@ -143,6 +145,27 @@ impl PoolInner {
         self.use_clock = self.use_clock.wrapping_add(1).max(1);
         self.use_clock
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReuseCandidate {
+    bucket_bytes: u64,
+    index: usize,
+    last_used: u64,
+    is_free: bool,
+}
+
+/// Choose the least-waste free buffer, then the oldest slot within that bucket.
+/// Keeping this policy pure makes the size and ownership invariants testable
+/// without constructing Vulkan handles.
+fn best_fit_free_slot(
+    requested_bucket: u64,
+    candidates: impl IntoIterator<Item = ReuseCandidate>,
+) -> Option<ReuseCandidate> {
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate.is_free && candidate.bucket_bytes >= requested_bucket)
+        .min_by_key(|candidate| (candidate.bucket_bytes, candidate.last_used, candidate.index))
 }
 
 #[track_caller]
@@ -280,26 +303,63 @@ pub fn pool_alloc_host_visible(
     let key = (dev_handle, host_mem_type, bucket);
     let mut inner = pool().lock().unwrap();
     let last_used = inner.next_use();
+    // Preserve the common O(exact-bucket) path. Best-fit scans the retained
+    // host buckets only when this request shape has no idle exact slot.
     if let Some(slots) = inner.host_by_device_bytes.get_mut(&key) {
-        for slot in slots.iter_mut() {
-            // Each caller gets a DISTINCT Arc (a free slot here, or a fresh
-            // alloc below), so concurrent `read_back`s never map/unmap the
-            // same VkDeviceMemory at once. The host memory type is
-            // HOST_COHERENT (see `VulkanDevice` mem-type selection), so the
-            // mapped read after `queue_wait_idle` needs no explicit
-            // vkInvalidateMappedMemoryRanges.
-            if Arc::strong_count(&slot.buffer) == 1 {
-                debug_assert!(
-                    slot.buffer.size() >= bytes,
-                    "pooled host buffer {} < requested {bytes}",
-                    slot.buffer.size()
-                );
-                slot.last_used = last_used;
-                let buffer = Arc::clone(&slot.buffer);
-                inner.cache_hits = inner.cache_hits.saturating_add(1);
-                return Ok(buffer);
-            }
+        if let Some(slot) = slots
+            .iter_mut()
+            .find(|slot| Arc::strong_count(&slot.buffer) == 1)
+        {
+            debug_assert!(slot.buffer.size() >= bytes);
+            slot.last_used = last_used;
+            let buffer = Arc::clone(&slot.buffer);
+            inner.cache_hits = inner.cache_hits.saturating_add(1);
+            return Ok(buffer);
         }
+    }
+    let candidate = best_fit_free_slot(
+        bucket,
+        inner
+            .host_by_device_bytes
+            .iter()
+            .filter(|((entry_device, entry_memory_type, entry_bucket), _)| {
+                *entry_device == dev_handle
+                    && *entry_memory_type == host_mem_type
+                    && *entry_bucket > bucket
+            })
+            .flat_map(|((_, _, entry_bucket), slots)| {
+                slots
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, slot)| ReuseCandidate {
+                        bucket_bytes: *entry_bucket,
+                        index,
+                        last_used: slot.last_used,
+                        is_free: Arc::strong_count(&slot.buffer) == 1,
+                    })
+            }),
+    );
+    if let Some(candidate) = candidate {
+        let key = (dev_handle, host_mem_type, candidate.bucket_bytes);
+        let slot = inner
+            .host_by_device_bytes
+            .get_mut(&key)
+            .and_then(|slots| slots.get_mut(candidate.index))
+            .expect("selected host-visible reuse candidate disappeared");
+        // Each caller gets a DISTINCT Arc (a free slot here, or a fresh alloc
+        // below), so concurrent readbacks never map/unmap the same memory. The
+        // production host memory type is HOST_COHERENT; the queue-idle boundary
+        // therefore needs no explicit mapped-range invalidation.
+        debug_assert_eq!(Arc::strong_count(&slot.buffer), 1);
+        debug_assert!(
+            slot.buffer.size() >= bytes,
+            "pooled host buffer {} < requested {bytes}",
+            slot.buffer.size()
+        );
+        slot.last_used = last_used;
+        let buffer = Arc::clone(&slot.buffer);
+        inner.cache_hits = inner.cache_hits.saturating_add(1);
+        return Ok(buffer);
     }
     record_cache_miss(
         &mut inner,
@@ -736,6 +796,83 @@ pub fn pool_drop_for_device(dev: vk::Device) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_reuse_selects_smallest_sufficient_oldest_free_slot() {
+        let candidates = [
+            ReuseCandidate {
+                bucket_bytes: 1_048_576,
+                index: 0,
+                last_used: 1,
+                is_free: true,
+            },
+            ReuseCandidate {
+                bucket_bytes: 2_097_152,
+                index: 0,
+                last_used: 8,
+                is_free: true,
+            },
+            ReuseCandidate {
+                bucket_bytes: 1_572_864,
+                index: 1,
+                last_used: 7,
+                is_free: true,
+            },
+            ReuseCandidate {
+                bucket_bytes: 1_572_864,
+                index: 0,
+                last_used: 4,
+                is_free: true,
+            },
+        ];
+
+        assert_eq!(
+            best_fit_free_slot(1_310_720, candidates),
+            Some(candidates[3])
+        );
+    }
+
+    #[test]
+    fn host_reuse_rejects_undersized_and_borrowed_slots() {
+        let candidates = [
+            ReuseCandidate {
+                bucket_bytes: 1_310_720,
+                index: 0,
+                last_used: 1,
+                is_free: true,
+            },
+            ReuseCandidate {
+                bucket_bytes: 1_572_864,
+                index: 1,
+                last_used: 2,
+                is_free: false,
+            },
+        ];
+
+        assert_eq!(best_fit_free_slot(1_572_864, candidates), None);
+    }
+
+    #[test]
+    fn host_pool_reuses_larger_idle_buffer_for_prefill_tail_shape() -> Result<()> {
+        let device = Arc::new(VulkanDevice::new()?);
+        let larger = pool_alloc_host_visible(
+            device.device(),
+            device.host_visible_mem_type(),
+            2 * 1024 * 1024,
+        )?;
+        let larger_handle = larger.handle();
+        assert_eq!(larger.size(), 2 * 1024 * 1024);
+        drop(larger);
+
+        let reused =
+            pool_alloc_host_visible(device.device(), device.host_visible_mem_type(), 1_572_864)?;
+        assert_eq!(reused.handle(), larger_handle);
+        assert_eq!(reused.size(), 2 * 1024 * 1024);
+
+        drop(reused);
+        drop(device);
+        Ok(())
+    }
 
     #[test]
     fn detailed_stats_derive_borrowed_ownership_without_underflow() {

@@ -394,8 +394,9 @@ curl -s http://localhost:8420/v1/chat/completions \
             <div class="label mb-2">Check</div>
             <ul class="list-disc pl-5">
               <li>Inspect <code>/v1/config</code> at <code>vram.live</code>, including sample age, staleness, sampler health, and <code>raw_observations.host_backed</code>.</li>
-              <li>For Vulkan, inspect <code>vram.vulkan_buffer_pool</code> and <code>/health</code> at <code>vulkan_buffer_pool</code>. Growing retained bytes indicate recycler working-set growth; flat retention with growing RSS indicates a different ownership or page-residency mechanism.</li>
+              <li>For Vulkan, inspect <code>vram.vulkan_buffer_pool</code> and <code>/health</code> at <code>vulkan_buffer_pool</code>. Growing retained bytes indicate recycler working-set growth; flat retention with growing RSS indicates a different ownership or page-residency mechanism. Route-specific misses identify device-local versus host-visible growth; host-visible lookup may legitimately hit a larger compatible idle bucket.</li>
               <li>On Linux Vulkan, compare primary VRAM with the host-backed GTT tier. A 96 GiB firmware VRAM carveout does not mean Linux can safely allocate a 96 GiB host-resident KV cache.</li>
+              <li>If live ownership is flat but anonymous RSS grows, inspect <code>AnonHugePages</code> in <code>/proc/&lt;pid&gt;/smaps</code>. Repeated fixed-shape requests should reuse recently released KV blocks instead of continuously first-touching untouched pool pages.</li>
               <li>Check host <code>MemAvailable</code> and every applicable cgroup <code>memory.max</code>/<code>memory.high</code> ancestor.</li>
             </ul>
           </div>

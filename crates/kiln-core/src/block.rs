@@ -14,7 +14,7 @@ pub enum BlockError {
     OutOfMemory { needed: usize, available: usize },
 }
 
-/// Manages physical KV cache blocks using a simple free list.
+/// Manages physical KV cache blocks using a locality-preserving free list.
 ///
 /// Each block holds `block_size` tokens worth of KV cache data.
 /// Blocks are identified by integer IDs that index into the pre-allocated
@@ -244,7 +244,11 @@ impl BlockManager {
             self.retired_blocks.push_back(block_id);
         } else {
             self.transition(block_id, BlockState::InUse, BlockState::Free);
-            self.free_blocks.push_back(block_id);
+            // Prefer an already-touched block over walking untouched capacity.
+            // This is especially important for host-resident Vulkan KV pools:
+            // first-touching a FIFO of sparse zero pages grows RSS and can incur
+            // transparent-huge-page faults long after model startup.
+            self.free_blocks.push_front(block_id);
         }
     }
 
@@ -261,7 +265,10 @@ impl BlockManager {
             },
             "BlockManager::free_all called with duplicate block IDs: {block_ids:?}",
         );
-        for &id in block_ids {
+        // Reverse + push_front preserves the request's logical block order while
+        // placing the whole just-freed run ahead of untouched capacity. A retry
+        // of the same shape therefore gets the same physical run immediately.
+        for &id in block_ids.iter().rev() {
             // Retire instead of free while a pending shrink keeps circulation
             // above the target (see free_one).
             if self.num_blocks - self.retired_blocks.len() > self.target_usable {
@@ -269,7 +276,7 @@ impl BlockManager {
                 self.retired_blocks.push_back(id);
             } else {
                 self.transition(id, BlockState::InUse, BlockState::Free);
-                self.free_blocks.push_back(id);
+                self.free_blocks.push_front(id);
             }
         }
     }
@@ -431,6 +438,26 @@ mod tests {
 
         bm.free_all(&blocks);
         assert_eq!(bm.num_free(), 10);
+    }
+
+    #[test]
+    fn block_manager_reuses_freed_run_before_untouched_capacity() {
+        let mut bm = BlockManager::new(10, 16);
+        let first = bm.allocate(3).unwrap();
+        assert_eq!(first, vec![0, 1, 2]);
+
+        bm.free_all(&first);
+
+        assert_eq!(bm.allocate(3).unwrap(), first);
+    }
+
+    #[test]
+    fn block_manager_reuses_one_freed_block_immediately() {
+        let mut bm = BlockManager::new(10, 16);
+        let first = bm.allocate_one().unwrap();
+        bm.free_one(first);
+
+        assert_eq!(bm.allocate_one().unwrap(), first);
     }
 
     #[test]

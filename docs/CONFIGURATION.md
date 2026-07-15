@@ -617,6 +617,23 @@ including its process-lifetime sequence, requested size, rounded bucket, route,
 and Rust caller file and line; it reports `null` before any miss. This diagnostic
 record has constant memory cost and is not a per-allocation log.
 
+Device-local scratch lookup requires the exact rounded bucket. Host-visible
+staging lookup checks its exact bucket first, then selects the smallest
+sufficient idle larger bucket for the same Vulkan device and memory type, with
+oldest-use order breaking ties. This is sound because every host staging
+operation retains its logical copy/read extent; it prevents arbitrary
+prompt-tail shapes from allocating a new staging buffer while a larger
+compatible one is idle. Undersized and borrowed buffers are never candidates,
+and cross-device or cross-memory-type reuse is prohibited.
+
+The paged KV block manager also favors residency locality: a completed
+request's block run returns to the front of the free list in its original
+logical order. The next compatible request reuses those already-touched pages
+before walking untouched sparse-zero capacity. On host-resident Vulkan KV
+pools, this bounds delayed anonymous/transparent-huge-page first touch without
+prefaulting the full configured cache; logical block ownership, prefix-cache
+leases, shrink retirement, and physical-resize safety are unchanged.
+
 Physical-device identity is currently fail-closed while backend selection and
 memory probes still expose unrelated logical ordinals. CUDA, ROCm, and Vulkan
 startup therefore accepts only logical device `0` when the relevant NVIDIA or

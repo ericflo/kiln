@@ -1254,6 +1254,15 @@ bytes, both lookup outcomes, both route-specific miss counters, eviction totals,
 and uncached overflow totals. It deliberately omits the source-level last-miss
 record; use `GET /health` for that live diagnostic.
 
+Device-local lookup is exact-bucket because legacy device-buffer consumers can
+still use physical buffer size as a copy extent. Host-visible staging carries
+an explicit logical extent, so its lookup first checks the exact bucket, then
+selects the smallest sufficient idle larger bucket for the same Vulkan device
+and host-memory type, with oldest-use order breaking ties. An undersized or
+currently borrowed slot can never satisfy a request. Consequently, a
+host-visible `cache_hit` may reuse a larger bucket; that is expected and does
+not increase retained ownership or allocation count.
+
 Prometheus exports the same state as:
 
 ```text

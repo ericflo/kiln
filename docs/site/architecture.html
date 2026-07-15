@@ -704,9 +704,18 @@ kiln_rocm_graph_fallback_duration_seconds_max</code></pre>
           </div>
           <div>
             <h3 class="font-semibold mb-2" style="color: var(--fg);">Memory</h3>
-            <p>The paged KV block manager tracks the full-attention layers. Qwen3.5-4B&rsquo;s Gated DeltaNet layers do not need KV cache.</p>
+            <p>The paged KV block manager tracks the full-attention layers and reuses recently released runs before untouched sparse pages. Qwen3.5-4B&rsquo;s Gated DeltaNet layers do not need KV cache.</p>
           </div>
         </div>
+        <p class="mt-5 leading-relaxed" style="color: var(--fg-dim);">
+          The locality policy preserves a released request&rsquo;s logical block order while moving that run to
+          the front of the allocator. This avoids walking an entire host-resident Vulkan KV pool and
+          first-touching new anonymous or transparent-huge pages during otherwise steady traffic. Prefix-cache
+          leases still retain their blocks, and logical shrink still retires capacity before any physical pool
+          replacement. Vulkan&rsquo;s bounded scratch recycler separately uses exact buckets for device-local
+          buffers; host-visible staging checks its exact bucket first and then the smallest sufficient idle larger
+          bucket on the same device and memory type. A borrowed, undersized, or cross-device buffer is never reused.
+        </p>
         <p class="mt-5 leading-relaxed" style="color: var(--fg-dim);">
           Startup resolves one immutable <code>BatchingRuntimeConfig</code> after backend selection and
           effective decode-width resolution. The state boundary applies actor selection, the decode-forward
