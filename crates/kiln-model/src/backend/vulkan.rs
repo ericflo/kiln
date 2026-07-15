@@ -1390,9 +1390,15 @@ impl ResidencyBackend for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let row_bytes = rows[0]
+            .elem_count()
+            .checked_mul(rows[0].dtype().size_in_bytes())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .context("resident GDN recurrent row byte count overflow")?;
         let batch_buffer = kiln_vulkan_kernel::kernels::copy_gdn_recurrent_state_rows_to_batch(
             vk_device,
             &row_buffers,
+            row_bytes,
         )
         .context("failed to assemble resident GDN recurrent batch rows")?;
         insert_recurrent_state_resident_buffer(batch.id(), batch_buffer);
@@ -1428,10 +1434,19 @@ impl ResidencyBackend for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let row_elements = heads
+            .checked_mul(dk)
+            .and_then(|elements| elements.checked_mul(dv))
+            .context("resident GDN recurrent row element count overflow")?;
+        let row_bytes = row_elements
+            .checked_mul(batch.dtype().size_in_bytes())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .context("resident GDN recurrent row byte count overflow")?;
         let row_buffers = kiln_vulkan_kernel::kernels::split_gdn_recurrent_state_batch_rows(
             vk_device,
             &batch_buffer,
             batch_rows,
+            row_bytes,
         )
         .context("failed to scatter resident GDN recurrent batch rows")?;
         if row_buffers.len() != destinations.len() {
@@ -1471,16 +1486,32 @@ impl ResidencyBackend for VulkanBackend {
         &self,
         row_keys: &[kiln_tensor::TensorId],
         batch_key: kiln_tensor::TensorId,
+        recurrent_row_bytes: u64,
+        conv_row_bytes: u64,
     ) -> Result<bool> {
-        VulkanBackend::assemble_linear_attn_gdn_state_batch_kt(self, row_keys, batch_key)
+        VulkanBackend::assemble_linear_attn_gdn_state_batch_kt(
+            self,
+            row_keys,
+            batch_key,
+            recurrent_row_bytes,
+            conv_row_bytes,
+        )
     }
 
     fn runtime_scatter_linear_attn_gdn_state_batch_kt(
         &self,
         batch_key: kiln_tensor::TensorId,
         row_keys: &[kiln_tensor::TensorId],
+        recurrent_row_bytes: u64,
+        conv_row_bytes: u64,
     ) -> Result<bool> {
-        VulkanBackend::scatter_linear_attn_gdn_state_batch_kt(self, batch_key, row_keys)
+        VulkanBackend::scatter_linear_attn_gdn_state_batch_kt(
+            self,
+            batch_key,
+            row_keys,
+            recurrent_row_bytes,
+            conv_row_bytes,
+        )
     }
 
     fn runtime_seed_linear_attn_gdn_state_kt(

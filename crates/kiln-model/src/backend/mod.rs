@@ -1564,6 +1564,8 @@ pub trait ResidencyBackend:
         &self,
         _row_keys: &[kiln_tensor::TensorId],
         _batch_key: kiln_tensor::TensorId,
+        _recurrent_row_bytes: u64,
+        _conv_row_bytes: u64,
     ) -> Result<bool> {
         Ok(false)
     }
@@ -1572,6 +1574,8 @@ pub trait ResidencyBackend:
         &self,
         _batch_key: kiln_tensor::TensorId,
         _row_keys: &[kiln_tensor::TensorId],
+        _recurrent_row_bytes: u64,
+        _conv_row_bytes: u64,
     ) -> Result<bool> {
         Ok(false)
     }

@@ -4830,6 +4830,10 @@ impl LinearAttentionState {
             rows.len(),
             batch
         );
+        anyhow::ensure!(
+            !rows.is_empty(),
+            "LinearAttentionState::assemble_gdn_state_resident_batch_rows_kt requires at least one row"
+        );
         let mut assembled_any = false;
         for layer_idx in 0..self.recurrent_states.len() {
             let row_keys: Vec<kiln_tensor::TensorId> = rows
@@ -4837,8 +4841,24 @@ impl LinearAttentionState {
                 .map(|row| row.recurrent_states[layer_idx].id())
                 .collect();
             let batch_key = self.recurrent_states[layer_idx].id();
+            let recurrent_row = &rows[0].recurrent_states[layer_idx];
+            let conv_row = &rows[0].conv_states[layer_idx];
+            let recurrent_row_bytes = recurrent_row
+                .elem_count()
+                .checked_mul(recurrent_row.dtype().size_in_bytes())
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .context("linear-attention recurrent row byte count overflow")?;
+            let conv_row_bytes = conv_row
+                .elem_count()
+                .checked_mul(conv_row.dtype().size_in_bytes())
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .context("linear-attention convolution row byte count overflow")?;
             assembled_any |= ResidencyBackend::runtime_assemble_linear_attn_gdn_state_batch_kt(
-                backend, &row_keys, batch_key,
+                backend,
+                &row_keys,
+                batch_key,
+                recurrent_row_bytes,
+                conv_row_bytes,
             )?;
         }
         Ok(assembled_any)
@@ -4971,6 +4991,10 @@ impl LinearAttentionState {
             destinations.len(),
             batch
         );
+        anyhow::ensure!(
+            !destinations.is_empty(),
+            "LinearAttentionState::scatter_gdn_state_resident_batch_rows_kt requires at least one destination"
+        );
         for (row_idx, dst) in destinations.iter_mut().enumerate() {
             anyhow::ensure!(
                 dst.recurrent_states.len() == self.recurrent_states.len(),
@@ -4993,8 +5017,24 @@ impl LinearAttentionState {
                 .map(|dst| dst.recurrent_states[layer_idx].id())
                 .collect();
             let batch_key = self.recurrent_states[layer_idx].id();
+            let recurrent_row = &destinations[0].recurrent_states[layer_idx];
+            let conv_row = &destinations[0].conv_states[layer_idx];
+            let recurrent_row_bytes = recurrent_row
+                .elem_count()
+                .checked_mul(recurrent_row.dtype().size_in_bytes())
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .context("linear-attention recurrent row byte count overflow")?;
+            let conv_row_bytes = conv_row
+                .elem_count()
+                .checked_mul(conv_row.dtype().size_in_bytes())
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .context("linear-attention convolution row byte count overflow")?;
             scattered_any |= ResidencyBackend::runtime_scatter_linear_attn_gdn_state_batch_kt(
-                backend, batch_key, &row_keys,
+                backend,
+                batch_key,
+                &row_keys,
+                recurrent_row_bytes,
+                conv_row_bytes,
             )?;
         }
         Ok(scattered_any)

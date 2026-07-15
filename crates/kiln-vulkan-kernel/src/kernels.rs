@@ -8816,38 +8816,37 @@ pub fn dispatch_gdn_forward_substitution_bytes(
 
 /// Copy same-sized device-local row buffers into one contiguous batch buffer.
 ///
-/// The layout is byte-row-major: `rows[row]` is copied into
+/// `row_size` is the logical byte length, which may be smaller than a pooled
+/// row's physical capacity. The layout is byte-row-major: `rows[row]` is copied into
 /// `[row * row_size .. (row + 1) * row_size)` in the returned buffer.
 /// Used by resident batched decode for both recurrent and conv GDN state.
 pub fn copy_device_buffer_rows_to_batch(
     vk_device: &VulkanDevice,
     rows: &[Arc<VulkanBuffer>],
+    row_size: u64,
 ) -> Result<Arc<VulkanBuffer>> {
     anyhow::ensure!(
         !rows.is_empty(),
         "copy_device_buffer_rows_to_batch requires at least one row"
     );
-    let row_size = rows[0].size();
     anyhow::ensure!(
         row_size > 0,
         "copy_device_buffer_rows_to_batch row size must be non-zero"
     );
     for (idx, row) in rows.iter().enumerate() {
         anyhow::ensure!(
-            row.size() == row_size,
-            "copy_device_buffer_rows_to_batch row {idx} size {} != row 0 size {row_size}",
+            row.size() >= row_size,
+            "copy_device_buffer_rows_to_batch row {idx} size {} < logical row size {row_size}",
             row.size()
         );
     }
 
     let device = vk_device.device();
     let queue = vk_device.queue();
-    let device_local_mt = vk_device.device_local_mem_type();
-    let batch_buf = Arc::new(VulkanBuffer::create_device_local(
-        device,
-        device_local_mt,
-        row_size * rows.len() as u64,
-    )?);
+    let batch_bytes = row_size
+        .checked_mul(rows.len() as u64)
+        .context("copy_device_buffer_rows_to_batch byte count overflow")?;
+    let batch_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, batch_bytes)?;
 
     let cmd_pool = vk_device.transient_command_pool()?;
     let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
@@ -8901,37 +8900,38 @@ pub fn copy_device_buffer_rows_to_batch(
 
 /// Split a contiguous device-local batch buffer into same-sized row buffers.
 ///
-/// `batch_buffer` is interpreted as `batch` byte rows of equal size.
+/// `batch_buffer` is interpreted as `batch` byte rows of logical `row_size`;
+/// its physical capacity may include recycler bucket padding.
 pub fn split_device_buffer_batch_rows(
     vk_device: &VulkanDevice,
     batch_buffer: &VulkanBuffer,
     batch: usize,
+    row_size: u64,
 ) -> Result<Vec<Arc<VulkanBuffer>>> {
     anyhow::ensure!(
         batch > 0,
         "split_device_buffer_batch_rows requires a non-zero batch"
     );
     anyhow::ensure!(
-        batch_buffer.size() % batch as u64 == 0,
-        "split_device_buffer_batch_rows buffer size {} is not divisible by batch {batch}",
-        batch_buffer.size()
-    );
-    let row_size = batch_buffer.size() / batch as u64;
-    anyhow::ensure!(
         row_size > 0,
         "split_device_buffer_batch_rows row size must be non-zero"
+    );
+    let logical_batch_size = row_size
+        .checked_mul(batch as u64)
+        .context("split_device_buffer_batch_rows byte count overflow")?;
+    anyhow::ensure!(
+        batch_buffer.size() >= logical_batch_size,
+        "split_device_buffer_batch_rows buffer size {} < logical batch size {logical_batch_size}",
+        batch_buffer.size()
     );
 
     let device = vk_device.device();
     let queue = vk_device.queue();
-    let device_local_mt = vk_device.device_local_mem_type();
     let mut rows = Vec::with_capacity(batch);
     for _ in 0..batch {
-        rows.push(Arc::new(VulkanBuffer::create_device_local(
-            device,
-            device_local_mt,
-            row_size,
-        )?));
+        rows.push(crate::buffer_pool::pool_alloc_device_local(
+            vk_device, row_size,
+        )?);
     }
 
     let cmd_pool = vk_device.transient_command_pool()?;
@@ -9002,16 +9002,18 @@ pub fn split_device_buffer_batch_rows(
 pub fn copy_gdn_recurrent_state_rows_to_batch(
     vk_device: &VulkanDevice,
     rows: &[Arc<VulkanBuffer>],
+    row_size: u64,
 ) -> Result<Arc<VulkanBuffer>> {
-    copy_device_buffer_rows_to_batch(vk_device, rows)
+    copy_device_buffer_rows_to_batch(vk_device, rows, row_size)
 }
 
 pub fn split_gdn_recurrent_state_batch_rows(
     vk_device: &VulkanDevice,
     batch_buffer: &VulkanBuffer,
     batch: usize,
+    row_size: u64,
 ) -> Result<Vec<Arc<VulkanBuffer>>> {
-    split_device_buffer_batch_rows(vk_device, batch_buffer, batch)
+    split_device_buffer_batch_rows(vk_device, batch_buffer, batch, row_size)
 }
 
 /// Bytes-only single-token GDN recurrent dispatch.

@@ -178,6 +178,7 @@ impl VulkanBackend {
         state_map: &Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
         row_keys: &[kiln_tensor::TensorId],
         batch_key: kiln_tensor::TensorId,
+        row_bytes: u64,
         label: &'static str,
     ) -> Result<bool> {
         if row_keys.is_empty() {
@@ -199,9 +200,12 @@ impl VulkanBackend {
             }
             out
         };
-        let batch_buffer =
-            kiln_vulkan_kernel::kernels::copy_device_buffer_rows_to_batch(vk_device, &row_buffers)
-                .with_context(|| format!("assemble kt {label} state batch rows"))?;
+        let batch_buffer = kiln_vulkan_kernel::kernels::copy_device_buffer_rows_to_batch(
+            vk_device,
+            &row_buffers,
+            row_bytes,
+        )
+        .with_context(|| format!("assemble kt {label} state batch rows"))?;
         state_map
             .lock()
             .map_err(|_| anyhow::anyhow!("kt {label} state mutex poisoned"))?
@@ -214,6 +218,7 @@ impl VulkanBackend {
         state_map: &Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
         batch_key: kiln_tensor::TensorId,
         row_keys: &[kiln_tensor::TensorId],
+        row_bytes: u64,
         label: &'static str,
     ) -> Result<bool> {
         if row_keys.is_empty() {
@@ -235,6 +240,7 @@ impl VulkanBackend {
             vk_device,
             &batch_buffer,
             row_keys.len(),
+            row_bytes,
         )
         .with_context(|| format!("scatter kt {label} state batch rows"))?;
         {
@@ -252,11 +258,13 @@ impl VulkanBackend {
         &self,
         row_keys: &[kiln_tensor::TensorId],
         batch_key: kiln_tensor::TensorId,
+        row_bytes: u64,
     ) -> Result<bool> {
         self.assemble_linear_attn_state_batch_kt(
             &self.linear_attn_recurrent_state_kt,
             row_keys,
             batch_key,
+            row_bytes,
             "recurrent",
         )
     }
@@ -265,11 +273,13 @@ impl VulkanBackend {
         &self,
         row_keys: &[kiln_tensor::TensorId],
         batch_key: kiln_tensor::TensorId,
+        row_bytes: u64,
     ) -> Result<bool> {
         self.assemble_linear_attn_state_batch_kt(
             &self.linear_attn_conv_state_kt,
             row_keys,
             batch_key,
+            row_bytes,
             "conv",
         )
     }
@@ -278,11 +288,13 @@ impl VulkanBackend {
         &self,
         batch_key: kiln_tensor::TensorId,
         row_keys: &[kiln_tensor::TensorId],
+        row_bytes: u64,
     ) -> Result<bool> {
         self.scatter_linear_attn_state_batch_kt(
             &self.linear_attn_recurrent_state_kt,
             batch_key,
             row_keys,
+            row_bytes,
             "recurrent",
         )
     }
@@ -291,11 +303,13 @@ impl VulkanBackend {
         &self,
         batch_key: kiln_tensor::TensorId,
         row_keys: &[kiln_tensor::TensorId],
+        row_bytes: u64,
     ) -> Result<bool> {
         self.scatter_linear_attn_state_batch_kt(
             &self.linear_attn_conv_state_kt,
             batch_key,
             row_keys,
+            row_bytes,
             "conv",
         )
     }
@@ -304,13 +318,19 @@ impl VulkanBackend {
         &self,
         row_keys: &[kiln_tensor::TensorId],
         batch_key: kiln_tensor::TensorId,
+        recurrent_row_bytes: u64,
+        conv_row_bytes: u64,
     ) -> Result<bool> {
-        let recurrent_ok =
-            self.assemble_linear_attn_recurrent_state_batch_kt(row_keys, batch_key)?;
+        let recurrent_ok = self.assemble_linear_attn_recurrent_state_batch_kt(
+            row_keys,
+            batch_key,
+            recurrent_row_bytes,
+        )?;
         if !recurrent_ok {
             return Ok(false);
         }
-        let conv_ok = self.assemble_linear_attn_conv_state_batch_kt(row_keys, batch_key)?;
+        let conv_ok =
+            self.assemble_linear_attn_conv_state_batch_kt(row_keys, batch_key, conv_row_bytes)?;
         if !conv_ok {
             return Ok(false);
         }
@@ -322,13 +342,19 @@ impl VulkanBackend {
         &self,
         batch_key: kiln_tensor::TensorId,
         row_keys: &[kiln_tensor::TensorId],
+        recurrent_row_bytes: u64,
+        conv_row_bytes: u64,
     ) -> Result<bool> {
-        let recurrent_ok =
-            self.scatter_linear_attn_recurrent_state_batch_kt(batch_key, row_keys)?;
+        let recurrent_ok = self.scatter_linear_attn_recurrent_state_batch_kt(
+            batch_key,
+            row_keys,
+            recurrent_row_bytes,
+        )?;
         if !recurrent_ok {
             return Ok(false);
         }
-        let conv_ok = self.scatter_linear_attn_conv_state_batch_kt(batch_key, row_keys)?;
+        let conv_ok =
+            self.scatter_linear_attn_conv_state_batch_kt(batch_key, row_keys, conv_row_bytes)?;
         if !conv_ok {
             return Ok(false);
         }
