@@ -3485,6 +3485,11 @@ mod tests {
             &[rows, hidden],
         )
         .unwrap();
+        assert_eq!(
+            baseline_bytes.len(),
+            rows * hidden * 4,
+            "nonresident readback must expose logical bytes, not its pooled bucket"
+        );
         let expected = bytes_to_f32(&baseline_bytes);
 
         let x_buf = upload_f32_slice(&dev, &x).unwrap();

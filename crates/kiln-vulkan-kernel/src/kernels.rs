@@ -8055,8 +8055,17 @@ fn run_compute_pipeline_with_transfers_readback(
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
 
-    VulkanBuffer::read_host_visible(device, &readback_stage)
-        .context("failed to read transfers-readback output")
+    let mut output = VulkanBuffer::read_host_visible(device, &readback_stage)
+        .context("failed to read transfers-readback output")?;
+    let logical_size =
+        usize::try_from(readback_size).context("transfers-readback logical size exceeds usize")?;
+    anyhow::ensure!(
+        output.len() >= logical_size,
+        "transfers-readback staging buffer returned {} bytes, expected at least {logical_size}",
+        output.len()
+    );
+    output.truncate(logical_size);
+    Ok(output)
 }
 
 #[allow(clippy::too_many_arguments)]
