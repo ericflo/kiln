@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -75,6 +76,7 @@ class VulkanHfModelOracleTests(unittest.TestCase):
         )
         for expected in (
             "--wait",
+            "--collect",
             "--pipe",
             "MemoryMax=16G",
             "MemorySwapMax=0",
@@ -113,23 +115,32 @@ class VulkanHfModelOracleTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.QualificationError, "non-finite"):
             oracle._parse_rust_metrics(marker.replace("max_abs=1.25e-1", "max_abs=nan"))
 
-    def test_cgroup_memory_reader_requires_numeric_peak_swap_and_events(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            original = oracle.Path
-            root = Path(directory)
-            group = root / "unit"
-            group.mkdir()
-            (group / "memory.peak").write_text("12345\n")
-            (group / "memory.swap.current").write_text("0\n")
-            (group / "memory.events").write_text("low 0\noom 0\noom_kill 0\n")
-            try:
-                oracle.Path = lambda value: root if value == "/sys/fs/cgroup" else original(value)
-                sample = oracle._read_cgroup_memory("/unit")
-            finally:
-                oracle.Path = original
-            self.assertEqual(
-                sample,
-                {"oom": 0, "oom_kill": 0, "peak": 12345, "swap_current": 0},
+    def test_hf_marker_parser_is_closed_and_requires_valid_memory(self) -> None:
+        evidence = {
+            "argmax": 1,
+            "device": "AMD Radeon 8060S Graphics",
+            "duration_seconds": 5.0,
+            "logits_sha256": "sha256:" + "a" * 64,
+            "memory_high_events": 0,
+            "memory_max_events": 0,
+            "memory_oom_events": 0,
+            "memory_oom_kill_events": 0,
+            "memory_peak_bytes": 14_000_000_000,
+            "memory_swap_bytes": 0,
+            "output_bytes": 993_896,
+            "torch_hip_version": "7.2.53211",
+            "torch_version": "2.13.0+rocm7.2",
+            "transformers_version": "5.13.1",
+            "vocab": 248_320,
+        }
+        marker = oracle.HF_PASS_PREFIX + json.dumps(evidence)
+        self.assertEqual(oracle._parse_hf_evidence(marker), evidence)
+        with self.assertRaisesRegex(oracle.QualificationError, "found 2"):
+            oracle._parse_hf_evidence(marker + "\n" + marker)
+        evidence["unexpected"] = 1
+        with self.assertRaisesRegex(oracle.QualificationError, "not closed"):
+            oracle._parse_hf_evidence(
+                oracle.HF_PASS_PREFIX + json.dumps(evidence)
             )
 
     def test_case_result_is_closed_sorted_and_records_thresholds(self) -> None:
@@ -137,6 +148,9 @@ class VulkanHfModelOracleTests(unittest.TestCase):
             duration=12.5,
             hf={
                 "memory_limit_gib": 16,
+                "logits_sha256": "sha256:" + "c" * 64,
+                "memory_high_events": 0,
+                "memory_max_events": 0,
                 "memory_peak_bytes": 10_000_000_000,
                 "reference_sha256": "sha256:" + "a" * 64,
                 "swap_bytes": 0,
@@ -173,8 +187,6 @@ class VulkanHfModelOracleTests(unittest.TestCase):
         self.assertIn("hf_reference_sha256", result["details"])
 
     def test_declared_workload_config_matches_command_result(self) -> None:
-        import json
-
         workload = json.loads(
             (ROOT / "qualification/workloads/vulkan-hf-full-model-oracle-v1.json").read_text()
         )
@@ -183,6 +195,9 @@ class VulkanHfModelOracleTests(unittest.TestCase):
             duration=1.0,
             hf={
                 "memory_limit_gib": 16,
+                "logits_sha256": "sha256:" + "d" * 64,
+                "memory_high_events": 0,
+                "memory_max_events": 0,
                 "memory_peak_bytes": 1,
                 "reference_sha256": "sha256:" + "b" * 64,
                 "swap_bytes": 0,

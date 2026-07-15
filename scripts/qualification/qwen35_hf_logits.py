@@ -26,12 +26,45 @@ class OracleError(RuntimeError):
     """The independent reference cannot be produced exactly as declared."""
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
+def _current_cgroup_memory() -> dict[str, int]:
+    try:
+        cgroup_lines = Path("/proc/self/cgroup").read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise OracleError(f"cannot read the HF service cgroup: {exc}") from exc
+    unified = []
+    for line in cgroup_lines:
+        hierarchy, separator, remainder = line.partition(":")
+        controllers, second_separator, path = remainder.partition(":")
+        if separator and second_separator and hierarchy == "0" and controllers == "":
+            unified.append(path)
+    if len(unified) != 1 or not unified[0].startswith("/"):
+        raise OracleError(f"expected one cgroup-v2 path, got {unified!r}")
+    root = Path("/sys/fs/cgroup") / unified[0].lstrip("/")
+
+    def read_integer(name: str) -> int:
+        try:
+            value = (root / name).read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError) as exc:
+            raise OracleError(f"cannot read HF cgroup {name}: {exc}") from exc
+        if not value.isdigit():
+            raise OracleError(f"HF cgroup {name} is not numeric: {value!r}")
+        return int(value)
+
+    events: dict[str, int] = {}
+    try:
+        for line in (root / "memory.events").read_text(encoding="ascii").splitlines():
+            name, value = line.split()
+            events[name] = int(value)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise OracleError(f"cannot read HF cgroup memory.events: {exc}") from exc
+    return {
+        "memory_high_events": events.get("high", 0),
+        "memory_max_events": events.get("max", 0),
+        "memory_oom_events": events.get("oom", 0),
+        "memory_oom_kill_events": events.get("oom_kill", 0),
+        "memory_peak_bytes": read_integer("memory.peak"),
+        "memory_swap_bytes": read_integer("memory.swap.current"),
+    }
 
 
 def _source_sha256(module: object) -> str:
@@ -132,6 +165,9 @@ def generate(model_path: Path, output_path: Path) -> dict[str, object]:
         raise OracleError(f"unexpected HF logit shape {tuple(logits.shape)}")
     if not bool(torch.isfinite(logits).all()):
         raise OracleError("HF full-vocabulary logits contain non-finite values")
+    logits_sha256 = "sha256:" + hashlib.sha256(
+        logits.contiguous().numpy().tobytes(order="C")
+    ).hexdigest()
 
     metadata = {
         "attention_implementation": "eager",
@@ -154,17 +190,19 @@ def generate(model_path: Path, output_path: Path) -> dict[str, object]:
     )
     os.replace(temporary, output_path)
     output_path.chmod(0o600)
-    return {
+    evidence = {
         "argmax": int(logits.argmax().item()),
         "device": metadata["device_name"],
         "duration_seconds": time.monotonic() - started,
-        "logits_sha256": _sha256_file(output_path),
+        "logits_sha256": logits_sha256,
         "output_bytes": output_path.stat().st_size,
         "torch_hip_version": metadata["torch_hip_version"],
         "torch_version": metadata["torch_version"],
         "transformers_version": TRANSFORMERS_VERSION,
         "vocab": int(logits.numel()),
     }
+    evidence.update(_current_cgroup_memory())
+    return evidence
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

@@ -29,6 +29,24 @@ HF_RUNTIME_MAX_SECONDS = 600
 VULKAN_MAX_MEMORY_GIB = 17
 VULKAN_MIN_AVAILABLE_GIB = VULKAN_MAX_MEMORY_GIB + HF_HOST_RESERVE_GIB
 MAX_RESULT_DETAILS_CHARACTERS = 2048
+HF_PASS_PREFIX = "KILN_HF_FULL_LOGIT_REFERENCE_PASS "
+HF_EVIDENCE_KEYS = {
+    "argmax",
+    "device",
+    "duration_seconds",
+    "logits_sha256",
+    "memory_high_events",
+    "memory_max_events",
+    "memory_oom_events",
+    "memory_oom_kill_events",
+    "memory_peak_bytes",
+    "memory_swap_bytes",
+    "output_bytes",
+    "torch_hip_version",
+    "torch_version",
+    "transformers_version",
+    "vocab",
+}
 RUST_PASS_RE = re.compile(
     r"KILN_VULKAN_HF_FULL_LOGIT_PASS "
     r"vocab=(?P<vocab>[1-9][0-9]*) "
@@ -129,6 +147,7 @@ def _bounded_hf_command(
         "systemd-run",
         "--user",
         "--wait",
+        "--collect",
         "--pipe",
         "--quiet",
         "--same-dir",
@@ -162,88 +181,55 @@ def _bounded_hf_command(
     ]
 
 
-def _systemd_properties(unit: str) -> dict[str, str]:
-    completed = subprocess.run(
-        [
-            "systemctl",
-            "--user",
-            "show",
-            unit,
-            "--property=ActiveState,ExecMainStatus,Result",
-        ],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=30,
-    )
-    if completed.returncode != 0:
+def _parse_hf_evidence(output: str) -> dict[str, Any]:
+    records = [
+        line[len(HF_PASS_PREFIX) :]
+        for line in output.splitlines()
+        if line.startswith(HF_PASS_PREFIX)
+    ]
+    if len(records) != 1:
         raise QualificationError(
-            f"cannot inspect bounded HF service {unit}: {completed.stderr.strip()}"
+            f"expected one bounded HF reference marker, found {len(records)}"
         )
-    properties: dict[str, str] = {}
-    for line in completed.stdout.splitlines():
-        key, separator, value = line.partition("=")
-        if separator:
-            properties[key] = value
-    return properties
-
-
-def _unit_control_group(unit: str) -> str | None:
-    completed = subprocess.run(
-        ["systemctl", "--user", "show", unit, "--property=ControlGroup", "--value"],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        timeout=10,
-    )
-    value = completed.stdout.strip()
-    return value if completed.returncode == 0 and value else None
-
-
-def _read_cgroup_memory(control_group: str) -> dict[str, int]:
-    root = Path("/sys/fs/cgroup") / control_group.lstrip("/")
-
-    def read_integer(name: str) -> int:
-        try:
-            value = (root / name).read_text(encoding="ascii").strip()
-        except (OSError, UnicodeError) as exc:
-            raise QualificationError(f"cannot read {root / name}: {exc}") from exc
-        if not value.isdigit():
-            raise QualificationError(f"{root / name} is not numeric: {value!r}")
-        return int(value)
-
-    events: dict[str, int] = {}
     try:
-        for line in (root / "memory.events").read_text(encoding="ascii").splitlines():
-            name, value = line.split()
-            events[name] = int(value)
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise QualificationError(f"cannot read {root / 'memory.events'}: {exc}") from exc
-    return {
-        "oom": events.get("oom", 0),
-        "oom_kill": events.get("oom_kill", 0),
-        "peak": read_integer("memory.peak"),
-        "swap_current": read_integer("memory.swap.current"),
-    }
-
-
-def _cleanup_unit(unit: str) -> None:
-    subprocess.run(
-        ["systemctl", "--user", "stop", unit],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=30,
+        evidence = json.loads(records[0])
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise QualificationError(f"bounded HF reference marker is invalid JSON: {exc}") from exc
+    if not isinstance(evidence, dict) or set(evidence) != HF_EVIDENCE_KEYS:
+        actual = sorted(evidence) if isinstance(evidence, dict) else type(evidence).__name__
+        raise QualificationError(f"bounded HF reference fields are not closed: {actual}")
+    integer_fields = (
+        "argmax",
+        "memory_high_events",
+        "memory_max_events",
+        "memory_oom_events",
+        "memory_oom_kill_events",
+        "memory_peak_bytes",
+        "memory_swap_bytes",
+        "output_bytes",
+        "vocab",
     )
-    subprocess.run(
-        ["systemctl", "--user", "reset-failed", unit],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=30,
-    )
+    for name in integer_fields:
+        value = evidence[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise QualificationError(f"bounded HF reference {name} is not a nonnegative integer")
+    duration = evidence["duration_seconds"]
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+        raise QualificationError("bounded HF reference duration is not numeric")
+    if not math.isfinite(float(duration)) or duration <= 0:
+        raise QualificationError("bounded HF reference duration is not positive and finite")
+    for name in (
+        "device",
+        "logits_sha256",
+        "torch_hip_version",
+        "torch_version",
+        "transformers_version",
+    ):
+        if not isinstance(evidence[name], str) or not evidence[name]:
+            raise QualificationError(f"bounded HF reference {name} is not a nonempty string")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", evidence["logits_sha256"]) is None:
+        raise QualificationError("bounded HF reference logits_sha256 is not canonical")
+    return evidence
 
 
 def _run_hf_reference(
@@ -264,56 +250,33 @@ def _run_hf_reference(
         temporary_directory=temporary_directory,
         memory_limit_gib=limit,
     )
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        deadline = time.monotonic() + HF_RUNTIME_MAX_SECONDS + 60
-        control_group: str | None = None
-        memory_peak = 0
-        swap_peak = 0
-        oom = 0
-        oom_kill = 0
-        samples = 0
-        while process.poll() is None:
-            if time.monotonic() >= deadline:
-                raise QualificationError("bounded HF service exceeded its outer deadline")
-            if control_group is None:
-                control_group = _unit_control_group(unit)
-            if control_group is not None:
-                sample = _read_cgroup_memory(control_group)
-                memory_peak = max(memory_peak, sample["peak"])
-                swap_peak = max(swap_peak, sample["swap_current"])
-                oom = max(oom, sample["oom"])
-                oom_kill = max(oom_kill, sample["oom_kill"])
-                samples += 1
-            time.sleep(0.05)
-        stdout, stderr = process.communicate(timeout=30)
-        completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-        properties = _systemd_properties(unit)
-    finally:
-        _cleanup_unit(unit)
+    completed = subprocess.run(
+        command,
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=HF_RUNTIME_MAX_SECONDS + 60,
+    )
     sys.stdout.write(completed.stdout)
     sys.stderr.write(completed.stderr)
     if completed.returncode != 0:
         raise QualificationError(
             f"bounded HF reference exited {completed.returncode}: {completed.stderr[-2000:]}"
         )
-    if "KILN_HF_FULL_LOGIT_REFERENCE_PASS " not in completed.stdout:
-        raise QualificationError("bounded HF reference omitted its pass marker")
-    if properties.get("Result") != "success" or properties.get("ExecMainStatus") != "0":
-        raise QualificationError(f"bounded HF service failed: {properties}")
-    if samples == 0 or memory_peak <= 0:
-        raise QualificationError("bounded HF service produced no cgroup memory samples")
-    if swap_peak != 0:
-        raise QualificationError(f"bounded HF service used {swap_peak} bytes of swap")
-    if oom != 0 or oom_kill != 0:
+    evidence = _parse_hf_evidence(completed.stdout)
+    if evidence["memory_peak_bytes"] <= 0:
+        raise QualificationError("bounded HF service reported zero peak memory")
+    if evidence["memory_swap_bytes"] != 0:
         raise QualificationError(
-            f"bounded HF service reported oom={oom} oom_kill={oom_kill}"
+            f"bounded HF service used {evidence['memory_swap_bytes']} bytes of swap"
+        )
+    if evidence["memory_oom_events"] != 0 or evidence["memory_oom_kill_events"] != 0:
+        raise QualificationError(
+            "bounded HF service reported "
+            f"oom={evidence['memory_oom_events']} "
+            f"oom_kill={evidence['memory_oom_kill_events']}"
         )
     if not output.is_file() or output.is_symlink():
         raise QualificationError("bounded HF reference did not create a regular artifact")
@@ -321,15 +284,21 @@ def _run_hf_reference(
         raise QualificationError(
             f"HF reference artifact has unexpected size {output.stat().st_size}"
         )
+    if evidence["output_bytes"] != output.stat().st_size:
+        raise QualificationError("bounded HF reference reported the wrong artifact size")
+    if evidence["vocab"] != 248_320:
+        raise QualificationError("bounded HF reference reported the wrong vocabulary width")
     return {
         "available_before_gib": available,
         "memory_limit_gib": limit,
-        "memory_peak_bytes": memory_peak,
-        "memory_samples": samples,
-        "oom": oom,
-        "oom_kill": oom_kill,
+        "memory_high_events": evidence["memory_high_events"],
+        "memory_max_events": evidence["memory_max_events"],
+        "memory_peak_bytes": evidence["memory_peak_bytes"],
+        "logits_sha256": evidence["logits_sha256"],
+        "oom": evidence["memory_oom_events"],
+        "oom_kill": evidence["memory_oom_kill_events"],
         "reference_sha256": _sha256_file(output),
-        "swap_bytes": swap_peak,
+        "swap_bytes": evidence["memory_swap_bytes"],
     }
 
 
@@ -437,6 +406,9 @@ def _result_document(
 ) -> dict[str, Any]:
     details = {
         "hf_memory_limit_gib": hf["memory_limit_gib"],
+        "hf_memory_high_events": hf["memory_high_events"],
+        "hf_memory_max_events": hf["memory_max_events"],
+        "hf_logits_sha256": hf["logits_sha256"],
         "hf_reference_sha256": hf["reference_sha256"],
         "hf_swap_bytes": hf["swap_bytes"],
         "hf_torch_path": "pinned_rocm_torch_fallback",
