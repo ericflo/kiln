@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
     mpsc,
 };
 use std::time::Instant;
@@ -341,6 +341,7 @@ pub struct ModelRunner {
     /// allocator churn without retaining one host/device state per width.
     /// The cache is invalidated on adapter transitions with graph state.
     batched_state_cache: Mutex<Option<CachedBatchedState>>,
+    batched_state_cache_counters: BatchedStateCacheCounters,
     backend: Arc<dyn BackendRuntime>,
     /// Immutable startup-resolved streaming-prefill execution policy.
     streaming_prefill: StreamingPrefillExecutionPolicy,
@@ -679,6 +680,118 @@ pub(crate) struct CachedBatchedState {
     pub(crate) row_ids: Vec<u64>,
 }
 
+/// Process-lifetime lifecycle and current-ownership snapshot for the recurrent
+/// state shared by native batched decode calls.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct BatchedStateCacheStats {
+    pub entry_present: bool,
+    pub capacity_rows: usize,
+    pub logical_rows: usize,
+    pub resident: bool,
+    pub active_leases: u64,
+    pub max_active_leases: u64,
+    pub take_hit_count: u64,
+    pub take_miss_count: u64,
+    pub take_miss_while_leased_count: u64,
+    pub exact_reuse_count: u64,
+    pub resident_capacity_reuse_count: u64,
+    pub resident_prefix_view_count: u64,
+    pub resident_refresh_count: u64,
+    pub fresh_assembly_count: u64,
+    pub rejected_missing_row_ids_count: u64,
+    pub rejected_nonresident_rows_count: u64,
+    pub rejected_nonresident_cache_count: u64,
+    pub rejected_insufficient_capacity_count: u64,
+    pub park_count: u64,
+    pub park_replacement_eviction_count: u64,
+    pub explicit_invalidation_count: u64,
+    pub explicit_invalidation_eviction_count: u64,
+    pub completed_row_preservation_count: u64,
+    pub completed_row_eviction_count: u64,
+    pub lease_drop_eviction_count: u64,
+}
+
+#[derive(Debug, Default)]
+struct BatchedStateCacheCounters {
+    active_leases: AtomicU64,
+    max_active_leases: AtomicU64,
+    take_hit_count: AtomicU64,
+    take_miss_count: AtomicU64,
+    take_miss_while_leased_count: AtomicU64,
+    exact_reuse_count: AtomicU64,
+    resident_capacity_reuse_count: AtomicU64,
+    resident_prefix_view_count: AtomicU64,
+    resident_refresh_count: AtomicU64,
+    fresh_assembly_count: AtomicU64,
+    rejected_missing_row_ids_count: AtomicU64,
+    rejected_nonresident_rows_count: AtomicU64,
+    rejected_nonresident_cache_count: AtomicU64,
+    rejected_insufficient_capacity_count: AtomicU64,
+    park_count: AtomicU64,
+    park_replacement_eviction_count: AtomicU64,
+    explicit_invalidation_count: AtomicU64,
+    explicit_invalidation_eviction_count: AtomicU64,
+    completed_row_preservation_count: AtomicU64,
+    completed_row_eviction_count: AtomicU64,
+    lease_drop_eviction_count: AtomicU64,
+}
+
+impl BatchedStateCacheCounters {
+    fn acquire_lease(&self) {
+        let active = self.active_leases.fetch_add(1, Ordering::Relaxed) + 1;
+        self.max_active_leases.fetch_max(active, Ordering::Relaxed);
+    }
+
+    fn release_lease(&self) {
+        let previous = self.active_leases.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(previous > 0, "batched-state lease counter underflow");
+    }
+
+    fn snapshot(&self) -> BatchedStateCacheStats {
+        BatchedStateCacheStats {
+            active_leases: self.active_leases.load(Ordering::Relaxed),
+            max_active_leases: self.max_active_leases.load(Ordering::Relaxed),
+            take_hit_count: self.take_hit_count.load(Ordering::Relaxed),
+            take_miss_count: self.take_miss_count.load(Ordering::Relaxed),
+            take_miss_while_leased_count: self.take_miss_while_leased_count.load(Ordering::Relaxed),
+            exact_reuse_count: self.exact_reuse_count.load(Ordering::Relaxed),
+            resident_capacity_reuse_count: self
+                .resident_capacity_reuse_count
+                .load(Ordering::Relaxed),
+            resident_prefix_view_count: self.resident_prefix_view_count.load(Ordering::Relaxed),
+            resident_refresh_count: self.resident_refresh_count.load(Ordering::Relaxed),
+            fresh_assembly_count: self.fresh_assembly_count.load(Ordering::Relaxed),
+            rejected_missing_row_ids_count: self
+                .rejected_missing_row_ids_count
+                .load(Ordering::Relaxed),
+            rejected_nonresident_rows_count: self
+                .rejected_nonresident_rows_count
+                .load(Ordering::Relaxed),
+            rejected_nonresident_cache_count: self
+                .rejected_nonresident_cache_count
+                .load(Ordering::Relaxed),
+            rejected_insufficient_capacity_count: self
+                .rejected_insufficient_capacity_count
+                .load(Ordering::Relaxed),
+            park_count: self.park_count.load(Ordering::Relaxed),
+            park_replacement_eviction_count: self
+                .park_replacement_eviction_count
+                .load(Ordering::Relaxed),
+            explicit_invalidation_count: self.explicit_invalidation_count.load(Ordering::Relaxed),
+            explicit_invalidation_eviction_count: self
+                .explicit_invalidation_eviction_count
+                .load(Ordering::Relaxed),
+            completed_row_preservation_count: self
+                .completed_row_preservation_count
+                .load(Ordering::Relaxed),
+            completed_row_eviction_count: self.completed_row_eviction_count.load(Ordering::Relaxed),
+            lease_drop_eviction_count: self.lease_drop_eviction_count.load(Ordering::Relaxed),
+            ..BatchedStateCacheStats::default()
+        }
+    }
+}
+
+#[cfg(test)]
 fn completed_row_invalidates_batched_state_cache(
     cached_row_ids: &[u64],
     completed_row_id: u64,
@@ -697,14 +810,26 @@ struct ResidentBatchedStateLease<'a> {
     /// exactly once through this owner.
     capacity_state: Option<LinearAttentionState>,
     backend: &'a dyn BackendRuntime,
+    counters: &'a BatchedStateCacheCounters,
+    tracked: bool,
 }
 
 impl<'a> ResidentBatchedStateLease<'a> {
-    fn new(state: Option<LinearAttentionState>, backend: &'a dyn BackendRuntime) -> Self {
+    fn new(
+        state: Option<LinearAttentionState>,
+        backend: &'a dyn BackendRuntime,
+        counters: &'a BatchedStateCacheCounters,
+    ) -> Self {
+        let tracked = state.is_some();
+        if tracked {
+            counters.acquire_lease();
+        }
         Self {
             state,
             capacity_state: None,
             backend,
+            counters,
+            tracked,
         }
     }
 
@@ -712,11 +837,22 @@ impl<'a> ResidentBatchedStateLease<'a> {
         state: LinearAttentionState,
         capacity_state: LinearAttentionState,
         backend: &'a dyn BackendRuntime,
+        counters: &'a BatchedStateCacheCounters,
     ) -> Self {
+        counters.acquire_lease();
         Self {
             state: Some(state),
             capacity_state: Some(capacity_state),
             backend,
+            counters,
+            tracked: true,
+        }
+    }
+
+    fn release_tracking(&mut self) {
+        if self.tracked {
+            self.counters.release_lease();
+            self.tracked = false;
         }
     }
 
@@ -729,17 +865,25 @@ impl<'a> ResidentBatchedStateLease<'a> {
     }
 
     fn take(&mut self) -> Option<LinearAttentionState> {
-        self.state.take()
+        let state = self.state.take();
+        if state.is_some() {
+            self.release_tracking();
+        }
+        state
     }
 
     fn take_for_cache(&mut self) -> Option<LinearAttentionState> {
-        match self.capacity_state.take() {
+        let state = match self.capacity_state.take() {
             Some(capacity_state) => {
                 self.state.take();
                 Some(capacity_state)
             }
             None => self.state.take(),
+        };
+        if state.is_some() {
+            self.release_tracking();
         }
+        state
     }
 }
 
@@ -748,6 +892,10 @@ impl Drop for ResidentBatchedStateLease<'_> {
         let state = self.capacity_state.take().or_else(|| self.state.take());
         self.state.take();
         if let Some(state) = state {
+            self.release_tracking();
+            self.counters
+                .lease_drop_eviction_count
+                .fetch_add(1, Ordering::Relaxed);
             state.evict_gdn_state_resident_kt(self.backend);
         }
     }
@@ -2703,6 +2851,7 @@ impl ModelRunner {
             decode_buffer_max_batch,
             decode_buffer_config: OnceLock::new(),
             batched_state_cache: Mutex::new(None),
+            batched_state_cache_counters: BatchedStateCacheCounters::default(),
             backend: selected_backend,
             streaming_prefill,
             backend_health: BackendHealthHandle::default(),
@@ -2812,6 +2961,24 @@ impl ModelRunner {
         self.backend.as_ref()
     }
 
+    /// Snapshot batched recurrent-state cache ownership without changing it.
+    pub fn batched_state_cache_stats(&self) -> BatchedStateCacheStats {
+        let mut stats = self.batched_state_cache_counters.snapshot();
+        let cache = self
+            .batched_state_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cache.as_ref() {
+            stats.entry_present = true;
+            stats.logical_rows = cached.row_ids.len();
+            stats.capacity_rows = cached.state.batch_size().unwrap_or(stats.logical_rows);
+            stats.resident = cached
+                .state
+                .has_all_gdn_state_resident_kt(self.backend.as_ref());
+        }
+        stats
+    }
+
     fn evict_cached_batched_state(&self, cached: CachedBatchedState) {
         cached
             .state
@@ -2826,7 +2993,11 @@ impl ModelRunner {
         let state_refs: Vec<&LinearAttentionState> =
             linear_states.iter().map(|state| &**state).collect();
         let state = LinearAttentionState::from_batch_rows(&state_refs)?;
-        let mut lease = ResidentBatchedStateLease::new(Some(state), self.backend.as_ref());
+        let mut lease = ResidentBatchedStateLease::new(
+            Some(state),
+            self.backend.as_ref(),
+            &self.batched_state_cache_counters,
+        );
         if all_rows_resident {
             lease
                 .as_ref()
@@ -2839,6 +3010,9 @@ impl ModelRunner {
     }
 
     fn invalidate_batched_state_cache(&self) {
+        self.batched_state_cache_counters
+            .explicit_invalidation_count
+            .fetch_add(1, Ordering::Relaxed);
         let cached = match self.batched_state_cache.lock() {
             Ok(mut cache) => cache.take(),
             Err(poisoned) => {
@@ -2847,6 +3021,9 @@ impl ModelRunner {
             }
         };
         if let Some(cached) = cached {
+            self.batched_state_cache_counters
+                .explicit_invalidation_eviction_count
+                .fetch_add(1, Ordering::Relaxed);
             self.evict_cached_batched_state(cached);
         }
     }
@@ -2856,7 +3033,27 @@ impl ModelRunner {
             .batched_state_cache
             .lock()
             .map_err(|error| anyhow::anyhow!("failed to lock batched state cache: {error}"))?;
-        Ok(cache.take())
+        let cached = cache.take();
+        if cached.is_some() {
+            self.batched_state_cache_counters
+                .take_hit_count
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.batched_state_cache_counters
+                .take_miss_count
+                .fetch_add(1, Ordering::Relaxed);
+            if self
+                .batched_state_cache_counters
+                .active_leases
+                .load(Ordering::Relaxed)
+                > 0
+            {
+                self.batched_state_cache_counters
+                    .take_miss_while_leased_count
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Ok(cached)
     }
 
     fn prepare_batched_linear_state<'a>(
@@ -2882,8 +3079,11 @@ impl ModelRunner {
                 state,
                 row_ids: cached_row_ids,
             } = cached;
-            let mut cached_lease =
-                ResidentBatchedStateLease::new(Some(state), self.backend.as_ref());
+            let mut cached_lease = ResidentBatchedStateLease::new(
+                Some(state),
+                self.backend.as_ref(),
+                &self.batched_state_cache_counters,
+            );
             let exact_match = row_ids.is_some_and(|ids| cached_row_ids == ids);
             let capacity = cached_lease
                 .as_ref()
@@ -2895,13 +3095,22 @@ impl ModelRunner {
                 .has_all_gdn_state_resident_kt(self.backend.as_ref());
 
             if exact_match && capacity == batch {
+                self.batched_state_cache_counters
+                    .exact_reuse_count
+                    .fetch_add(1, Ordering::Relaxed);
                 return Ok((cached_lease, true));
             }
 
             if row_ids.is_some() && all_rows_resident && cached_is_resident && capacity >= batch {
+                self.batched_state_cache_counters
+                    .resident_capacity_reuse_count
+                    .fetch_add(1, Ordering::Relaxed);
                 let lease = if capacity == batch {
                     cached_lease
                 } else {
+                    self.batched_state_cache_counters
+                        .resident_prefix_view_count
+                        .fetch_add(1, Ordering::Relaxed);
                     let view = cached_lease
                         .as_ref()
                         .expect("cached batched-state lease was just initialized")
@@ -2913,9 +3122,17 @@ impl ModelRunner {
                         view,
                         capacity_state,
                         self.backend.as_ref(),
+                        &self.batched_state_cache_counters,
                     )
                 };
-                if !exact_match {
+                if exact_match {
+                    self.batched_state_cache_counters
+                        .exact_reuse_count
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.batched_state_cache_counters
+                        .resident_refresh_count
+                        .fetch_add(1, Ordering::Relaxed);
                     lease
                         .as_ref()
                         .expect("resident capacity lease was just initialized")
@@ -2926,16 +3143,46 @@ impl ModelRunner {
                 }
                 return Ok((lease, exact_match));
             }
+
+            let rejection_counter = if row_ids.is_none() {
+                &self
+                    .batched_state_cache_counters
+                    .rejected_missing_row_ids_count
+            } else if !all_rows_resident {
+                &self
+                    .batched_state_cache_counters
+                    .rejected_nonresident_rows_count
+            } else if !cached_is_resident {
+                &self
+                    .batched_state_cache_counters
+                    .rejected_nonresident_cache_count
+            } else {
+                debug_assert!(capacity < batch);
+                &self
+                    .batched_state_cache_counters
+                    .rejected_insufficient_capacity_count
+            };
+            rejection_counter.fetch_add(1, Ordering::Relaxed);
         }
 
+        self.batched_state_cache_counters
+            .fresh_assembly_count
+            .fetch_add(1, Ordering::Relaxed);
         let state = self.assemble_batched_linear_state(linear_states, all_rows_resident)?;
         Ok((
-            ResidentBatchedStateLease::new(Some(state), self.backend.as_ref()),
+            ResidentBatchedStateLease::new(
+                Some(state),
+                self.backend.as_ref(),
+                &self.batched_state_cache_counters,
+            ),
             false,
         ))
     }
 
     fn park_batched_state(&self, state: LinearAttentionState, row_ids: &[u64]) {
+        self.batched_state_cache_counters
+            .park_count
+            .fetch_add(1, Ordering::Relaxed);
         let stale = match self.batched_state_cache.lock() {
             Ok(mut cache) => cache.replace(CachedBatchedState {
                 state,
@@ -2950,6 +3197,9 @@ impl ModelRunner {
             }
         };
         if let Some(stale) = stale {
+            self.batched_state_cache_counters
+                .park_replacement_eviction_count
+                .fetch_add(1, Ordering::Relaxed);
             self.evict_cached_batched_state(stale);
         }
     }
@@ -2962,16 +3212,26 @@ impl ModelRunner {
         // buffers in place. Nonresident caches cannot do that and are released
         // eagerly as before.
         let take_nonresident_cache = |cache: &mut Option<CachedBatchedState>| {
-            let should_take = cache.as_ref().is_some_and(|cached| {
-                completed_row_invalidates_batched_state_cache(
-                    &cached.row_ids,
-                    row_id,
-                    cached
-                        .state
-                        .has_all_gdn_state_resident_kt(self.backend.as_ref()),
-                )
-            });
-            if should_take { cache.take() } else { None }
+            let Some(cached) = cache.as_ref() else {
+                return None;
+            };
+            if !cached.row_ids.contains(&row_id) {
+                return None;
+            }
+            if cached
+                .state
+                .has_all_gdn_state_resident_kt(self.backend.as_ref())
+            {
+                self.batched_state_cache_counters
+                    .completed_row_preservation_count
+                    .fetch_add(1, Ordering::Relaxed);
+                None
+            } else {
+                self.batched_state_cache_counters
+                    .completed_row_eviction_count
+                    .fetch_add(1, Ordering::Relaxed);
+                cache.take()
+            }
         };
         let cached = match self.batched_state_cache.lock() {
             Ok(mut cache) => take_nonresident_cache(&mut cache),
@@ -6192,7 +6452,11 @@ impl ModelRunner {
             self.prepare_batched_linear_state(linear_states, all_rows_resident, row_ids)?
         } else {
             (
-                ResidentBatchedStateLease::new(None, self.backend.as_ref()),
+                ResidentBatchedStateLease::new(
+                    None,
+                    self.backend.as_ref(),
+                    &self.batched_state_cache_counters,
+                ),
                 false,
             )
         };
@@ -6416,7 +6680,11 @@ impl ModelRunner {
                 self.prepare_batched_linear_state(linear_states, all_rows_resident, row_ids)?
             } else {
                 (
-                    ResidentBatchedStateLease::new(None, self.backend.as_ref()),
+                    ResidentBatchedStateLease::new(
+                        None,
+                        self.backend.as_ref(),
+                        &self.batched_state_cache_counters,
+                    ),
                     false,
                 )
             };
@@ -6638,7 +6906,11 @@ impl ModelRunner {
                 self.prepare_batched_linear_state(linear_states, all_rows_resident, row_ids)?
             } else {
                 (
-                    ResidentBatchedStateLease::new(None, self.backend.as_ref()),
+                    ResidentBatchedStateLease::new(
+                        None,
+                        self.backend.as_ref(),
+                        &self.batched_state_cache_counters,
+                    ),
                     false,
                 )
             };
@@ -10599,6 +10871,27 @@ mod tests {
             99,
             false
         ));
+    }
+
+    #[test]
+    fn batched_state_cache_counters_track_overlapping_leases() {
+        let counters = BatchedStateCacheCounters::default();
+        counters.acquire_lease();
+        counters.acquire_lease();
+        counters
+            .take_miss_while_leased_count
+            .fetch_add(1, Ordering::Relaxed);
+
+        let overlapping = counters.snapshot();
+        assert_eq!(overlapping.active_leases, 2);
+        assert_eq!(overlapping.max_active_leases, 2);
+        assert_eq!(overlapping.take_miss_while_leased_count, 1);
+
+        counters.release_lease();
+        counters.release_lease();
+        let drained = counters.snapshot();
+        assert_eq!(drained.active_leases, 0);
+        assert_eq!(drained.max_active_leases, 2);
     }
 
     #[test]

@@ -222,6 +222,7 @@ struct CacheDebugState {
     deterministic_chat_request_entries: usize,
     deterministic_chat_choices_entries: usize,
     deterministic_batch_entries: usize,
+    batched_recurrent_state: kiln_model::BatchedStateCacheStats,
     rendered_prompt: PromptCacheDebugState,
     prompt_token: PromptCacheDebugState,
     prefix_cache: PrefixCacheDebugState,
@@ -563,12 +564,20 @@ fn cache_state(state: &AppState) -> CacheDebugState {
         state.rendered_prompt_cache.lock().unwrap().stats();
     let (prompt_token_hits, prompt_token_misses, prompt_token_entries) =
         state.prompt_token_cache.lock().unwrap().stats();
+    let batched_recurrent_state = match state.backend.as_ref() {
+        ModelBackend::Mock { .. } => kiln_model::BatchedStateCacheStats::default(),
+        ModelBackend::Real { runner, .. } => runner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .batched_state_cache_stats(),
+    };
 
     CacheDebugState {
         deterministic_completion_entries: state.completion_cache.lock().unwrap().stats(),
         deterministic_chat_request_entries: state.chat_request_cache.lock().unwrap().stats(),
         deterministic_chat_choices_entries: state.chat_choices_cache.lock().unwrap().stats(),
         deterministic_batch_entries: state.batch_cache.lock().unwrap().stats(),
+        batched_recurrent_state,
         rendered_prompt: PromptCacheDebugState {
             hits: rendered_prompt_hits,
             misses: rendered_prompt_misses,
@@ -955,6 +964,19 @@ mod tests {
         assert_eq!(json["streaming_prefill"]["tile_tokens"]["effective"], 8192);
         assert!(json["caches"]["rendered_prompt"].is_object());
         assert!(json["caches"]["prefix_cache"].is_object());
+        assert!(json["caches"]["batched_recurrent_state"].is_object());
+        assert_eq!(
+            json["caches"]["batched_recurrent_state"]["entry_present"],
+            false
+        );
+        assert_eq!(
+            json["caches"]["batched_recurrent_state"]["active_leases"],
+            0
+        );
+        assert_eq!(
+            json["caches"]["batched_recurrent_state"]["park_replacement_eviction_count"],
+            0
+        );
         assert_eq!(json["caches"]["prefix_cache"]["active_leases"], 0);
         assert_eq!(json["caches"]["prefix_cache"]["pending_release_entries"], 0);
 

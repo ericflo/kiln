@@ -2191,6 +2191,178 @@ impl Metrics {
             );
         }
 
+        let stats = gauges.batched_state_cache;
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_entry Whether a parked batched recurrent-state cache entry exists.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_entry gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batched_recurrent_state_cache_entry {}",
+                u8::from(stats.entry_present)
+            ),
+        );
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_rows Parked recurrent-state rows by ownership kind.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_rows gauge\n");
+        prom_counter(
+            &mut out,
+            "kiln_batched_recurrent_state_cache_rows",
+            "kind",
+            "capacity",
+            stats.capacity_rows as u64,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_batched_recurrent_state_cache_rows",
+            "kind",
+            "logical",
+            stats.logical_rows as u64,
+        );
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_resident Whether every parked GDN buffer is backend-resident.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_resident gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batched_recurrent_state_cache_resident {}",
+                u8::from(stats.resident)
+            ),
+        );
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_leases Batched recurrent-state leases by kind.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_leases gauge\n");
+        prom_counter(
+            &mut out,
+            "kiln_batched_recurrent_state_cache_leases",
+            "kind",
+            "active",
+            stats.active_leases,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_batched_recurrent_state_cache_leases",
+            "kind",
+            "max",
+            stats.max_active_leases,
+        );
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_takes_total Batched recurrent-state cache checkouts by result.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_takes_total counter\n");
+        for (result, value) in [
+            ("hit", stats.take_hit_count),
+            ("miss", stats.take_miss_count),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_batched_recurrent_state_cache_takes_total",
+                "result",
+                result,
+                value,
+            );
+        }
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_misses_while_leased_total Empty cache checkouts while another recurrent-state lease is active.\n");
+        out.push_str(
+            "# TYPE kiln_batched_recurrent_state_cache_misses_while_leased_total counter\n",
+        );
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batched_recurrent_state_cache_misses_while_leased_total {}",
+                stats.take_miss_while_leased_count
+            ),
+        );
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_reuses_total Batched recurrent-state cache reuse operations by kind.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_reuses_total counter\n");
+        for (kind, value) in [
+            ("exact", stats.exact_reuse_count),
+            ("resident_capacity", stats.resident_capacity_reuse_count),
+            ("prefix_view", stats.resident_prefix_view_count),
+            ("refresh", stats.resident_refresh_count),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_batched_recurrent_state_cache_reuses_total",
+                "kind",
+                kind,
+                value,
+            );
+        }
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_assemblies_total Fresh batched recurrent-state assemblies.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_assemblies_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batched_recurrent_state_cache_assemblies_total {}",
+                stats.fresh_assembly_count
+            ),
+        );
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_rejections_total Checked-out entries rejected for reuse by reason.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_rejections_total counter\n");
+        for (reason, value) in [
+            ("missing_row_ids", stats.rejected_missing_row_ids_count),
+            ("nonresident_rows", stats.rejected_nonresident_rows_count),
+            ("nonresident_cache", stats.rejected_nonresident_cache_count),
+            (
+                "insufficient_capacity",
+                stats.rejected_insufficient_capacity_count,
+            ),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_batched_recurrent_state_cache_rejections_total",
+                "reason",
+                reason,
+                value,
+            );
+        }
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_parks_total Batched recurrent-state leases returned to the cache.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_parks_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batched_recurrent_state_cache_parks_total {}",
+                stats.park_count
+            ),
+        );
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_invalidations_total Explicit adapter or model lifecycle invalidations.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_invalidations_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batched_recurrent_state_cache_invalidations_total {}",
+                stats.explicit_invalidation_count
+            ),
+        );
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_completed_rows_total Completed cached rows by ownership action.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_completed_rows_total counter\n");
+        for (action, value) in [
+            ("preserve", stats.completed_row_preservation_count),
+            ("evict", stats.completed_row_eviction_count),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_batched_recurrent_state_cache_completed_rows_total",
+                "action",
+                action,
+                value,
+            );
+        }
+        out.push_str("# HELP kiln_batched_recurrent_state_cache_evictions_total Batched recurrent-state ownership releases by reason.\n");
+        out.push_str("# TYPE kiln_batched_recurrent_state_cache_evictions_total counter\n");
+        for (reason, value) in [
+            ("park_replacement", stats.park_replacement_eviction_count),
+            (
+                "explicit_invalidation",
+                stats.explicit_invalidation_eviction_count,
+            ),
+            ("completed_row", stats.completed_row_eviction_count),
+            ("lease_drop", stats.lease_drop_eviction_count),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_batched_recurrent_state_cache_evictions_total",
+                "reason",
+                reason,
+                value,
+            );
+        }
+
         if let Some(stats) = gauges.vulkan_buffer_pool {
             out.push_str("# HELP kiln_vulkan_buffer_pool_limit_bytes Configured maximum bytes retained by the Vulkan scratch recycler.\n");
             out.push_str("# TYPE kiln_vulkan_buffer_pool_limit_bytes gauge\n");
@@ -2792,6 +2964,7 @@ pub struct SnapshotGauges {
     pub vram_training_budget: u64,
     pub vulkan_buffers: Option<kiln_model::VulkanBufferAllocationStats>,
     pub vulkan_buffer_pool: Option<kiln_model::VulkanBufferPoolStats>,
+    pub batched_state_cache: kiln_model::BatchedStateCacheStats,
     pub prefix_cache: PrefixCacheStats,
     pub rendered_prompt_cache_hits: u64,
     pub rendered_prompt_cache_misses: u64,
@@ -3342,6 +3515,33 @@ mod tests {
                 uncached_allocation_count: 1,
                 uncached_allocated_bytes: 256,
             }),
+            batched_state_cache: kiln_model::BatchedStateCacheStats {
+                entry_present: true,
+                capacity_rows: 8,
+                logical_rows: 4,
+                resident: true,
+                active_leases: 1,
+                max_active_leases: 3,
+                take_hit_count: 19,
+                take_miss_count: 5,
+                take_miss_while_leased_count: 4,
+                exact_reuse_count: 7,
+                resident_capacity_reuse_count: 8,
+                resident_prefix_view_count: 6,
+                resident_refresh_count: 5,
+                fresh_assembly_count: 5,
+                rejected_missing_row_ids_count: 1,
+                rejected_nonresident_rows_count: 2,
+                rejected_nonresident_cache_count: 3,
+                rejected_insufficient_capacity_count: 4,
+                park_count: 20,
+                park_replacement_eviction_count: 4,
+                explicit_invalidation_count: 2,
+                explicit_invalidation_eviction_count: 1,
+                completed_row_preservation_count: 11,
+                completed_row_eviction_count: 1,
+                lease_drop_eviction_count: 6,
+            },
             prefix_cache: PrefixCacheStats {
                 lookup_hits: 7,
                 lookup_misses: 3,
@@ -3603,6 +3803,36 @@ mod tests {
         assert!(
             output.contains("kiln_vulkan_buffer_freed_bytes_total{memory=\"host_visible\"} 100")
         );
+        for expected in [
+            "kiln_batched_recurrent_state_cache_entry 1",
+            "kiln_batched_recurrent_state_cache_rows{kind=\"capacity\"} 8",
+            "kiln_batched_recurrent_state_cache_rows{kind=\"logical\"} 4",
+            "kiln_batched_recurrent_state_cache_resident 1",
+            "kiln_batched_recurrent_state_cache_leases{kind=\"active\"} 1",
+            "kiln_batched_recurrent_state_cache_leases{kind=\"max\"} 3",
+            "kiln_batched_recurrent_state_cache_takes_total{result=\"hit\"} 19",
+            "kiln_batched_recurrent_state_cache_takes_total{result=\"miss\"} 5",
+            "kiln_batched_recurrent_state_cache_misses_while_leased_total 4",
+            "kiln_batched_recurrent_state_cache_reuses_total{kind=\"exact\"} 7",
+            "kiln_batched_recurrent_state_cache_reuses_total{kind=\"resident_capacity\"} 8",
+            "kiln_batched_recurrent_state_cache_reuses_total{kind=\"prefix_view\"} 6",
+            "kiln_batched_recurrent_state_cache_reuses_total{kind=\"refresh\"} 5",
+            "kiln_batched_recurrent_state_cache_assemblies_total 5",
+            "kiln_batched_recurrent_state_cache_rejections_total{reason=\"missing_row_ids\"} 1",
+            "kiln_batched_recurrent_state_cache_rejections_total{reason=\"nonresident_rows\"} 2",
+            "kiln_batched_recurrent_state_cache_rejections_total{reason=\"nonresident_cache\"} 3",
+            "kiln_batched_recurrent_state_cache_rejections_total{reason=\"insufficient_capacity\"} 4",
+            "kiln_batched_recurrent_state_cache_parks_total 20",
+            "kiln_batched_recurrent_state_cache_invalidations_total 2",
+            "kiln_batched_recurrent_state_cache_completed_rows_total{action=\"preserve\"} 11",
+            "kiln_batched_recurrent_state_cache_completed_rows_total{action=\"evict\"} 1",
+            "kiln_batched_recurrent_state_cache_evictions_total{reason=\"park_replacement\"} 4",
+            "kiln_batched_recurrent_state_cache_evictions_total{reason=\"explicit_invalidation\"} 1",
+            "kiln_batched_recurrent_state_cache_evictions_total{reason=\"completed_row\"} 1",
+            "kiln_batched_recurrent_state_cache_evictions_total{reason=\"lease_drop\"} 6",
+        ] {
+            assert!(output.contains(expected), "missing metric: {expected}");
+        }
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"hit\"} 7"));
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"miss\"} 3"));
         assert!(output.contains("kiln_prefix_cache_hit_tokens_total 112"));
@@ -3791,6 +4021,7 @@ mod tests {
             vram_training_budget: 0,
             vulkan_buffers: None,
             vulkan_buffer_pool: None,
+            batched_state_cache: kiln_model::BatchedStateCacheStats::default(),
             prefix_cache: PrefixCacheStats::default(),
             rendered_prompt_cache_hits: 0,
             rendered_prompt_cache_misses: 0,

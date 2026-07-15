@@ -1403,7 +1403,12 @@ Kiln currently exposes several complementary, partial views:
   alerting. A stale or failed sample remains visible diagnostically but
   contributes zero allocation headroom.
 - `/health` and `/v1/debug/model-state` expose config hashes and other runtime
-  identity data.
+  identity data. Trusted debug additionally exposes the current and
+  process-lifetime batched recurrent-state cache lifecycle at
+  `caches.batched_recurrent_state`; `/metrics` publishes the same
+  fixed-cardinality ownership, reuse, rejection, concurrency, and eviction
+  counters. The complete field and interpretation contract is in
+  [Local Hardware Qualification](qualification.md#batched-recurrent-state-cache-telemetry).
 - Startup logs record serving-profile provenance and configured/backend/final
   decode-width sources.
 

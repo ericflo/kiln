@@ -30,6 +30,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         batching_engine,
         backend_health_quarantined,
         external_yield_sync,
+        batched_state_cache,
     ) = match state.backend.as_ref() {
         ModelBackend::Mock { scheduler, .. } => {
             let sched = scheduler.lock().await;
@@ -46,6 +47,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 BatchingEngineSnapshot::default(),
                 false,
                 Vec::new(),
+                kiln_model::BatchedStateCacheStats::default(),
             )
         }
         ModelBackend::Real {
@@ -54,6 +56,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
             backend_health,
             batching_engine,
             decode_batcher,
+            runner,
             ..
         } => {
             let (blocks_used, blocks_total) = {
@@ -85,6 +88,10 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 batching_engine_snapshot,
                 backend_health_snapshot.quarantined,
                 backend_health.external_yield_sync_stats(),
+                runner
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .batched_state_cache_stats(),
             )
         }
     };
@@ -134,6 +141,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         vram_training_budget: state.memory_budget.training_budget_bytes,
         vulkan_buffers: kiln_model::vulkan_buffer_allocation_stats(),
         vulkan_buffer_pool: kiln_model::vulkan_buffer_pool_stats(),
+        batched_state_cache,
         prefix_cache,
         rendered_prompt_cache_hits,
         rendered_prompt_cache_misses,

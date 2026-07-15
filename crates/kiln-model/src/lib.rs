@@ -83,12 +83,13 @@ pub use cancel::CancelHandle;
 pub use engine::Engine;
 pub use forward::{LinearAttentionState, StreamingPrefillExecutionPolicy, StreamingPrefillMode};
 pub use generate::{
-    BackendHealthHandle, BackendHealthSnapshot, DecodeBatcher, DecodeBatcherConfig,
-    DecodeBatcherStats, ExternalYieldSyncStats, FinishReason, GenerationOutput,
-    InferenceMemoryRuntime, ModelRunner, ModelRunnerRuntimeOptions, MtpGenerationOutput,
-    PagedBatchedDecodeState, PagedBatchedPrefillProgress, PagedBatchedPrefillStart,
-    PagedBatchedPrefillState, PagedPrefixNextToken, PagedPrefixRegistration, PagedPrefixReuse,
-    PrefixCachedGenerationOutput, StreamDone, StreamEvent, StreamToken, ThreadedStreamingOutput,
+    BackendHealthHandle, BackendHealthSnapshot, BatchedStateCacheStats, DecodeBatcher,
+    DecodeBatcherConfig, DecodeBatcherStats, ExternalYieldSyncStats, FinishReason,
+    GenerationOutput, InferenceMemoryRuntime, ModelRunner, ModelRunnerRuntimeOptions,
+    MtpGenerationOutput, PagedBatchedDecodeState, PagedBatchedPrefillProgress,
+    PagedBatchedPrefillStart, PagedBatchedPrefillState, PagedPrefixNextToken,
+    PagedPrefixRegistration, PagedPrefixReuse, PrefixCachedGenerationOutput, StreamDone,
+    StreamEvent, StreamToken, ThreadedStreamingOutput,
 };
 pub use kv_cache::KvCache;
 pub use loader::{

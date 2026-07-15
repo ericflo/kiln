@@ -1240,6 +1240,67 @@ kiln_vulkan_buffer_pool_uncached_allocations_total
 kiln_vulkan_buffer_pool_uncached_allocated_bytes_total
 ```
 
+#### Batched recurrent-state cache telemetry
+
+Native batched decode also owns a persistent `LinearAttentionState` cache for
+the recurrent GDN layers. Trusted `GET /v1/debug/model-state` exposes its full
+snapshot at `caches.batched_recurrent_state` on every backend. The four current
+ownership fields are `entry_present`, `capacity_rows`, `logical_rows`, and
+`resident`. A parked resident entry may have more capacity rows than logical
+rows because smaller batches use an identity-preserving prefix view of the
+maximum observed allocation. An entry is temporarily absent while a forward
+call owns its lease.
+
+The remaining fields are process-lifetime monotonic counters:
+
+| Field group | Meaning |
+|---|---|
+| `active_leases`, `max_active_leases` | Current and peak simultaneous checked-out or newly assembled states. More than one proves overlapping batched-state forwards. |
+| `take_hit_count`, `take_miss_count` | Cache checkout outcomes. The first eligible forward normally misses. |
+| `take_miss_while_leased_count` | Misses observed while another state lease is active. This is the direct signal for concurrent checkout of a single-slot cache. |
+| `exact_reuse_count` | Reuse with the same ordered request-ID fingerprint; no state-row refresh is needed. |
+| `resident_capacity_reuse_count` | Reuse of backend-resident allocation capacity. This includes same-width and smaller-prefix reuse. |
+| `resident_prefix_view_count` | Capacity reuse through a smaller logical axis-0 prefix. |
+| `resident_refresh_count` | In-place row refresh because the ordered request IDs changed. |
+| `fresh_assembly_count` | New batched state assembled after a miss or rejected entry. |
+| `rejected_*_count` | A checked-out entry could not be reused because row IDs were absent, input rows were nonresident, the cache was nonresident, or capacity was insufficient. Exactly one rejection reason is recorded for each rejected entry. |
+| `park_count` | A forward returned its state to the persistent cache. |
+| `park_replacement_eviction_count` | A returning lease found another parked entry and evicted it. This should remain zero when one cache owner cannot overlap another. |
+| `explicit_invalidation_count`, `explicit_invalidation_eviction_count` | Adapter/model lifecycle invalidations requested, and those that actually removed a parked entry. |
+| `completed_row_preservation_count`, `completed_row_eviction_count` | Completed request rows that appeared in the cache fingerprint and caused resident preservation or nonresident eviction. |
+| `lease_drop_eviction_count` | Checked-out capacity released instead of parked, including rejected entries and forward/error exits. Use the rejection counters and request failures to distinguish expected capacity replacement from errors. |
+
+Prometheus exports the same bounded-cardinality state as:
+
+```text
+kiln_batched_recurrent_state_cache_entry
+kiln_batched_recurrent_state_cache_rows{kind="capacity|logical"}
+kiln_batched_recurrent_state_cache_resident
+kiln_batched_recurrent_state_cache_leases{kind="active|max"}
+kiln_batched_recurrent_state_cache_takes_total{result="hit|miss"}
+kiln_batched_recurrent_state_cache_misses_while_leased_total
+kiln_batched_recurrent_state_cache_reuses_total{kind="exact|resident_capacity|prefix_view|refresh"}
+kiln_batched_recurrent_state_cache_assemblies_total
+kiln_batched_recurrent_state_cache_rejections_total{reason="missing_row_ids|nonresident_rows|nonresident_cache|insufficient_capacity"}
+kiln_batched_recurrent_state_cache_parks_total
+kiln_batched_recurrent_state_cache_invalidations_total
+kiln_batched_recurrent_state_cache_completed_rows_total{action="preserve|evict"}
+kiln_batched_recurrent_state_cache_evictions_total{reason="park_replacement|explicit_invalidation|completed_row|lease_drop"}
+```
+
+The reuse counters deliberately describe overlapping properties: an exact
+fingerprint can also reuse resident capacity and a prefix view. Rejection
+reasons, by contrast, are mutually exclusive. In a warmed, serialized,
+fixed-maximum-capacity workload, fresh assemblies and insufficient-capacity
+rejections stop increasing after the largest batch is seen;
+`take_miss_while_leased_count`, `park_replacement_eviction_count`, and
+`max_active_leases - 1` remain zero. Growth in those three concurrency signals
+alongside flat semantic/device error counters identifies ownership overlap,
+not allocator pressure. Increasing `rejected_insufficient_capacity_count`
+without overlap identifies legitimate high-water growth. Increasing
+`lease_drop_eviction_count` without a rejection requires an accompanying
+forward/error investigation.
+
 The soak validates that allocation/free deltas reconcile exactly with the
 change in live count and bytes, that pool free plus borrowed ownership equals
 retention, that the cap never changes or overflows, and that every cache
