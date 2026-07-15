@@ -17,6 +17,22 @@ fn gib(bytes: u64) -> f64 {
     bytes as f64 / BYTES_PER_GIB
 }
 
+fn prefix_cache_effective_reason(
+    requested_enabled: bool,
+    effective_enabled: bool,
+    inference_device: kiln_tensor::Device,
+) -> &'static str {
+    if effective_enabled {
+        "active"
+    } else if !requested_enabled {
+        "configuration"
+    } else if matches!(inference_device, kiln_tensor::Device::Vulkan(_)) {
+        "vulkan_correctness_quarantine"
+    } else {
+        "backend_unavailable"
+    }
+}
+
 #[derive(Serialize)]
 struct ConfigResponse {
     serving_profile: ServingProfileDiagnostics,
@@ -326,15 +342,11 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             Err(_) => (false, kiln_scheduler::PrefixCacheStats::default()),
         },
     };
-    let prefix_cache_effective_reason = if prefix_cache_effective_enabled {
-        "active"
-    } else if !state.prefix_cache_config.enabled {
-        "configuration"
-    } else if matches!(state.model_weight_device, kiln_tensor::Device::Vulkan(_)) {
-        "vulkan_correctness_quarantine"
-    } else {
-        "backend_unavailable"
-    };
+    let prefix_cache_effective_reason = prefix_cache_effective_reason(
+        state.prefix_cache_config.enabled,
+        prefix_cache_effective_enabled,
+        state.inference_device,
+    );
 
     // Determine checkpoint segments
     let ckpt = kiln_train::CheckpointConfig::from_runtime(
@@ -842,6 +854,74 @@ mod tests {
             300,
             "Qwen3.5-4B".to_string(),
         )
+    }
+
+    #[test]
+    fn prefix_cache_reason_uses_logical_inference_device() {
+        assert_eq!(
+            prefix_cache_effective_reason(true, true, kiln_tensor::Device::Vulkan(0)),
+            "active"
+        );
+        assert_eq!(
+            prefix_cache_effective_reason(false, false, kiln_tensor::Device::Vulkan(0)),
+            "configuration"
+        );
+        assert_eq!(
+            prefix_cache_effective_reason(true, false, kiln_tensor::Device::Vulkan(0)),
+            "vulkan_correctness_quarantine"
+        );
+        assert_eq!(
+            prefix_cache_effective_reason(true, false, kiln_tensor::Device::Cpu),
+            "backend_unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_reports_vulkan_quarantine_with_cpu_resident_weights() {
+        let model_config = ModelConfig::qwen3_5_4b();
+        let scheduler = Scheduler::new(
+            SchedulerConfig {
+                prefix_cache_enabled: false,
+                ..SchedulerConfig::default()
+            },
+            256,
+        );
+        let mut state = AppState::new_mock(
+            model_config.clone(),
+            scheduler,
+            Arc::new(MockEngine::new(model_config)),
+            crate::api::test_tokenizer(),
+            300,
+            "Qwen3.5-4B".to_string(),
+        );
+        state.inference_device = kiln_tensor::Device::Vulkan(0);
+        assert_eq!(state.model_weight_device, kiln_tensor::Device::Cpu);
+
+        let response = routes()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["prefix_cache"]["configuration"]["enabled"], true);
+        assert_eq!(json["prefix_cache"]["effective_enabled"], false);
+        assert_eq!(
+            json["prefix_cache"]["effective_reason"],
+            "vulkan_correctness_quarantine"
+        );
+        assert_eq!(json["prefix_cache"]["effective_max_blocks"], 0);
+        assert_eq!(json["prefix_cache"]["effective_max_entries"], 0);
+        assert_eq!(json["prefix_cache"]["effective_max_state_bytes"], 0);
     }
 
     #[tokio::test]

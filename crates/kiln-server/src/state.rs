@@ -2553,6 +2553,10 @@ pub struct AppState {
     pub memory_config: crate::config::MemoryConfig,
     /// Immutable native-training planning inputs shared by every queued job.
     pub training_runtime: kiln_train::TrainingRuntimeContext,
+    /// Immutable logical device selected for inference execution. Vulkan's
+    /// hybrid path can keep weights on CPU while dispatching kernels through
+    /// Vulkan, so this identity must remain distinct from weight placement.
+    pub inference_device: kiln_tensor::Device,
     /// Immutable device identity of the frozen model-weight representation.
     /// This differs from the execution device on Vulkan's hybrid serving path
     /// and lets admission/reporting reject unqualified residency without
@@ -3365,6 +3369,7 @@ impl AppState {
                 kiln_train::GradientCheckpointPolicy::Auto,
             )
             .with_streaming_prefill_policy(streaming_prefill_runtime_config.execution_policy()),
+            inference_device: kiln_tensor::Device::Cpu,
             model_weight_device: kiln_tensor::Device::Cpu,
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
@@ -4498,6 +4503,7 @@ impl AppState {
             )
             .with_checkpoint_boundary_policy(checkpoint_boundary_policy)
             .with_streaming_prefill_policy(streaming_prefill_runtime_config.execution_policy()),
+            inference_device: device_kt,
             model_weight_device,
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
