@@ -896,38 +896,38 @@
     },
     "prefix_cache": {
       "type": "object",
-      "description": "Shared-prefix KV and recurrent-state retention policy.",
+      "description": "Requested shared-prefix KV and recurrent-state retention policy. Backend qualification determines the effective capability.",
       "additionalProperties": false,
       "properties": {
         "enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Enables reuse of KV blocks and recurrent-state snapshots for shared prompt prefixes.",
+          "description": "Requests reuse of KV blocks and recurrent-state snapshots for shared prompt prefixes. CPU, CUDA, ROCm, and Metal honor the request. Vulkan currently forces the effective capability off because repeated production-model runs proved semantic corruption after cross-request restoration. This is a source-level correctness quarantine, not a second setting.",
           "x-kiln-path": "prefix_cache.enabled",
           "x-kiln-type-and-default": "boolean; true",
           "x-kiln-canonical-env": "KILN_PREFIX_CACHE_ENABLED (implemented)",
           "x-kiln-environment": "KILN_PREFIX_CACHE_ENABLED",
-          "x-kiln-validation": "Enables reuse of KV blocks and recurrent-state snapshots for shared prompt prefixes."
+          "x-kiln-validation": "Requests reuse of KV blocks and recurrent-state snapshots for shared prompt prefixes. CPU, CUDA, ROCm, and Metal honor the request. Vulkan currently forces the effective capability off because repeated production-model runs proved semantic corruption after cross-request restoration. This is a source-level correctness quarantine, not a second setting."
         },
         "max_blocks": {
           "type": "integer",
           "minimum": 1,
-          "description": "Must be greater than zero when set. None resolves to half of the allocated KV block pool.",
+          "description": "Must be greater than zero when set. On an admitted backend, None resolves to half of the allocated KV block pool. It has no runtime allocation effect while the effective capability is off.",
           "x-kiln-path": "prefix_cache.max_blocks",
           "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
           "x-kiln-canonical-env": "KILN_PREFIX_CACHE_MAX_BLOCKS (implemented)",
           "x-kiln-environment": "KILN_PREFIX_CACHE_MAX_BLOCKS",
-          "x-kiln-validation": "Must be greater than zero when set. None resolves to half of the allocated KV block pool."
+          "x-kiln-validation": "Must be greater than zero when set. On an admitted backend, None resolves to half of the allocated KV block pool. It has no runtime allocation effect while the effective capability is off."
         },
         "max_entries": {
           "type": "integer",
           "minimum": 1,
-          "description": "Must be greater than zero when set. None resolves from the relevant safe allocation tier and per-entry recurrent-state bytes, with at least one entry. Vulkan reserves this state from the separately bounded host-backed tier before sizing its host-resident KV pool; an explicit count that cannot fit stops startup.",
+          "description": "Must be greater than zero when set. On an admitted backend, None resolves from the relevant safe allocation tier and per-entry recurrent-state bytes, with at least one entry. It has no runtime allocation effect while the effective capability is off; quarantined Vulkan reserves no host-backed prefix state.",
           "x-kiln-path": "prefix_cache.max_entries",
           "x-kiln-type-and-default": "optional unsigned integer; omitted (None)",
           "x-kiln-canonical-env": "KILN_PREFIX_CACHE_MAX_ENTRIES (implemented)",
           "x-kiln-environment": "KILN_PREFIX_CACHE_MAX_ENTRIES",
-          "x-kiln-validation": "Must be greater than zero when set. None resolves from the relevant safe allocation tier and per-entry recurrent-state bytes, with at least one entry. Vulkan reserves this state from the separately bounded host-backed tier before sizing its host-resident KV pool; an explicit count that cannot fit stops startup."
+          "x-kiln-validation": "Must be greater than zero when set. On an admitted backend, None resolves from the relevant safe allocation tier and per-entry recurrent-state bytes, with at least one entry. It has no runtime allocation effect while the effective capability is off; quarantined Vulkan reserves no host-backed prefix state."
         }
       },
       "default": {}
