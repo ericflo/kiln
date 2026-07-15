@@ -739,6 +739,7 @@ PERFORMANCE_METADATA_FIELDS = {
     "actor_queue_ms",
     "actor_admission_ms",
     "actor_prefill_wall_ms",
+    "resident_prefill_used",
     "decode_ms",
     "total_latency_ms",
     "decode_tokens_per_sec",
@@ -847,7 +848,7 @@ def validate_request_latency(value: Any) -> None:
             raise QualificationError(f"request latency phase {field} is invalid")
 
 
-def parse_actor_performance(value: Any) -> tuple[float, float, float] | None:
+def parse_actor_performance(value: Any) -> tuple[float, float, float, bool] | None:
     if not isinstance(value, dict):
         return None
     metadata = value.get("metadata")
@@ -857,6 +858,11 @@ def parse_actor_performance(value: Any) -> tuple[float, float, float] | None:
     if not isinstance(performance, dict) or set(performance) != PERFORMANCE_METADATA_FIELDS:
         raise QualificationError("performance metadata has an unexpected shape")
     validate_request_latency(performance["latency"])
+    resident_prefill_used = performance["resident_prefill_used"]
+    if not isinstance(resident_prefill_used, bool):
+        raise QualificationError(
+            "performance metadata resident_prefill_used is not boolean"
+        )
     numbers: dict[str, float] = {}
     for field in (
         "ttft_ms",
@@ -890,6 +896,7 @@ def parse_actor_performance(value: Any) -> tuple[float, float, float] | None:
         numbers["actor_queue_ms"],
         numbers["actor_admission_ms"],
         numbers["actor_prefill_wall_ms"],
+        resident_prefill_used,
     )
 
 
@@ -966,6 +973,7 @@ class StreamResult:
     cancelled: bool
     error: str | None
     token_ids: list[int] = dataclasses.field(default_factory=list)
+    resident_prefill_used: bool | None = None
     actor_queue_ms: float | None = None
     actor_admission_ms: float | None = None
     actor_prefill_wall_ms: float | None = None
@@ -1200,6 +1208,7 @@ def run_stream(
     actor_queue_ms: float | None = None
     actor_admission_ms: float | None = None
     actor_prefill_wall_ms: float | None = None
+    resident_prefill_used: bool | None = None
     reasons: list[str] = []
     done = False
     cancelled = False
@@ -1274,6 +1283,7 @@ def run_stream(
                         actor_queue_ms,
                         actor_admission_ms,
                         actor_prefill_wall_ms,
+                        resident_prefill_used,
                     ) = actor_performance
                 timing = parse_token_timing(
                     value,
@@ -1381,6 +1391,7 @@ def run_stream(
         cancelled=cancelled,
         error=error,
         token_ids=token_ids,
+        resident_prefill_used=resident_prefill_used,
         actor_queue_ms=actor_queue_ms,
         actor_admission_ms=actor_admission_ms,
         actor_prefill_wall_ms=actor_prefill_wall_ms,

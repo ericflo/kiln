@@ -152,6 +152,13 @@ The currently measured batching path exposes:
 | `client_delivery_ms` | Handler receipt to response-body enqueue for streams |
 | `unexplained_ms` | Wall time between tokens not covered by a measured phase candidate |
 
+The terminal performance object also reports `resident_prefill_used`. It is
+`true` only when that request completed at least one prompt token through a
+successful native multi-row resident-prefill forward, `false` when a batching
+request never entered that route, and `null` on direct paths that cannot use
+it. This is request-scoped route evidence, not an inference from process-global
+counters; a native decline that performs no mutation leaves it `false`.
+
 The batching engine measures `gpu_lock_wait_ms` and `synchronization_ms` on the
 owned decode invocation and propagates those observations only to requests
 active for that step. Direct streaming measures `tokenization_ms`, model-ready-to-bridge

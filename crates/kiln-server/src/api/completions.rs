@@ -583,6 +583,7 @@ fn attach_chat_performance_metadata(
         actor_queue_ms: None,
         actor_admission_ms: None,
         actor_prefill_wall_ms: None,
+        resident_prefill_used: None,
         decode_ms: decode_duration.map(duration_ms_f64),
         total_latency_ms: duration_ms_f64(total_latency),
         decode_tokens_per_sec: decode_tokens_per_sec_for_performance_metadata(
@@ -603,6 +604,7 @@ fn attach_batched_actor_performance_metadata(
     actor_queue_duration: std::time::Duration,
     actor_admission_duration: std::time::Duration,
     actor_prefill_wall_duration: Option<std::time::Duration>,
+    resident_prefill_used: bool,
 ) {
     let Some(performance) = resp.metadata.performance.as_mut() else {
         return;
@@ -610,6 +612,7 @@ fn attach_batched_actor_performance_metadata(
     performance.actor_queue_ms = Some(duration_ms_f64(actor_queue_duration));
     performance.actor_admission_ms = Some(duration_ms_f64(actor_admission_duration));
     performance.actor_prefill_wall_ms = actor_prefill_wall_duration.map(duration_ms_f64);
+    performance.resident_prefill_used = Some(resident_prefill_used);
 }
 
 struct TimedGenerationOutput {
@@ -4332,6 +4335,7 @@ pub struct ChatCompletionPerformanceMetadata {
     pub actor_queue_ms: Option<f64>,
     pub actor_admission_ms: Option<f64>,
     pub actor_prefill_wall_ms: Option<f64>,
+    pub resident_prefill_used: Option<bool>,
     pub decode_ms: Option<f64>,
     pub total_latency_ms: f64,
     pub decode_tokens_per_sec: Option<f64>,
@@ -7187,6 +7191,7 @@ async fn generate_real_batched(
         actor_queue_duration,
         actor_admission_duration,
         actor_prefill_wall_duration,
+        output.resident_prefill_used,
     );
     if let Some(performance) = response.metadata.performance.as_mut() {
         performance.latency = Some(latency_diagnostics);
@@ -7721,6 +7726,9 @@ async fn generate_real_batched_streaming(
                                         actor_prefill_wall_ms: output
                                             .actor_prefill_wall_duration
                                             .map(duration_ms_f64),
+                                        resident_prefill_used: Some(
+                                            output.resident_prefill_used,
+                                        ),
                                         decode_ms: Some(duration_ms_f64(output.decode_duration)),
                                         total_latency_ms: duration_ms_f64(total_latency),
                                         decode_tokens_per_sec:
@@ -9242,6 +9250,7 @@ async fn generate_real_streaming(
                                 actor_queue_ms: None,
                                 actor_admission_ms: None,
                                 actor_prefill_wall_ms: None,
+                                resident_prefill_used: None,
                                 decode_ms: None,
                                 total_latency_ms: duration_ms_f64(total_latency),
                                 decode_tokens_per_sec:
@@ -12357,6 +12366,7 @@ mod tests {
             actor_queue_ms: Some(12.0),
             actor_admission_ms: Some(3.0),
             actor_prefill_wall_ms: Some(20.0),
+            resident_prefill_used: Some(true),
             decode_ms: Some(8.0),
             total_latency_ms: 60.0,
             decode_tokens_per_sec: Some(375.0),
@@ -12373,6 +12383,10 @@ mod tests {
         .unwrap();
         assert_eq!(timed["metadata"]["performance"]["actor_queue_ms"], 12.0);
         assert_eq!(timed["metadata"]["performance"]["actor_admission_ms"], 3.0);
+        assert_eq!(
+            timed["metadata"]["performance"]["resident_prefill_used"],
+            true
+        );
         assert_eq!(
             timed["metadata"]["performance"]["actor_prefill_wall_ms"],
             20.0
@@ -15832,6 +15846,7 @@ mod tests {
         assert!(perf["actor_queue_ms"].is_null());
         assert!(perf["actor_admission_ms"].is_null());
         assert!(perf["actor_prefill_wall_ms"].is_null());
+        assert!(perf["resident_prefill_used"].is_null());
         assert_eq!(perf["decode_ms"], 0.0);
         assert!(perf["total_latency_ms"].as_f64().unwrap() >= 0.0);
         assert_eq!(perf["decode_tokens_per_sec"], 0.0);

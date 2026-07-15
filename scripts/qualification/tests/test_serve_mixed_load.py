@@ -1132,6 +1132,7 @@ class ServeMixedLoadTests(unittest.TestCase):
             "actor_queue_ms": 12.0,
             "actor_admission_ms": 3.0,
             "actor_prefill_wall_ms": 20.0,
+            "resident_prefill_used": True,
             "decode_ms": 8.0,
             "total_latency_ms": 60.0,
             "decode_tokens_per_sec": 375.0,
@@ -1197,7 +1198,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         value = {"metadata": {"performance": performance}}
         self.assertEqual(
             serve.parse_actor_performance(value),
-            (12.0, 3.0, 20.0),
+            (12.0, 3.0, 20.0, True),
         )
         self.assertIsNone(serve.parse_actor_performance({"choices": []}))
 
@@ -1216,6 +1217,11 @@ class ServeMixedLoadTests(unittest.TestCase):
         impossible["actor_admission_ms"] = 1.0
         impossible["actor_prefill_wall_ms"] = 20.0
         with self.assertRaisesRegex(serve.QualificationError, "prefill time exceeds"):
+            serve.parse_actor_performance({"metadata": {"performance": impossible}})
+
+        impossible = dict(performance)
+        impossible["resident_prefill_used"] = 1
+        with self.assertRaisesRegex(serve.QualificationError, "is not boolean"):
             serve.parse_actor_performance({"metadata": {"performance": impossible}})
 
     def test_percentile_uses_r7_linear_interpolation(self) -> None:

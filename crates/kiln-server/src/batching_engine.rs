@@ -280,6 +280,9 @@ pub struct BatchedGenerationOutput {
     pub actor_admission_duration: Duration,
     /// Wall time from slot admission until the first sampled token became ready.
     pub actor_prefill_wall_duration: Option<Duration>,
+    /// Whether this request completed prompt work through the native multi-row
+    /// resident-prefill route.
+    pub resident_prefill_used: bool,
 }
 
 fn completion_usage_tokens(visible_token_count: usize, finish_reason: &FinishReason) -> usize {
@@ -2204,6 +2207,7 @@ struct ActiveRequest {
     token_phase_durations: TokenPhaseDurations,
     inflight_token_ready_at: Option<Instant>,
     action_tokens: Option<Vec<EngineActionToken>>,
+    resident_prefill_used: bool,
     slot: DecodeSlot,
 }
 
@@ -3149,6 +3153,7 @@ impl BatchingEngineActor {
                         token_phase_durations,
                         inflight_token_ready_at: None,
                         action_tokens,
+                        resident_prefill_used: false,
                         slot,
                     });
                     // Publish admission before first-token delivery, which can
@@ -3577,6 +3582,9 @@ impl BatchingEngineActor {
         *budget -= indices.len();
         self.next_prefill_index = next_prefill_index;
 
+        for &idx in &indices {
+            self.active[idx].resident_prefill_used = true;
+        }
         for (&idx, row) in indices.iter().zip(&progress).rev() {
             if row.ready {
                 self.emit_pending_first_token_at(idx);
@@ -3619,6 +3627,7 @@ impl BatchingEngineActor {
                 mut token_phase_durations,
                 inflight_token_ready_at,
                 action_tokens,
+                resident_prefill_used,
                 slot,
             } = self.active.remove(idx);
             let started = Instant::now();
@@ -3756,6 +3765,7 @@ impl BatchingEngineActor {
                         token_phase_durations,
                         inflight_token_ready_at,
                         action_tokens,
+                        resident_prefill_used,
                         slot,
                     },
                 );
@@ -3787,6 +3797,7 @@ impl BatchingEngineActor {
                     token_phase_durations,
                     inflight_token_ready_at,
                     action_tokens,
+                    resident_prefill_used,
                     slot,
                 },
             );
@@ -4240,6 +4251,7 @@ impl BatchingEngineActor {
                     actor_queue_duration: active.actor_queue_duration,
                     actor_admission_duration: active.actor_admission_duration,
                     actor_prefill_wall_duration: active.first_token_ready_after_admission,
+                    resident_prefill_used: active.resident_prefill_used,
                 })
             }
             Err(err) => {
@@ -5128,6 +5140,7 @@ mod tests {
             token_phase_durations: TokenPhaseDurations::default(),
             inflight_token_ready_at: None,
             action_tokens,
+            resident_prefill_used: false,
             slot,
         });
     }
@@ -5230,6 +5243,12 @@ mod tests {
         assert_eq!(budget, 2);
         assert!(forward.events.lock().unwrap().is_empty());
         assert!(forward.resident_rows.lock().unwrap().is_empty());
+        assert!(
+            actor
+                .active
+                .iter()
+                .all(|active| !active.resident_prefill_used)
+        );
 
         forward.pending_layers.lock().unwrap().remove(&22);
         assert_eq!(actor.run_resident_prefill_batch(&mut budget), Some(true));
@@ -5242,6 +5261,12 @@ mod tests {
         assert_eq!(actor.snapshot.total_resident_prefill_attempts, 1);
         assert_eq!(actor.snapshot.total_resident_prefill_forwards, 1);
         assert_eq!(actor.snapshot.total_resident_prefill_rows, 2);
+        assert!(
+            actor
+                .active
+                .iter()
+                .all(|active| active.resident_prefill_used)
+        );
     }
 
     #[test]

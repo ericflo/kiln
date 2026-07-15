@@ -1017,6 +1017,7 @@ mod tests {
             actor_queue_duration: Duration::from_millis(4),
             actor_admission_duration: Duration::from_millis(1),
             actor_prefill_wall_duration: Some(Duration::from_millis(5)),
+            resident_prefill_used: false,
         }
     }
 

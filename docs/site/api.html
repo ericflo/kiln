@@ -1571,7 +1571,12 @@ kiln serve --config kiln.toml</code></pre>
           <code>actor_admission_ms</code> (slot preparation), and
           <code>actor_prefill_wall_ms</code> (admission completion to first sampled-token readiness),
           alongside accumulated model <code>prefill_ms</code>, <code>decode_ms</code>, TTFT, and total
-          latency. Non-batching paths return the actor fields as <code>null</code>. Both real-model
+          latency. <code>resident_prefill_used</code> is request-scoped route evidence: it is
+          <code>true</code> only after a successful native multi-row resident-prefill forward included
+          that request, <code>false</code> for batching requests that never entered the route, and
+          <code>null</code> for direct paths. It is not inferred from process-global counters, and a
+          mutation-free native decline remains <code>false</code>. Non-batching paths return the actor
+          fields as <code>null</code>. Both real-model
           streaming paths publish a performance object on the terminal chat chunk; explicit opt-in
           also emits a separate <code>kiln.token_timing</code> SSE object for each model token with a
           bounded path source, exact accepted <code>token_id</code>, plus producer-ready/delivered,
