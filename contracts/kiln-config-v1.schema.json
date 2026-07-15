@@ -172,12 +172,12 @@
           "minimum": 1,
           "maximum": 65536,
           "default": 64,
-          "description": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget.",
+          "description": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. The checked Strix Halo Vulkan development profile pins 128; 256 is not qualified for concurrent Vulkan serving.",
           "x-kiln-path": "server.max_prefill_tokens_per_cycle",
           "x-kiln-type-and-default": "unsigned integer; 64",
           "x-kiln-canonical-env": "KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE (implemented)",
           "x-kiln-environment": "KILN_MAX_PREFILL_TOKENS_PER_CYCLE (deprecated compatibility)",
-          "x-kiln-validation": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget."
+          "x-kiln-validation": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. The checked Strix Halo Vulkan development profile pins 128; 256 is not qualified for concurrent Vulkan serving."
         },
         "max_prefill_layers_per_cycle": {
           "type": "integer",
@@ -552,6 +552,28 @@
           "x-kiln-canonical-env": "KILN_MODEL_SNAPSHOT_DIR (implemented)",
           "x-kiln-environment": "KILN_MODEL_SNAPSHOT_DIR",
           "x-kiln-validation": "Must be non-empty when set. The environment alias uniquely treats an empty or whitespace-only value as a request to clear the TOML value. Without a value, Kiln tries a location beside the model and then the system temporary directory."
+        },
+        "vulkan_decode_weight_prewarm": {
+          "type": "boolean",
+          "default": true,
+          "description": "Populates backend-private Vulkan decode-weight caches during startup. Disable only to trade first-request latency for lower startup work. Restart required.",
+          "x-kiln-path": "model.vulkan_decode_weight_prewarm",
+          "x-kiln-type-and-default": "boolean; true",
+          "x-kiln-canonical-env": "KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM (implemented)",
+          "x-kiln-environment": "KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM",
+          "x-kiln-validation": "Populates backend-private Vulkan decode-weight caches during startup. Disable only to trade first-request latency for lower startup work. Restart required."
+        },
+        "vulkan_decode_weight_prewarm_mib_per_second": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384,
+          "default": 256,
+          "description": "1..=16384. Bounds the average Vulkan decode-weight cache materialization rate. Pacing checks shutdown at least every 25 ms between uploads. Restart required.",
+          "x-kiln-path": "model.vulkan_decode_weight_prewarm_mib_per_second",
+          "x-kiln-type-and-default": "unsigned integer MiB/s; 256",
+          "x-kiln-canonical-env": "KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND (implemented)",
+          "x-kiln-environment": "KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND",
+          "x-kiln-validation": "1..=16384. Bounds the average Vulkan decode-weight cache materialization rate. Pacing checks shutdown at least every 25 ms between uploads. Restart required."
         },
         "served_model_id": {
           "type": "string",
@@ -1555,9 +1577,9 @@
       }
     }
   ],
-  "x-kiln-field-count": 99,
+  "x-kiln-field-count": 101,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 94,
+  "x-kiln-canonical-environment-count": 96,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 67,
   "x-kiln-compatibility-alias-count": 70,

@@ -3385,12 +3385,25 @@ impl ModelRunner {
     /// training retain the authoritative tensors because portable fallback and
     /// backward both read them directly.
     pub fn prewarm_backend_decode_weights(&self) -> Result<()> {
+        self.prewarm_backend_decode_weights_with_policy(
+            &crate::backend::DecodeWeightPrewarmPolicy::unlimited(),
+        )
+    }
+
+    pub fn prewarm_backend_decode_weights_with_policy(
+        &self,
+        policy: &crate::backend::DecodeWeightPrewarmPolicy,
+    ) -> Result<()> {
         self.ensure_backend_healthy()?;
         #[cfg(feature = "vulkan")]
         let _durable_vulkan_allocations =
             matches!(self.weights.device_kt(), kiln_tensor::Device::Vulkan(_))
                 .then(kiln_vulkan_kernel::buffer_pool::durable_allocation_scope);
-        LinearBackend::runtime_prewarm_decode_weights(self.backend.as_ref(), &self.weights)?;
+        LinearBackend::runtime_prewarm_decode_weights_with_policy(
+            self.backend.as_ref(),
+            &self.weights,
+            policy,
+        )?;
         self.ensure_backend_healthy()
     }
 

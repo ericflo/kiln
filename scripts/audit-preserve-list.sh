@@ -69,7 +69,7 @@ for dirpath, dirs, files in os.walk(os.path.join(repo_root, "crates")):
                         e["first"] = f"{rel}:{lineno}"
 
 with open(csv_out, "w", encoding="utf-8", newline="") as f:
-    w = csv.writer(f)
+    w = csv.writer(f, lineterminator="\n")
     w.writerow(["nvtx_range_name", "call_site_count", "first_seen"])
     for nm in sorted(seen, key=lambda n: (-seen[n]["count"], n)):
         e = seen[nm]
@@ -132,7 +132,7 @@ for dirpath, dirs, files in os.walk(os.path.join(repo_root, "crates")):
                         e["first"] = f"{rel}:{lineno}"
 
 with open(csv_out, "w", encoding="utf-8", newline="") as f:
-    w = csv.writer(f)
+    w = csv.writer(f, lineterminator="\n")
     w.writerow(["env_var", "call_site_count", "first_seen",
                 "via_env_flag_or_tristate", "via_env_var", "crates_touched"])
     for nm in sorted(seen, key=lambda n: (-seen[n]["count"], n)):
@@ -163,7 +163,7 @@ if not os.path.exists(backend_mod):
     print(f"warning: {backend_mod} not found; skipping BackendRuntime audit",
           file=sys.stderr)
     with open(csv_out, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(["method_name", "first_line", "signature_snippet",
                     "uses_candle_tensor", "uses_candle_var"])
     sys.exit(0)
@@ -242,7 +242,7 @@ if trait_idx is not None:
                 method_line = None
 
 with open(csv_out, "w", encoding="utf-8", newline="") as f:
-    w = csv.writer(f)
+    w = csv.writer(f, lineterminator="\n")
     w.writerow(["method_name", "first_line", "uses_candle_tensor",
                 "uses_candle_var", "signature_snippet"])
     for r in rows:

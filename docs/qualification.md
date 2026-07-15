@@ -586,7 +586,8 @@ The source-bound serving drivers materialize that declared policy as a private T
 file inside the ignored run directory and start `kiln serve --config <file>`.
 Server profile, bind address, model/snapshot/adapter paths, thinking default,
 transport bounds, scheduling ceilings, logging, memory reclaim, synchronization,
-graph mode, graph entry capacity, and graph byte capacity therefore travel
+graph mode, graph entry capacity, graph byte capacity, and Vulkan decode-weight
+prewarm enable/rate policy therefore travel
 through the same typed parser and source diagnostics as an operator config.
 The process environment is scrubbed of ambient `KILN_*` controls before build
 and launch. `memory.kv_autoscale` now carries both enabled and disabled requests.
@@ -643,8 +644,9 @@ graphs. Runtime attestation requires all three policies and their
 `config_file` provenance before measurement and again after the final wave.
 Readiness requires both the passing health check and causal log evidence. The
 Vulkan-native path satisfies the latter with `Vulkan decode weight prewarm
-complete`; it does not run or claim the synthetic inference prewarm used by
-other serving paths.
+complete`; its typed 256 MiB/s rate shapes startup pressure, and shutdown must
+join the task before reporting a clean stop. It does not run or claim the
+synthetic inference prewarm used by other serving paths.
 
 After one fixed warmup, four thread-barrier waves dispatch concurrency 1, 4, 8,
 and 12 with mixed prompt lengths from 16 through 1,024 deterministic words.

@@ -89,6 +89,12 @@ def _vulkan_variant_config() -> dict[str, Any]:
     config["server"]["max_prefill_tokens_per_cycle"] = (
         VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE
     )
+    config["model"] = {
+        "vulkan_decode_weight_prewarm": mixed.VULKAN_DECODE_WEIGHT_PREWARM,
+        "vulkan_decode_weight_prewarm_mib_per_second": (
+            mixed.VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND
+        ),
+    }
     config["runtime"].update(
         {
             "prefix_cache_requested_enabled": True,
@@ -462,6 +468,8 @@ def effective_config(
             },
         },
     }
+    if "model" in base:
+        effective["model"] = base["model"]
     if runtime.host_mem_available_floor_bytes is not None:
         effective["soak"]["host_mem_available_floor_bytes"] = (
             runtime.host_mem_available_floor_bytes

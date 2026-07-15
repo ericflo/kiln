@@ -738,7 +738,11 @@ copy-on-write when the filesystem supports it; otherwise startup performs a
 full bounded copy and requires enough free space plus a reserve. Set
 `model.snapshot_dir` (or its `KILN_MODEL_SNAPSHOT_DIR` override) to a private
 filesystem with suitable capacity when the model directory's parent is not
-appropriate. The snapshot stays alive for
+appropriate. On Linux, a copied snapshot is synchronized and Kiln asks the OS
+to release both source and destination page-cache ranges before parsing so the
+fallback copy does not leave two checkpoint-sized cache populations competing
+with model materialization. Startup logs report attempts, successes, and
+failures. The snapshot stays alive for
 deferred MTP loading. The server explicitly removes it after model-backed work
 drains; the loader lease also removes it on drop for startup errors and library
 callers. Cleanup retries after restoring owner-only deletion permissions and a
@@ -747,6 +751,14 @@ Mutating the original checkpoint after startup cannot change loaded bytes or
 their revision. A user
 with the same UID (or root) can still discover and rewrite process-owned files;
 Kiln treats that as part of the trusted host boundary.
+
+Vulkan startup populates its backend-private decode-weight caches by default,
+but materialization is paced at 256 MiB/s rather than uploaded as an unbounded
+burst. Configure `model.vulkan_decode_weight_prewarm` and
+`model.vulkan_decode_weight_prewarm_mib_per_second` in TOML; their canonical
+environment names are mechanically derived from those paths. The prewarm task
+observes process shutdown, is joined before accelerator teardown, and never
+outlives the server's clean-shutdown log.
 
 That startup hash pass also retains a strict manifest for every safetensors
 shard: portable filename, exact byte length, complete SHA-256, and one

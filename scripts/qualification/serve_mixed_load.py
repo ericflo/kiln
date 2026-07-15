@@ -235,6 +235,8 @@ VULKAN_BUILD_SPEC = SourceBuildSpec(
     cargo_host_thermal_poll_milliseconds=BUILD_CARGO_HOST_THERMAL_POLL_MILLISECONDS,
     timeout_seconds=900.0,
 )
+VULKAN_DECODE_WEIGHT_PREWARM = True
+VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND = 256
 
 
 def _variant_config(
@@ -2268,6 +2270,7 @@ def write_server_config(
     config = VARIANT_CONFIGS[variant]
     runtime = config["runtime"]
     server = config["server"]
+    model = config.get("model", {})
     if deterministic is None:
         deterministic = bool(server.get("deterministic", False))
     if rocm_synchronization_mode is None:
@@ -2306,6 +2309,21 @@ def write_server_config(
         f"model_id = {_toml_string(MODEL_SOURCE_ID)}",
         f"adapter_dir = {_toml_string(str(adapter_dir))}",
         f"snapshot_dir = {_toml_string(str(snapshot_dir))}",
+        "vulkan_decode_weight_prewarm = "
+        + (
+            "true"
+            if model.get(
+                "vulkan_decode_weight_prewarm", VULKAN_DECODE_WEIGHT_PREWARM
+            )
+            else "false"
+        ),
+        "vulkan_decode_weight_prewarm_mib_per_second = "
+        + str(
+            model.get(
+                "vulkan_decode_weight_prewarm_mib_per_second",
+                VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND,
+            )
+        ),
         f"served_model_id = {_toml_string(MODEL_ID)}",
         "",
         "[memory]",

@@ -28,6 +28,82 @@ use kiln_model::{
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::{AppState, GpuCoordinationLock, ModelBackend, SpeculativeRuntimePolicy};
 
+#[derive(Clone, Copy, Debug)]
+enum ProcessShutdownCause {
+    Sigint,
+    Sigterm,
+    HandlerFailure,
+}
+
+impl ProcessShutdownCause {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sigint => "SIGINT",
+            Self::Sigterm => "SIGTERM",
+            Self::HandlerFailure => "signal_handler_failure",
+        }
+    }
+}
+
+struct ProcessShutdown {
+    requested: Arc<std::sync::atomic::AtomicBool>,
+    receiver: tokio::sync::watch::Receiver<Option<ProcessShutdownCause>>,
+}
+
+impl ProcessShutdown {
+    fn requested_during_startup(&self, stage: &str) -> bool {
+        let requested = self.requested.load(Ordering::Acquire);
+        if requested {
+            tracing::info!(
+                stage,
+                "shutdown requested during startup; releasing startup owners"
+            );
+        }
+        requested
+    }
+}
+
+fn install_process_shutdown_listener() -> Result<ProcessShutdown> {
+    let requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (sender, receiver) = tokio::sync::watch::channel(None);
+    let requested_for_task = Arc::clone(&requested);
+
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("install early SIGTERM handler")?;
+
+    tokio::spawn(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        let cause = tokio::select! {
+            result = ctrl_c => match result {
+                Ok(()) => ProcessShutdownCause::Sigint,
+                Err(error) => {
+                    tracing::error!(error = %error, "early SIGINT handler failed");
+                    ProcessShutdownCause::HandlerFailure
+                }
+            },
+            _ = terminate.recv() => ProcessShutdownCause::Sigterm,
+        };
+        #[cfg(not(unix))]
+        let cause = match ctrl_c.await {
+            Ok(()) => ProcessShutdownCause::Sigint,
+            Err(error) => {
+                tracing::error!(error = %error, "early interrupt handler failed");
+                ProcessShutdownCause::HandlerFailure
+            }
+        };
+        requested_for_task.store(true, Ordering::Release);
+        let _ = sender.send(Some(cause));
+        tracing::info!(signal = cause.label(), "process shutdown requested");
+    });
+
+    Ok(ProcessShutdown {
+        requested,
+        receiver,
+    })
+}
+
 fn resolve_model_runner_runtime_options(
     policy: kiln_server::config::ServingRuntimePolicy,
     accelerator_policy: kiln_server::config::ResolvedAcceleratorRuntimePolicy,
@@ -484,6 +560,11 @@ async fn main() -> Result<()> {
     // --- Server startup ---
     let mut config = KilnConfig::load(args.config.as_deref())?;
     config.apply_serve_cli_overrides(serve_cli_overrides.0.as_deref(), serve_cli_overrides.1)?;
+    // Install signal ownership before tokenizer/model loading. A termination
+    // request during a long synchronous startup phase is retained and handled
+    // at the next ownership boundary instead of invoking the OS default action
+    // and bypassing private-snapshot destructors.
+    let process_shutdown = install_process_shutdown_listener()?;
     #[cfg(feature = "vulkan")]
     {
         let max_retained_bytes = config.memory.vulkan_buffer_pool_bytes();
@@ -640,6 +721,9 @@ async fn main() -> Result<()> {
     } else {
         tokenizer
     };
+    if process_shutdown.requested_during_startup("tokenizer_loaded") {
+        return Ok(());
+    }
 
     tracing::debug!(
         vocab_size = tokenizer.vocab_size(),
@@ -723,6 +807,9 @@ async fn main() -> Result<()> {
             kiln_model::LoadModelOptions { load_mtp: false },
             config.model.snapshot_dir.as_deref().map(Path::new),
         )?;
+        if process_shutdown.requested_during_startup("immutable_model_snapshot_loaded") {
+            return Ok(());
+        }
         let base_model_source_sha256 = model_weights
             .source_content_sha256
             .clone()
@@ -741,6 +828,9 @@ async fn main() -> Result<()> {
         }
         let gpu_weights =
             GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)?;
+        if process_shutdown.requested_during_startup("accelerator_weights_uploaded") {
+            return Ok(());
+        }
         anyhow::ensure!(
             gpu_weights.base_weight_shard_manifest.as_ref() == Some(&base_weight_shard_manifest),
             "GPU weights did not retain the verified base-weight shard manifest"
@@ -1265,6 +1355,9 @@ async fn main() -> Result<()> {
 
     // Spawn the background training queue worker
     let shutdown_flag = state.shutdown.clone();
+    if process_shutdown.requested_during_startup("application_state_constructed") {
+        return Ok(());
+    }
     kiln_server::training_queue::spawn_training_worker(state.clone(), shutdown_flag.clone());
     // Spawn the background eval queue worker
     kiln_server::eval::spawn_eval_worker(state.clone(), shutdown_flag.clone());
@@ -1453,7 +1546,11 @@ async fn main() -> Result<()> {
             );
         }
     }
-    spawn_backend_prewarm(prewarm_state);
+    let backend_prewarm_task = spawn_backend_prewarm(
+        prewarm_state,
+        config.model.vulkan_decode_weight_prewarm,
+        config.model.vulkan_decode_weight_prewarm_mib_per_second,
+    )?;
     // Graceful shutdown: listen for SIGTERM/SIGINT, cancel in-flight
     // inference via the batching engine (so SSE streams terminate
     // immediately instead of holding the connection until the model
@@ -1479,13 +1576,20 @@ async fn main() -> Result<()> {
     // the signal actually fires — see comments there. We deliberately
     // don't wrap `axum::serve` itself in a timeout, because that would
     // cap *total server uptime*, not just the drain. (Lesson learned.)
-    axum::serve(listener, app)
+    let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(
+            process_shutdown.receiver,
             shutdown_flag,
             engine_for_shutdown,
             shutdown_timeout_secs,
         ))
-        .await?;
+        .await;
+    if let Err(error) = &serve_result {
+        app_state_for_shutdown
+            .shutdown
+            .store(true, Ordering::Release);
+        tracing::warn!(error = %error, "HTTP server stopped with an error; cancelling background work");
+    }
 
     if let Some(decode_batcher) = decode_batcher_for_shutdown {
         decode_batcher
@@ -1494,11 +1598,18 @@ async fn main() -> Result<()> {
         tracing::debug!("decode batcher stopped and joined");
     }
 
+    if let Some(task) = backend_prewarm_task {
+        task.await
+            .context("join backend prewarm task before accelerator teardown")?;
+        tracing::debug!("backend prewarm task stopped and joined");
+    }
+
     if let Some(cleanup) = model_snapshot_cleanup {
         cleanup
             .cleanup()
             .with_context(|| format!("remove model snapshot {}", cleanup.path().display()))?;
     }
+    serve_result?;
     tracing::info!("server stopped cleanly");
     Ok(())
 }
@@ -1526,7 +1637,11 @@ fn load_chat_template_from_model_dir(dir: &Path) -> Result<Option<(&'static str,
         .map(|s| ("tokenizer_config.json", s.to_string())))
 }
 
-fn spawn_backend_prewarm(state: AppState) {
+fn spawn_backend_prewarm(
+    state: AppState,
+    vulkan_decode_weight_prewarm: bool,
+    vulkan_decode_weight_prewarm_mib_per_second: u64,
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
     if let Err(error) = state.ensure_inference_admission_allowed() {
         state
             .inference_prewarm_complete
@@ -1536,7 +1651,7 @@ fn spawn_backend_prewarm(state: AppState) {
             reason = %error,
             "skipping inference prewarm because inference admission is disabled"
         );
-        return;
+        return Ok(None);
     }
     let ModelBackend::Real {
         runner,
@@ -1545,7 +1660,7 @@ fn spawn_backend_prewarm(state: AppState) {
         ..
     } = state.backend.as_ref()
     else {
-        return;
+        return Ok(None);
     };
 
     let startup_policy = {
@@ -1553,7 +1668,7 @@ fn spawn_backend_prewarm(state: AppState) {
         runner_guard.backend_capabilities().startup
     };
     if !startup_policy.run_inference_prewarm {
-        return;
+        return Ok(None);
     }
 
     let runner = runner.clone();
@@ -1561,6 +1676,9 @@ fn spawn_backend_prewarm(state: AppState) {
     let paged_cache = paged_cache.clone();
     let gpu_lock = state.gpu_lock.clone();
     let prewarm_complete = state.inference_prewarm_complete.clone();
+    let cancellation = state.shutdown.clone();
+    let max_bytes_per_second =
+        vulkan_decode_weight_prewarm_mib_per_second.saturating_mul(1024 * 1024);
 
     if startup_policy.decode_weight_prewarm_when_native_training
         && native_training_enabled_for_startup(startup_policy)
@@ -1568,11 +1686,20 @@ fn spawn_backend_prewarm(state: AppState) {
         tracing::info!(
             "skipping synthetic inference prewarm because backend native training is enabled"
         );
-        spawn_vulkan_decode_weight_prewarm(runner, gpu_lock, prewarm_complete);
-        return;
+        if !vulkan_decode_weight_prewarm {
+            prewarm_complete.store(true, Ordering::Release);
+            tracing::info!("Vulkan decode weight prewarm disabled by typed model configuration");
+            return Ok(None);
+        }
+        return Ok(Some(spawn_vulkan_decode_weight_prewarm(
+            runner,
+            gpu_lock,
+            prewarm_complete,
+            kiln_model::DecodeWeightPrewarmPolicy::paced(max_bytes_per_second, cancellation)?,
+        )));
     }
 
-    tokio::spawn(async move {
+    Ok(Some(tokio::spawn(async move {
         tracing::info!("starting background inference prewarm");
         let prewarm_start = std::time::Instant::now();
         let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -1600,9 +1727,14 @@ fn spawn_backend_prewarm(state: AppState) {
             // serving tensors; shared-tape training and portable fallback keep
             // the same authoritative values.
             let runner_guard = runner.read().unwrap();
+            let policy = kiln_model::DecodeWeightPrewarmPolicy::paced(
+                max_bytes_per_second,
+                Arc::clone(&cancellation),
+            )?;
             runner_guard
-                .prewarm_backend_decode_weights()
+                .prewarm_backend_decode_weights_with_policy(&policy)
                 .context("backend decode weight prewarm failed")?;
+            policy.ensure_active()?;
             let params = SamplingParams {
                 temperature: 0.0,
                 top_p: 1.0,
@@ -1624,6 +1756,7 @@ fn spawn_backend_prewarm(state: AppState) {
                 (1..=64).collect::<Vec<u32>>(),
             ];
             for prompt_tokens in prewarm_prompts {
+                policy.ensure_active()?;
                 let prewarm_result = runner_guard.generate_paged_shared_tokens(
                     &prompt_tokens,
                     &params,
@@ -1660,18 +1793,29 @@ fn spawn_backend_prewarm(state: AppState) {
                     }
                 }
             }
+            Ok(Err(err))
+                if err
+                    .downcast_ref::<kiln_model::DecodeWeightPrewarmCancelled>()
+                    .is_some() =>
+            {
+                tracing::info!(
+                    elapsed_ms = prewarm_start.elapsed().as_millis() as u64,
+                    "background inference prewarm cancelled during shutdown"
+                )
+            }
             Ok(Err(err)) => tracing::warn!(error = %err, "background inference prewarm failed"),
             Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
         }
         prewarm_complete.store(true, Ordering::Release);
-    });
+    })))
 }
 
 fn spawn_vulkan_decode_weight_prewarm(
     runner: Arc<std::sync::RwLock<ModelRunner>>,
     gpu_lock: GpuCoordinationLock,
     prewarm_complete: Arc<std::sync::atomic::AtomicBool>,
-) {
+    policy: kiln_model::DecodeWeightPrewarmPolicy,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("starting Vulkan decode weight prewarm");
         let prewarm_start = std::time::Instant::now();
@@ -1694,7 +1838,7 @@ fn spawn_vulkan_decode_weight_prewarm(
             }
             let runner_guard = runner.read().unwrap();
             runner_guard
-                .prewarm_backend_decode_weights()
+                .prewarm_backend_decode_weights_with_policy(&policy)
                 .context("Vulkan decode weight prewarm failed")?;
             Ok(true)
         })
@@ -1709,11 +1853,21 @@ fn spawn_vulkan_decode_weight_prewarm(
                 elapsed_ms = prewarm_start.elapsed().as_millis() as u64,
                 "Vulkan decode weight prewarm skipped"
             ),
+            Ok(Err(err))
+                if err
+                    .downcast_ref::<kiln_model::DecodeWeightPrewarmCancelled>()
+                    .is_some() =>
+            {
+                tracing::info!(
+                    elapsed_ms = prewarm_start.elapsed().as_millis() as u64,
+                    "Vulkan decode weight prewarm cancelled during shutdown"
+                )
+            }
             Ok(Err(err)) => tracing::warn!(error = %err, "Vulkan decode weight prewarm failed"),
             Err(err) => tracing::warn!(error = %err, "Vulkan decode weight prewarm task failed"),
         }
         prewarm_complete.store(true, Ordering::Release);
-    });
+    })
 }
 
 fn native_training_enabled_for_startup(policy: StartupCapabilities) -> bool {
@@ -1757,31 +1911,21 @@ fn warm_tokenizer(tokenizer: &KilnTokenizer) {
 /// triggers, a detached watchdog will force-exit the process at the
 /// timeout even if axum's drain hasn't returned yet.
 async fn shutdown_signal(
+    mut process_shutdown: tokio::sync::watch::Receiver<Option<ProcessShutdownCause>>,
     shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     engine: Option<kiln_server::batching_engine::BatchingEngineHandle>,
     drain_timeout_secs: u64,
 ) {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => tracing::info!("received SIGINT — initiating graceful shutdown"),
-        _ = terminate => tracing::info!("received SIGTERM — initiating graceful shutdown"),
+    if process_shutdown.borrow().is_none() {
+        let _ = process_shutdown.changed().await;
     }
+    let cause = *process_shutdown.borrow();
+    tracing::info!(
+        signal = cause
+            .map(ProcessShutdownCause::label)
+            .unwrap_or("listener_closed"),
+        "initiating graceful shutdown"
+    );
 
     // Tell training/eval workers + every shutdown-aware code path to stop
     // accepting work.

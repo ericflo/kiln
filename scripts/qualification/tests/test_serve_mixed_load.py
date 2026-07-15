@@ -1807,6 +1807,13 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     self.assertEqual(parsed["model"]["model_id"], serve.MODEL_SOURCE_ID)
                     self.assertEqual(parsed["model"]["adapter_dir"], str(adapters))
                     self.assertEqual(parsed["model"]["snapshot_dir"], str(snapshots))
+                    self.assertTrue(parsed["model"]["vulkan_decode_weight_prewarm"])
+                    self.assertEqual(
+                        parsed["model"][
+                            "vulkan_decode_weight_prewarm_mib_per_second"
+                        ],
+                        serve.VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND,
+                    )
                     self.assertEqual(parsed["model"]["served_model_id"], serve.MODEL_ID)
                     self.assertEqual(
                         parsed["accelerator"]["rocm_graph_mode"],

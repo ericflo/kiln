@@ -79,7 +79,6 @@ pub struct VulkanBackend {
     pub(super) bf16_packed_gdn_in_proj_weights_enabled: bool,
     pub(super) bf16_packed_full_attn_qkv_weights_enabled: bool,
     pub(super) bf16_packed_mlp_decode_weights_enabled: bool,
-    pub(super) weight_prewarm_enabled: bool,
     pub(super) recurrent_state_residency_enabled: bool,
     /// Cached `supports_resident_decode()` evaluation. The trait method
     /// is called per-call on the hot path; reading env vars and checking
@@ -219,7 +218,6 @@ impl VulkanBackend {
             bf16_packed_full_attn_qkv_weights_enabled: config
                 .bf16_packed_full_attn_qkv_weights_enabled,
             bf16_packed_mlp_decode_weights_enabled: config.bf16_packed_mlp_decode_weights_enabled,
-            weight_prewarm_enabled: config.weight_prewarm_enabled,
             recurrent_state_residency_enabled: config.recurrent_state_residency_enabled,
             resident_decode_enabled: config.resident_decode_enabled,
             decode_resident_pool: OnceLock::new(),
@@ -914,7 +912,19 @@ impl LinearBackend for VulkanBackend {
     }
 
     fn runtime_prewarm_decode_weights(&self, weights: &GpuWeights) -> Result<()> {
-        vulkan_weights::prewarm_decode_weights(self, weights)
+        vulkan_weights::prewarm_decode_weights(
+            self,
+            weights,
+            &super::DecodeWeightPrewarmPolicy::unlimited(),
+        )
+    }
+
+    fn runtime_prewarm_decode_weights_with_policy(
+        &self,
+        weights: &GpuWeights,
+        policy: &super::DecodeWeightPrewarmPolicy,
+    ) -> Result<()> {
+        vulkan_weights::prewarm_decode_weights(self, weights, policy)
     }
 
     fn runtime_full_attn_qkv_decode(

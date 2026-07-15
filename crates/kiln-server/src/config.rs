@@ -2565,6 +2565,13 @@ pub struct ModelConfig {
     /// directory. `KILN_MODEL_SNAPSHOT_DIR` is the explicit environment
     /// override.
     pub snapshot_dir: Option<String>,
+    /// Populate Vulkan's backend-private decode-weight caches during startup.
+    /// Disable only when startup latency matters more than first-request
+    /// latency; ordinary serving keeps this enabled.
+    pub vulkan_decode_weight_prewarm: bool,
+    /// Average materialization rate for Vulkan decode-weight caches. Pacing is
+    /// cancellation-aware and bounds sustained startup memory/thermal pressure.
+    pub vulkan_decode_weight_prewarm_mib_per_second: u64,
     /// Override the string exposed at `/v1/models` and echoed in chat completion responses.
     /// When `None`, derived from `model_id` by stripping up to the last `/`.
     pub served_model_id: Option<String>,
@@ -4987,6 +4994,8 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     public_env_field!(some_text, model.tokenizer_path, "KILN_TOKENIZER_PATH"),
     public_env_field!(some_text, model.adapter_dir, "KILN_ADAPTER_DIR"),
     public_env_field!(snapshot_dir, model.snapshot_dir, "KILN_MODEL_SNAPSHOT_DIR"),
+    public_env_field!(bool, model.vulkan_decode_weight_prewarm),
+    public_env_field!(u64, model.vulkan_decode_weight_prewarm_mib_per_second),
     public_env_field!(some_text, model.served_model_id, "KILN_SERVED_MODEL_ID"),
     public_env_field!(some_usize, memory.num_blocks, "KILN_NUM_BLOCKS"),
     public_env_field!(some_f64, memory.gpu_memory_gb, "KILN_GPU_MEMORY_GB"),
@@ -5241,6 +5250,8 @@ impl Default for ModelConfig {
             tokenizer_path: None,
             adapter_dir: None,
             snapshot_dir: None,
+            vulkan_decode_weight_prewarm: true,
+            vulkan_decode_weight_prewarm_mib_per_second: 256,
             served_model_id: None,
         }
     }
@@ -5747,6 +5758,12 @@ impl KilnConfig {
                 anyhow::bail!("{field} must be non-empty when set, got {value:?}");
             }
         }
+        if !(1..=16_384).contains(&self.model.vulkan_decode_weight_prewarm_mib_per_second) {
+            anyhow::bail!(
+                "model.vulkan_decode_weight_prewarm_mib_per_second must be in 1..=16384, got {}",
+                self.model.vulkan_decode_weight_prewarm_mib_per_second
+            );
+        }
 
         if self.memory.num_blocks == Some(0) {
             anyhow::bail!("memory.num_blocks must be > 0 when set, got Some(0)");
@@ -6243,6 +6260,8 @@ mod tests {
         "KILN_MODEL_SERVED_MODEL_ID",
         "KILN_MODEL_SNAPSHOT_DIR",
         "KILN_MODEL_TOKENIZER_PATH",
+        "KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM",
+        "KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND",
         "KILN_PREFIX_CACHE_ENABLED",
         "KILN_PREFIX_CACHE_MAX_BLOCKS",
         "KILN_PREFIX_CACHE_MAX_ENTRIES",
@@ -7025,7 +7044,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 94);
+        assert_eq!(original_len, 96);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -7096,7 +7115,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 99);
+        assert_eq!(serialized_leaves.len(), 101);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -7139,7 +7158,7 @@ rocm_graph_cache_max_bytes = 17179869184
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_ninety_four_public_fields() {
+    fn public_env_canonical_only_loads_all_ninety_six_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
@@ -11348,6 +11367,21 @@ level = "warn"
     fn test_served_model_id_default_derivation() {
         let config = ModelConfig::default();
         assert_eq!(config.effective_served_model_id(), "Qwen3.5-4B");
+        assert!(config.vulkan_decode_weight_prewarm);
+        assert_eq!(config.vulkan_decode_weight_prewarm_mib_per_second, 256);
+    }
+
+    #[test]
+    fn vulkan_decode_weight_prewarm_rate_is_bounded() {
+        for invalid in [0, 16_385] {
+            let mut config = KilnConfig::default();
+            config.model.vulkan_decode_weight_prewarm_mib_per_second = invalid;
+            let error = config.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("model.vulkan_decode_weight_prewarm_mib_per_second"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

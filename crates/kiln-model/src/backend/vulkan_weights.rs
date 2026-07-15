@@ -7,9 +7,52 @@
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use super::DecodeWeightPrewarmPolicy;
 use super::vulkan::VulkanBackend;
 use crate::forward::{GpuAttentionWeights, GpuWeights};
+
+const PREWARM_CANCELLATION_POLL: Duration = Duration::from_millis(25);
+
+struct DecodeWeightPrewarmPacer<'a> {
+    policy: &'a DecodeWeightPrewarmPolicy,
+    started: Instant,
+}
+
+impl<'a> DecodeWeightPrewarmPacer<'a> {
+    fn new(policy: &'a DecodeWeightPrewarmPolicy) -> Result<Self> {
+        policy.ensure_active()?;
+        Ok(Self {
+            policy,
+            started: Instant::now(),
+        })
+    }
+
+    fn settle(&self, materialized_bytes: usize) -> Result<()> {
+        self.policy.ensure_active()?;
+        let Some(rate) = self.policy.max_bytes_per_second() else {
+            return Ok(());
+        };
+        let target = prewarm_target_elapsed(materialized_bytes, rate);
+        loop {
+            self.policy.ensure_active()?;
+            let elapsed = self.started.elapsed();
+            if elapsed >= target {
+                return Ok(());
+            }
+            let remaining = target.saturating_sub(elapsed);
+            std::thread::sleep(remaining.min(PREWARM_CANCELLATION_POLL));
+        }
+    }
+}
+
+fn prewarm_target_elapsed(materialized_bytes: usize, bytes_per_second: u64) -> Duration {
+    let target_nanos = (materialized_bytes as u128)
+        .saturating_mul(1_000_000_000)
+        .div_ceil(bytes_per_second as u128);
+    Duration::from_nanos(u64::try_from(target_nanos).unwrap_or(u64::MAX))
+}
 
 /// kt-native f32 weight buffer cache: keys the buffer
 /// cache on the **kt** `TensorId` (stable for the model's lifetime) and
@@ -286,12 +329,17 @@ pub(super) fn prewarm_mlp_decode_weights_kt(
     Ok(())
 }
 
-pub(super) fn prewarm_decode_weights(backend: &VulkanBackend, weights: &GpuWeights) -> Result<()> {
-    if !backend.has_vulkan() || !backend.weight_prewarm_enabled {
+pub(super) fn prewarm_decode_weights(
+    backend: &VulkanBackend,
+    weights: &GpuWeights,
+    policy: &DecodeWeightPrewarmPolicy,
+) -> Result<()> {
+    if !backend.has_vulkan() {
         return Ok(());
     }
 
     let start = std::time::Instant::now();
+    let pacer = DecodeWeightPrewarmPacer::new(policy)?;
     let mut count = 0usize;
     let mut bytes = 0usize;
     let mut bf16_packed_count = 0usize;
@@ -306,6 +354,7 @@ pub(super) fn prewarm_decode_weights(backend: &VulkanBackend, weights: &GpuWeigh
         &mut bf16_packed_count,
         &mut bf16_packed_bytes,
     )?;
+    pacer.settle(bytes.saturating_add(bf16_packed_bytes))?;
 
     for (layer_idx, layer) in weights.layers.iter().enumerate() {
         match &layer.attention {
@@ -391,6 +440,7 @@ pub(super) fn prewarm_decode_weights(backend: &VulkanBackend, weights: &GpuWeigh
             &mut bf16_packed_count,
             &mut bf16_packed_bytes,
         )?;
+        pacer.settle(bytes.saturating_add(bf16_packed_bytes))?;
     }
 
     tracing::info!(
@@ -412,6 +462,30 @@ mod tests {
         GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
     };
     use kiln_tensor::{DType, Device, Tensor};
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn prewarm_pacer_converts_materialized_bytes_to_exact_elapsed_budget() {
+        assert_eq!(
+            prewarm_target_elapsed(256 * 1024 * 1024, 512 * 1024 * 1024),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn prewarm_pacer_rejects_work_after_shutdown() -> Result<()> {
+        let cancellation = Arc::new(AtomicBool::new(true));
+        let policy = DecodeWeightPrewarmPolicy::paced(1024, cancellation)?;
+        let error = DecodeWeightPrewarmPacer::new(&policy)
+            .err()
+            .expect("cancelled policy must reject prewarm");
+        assert!(
+            error
+                .downcast_ref::<super::super::DecodeWeightPrewarmCancelled>()
+                .is_some()
+        );
+        Ok(())
+    }
 
     fn bf16_tensor(values: Vec<f32>, shape: Vec<usize>, device: Device) -> Result<Tensor> {
         Ok(Tensor::from_vec(values, shape)?
@@ -554,11 +628,6 @@ mod tests {
             "KILN_TENSOR_VULKAN_TEST=1 requires a working Vulkan device"
         );
         let backend = VulkanBackend::new(Device::Cpu);
-        assert!(
-            backend.weight_prewarm_enabled,
-            "default qualification requires KILN_DISABLE_VULKAN_WEIGHT_PREWARM to be unset"
-        );
-
         // Serving keeps model weights on CPU and uses the backend-private
         // packed cache. Training may keep the same authoritative tensors
         // resident. Prewarm must preserve both representations exactly.

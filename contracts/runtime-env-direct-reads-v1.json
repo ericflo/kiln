@@ -4463,19 +4463,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_DISABLE_VULKAN_WEIGHT_PREWARM",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/vulkan_config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_ENABLE_VULKAN_FUSED_CONV1D",
       "argument_kind": "literal",
       "classification": "experimental_debug",
@@ -10689,11 +10676,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 529,
-    "literal_kiln_read_names": 366,
+    "literal_kiln_read_call_sites": 528,
+    "literal_kiln_read_names": 365,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 325,
+      "experimental_debug": 324,
       "public_stable": 1,
       "test_only": 41
     },
@@ -10703,13 +10690,13 @@
       "test_only": 353
     },
     "process_mutation_entries": 205,
-    "read_call_sites": 904,
+    "read_call_sites": 903,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 432,
+      "experimental_debug": 431,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 616
+    "read_entries": 615
   }
 }

@@ -22,6 +22,52 @@ use anyhow::Result;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Immutable policy for materializing backend-private decode-weight caches.
+///
+/// Servers use a bounded rate and their process shutdown flag. Embedded callers
+/// may use [`unlimited`](Self::unlimited) when they own equivalent containment.
+#[derive(Clone, Debug)]
+pub struct DecodeWeightPrewarmPolicy {
+    max_bytes_per_second: Option<u64>,
+    cancellation: Arc<AtomicBool>,
+}
+
+impl DecodeWeightPrewarmPolicy {
+    pub fn paced(max_bytes_per_second: u64, cancellation: Arc<AtomicBool>) -> Result<Self> {
+        anyhow::ensure!(max_bytes_per_second > 0, "prewarm rate must be nonzero");
+        Ok(Self {
+            max_bytes_per_second: Some(max_bytes_per_second),
+            cancellation,
+        })
+    }
+
+    pub fn unlimited() -> Self {
+        Self {
+            max_bytes_per_second: None,
+            cancellation: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn max_bytes_per_second(&self) -> Option<u64> {
+        self.max_bytes_per_second
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.load(Ordering::Acquire)
+    }
+
+    pub fn ensure_active(&self) -> Result<()> {
+        if self.is_cancelled() {
+            return Err(DecodeWeightPrewarmCancelled.into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("decode weight prewarm cancelled during shutdown")]
+pub struct DecodeWeightPrewarmCancelled;
+
 /// Process-global flag set when Vulkan is the active backend.
 ///
 /// candle-core has no `candle_core::Device::Vulkan`, so call sites in `forward.rs` and
@@ -1323,6 +1369,14 @@ pub trait LinearBackend: Send + Sync + std::fmt::Debug {
 
     fn runtime_prewarm_decode_weights(&self, _weights: &crate::forward::GpuWeights) -> Result<()> {
         Ok(())
+    }
+
+    fn runtime_prewarm_decode_weights_with_policy(
+        &self,
+        weights: &crate::forward::GpuWeights,
+        _policy: &DecodeWeightPrewarmPolicy,
+    ) -> Result<()> {
+        self.runtime_prewarm_decode_weights(weights)
     }
 
     fn runtime_full_attn_qkv_combined_decode(

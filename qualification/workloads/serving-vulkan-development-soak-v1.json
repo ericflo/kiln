@@ -70,6 +70,10 @@
           "max_prefill_tokens_per_cycle": 128,
           "max_prefill_layers_per_cycle": 4
         },
+        "model": {
+          "vulkan_decode_weight_prewarm": true,
+          "vulkan_decode_weight_prewarm_mib_per_second": 256
+        },
         "soak": {
           "cancellation_after_semantic_deltas": 4,
           "cancellation_max_tokens": 256,

@@ -25,7 +25,6 @@ pub(super) struct VulkanRuntimeConfig {
     pub(super) bf16_packed_gdn_in_proj_weights_enabled: bool,
     pub(super) bf16_packed_full_attn_qkv_weights_enabled: bool,
     pub(super) bf16_packed_mlp_decode_weights_enabled: bool,
-    pub(super) weight_prewarm_enabled: bool,
     pub(super) recurrent_state_residency_enabled: bool,
     pub(super) resident_decode_enabled: bool,
 }
@@ -92,7 +91,6 @@ impl VulkanRuntimeConfig {
         // it was slower than the generic cached GEMV path in short decode
         // benchmarks. Keep it opt-in until it is tiled/tuned.
         let mlp_gate_up_enabled = std::env::var("KILN_ENABLE_VULKAN_MLP_GATE_UP").is_ok();
-        let weight_prewarm_enabled = std::env::var("KILN_DISABLE_VULKAN_WEIGHT_PREWARM").is_err();
         // Device-resident recurrent state is correct but regressed the live
         // Strix Halo batcher A/B in A129 because row/batch buffer copies cost
         // more than the saved readback/upload at the current batch shape.
@@ -132,7 +130,6 @@ impl VulkanRuntimeConfig {
             bf16_packed_gdn_in_proj_weights_enabled,
             bf16_packed_full_attn_qkv_weights_enabled,
             bf16_packed_mlp_decode_weights_enabled,
-            weight_prewarm_enabled,
             recurrent_state_residency_enabled,
             resident_decode_enabled,
         }

@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -51,6 +53,13 @@ struct LoadedShard {
     meta: Arc<ShardMetadata>,
     file: Arc<fs::File>,
     mmap: Arc<Mmap>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SnapshotCopyOutcome {
+    copied: bool,
+    cache_release_attempts: usize,
+    cache_release_successes: usize,
 }
 
 #[derive(Debug)]
@@ -427,14 +436,18 @@ fn create_immutable_model_snapshot(
     let mut remaining_bytes = total_bytes;
     let mut cloned_files = 0usize;
     let mut copied_files = 0usize;
+    let mut cache_release_attempts = 0usize;
+    let mut cache_release_successes = 0usize;
     for (source, relative) in &inputs {
         let destination = directory.path().join(relative);
-        let copied = copy_snapshot_input(source, &destination, remaining_bytes, directory.path())?;
-        if copied {
+        let outcome = copy_snapshot_input(source, &destination, remaining_bytes, directory.path())?;
+        if outcome.copied {
             copied_files += 1;
         } else {
             cloned_files += 1;
         }
+        cache_release_attempts += outcome.cache_release_attempts;
+        cache_release_successes += outcome.cache_release_successes;
         remaining_bytes = remaining_bytes.saturating_sub(
             fs::metadata(&destination)
                 .with_context(|| format!("stat copied snapshot input {}", destination.display()))?
@@ -458,6 +471,9 @@ fn create_immutable_model_snapshot(
         logical_bytes = total_bytes,
         cloned_files,
         copied_files,
+        cache_release_attempts,
+        cache_release_successes,
+        cache_release_failures = cache_release_attempts.saturating_sub(cache_release_successes),
         "created private immutable model snapshot"
     );
     Ok(ImmutableModelSnapshot {
@@ -503,7 +519,7 @@ fn copy_snapshot_input(
     destination_path: &Path,
     remaining_logical_bytes: u64,
     snapshot_root: &Path,
-) -> Result<bool> {
+) -> Result<SnapshotCopyOutcome> {
     let mut source = open_regular_source(source_path, "model snapshot input")?;
     let expected_len = source
         .metadata()
@@ -555,6 +571,11 @@ fn copy_snapshot_input(
     destination
         .sync_all()
         .map_err(|error| snapshot_write_error(error, destination_path, remaining_logical_bytes))?;
+    let (cache_release_attempts, cache_release_successes) = if cloned {
+        (0, 0)
+    } else {
+        release_snapshot_copy_caches(&source, source_path, &destination, destination_path)
+    };
     let observed_len = destination
         .metadata()
         .with_context(|| format!("stat snapshot destination {}", destination_path.display()))?
@@ -566,7 +587,58 @@ fn copy_snapshot_input(
         );
     }
     set_read_only_file_permissions(destination_path)?;
-    Ok(!cloned)
+    Ok(SnapshotCopyOutcome {
+        copied: !cloned,
+        cache_release_attempts,
+        cache_release_successes,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn release_snapshot_copy_cache(file: &File, path: &Path, role: &str) -> bool {
+    // `sync_all` above makes destination data durable before this hint. The
+    // source and destination are immediately reopened through the immutable
+    // snapshot, so retaining both copies in the host page cache needlessly
+    // doubles startup pressure for filesystems without reflink support.
+    let result = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+    if result == 0 {
+        tracing::debug!(path = %path.display(), role, "released copied model snapshot page cache");
+        true
+    } else {
+        tracing::warn!(
+            path = %path.display(),
+            role,
+            error = %io::Error::from_raw_os_error(result),
+            "could not release copied model snapshot page cache"
+        );
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn release_snapshot_copy_caches(
+    source: &File,
+    source_path: &Path,
+    destination: &File,
+    destination_path: &Path,
+) -> (usize, usize) {
+    let source_released = release_snapshot_copy_cache(source, source_path, "source");
+    let destination_released =
+        release_snapshot_copy_cache(destination, destination_path, "destination");
+    (
+        2,
+        usize::from(source_released) + usize::from(destination_released),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn release_snapshot_copy_caches(
+    _source: &File,
+    _source_path: &Path,
+    _destination: &File,
+    _destination_path: &Path,
+) -> (usize, usize) {
+    (0, 0)
 }
 
 fn snapshot_write_error(error: io::Error, path: &Path, required: u64) -> anyhow::Error {
@@ -2163,6 +2235,30 @@ mod tests {
         cleanup.cleanup().unwrap();
         drop(weights);
         assert!(!snapshot_root.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn copied_snapshot_cache_release_preserves_durable_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("source.safetensors");
+        let destination_path = directory.path().join("destination.safetensors");
+        let payload = vec![0x5a; 128 * 1024];
+        fs::write(&source_path, &payload).unwrap();
+        fs::write(&destination_path, &payload).unwrap();
+        let source = File::open(&source_path).unwrap();
+        let destination = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&destination_path)
+            .unwrap();
+        destination.sync_all().unwrap();
+
+        assert_eq!(
+            release_snapshot_copy_caches(&source, &source_path, &destination, &destination_path,),
+            (2, 2)
+        );
+        assert_eq!(fs::read(destination_path).unwrap(), payload);
     }
 
     #[cfg(unix)]

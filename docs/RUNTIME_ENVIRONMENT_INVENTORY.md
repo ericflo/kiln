@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **904 direct read call sites** and
+The scanner records **903 direct read call sites** and
 **361 process-mutation call sites**. It can
-statically name **366 distinct literal `KILN_*`
-read names** across **529 call sites**.
+statically name **365 distinct literal `KILN_*`
+read names** across **528 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 432 | 325 | 0 |
+| Experimental/debug migration | 431 | 324 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 135 | 41 | 353 |
 
@@ -58,7 +58,7 @@ boundary. This table is the prioritized deletion/migration queue.
 |---|---:|---:|
 | `crates/kiln-model/src/forward.rs` | 136 | 112 |
 | `crates/kiln-vulkan-kernel/src/kernels.rs` | 47 | 46 |
-| `crates/kiln-model/src/backend/vulkan_config.rs` | 28 | 28 |
+| `crates/kiln-model/src/backend/vulkan_config.rs` | 27 | 27 |
 | `crates/kiln-model/src/mtp_debug.rs` | 24 | 24 |
 | `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
 | `crates/kiln-model/src/vk_decode_resident.rs` | 12 | 10 |
@@ -316,7 +316,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_QWEN_RMSNORM_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_SKIP_FINAL_GDN_STATE_READBACK` | Experimental/debug migration | 1 | `crates/kiln-model/src/generate.rs` |
-| `KILN_DISABLE_VULKAN_WEIGHT_PREWARM` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_DOCTEST_PYTHON` | Experimental/debug migration | 1 | `crates/kiln-eval/src/scorers/python_doctest.rs` |
 | `KILN_DROP_PROJECTION_ORIGINALS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_ECHO_ENABLED` | Experimental/debug migration, Test only | 2 | `crates/kiln-train/examples/cuda_grpo_ablation.rs`, `crates/kiln-train/src/lib.rs` |

@@ -119,18 +119,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 98 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 101 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 98 fixed fields:
+credential. Of the 101 fixed fields:
 
-- 93 implement the canonical mechanical environment name;
+- 96 implement the canonical mechanical environment name;
 - 66 also retain one or more deprecated compatibility spellings (69 aliases
   total);
 - 5 are config-file-only and have no environment override;
 - the 69 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 98 fixed fields and both dynamic credential fields.
+The tables below cover all 101 fixed fields and both dynamic credential fields.
 The schema additionally records the accepted deprecated TOML-only
 `streaming_prefill.enabled` compatibility field so validators match the loader.
 
@@ -558,6 +558,8 @@ not construct a model; inspect `/v1/config` after restart for those facts.
 | `model.tokenizer_path` | optional string; omitted (`None`) | `KILN_MODEL_TOKENIZER_PATH` (implemented) | `KILN_TOKENIZER_PATH` (deprecated compatibility) | Must be non-empty when set. |
 | `model.adapter_dir` | optional string; omitted (`None`) | `KILN_MODEL_ADAPTER_DIR` (implemented) | `KILN_ADAPTER_DIR` (deprecated compatibility) | Must be non-empty when set. For the Qwen3.5-4B profile, omission resolves to `<model.path>/adapters`. |
 | `model.snapshot_dir` | optional string; omitted (`None`) | `KILN_MODEL_SNAPSHOT_DIR` (implemented) | `KILN_MODEL_SNAPSHOT_DIR` | Must be non-empty when set. The environment alias uniquely treats an empty or whitespace-only value as a request to clear the TOML value. Without a value, Kiln tries a location beside the model and then the system temporary directory. |
+| `model.vulkan_decode_weight_prewarm` | boolean; `true` | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM` (implemented) | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM` | Populates backend-private Vulkan decode-weight caches during startup. Disable only to trade first-request latency for lower startup work. Restart required. |
+| `model.vulkan_decode_weight_prewarm_mib_per_second` | unsigned integer MiB/s; `256` | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND` (implemented) | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND` | `1..=16384`. Bounds the average Vulkan decode-weight cache materialization rate. Pacing checks shutdown at least every 25 ms between uploads. Restart required. |
 | `model.served_model_id` | optional string; omitted (`None`) | `KILN_MODEL_SERVED_MODEL_ID` (implemented) | `KILN_SERVED_MODEL_ID` (deprecated compatibility) | Must be non-empty when set. Otherwise the effective id is the final slash-separated component of `model.model_id` (`Qwen3.5-4B` by default). `serve --served-model-id` applies a typed, validated override after environment resolution. |
 
 ## `[memory]`

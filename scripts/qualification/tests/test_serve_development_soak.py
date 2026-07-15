@@ -1071,6 +1071,13 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE,
         )
         self.assertEqual(
+            variant["effective_config"]["model"],
+            {
+                "vulkan_decode_weight_prewarm": True,
+                "vulkan_decode_weight_prewarm_mib_per_second": 256,
+            },
+        )
+        self.assertEqual(
             soak.mixed.VARIANT_CONFIGS["stable"]["server"][
                 "max_prefill_tokens_per_cycle"
             ],
