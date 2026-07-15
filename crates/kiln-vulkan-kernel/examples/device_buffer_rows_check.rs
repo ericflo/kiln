@@ -43,18 +43,19 @@ fn main() -> Result<()> {
         .iter()
         .map(|row| upload_row(&dev, row))
         .collect::<Result<Vec<_>>>()?;
+    let row_bytes = rows[0].len() as u64;
 
-    let batch = copy_device_buffer_rows_to_batch(&dev, &row_buffers)?;
+    let batch = copy_device_buffer_rows_to_batch(&dev, &row_buffers, row_bytes)?;
     let got_batch = read(&dev, &batch)?;
     let expected_batch: Vec<u8> = rows.iter().flat_map(|row| row.iter().copied()).collect();
     ensure!(
-        got_batch == expected_batch,
+        got_batch[..expected_batch.len()] == expected_batch,
         "row-to-batch mismatch: got {:?}, expected {:?}",
-        got_batch,
+        &got_batch[..expected_batch.len()],
         expected_batch
     );
 
-    let split = split_device_buffer_batch_rows(&dev, &batch, rows.len())?;
+    let split = split_device_buffer_batch_rows(&dev, &batch, rows.len(), row_bytes)?;
     ensure!(
         split.len() == rows.len(),
         "split row count mismatch: got {}, expected {}",
@@ -64,9 +65,9 @@ fn main() -> Result<()> {
     for (idx, row_buf) in split.iter().enumerate() {
         let got = read(&dev, row_buf)?;
         ensure!(
-            got == rows[idx],
+            got[..rows[idx].len()] == rows[idx],
             "split row {idx} mismatch: got {:?}, expected {:?}",
-            got,
+            &got[..rows[idx].len()],
             rows[idx]
         );
     }
@@ -75,7 +76,7 @@ fn main() -> Result<()> {
         "device_buffer_rows_check: OK rows={} row_bytes={} batch_bytes={}",
         rows.len(),
         rows[0].len(),
-        got_batch.len()
+        expected_batch.len()
     );
     Ok(())
 }

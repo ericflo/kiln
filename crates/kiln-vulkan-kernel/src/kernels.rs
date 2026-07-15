@@ -8833,10 +8833,37 @@ pub fn copy_device_buffer_rows_to_batch(
         row_size > 0,
         "copy_device_buffer_rows_to_batch row size must be non-zero"
     );
+    let batch_bytes = row_size
+        .checked_mul(rows.len() as u64)
+        .context("copy_device_buffer_rows_to_batch byte count overflow")?;
+    let batch_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, batch_bytes)?;
+    copy_device_buffer_rows_to_existing_batch(vk_device, rows, batch_buf.as_ref(), row_size)?;
+    Ok(batch_buf)
+}
+
+/// Copy same-sized device-local rows into an existing contiguous batch buffer.
+///
+/// The destination may have greater physical capacity than the logical
+/// `rows.len() * row_size` payload. Its identity and allocation remain stable,
+/// allowing a maximum-capacity decode state to serve smaller logical batches.
+pub fn copy_device_buffer_rows_to_existing_batch(
+    vk_device: &VulkanDevice,
+    rows: &[Arc<VulkanBuffer>],
+    batch_buffer: &VulkanBuffer,
+    row_size: u64,
+) -> Result<()> {
+    anyhow::ensure!(
+        !rows.is_empty(),
+        "copy_device_buffer_rows_to_existing_batch requires at least one row"
+    );
+    anyhow::ensure!(
+        row_size > 0,
+        "copy_device_buffer_rows_to_existing_batch row size must be non-zero"
+    );
     for (idx, row) in rows.iter().enumerate() {
         anyhow::ensure!(
             row.size() >= row_size,
-            "copy_device_buffer_rows_to_batch row {idx} size {} < logical row size {row_size}",
+            "copy_device_buffer_rows_to_existing_batch row {idx} size {} < logical row size {row_size}",
             row.size()
         );
     }
@@ -8845,8 +8872,12 @@ pub fn copy_device_buffer_rows_to_batch(
     let queue = vk_device.queue();
     let batch_bytes = row_size
         .checked_mul(rows.len() as u64)
-        .context("copy_device_buffer_rows_to_batch byte count overflow")?;
-    let batch_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, batch_bytes)?;
+        .context("copy_device_buffer_rows_to_existing_batch byte count overflow")?;
+    anyhow::ensure!(
+        batch_buffer.size() >= batch_bytes,
+        "copy_device_buffer_rows_to_existing_batch buffer size {} < logical batch size {batch_bytes}",
+        batch_buffer.size()
+    );
 
     let cmd_pool = vk_device.transient_command_pool()?;
     let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
@@ -8859,11 +8890,24 @@ pub fn copy_device_buffer_rows_to_batch(
         device
             .begin_command_buffer(cmd, &make_cmd_begin_info())
             .context("failed to begin row-to-batch copy command buffer")?;
+        let pre_copy_barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::TRANSFER_WRITE,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[pre_copy_barrier],
+            &[],
+            &[],
+        );
         for (row_idx, row) in rows.iter().enumerate() {
             device.cmd_copy_buffer(
                 cmd,
                 row.handle(),
-                batch_buf.handle(),
+                batch_buffer.handle(),
                 &[vk::BufferCopy::default()
                     .src_offset(0)
                     .dst_offset(row_size * row_idx as u64)
@@ -8895,7 +8939,7 @@ pub fn copy_device_buffer_rows_to_batch(
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
 
-    Ok(batch_buf)
+    Ok(())
 }
 
 /// Copy one contiguous device-local batch buffer into existing row buffers.

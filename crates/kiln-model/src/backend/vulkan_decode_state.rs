@@ -200,16 +200,31 @@ impl VulkanBackend {
             }
             out
         };
-        let batch_buffer = kiln_vulkan_kernel::kernels::copy_device_buffer_rows_to_batch(
-            vk_device,
-            &row_buffers,
-            row_bytes,
-        )
-        .with_context(|| format!("assemble kt {label} state batch rows"))?;
-        state_map
+        let existing_batch = state_map
             .lock()
             .map_err(|_| anyhow::anyhow!("kt {label} state mutex poisoned"))?
-            .insert(batch_key, batch_buffer);
+            .get(&batch_key)
+            .cloned();
+        if let Some(batch_buffer) = existing_batch {
+            kiln_vulkan_kernel::kernels::copy_device_buffer_rows_to_existing_batch(
+                vk_device,
+                &row_buffers,
+                batch_buffer.as_ref(),
+                row_bytes,
+            )
+            .with_context(|| format!("refresh kt {label} state batch rows"))?;
+        } else {
+            let batch_buffer = kiln_vulkan_kernel::kernels::copy_device_buffer_rows_to_batch(
+                vk_device,
+                &row_buffers,
+                row_bytes,
+            )
+            .with_context(|| format!("assemble kt {label} state batch rows"))?;
+            state_map
+                .lock()
+                .map_err(|_| anyhow::anyhow!("kt {label} state mutex poisoned"))?
+                .insert(batch_key, batch_buffer);
+        }
         Ok(true)
     }
 

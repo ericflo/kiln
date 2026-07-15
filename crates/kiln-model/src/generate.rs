@@ -334,13 +334,12 @@ pub struct ModelRunner {
     /// shapes that decode hasn't asked for yet.
     decode_buffer_config: OnceLock<DecodeBufferConfig>,
     /// Cached batched `LinearAttentionState` carried across consecutive
-    /// `decode_next_tokens_paged_contiguous_batch_greedy` invocations. When
-    /// the next call's per-row state-id set is identical to what produced
-    /// this cache, we skip the `from_batch_rows` cat (24 GDN layers × 2
-    /// state-kinds = 48 cats per step, ~1.6 ms total at bs=16) and reuse
-    /// the cached batched state directly. The cache is invalidated on
-    /// adapter swap (same lifecycle as `cuda_graph`) and on id-set
-    /// mismatch.
+    /// paged-decode invocations. Exact row-ID matches reuse the state without
+    /// a copy. A Vulkan-resident cache also retains its maximum observed batch
+    /// capacity across row-set and width changes, refreshing the same backend
+    /// buffers through a smaller identity-preserving prefix view. This avoids
+    /// allocator churn without retaining one host/device state per width.
+    /// The cache is invalidated on adapter transitions with graph state.
     batched_state_cache: Mutex<Option<CachedBatchedState>>,
     backend: Arc<dyn BackendRuntime>,
     /// Immutable startup-resolved streaming-prefill execution policy.
@@ -671,14 +670,10 @@ impl BackendHealthHandle {
     }
 }
 
-/// Persistent batched-state cache entry. The fingerprint is the set of
-/// per-row `PagedBatchedDecodeState::id` values *in order*. We use the
-/// stable atomic-counter id rather than a pointer fingerprint because
-/// the batching-engine actor's `Vec<ActiveRequest>` shifts surviving
-/// requests down in memory whenever a finished request is removed mid-
-/// batch via `Vec::remove`, which invalidates pointer-based keys even
-/// though the requests themselves are the same. The id survives the
-/// shift.
+/// Persistent batched-state cache entry. `state.batch_size()` is its retained
+/// capacity, while `row_ids` names the logical prefix whose device bytes are
+/// currently valid. Stable request IDs survive batching-actor `Vec::remove`
+/// shifts that invalidate pointer fingerprints.
 pub(crate) struct CachedBatchedState {
     pub(crate) state: crate::forward::LinearAttentionState,
     pub(crate) row_ids: Vec<u64>,
@@ -689,12 +684,32 @@ pub(crate) struct CachedBatchedState {
 /// releases backend-resident buffers instead of orphaning their tensor IDs.
 struct ResidentBatchedStateLease<'a> {
     state: Option<LinearAttentionState>,
+    /// Maximum-capacity owner when `state` is a smaller identity-preserving
+    /// prefix view. Both name the same backend buffers, so cleanup must evict
+    /// exactly once through this owner.
+    capacity_state: Option<LinearAttentionState>,
     backend: &'a dyn BackendRuntime,
 }
 
 impl<'a> ResidentBatchedStateLease<'a> {
     fn new(state: Option<LinearAttentionState>, backend: &'a dyn BackendRuntime) -> Self {
-        Self { state, backend }
+        Self {
+            state,
+            capacity_state: None,
+            backend,
+        }
+    }
+
+    fn with_capacity_view(
+        state: LinearAttentionState,
+        capacity_state: LinearAttentionState,
+        backend: &'a dyn BackendRuntime,
+    ) -> Self {
+        Self {
+            state: Some(state),
+            capacity_state: Some(capacity_state),
+            backend,
+        }
     }
 
     fn as_ref(&self) -> Option<&LinearAttentionState> {
@@ -708,11 +723,23 @@ impl<'a> ResidentBatchedStateLease<'a> {
     fn take(&mut self) -> Option<LinearAttentionState> {
         self.state.take()
     }
+
+    fn take_for_cache(&mut self) -> Option<LinearAttentionState> {
+        match self.capacity_state.take() {
+            Some(capacity_state) => {
+                self.state.take();
+                Some(capacity_state)
+            }
+            None => self.state.take(),
+        }
+    }
 }
 
 impl Drop for ResidentBatchedStateLease<'_> {
     fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
+        let state = self.capacity_state.take().or_else(|| self.state.take());
+        self.state.take();
+        if let Some(state) = state {
             state.evict_gdn_state_resident_kt(self.backend);
         }
     }
@@ -2816,29 +2843,88 @@ impl ModelRunner {
         }
     }
 
-    fn take_matching_batched_state(
-        &self,
-        row_ids: Option<&[u64]>,
-    ) -> Result<Option<LinearAttentionState>> {
+    fn take_batched_state_cache(&self) -> Result<Option<CachedBatchedState>> {
         let mut cache = self
             .batched_state_cache
             .lock()
             .map_err(|error| anyhow::anyhow!("failed to lock batched state cache: {error}"))?;
-        let matches = match (row_ids, cache.as_ref()) {
-            (Some(ids), Some(cached)) => cached.row_ids == ids,
-            _ => false,
-        };
-        let cached = cache.take();
-        drop(cache);
+        Ok(cache.take())
+    }
 
-        match cached {
-            Some(cached) if matches => Ok(Some(cached.state)),
-            Some(stale) => {
-                self.evict_cached_batched_state(stale);
-                Ok(None)
-            }
-            None => Ok(None),
+    fn prepare_batched_linear_state<'a>(
+        &'a self,
+        linear_states: &[&mut LinearAttentionState],
+        all_rows_resident: bool,
+        row_ids: Option<&[u64]>,
+    ) -> Result<(ResidentBatchedStateLease<'a>, bool)> {
+        let batch = linear_states.len();
+        anyhow::ensure!(batch > 0, "batched linear state requires at least one row");
+        if let Some(ids) = row_ids {
+            anyhow::ensure!(
+                ids.len() == batch,
+                "batched linear state row-id count mismatch ({} vs {batch})",
+                ids.len()
+            );
         }
+        let state_refs: Vec<&LinearAttentionState> =
+            linear_states.iter().map(|state| &**state).collect();
+
+        if let Some(cached) = self.take_batched_state_cache()? {
+            let CachedBatchedState {
+                state,
+                row_ids: cached_row_ids,
+            } = cached;
+            let mut cached_lease =
+                ResidentBatchedStateLease::new(Some(state), self.backend.as_ref());
+            let exact_match = row_ids.is_some_and(|ids| cached_row_ids == ids);
+            let capacity = cached_lease
+                .as_ref()
+                .expect("cached batched-state lease was just initialized")
+                .batch_size()?;
+            let cached_is_resident = cached_lease
+                .as_ref()
+                .expect("cached batched-state lease was just initialized")
+                .has_all_gdn_state_resident_kt(self.backend.as_ref());
+
+            if exact_match && capacity == batch {
+                return Ok((cached_lease, true));
+            }
+
+            if row_ids.is_some() && all_rows_resident && cached_is_resident && capacity >= batch {
+                let lease = if capacity == batch {
+                    cached_lease
+                } else {
+                    let view = cached_lease
+                        .as_ref()
+                        .expect("cached batched-state lease was just initialized")
+                        .resident_batch_prefix_view(batch)?;
+                    let capacity_state = cached_lease
+                        .take()
+                        .expect("cached batched-state lease still owns capacity state");
+                    ResidentBatchedStateLease::with_capacity_view(
+                        view,
+                        capacity_state,
+                        self.backend.as_ref(),
+                    )
+                };
+                if !exact_match {
+                    lease
+                        .as_ref()
+                        .expect("resident capacity lease was just initialized")
+                        .assemble_gdn_state_resident_batch_rows_kt(
+                            self.backend.as_ref(),
+                            &state_refs,
+                        )?;
+                }
+                return Ok((lease, exact_match));
+            }
+        }
+
+        let state = self.assemble_batched_linear_state(linear_states, all_rows_resident)?;
+        Ok((
+            ResidentBatchedStateLease::new(Some(state), self.backend.as_ref()),
+            false,
+        ))
     }
 
     fn park_batched_state(&self, state: LinearAttentionState, row_ids: &[u64]) {
@@ -6094,26 +6180,7 @@ impl ModelRunner {
                 .iter()
                 .all(|state| state.has_all_gdn_state_resident_kt(&*self.backend));
         let (mut batch_state, batched_state_cache_hit) = if has_linear_layers {
-            // Cache lookup: when the same set of per-row state IDs came in
-            // last decode step, the cached batched state is already what
-            // `from_batch_rows` would re-produce (because we scatter to
-            // per-row after every forward — the batched state post-scatter
-            // and the per-row states post-scatter are byte-for-byte
-            // equivalent). Taking the cached state directly skips the
-            // per-step 24-GDN-layer × 2-state-kind tensor `cat` workload
-            // (~1.6 ms / step at bs=16). The cache is only consulted when
-            // the caller supplied a `row_ids` fingerprint that survives the
-            // batching-engine actor's `Vec::remove` shifts.
-            let cached = self.take_matching_batched_state(row_ids)?;
-            let cache_hit = cached.is_some();
-            let state = if let Some(cached) = cached {
-                cached
-            } else {
-                // Cache miss: the helper evicted any stale resident entry.
-                self.assemble_batched_linear_state(linear_states, all_rows_resident)?
-            };
-            let state = ResidentBatchedStateLease::new(Some(state), self.backend.as_ref());
-            (state, cache_hit)
+            self.prepare_batched_linear_state(linear_states, all_rows_resident, row_ids)?
         } else {
             (
                 ResidentBatchedStateLease::new(None, self.backend.as_ref()),
@@ -6197,15 +6264,13 @@ impl ModelRunner {
             }
         }
         // Park the (now updated) batched state back in the cache so the
-        // next decode step on the same id set can skip the
-        // `from_batch_rows` cat. The per-row states are byte-for-byte
-        // equivalent to this batched state right now (we just scattered),
-        // so the next cache-hit reuses correct data; the next cache-miss
-        // (different id set, or caller without ids) discards this entry
-        // and re-assembles. We only cache when the caller supplied ids;
-        // otherwise the next call has no way to match and we'd just hold
-        // dead memory.
-        if let (Some(state), Some(ids)) = (batch_state.take(), row_ids) {
+        // next decode step can reuse its resident allocation. Exact row IDs
+        // skip assembly; a different Vulkan-resident row set refreshes the
+        // retained maximum-capacity buffers in place. The per-row states are
+        // byte-for-byte equivalent to the logical batch prefix right now
+        // because we just scattered. We only cache when the caller supplied
+        // IDs; otherwise no later call can establish that equivalence.
+        if let (Some(state), Some(ids)) = (batch_state.take_for_cache(), row_ids) {
             self.park_batched_state(state, ids);
         }
         finish_decode_batcher_stage_profile("decode_total", batch, total_start);
@@ -6339,15 +6404,7 @@ impl ModelRunner {
                 .all(|state| state.has_all_gdn_state_resident_kt(&*self.backend));
         let (mut batch_state, batched_state_cache_hit) =
             if has_linear_layers && !single_row_direct_state {
-                let cached = self.take_matching_batched_state(row_ids)?;
-                let cache_hit = cached.is_some();
-                let state = if let Some(cached) = cached {
-                    cached
-                } else {
-                    self.assemble_batched_linear_state(linear_states, all_rows_resident)?
-                };
-                let state = ResidentBatchedStateLease::new(Some(state), self.backend.as_ref());
-                (state, cache_hit)
+                self.prepare_batched_linear_state(linear_states, all_rows_resident, row_ids)?
             } else {
                 (
                     ResidentBatchedStateLease::new(None, self.backend.as_ref()),
@@ -6488,7 +6545,7 @@ impl ModelRunner {
             }
         }
 
-        if let (Some(state), Some(ids)) = (batch_state.take(), row_ids) {
+        if let (Some(state), Some(ids)) = (batch_state.take_for_cache(), row_ids) {
             self.park_batched_state(state, ids);
         }
         finish_decode_batcher_stage_profile("sample_decode_total", batch, total_start);
@@ -6569,15 +6626,7 @@ impl ModelRunner {
         let single_row_direct_state = has_linear_layers && batch == 1;
         let (mut batch_state, batched_state_cache_hit) =
             if has_linear_layers && !single_row_direct_state {
-                let cached = self.take_matching_batched_state(row_ids)?;
-                let cache_hit = cached.is_some();
-                let state = if let Some(cached) = cached {
-                    cached
-                } else {
-                    self.assemble_batched_linear_state(linear_states, all_rows_resident)?
-                };
-                let state = ResidentBatchedStateLease::new(Some(state), self.backend.as_ref());
-                (state, cache_hit)
+                self.prepare_batched_linear_state(linear_states, all_rows_resident, row_ids)?
             } else {
                 (
                     ResidentBatchedStateLease::new(None, self.backend.as_ref()),
@@ -6645,7 +6694,7 @@ impl ModelRunner {
             }
         }
 
-        if let (Some(state), Some(ids)) = (batch_state.take(), row_ids) {
+        if let (Some(state), Some(ids)) = (batch_state.take_for_cache(), row_ids) {
             self.park_batched_state(state, ids);
         }
         finish_decode_batcher_stage_profile("hidden_decode_total", batch, total_start);
