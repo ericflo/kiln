@@ -136,13 +136,8 @@ fn alloc_transpose_output(
         // BF16 shaders address storage as u32-packed pairs.
         bytes = ((bytes + 3) / 4) * 4;
     }
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes as u64,
-    )
-    .context("vk_transpose_2d: alloc output buffer")?;
-    Ok(Arc::new(buf))
+    crate::buffer_pool::pool_alloc_device_local(device, bytes as u64)
+        .context("vk_transpose_2d: acquire output buffer")
 }
 
 pub fn vk_transpose_2d_no_grad(t: &VkTensor) -> Result<VkTensor> {

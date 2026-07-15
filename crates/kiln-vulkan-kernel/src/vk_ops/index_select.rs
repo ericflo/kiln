@@ -16,11 +16,7 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
 
 fn upload_indices(device: &Arc<VulkanDevice>, indices: &[u32]) -> Result<Arc<VulkanBuffer>> {
     let bytes: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes.len().max(4) as u64,
-    )?;
+    let buf = crate::buffer_pool::pool_alloc_device_local(device, bytes.len().max(4) as u64)?;
     VulkanBuffer::upload_data(
         device.device(),
         device.host_visible_mem_type(),
@@ -29,7 +25,7 @@ fn upload_indices(device: &Arc<VulkanDevice>, indices: &[u32]) -> Result<Arc<Vul
         &buf,
         &bytes,
     )?;
-    Ok(Arc::new(buf))
+    Ok(buf)
 }
 
 fn dispatch_fwd(

@@ -63,10 +63,8 @@ fn dispatch_binary(
 fn alloc_like(a: &VkTensor) -> Result<Arc<VulkanBuffer>> {
     let dev = a.device();
     let bytes = (a.num_elements() * a.dtype().byte_size()).max(1);
-    let buf =
-        VulkanBuffer::create_device_local(dev.device(), dev.device_local_mem_type(), bytes as u64)
-            .context("vk_elementwise: alloc output buffer")?;
-    Ok(Arc::new(buf))
+    crate::buffer_pool::pool_alloc_device_local(dev, bytes as u64)
+        .context("vk_elementwise: acquire output buffer")
 }
 
 fn check_same_shape_f32(a: &VkTensor, b: &VkTensor) -> Result<()> {

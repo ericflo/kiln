@@ -223,13 +223,9 @@ impl VkTensor {
     ) -> Result<Self> {
         let nelem: usize = shape.iter().product();
         let bytes = nelem * dtype.byte_size();
-        let buffer = VulkanBuffer::create_device_local(
-            device.device(),
-            device.device_local_mem_type(),
-            bytes.max(1) as u64,
-        )
-        .context("VkTensor::alloc_uninit: device-local buffer")?;
-        Ok(Self::from_buffer(Arc::new(buffer), shape, dtype, device))
+        let buffer = crate::buffer_pool::pool_alloc_device_local(&device, bytes.max(1) as u64)
+            .context("VkTensor::alloc_uninit: acquire device-local buffer")?;
+        Ok(Self::from_buffer(buffer, shape, dtype, device))
     }
 
     /// Upload an f32 slice as a fresh F32 VkTensor leaf. Candle-free
@@ -250,12 +246,11 @@ impl VkTensor {
             nelem
         );
         let bytes: &[u8] = bytemuck::cast_slice(data);
-        let buffer = VulkanBuffer::create_device_local(
-            device.device(),
-            device.device_local_mem_type(),
+        let buffer = crate::buffer_pool::pool_alloc_device_local(
+            &device,
             device_buffer_bytes(nelem, VkDType::F32) as u64,
         )
-        .context("VkTensor::from_f32_slice: device-local buffer")?;
+        .context("VkTensor::from_f32_slice: acquire device-local buffer")?;
         VulkanBuffer::upload_data(
             device.device(),
             device.host_visible_mem_type(),
@@ -265,12 +260,7 @@ impl VkTensor {
             bytes,
         )
         .context("VkTensor::from_f32_slice: upload")?;
-        Ok(Self::from_buffer(
-            Arc::new(buffer),
-            shape,
-            VkDType::F32,
-            device,
-        ))
+        Ok(Self::from_buffer(buffer, shape, VkDType::F32, device))
     }
 
     /// Upload an f32 source slice converted to BF16 as a fresh BF16

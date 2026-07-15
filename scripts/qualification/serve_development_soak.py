@@ -87,6 +87,7 @@ class SoakRuntime:
     stabilization_gpu_delta_limit_bytes: int
     stabilization_rss_delta_limit_bytes: int
     active_gpu_peak_growth_limit_bytes: int | None
+    vulkan_allocation_growth_limit_count: int | None
     setup_deadline_seconds: float
     host_mem_available_floor_bytes: int | None = None
     host_swap_growth_limit_bytes: int | None = None
@@ -114,6 +115,7 @@ ROCM_RUNTIME = SoakRuntime(
     stabilization_gpu_delta_limit_bytes=STABILIZATION_GPU_DELTA_LIMIT_BYTES,
     stabilization_rss_delta_limit_bytes=STABILIZATION_RSS_DELTA_LIMIT_BYTES,
     active_gpu_peak_growth_limit_bytes=None,
+    vulkan_allocation_growth_limit_count=None,
     setup_deadline_seconds=SETUP_DEADLINE_SECONDS,
 )
 VULKAN_RUNTIME = SoakRuntime(
@@ -138,6 +140,7 @@ VULKAN_RUNTIME = SoakRuntime(
     stabilization_gpu_delta_limit_bytes=64 * 1024 * 1024,
     stabilization_rss_delta_limit_bytes=16 * 1024 * 1024,
     active_gpu_peak_growth_limit_bytes=VULKAN_ACTIVE_GPU_PEAK_GROWTH_LIMIT_BYTES,
+    vulkan_allocation_growth_limit_count=0,
     setup_deadline_seconds=1800.0,
     host_mem_available_floor_bytes=8 * 1024 * 1024 * 1024,
     host_swap_growth_limit_bytes=512 * 1024 * 1024,
@@ -340,6 +343,10 @@ def effective_config(
             runtime.host_swap_growth_limit_bytes
         )
         effective["soak"]["host_memory_poll_interval_ms"] = 250
+    if runtime.vulkan_allocation_growth_limit_count is not None:
+        effective["soak"]["vulkan_allocation_growth_limit_count"] = (
+            runtime.vulkan_allocation_growth_limit_count
+        )
     return effective
 
 
@@ -1588,17 +1595,18 @@ def execute(
                 vulkan_buffers_start is not None
                 and current_vulkan_buffers is not None
             ):
+                vulkan_allocation_growth = vulkan_buffer_counter_delta(
+                    vulkan_buffers_start,
+                    current_vulkan_buffers,
+                    "allocations",
+                )
                 wave_trace.update(
                     vulkan_allocated_bytes=vulkan_buffer_counter_delta(
                         vulkan_buffers_start,
                         current_vulkan_buffers,
                         "allocated_bytes",
                     ),
-                    vulkan_allocation_count=vulkan_buffer_counter_delta(
-                        vulkan_buffers_start,
-                        current_vulkan_buffers,
-                        "allocations",
-                    ),
+                    vulkan_allocation_count=vulkan_allocation_growth,
                     vulkan_free_count=vulkan_buffer_counter_delta(
                         vulkan_buffers_start, current_vulkan_buffers, "frees"
                     ),
@@ -1614,6 +1622,16 @@ def execute(
                         "live_host_visible_bytes"
                     ],
                 )
+                if (
+                    runtime.vulkan_allocation_growth_limit_count is not None
+                    and vulkan_allocation_growth
+                    > runtime.vulkan_allocation_growth_limit_count
+                ):
+                    wave_failures.append(
+                        "Vulkan buffer allocations continued after stabilization: "
+                        f"{vulkan_allocation_growth} > "
+                        f"{runtime.vulkan_allocation_growth_limit_count}"
+                    )
             mixed.trace("soak_wave_complete", **wave_trace)
             wave += 1
             if wave_failures:

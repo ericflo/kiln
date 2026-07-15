@@ -40,11 +40,7 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
 
 fn upload_u32(device: &Arc<VulkanDevice>, data: &[u32]) -> Result<Arc<VulkanBuffer>> {
     let bytes: Vec<u8> = data.iter().flat_map(|i| i.to_le_bytes()).collect();
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes.len().max(4) as u64,
-    )?;
+    let buf = crate::buffer_pool::pool_alloc_device_local(device, bytes.len().max(4) as u64)?;
     VulkanBuffer::upload_data(
         device.device(),
         device.host_visible_mem_type(),
@@ -53,7 +49,7 @@ fn upload_u32(device: &Arc<VulkanDevice>, data: &[u32]) -> Result<Arc<VulkanBuff
         &buf,
         &bytes,
     )?;
-    Ok(Arc::new(buf))
+    Ok(buf)
 }
 
 /// Computed in `flce_forward_workspace`, used by the backward op.
@@ -532,12 +528,9 @@ fn extract_weight_chunk_rows(
             byte_offset + byte_len,
             weight.buffer().size()
         );
-        let out = VulkanBuffer::create_device_local(
-            weight.device().device(),
-            weight.device().device_local_mem_type(),
-            byte_len.max(4) as u64,
-        )
-        .context("FLCE BF16 weight chunk allocation")?;
+        let out =
+            crate::buffer_pool::pool_alloc_device_local(weight.device(), byte_len.max(4) as u64)
+                .context("FLCE BF16 weight chunk allocation")?;
         copy_buffer_region(
             weight.device(),
             weight.buffer(),
@@ -548,7 +541,7 @@ fn extract_weight_chunk_rows(
             "FLCE BF16 LM-head chunk copy",
         )?;
         return Ok(VkTensor::from_buffer(
-            Arc::new(out),
+            out,
             vec![cur_len, hidden_dim],
             VkDType::Bf16,
             Arc::clone(weight.device()),

@@ -266,7 +266,8 @@ impl VulkanBuffer {
         dst_offset: u64,
         data: &[u8],
     ) -> Result<()> {
-        let staging = VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
+        let staging =
+            crate::buffer_pool::pool_alloc_host_visible(device, host_mem_type, data.len() as u64)?;
         let mapped_ptr = unsafe {
             device
                 .map_memory(
@@ -379,7 +380,8 @@ impl VulkanBuffer {
         data: &[u8],
     ) -> Result<()> {
         tracing::trace!("[upload] creating staging buffer");
-        let staging = VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
+        let staging =
+            crate::buffer_pool::pool_alloc_host_visible(device, host_mem_type, data.len() as u64)?;
         tracing::trace!("[upload] staging buffer created");
 
         // Map and copy data to staging buffer
@@ -479,8 +481,11 @@ impl VulkanBuffer {
             total_staging_bytes > 0,
             "upload_data_batch: total payload size must be non-zero"
         );
-        let staging =
-            VulkanBuffer::create_host_visible(device, host_mem_type, total_staging_bytes)?;
+        let staging = crate::buffer_pool::pool_alloc_host_visible(
+            device,
+            host_mem_type,
+            total_staging_bytes,
+        )?;
         let mapped = unsafe {
             device
                 .map_memory(
@@ -571,8 +576,11 @@ impl VulkanBuffer {
             total_staging_bytes > 0,
             "upload_data_at_offset_batch: total payload size must be non-zero"
         );
-        let staging =
-            VulkanBuffer::create_host_visible(device, host_mem_type, total_staging_bytes)?;
+        let staging = crate::buffer_pool::pool_alloc_host_visible(
+            device,
+            host_mem_type,
+            total_staging_bytes,
+        )?;
         let mapped = unsafe {
             device
                 .map_memory(
@@ -661,7 +669,8 @@ impl VulkanBuffer {
         dst: &VulkanBuffer,
         data: &[u8],
     ) -> Result<()> {
-        let staging = VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
+        let staging =
+            crate::buffer_pool::pool_alloc_host_visible(device, host_mem_type, data.len() as u64)?;
 
         let mapped_ptr = unsafe {
             device
@@ -997,7 +1006,7 @@ impl VulkanBuffer {
         command_pool: vk::CommandPool,
         src: &VulkanBuffer,
     ) -> Result<Vec<u8>> {
-        let staging = VulkanBuffer::create_host_visible(device, host_mem_type, src.size)?;
+        let staging = crate::buffer_pool::pool_alloc_host_visible(device, host_mem_type, src.size)?;
 
         let alloc_info = make_alloc_info(command_pool);
         let command_buffers =
@@ -1079,7 +1088,7 @@ impl VulkanBuffer {
         device: &Arc<ash::Device>,
         mem_type_index: u32,
         segments: &[&[u8]],
-    ) -> Result<(Self, Vec<u64>)> {
+    ) -> Result<(Arc<Self>, Vec<u64>)> {
         anyhow::ensure!(
             !segments.is_empty(),
             "create_host_visible_with_segments: at least one segment is required"
@@ -1098,8 +1107,8 @@ impl VulkanBuffer {
             })?;
         }
 
-        let buffer = VulkanBuffer::create_host_visible(device, mem_type_index, total)
-            .context("create_host_visible_with_segments: create host-visible buffer")?;
+        let buffer = crate::buffer_pool::pool_alloc_host_visible(device, mem_type_index, total)
+            .context("create_host_visible_with_segments: acquire host-visible buffer")?;
         let mapped_ptr = unsafe {
             device
                 .map_memory(
@@ -1292,13 +1301,11 @@ mod tests {
             offsets,
             vec![0, first.len() as u64, (first.len() + second.len()) as u64]
         );
-        assert_eq!(
-            buffer.size(),
-            (first.len() + second.len() + third.len()) as u64
-        );
+        let logical_len = first.len() + second.len() + third.len();
+        assert!(buffer.size() >= logical_len as u64);
         let bytes = VulkanBuffer::read_host_visible(vk_device.device(), &buffer)?;
         assert_eq!(
-            bytes,
+            &bytes[..logical_len],
             [first.as_slice(), second.as_slice(), third.as_slice()].concat()
         );
         Ok(())

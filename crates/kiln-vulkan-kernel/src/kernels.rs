@@ -3317,7 +3317,7 @@ pub fn dispatch_linear_decode_sample_bytes(
         crate::CommandBatch::new(vk_device).context("linear_decode_sample: create CommandBatch")?;
     let mut upload_copies = Vec::with_capacity(if penalties_active { 3 } else { 1 });
     upload_copies.push((
-        &upload_stage,
+        upload_stage.as_ref(),
         &x_buf,
         upload_offsets[0],
         0,
@@ -3325,14 +3325,14 @@ pub fn dispatch_linear_decode_sample_bytes(
     ));
     if let (Some(idx_buf), Some(cnt_buf)) = (&_history_idx_buf, &_history_cnt_buf) {
         upload_copies.push((
-            &upload_stage,
+            upload_stage.as_ref(),
             idx_buf,
             upload_offsets[1],
             0,
             (history_indices.len() * 4) as u64,
         ));
         upload_copies.push((
-            &upload_stage,
+            upload_stage.as_ref(),
             cnt_buf,
             upload_offsets[2],
             0,
@@ -3652,7 +3652,7 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
         .enumerate()
         .map(|(idx, (dst, bytes))| {
             (
-                &upload_stage,
+                upload_stage.as_ref(),
                 *dst,
                 upload_offsets[idx],
                 0,
@@ -6572,7 +6572,6 @@ fn dispatch_gdn_gates_cached_bytes_core(
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
-    let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
     // Compile shader
@@ -6580,14 +6579,14 @@ fn dispatch_gdn_gates_cached_bytes_core(
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
 
     // Create input buffers
-    let a_buf = VulkanBuffer::create_device_local(device, device_local_mt, a_data.len() as u64)?;
-    let b_buf = VulkanBuffer::create_device_local(device, device_local_mt, b_data.len() as u64)?;
+    let a_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, a_data.len() as u64)?;
+    let b_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, b_data.len() as u64)?;
 
     // Create output buffers
     let elem_count: usize = out_shape.iter().product();
     let output_size = (elem_count * 4) as u64; // f32
-    let beta_buf = VulkanBuffer::create_device_local(device, device_local_mt, output_size)?;
-    let g_buf = VulkanBuffer::create_device_local(device, device_local_mt, output_size)?;
+    let beta_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, output_size)?;
+    let g_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, output_size)?;
 
     // Push constants: total elements, nv
     let push_constants: [u32; 2] = [elem_count as u32, nv as u32];
@@ -7692,7 +7691,7 @@ fn create_packed_upload_stage(
     host_visible_mt: u32,
     uploads: &[(&VulkanBuffer, &[u8])],
     context: &'static str,
-) -> Result<(Option<VulkanBuffer>, Vec<u64>)> {
+) -> Result<(Option<Arc<VulkanBuffer>>, Vec<u64>)> {
     if uploads.is_empty() {
         return Ok((None, Vec::new()));
     }

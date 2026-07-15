@@ -131,14 +131,8 @@ pub fn vk_gather_contiguous_bf16(
     // BF16 output: n * 2 bytes, rounded up to a u32-word multiple (the shader
     // addresses storage as u32-packed pairs). Mirrors `alloc_transpose_output`.
     let bytes = (((n * 2).max(2) + 3) / 4) * 4;
-    let out = Arc::new(
-        VulkanBuffer::create_device_local(
-            device.device(),
-            device.device_local_mem_type(),
-            bytes as u64,
-        )
-        .context("vk_gather_contiguous_bf16: alloc output buffer")?,
-    );
+    let out = crate::buffer_pool::pool_alloc_device_local(device, bytes as u64)
+        .context("vk_gather_contiguous_bf16: acquire output buffer")?;
     let push = gather_push(rank, n, start_offset, shape, strides);
 
     if n > 0 {

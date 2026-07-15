@@ -51,11 +51,7 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
 
 fn upload_u32(device: &Arc<VulkanDevice>, data: &[u32]) -> Result<Arc<VulkanBuffer>> {
     let bytes: Vec<u8> = data.iter().flat_map(|i| i.to_le_bytes()).collect();
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes.len().max(4) as u64,
-    )?;
+    let buf = crate::buffer_pool::pool_alloc_device_local(device, bytes.len().max(4) as u64)?;
     VulkanBuffer::upload_data(
         device.device(),
         device.host_visible_mem_type(),
@@ -64,16 +60,12 @@ fn upload_u32(device: &Arc<VulkanDevice>, data: &[u32]) -> Result<Arc<VulkanBuff
         &buf,
         &bytes,
     )?;
-    Ok(Arc::new(buf))
+    Ok(buf)
 }
 
 fn upload_f32(device: &Arc<VulkanDevice>, data: &[f32]) -> Result<Arc<VulkanBuffer>> {
     let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes.len().max(4) as u64,
-    )?;
+    let buf = crate::buffer_pool::pool_alloc_device_local(device, bytes.len().max(4) as u64)?;
     VulkanBuffer::upload_data(
         device.device(),
         device.host_visible_mem_type(),
@@ -82,7 +74,7 @@ fn upload_f32(device: &Arc<VulkanDevice>, data: &[f32]) -> Result<Arc<VulkanBuff
         &buf,
         &bytes,
     )?;
-    Ok(Arc::new(buf))
+    Ok(buf)
 }
 
 /// Validate the (hidden, weight) shapes + dtypes accepted by the kernel.

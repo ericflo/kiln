@@ -42,22 +42,15 @@ pub struct VkLinearAttentionState {
 
 fn alloc_zeroed_f32(device: &Arc<VulkanDevice>, n_elements: usize) -> Result<Arc<VulkanBuffer>> {
     let bytes = (n_elements * 4).max(4);
-    let buf = VulkanBuffer::create_device_local(
+    let buf = crate::buffer_pool::pool_alloc_device_local(device, bytes as u64)
+        .context("VkLinearAttentionState: acquire state buffer")?;
+    VulkanBuffer::fill_zero(
         device.device(),
-        device.device_local_mem_type(),
-        bytes as u64,
-    )
-    .context("VkLinearAttentionState: alloc state buffer")?;
-    let zeros = vec![0u8; bytes];
-    VulkanBuffer::upload_data(
-        device.device(),
-        device.host_visible_mem_type(),
         device.queue(),
         device.queue_family_index(),
         &buf,
-        &zeros,
     )?;
-    Ok(Arc::new(buf))
+    Ok(buf)
 }
 
 fn copy_device_buffer(
@@ -66,12 +59,8 @@ fn copy_device_buffer(
     bytes: usize,
     label: &str,
 ) -> Result<Arc<VulkanBuffer>> {
-    let dst = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes.max(4) as u64,
-    )
-    .with_context(|| format!("{label}: alloc dst buffer"))?;
+    let dst = crate::buffer_pool::pool_alloc_device_local(device, bytes.max(4) as u64)
+        .with_context(|| format!("{label}: acquire dst buffer"))?;
 
     let command_pool = device.transient_command_pool()?;
     let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -106,7 +95,7 @@ fn copy_device_buffer(
             .free_command_buffers(*command_pool, &command_buffers);
     }
 
-    Ok(Arc::new(dst))
+    Ok(dst)
 }
 
 impl VkLinearAttentionState {

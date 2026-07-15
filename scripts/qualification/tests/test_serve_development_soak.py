@@ -72,6 +72,7 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(
             vulkan["soak"]["active_gpu_peak_growth_limit_bytes"], 1024**3
         )
+        self.assertEqual(vulkan["soak"]["vulkan_allocation_growth_limit_count"], 0)
         self.assertEqual(
             vulkan["soak"]["host_mem_available_floor_bytes"], 8 * 1024**3
         )

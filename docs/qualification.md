@@ -1176,6 +1176,11 @@ drain, cache-ownership, pause, device-fault, shutdown, and residue gates apply
 as in the ROCm arm. Vulkan graphs must remain disabled: any graph capture,
 replay, slot, or fallback activity fails.
 
+The allocation counter must also remain unchanged after stabilization. Cache
+hits may continue, but even one new `VulkanBuffer` allocation fails the next
+measured wave. This catches allocator churn that has balanced ownership at
+drain yet still creates driver-side RSS growth or inference pauses.
+
 #### Vulkan buffer ownership telemetry
 
 A Vulkan build adds `vulkan_buffers` to `GET /health`. The object is omitted on

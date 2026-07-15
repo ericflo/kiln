@@ -98,6 +98,7 @@
           "stabilization_rss_delta_limit_bytes": null,
           "stabilization_rss_growth_limit_bytes": 536870912,
           "steady_state_warmup_max_waves": 12,
+          "vulkan_allocation_growth_limit_count": 0,
           "vulkan_buffer_pool_gb": 3.0,
           "wave_concurrency": {
             "wave_0": 1,

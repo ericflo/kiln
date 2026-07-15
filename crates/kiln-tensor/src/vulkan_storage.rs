@@ -63,9 +63,9 @@ pub struct VulkanStorage {
 
 impl VulkanStorage {
     /// Allocate `n_elements` worth of bytes for `dtype` on
-    /// `vulkan_device`. Uses
-    /// `VulkanBuffer::create_device_local(device.device(),
-    /// device.device_local_mem_type(), byte_len)`.
+    /// `vulkan_device`. Transient tensor storage participates in the bounded
+    /// Vulkan recycler and is zeroed on-device, avoiding allocator and staging
+    /// churn in repeated `zeros_like`-style serving operations.
     ///
     /// `device_index` is the Vulkan physical-device index — stored as
     /// the [`Device::Vulkan`] variant. The `vulkan_device` argument's
@@ -79,34 +79,24 @@ impl VulkanStorage {
     ) -> Result<Self> {
         let byte_len = dtype.packed_buffer_bytes(n_elements);
         let alloc_len = byte_len.max(1);
-        let buffer = VulkanBuffer::create_device_local(
-            vulkan_device.device(),
-            vulkan_device.device_local_mem_type(),
+        let buffer = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(
+            &vulkan_device,
             alloc_len as u64,
         )
-        .map_err(|e| {
-            Error::Msg(format!(
-                "VulkanStorage::zeros: create_device_local({alloc_len}) failed: {e}"
-            ))
-        })?;
+        .map_err(|e| Error::Msg(format!("VulkanStorage::zeros: allocation failed: {e}")))?;
         if byte_len > 0 {
-            let zeros = vec![0u8; byte_len];
-            VulkanBuffer::upload_data(
+            VulkanBuffer::fill_zero(
                 vulkan_device.device(),
-                vulkan_device.host_visible_mem_type(),
                 vulkan_device.queue(),
                 vulkan_device.queue_family_index(),
                 &buffer,
-                &zeros,
             )
-            .map_err(|e| {
-                Error::Msg(format!("VulkanStorage::zeros: H2D zero upload failed: {e}"))
-            })?;
+            .map_err(|e| Error::Msg(format!("VulkanStorage::zeros: device fill failed: {e}")))?;
         }
         Ok(VulkanStorage {
             device: Device::Vulkan(device_index),
             dtype,
-            buffer: Arc::new(buffer),
+            buffer,
             byte_len,
             vulkan_device,
         })
@@ -1468,16 +1458,9 @@ pub fn host_to_vulkan_copy(cpu: &crate::Tensor, device_index: usize) -> Result<c
     let vulkan_device = primary_vulkan_device(device_index)?;
     // Allocate at least 1 byte: a zero-length Vulkan buffer is invalid.
     let alloc_len = byte_len.max(1) as u64;
-    let buffer = VulkanBuffer::create_device_local(
-        vulkan_device.device(),
-        vulkan_device.device_local_mem_type(),
-        alloc_len,
-    )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "host_to_vulkan_copy: create_device_local({alloc_len}) failed: {e}"
-        ))
-    })?;
+    let buffer =
+        kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(&vulkan_device, alloc_len)
+            .map_err(|e| Error::Msg(format!("host_to_vulkan_copy: allocation failed: {e}")))?;
     // H2D: stage `src` and copy into the device-local buffer. `src` may
     // be empty (a zero-element tensor); skip the transfer in that case
     // since the buffer was allocated at the 1-byte floor purely to be
@@ -1494,8 +1477,13 @@ pub fn host_to_vulkan_copy(cpu: &crate::Tensor, device_index: usize) -> Result<c
         .map_err(|e| Error::Msg(format!("host_to_vulkan_copy: H2D upload failed: {e}")))?;
     }
 
-    let storage =
-        VulkanStorage::from_buffer(vulkan_device, device_index, dtype, buffer, byte_len as u64)?;
+    let storage = VulkanStorage::from_arc_buffer(
+        vulkan_device,
+        device_index,
+        dtype,
+        buffer,
+        byte_len as u64,
+    )?;
     crate::Tensor::from_parts(
         Arc::new(storage),
         crate::Layout::contiguous(contig.shape().to_vec()),
@@ -1824,16 +1812,11 @@ pub fn vulkan_rmsnorm_last_axis(
     };
 
     let vk_dtype = VkDType::F32;
-    let vk_w_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
-        vulkan_device.device(),
-        vulkan_device.device_local_mem_type(),
+    let vk_w_buffer = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(
+        &vulkan_device,
         w_byte_len.max(1) as u64,
     )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "vulkan_rmsnorm_last_axis: device-local alloc for VkTensor weight failed: {e}"
-        ))
-    })?;
+    .map_err(|e| Error::Msg(format!("vulkan_rmsnorm_last_axis: allocation failed: {e}")))?;
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
         vulkan_device.device(),
         vulkan_device.host_visible_mem_type(),
@@ -1848,7 +1831,7 @@ pub fn vulkan_rmsnorm_last_axis(
         ))
     })?;
     let vk_w = VkTensor::from_buffer(
-        Arc::new(vk_w_buffer),
+        vk_w_buffer,
         vec![hidden],
         vk_dtype,
         Arc::clone(&vulkan_device),
@@ -2224,14 +2207,13 @@ pub fn vulkan_index_select_dim0(
 
     // ---- H2D input as F32 VkTensor with shape [vocab, hidden] (flatten inner) ----
     let weight_shape = vec![vocab_size, hidden];
-    let vk_in_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
-        vulkan_device.device(),
-        vulkan_device.device_local_mem_type(),
+    let vk_in_buffer = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(
+        &vulkan_device,
         in_byte_len.max(1) as u64,
     )
     .map_err(|e| {
         Error::Msg(format!(
-            "vulkan_index_select_dim0: device-local alloc for VkTensor input failed: {e}"
+            "vulkan_index_select_dim0: input allocation failed: {e}"
         ))
     })?;
     // Pool-overflow guard (see vulkan_cast): clamp the upload to the logical
@@ -2251,7 +2233,7 @@ pub fn vulkan_index_select_dim0(
         ))
     })?;
     let vk_in = VkTensor::from_buffer(
-        Arc::new(vk_in_buffer),
+        vk_in_buffer,
         weight_shape,
         VkDType::F32,
         Arc::clone(&vulkan_device),
@@ -2260,14 +2242,13 @@ pub fn vulkan_index_select_dim0(
     // ---- H2D ids as F32-placeholder VkTensor (buffer holds raw u32 bytes)
     // The vk_embedding_lookup_f32 kernel reads the ids buffer as u32[]
     // regardless of placeholder dtype — same convention as `upload_u32_ids`.
-    let vk_ids_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
-        vulkan_device.device(),
-        vulkan_device.device_local_mem_type(),
+    let vk_ids_buffer = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(
+        &vulkan_device,
         ids_byte_len.max(4) as u64,
     )
     .map_err(|e| {
         Error::Msg(format!(
-            "vulkan_index_select_dim0: device-local alloc for VkTensor ids failed: {e}"
+            "vulkan_index_select_dim0: ids allocation failed: {e}"
         ))
     })?;
     // Pool-overflow guard: clamp to the logical `ids_byte_len`.
@@ -2285,7 +2266,7 @@ pub fn vulkan_index_select_dim0(
         ))
     })?;
     let vk_ids = VkTensor::from_buffer(
-        Arc::new(vk_ids_buffer),
+        vk_ids_buffer,
         vec![n_indices],
         VkDType::F32, // placeholder; buffer holds u32 bytes per upload_u32_ids convention
         Arc::clone(&vulkan_device),
@@ -2333,14 +2314,13 @@ pub fn vulkan_index_select_dim0(
     };
 
     // ---- H2D into kt VulkanStorage ----
-    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
-        vulkan_device.device(),
-        vulkan_device.device_local_mem_type(),
+    let out_buffer = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(
+        &vulkan_device,
         out_byte_len.max(1) as u64,
     )
     .map_err(|e| {
         Error::Msg(format!(
-            "vulkan_index_select_dim0: device-local alloc for kt output failed: {e}"
+            "vulkan_index_select_dim0: output allocation failed: {e}"
         ))
     })?;
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
@@ -2356,7 +2336,7 @@ pub fn vulkan_index_select_dim0(
             "vulkan_index_select_dim0: H2D upload of kt output failed: {e}"
         ))
     })?;
-    let out_storage = VulkanStorage::from_buffer(
+    let out_storage = VulkanStorage::from_arc_buffer(
         vulkan_device,
         device_index,
         dtype,
@@ -2456,16 +2436,11 @@ pub fn vulkan_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
     .map_err(|e| Error::Msg(format!("vulkan_cast: D2H read_back failed: {e}")))?;
 
     // ---- H2D into VkTensor (source dtype) ----
-    let vk_in_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
-        vulkan_device.device(),
-        vulkan_device.device_local_mem_type(),
+    let vk_in_buffer = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(
+        &vulkan_device,
         in_byte_len.max(1) as u64,
     )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "vulkan_cast: device-local alloc for VkTensor failed: {e}"
-        ))
-    })?;
+    .map_err(|e| Error::Msg(format!("vulkan_cast: input allocation failed: {e}")))?;
     // Pool-overflow guard: `read_back` returns the buffer's *physical*
     // (bucket-rounded) byte image, which is >= the logical `in_byte_len` if the
     // input is a zero-copy kernel output (PR3b bridge). `vk_in_buffer` is sized
@@ -2485,7 +2460,7 @@ pub fn vulkan_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
         ))
     })?;
     let vk_in = VkTensor::from_buffer(
-        Arc::new(vk_in_buffer),
+        vk_in_buffer,
         shape.clone(),
         vk_from,
         Arc::clone(&vulkan_device),
@@ -2525,16 +2500,11 @@ pub fn vulkan_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
     }
 
     // ---- H2D into kt VulkanStorage (target dtype) ----
-    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
-        vulkan_device.device(),
-        vulkan_device.device_local_mem_type(),
+    let out_buffer = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(
+        &vulkan_device,
         out_byte_len.max(1) as u64,
     )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "vulkan_cast: device-local alloc for kt output failed: {e}"
-        ))
-    })?;
+    .map_err(|e| Error::Msg(format!("vulkan_cast: output allocation failed: {e}")))?;
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
         vulkan_device.device(),
         vulkan_device.host_visible_mem_type(),
@@ -2544,7 +2514,7 @@ pub fn vulkan_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
         &out_bytes,
     )
     .map_err(|e| Error::Msg(format!("vulkan_cast: H2D upload of kt output failed: {e}")))?;
-    let out_storage = VulkanStorage::from_buffer(
+    let out_storage = VulkanStorage::from_arc_buffer(
         vulkan_device,
         device_index,
         to,
@@ -2778,14 +2748,13 @@ pub fn vulkan_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let out_byte_len = out_bytes.len();
 
     // ---- H2D: upload I64 result bytes into a fresh kt VulkanStorage ----
-    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
-        vulkan_device.device(),
-        vulkan_device.device_local_mem_type(),
+    let out_buffer = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(
+        &vulkan_device,
         out_byte_len.max(1) as u64,
     )
     .map_err(|e| {
         Error::Msg(format!(
-            "vulkan_argmax_last_axis: device-local alloc for kt output failed: {e}"
+            "vulkan_argmax_last_axis: output allocation failed: {e}"
         ))
     })?;
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
@@ -2801,7 +2770,7 @@ pub fn vulkan_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
             "vulkan_argmax_last_axis: H2D upload of kt output failed: {e}"
         ))
     })?;
-    let out_storage = VulkanStorage::from_buffer(
+    let out_storage = VulkanStorage::from_arc_buffer(
         vulkan_device,
         device_index,
         DType::I64,
@@ -3004,16 +2973,11 @@ pub fn vulkan_masked_fill(
     }
 
     // ---- H2D: upload result bytes into a fresh kt VulkanStorage ----
-    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
-        vulkan_device.device(),
-        vulkan_device.device_local_mem_type(),
+    let out_buffer = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(
+        &vulkan_device,
         byte_len.max(1) as u64,
     )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "vulkan_masked_fill: device-local alloc for kt output failed: {e}"
-        ))
-    })?;
+    .map_err(|e| Error::Msg(format!("vulkan_masked_fill: output allocation failed: {e}")))?;
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
         vulkan_device.device(),
         vulkan_device.host_visible_mem_type(),
@@ -3027,7 +2991,7 @@ pub fn vulkan_masked_fill(
             "vulkan_masked_fill: H2D upload of kt output failed: {e}"
         ))
     })?;
-    let out_storage = VulkanStorage::from_buffer(
+    let out_storage = VulkanStorage::from_arc_buffer(
         vulkan_device,
         device_index,
         dtype,

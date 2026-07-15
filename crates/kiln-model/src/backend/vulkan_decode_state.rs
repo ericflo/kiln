@@ -130,13 +130,8 @@ impl VulkanBackend {
                 return Ok(Arc::clone(buf));
             }
         }
-        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
-            dev.device(),
-            dev.device_local_mem_type(),
-            bytes,
-        )
-        .context("alloc kt linear-attn recurrent state buffer")?;
-        let arc = Arc::new(buf);
+        let arc = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(dev, bytes)
+            .context("acquire kt linear-attn recurrent state buffer")?;
         g.insert(key, Arc::clone(&arc));
         Ok(arc)
     }
@@ -159,13 +154,8 @@ impl VulkanBackend {
                 return Ok(Arc::clone(buf));
             }
         }
-        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
-            dev.device(),
-            dev.device_local_mem_type(),
-            bytes,
-        )
-        .context("alloc kt linear-attn conv state buffer")?;
-        let arc = Arc::new(buf);
+        let arc = kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(dev, bytes)
+            .context("acquire kt linear-attn conv state buffer")?;
         g.insert(key, Arc::clone(&arc));
         Ok(arc)
     }

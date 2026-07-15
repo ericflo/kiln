@@ -28,11 +28,7 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
 /// cleanup.)
 pub fn upload_u32_ids(device: &Arc<VulkanDevice>, ids: &[u32]) -> Result<VkTensor> {
     let bytes: Vec<u8> = ids.iter().flat_map(|i| i.to_le_bytes()).collect();
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes.len().max(4) as u64,
-    )?;
+    let buf = crate::buffer_pool::pool_alloc_device_local(device, bytes.len().max(4) as u64)?;
     VulkanBuffer::upload_data(
         device.device(),
         device.host_visible_mem_type(),
@@ -42,7 +38,7 @@ pub fn upload_u32_ids(device: &Arc<VulkanDevice>, ids: &[u32]) -> Result<VkTenso
         &bytes,
     )?;
     Ok(VkTensor::from_buffer(
-        Arc::new(buf),
+        buf,
         vec![ids.len()],
         VkDType::F32, // placeholder; data is u32
         Arc::clone(device),

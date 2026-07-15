@@ -89,10 +89,7 @@ impl PoolInner {
 /// The returned `Arc<VulkanBuffer>` shares storage with the internal
 /// pool; when the caller's last clone drops, an admitted buffer is
 /// recycled. Buffers beyond the configured cap are freed normally.
-pub fn pool_alloc_device_local(
-    device: &Arc<VulkanDevice>,
-    bytes: u64,
-) -> Result<Arc<VulkanBuffer>> {
+pub fn pool_alloc_device_local(device: &VulkanDevice, bytes: u64) -> Result<Arc<VulkanBuffer>> {
     // Round to the next power-of-two-ish bucket to reduce fragmentation.
     // Buckets: round up to multiples of 64 KB at small sizes, larger
     // multiples for big buffers. Empirically the GDN training step has
@@ -489,7 +486,7 @@ fn free_retained_bytes(inner: &PoolInner) -> u64 {
 }
 
 /// Convenience wrapper: allocate `n` F32 elements (`n * 4` bytes).
-pub fn pool_alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
+pub fn pool_alloc_f32(device: &VulkanDevice, n: usize) -> Result<Arc<VulkanBuffer>> {
     let bytes = (n as u64).saturating_mul(4).max(4);
     pool_alloc_device_local(device, bytes)
 }

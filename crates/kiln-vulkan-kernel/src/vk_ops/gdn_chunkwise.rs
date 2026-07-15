@@ -1225,22 +1225,15 @@ impl std::fmt::Debug for GdnChunkwiseBackward {
 
 fn alloc_zeroed_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
     let bytes = (n * 4).max(4);
-    let buf = VulkanBuffer::create_device_local(
+    let buf = crate::buffer_pool::pool_alloc_device_local(device, bytes as u64)
+        .context("alloc_zeroed_f32")?;
+    VulkanBuffer::fill_zero(
         device.device(),
-        device.device_local_mem_type(),
-        bytes as u64,
-    )
-    .context("alloc_zeroed_f32")?;
-    let zeros = vec![0u8; bytes];
-    VulkanBuffer::upload_data(
-        device.device(),
-        device.host_visible_mem_type(),
         device.queue(),
         device.queue_family_index(),
         &buf,
-        &zeros,
     )?;
-    Ok(Arc::new(buf))
+    Ok(buf)
 }
 
 fn upload_f32(device: &Arc<VulkanDevice>, data: &[f32], shape: Vec<usize>) -> Result<VkTensor> {
