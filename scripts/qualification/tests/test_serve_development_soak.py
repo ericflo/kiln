@@ -125,6 +125,141 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(snapshot.rss_shmem_bytes, 50 * 1024)
         self.assertEqual(snapshot.swap_bytes, 25 * 1024)
 
+    def test_process_memory_mapping_categories_are_closed(self) -> None:
+        self.assertEqual(soak.process_memory_mapping_category(""), "anonymous")
+        self.assertEqual(
+            soak.process_memory_mapping_category("[anon:jemalloc]"), "anonymous"
+        )
+        self.assertEqual(soak.process_memory_mapping_category("[heap]"), "heap")
+        self.assertEqual(soak.process_memory_mapping_category("[stack:42]"), "stack")
+        self.assertEqual(
+            soak.process_memory_mapping_category("/dev/dri/renderD128"), "device"
+        )
+        self.assertEqual(
+            soak.process_memory_mapping_category("/memfd:mesa-shared (deleted)"),
+            "shared_memory",
+        )
+        self.assertEqual(soak.process_memory_mapping_category("[vdso]"), "kernel")
+        self.assertEqual(
+            soak.process_memory_mapping_category("/models/model.safetensors"), "file"
+        )
+
+    def test_process_memory_mapping_snapshot_and_growth_are_exact(self) -> None:
+        def mapping(
+            address_range: str,
+            pathname: str,
+            *,
+            size: int,
+            rss: int,
+            pss: int,
+            anonymous: int,
+            private_dirty: int,
+            swap: int,
+        ) -> str:
+            suffix = f" {pathname}" if pathname else ""
+            return (
+                f"{address_range} rw-p 00000000 00:00 0{suffix}\n"
+                f"Size: {size} kB\n"
+                f"Rss: {rss} kB\n"
+                f"Pss: {pss} kB\n"
+                f"Private_Dirty: {private_dirty} kB\n"
+                f"Anonymous: {anonymous} kB\n"
+                f"Swap: {swap} kB\n"
+                "VmFlags: rd wr mr mw me ac sd\n"
+            )
+
+        before_raw = mapping(
+            "1000-2000",
+            "",
+            size=64,
+            rss=16,
+            pss=16,
+            anonymous=16,
+            private_dirty=12,
+            swap=0,
+        ) + mapping(
+            "3000-4000",
+            "/dev/dri/renderD128",
+            size=128,
+            rss=32,
+            pss=30,
+            anonymous=32,
+            private_dirty=32,
+            swap=0,
+        )
+        after_raw = mapping(
+            "1000-2000",
+            "",
+            size=64,
+            rss=48,
+            pss=48,
+            anonymous=48,
+            private_dirty=44,
+            swap=4,
+        ) + mapping(
+            "3000-4000",
+            "/dev/dri/renderD128",
+            size=128,
+            rss=40,
+            pss=38,
+            anonymous=40,
+            private_dirty=40,
+            swap=0,
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            smaps = root / "42" / "smaps"
+            smaps.parent.mkdir(parents=True)
+            smaps.write_text(before_raw, encoding="utf-8")
+            before = soak.process_memory_mapping_snapshot(42, root)
+            smaps.write_text(after_raw, encoding="utf-8")
+            after = soak.process_memory_mapping_snapshot(42, root)
+
+        self.assertEqual(len(before.mappings), 2)
+        self.assertEqual(before.mappings[0].category, "anonymous")
+        self.assertEqual(before.mappings[1].category, "device")
+        totals = soak.process_memory_mapping_totals(after)
+        self.assertEqual(totals["rss_bytes"], 88 * 1024)
+        self.assertEqual(totals["anonymous_bytes"], 88 * 1024)
+        self.assertEqual(totals["anonymous_rss_bytes"], 48 * 1024)
+        self.assertEqual(totals["device_rss_bytes"], 40 * 1024)
+
+        trace = soak.process_memory_mapping_trace(before, after, top_limit=1)
+        self.assertEqual(trace["smaps_anonymous_delta_bytes"], 40 * 1024)
+        self.assertEqual(
+            trace["smaps_rss_delta_bytes_by_category"]["anonymous"], 32 * 1024
+        )
+        self.assertEqual(len(trace["smaps_top_rss_growth"]), 1)
+        self.assertEqual(
+            trace["smaps_top_rss_growth"][0]["rss_delta_bytes"], 32 * 1024
+        )
+        metrics = soak.process_memory_mapping_metric_values(before, after)
+        self.assertEqual(
+            metrics["vulkan_process_mapping_anonymous_rss_growth_bytes"],
+            32 * 1024,
+        )
+        self.assertEqual(
+            metrics["vulkan_process_mapping_device_rss_growth_bytes"], 8 * 1024
+        )
+        self.assertEqual(
+            metrics["vulkan_process_smaps_private_dirty_growth_bytes"], 40 * 1024
+        )
+
+    def test_process_memory_mapping_snapshot_fails_on_incomplete_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            smaps = root / "42" / "smaps"
+            smaps.parent.mkdir(parents=True)
+            smaps.write_text(
+                "1000-2000 rw-p 00000000 00:00 0\n"
+                "Size: 4 kB\n"
+                "Rss: 4 kB\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(soak.SoakError, "omitted required fields"):
+                soak.process_memory_mapping_snapshot(42, root)
+
     def test_process_drm_memory_deduplicates_client_ids_and_regions(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

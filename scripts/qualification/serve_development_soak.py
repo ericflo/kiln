@@ -8,6 +8,7 @@ import concurrent.futures
 import dataclasses
 import math
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -43,6 +44,28 @@ STABILIZATION_GPU_DELTA_LIMIT_BYTES = 64 * 1024 * 1024
 STABILIZATION_RSS_DELTA_LIMIT_BYTES = 16 * 1024 * 1024
 VULKAN_ACTIVE_GPU_PEAK_GROWTH_LIMIT_BYTES = 1024 * 1024 * 1024
 SETUP_DEADLINE_SECONDS = 1200.0
+PROCESS_MEMORY_MAPPING_CATEGORIES = (
+    "anonymous",
+    "device",
+    "file",
+    "heap",
+    "kernel",
+    "shared_memory",
+    "stack",
+)
+PROCESS_MEMORY_MAPPING_FIELDS = (
+    "Size",
+    "Rss",
+    "Pss",
+    "Anonymous",
+    "Private_Dirty",
+    "Swap",
+)
+SMAPS_HEADER = re.compile(
+    r"^(?P<range>[0-9A-Fa-f]+-[0-9A-Fa-f]+)\s+"
+    r"[r-][w-][x-][ps]\s+[0-9A-Fa-f]+\s+"
+    r"[0-9A-Fa-f]+:[0-9A-Fa-f]+\s+\d+(?:\s+(?P<pathname>.*))?$"
+)
 
 
 def _vulkan_variant_config() -> dict[str, Any]:
@@ -287,6 +310,19 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "host_swap_used_end_bytes": ("bytes", "exact", True),
     "host_swap_used_peak_bytes": ("bytes", "max", True),
     "host_swap_used_start_bytes": ("bytes", "exact", True),
+    **{
+        f"vulkan_process_mapping_{category}_rss_growth_bytes": (
+            "bytes",
+            "exact",
+            True,
+        )
+        for category in PROCESS_MEMORY_MAPPING_CATEGORIES
+    },
+    "vulkan_process_smaps_anonymous_growth_bytes": ("bytes", "exact", True),
+    "vulkan_process_smaps_private_dirty_growth_bytes": ("bytes", "exact", True),
+    "vulkan_process_smaps_rss_end_bytes": ("bytes", "exact", True),
+    "vulkan_process_smaps_rss_start_bytes": ("bytes", "exact", True),
+    "vulkan_process_smaps_swap_growth_bytes": ("bytes", "exact", True),
     "vulkan_buffer_allocated_bytes": ("bytes", "sum", True),
     "vulkan_buffer_allocation_count": ("count", "sum", True),
     "vulkan_buffer_free_count": ("count", "sum", False),
@@ -400,6 +436,24 @@ class ProcessMemorySnapshot:
     swap_bytes: int
 
 
+@dataclasses.dataclass(frozen=True)
+class ProcessMemoryMappingUsage:
+    identity: str
+    category: str
+    pathname: str
+    size_bytes: int
+    rss_bytes: int
+    pss_bytes: int
+    anonymous_bytes: int
+    private_dirty_bytes: int
+    swap_bytes: int
+
+
+@dataclasses.dataclass(frozen=True)
+class ProcessMemoryMappingSnapshot:
+    mappings: tuple[ProcessMemoryMappingUsage, ...]
+
+
 def parse_memory_kib(path: Path, name: str, raw: str, unit: str) -> int:
     fields = raw.split()
     if len(fields) != 2 or fields[1] != unit:
@@ -434,6 +488,213 @@ def process_memory_snapshot(
         rss_shmem_bytes=values["RssShmem"],
         swap_bytes=values["VmSwap"],
     )
+
+
+def process_memory_mapping_category(pathname: str) -> str:
+    if pathname == "[heap]":
+        return "heap"
+    if pathname == "[stack]" or pathname.startswith("[stack:"):
+        return "stack"
+    if not pathname or pathname.startswith("[anon:"):
+        return "anonymous"
+    if (
+        pathname.startswith("/dev/shm/")
+        or pathname.startswith("/memfd:")
+        or pathname.startswith("memfd:")
+        or pathname.startswith("/SYSV")
+        or pathname.startswith("[anon_shmem:")
+    ):
+        return "shared_memory"
+    if pathname.startswith("/dev/"):
+        return "device"
+    if pathname.startswith("["):
+        return "kernel"
+    return "file"
+
+
+def process_memory_mapping_snapshot(
+    pid: int, proc_root: Path = Path("/proc")
+) -> ProcessMemoryMappingSnapshot:
+    smaps = proc_root / str(pid) / "smaps"
+    mappings: list[ProcessMemoryMappingUsage] = []
+    address_range: str | None = None
+    pathname = ""
+    values: dict[str, int] = {}
+
+    def finish_mapping() -> None:
+        if address_range is None:
+            return
+        missing = sorted(set(PROCESS_MEMORY_MAPPING_FIELDS) - set(values))
+        if missing:
+            raise SoakError(
+                f"{smaps} mapping {address_range} omitted required fields: {missing}"
+            )
+        for field in ("Rss", "Pss", "Anonymous", "Private_Dirty"):
+            if values[field] > values["Size"]:
+                raise SoakError(
+                    f"{smaps} mapping {address_range} has {field}="
+                    f"{values[field]} above Size={values['Size']}"
+                )
+        if values["Anonymous"] > values["Rss"]:
+            raise SoakError(
+                f"{smaps} mapping {address_range} has Anonymous="
+                f"{values['Anonymous']} above Rss={values['Rss']}"
+            )
+        if values["Private_Dirty"] > values["Rss"]:
+            raise SoakError(
+                f"{smaps} mapping {address_range} has Private_Dirty="
+                f"{values['Private_Dirty']} above Rss={values['Rss']}"
+            )
+        category = process_memory_mapping_category(pathname)
+        label = pathname or "[anonymous]"
+        mappings.append(
+            ProcessMemoryMappingUsage(
+                identity=f"{label}@{address_range}",
+                category=category,
+                pathname=pathname,
+                size_bytes=values["Size"],
+                rss_bytes=values["Rss"],
+                pss_bytes=values["Pss"],
+                anonymous_bytes=values["Anonymous"],
+                private_dirty_bytes=values["Private_Dirty"],
+                swap_bytes=values["Swap"],
+            )
+        )
+
+    with smaps.open("r", encoding="utf-8") as stream:
+        for raw_line in stream:
+            line = raw_line.rstrip("\n")
+            header = SMAPS_HEADER.fullmatch(line)
+            if header is not None:
+                finish_mapping()
+                address_range = header.group("range")
+                pathname = header.group("pathname") or ""
+                values = {}
+                continue
+            if address_range is None:
+                raise SoakError(f"{smaps} has content before its first mapping header")
+            name, separator, raw = line.partition(":")
+            if separator and name in PROCESS_MEMORY_MAPPING_FIELDS:
+                if name in values:
+                    raise SoakError(
+                        f"{smaps} mapping {address_range} repeats field {name}"
+                    )
+                values[name] = parse_memory_kib(smaps, name, raw, "kB")
+    finish_mapping()
+    if not mappings:
+        raise SoakError(f"{smaps} contains no memory mappings")
+    return ProcessMemoryMappingSnapshot(mappings=tuple(mappings))
+
+
+def process_memory_mapping_totals(
+    snapshot: ProcessMemoryMappingSnapshot,
+) -> dict[str, int]:
+    totals = {
+        "rss_bytes": 0,
+        "pss_bytes": 0,
+        "anonymous_bytes": 0,
+        "private_dirty_bytes": 0,
+        "swap_bytes": 0,
+        **{f"{category}_rss_bytes": 0 for category in PROCESS_MEMORY_MAPPING_CATEGORIES},
+    }
+    for mapping in snapshot.mappings:
+        if mapping.category not in PROCESS_MEMORY_MAPPING_CATEGORIES:
+            raise SoakError(f"unknown process-memory mapping category {mapping.category!r}")
+        totals["rss_bytes"] += mapping.rss_bytes
+        totals["pss_bytes"] += mapping.pss_bytes
+        totals["anonymous_bytes"] += mapping.anonymous_bytes
+        totals["private_dirty_bytes"] += mapping.private_dirty_bytes
+        totals["swap_bytes"] += mapping.swap_bytes
+        totals[f"{mapping.category}_rss_bytes"] += mapping.rss_bytes
+    return totals
+
+
+def process_memory_mapping_trace(
+    before: ProcessMemoryMappingSnapshot,
+    after: ProcessMemoryMappingSnapshot,
+    *,
+    top_limit: int = 8,
+) -> dict[str, Any]:
+    if top_limit < 1:
+        raise SoakError("process-memory mapping trace top_limit must be positive")
+    before_totals = process_memory_mapping_totals(before)
+    after_totals = process_memory_mapping_totals(after)
+    before_by_identity = {mapping.identity: mapping for mapping in before.mappings}
+    top_growth: list[dict[str, int | str]] = []
+    for mapping in after.mappings:
+        prior = before_by_identity.get(mapping.identity)
+        rss_delta = mapping.rss_bytes - (prior.rss_bytes if prior is not None else 0)
+        if rss_delta <= 0:
+            continue
+        top_growth.append(
+            {
+                "anonymous_bytes": mapping.anonymous_bytes,
+                "category": mapping.category,
+                "identity": mapping.identity,
+                "private_dirty_bytes": mapping.private_dirty_bytes,
+                "rss_bytes": mapping.rss_bytes,
+                "rss_delta_bytes": rss_delta,
+                "size_bytes": mapping.size_bytes,
+            }
+        )
+    top_growth.sort(key=lambda item: (-int(item["rss_delta_bytes"]), str(item["identity"])))
+    return {
+        "smaps_anonymous_delta_bytes": (
+            after_totals["anonymous_bytes"] - before_totals["anonymous_bytes"]
+        ),
+        "smaps_private_dirty_delta_bytes": (
+            after_totals["private_dirty_bytes"]
+            - before_totals["private_dirty_bytes"]
+        ),
+        "smaps_pss_delta_bytes": after_totals["pss_bytes"] - before_totals["pss_bytes"],
+        "smaps_rss_bytes_by_category": {
+            category: after_totals[f"{category}_rss_bytes"]
+            for category in PROCESS_MEMORY_MAPPING_CATEGORIES
+        },
+        "smaps_rss_delta_bytes_by_category": {
+            category: (
+                after_totals[f"{category}_rss_bytes"]
+                - before_totals[f"{category}_rss_bytes"]
+            )
+            for category in PROCESS_MEMORY_MAPPING_CATEGORIES
+        },
+        "smaps_swap_delta_bytes": after_totals["swap_bytes"] - before_totals["swap_bytes"],
+        "smaps_top_rss_growth": top_growth[:top_limit],
+    }
+
+
+def process_memory_mapping_metric_values(
+    before: ProcessMemoryMappingSnapshot,
+    after: ProcessMemoryMappingSnapshot,
+) -> dict[str, int]:
+    before_totals = process_memory_mapping_totals(before)
+    after_totals = process_memory_mapping_totals(after)
+    values = {
+        "vulkan_process_smaps_anonymous_growth_bytes": max(
+            0, after_totals["anonymous_bytes"] - before_totals["anonymous_bytes"]
+        ),
+        "vulkan_process_smaps_private_dirty_growth_bytes": max(
+            0,
+            after_totals["private_dirty_bytes"]
+            - before_totals["private_dirty_bytes"],
+        ),
+        "vulkan_process_smaps_rss_end_bytes": after_totals["rss_bytes"],
+        "vulkan_process_smaps_rss_start_bytes": before_totals["rss_bytes"],
+        "vulkan_process_smaps_swap_growth_bytes": max(
+            0, after_totals["swap_bytes"] - before_totals["swap_bytes"]
+        ),
+    }
+    values.update(
+        {
+            f"vulkan_process_mapping_{category}_rss_growth_bytes": max(
+                0,
+                after_totals[f"{category}_rss_bytes"]
+                - before_totals[f"{category}_rss_bytes"],
+            )
+            for category in PROCESS_MEMORY_MAPPING_CATEGORIES
+        }
+    )
+    return values
 
 
 def host_memory_snapshot() -> tuple[int, int]:
@@ -1263,6 +1524,8 @@ def execute(
     observed_vulkan_pool_end: dict[str, int] | None = None
     observed_batched_state_start: dict[str, int | bool] | None = None
     observed_batched_state_end: dict[str, int | bool] | None = None
+    observed_process_mappings_start: ProcessMemoryMappingSnapshot | None = None
+    observed_process_mappings_end: ProcessMemoryMappingSnapshot | None = None
     try:
         mixed.wait_ready(port, process, server_log, deadline)
         health_startup = mixed.read_stable_health(port, deadline, "soak startup health")
@@ -1378,6 +1641,13 @@ def execute(
         previous_gpu = gpu_memory_bytes(port, process.pid, runtime)
         previous_memory = process_memory_snapshot(process.pid)
         stabilization_memory_baseline = previous_memory
+        previous_process_mappings = (
+            process_memory_mapping_snapshot(process.pid)
+            if runtime.backend == "vulkan"
+            else None
+        )
+        observed_process_mappings_start = previous_process_mappings
+        observed_process_mappings_end = previous_process_mappings
         previous_vulkan_buffers = vulkan_buffer_snapshot(health_start, runtime)
         observed_vulkan_buffers_start = previous_vulkan_buffers
         observed_vulkan_buffers_end = previous_vulkan_buffers
@@ -1517,6 +1787,12 @@ def execute(
                 raise SoakError("; ".join(dict.fromkeys(cycle_failures)))
             current_gpu = gpu_memory_bytes(port, process.pid, runtime)
             current_memory = process_memory_snapshot(process.pid)
+            current_process_mappings = (
+                process_memory_mapping_snapshot(process.pid)
+                if runtime.backend == "vulkan"
+                else None
+            )
+            observed_process_mappings_end = current_process_mappings
             current_vulkan_buffers = vulkan_buffer_snapshot(health_start, runtime)
             observed_vulkan_buffers_end = current_vulkan_buffers
             current_vulkan_pool = vulkan_buffer_pool_snapshot(health_start, runtime)
@@ -1644,12 +1920,22 @@ def execute(
                         previous_batched_state, current_batched_state
                     )
                 )
+            if (
+                previous_process_mappings is not None
+                and current_process_mappings is not None
+            ):
+                cycle_trace.update(
+                    process_memory_mapping_trace(
+                        previous_process_mappings, current_process_mappings
+                    )
+                )
             mixed.trace("soak_stabilization_cycle", **cycle_trace)
             previous_gpu = current_gpu
             previous_memory = current_memory
             previous_vulkan_buffers = current_vulkan_buffers
             previous_vulkan_pool = current_vulkan_pool
             previous_batched_state = current_batched_state
+            previous_process_mappings = current_process_mappings
             if (
                 runtime.backend == "vulkan"
                 and stabilization_rss_growth > memory_growth_limit_bytes
@@ -1892,6 +2178,11 @@ def execute(
         debug_end = mixed.json_request(port, "GET", "/v1/debug/model-state")
         batched_state_end = batched_state_cache_snapshot(debug_end, runtime)
         observed_batched_state_end = batched_state_end
+        observed_process_mappings_end = (
+            process_memory_mapping_snapshot(process.pid)
+            if runtime.backend == "vulkan"
+            else None
+        )
         failures.extend(
             mixed.attest_runtime_execution(runtime.variant_id, health_start, health_end)
         )
@@ -2089,6 +2380,16 @@ def execute(
                 failures.append("batched recurrent-state capacity was not parked at final drain")
             if values["batched_state_cache_resident_end"] != 1:
                 failures.append("final batched recurrent-state capacity was not resident")
+        if (
+            observed_process_mappings_start is not None
+            and observed_process_mappings_end is not None
+        ):
+            values.update(
+                process_memory_mapping_metric_values(
+                    observed_process_mappings_start,
+                    observed_process_mappings_end,
+                )
+            )
         if host_guard is not None:
             values.update(host_guard.metric_values())
         if duration < minimum_duration_seconds:
@@ -2256,6 +2557,16 @@ def execute(
             values.update(
                 batched_state_cache_metric_values(
                     observed_batched_state_start, observed_batched_state_end
+                )
+            )
+        if (
+            observed_process_mappings_start is not None
+            and observed_process_mappings_end is not None
+        ):
+            values.update(
+                process_memory_mapping_metric_values(
+                    observed_process_mappings_start,
+                    observed_process_mappings_end,
                 )
             )
     assert shutdown is not None

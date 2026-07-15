@@ -1154,6 +1154,30 @@ fails closed. The receipt records the starting, minimum, and ending available
 memory, starting/peak/ending swap use, and swap growth. More than 512 MiB of
 new swap is a failure even when the 8 GiB floor was not crossed.
 
+At the drained warmup baseline and after each of the at most eight Vulkan
+stabilization cycles, the driver also reads `/proc/<pid>/smaps`. This is bounded
+diagnostic work, not a hot-loop sampler. Every mapping must contain Linux's
+`Size`, `Rss`, `Pss`, `Anonymous`, `Private_Dirty`, and `Swap` fields or the run
+fails closed. Mappings are assigned to a fixed, low-cardinality set:
+
+- `anonymous`: unnamed and `[anon:*]` mappings;
+- `heap`: the process `[heap]` mapping;
+- `stack`: main and named thread stacks;
+- `shared_memory`: `/dev/shm`, `memfd`, and System V shared-memory mappings;
+- `device`: other `/dev/*` mappings, including DRM render nodes;
+- `file`: ordinary file-backed mappings, including model shards and libraries;
+- `kernel`: kernel pseudo-mappings such as `[vdso]` and `[vvar]`.
+
+Each cycle trace records signed RSS deltas for every category, total PSS,
+anonymous-page, private-dirty, and swap deltas, plus the eight largest positive
+mapping-level RSS changes. A mapping identity includes its path (or
+`[anonymous]`) and virtual address range, so a fixed mapping becoming resident
+can be distinguished from a newly mapped object. The bounded case-result
+metrics retain start/end `smaps` RSS, positive growth by category, and positive
+anonymous, private-dirty, and swap growth across the complete observed
+stabilization-through-measurement window. These diagnostics attribute a safety
+failure; they do not weaken, replace, or exempt it from the RSS gate.
+
 Vulkan stabilization runs complete concurrency 1, 4, 8, and 4 cycles with
 16-token outputs and a cancellation every fourth wave. It first fills the
 prefix cache and then requires two consecutive cycles with no positive live
@@ -1338,9 +1362,11 @@ within the cumulative host limit, investigate driver or unified-memory page
 residency rather than mislabeling it as retained Rust ownership. Flat
 allocation/free counters and flat live bytes with growing RSS instead point to
 pages becoming resident in already-live allocations. The stabilization trace
-records buffer, pool, DRM, RSS, and swap deltas per cycle. A run that fails
+records buffer, pool, DRM, RSS, swap, fixed-category `smaps`, and bounded
+per-mapping deltas per cycle. A run that fails
 before measurement retains the observed stabilization window in the Vulkan
-allocation and pool metrics instead of replacing it with zeroes.
+allocation, pool, cache-lifecycle, and mapping metrics instead of replacing it
+with zeroes.
 The cumulative stabilization RSS gate runs only after the completed cycle's
 health, debug snapshot, lifecycle deltas, and memory deltas have been traced
 and stored, so the cycle that crosses the safety limit is not lost from the
