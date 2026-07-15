@@ -33,6 +33,10 @@ use kiln_server::state::{AppState, ModelBackend};
 
 const ROLLOUT_CHAT_TEMPLATE: &str = "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}<|im_start|>assistant\n";
 
+fn qualification_enabled() -> bool {
+    std::env::var("KILN_QUALIFICATION").ok().as_deref() == Some("1")
+}
+
 /// Create a tiny model config for testing.
 fn tiny_config() -> ModelConfig {
     ModelConfig {
@@ -145,8 +149,7 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
 }
 
 #[cfg(any(feature = "rocm", feature = "vulkan"))]
-fn tiny_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
-    let mut weights = tiny_weights(config, device);
+fn tiny_full_attention_weights_bf16(mut weights: GpuWeights) -> GpuWeights {
     let bf16 = |tensor: &Tensor| tensor.to_dtype(DType::BF16).unwrap();
 
     weights.embed_tokens = bf16(&weights.embed_tokens);
@@ -176,6 +179,11 @@ fn tiny_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
         layer.mlp.down_proj_t = bf16(&layer.mlp.down_proj_t);
     }
     weights
+}
+
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+fn tiny_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
+    tiny_full_attention_weights_bf16(tiny_weights(config, device))
 }
 
 fn tiny_weights_preferring_token(
@@ -1981,7 +1989,7 @@ async fn qualify_public_opd_route(device: Device, backend: &str) -> anyhow::Resu
 #[cfg(feature = "rocm")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_sft_repeatability_and_exact_resume_route_rocm() -> anyhow::Result<()> {
-    if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+    if !qualification_enabled() {
         eprintln!("skip public_sft_repeatability_and_exact_resume_route_rocm: qualification off");
         return Ok(());
     }
@@ -1996,7 +2004,7 @@ async fn public_sft_repeatability_and_exact_resume_route_rocm() -> anyhow::Resul
 #[cfg(feature = "vulkan")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_sft_repeatability_and_exact_resume_route_vulkan() -> anyhow::Result<()> {
-    if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+    if !qualification_enabled() {
         eprintln!("skip public_sft_repeatability_and_exact_resume_route_vulkan: qualification off");
         return Ok(());
     }
@@ -2011,7 +2019,7 @@ async fn public_sft_repeatability_and_exact_resume_route_vulkan() -> anyhow::Res
 #[cfg(feature = "rocm")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_grpo_exact_resume_routes_rocm() -> anyhow::Result<()> {
-    if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+    if !qualification_enabled() {
         eprintln!("skip public_grpo_exact_resume_routes_rocm: qualification off");
         return Ok(());
     }
@@ -2026,7 +2034,7 @@ async fn public_grpo_exact_resume_routes_rocm() -> anyhow::Result<()> {
 #[cfg(feature = "vulkan")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_grpo_exact_resume_routes_vulkan() -> anyhow::Result<()> {
-    if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+    if !qualification_enabled() {
         eprintln!("skip public_grpo_exact_resume_routes_vulkan: qualification off");
         return Ok(());
     }
@@ -2041,7 +2049,7 @@ async fn public_grpo_exact_resume_routes_vulkan() -> anyhow::Result<()> {
 #[cfg(feature = "rocm")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_opd_exact_resume_route_rocm() -> anyhow::Result<()> {
-    if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+    if !qualification_enabled() {
         eprintln!("skip public_opd_exact_resume_route_rocm: qualification off");
         return Ok(());
     }
@@ -2056,7 +2064,7 @@ async fn public_opd_exact_resume_route_rocm() -> anyhow::Result<()> {
 #[cfg(feature = "vulkan")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_opd_exact_resume_route_vulkan() -> anyhow::Result<()> {
-    if std::env::var("KILN_QUALIFICATION").ok().as_deref() != Some("1") {
+    if !qualification_enabled() {
         eprintln!("skip public_opd_exact_resume_route_vulkan: qualification off");
         return Ok(());
     }
@@ -4145,8 +4153,10 @@ use kiln_model::{
     CancelHandle, FinishReason, PagedBatchedPrefillStart, PagedKvCacheKt, PagedPrefixReuse,
     StreamEvent,
 };
+#[cfg(any(feature = "rocm", feature = "vulkan"))]
+use kiln_server::batching_engine::BatchingEngineHandle;
 #[cfg(feature = "rocm")]
-use kiln_server::batching_engine::{BatchingEngineHandle, EngineEvent};
+use kiln_server::batching_engine::EngineEvent;
 use kiln_server::batching_engine::{
     DecodeForward, DecodeSlot, EngineRequest, RealDecodeForward, RequestPreparation,
 };
@@ -4804,9 +4814,8 @@ fn resumable_paged_prefill_matches_monolithic_cpu() {
 #[test]
 fn resumable_paged_prefill_matches_monolithic_rocm() {
     if !kiln_tensor::rocm_is_available() {
-        assert_ne!(
-            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
-            Some("1"),
+        assert!(
+            !qualification_enabled(),
             "ROCm device unavailable while KILN_QUALIFICATION=1"
         );
         eprintln!("no ROCm device available; skipping resumable prefill parity");
@@ -4982,9 +4991,8 @@ async fn rocm_run_graph_request_with_pending_resize(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires an explicit real-ROCm qualification run"]
 async fn rocm_eager_and_graph_decode_survive_active_shrink_and_grow() {
-    assert_eq!(
-        std::env::var("KILN_QUALIFICATION").ok().as_deref(),
-        Some("1"),
+    assert!(
+        qualification_enabled(),
         "set KILN_QUALIFICATION=1 for the explicit hardware run"
     );
     assert!(
@@ -5187,9 +5195,8 @@ async fn rocm_eager_and_graph_decode_survive_active_shrink_and_grow() {
 #[test]
 fn resumable_paged_prefill_matches_monolithic_vulkan() {
     if !kiln_model::backend::vulkan::vulkan_is_available() {
-        assert_ne!(
-            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
-            Some("1"),
+        assert!(
+            !qualification_enabled(),
             "Vulkan device unavailable while KILN_QUALIFICATION=1"
         );
         eprintln!("no Vulkan device available; skipping resumable prefill parity");
@@ -5207,9 +5214,15 @@ fn resumable_paged_prefill_matches_monolithic_vulkan() {
     );
 }
 
-#[test]
-fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
-    let config = tiny_gdn_config_f32();
+fn assert_real_resumable_prefill_cancel_and_discard_release_ownership(
+    config: ModelConfig,
+    weights: GpuWeights,
+    expected_runtime: Option<&str>,
+) {
+    let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+    if let Some(expected_runtime) = expected_runtime {
+        assert_eq!(runner.backend_name(), expected_runtime);
+    }
     let block_manager = Arc::new(Mutex::new(BlockManager::new(
         PREFIX_TEST_NUM_BLOCKS,
         PREFIX_TEST_BLOCK_SIZE,
@@ -5223,11 +5236,7 @@ fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
         64,
     )));
     let forward = RealDecodeForward::new(
-        Arc::new(RwLock::new(ModelRunner::new(
-            tiny_gdn_weights_f32(&config, &Device::Cpu),
-            test_tokenizer(),
-            config.clone(),
-        ))),
+        Arc::new(RwLock::new(runner)),
         block_manager.clone(),
         Arc::new(prefix_test_paged_cache(&config)),
         prefix_cache.clone(),
@@ -5317,15 +5326,26 @@ fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
     assert_eq!(stats.pending_release_entries, 0);
 }
 
+#[test]
+fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
+    let config = tiny_gdn_config_f32();
+    let weights = tiny_gdn_weights_f32(&config, &Device::Cpu);
+    assert_real_resumable_prefill_cancel_and_discard_release_ownership(config, weights, None);
+}
+
 /// Batching-engine serve path (CUDA / Vulkan / ROCm / CPU default): a prompt
 /// ending inside a KV block must retain only its block-aligned strict prefix.
 /// Both an identical retry and a longer second turn must resume from that safe
 /// entry instead of sharing and then mutating the prompt's final partial block.
-#[test]
-fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
-    let config = tiny_config();
-    let weights = tiny_weights(&config, &Device::Cpu);
+fn assert_prefix_cache_multi_turn_hit_through_batching_engine_forward(
+    config: ModelConfig,
+    weights: GpuWeights,
+    expected_runtime: Option<&str>,
+) {
     let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+    if let Some(expected_runtime) = expected_runtime {
+        assert_eq!(runner.backend_name(), expected_runtime);
+    }
 
     let prefix_cache = Arc::new(Mutex::new(RealPrefixCache::new_with_min_register_tokens(
         true,
@@ -5464,6 +5484,13 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
     );
 }
 
+#[test]
+fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
+    let config = tiny_config();
+    let weights = tiny_weights(&config, &Device::Cpu);
+    assert_prefix_cache_multi_turn_hit_through_batching_engine_forward(config, weights, None);
+}
+
 /// Non-batched serve path (Metal's default): the non-streaming CPU prefill
 /// must register a block-aligned strict-prefix entry (the branch 002af558-era
 /// code only covered under streaming prefill), and resuming generation from
@@ -5471,11 +5498,15 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
 /// must produce tokens IDENTICAL to an uncached full prefill. Token
 /// equivalence on a hybrid GDN model is the correctness proof that the
 /// linear-state snapshot/restore is exact, not just that plumbing connects.
-#[test]
-fn prefix_cache_nonbatched_path_split_entry_replays_token_identical() {
-    let config = tiny_gdn_config_f32();
-    let weights = tiny_gdn_weights_f32(&config, &Device::Cpu);
+fn assert_prefix_cache_nonbatched_path_split_entry_replays_token_identical(
+    config: ModelConfig,
+    weights: GpuWeights,
+    expected_runtime: Option<&str>,
+) {
     let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+    if let Some(expected_runtime) = expected_runtime {
+        assert_eq!(runner.backend_name(), expected_runtime);
+    }
 
     let sampling = SamplingParams {
         max_tokens: 4,
@@ -5563,6 +5594,248 @@ fn prefix_cache_nonbatched_path_split_entry_replays_token_identical() {
     assert_eq!(
         cached.output.token_ids, control.output.token_ids,
         "generation resumed from the prefix-cache entry (KV blocks + GDN linear \
-         state) must be token-identical to an uncached full prefill"
+        state) must be token-identical to an uncached full prefill"
+    );
+}
+
+#[test]
+fn prefix_cache_nonbatched_path_split_entry_replays_token_identical() {
+    let config = tiny_gdn_config_f32();
+    let weights = tiny_gdn_weights_f32(&config, &Device::Cpu);
+    assert_prefix_cache_nonbatched_path_split_entry_replays_token_identical(config, weights, None);
+}
+
+#[cfg(feature = "vulkan")]
+fn tiny_gdn_vulkan_fixture() -> (ModelConfig, GpuWeights) {
+    let mut config = tiny_gdn_config_f32();
+    config.dtype = kiln_core::config::DType::BF16;
+    config.attn_output_gate = true;
+    let weights = tiny_gdn_weights_bf16_deterministic(&config, &Device::Cpu);
+    (config, weights)
+}
+
+#[cfg(feature = "vulkan")]
+fn tiny_gdn_vulkan_weights_preferring_token(
+    config: &ModelConfig,
+    preferred_id: TokenId,
+) -> GpuWeights {
+    let mut weights = tiny_gdn_weights_bf16_deterministic(config, &Device::Cpu);
+    let h = config.hidden_size;
+    let mut embeddings = vec![0.0_f32; config.vocab_size * h];
+    for row in 0..config.vocab_size {
+        embeddings[row * h] = 1.0;
+    }
+    embeddings[preferred_id as usize * h] = 2.0;
+    let embed = Tensor::from_vec_on(
+        Device::Cpu,
+        embeddings,
+        vec![config.vocab_size, config.hidden_size],
+    )
+    .unwrap()
+    .to_dtype(DType::BF16)
+    .unwrap();
+    weights.embed_tokens = embed.clone();
+    weights.embed_tokens_t = embed.t().unwrap().contiguous().unwrap();
+    weights.final_norm = Tensor::ones((h,), DType::BF16, &Device::Cpu).unwrap();
+
+    for layer in &mut weights.layers {
+        match &mut layer.attention {
+            GpuAttentionWeights::Linear(attention) => {
+                attention.out_proj =
+                    Tensor::zeros((h, config.linear_v_dim()), DType::BF16, &Device::Cpu).unwrap();
+                attention.out_proj_t = attention.out_proj.t().unwrap().contiguous().unwrap();
+            }
+            GpuAttentionWeights::Full(attention) => {
+                attention.o_proj = Tensor::zeros(
+                    (h, config.num_attention_heads * config.head_dim),
+                    DType::BF16,
+                    &Device::Cpu,
+                )
+                .unwrap();
+                attention.o_proj_t = attention.o_proj.t().unwrap().contiguous().unwrap();
+            }
+        }
+        layer.mlp.down_proj =
+            Tensor::zeros((h, config.intermediate_size), DType::BF16, &Device::Cpu).unwrap();
+        layer.mlp.down_proj_t = layer.mlp.down_proj.t().unwrap().contiguous().unwrap();
+    }
+    weights
+}
+
+#[cfg(feature = "vulkan")]
+async fn assert_live_eval_executor_uses_vulkan() -> (u32, usize, String) {
+    let (config, _) = tiny_gdn_vulkan_fixture();
+    let weights = tiny_gdn_vulkan_weights_preferring_token(&config, 1);
+    let tokenizer = test_tokenizer();
+    let runner = ModelRunner::new(weights, tokenizer.clone(), config.clone());
+    assert_eq!(runner.backend_name(), "vulkan");
+
+    // AppState's production constructor sizes a process-global memory policy.
+    // This focused route test already owns a bounded test KV pool, so start
+    // from the dependency-complete mock state and replace only its backend.
+    let scheduler = kiln_scheduler::Scheduler::new(
+        kiln_scheduler::SchedulerConfig {
+            max_batch_tokens: 128,
+            max_batch_size: 1,
+            block_size: PREFIX_TEST_BLOCK_SIZE,
+            prefix_cache_enabled: false,
+            ..Default::default()
+        },
+        PREFIX_TEST_NUM_BLOCKS,
+    );
+    let mock_engine = kiln_model::engine::MockEngine::new(config.clone());
+    let mut state = AppState::new_mock(
+        config.clone(),
+        scheduler,
+        Arc::new(mock_engine),
+        tokenizer.clone(),
+        30,
+        "vulkan-live-eval".to_string(),
+    );
+    let rocm_graph_telemetry = runner.rocm_graph_telemetry_handle();
+    let backend_health = runner.backend_health_handle();
+    let runner = Arc::new(RwLock::new(runner));
+    let block_manager = Arc::new(Mutex::new(BlockManager::new(
+        PREFIX_TEST_NUM_BLOCKS,
+        PREFIX_TEST_BLOCK_SIZE,
+    )));
+    let paged_cache = Arc::new(prefix_test_paged_cache(&config));
+    let prefix_cache = Arc::new(Mutex::new(RealPrefixCache::disabled(
+        PREFIX_TEST_BLOCK_SIZE,
+    )));
+    let forward = RealDecodeForward::new(
+        runner.clone(),
+        block_manager.clone(),
+        paged_cache.clone(),
+        prefix_cache.clone(),
+        state.gpu_lock.clone(),
+        state.loaded_adapter.clone(),
+        false,
+    );
+    let batching_engine = BatchingEngineHandle::start_with_options(Arc::new(forward), 1);
+    state.base_teacher_identity = Some(synthetic_base_teacher_identity(
+        &config, &tokenizer, "vulkan",
+    ));
+    state.backend = Arc::new(ModelBackend::Real {
+        runner,
+        rocm_graph_telemetry,
+        backend_health,
+        block_manager,
+        paged_cache,
+        prefix_cache,
+        batching_engine: Some(batching_engine.clone()),
+        decode_batcher: None,
+    });
+    let batching_engine = match state.backend.as_ref() {
+        ModelBackend::Real {
+            batching_engine: Some(engine),
+            ..
+        } => engine.clone(),
+        ModelBackend::Real { .. } => panic!("Vulkan live eval requires the batching engine"),
+        ModelBackend::Mock { .. } => panic!("Vulkan live eval constructed a mock backend"),
+    };
+
+    let suite = kiln_eval::EvalSuite {
+        name: "vulkan-live-eval".to_string(),
+        description: Some("deterministic live Vulkan eval route".to_string()),
+        default_scorer: kiln_eval::scorers::Scorer::ExactMatch {
+            case_sensitive: true,
+            strip_whitespace: false,
+        },
+        generation: kiln_eval::EvalGenerationParams {
+            max_tokens: 2,
+            ..Default::default()
+        },
+        aggregation: kiln_eval::EvalAggregation::Single,
+        system_prompt: None,
+        examples: vec![kiln_eval::EvalExample {
+            id: Some("known-token".to_string()),
+            messages: vec![kiln_eval::EvalChatMessage::new("user", "t1")],
+            target: Some("t1 t1".to_string()),
+            tags: vec!["vulkan".to_string(), "live-generator".to_string()],
+            ..Default::default()
+        }],
+        schema_version: 1,
+        tools: None,
+    };
+    let generator = kiln_server::eval::generator_from_state(state.clone());
+    let result = kiln_server::eval::executor::run_suite_against_adapter(
+        &suite,
+        None,
+        None,
+        20260715,
+        generator,
+        None,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        kiln_server::eval::executor::noop_judge_runner(),
+    )
+    .await
+    .expect("run deterministic live Vulkan eval suite");
+
+    assert_eq!(result.metrics.num_examples, 1);
+    assert_eq!(result.metrics.num_completions, 1);
+    assert_eq!(result.metrics.num_pass, 1, "{result:#?}");
+    assert_eq!(result.metrics.num_fail, 0, "{result:#?}");
+    assert_eq!(result.metrics.num_invalid, 0, "{result:#?}");
+    assert_eq!(result.metrics.num_error, 0, "{result:#?}");
+    assert_eq!(result.metrics.total_completion_tokens, 2);
+    let outcome = result.outcomes.first().expect("one eval outcome");
+    assert_eq!(outcome.completion_text, "t1 t1");
+    assert_eq!(outcome.raw_completion_text.as_deref(), Some("t1 t1"));
+    assert_eq!(outcome.prompt_tokens, Some(6));
+    assert_eq!(outcome.completion_tokens, Some(2));
+    assert_eq!(outcome.score, 1.0);
+
+    batching_engine
+        .stop()
+        .await
+        .expect("stop Vulkan live-eval batching engine");
+    (
+        result.metrics.num_pass,
+        outcome.prompt_tokens.unwrap(),
+        outcome.completion_text.clone(),
+    )
+}
+
+/// Fail-closed model-route corpus run explicitly by the Vulkan qualification
+/// manifest. The ordinary CPU tests above retain fast portable coverage.
+#[cfg(feature = "vulkan")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an explicit real-Vulkan qualification run"]
+async fn vulkan_prefix_cache_cancellation_and_live_eval_qualification() {
+    assert!(
+        qualification_enabled(),
+        "set KILN_QUALIFICATION=1 for the explicit hardware run"
+    );
+    assert!(
+        kiln_model::backend::vulkan::vulkan_is_available(),
+        "Vulkan qualification requested but no Vulkan device is available"
+    );
+
+    let (config, weights) = tiny_gdn_vulkan_fixture();
+    assert_real_resumable_prefill_cancel_and_discard_release_ownership(
+        config,
+        weights,
+        Some("vulkan"),
+    );
+
+    let (config, weights) = tiny_gdn_vulkan_fixture();
+    assert_prefix_cache_multi_turn_hit_through_batching_engine_forward(
+        config,
+        weights,
+        Some("vulkan"),
+    );
+
+    let (config, weights) = tiny_gdn_vulkan_fixture();
+    assert_prefix_cache_nonbatched_path_split_entry_replays_token_identical(
+        config,
+        weights,
+        Some("vulkan"),
+    );
+
+    let (eval_passes, prompt_tokens, completion) = assert_live_eval_executor_uses_vulkan().await;
+    eprintln!(
+        "KILN_VULKAN_MODEL_ROUTES_PASS cache_contracts=3 eval_passes={eval_passes} \
+         eval_prompt_tokens={prompt_tokens} eval_completion={completion:?}"
     );
 }

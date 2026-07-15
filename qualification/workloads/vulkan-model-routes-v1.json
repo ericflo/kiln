@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "workload_id": "vulkan-model-routes-v1",
+  "kind": "correctness",
+  "description": "Prove Vulkan prefix-cache reuse, retained-prefill cancellation/discard cleanup, split-entry replay, and live eval execution through the production batching engine.",
+  "determinism": {
+    "seed": 20260715,
+    "seed_delivery": "fixed_fixture",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "vulkan",
+      "description": "Run fail-closed model-route contracts on the required RADV Strix Halo Vulkan device.",
+      "backend": "vulkan",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require a concrete headless Vulkan physical device without mistaking skipped presentation-surface reporting for a device skip.",
+          "required": true,
+          "command": ["vulkaninfo", "--summary"],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "(?m)^GPU[0-9]+:$"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no vulkan device|skipp(?:ed|ing).*(?:vulkan|physical device))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "prefix-cache-cancellation-live-eval",
+          "description": "Exercise three deterministic BF16 Vulkan cache contracts plus a real one-example exact-match eval through LiveEvalGenerator and the production batching actor.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-server",
+            "--no-default-features",
+            "--features",
+            "vulkan",
+            "--test",
+            "real_model_integration",
+            "vulkan_prefix_cache_cancellation_and_live_eval_qualification",
+            "--",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "KILN_VULKAN_MODEL_ROUTES_PASS cache_contracts=3 eval_passes=1 eval_prompt_tokens=6 eval_completion=\\\"t1 t1\\\""
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "test result: ok\\. 1 passed; 0 failed; 0 ignored"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(vulkan device.*(?:unavailable|not available)|skipp(?:ed|ing).*(?:vulkan|hardware)|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  }
+}

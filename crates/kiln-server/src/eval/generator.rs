@@ -238,6 +238,10 @@ impl LiveEvalGenerator {
     }
 }
 
+fn eval_target_requires_content_reload(adapter: Option<&str>) -> bool {
+    adapter.is_some_and(|name| !name.is_empty())
+}
+
 impl EvalGenerator for LiveEvalGenerator {
     fn preflight_thinking_budget(
         &self,
@@ -302,18 +306,19 @@ impl EvalGenerator for LiveEvalGenerator {
         Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + '_>,
     > {
         let state = self.state.clone();
+        let content_changed = eval_target_requires_content_reload(adapter);
         let want = adapter.map(str::to_string).filter(|s| !s.is_empty());
         Box::pin(async move {
             state
                 .ensure_inference_admission_allowed()
                 .map_err(|error| format!("eval adapter selection rejected: {error:#}"))?;
             let previous = state.active_adapter_name.read().unwrap().clone();
-            // NO name-equality early return here (round-4 discovery): the
-            // §8.7 gate evaluates an adapter that was just RETRAINED under
-            // its serving name — a no-op would score the stale in-memory
-            // weights and then "promote" them with a no-op swap. Evals
-            // measure disk content; content_changed forces the reload
-            // through the same-name fast path in adapter_swap.
+            // Named eval targets always reload: the §8.7 gate can evaluate an
+            // adapter just retrained under its serving name, and a name-only
+            // no-op would score stale weights. The immutable base target has
+            // no disk adapter content to reload; treating base-to-base as a
+            // mutation would incorrectly reject ordinary evals under the
+            // stable serving profile.
             //
             // Barrier swap (see `adapter_swap`): a streaming request that's
             // mid-generation when an eval starts finishes on its own
@@ -330,7 +335,7 @@ impl EvalGenerator for LiveEvalGenerator {
                 &state,
                 crate::adapter_swap::SwapRequest {
                     target,
-                    content_changed: true,
+                    content_changed,
                     default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(
                         want.clone(),
                     ),
@@ -820,6 +825,13 @@ pub fn generator_from_state(state: AppState) -> Arc<dyn EvalGenerator> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_named_eval_targets_require_content_reload() {
+        assert!(!eval_target_requires_content_reload(None));
+        assert!(!eval_target_requires_content_reload(Some("")));
+        assert!(eval_target_requires_content_reload(Some("adapter-a")));
+    }
 
     #[test]
     fn resolved_budget_tracks_limit_provenance() {

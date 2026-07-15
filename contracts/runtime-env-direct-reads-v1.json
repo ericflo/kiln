@@ -8380,25 +8380,12 @@
       "argument_kind": "literal",
       "classification": "test_only",
       "classification_basis": "integration-test source surface",
-      "count": 7,
+      "count": 1,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-server/tests/real_model_integration.rs",
       "phase": "runtime",
       "surface": "integration-test"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_QUALIFICATION",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/tests/real_model_integration.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
     },
     {
       "api": "var",
@@ -10689,7 +10676,7 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 536,
+    "literal_kiln_read_call_sites": 528,
     "literal_kiln_read_names": 365,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
@@ -10703,13 +10690,13 @@
       "test_only": 353
     },
     "process_mutation_entries": 205,
-    "read_call_sites": 911,
+    "read_call_sites": 903,
     "read_call_sites_by_classification": {
       "build_time": 328,
       "experimental_debug": 432,
       "public_stable": 9,
-      "test_only": 142
+      "test_only": 134
     },
-    "read_entries": 616
+    "read_entries": 615
   }
 }
