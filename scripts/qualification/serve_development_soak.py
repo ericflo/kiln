@@ -236,6 +236,14 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "host_swap_used_end_bytes": ("bytes", "exact", True),
     "host_swap_used_peak_bytes": ("bytes", "max", True),
     "host_swap_used_start_bytes": ("bytes", "exact", True),
+    "vulkan_buffer_allocated_bytes": ("bytes", "sum", True),
+    "vulkan_buffer_allocation_count": ("count", "sum", True),
+    "vulkan_buffer_free_count": ("count", "sum", False),
+    "vulkan_buffer_freed_bytes": ("bytes", "sum", False),
+    "vulkan_buffer_live_bytes_end": ("bytes", "exact", True),
+    "vulkan_buffer_live_bytes_growth": ("bytes", "exact", True),
+    "vulkan_buffer_live_bytes_start": ("bytes", "exact", True),
+    "vulkan_buffer_peak_live_bytes": ("bytes", "max", True),
 }
 
 
@@ -607,6 +615,119 @@ def prefix_cache_snapshot(health: dict[str, Any]) -> dict[str, int]:
     return snapshot
 
 
+VULKAN_BUFFER_FIELDS = (
+    "live_device_local_buffers",
+    "live_device_local_bytes",
+    "live_host_visible_buffers",
+    "live_host_visible_bytes",
+    "peak_live_bytes",
+    "device_local_allocations",
+    "device_local_allocated_bytes",
+    "device_local_frees",
+    "device_local_freed_bytes",
+    "host_visible_allocations",
+    "host_visible_allocated_bytes",
+    "host_visible_frees",
+    "host_visible_freed_bytes",
+)
+
+
+def vulkan_buffer_snapshot(
+    health: dict[str, Any], runtime: SoakRuntime = ROCM_RUNTIME
+) -> dict[str, int] | None:
+    if runtime.backend != "vulkan":
+        return None
+    raw = health.get("vulkan_buffers")
+    if not isinstance(raw, dict):
+        raise SoakError("health.vulkan_buffers is missing for the Vulkan runtime")
+    if set(raw) != set(VULKAN_BUFFER_FIELDS):
+        missing = sorted(set(VULKAN_BUFFER_FIELDS) - set(raw))
+        extra = sorted(set(raw) - set(VULKAN_BUFFER_FIELDS))
+        raise SoakError(
+            f"health.vulkan_buffers field mismatch: missing={missing}, extra={extra}"
+        )
+    snapshot: dict[str, int] = {}
+    for field in VULKAN_BUFFER_FIELDS:
+        value = raw[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SoakError(
+                f"Vulkan buffer field {field} must be a nonnegative integer, "
+                f"got {value!r}"
+            )
+        snapshot[field] = value
+    return snapshot
+
+
+def vulkan_buffer_total(snapshot: dict[str, int], suffix: str) -> int:
+    return snapshot[f"device_local_{suffix}"] + snapshot[f"host_visible_{suffix}"]
+
+
+def vulkan_buffer_live_bytes(snapshot: dict[str, int]) -> int:
+    return snapshot["live_device_local_bytes"] + snapshot["live_host_visible_bytes"]
+
+
+def vulkan_buffer_live_count(snapshot: dict[str, int]) -> int:
+    return snapshot["live_device_local_buffers"] + snapshot["live_host_visible_buffers"]
+
+
+def vulkan_buffer_counter_delta(
+    before: dict[str, int], after: dict[str, int], suffix: str
+) -> int:
+    start = vulkan_buffer_total(before, suffix)
+    end = vulkan_buffer_total(after, suffix)
+    if end < start:
+        raise SoakError(f"Vulkan buffer counter {suffix} regressed: {start} -> {end}")
+    return end - start
+
+
+def vulkan_buffer_metric_values(
+    before: dict[str, int], after: dict[str, int]
+) -> dict[str, int]:
+    live_start = vulkan_buffer_live_bytes(before)
+    live_end = vulkan_buffer_live_bytes(after)
+    return {
+        "vulkan_buffer_allocated_bytes": vulkan_buffer_counter_delta(
+            before, after, "allocated_bytes"
+        ),
+        "vulkan_buffer_allocation_count": vulkan_buffer_counter_delta(
+            before, after, "allocations"
+        ),
+        "vulkan_buffer_free_count": vulkan_buffer_counter_delta(
+            before, after, "frees"
+        ),
+        "vulkan_buffer_freed_bytes": vulkan_buffer_counter_delta(
+            before, after, "freed_bytes"
+        ),
+        "vulkan_buffer_live_bytes_end": live_end,
+        "vulkan_buffer_live_bytes_growth": max(0, live_end - live_start),
+        "vulkan_buffer_live_bytes_start": live_start,
+        "vulkan_buffer_peak_live_bytes": after["peak_live_bytes"],
+    }
+
+
+def vulkan_buffer_accounting_failures(
+    before: dict[str, int], after: dict[str, int]
+) -> list[str]:
+    allocated = vulkan_buffer_counter_delta(before, after, "allocated_bytes")
+    freed = vulkan_buffer_counter_delta(before, after, "freed_bytes")
+    observed_bytes = vulkan_buffer_live_bytes(after) - vulkan_buffer_live_bytes(before)
+    allocations = vulkan_buffer_counter_delta(before, after, "allocations")
+    frees = vulkan_buffer_counter_delta(before, after, "frees")
+    observed_buffers = vulkan_buffer_live_count(after) - vulkan_buffer_live_count(before)
+    failures = []
+    if allocated - freed != observed_bytes:
+        failures.append(
+            "Vulkan buffer byte accounting is inconsistent: "
+            f"allocated={allocated}, freed={freed}, live_delta={observed_bytes}"
+        )
+    if allocations - frees != observed_buffers:
+        failures.append(
+            "Vulkan buffer count accounting is inconsistent: "
+            f"allocations={allocations}, frees={frees}, live_delta={observed_buffers}"
+        )
+    return failures
+
+
 def unaccounted_blocks(
     batching: dict[str, float | int], prefix_cache: dict[str, int]
 ) -> int:
@@ -812,6 +933,8 @@ def execute(
     stabilization_final_rss_delta = 0
     stabilization_max_gpu_delta = 0
     stabilization_max_rss_delta = 0
+    observed_vulkan_buffers_start: dict[str, int] | None = None
+    observed_vulkan_buffers_end: dict[str, int] | None = None
     try:
         mixed.wait_ready(port, process, server_log, deadline)
         health_startup = mixed.read_stable_health(port, deadline, "soak startup health")
@@ -921,6 +1044,9 @@ def execute(
 
         previous_gpu = gpu_memory_bytes(port, process.pid, runtime)
         previous_memory = process_memory_snapshot(process.pid)
+        previous_vulkan_buffers = vulkan_buffer_snapshot(health_start, runtime)
+        observed_vulkan_buffers_start = previous_vulkan_buffers
+        observed_vulkan_buffers_end = previous_vulkan_buffers
         stabilization_started = time.monotonic()
         while stabilization_cycles < runtime.max_stabilization_cycles:
             cycle_failures: list[str] = []
@@ -1032,6 +1158,17 @@ def execute(
                 raise SoakError("; ".join(dict.fromkeys(cycle_failures)))
             current_gpu = gpu_memory_bytes(port, process.pid, runtime)
             current_memory = process_memory_snapshot(process.pid)
+            current_vulkan_buffers = vulkan_buffer_snapshot(health_start, runtime)
+            observed_vulkan_buffers_end = current_vulkan_buffers
+            if (
+                previous_vulkan_buffers is not None
+                and current_vulkan_buffers is not None
+            ):
+                accounting_failures = vulkan_buffer_accounting_failures(
+                    previous_vulkan_buffers, current_vulkan_buffers
+                )
+                if accounting_failures:
+                    raise SoakError("; ".join(accounting_failures))
             gpu_delta = max(0, current_gpu - previous_gpu)
             rss_delta = max(0, current_memory.rss_bytes - previous_memory.rss_bytes)
             stabilization_final_gpu_delta = gpu_delta
@@ -1046,28 +1183,64 @@ def execute(
             else:
                 stabilization_stable_cycles = 0
             stabilization_cycles += 1
-            mixed.trace(
-                "soak_stabilization_cycle",
-                cycle=stabilization_cycles,
-                gpu_delta_bytes=gpu_delta,
-                rss_anon_delta_bytes=max(
+            cycle_trace = {
+                "cycle": stabilization_cycles,
+                "gpu_delta_bytes": gpu_delta,
+                "rss_anon_delta_bytes": max(
                     0, current_memory.rss_anon_bytes - previous_memory.rss_anon_bytes
                 ),
-                rss_delta_bytes=rss_delta,
-                rss_file_delta_bytes=max(
+                "rss_delta_bytes": rss_delta,
+                "rss_file_delta_bytes": max(
                     0, current_memory.rss_file_bytes - previous_memory.rss_file_bytes
                 ),
-                rss_shmem_delta_bytes=max(
+                "rss_shmem_delta_bytes": max(
                     0,
                     current_memory.rss_shmem_bytes - previous_memory.rss_shmem_bytes,
                 ),
-                stable_cycles=stabilization_stable_cycles,
-                swap_delta_bytes=max(
+                "stable_cycles": stabilization_stable_cycles,
+                "swap_delta_bytes": max(
                     0, current_memory.swap_bytes - previous_memory.swap_bytes
                 ),
-            )
+            }
+            if (
+                previous_vulkan_buffers is not None
+                and current_vulkan_buffers is not None
+            ):
+                cycle_trace.update(
+                    vulkan_allocated_bytes=vulkan_buffer_counter_delta(
+                        previous_vulkan_buffers,
+                        current_vulkan_buffers,
+                        "allocated_bytes",
+                    ),
+                    vulkan_allocation_count=vulkan_buffer_counter_delta(
+                        previous_vulkan_buffers,
+                        current_vulkan_buffers,
+                        "allocations",
+                    ),
+                    vulkan_free_count=vulkan_buffer_counter_delta(
+                        previous_vulkan_buffers, current_vulkan_buffers, "frees"
+                    ),
+                    vulkan_freed_bytes=vulkan_buffer_counter_delta(
+                        previous_vulkan_buffers,
+                        current_vulkan_buffers,
+                        "freed_bytes",
+                    ),
+                    vulkan_live_device_local_bytes=current_vulkan_buffers[
+                        "live_device_local_bytes"
+                    ],
+                    vulkan_live_host_visible_bytes=current_vulkan_buffers[
+                        "live_host_visible_bytes"
+                    ],
+                    vulkan_live_bytes_delta=max(
+                        0,
+                        vulkan_buffer_live_bytes(current_vulkan_buffers)
+                        - vulkan_buffer_live_bytes(previous_vulkan_buffers),
+                    ),
+                )
+            mixed.trace("soak_stabilization_cycle", **cycle_trace)
             previous_gpu = current_gpu
             previous_memory = current_memory
+            previous_vulkan_buffers = current_vulkan_buffers
             if (
                 stabilization_cycles >= runtime.min_stabilization_cycles
                 and stabilization_stable_cycles >= runtime.required_stable_cycles
@@ -1082,6 +1255,7 @@ def execute(
         graph_start = mixed.graph_snapshot(health_start)
         batching_start = mixed.batching_snapshot(health_start)
         prefix_start = prefix_cache_snapshot(health_start)
+        vulkan_buffers_start = vulkan_buffer_snapshot(health_start, runtime)
         gpu_start = gpu_memory_bytes(port, process.pid, runtime)
         rss_start = process_memory_snapshot(process.pid).rss_bytes
         sampler.start()
@@ -1184,6 +1358,7 @@ def execute(
 
             current_gpu = gpu_memory_bytes(port, process.pid, runtime)
             current_memory = process_memory_snapshot(process.pid)
+            current_vulkan_buffers = vulkan_buffer_snapshot(health, runtime)
             current_rss = current_memory.rss_bytes
             rss_samples.append(current_rss)
             if current_gpu > gpu_start + memory_growth_limit_bytes:
@@ -1194,19 +1369,49 @@ def execute(
                 wave_failures.append(
                     f"RSS grew by {current_rss - rss_start} bytes after warmup"
                 )
-            mixed.trace(
-                "soak_wave_complete",
-                cancellations=cancellations,
-                elapsed_seconds=time.monotonic() - measurement_started,
-                gpu_memory_bytes=current_gpu,
-                requests=len(wave_results),
-                rss_anon_bytes=current_memory.rss_anon_bytes,
-                rss_bytes=current_rss,
-                rss_file_bytes=current_memory.rss_file_bytes,
-                rss_shmem_bytes=current_memory.rss_shmem_bytes,
-                swap_bytes=current_memory.swap_bytes,
-                wave=wave,
-            )
+            wave_trace = {
+                "cancellations": cancellations,
+                "elapsed_seconds": time.monotonic() - measurement_started,
+                "gpu_memory_bytes": current_gpu,
+                "requests": len(wave_results),
+                "rss_anon_bytes": current_memory.rss_anon_bytes,
+                "rss_bytes": current_rss,
+                "rss_file_bytes": current_memory.rss_file_bytes,
+                "rss_shmem_bytes": current_memory.rss_shmem_bytes,
+                "swap_bytes": current_memory.swap_bytes,
+                "wave": wave,
+            }
+            if (
+                vulkan_buffers_start is not None
+                and current_vulkan_buffers is not None
+            ):
+                wave_trace.update(
+                    vulkan_allocated_bytes=vulkan_buffer_counter_delta(
+                        vulkan_buffers_start,
+                        current_vulkan_buffers,
+                        "allocated_bytes",
+                    ),
+                    vulkan_allocation_count=vulkan_buffer_counter_delta(
+                        vulkan_buffers_start,
+                        current_vulkan_buffers,
+                        "allocations",
+                    ),
+                    vulkan_free_count=vulkan_buffer_counter_delta(
+                        vulkan_buffers_start, current_vulkan_buffers, "frees"
+                    ),
+                    vulkan_freed_bytes=vulkan_buffer_counter_delta(
+                        vulkan_buffers_start,
+                        current_vulkan_buffers,
+                        "freed_bytes",
+                    ),
+                    vulkan_live_device_local_bytes=current_vulkan_buffers[
+                        "live_device_local_bytes"
+                    ],
+                    vulkan_live_host_visible_bytes=current_vulkan_buffers[
+                        "live_host_visible_bytes"
+                    ],
+                )
+            mixed.trace("soak_wave_complete", **wave_trace)
             wave += 1
             if wave_failures:
                 failures.extend(wave_failures)
@@ -1217,6 +1422,7 @@ def execute(
         graph_end = mixed.graph_snapshot(health_end)
         batching_end = mixed.batching_snapshot(health_end)
         prefix_end = prefix_cache_snapshot(health_end)
+        vulkan_buffers_end = vulkan_buffer_snapshot(health_end, runtime)
         failures.extend(
             mixed.attest_runtime_execution(runtime.variant_id, health_start, health_end)
         )
@@ -1355,6 +1561,22 @@ def execute(
             "wave_count": wave,
             "zero_token_response_count": zero_tokens,
         }
+        if vulkan_buffers_start is not None and vulkan_buffers_end is not None:
+            vulkan_live_start = vulkan_buffer_live_bytes(vulkan_buffers_start)
+            vulkan_live_end = vulkan_buffer_live_bytes(vulkan_buffers_end)
+            values.update(
+                vulkan_buffer_metric_values(vulkan_buffers_start, vulkan_buffers_end)
+            )
+            failures.extend(
+                vulkan_buffer_accounting_failures(
+                    vulkan_buffers_start, vulkan_buffers_end
+                )
+            )
+            if vulkan_live_end > vulkan_live_start:
+                failures.append(
+                    "live Vulkan buffer ownership grew after warmup: "
+                    f"{vulkan_live_start} -> {vulkan_live_end} bytes"
+                )
         if host_guard is not None:
             values.update(host_guard.metric_values())
         if duration < minimum_duration_seconds:
@@ -1485,6 +1707,15 @@ def execute(
         values["stabilization_stable_cycle_count"] = stabilization_stable_cycles
         if host_guard is not None:
             values.update(host_guard.metric_values())
+        if (
+            observed_vulkan_buffers_start is not None
+            and observed_vulkan_buffers_end is not None
+        ):
+            values.update(
+                vulkan_buffer_metric_values(
+                    observed_vulkan_buffers_start, observed_vulkan_buffers_end
+                )
+            )
     assert shutdown is not None
     values["shutdown_forced_count"] = int(shutdown.forced)
     values["shutdown_nonzero_count"] = int(shutdown.returncode != 0)

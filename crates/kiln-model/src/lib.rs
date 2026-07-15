@@ -103,3 +103,35 @@ pub use rocm_graph::{
 };
 pub use speculative::SpeculativeConfig;
 pub use weights::{ModelSnapshotCleanup, ModelWeights};
+
+#[cfg(feature = "vulkan")]
+pub use kiln_vulkan_kernel::buffer::VulkanBufferAllocationStats;
+
+#[cfg(not(feature = "vulkan"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VulkanBufferAllocationStats {
+    pub live_device_local_buffers: u64,
+    pub live_device_local_bytes: u64,
+    pub live_host_visible_buffers: u64,
+    pub live_host_visible_bytes: u64,
+    pub peak_live_bytes: u64,
+    pub device_local_allocations: u64,
+    pub device_local_allocated_bytes: u64,
+    pub device_local_frees: u64,
+    pub device_local_freed_bytes: u64,
+    pub host_visible_allocations: u64,
+    pub host_visible_allocated_bytes: u64,
+    pub host_visible_frees: u64,
+    pub host_visible_freed_bytes: u64,
+}
+
+pub fn vulkan_buffer_allocation_stats() -> Option<VulkanBufferAllocationStats> {
+    #[cfg(feature = "vulkan")]
+    {
+        Some(kiln_vulkan_kernel::buffer::allocation_stats())
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        None
+    }
+}

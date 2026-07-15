@@ -1,12 +1,130 @@
 use anyhow::{Context, Result};
 use ash::vk;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VulkanBufferAllocationStats {
+    pub live_device_local_buffers: u64,
+    pub live_device_local_bytes: u64,
+    pub live_host_visible_buffers: u64,
+    pub live_host_visible_bytes: u64,
+    pub peak_live_bytes: u64,
+    pub device_local_allocations: u64,
+    pub device_local_allocated_bytes: u64,
+    pub device_local_frees: u64,
+    pub device_local_freed_bytes: u64,
+    pub host_visible_allocations: u64,
+    pub host_visible_allocated_bytes: u64,
+    pub host_visible_frees: u64,
+    pub host_visible_freed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VulkanBufferMemoryKind {
+    DeviceLocal,
+    HostVisible,
+}
+
+static LIVE_DEVICE_LOCAL_BUFFERS: AtomicU64 = AtomicU64::new(0);
+static LIVE_DEVICE_LOCAL_BYTES: AtomicU64 = AtomicU64::new(0);
+static LIVE_HOST_VISIBLE_BUFFERS: AtomicU64 = AtomicU64::new(0);
+static LIVE_HOST_VISIBLE_BYTES: AtomicU64 = AtomicU64::new(0);
+static LIVE_TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
+static PEAK_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+static DEVICE_LOCAL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static DEVICE_LOCAL_ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+static DEVICE_LOCAL_FREES: AtomicU64 = AtomicU64::new(0);
+static DEVICE_LOCAL_FREED_BYTES: AtomicU64 = AtomicU64::new(0);
+static HOST_VISIBLE_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static HOST_VISIBLE_ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+static HOST_VISIBLE_FREES: AtomicU64 = AtomicU64::new(0);
+static HOST_VISIBLE_FREED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+fn decrement_live(counter: &AtomicU64, amount: u64, counter_name: &'static str) {
+    if counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_sub(amount)
+        })
+        .is_err()
+    {
+        tracing::error!(
+            counter = counter_name,
+            amount,
+            current = counter.load(Ordering::Relaxed),
+            "Vulkan buffer allocation counter underflow"
+        );
+    }
+}
+
+fn record_allocation(kind: VulkanBufferMemoryKind, bytes: u64) {
+    match kind {
+        VulkanBufferMemoryKind::DeviceLocal => {
+            LIVE_DEVICE_LOCAL_BUFFERS.fetch_add(1, Ordering::Relaxed);
+            LIVE_DEVICE_LOCAL_BYTES.fetch_add(bytes, Ordering::Relaxed);
+            DEVICE_LOCAL_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            DEVICE_LOCAL_ALLOCATED_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        }
+        VulkanBufferMemoryKind::HostVisible => {
+            LIVE_HOST_VISIBLE_BUFFERS.fetch_add(1, Ordering::Relaxed);
+            LIVE_HOST_VISIBLE_BYTES.fetch_add(bytes, Ordering::Relaxed);
+            HOST_VISIBLE_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            HOST_VISIBLE_ALLOCATED_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+    let live_total = LIVE_TOTAL_BYTES
+        .fetch_add(bytes, Ordering::Relaxed)
+        .saturating_add(bytes);
+    PEAK_LIVE_BYTES.fetch_max(live_total, Ordering::Relaxed);
+}
+
+fn record_free(kind: VulkanBufferMemoryKind, bytes: u64) {
+    let (live_buffers, live_bytes, frees, freed_bytes) = match kind {
+        VulkanBufferMemoryKind::DeviceLocal => (
+            &LIVE_DEVICE_LOCAL_BUFFERS,
+            &LIVE_DEVICE_LOCAL_BYTES,
+            &DEVICE_LOCAL_FREES,
+            &DEVICE_LOCAL_FREED_BYTES,
+        ),
+        VulkanBufferMemoryKind::HostVisible => (
+            &LIVE_HOST_VISIBLE_BUFFERS,
+            &LIVE_HOST_VISIBLE_BYTES,
+            &HOST_VISIBLE_FREES,
+            &HOST_VISIBLE_FREED_BYTES,
+        ),
+    };
+    decrement_live(live_buffers, 1, "live_buffers");
+    decrement_live(live_bytes, bytes, "live_bytes");
+    decrement_live(&LIVE_TOTAL_BYTES, bytes, "live_total_bytes");
+    frees.fetch_add(1, Ordering::Relaxed);
+    freed_bytes.fetch_add(bytes, Ordering::Relaxed);
+}
+
+pub fn allocation_stats() -> VulkanBufferAllocationStats {
+    VulkanBufferAllocationStats {
+        live_device_local_buffers: LIVE_DEVICE_LOCAL_BUFFERS.load(Ordering::Relaxed),
+        live_device_local_bytes: LIVE_DEVICE_LOCAL_BYTES.load(Ordering::Relaxed),
+        live_host_visible_buffers: LIVE_HOST_VISIBLE_BUFFERS.load(Ordering::Relaxed),
+        live_host_visible_bytes: LIVE_HOST_VISIBLE_BYTES.load(Ordering::Relaxed),
+        peak_live_bytes: PEAK_LIVE_BYTES.load(Ordering::Relaxed),
+        device_local_allocations: DEVICE_LOCAL_ALLOCATIONS.load(Ordering::Relaxed),
+        device_local_allocated_bytes: DEVICE_LOCAL_ALLOCATED_BYTES.load(Ordering::Relaxed),
+        device_local_frees: DEVICE_LOCAL_FREES.load(Ordering::Relaxed),
+        device_local_freed_bytes: DEVICE_LOCAL_FREED_BYTES.load(Ordering::Relaxed),
+        host_visible_allocations: HOST_VISIBLE_ALLOCATIONS.load(Ordering::Relaxed),
+        host_visible_allocated_bytes: HOST_VISIBLE_ALLOCATED_BYTES.load(Ordering::Relaxed),
+        host_visible_frees: HOST_VISIBLE_FREES.load(Ordering::Relaxed),
+        host_visible_freed_bytes: HOST_VISIBLE_FREED_BYTES.load(Ordering::Relaxed),
+    }
+}
 
 /// Vulkan buffer wrapper for Kiln tensor data.
 pub struct VulkanBuffer {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
     size: u64,
+    allocation_size: u64,
+    memory_kind: VulkanBufferMemoryKind,
     #[allow(dead_code)]
     device: Arc<ash::Device>,
 }
@@ -26,6 +144,7 @@ impl Drop for VulkanBuffer {
             self.device.destroy_buffer(self.buffer, None);
             self.device.free_memory(self.memory, None);
         }
+        record_free(self.memory_kind, self.allocation_size);
     }
 }
 
@@ -55,48 +174,67 @@ fn make_submit_info(cmds: &[vk::CommandBuffer]) -> vk::SubmitInfo<'_> {
 }
 
 impl VulkanBuffer {
-    /// Create a device-local buffer (GPU-only, fast access).
-    pub fn create_device_local(
+    fn create(
         device: &Arc<ash::Device>,
         mem_type_index: u32,
         size: u64,
+        memory_kind: VulkanBufferMemoryKind,
+        description: &str,
     ) -> Result<Self> {
         let buffer_info = vk::BufferCreateInfo::default().size(size).usage(
             vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_SRC
                 | vk::BufferUsageFlags::TRANSFER_DST,
         );
-
         let buffer = unsafe {
             device
                 .create_buffer(&buffer_info, None)
-                .context("failed to create storage buffer")?
+                .with_context(|| format!("failed to create {description} buffer"))?
         };
-
         let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
             .memory_type_index(mem_type_index);
-
-        let memory = unsafe {
-            device
-                .allocate_memory(&alloc_info, None)
-                .context("failed to allocate device memory")?
+        let memory = match unsafe { device.allocate_memory(&alloc_info, None) } {
+            Ok(memory) => memory,
+            Err(error) => {
+                unsafe { device.destroy_buffer(buffer, None) };
+                return Err(error)
+                    .with_context(|| format!("failed to allocate {description} buffer memory"));
+            }
         };
-
-        unsafe {
-            device
-                .bind_buffer_memory(buffer, memory, 0)
-                .context("failed to bind memory to buffer")?;
+        if let Err(error) = unsafe { device.bind_buffer_memory(buffer, memory, 0) } {
+            unsafe {
+                device.destroy_buffer(buffer, None);
+                device.free_memory(memory, None);
+            }
+            return Err(error)
+                .with_context(|| format!("failed to bind {description} buffer memory"));
         }
-
+        record_allocation(memory_kind, mem_requirements.size);
         Ok(Self {
             buffer,
             memory,
             size,
+            allocation_size: mem_requirements.size,
+            memory_kind,
             device: Arc::clone(device),
         })
+    }
+
+    /// Create a device-local buffer (GPU-only, fast access).
+    pub fn create_device_local(
+        device: &Arc<ash::Device>,
+        mem_type_index: u32,
+        size: u64,
+    ) -> Result<Self> {
+        Self::create(
+            device,
+            mem_type_index,
+            size,
+            VulkanBufferMemoryKind::DeviceLocal,
+            "device-local",
+        )
     }
 
     /// Create a host-visible buffer (for uploading data).
@@ -105,42 +243,13 @@ impl VulkanBuffer {
         mem_type_index: u32,
         size: u64,
     ) -> Result<Self> {
-        let buffer_info = vk::BufferCreateInfo::default().size(size).usage(
-            vk::BufferUsageFlags::TRANSFER_SRC
-                | vk::BufferUsageFlags::TRANSFER_DST
-                | vk::BufferUsageFlags::STORAGE_BUFFER,
-        );
-
-        let buffer = unsafe {
-            device
-                .create_buffer(&buffer_info, None)
-                .context("failed to create host buffer")?
-        };
-
-        let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-
-        let alloc_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(mem_requirements.size)
-            .memory_type_index(mem_type_index);
-
-        let memory = unsafe {
-            device
-                .allocate_memory(&alloc_info, None)
-                .context("failed to allocate host memory")?
-        };
-
-        unsafe {
-            device
-                .bind_buffer_memory(buffer, memory, 0)
-                .context("failed to bind memory to buffer")?;
-        }
-
-        Ok(Self {
-            buffer,
-            memory,
+        Self::create(
+            device,
+            mem_type_index,
             size,
-            device: Arc::clone(device),
-        })
+            VulkanBufferMemoryKind::HostVisible,
+            "host-visible",
+        )
     }
 
     /// Upload data from CPU to this buffer via a staging buffer.
@@ -1091,8 +1200,11 @@ impl VulkanBuffer {
 mod tests {
     use super::*;
 
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn read_back_batch_matches_individual_reads() -> Result<()> {
+        let _guard = TEST_LOCK.lock().unwrap();
         let Ok(vk_device) = crate::VulkanDevice::new() else {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -1155,6 +1267,7 @@ mod tests {
 
     #[test]
     fn create_host_visible_with_segments_packs_offsets() -> Result<()> {
+        let _guard = TEST_LOCK.lock().unwrap();
         let Ok(vk_device) = crate::VulkanDevice::new() else {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -1181,6 +1294,58 @@ mod tests {
         assert_eq!(
             bytes,
             [first.as_slice(), second.as_slice(), third.as_slice()].concat()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn allocation_stats_track_live_and_cumulative_bytes_by_memory_kind() -> Result<()> {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let Ok(vk_device) = crate::VulkanDevice::new() else {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        };
+        let before = allocation_stats();
+        let device_local = VulkanBuffer::create_device_local(
+            vk_device.device(),
+            vk_device.device_local_mem_type(),
+            17,
+        )?;
+        let host_visible = VulkanBuffer::create_host_visible(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            19,
+        )?;
+        let device_local_allocation_size = device_local.allocation_size;
+        let host_visible_allocation_size = host_visible.allocation_size;
+        let live = allocation_stats();
+        assert!(live.live_device_local_buffers >= before.live_device_local_buffers + 1);
+        assert!(live.live_host_visible_buffers >= before.live_host_visible_buffers + 1);
+        assert!(live.live_device_local_bytes >= before.live_device_local_bytes + 17);
+        assert!(live.live_host_visible_bytes >= before.live_host_visible_bytes + 19);
+        assert!(live.device_local_allocations >= before.device_local_allocations + 1);
+        assert!(live.host_visible_allocations >= before.host_visible_allocations + 1);
+        assert!(
+            live.device_local_allocated_bytes
+                >= before.device_local_allocated_bytes + device_local_allocation_size
+        );
+        assert!(
+            live.host_visible_allocated_bytes
+                >= before.host_visible_allocated_bytes + host_visible_allocation_size
+        );
+
+        drop(device_local);
+        drop(host_visible);
+        let after = allocation_stats();
+        assert!(after.device_local_frees >= live.device_local_frees + 1);
+        assert!(after.host_visible_frees >= live.host_visible_frees + 1);
+        assert!(
+            after.device_local_freed_bytes
+                >= live.device_local_freed_bytes + device_local_allocation_size
+        );
+        assert!(
+            after.host_visible_freed_bytes
+                >= live.host_visible_freed_bytes + host_visible_allocation_size
         );
         Ok(())
     }

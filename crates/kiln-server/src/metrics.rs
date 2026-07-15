@@ -2083,6 +2083,114 @@ impl Metrics {
             ),
         );
 
+        if let Some(stats) = gauges.vulkan_buffers {
+            out.push_str("# HELP kiln_vulkan_buffer_live_buffers Vulkan buffers with live bound allocations in this process.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_live_buffers gauge\n");
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_live_buffers",
+                "memory",
+                "device_local",
+                stats.live_device_local_buffers,
+            );
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_live_buffers",
+                "memory",
+                "host_visible",
+                stats.live_host_visible_buffers,
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_live_bytes Vulkan memory bytes currently bound to live buffers in this process.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_live_bytes gauge\n");
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_live_bytes",
+                "memory",
+                "device_local",
+                stats.live_device_local_bytes,
+            );
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_live_bytes",
+                "memory",
+                "host_visible",
+                stats.live_host_visible_bytes,
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_peak_live_bytes Process-lifetime high-water mark of memory bytes bound to live Vulkan buffers.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_peak_live_bytes gauge\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_vulkan_buffer_peak_live_bytes {}",
+                    stats.peak_live_bytes
+                ),
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_allocations_total Vulkan buffer memory allocations completed by this process.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_allocations_total counter\n");
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_allocations_total",
+                "memory",
+                "device_local",
+                stats.device_local_allocations,
+            );
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_allocations_total",
+                "memory",
+                "host_visible",
+                stats.host_visible_allocations,
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_allocated_bytes_total Vulkan buffer memory bytes cumulatively allocated by this process.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_allocated_bytes_total counter\n");
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_allocated_bytes_total",
+                "memory",
+                "device_local",
+                stats.device_local_allocated_bytes,
+            );
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_allocated_bytes_total",
+                "memory",
+                "host_visible",
+                stats.host_visible_allocated_bytes,
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_frees_total Vulkan buffer memory allocations freed by this process after destroying their bound buffers.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_frees_total counter\n");
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_frees_total",
+                "memory",
+                "device_local",
+                stats.device_local_frees,
+            );
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_frees_total",
+                "memory",
+                "host_visible",
+                stats.host_visible_frees,
+            );
+            out.push_str("# HELP kiln_vulkan_buffer_freed_bytes_total Vulkan buffer memory bytes cumulatively freed by this process.\n");
+            out.push_str("# TYPE kiln_vulkan_buffer_freed_bytes_total counter\n");
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_freed_bytes_total",
+                "memory",
+                "device_local",
+                stats.device_local_freed_bytes,
+            );
+            prom_counter(
+                &mut out,
+                "kiln_vulkan_buffer_freed_bytes_total",
+                "memory",
+                "host_visible",
+                stats.host_visible_freed_bytes,
+            );
+        }
+
         // --- Prefix cache ---
         out.push_str("# HELP kiln_prefix_cache_lookups_total Total prefix cache lookups.\n");
         out.push_str("# TYPE kiln_prefix_cache_lookups_total counter\n");
@@ -2582,6 +2690,7 @@ pub struct SnapshotGauges {
     pub vram_prefill_peak_used: u64,
     pub vram_kv_cache: u64,
     pub vram_training_budget: u64,
+    pub vulkan_buffers: Option<kiln_model::VulkanBufferAllocationStats>,
     pub prefix_cache: PrefixCacheStats,
     pub rendered_prompt_cache_hits: u64,
     pub rendered_prompt_cache_misses: u64,
@@ -3103,6 +3212,21 @@ mod tests {
             vram_prefill_peak_used: 19_000_000_000,
             vram_kv_cache: 2_000_000_000,
             vram_training_budget: 14_000_000_000,
+            vulkan_buffers: Some(kiln_model::VulkanBufferAllocationStats {
+                live_device_local_buffers: 11,
+                live_device_local_bytes: 101,
+                live_host_visible_buffers: 12,
+                live_host_visible_bytes: 102,
+                peak_live_bytes: 203,
+                device_local_allocations: 21,
+                device_local_allocated_bytes: 201,
+                device_local_frees: 10,
+                device_local_freed_bytes: 100,
+                host_visible_allocations: 22,
+                host_visible_allocated_bytes: 202,
+                host_visible_frees: 10,
+                host_visible_freed_bytes: 100,
+            }),
             prefix_cache: PrefixCacheStats {
                 lookup_hits: 7,
                 lookup_misses: 3,
@@ -3350,6 +3474,20 @@ mod tests {
         assert!(output.contains("kiln_rocm_graph_fallback_slow_total 2"));
         assert!(output.contains("kiln_rocm_graph_fallback_duration_seconds_total 0.425000"));
         assert!(output.contains("kiln_rocm_graph_fallback_duration_seconds_max 0.275000"));
+        assert!(output.contains("kiln_vulkan_buffer_live_buffers{memory=\"device_local\"} 11"));
+        assert!(output.contains("kiln_vulkan_buffer_live_bytes{memory=\"host_visible\"} 102"));
+        assert!(output.contains("kiln_vulkan_buffer_peak_live_bytes 203"));
+        assert!(
+            output.contains("kiln_vulkan_buffer_allocations_total{memory=\"device_local\"} 21")
+        );
+        assert!(
+            output
+                .contains("kiln_vulkan_buffer_allocated_bytes_total{memory=\"host_visible\"} 202")
+        );
+        assert!(output.contains("kiln_vulkan_buffer_frees_total{memory=\"device_local\"} 10"));
+        assert!(
+            output.contains("kiln_vulkan_buffer_freed_bytes_total{memory=\"host_visible\"} 100")
+        );
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"hit\"} 7"));
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"miss\"} 3"));
         assert!(output.contains("kiln_prefix_cache_hit_tokens_total 112"));
@@ -3536,6 +3674,7 @@ mod tests {
             vram_prefill_peak_used: 0,
             vram_kv_cache: 0,
             vram_training_budget: 0,
+            vulkan_buffers: None,
             prefix_cache: PrefixCacheStats::default(),
             rendered_prompt_cache_hits: 0,
             rendered_prompt_cache_misses: 0,

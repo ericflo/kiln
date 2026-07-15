@@ -171,6 +171,78 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(sampler.errors, [])
         sample.assert_called_once_with(8420, 42, soak.VULKAN_RUNTIME)
 
+    def test_vulkan_buffer_snapshot_is_closed_typed_and_monotonic(self) -> None:
+        before = {
+            "live_device_local_buffers": 5,
+            "live_device_local_bytes": 100,
+            "live_host_visible_buffers": 3,
+            "live_host_visible_bytes": 20,
+            "peak_live_bytes": 120,
+            "device_local_allocations": 8,
+            "device_local_allocated_bytes": 160,
+            "device_local_frees": 3,
+            "device_local_freed_bytes": 60,
+            "host_visible_allocations": 7,
+            "host_visible_allocated_bytes": 70,
+            "host_visible_frees": 4,
+            "host_visible_freed_bytes": 50,
+        }
+        after = dict(before)
+        after.update(
+            live_device_local_buffers=6,
+            live_device_local_bytes=130,
+            peak_live_bytes=150,
+            device_local_allocations=10,
+            device_local_allocated_bytes=200,
+            device_local_frees=4,
+            device_local_freed_bytes=70,
+        )
+        self.assertEqual(
+            soak.vulkan_buffer_snapshot(
+                {"vulkan_buffers": before}, soak.VULKAN_RUNTIME
+            ),
+            before,
+        )
+        self.assertIsNone(
+            soak.vulkan_buffer_snapshot({"vulkan_buffers": before}, soak.ROCM_RUNTIME)
+        )
+        self.assertEqual(soak.vulkan_buffer_live_bytes(before), 120)
+        self.assertEqual(
+            soak.vulkan_buffer_counter_delta(before, after, "allocated_bytes"), 40
+        )
+        self.assertEqual(
+            soak.vulkan_buffer_counter_delta(before, after, "allocations"), 2
+        )
+        self.assertEqual(soak.vulkan_buffer_live_count(before), 8)
+        self.assertEqual(
+            soak.vulkan_buffer_metric_values(before, after),
+            {
+                "vulkan_buffer_allocated_bytes": 40,
+                "vulkan_buffer_allocation_count": 2,
+                "vulkan_buffer_free_count": 1,
+                "vulkan_buffer_freed_bytes": 10,
+                "vulkan_buffer_live_bytes_end": 150,
+                "vulkan_buffer_live_bytes_growth": 30,
+                "vulkan_buffer_live_bytes_start": 120,
+                "vulkan_buffer_peak_live_bytes": 150,
+            },
+        )
+        self.assertEqual(soak.vulkan_buffer_accounting_failures(before, after), [])
+        inconsistent = dict(after)
+        inconsistent["device_local_freed_bytes"] = 69
+        self.assertRegex(
+            soak.vulkan_buffer_accounting_failures(before, inconsistent)[0],
+            "byte accounting is inconsistent",
+        )
+        with self.assertRaisesRegex(soak.SoakError, "field mismatch"):
+            soak.vulkan_buffer_snapshot(
+                {"vulkan_buffers": {**before, "future": 1}}, soak.VULKAN_RUNTIME
+            )
+        regressed = dict(after)
+        regressed["device_local_allocations"] = 1
+        with self.assertRaisesRegex(soak.SoakError, "regressed"):
+            soak.vulkan_buffer_counter_delta(after, regressed, "allocations")
+
     def test_graph_warmup_contract_depends_on_runtime(self) -> None:
         graph = {"capture_successes": 1, "replay_successes": 1, "failures": 0}
         self.assertTrue(soak.graph_warmup_ready(graph, soak.ROCM_RUNTIME))

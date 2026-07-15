@@ -970,6 +970,16 @@ def build_definitions() -> None:
         ]},
         "live": nullable(ref("LiveMemory")),
     }, "Startup GPU memory budget plus the live all-process memory observation.")
+    add_object("VulkanBufferInfo", "VulkanBufferInfo", {
+        field: ref("NonNegativeInteger") for field in [
+            "live_device_local_buffers", "live_device_local_bytes",
+            "live_host_visible_buffers", "live_host_visible_bytes", "peak_live_bytes",
+            "device_local_allocations", "device_local_allocated_bytes",
+            "device_local_frees", "device_local_freed_bytes",
+            "host_visible_allocations", "host_visible_allocated_bytes",
+            "host_visible_frees", "host_visible_freed_bytes",
+        ]
+    }, "Process-lifetime live and cumulative VulkanBuffer allocation accounting by memory route.")
     add_object("RequestMetrics", "RequestMetrics", {
         field: ref("NonNegativeInteger") for field in ["total", "ok", "error", "timeout", "rejected", "active", "active_peak"]
     }, "Lifetime request outcome and concurrency counters.")
@@ -1051,12 +1061,13 @@ def build_definitions() -> None:
         "adapters_loaded": ref("NonNegativeInteger"), "request_count": ref("NonNegativeInteger"),
         "requests": ref("RequestMetrics"), "recent_requests": ref("RecentRequestMetrics"),
         "scheduler": nullable(ref("SchedulerStats")), "self_improve_scheduler": ref("SelfImproveSchedulerStatus"),
-        "gpu_memory": nullable(ref("GpuMemoryInfo")), "prefix_cache": ref("PrefixCacheHealthInfo"),
+        "gpu_memory": nullable(ref("GpuMemoryInfo")), "vulkan_buffers": ref("VulkanBufferInfo"),
+        "prefix_cache": ref("PrefixCacheHealthInfo"),
         "prompt_caches": ref("PromptCachesInfo"), "decode_runtime": ref("DecodeRuntimeInfo"),
         "prefill_runtime": ref("PrefillRuntimeInfo"), "training": ref("TrainingInfo"),
         "checks": array(ref("HealthCheck"), min_items=6, max_items=6),
     }, "Complete readiness and runtime diagnostic response returned with HTTP 200 or 503.",
-        optional=("self_improve_scheduler",))
+        optional=("self_improve_scheduler", "vulkan_buffers"))
 
     add_object("BatchingConfigResponse", "BatchingConfigResponse", {
         "configuration": ref("BatchingRuntimeConfig"), "actor_active": ref("Boolean"),
@@ -1467,6 +1478,21 @@ def build_schema() -> dict[str, Any]:
     }]
     health = examples["HealthResponse"][0]
     health.update({"status": "ok", "version": "0.1.0", "model": "Qwen3.5-4B (32L, 32H, 8KV)"})
+    health["vulkan_buffers"] = {
+        "live_device_local_buffers": 96,
+        "live_device_local_bytes": 8_589_934_592,
+        "live_host_visible_buffers": 24,
+        "live_host_visible_bytes": 67_108_864,
+        "peak_live_bytes": 8_724_152_320,
+        "device_local_allocations": 140,
+        "device_local_allocated_bytes": 9_663_676_416,
+        "device_local_frees": 44,
+        "device_local_freed_bytes": 1_073_741_824,
+        "host_visible_allocations": 88,
+        "host_visible_allocated_bytes": 201_326_592,
+        "host_visible_frees": 64,
+        "host_visible_freed_bytes": 134_217_728,
+    }
     health["backend_runtime"].update({"healthy": True, "quarantined": False, "restart_required": False})
     health["serving_profile"].update({"profile": "stable", "immutable_after_startup": True})
     health["serving_profile"]["effective_policy"].update({

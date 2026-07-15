@@ -51,6 +51,8 @@ struct HealthResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     self_improve_scheduler: Option<crate::state::SelfImproveSchedulerStatus>,
     gpu_memory: Option<GpuMemoryInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vulkan_buffers: Option<VulkanBufferInfo>,
     prefix_cache: PrefixCacheInfo,
     prompt_caches: PromptCachesInfo,
     decode_runtime: DecodeRuntimeInfo,
@@ -173,6 +175,43 @@ struct GpuMemoryInfo {
     /// Distinct from the static startup budget above. `None` on CPU / when
     /// undetectable.
     live: Option<LiveMemory>,
+}
+
+#[derive(Serialize)]
+struct VulkanBufferInfo {
+    live_device_local_buffers: u64,
+    live_device_local_bytes: u64,
+    live_host_visible_buffers: u64,
+    live_host_visible_bytes: u64,
+    peak_live_bytes: u64,
+    device_local_allocations: u64,
+    device_local_allocated_bytes: u64,
+    device_local_frees: u64,
+    device_local_freed_bytes: u64,
+    host_visible_allocations: u64,
+    host_visible_allocated_bytes: u64,
+    host_visible_frees: u64,
+    host_visible_freed_bytes: u64,
+}
+
+impl From<kiln_model::VulkanBufferAllocationStats> for VulkanBufferInfo {
+    fn from(stats: kiln_model::VulkanBufferAllocationStats) -> Self {
+        Self {
+            live_device_local_buffers: stats.live_device_local_buffers,
+            live_device_local_bytes: stats.live_device_local_bytes,
+            live_host_visible_buffers: stats.live_host_visible_buffers,
+            live_host_visible_bytes: stats.live_host_visible_bytes,
+            peak_live_bytes: stats.peak_live_bytes,
+            device_local_allocations: stats.device_local_allocations,
+            device_local_allocated_bytes: stats.device_local_allocated_bytes,
+            device_local_frees: stats.device_local_frees,
+            device_local_freed_bytes: stats.device_local_freed_bytes,
+            host_visible_allocations: stats.host_visible_allocations,
+            host_visible_allocated_bytes: stats.host_visible_allocated_bytes,
+            host_visible_frees: stats.host_visible_frees,
+            host_visible_freed_bytes: stats.host_visible_freed_bytes,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -988,6 +1027,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         scheduler: scheduler_stats,
         self_improve_scheduler: state.self_improve_scheduler.read().unwrap().clone(),
         gpu_memory,
+        vulkan_buffers: kiln_model::vulkan_buffer_allocation_stats().map(VulkanBufferInfo::from),
         prefix_cache,
         prompt_caches,
         decode_runtime,

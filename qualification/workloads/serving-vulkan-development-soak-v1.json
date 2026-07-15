@@ -224,6 +224,14 @@
               "ttft_ms_p99",
               "ttft_ms_p999",
               "unexplained_itl_outlier_count",
+              "vulkan_buffer_allocated_bytes",
+              "vulkan_buffer_allocation_count",
+              "vulkan_buffer_free_count",
+              "vulkan_buffer_freed_bytes",
+              "vulkan_buffer_live_bytes_end",
+              "vulkan_buffer_live_bytes_growth",
+              "vulkan_buffer_live_bytes_start",
+              "vulkan_buffer_peak_live_bytes",
               "wave_count",
               "zero_token_response_count"
             ]

@@ -1126,6 +1126,88 @@ so its `comparison_policy` is null. Do not use it to claim relative throughput
 or latency; use the serving benchmark protocol for those claims. The 30-minute
 receipt also does not replace the final 24-hour ROCm phase soak.
 
+### Vulkan Development Soak
+
+Run the Vulkan peer on a clean, pushed source tree after the serving baseline
+and before a multi-hour Vulkan gate:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant vulkan-development-soak \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  qualification/workloads/serving-vulkan-development-soak-v1.json
+```
+
+This arm uses the same source-built, one-process, post-warmup qualification
+model as the ROCm soak, but its hardware accounting is deliberately different.
+ROCm's device-global memory counter cannot isolate another desktop process.
+The Vulkan driver therefore sums the server process's `drm-memory-vram`,
+`drm-memory-gtt`, and `drm-memory-cpu` records from `/proc/<pid>/fdinfo`,
+deduplicated by DRM client ID. It samples `VmRSS`, `RssAnon`, `RssFile`,
+`RssShmem`, and `VmSwap` from `/proc/<pid>/status` separately. A 250 ms host
+guard sends `SIGTERM` to the complete server process group if Linux
+`MemAvailable` falls below 8 GiB; missing or malformed host telemetry also
+fails closed. The receipt records the starting, minimum, and ending available
+memory, starting/peak/ending swap use, and swap growth. More than 512 MiB of
+new swap is a failure even when the 8 GiB floor was not crossed.
+
+Vulkan stabilization runs complete concurrency 1, 4, 8, and 4 cycles with
+16-token outputs and a cancellation every fourth wave. It first fills the
+prefix cache and then requires two consecutive cycles below both 64 MiB of
+process-scoped DRM growth and 16 MiB of RSS growth. It cannot accept before
+four cycles and fails after eight. The measured phase runs the same fixed-slot
+prompt set for at least 30 minutes, retains the 512 MiB post-warmup GPU/RSS
+peak limits, and applies the same response, drain, cache-ownership, pause,
+device-fault, shutdown, and residue gates as the ROCm arm. Vulkan graphs must
+remain disabled: any graph capture, replay, slot, or fallback activity fails.
+
+#### Vulkan buffer ownership telemetry
+
+A Vulkan build adds `vulkan_buffers` to `GET /health`. The object is omitted on
+other builds and contains these process-lifetime counters:
+
+| Field group | Meaning |
+|---|---|
+| `live_device_local_buffers`, `live_host_visible_buffers` | Number of live `VulkanBuffer` allocations by constructor intent. |
+| `live_device_local_bytes`, `live_host_visible_bytes` | Vulkan memory-requirement bytes still bound to those live buffers. |
+| `peak_live_bytes` | Process-lifetime high-water mark across both memory kinds. |
+| `*_allocations`, `*_allocated_bytes` | Successful allocation count and bytes since process start. |
+| `*_frees`, `*_freed_bytes` | Destructions and bytes freed since process start. |
+
+The byte values use Vulkan's allocation requirement, which can exceed the
+requested logical buffer size because of alignment. `device_local` and
+`host_visible` describe the allocation route; on a unified-memory device they
+do not imply physically separate VRAM and system-RAM chips. These counters
+cover memory owned through `VulkanBuffer`. Driver-private allocations and
+memory not created by that wrapper remain visible only through DRM, RSS, swap,
+and host-availability evidence.
+
+Prometheus exports the same state as:
+
+```text
+kiln_vulkan_buffer_live_buffers{memory="device_local|host_visible"}
+kiln_vulkan_buffer_live_bytes{memory="device_local|host_visible"}
+kiln_vulkan_buffer_peak_live_bytes
+kiln_vulkan_buffer_allocations_total{memory="device_local|host_visible"}
+kiln_vulkan_buffer_allocated_bytes_total{memory="device_local|host_visible"}
+kiln_vulkan_buffer_frees_total{memory="device_local|host_visible"}
+kiln_vulkan_buffer_freed_bytes_total{memory="device_local|host_visible"}
+```
+
+The soak validates that allocation/free deltas reconcile exactly with the
+change in live count and bytes. After warmup, positive live-byte growth is an
+ownership leak and fails the run. Allocation and free deltas that match while
+live bytes stay flat indicate temporary buffer churn; if RSS continues to grow
+in that case, investigate driver or unified-memory page residency rather than
+mislabeling it as retained Rust ownership. Flat allocation/free counters and
+flat live bytes with growing RSS instead point to pages becoming resident in
+already-live allocations. The stabilization trace records these deltas per
+cycle. A run that fails before measurement retains the observed stabilization
+window in the Vulkan allocation metrics instead of replacing it with zeroes.
+
 Never edit a receipt to make it pass. A failed receipt is useful evidence: keep
 it when it identifies a reproducible product defect, fix the defect in a new
 commit, and run a new receipt with a new ID.
