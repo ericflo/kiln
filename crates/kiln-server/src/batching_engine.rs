@@ -415,6 +415,13 @@ pub enum RequestPreparation {
     },
 }
 
+pub struct PrefillBatchProgress {
+    pub tokens_scheduled: usize,
+    pub tokens_processed: usize,
+    pub layers_processed: usize,
+    pub ready: bool,
+}
+
 fn collect_ready_decode_indices(
     slots: &mut [&mut DecodeSlot],
     sampling: &[SamplingParams],
@@ -530,6 +537,29 @@ pub trait DecodeForward: Send + Sync + 'static {
     /// row on the ordinary round-robin path.
     fn remaining_prefill_tokens(&self, _slot: &DecodeSlot) -> Option<usize> {
         None
+    }
+    /// Whether this row can enter the resident one-token Vulkan prefill batch.
+    /// The classification must be mutation-free; the batch method revalidates
+    /// every condition while holding model execution ownership.
+    fn resident_prefill_batch_candidate(
+        &self,
+        _slot: &DecodeSlot,
+        _sampling: &SamplingParams,
+    ) -> bool {
+        false
+    }
+    /// A row that has already written newer positions only to the resident KV
+    /// cache must remain on that route even when it is the final row left.
+    fn resident_prefill_batch_required(&self, _slot: &DecodeSlot) -> bool {
+        false
+    }
+    fn advance_resident_prefill_batch(
+        &self,
+        _slots: &mut [&mut DecodeSlot],
+        _sampling: &[SamplingParams],
+        _cancels: &[CancelHandle],
+    ) -> Result<Option<Vec<PrefillBatchProgress>>> {
+        Ok(None)
     }
     fn can_reuse_as_strict_prefix(&self, _prompt_token_len: usize) -> bool {
         false
@@ -877,6 +907,114 @@ impl DecodeForward for RealDecodeForward {
             return None;
         };
         Some(state.remaining_tokens())
+    }
+
+    fn resident_prefill_batch_candidate(
+        &self,
+        slot: &DecodeSlot,
+        sampling: &SamplingParams,
+    ) -> bool {
+        matches!(
+            slot,
+            DecodeSlot::RealPrefill {
+                state: Some(state),
+                ..
+            } if state.resident_token_prefill_candidate(sampling)
+        )
+    }
+
+    fn resident_prefill_batch_required(&self, slot: &DecodeSlot) -> bool {
+        matches!(
+            slot,
+            DecodeSlot::RealPrefill {
+                state: Some(state),
+                ..
+            } if state.resident_token_prefill_started()
+        )
+    }
+
+    fn advance_resident_prefill_batch(
+        &self,
+        slots: &mut [&mut DecodeSlot],
+        sampling: &[SamplingParams],
+        cancels: &[CancelHandle],
+    ) -> Result<Option<Vec<PrefillBatchProgress>>> {
+        anyhow::ensure!(
+            slots.len() == sampling.len() && slots.len() == cancels.len(),
+            "resident prefill batch metadata length mismatch"
+        );
+        let mut state_refs = Vec::with_capacity(slots.len());
+        for slot in slots.iter_mut() {
+            let DecodeSlot::RealPrefill { state, .. } = &mut **slot else {
+                anyhow::bail!("non-prefill slot sent to resident prefill batch")
+            };
+            state_refs.push(state);
+        }
+
+        let gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
+        let runner_guard = self.runner_guard()?;
+        let cancel_refs: Vec<&CancelHandle> = cancels.iter().collect();
+        let result = runner_guard.advance_paged_batched_prefill_resident_token_batch(
+            &mut state_refs,
+            sampling,
+            self.paged_cache.as_ref(),
+            &cancel_refs,
+        );
+        drop(state_refs);
+        let synchronized =
+            runner_guard.synchronize_external_yield("resident batched token-prefill quantum");
+        drop(runner_guard);
+        drop(gpu_guard);
+        let mut progress = match (result, synchronized) {
+            (Ok(progress), Ok(())) => progress,
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error),
+            (Err(error), Err(sync_error)) => {
+                return Err(anyhow::anyhow!(
+                    "{error:#}; resident token-prefill synchronization also failed: {sync_error:#}"
+                ));
+            }
+        };
+        let Some(progress) = progress.as_mut() else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            progress.len() == slots.len(),
+            "resident token-prefill returned {} rows for {} slots",
+            progress.len(),
+            slots.len()
+        );
+
+        let mut actor_progress = Vec::with_capacity(progress.len());
+        for (slot, row) in slots.iter_mut().zip(progress.drain(..)) {
+            let ready = row.decode_state.is_some();
+            if let Some(decode_state) = row.decode_state {
+                let DecodeSlot::RealPrefill {
+                    state,
+                    prefix_request,
+                } = &mut **slot
+                else {
+                    unreachable!("resident token-prefill slot changed during forward")
+                };
+                anyhow::ensure!(
+                    state.is_none(),
+                    "completed resident token-prefill retained duplicate state"
+                );
+                let prefix_request = prefix_request.take();
+                **slot = DecodeSlot::Real {
+                    state: decode_state,
+                    prefix_request,
+                    first_token_pending: true,
+                };
+            }
+            actor_progress.push(PrefillBatchProgress {
+                tokens_scheduled: row.tokens_scheduled,
+                tokens_processed: row.tokens_processed,
+                layers_processed: row.layers_processed,
+                ready,
+            });
+        }
+        Ok(Some(actor_progress))
     }
 
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
@@ -1371,6 +1509,12 @@ impl DecodeForward for RealDecodeForward {
                     std::mem::forget(prefix_request);
                     tracing::error!("discarded prefill ownership retained with unhealthy backend");
                     return;
+                }
+                if let Some(prefill) = state.as_ref()
+                    && prefill.resident_token_prefill_started()
+                {
+                    let (runner, _) = self.runner_guard_for_finish();
+                    runner.release_paged_batched_prefill_state(prefill);
                 }
                 let allocated_blocks = state
                     .take()
@@ -3152,12 +3296,182 @@ impl BatchingEngineActor {
         }
     }
 
+    /// Use the resident Vulkan decode stack as a one-token prompt batch once
+    /// every active prefill row has reached a safe committed-token boundary.
+    /// Returning `None` leaves the ordinary layer-resumable scheduler in
+    /// charge. Rows that already entered the resident route remain eligible as
+    /// a single-row tail because their newer KV positions are resident-only.
+    fn run_resident_prefill_batch(&mut self, budget: &mut usize) -> Option<bool> {
+        if *budget == 0 || self.active.is_empty() {
+            return None;
+        }
+        let active_len = self.active.len();
+        let round_robin_start = self.next_prefill_index % active_len;
+        let ready_prefill_indices: Vec<usize> = (0..active_len)
+            .filter(|&idx| {
+                self.active[idx].delivery_state == ActiveDeliveryState::Ready
+                    && self.forward.is_prefilling(&self.active[idx].slot)
+            })
+            .collect();
+        if ready_prefill_indices.is_empty() {
+            return None;
+        }
+        let required = ready_prefill_indices.iter().any(|&idx| {
+            self.forward
+                .resident_prefill_batch_required(&self.active[idx].slot)
+        });
+        let every_prefill_is_candidate = ready_prefill_indices.iter().all(|&idx| {
+            self.forward.resident_prefill_batch_candidate(
+                &self.active[idx].slot,
+                &self.active[idx].req.sampling,
+            )
+        });
+        if !required && !every_prefill_is_candidate {
+            return None;
+        }
+
+        let max_rows = self.max_decode_batch.min(*budget);
+        let mut indices = Vec::with_capacity(max_rows);
+        for offset in 0..active_len {
+            let idx = (round_robin_start + offset) % active_len;
+            if self.active[idx].delivery_state == ActiveDeliveryState::Ready
+                && self.forward.resident_prefill_batch_candidate(
+                    &self.active[idx].slot,
+                    &self.active[idx].req.sampling,
+                )
+            {
+                indices.push(idx);
+                if indices.len() == max_rows {
+                    break;
+                }
+            }
+        }
+        if indices.is_empty()
+            || (indices.len() == 1
+                && !self
+                    .forward
+                    .resident_prefill_batch_required(&self.active[indices[0]].slot))
+        {
+            return None;
+        }
+        let next_prefill_index = (indices[indices.len() - 1] + 1) % active_len;
+        indices.sort_unstable();
+
+        let sampling: Vec<SamplingParams> = indices
+            .iter()
+            .map(|&idx| self.active[idx].req.sampling.clone())
+            .collect();
+        let cancels: Vec<CancelHandle> = indices
+            .iter()
+            .map(|&idx| self.active[idx].req.cancel.clone())
+            .collect();
+        let started = Instant::now();
+        let result = {
+            let mut selected = self
+                .active
+                .iter_mut()
+                .enumerate()
+                .filter_map(|(idx, active)| {
+                    indices.binary_search(&idx).ok().map(|_| &mut active.slot)
+                })
+                .collect::<Vec<_>>();
+            self.forward
+                .advance_resident_prefill_batch(&mut selected, &sampling, &cancels)
+        };
+        let elapsed = started.elapsed();
+        let progress = match result {
+            Ok(Some(progress)) => progress,
+            Ok(None) => return None,
+            Err(error) => {
+                for idx in indices.iter().copied().rev() {
+                    let active = self.active.remove(idx);
+                    self.forward.discard_request(active.slot);
+                    self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                    self.terminate_delivery(active.delivery_key, format!("{error:#}"));
+                }
+                self.refresh_snapshot();
+                return Some(true);
+            }
+        };
+        if progress.len() != indices.len() {
+            let error = format!(
+                "resident prefill batch returned {} rows for {} requests",
+                progress.len(),
+                indices.len()
+            );
+            for idx in indices.iter().copied().rev() {
+                let active = self.active.remove(idx);
+                self.forward.discard_request(active.slot);
+                self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                self.terminate_delivery(active.delivery_key, error.clone());
+            }
+            self.refresh_snapshot();
+            return Some(true);
+        }
+
+        let layers_processed = progress[0].layers_processed;
+        let progress_valid = layers_processed > 0
+            && progress.iter().all(|row| {
+                row.tokens_scheduled == 1
+                    && row.tokens_processed == 1
+                    && row.layers_processed == layers_processed
+            });
+        if !progress_valid {
+            let error =
+                "resident prefill batch violated its one-token/full-stack progress contract"
+                    .to_string();
+            for idx in indices.iter().copied().rev() {
+                let active = self.active.remove(idx);
+                self.forward.discard_request(active.slot);
+                self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
+                self.terminate_delivery(active.delivery_key, error.clone());
+            }
+            self.refresh_snapshot();
+            return Some(true);
+        }
+
+        for active in &mut self.active {
+            active.token_phase_durations.add_actor_prefill(elapsed);
+        }
+        self.record_prefill_forward_duration(
+            elapsed,
+            self.active[indices[0]].req.request_id,
+            indices.len(),
+            layers_processed,
+        );
+        self.snapshot.total_prefill_forwards =
+            self.snapshot.total_prefill_forwards.saturating_add(1);
+        self.snapshot.last_prefill_layers = layers_processed;
+        self.snapshot.total_prefill_layers = self
+            .snapshot
+            .total_prefill_layers
+            .saturating_add(layers_processed as u64);
+        self.snapshot.last_prefill_tokens = indices.len();
+        self.snapshot.total_prefill_tokens = self
+            .snapshot
+            .total_prefill_tokens
+            .saturating_add(indices.len() as u64);
+        *budget -= indices.len();
+        self.next_prefill_index = next_prefill_index;
+
+        for (&idx, row) in indices.iter().zip(&progress).rev() {
+            if row.ready {
+                self.emit_pending_first_token_at(idx);
+            }
+        }
+        self.refresh_snapshot();
+        Some(true)
+    }
+
     /// Spend the combined-cycle remainder on newly selected prompt chunks.
     /// Retained layer groups were charged when their chunk began and resume
     /// without a second token charge; the independent layer ceiling still
     /// bounds each forward. Partial rows are selected round-robin so a 16K
     /// prompt cannot hide a 1K prompt behind repeated quanta.
     fn run_prefill_budget(&mut self, mut budget: usize) -> bool {
+        if let Some(advanced) = self.run_resident_prefill_batch(&mut budget) {
+            return advanced;
+        }
         let mut advanced = false;
         while !self.active.is_empty() {
             let Some((idx, selected_by_priority)) = self.select_prefill_index(budget) else {
@@ -3988,7 +4302,17 @@ mod tests {
             layers: usize,
             remaining: usize,
         },
+        ResidentPrefill(Vec<TokenId>),
         Discard(TokenId),
+    }
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    enum ResidentBatchOutcome {
+        #[default]
+        Progress,
+        Decline,
+        Error,
+        InvalidProgress,
     }
 
     #[derive(Default)]
@@ -3997,6 +4321,9 @@ mod tests {
         pending_layers: StdMutex<HashMap<TokenId, usize>>,
         pending_token_widths: StdMutex<HashMap<TokenId, usize>>,
         events: StdMutex<Vec<SchedulingEvent>>,
+        resident_rows: StdMutex<HashSet<TokenId>>,
+        resident_batch_outcomes: StdMutex<VecDeque<ResidentBatchOutcome>>,
+        resident_prefill_enabled: bool,
         layers_per_chunk: usize,
         layer_delay: Duration,
     }
@@ -4205,6 +4532,95 @@ mod tests {
                 .copied()
         }
 
+        fn resident_prefill_batch_candidate(
+            &self,
+            slot: &DecodeSlot,
+            _sampling: &SamplingParams,
+        ) -> bool {
+            if !self.resident_prefill_enabled {
+                return false;
+            }
+            let key = Self::slot_key(slot);
+            self.remaining.lock().unwrap().contains_key(&key)
+                && !self.pending_layers.lock().unwrap().contains_key(&key)
+                && !self.pending_token_widths.lock().unwrap().contains_key(&key)
+        }
+
+        fn resident_prefill_batch_required(&self, slot: &DecodeSlot) -> bool {
+            self.resident_rows
+                .lock()
+                .unwrap()
+                .contains(&Self::slot_key(slot))
+        }
+
+        fn advance_resident_prefill_batch(
+            &self,
+            slots: &mut [&mut DecodeSlot],
+            _sampling: &[SamplingParams],
+            cancels: &[CancelHandle],
+        ) -> Result<Option<Vec<PrefillBatchProgress>>> {
+            if !self.resident_prefill_enabled {
+                return Ok(None);
+            }
+            anyhow::ensure!(
+                slots.len() == cancels.len(),
+                "synthetic resident metadata mismatch"
+            );
+            let keys: Vec<_> = slots.iter().map(|slot| Self::slot_key(slot)).collect();
+            anyhow::ensure!(
+                keys.iter()
+                    .all(|key| self.remaining.lock().unwrap().contains_key(key)),
+                "synthetic resident batch contains a completed row"
+            );
+            let outcome = self
+                .resident_batch_outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default();
+            match outcome {
+                ResidentBatchOutcome::Decline => return Ok(None),
+                ResidentBatchOutcome::Error => {
+                    anyhow::bail!("synthetic resident prefill failure")
+                }
+                ResidentBatchOutcome::Progress | ResidentBatchOutcome::InvalidProgress => {}
+            }
+            for cancel in cancels {
+                anyhow::ensure!(
+                    !cancel.is_cancelled(),
+                    "synthetic resident prefill cancelled"
+                );
+            }
+
+            let mut remaining = self.remaining.lock().unwrap();
+            let mut resident_rows = self.resident_rows.lock().unwrap();
+            let mut progress = Vec::with_capacity(keys.len());
+            for key in &keys {
+                let row_remaining = remaining
+                    .get_mut(key)
+                    .expect("synthetic resident row validated above");
+                *row_remaining -= 1;
+                let ready = *row_remaining == 0;
+                if ready {
+                    remaining.remove(key);
+                }
+                resident_rows.insert(*key);
+                progress.push(PrefillBatchProgress {
+                    tokens_scheduled: 1,
+                    tokens_processed: usize::from(outcome != ResidentBatchOutcome::InvalidProgress),
+                    layers_processed: 32,
+                    ready,
+                });
+            }
+            drop(resident_rows);
+            drop(remaining);
+            self.events
+                .lock()
+                .unwrap()
+                .push(SchedulingEvent::ResidentPrefill(keys));
+            Ok(Some(progress))
+        }
+
         fn forward_decode(
             &self,
             slots: &mut [&mut DecodeSlot],
@@ -4263,7 +4679,8 @@ mod tests {
                 .unwrap()
                 .remove(&key)
                 .is_some();
-            if removed_tokens || removed_layers || removed_width {
+            let removed_resident = self.resident_rows.lock().unwrap().remove(&key);
+            if removed_tokens || removed_layers || removed_width || removed_resident {
                 self.events
                     .lock()
                     .unwrap()
@@ -4485,6 +4902,7 @@ mod tests {
                 block_size: 16,
                 prefill_split_snapshot: None,
                 rolling_snapshot: None,
+                prefix_cache_registration_allowed: true,
                 id: 0,
             },
             prefix_request: None,
@@ -4586,6 +5004,26 @@ mod tests {
         });
     }
 
+    fn push_synthetic_prefill_rows(
+        actor: &mut BatchingEngineActor,
+        forward: &SyntheticPrefillForward,
+        rows: &[(TokenId, usize)],
+    ) -> Vec<mpsc::Receiver<EngineEvent>> {
+        let mut receivers = Vec::with_capacity(rows.len());
+        for &(key, remaining) in rows {
+            forward.remaining.lock().unwrap().insert(key, remaining);
+            let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
+            push_test_active(
+                actor,
+                request_with_tokens(vec![key; remaining.saturating_add(1)], 2),
+                response_tx,
+                SyntheticPrefillForward::mock_slot(key),
+            );
+            receivers.push(response_rx);
+        }
+        receivers
+    }
+
     fn settle_active_deliveries(actor: &mut BatchingEngineActor) {
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
@@ -4638,6 +5076,229 @@ mod tests {
         assert_eq!(actor.snapshot.total_decode_forward_ms, 250.0);
         assert_eq!(actor.snapshot.max_decode_forward_ms, 175.0);
         assert_eq!(actor.snapshot.slow_decode_forward_count, 1);
+    }
+
+    #[test]
+    fn resident_prefill_waits_for_every_row_to_reach_a_committed_boundary() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(SyntheticPrefillForward {
+            resident_prefill_enabled: true,
+            ..SyntheticPrefillForward::default()
+        });
+        let mut actor = test_actor(
+            rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let _receivers = push_synthetic_prefill_rows(&mut actor, &forward, &[(11, 3), (22, 3)]);
+        forward.pending_layers.lock().unwrap().insert(22, 1);
+
+        let mut budget = 2;
+        assert_eq!(actor.run_resident_prefill_batch(&mut budget), None);
+        assert_eq!(budget, 2);
+        assert!(forward.events.lock().unwrap().is_empty());
+        assert!(forward.resident_rows.lock().unwrap().is_empty());
+
+        forward.pending_layers.lock().unwrap().remove(&22);
+        assert_eq!(actor.run_resident_prefill_batch(&mut budget), Some(true));
+        assert_eq!(budget, 0);
+        assert_eq!(
+            forward.events.lock().unwrap().as_slice(),
+            &[SchedulingEvent::ResidentPrefill(vec![11, 22])]
+        );
+    }
+
+    #[test]
+    fn resident_prefill_rotates_bounded_cohorts_in_round_robin_order() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(SyntheticPrefillForward {
+            resident_prefill_enabled: true,
+            ..SyntheticPrefillForward::default()
+        });
+        let mut actor = test_actor(
+            rx,
+            forward.clone(),
+            2,
+            false,
+            5,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let _receivers = push_synthetic_prefill_rows(
+            &mut actor,
+            &forward,
+            &[(1, 4), (2, 4), (3, 4), (4, 4), (5, 4)],
+        );
+
+        for _ in 0..3 {
+            let mut budget = 2;
+            assert_eq!(actor.run_resident_prefill_batch(&mut budget), Some(true));
+            assert_eq!(budget, 0);
+        }
+
+        let events = forward.events.lock().unwrap().clone();
+        assert_eq!(
+            events,
+            vec![
+                SchedulingEvent::ResidentPrefill(vec![1, 2]),
+                SchedulingEvent::ResidentPrefill(vec![3, 4]),
+                SchedulingEvent::ResidentPrefill(vec![1, 5]),
+            ]
+        );
+        assert_eq!(actor.next_prefill_index, 1);
+        assert_eq!(actor.snapshot.total_prefill_forwards, 3);
+        assert_eq!(actor.snapshot.total_prefill_tokens, 6);
+    }
+
+    #[test]
+    fn resident_prefill_finishes_the_last_owned_row_as_a_single_row_tail() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(SyntheticPrefillForward {
+            resident_prefill_enabled: true,
+            ..SyntheticPrefillForward::default()
+        });
+        let mut actor = test_actor(
+            rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let _receivers = push_synthetic_prefill_rows(&mut actor, &forward, &[(7, 1), (8, 2)]);
+
+        let mut first_budget = 2;
+        assert_eq!(
+            actor.run_resident_prefill_batch(&mut first_budget),
+            Some(true)
+        );
+        assert!(!forward.is_prefilling(&actor.active[0].slot));
+        assert!(forward.is_prefilling(&actor.active[1].slot));
+        assert!(forward.resident_prefill_batch_required(&actor.active[1].slot));
+
+        let mut tail_budget = 1;
+        assert_eq!(
+            actor.run_resident_prefill_batch(&mut tail_budget),
+            Some(true)
+        );
+        assert_eq!(tail_budget, 0);
+        assert!(!forward.is_prefilling(&actor.active[1].slot));
+        assert_eq!(
+            forward.events.lock().unwrap().as_slice(),
+            &[
+                SchedulingEvent::ResidentPrefill(vec![7, 8]),
+                SchedulingEvent::ResidentPrefill(vec![8]),
+            ]
+        );
+    }
+
+    #[test]
+    fn resident_prefill_decline_is_mutation_free_and_falls_back_cleanly() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(SyntheticPrefillForward {
+            resident_prefill_enabled: true,
+            ..SyntheticPrefillForward::default()
+        });
+        forward
+            .resident_batch_outcomes
+            .lock()
+            .unwrap()
+            .push_back(ResidentBatchOutcome::Decline);
+        let mut actor = test_actor(
+            rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let _receivers = push_synthetic_prefill_rows(&mut actor, &forward, &[(31, 2), (32, 2)]);
+
+        let mut budget = 2;
+        assert_eq!(actor.run_resident_prefill_batch(&mut budget), None);
+        assert_eq!(budget, 2);
+        assert_eq!(forward.remaining.lock().unwrap().get(&31), Some(&2));
+        assert_eq!(forward.remaining.lock().unwrap().get(&32), Some(&2));
+        assert!(forward.resident_rows.lock().unwrap().is_empty());
+        assert!(forward.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resident_prefill_error_discards_every_selected_row() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(SyntheticPrefillForward {
+            resident_prefill_enabled: true,
+            ..SyntheticPrefillForward::default()
+        });
+        forward
+            .resident_batch_outcomes
+            .lock()
+            .unwrap()
+            .push_back(ResidentBatchOutcome::Error);
+        let mut actor = test_actor(
+            rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let _receivers = push_synthetic_prefill_rows(&mut actor, &forward, &[(41, 2), (42, 2)]);
+
+        let mut budget = 2;
+        assert_eq!(actor.run_resident_prefill_batch(&mut budget), Some(true));
+        assert_eq!(actor.active.len(), 0);
+        assert_eq!(actor.snapshot.total_errors, 2);
+        assert_eq!(
+            forward.events.lock().unwrap().as_slice(),
+            &[SchedulingEvent::Discard(42), SchedulingEvent::Discard(41)]
+        );
+    }
+
+    #[test]
+    fn resident_prefill_invalid_progress_fails_closed_and_releases_rows() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(SyntheticPrefillForward {
+            resident_prefill_enabled: true,
+            ..SyntheticPrefillForward::default()
+        });
+        forward
+            .resident_batch_outcomes
+            .lock()
+            .unwrap()
+            .push_back(ResidentBatchOutcome::InvalidProgress);
+        let mut actor = test_actor(
+            rx,
+            forward.clone(),
+            2,
+            false,
+            2,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
+        let _receivers = push_synthetic_prefill_rows(&mut actor, &forward, &[(51, 2), (52, 2)]);
+
+        let mut budget = 2;
+        assert_eq!(actor.run_resident_prefill_batch(&mut budget), Some(true));
+        assert_eq!(actor.active.len(), 0);
+        assert_eq!(actor.snapshot.total_errors, 2);
+        assert!(forward.remaining.lock().unwrap().is_empty());
+        assert!(forward.resident_rows.lock().unwrap().is_empty());
+        assert_eq!(
+            forward.events.lock().unwrap().as_slice(),
+            &[
+                SchedulingEvent::ResidentPrefill(vec![51, 52]),
+                SchedulingEvent::Discard(52),
+                SchedulingEvent::Discard(51),
+            ]
+        );
     }
 
     #[test]

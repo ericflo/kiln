@@ -59,6 +59,16 @@ impl VulkanBackend {
         }
     }
 
+    /// Forget every full-attention seed marker owned by one completed or
+    /// cancelled row. Row IDs are process-unique, so retaining these markers
+    /// cannot produce a cache hit and would grow the registry for the life of
+    /// the server.
+    pub fn evict_resident_decode_row(&self, row_id: u64) {
+        if let Ok(mut g) = self.seeded_resident_decode_rows.lock() {
+            g.retain(|&(_, resident_row_id)| resident_row_id != row_id);
+        }
+    }
+
     pub fn reset_resident_decode_row_seeded(&self) {
         if let Ok(mut g) = self.seeded_resident_decode_rows.lock() {
             g.clear();
@@ -513,5 +523,21 @@ mod tests {
         assert!(!backend.full_attn_layer_seeded(0));
         assert_eq!(backend.linear_attn_gdn_state_entry_counts(), (0, 0, 1));
         Ok(())
+    }
+
+    #[test]
+    fn completed_row_evicts_only_its_full_attention_seed_markers() {
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
+        backend.mark_resident_decode_row_seeded(0, 11);
+        backend.mark_resident_decode_row_seeded(1, 11);
+        backend.mark_resident_decode_row_seeded(0, 12);
+
+        backend.evict_resident_decode_row(11);
+
+        assert!(!backend.resident_decode_row_seeded(0, 11));
+        assert!(!backend.resident_decode_row_seeded(1, 11));
+        assert!(backend.resident_decode_row_seeded(0, 12));
+        backend.evict_resident_decode_row(11);
+        assert!(backend.resident_decode_row_seeded(0, 12));
     }
 }

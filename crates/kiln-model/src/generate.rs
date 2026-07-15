@@ -1006,6 +1006,11 @@ pub struct PagedBatchedDecodeState {
     /// during decode. None until decode first crosses a block boundary;
     /// replaced (drop+alloc) at each subsequent boundary.
     pub rolling_snapshot: Option<RollingPrefixSnapshot>,
+    /// Whether the generic paged KV cache contains every position represented
+    /// by this row. Native Vulkan token-prefill writes later prompt positions
+    /// only to its resident KV cache, so those rows must not publish generic
+    /// prefix-cache registrations at completion.
+    pub prefix_cache_registration_allowed: bool,
     /// Stable per-generation identity used for decode graph and state caching
     /// keys. Assigned from the same process-global namespace as direct
     /// generation owners so no two live decode rows can alias. The value is
@@ -1028,7 +1033,10 @@ fn complete_paged_batched_decode_step(
         state.decode_duration += decode_duration;
         // Preserve the existing rolling prefix-cache snapshot semantics for
         // both token-only and provenance-capturing decode paths.
-        if state.block_size > 0 && state.seq_len % state.block_size == 0 {
+        if state.prefix_cache_registration_allowed
+            && state.block_size > 0
+            && state.seq_len % state.block_size == 0
+        {
             match state.linear_state.snapshot() {
                 Ok(snap) => {
                     state.rolling_snapshot = Some(RollingPrefixSnapshot {
@@ -1077,6 +1085,14 @@ pub struct PagedBatchedPrefillState {
     pending_layer_forward: Option<PagedLayerForwardState>,
     /// Exclusive end position of the in-flight layer-resumable token chunk.
     pending_chunk_end: Option<usize>,
+    /// Stable identity shared with the eventual decode row. Native Vulkan
+    /// prefill uses it to retain exact per-row KV and recurrent-state ownership
+    /// across changing actor batch shapes.
+    id: u64,
+    /// Once native token-prefill writes a row into the resident Vulkan KV
+    /// cache, the generic paged cache is no longer authoritative for later
+    /// positions. Keep the row on the native route until completion/discard.
+    resident_token_prefill_started: bool,
 }
 
 impl PagedBatchedPrefillState {
@@ -1103,6 +1119,23 @@ impl PagedBatchedPrefillState {
 
     pub fn into_allocated_blocks(self) -> Vec<u32> {
         self.allocated_blocks
+    }
+
+    pub fn row_id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn resident_token_prefill_started(&self) -> bool {
+        self.resident_token_prefill_started
+    }
+
+    pub fn resident_token_prefill_candidate(&self, params: &SamplingParams) -> bool {
+        self.next_position > 0
+            && self.remaining_tokens() > 0
+            && self.pending_layer_forward.is_none()
+            && self.pending_chunk_end.is_none()
+            && !self.capture_behavior_logprobs
+            && params.is_effectively_greedy()
     }
 }
 
@@ -3206,6 +3239,12 @@ impl ModelRunner {
 
     fn release_batched_decode_state(&self, row_id: u64, state: &LinearAttentionState) {
         state.evict_gdn_state_resident_kt(self.backend.as_ref());
+        #[cfg(feature = "vulkan")]
+        if let Some(vk_backend) = BackendIdentity::runtime_as_any(self.backend.as_ref())
+            .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
+        {
+            vk_backend.evict_resident_decode_row(row_id);
+        }
         // A resident cache owns reusable allocation capacity; its row IDs are
         // only a content fingerprint. Completing one of those rows makes the
         // fingerprint stale, but the next batch safely refreshes the same
@@ -3245,6 +3284,15 @@ impl ModelRunner {
         };
         if let Some(cached) = cached {
             self.evict_cached_batched_state(cached);
+        }
+    }
+
+    /// Release backend-private ownership for a prefill row that never reached
+    /// decode. Ordinary prefills have no resident row ownership, so this is a
+    /// cheap no-op outside the native Vulkan token-prefill route.
+    pub fn release_paged_batched_prefill_state(&self, state: &PagedBatchedPrefillState) {
+        if state.resident_token_prefill_started {
+            self.release_batched_decode_state(state.id, &state.linear_state);
         }
     }
 
@@ -4763,6 +4811,7 @@ impl ModelRunner {
                 block_size,
                 prefill_split_snapshot: None,
                 rolling_snapshot: None,
+                prefix_cache_registration_allowed: true,
                 id: next_decode_row_id(),
             }));
         }
@@ -4798,6 +4847,8 @@ impl ModelRunner {
                 pending_logits: None,
                 pending_layer_forward: None,
                 pending_chunk_end: None,
+                id: next_decode_row_id(),
+                resident_token_prefill_started: false,
             },
         ))
     }
@@ -5017,9 +5068,211 @@ impl ModelRunner {
                 block_size: state.block_size,
                 prefill_split_snapshot,
                 rolling_snapshot: None,
-                id: next_decode_row_id(),
+                prefix_cache_registration_allowed: true,
+                id: state.id,
             }),
         })
+    }
+
+    /// Advance one prompt token per row through the native resident Vulkan
+    /// batch stack.
+    ///
+    /// The ordinary actor path remains token-chunked and layer-resumable. This
+    /// narrower route is eligible only after each row has committed initial KV
+    /// state, only for effectively greedy rows without behavior-logprob
+    /// capture, and only when at least two rows can enter together. Once a row
+    /// enters, it stays eligible as a single-row tail so authority never moves
+    /// back from the resident Vulkan KV cache to the now-stale generic cache.
+    /// A decline is reported as `Ok(None)` before any state is mutated.
+    pub fn advance_paged_batched_prefill_resident_token_batch(
+        &self,
+        prefills: &mut [&mut Option<PagedBatchedPrefillState>],
+        params: &[SamplingParams],
+        paged_cache: &PagedKvCache,
+        cancels: &[&CancelHandle],
+    ) -> Result<Option<Vec<PagedBatchedPrefillProgress>>> {
+        let batch = prefills.len();
+        anyhow::ensure!(
+            params.len() == batch && cancels.len() == batch,
+            "resident token-prefill batch metadata length mismatch"
+        );
+        if batch == 0
+            || self.backend.name() != "vulkan"
+            || self.active_lora.is_some()
+            || !self.config.attn_output_gate
+            || !ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
+            || !ReplayBackend::runtime_decode_resident_pool_ready(
+                self.backend.as_ref(),
+                self.config.hidden_size,
+                self.config.intermediate_size,
+                64,
+            )
+        {
+            return Ok(None);
+        }
+
+        let mut any_resident = false;
+        for (idx, (prefill, params)) in prefills.iter().zip(params).enumerate() {
+            let state = prefill
+                .as_ref()
+                .with_context(|| format!("resident token-prefill row {idx} has no state"))?;
+            any_resident |= state.resident_token_prefill_started;
+            if state.next_position == 0
+                || state.remaining_tokens() == 0
+                || state.pending_layer_forward.is_some()
+                || state.pending_chunk_end.is_some()
+                || state.capture_behavior_logprobs
+                || !params.is_effectively_greedy()
+            {
+                return Ok(None);
+            }
+        }
+        if batch == 1 && !any_resident {
+            return Ok(None);
+        }
+        for cancel in cancels {
+            check_cancelled(Some(cancel))?;
+        }
+
+        let input_tokens: Vec<TokenId> = prefills
+            .iter()
+            .map(|prefill| {
+                let state = prefill
+                    .as_ref()
+                    .expect("resident token-prefill state validated above");
+                state.prompt_tokens[state.next_position]
+            })
+            .collect();
+        let block_tables_owned: Vec<BlockTable> = prefills
+            .iter()
+            .map(|prefill| {
+                prefill
+                    .as_ref()
+                    .expect("resident token-prefill state validated above")
+                    .block_table
+                    .clone()
+            })
+            .collect();
+        let block_tables: Vec<&BlockTable> = block_tables_owned.iter().collect();
+        let seq_lens: Vec<usize> = prefills
+            .iter()
+            .map(|prefill| {
+                prefill
+                    .as_ref()
+                    .expect("resident token-prefill state validated above")
+                    .next_position
+            })
+            .collect();
+        let row_ids: Vec<u64> = prefills
+            .iter()
+            .map(|prefill| {
+                prefill
+                    .as_ref()
+                    .expect("resident token-prefill state validated above")
+                    .id
+            })
+            .collect();
+        // From this point onward a failed or cancelled call may have created
+        // backend-private row ownership. Mark it before entering the native
+        // stack so every error path releases conservatively.
+        for prefill in prefills.iter_mut() {
+            prefill
+                .as_mut()
+                .expect("resident token-prefill state validated above")
+                .resident_token_prefill_started = true;
+        }
+        let mut linear_states: Vec<&mut LinearAttentionState> = prefills
+            .iter_mut()
+            .map(|prefill| {
+                &mut prefill
+                    .as_mut()
+                    .expect("resident token-prefill state validated above")
+                    .linear_state
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let next_tokens = self
+            .decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
+                &input_tokens,
+                paged_cache,
+                &block_tables,
+                &seq_lens,
+                &mut linear_states,
+                Some(&row_ids),
+            )
+            .context("resident token-prefill Vulkan batch failed")?;
+        let elapsed = started.elapsed();
+        drop(linear_states);
+        anyhow::ensure!(
+            next_tokens.len() == batch,
+            "resident token-prefill returned {} rows for batch {batch}",
+            next_tokens.len()
+        );
+
+        for cancel in cancels {
+            check_cancelled(Some(cancel))?;
+        }
+        for (prefill, cancel) in prefills.iter_mut().zip(cancels) {
+            let state = prefill
+                .as_mut()
+                .expect("resident token-prefill state validated above");
+            state.next_position = state.next_position.saturating_add(1);
+            state.prefill_duration += elapsed;
+            cancel.report_prefill_tokens_completed(state.processed_tokens() as u64);
+        }
+
+        let mut completed = Vec::with_capacity(batch);
+        for prefill in prefills.iter() {
+            let state = prefill
+                .as_ref()
+                .expect("resident token-prefill state validated above");
+            completed.push(state.next_position == state.prompt_tokens.len());
+        }
+
+        let layers_processed = self.weights.layers.len();
+        let mut progress = Vec::with_capacity(batch);
+        for (idx, ((prefill, next_token), completed)) in prefills
+            .iter_mut()
+            .zip(next_tokens)
+            .zip(completed)
+            .enumerate()
+        {
+            let decode_state = match completed {
+                true => {
+                    let state = prefill
+                        .take()
+                        .expect("completed resident token-prefill state disappeared");
+                    Some(PagedBatchedDecodeState {
+                        block_table: state.block_table,
+                        linear_state: state.linear_state,
+                        seq_len: state.prompt_tokens.len(),
+                        next_token,
+                        next_token_logprob: None,
+                        generated_tokens: Vec::new(),
+                        step_seed: params[idx].seed,
+                        capture_behavior_logprobs: false,
+                        registration: None,
+                        allocated_blocks: state.allocated_blocks,
+                        prefill_duration: state.prefill_duration,
+                        decode_duration: std::time::Duration::ZERO,
+                        prompt_tokens: state.prompt_tokens,
+                        block_size: state.block_size,
+                        prefill_split_snapshot: None,
+                        rolling_snapshot: None,
+                        prefix_cache_registration_allowed: false,
+                        id: state.id,
+                    })
+                }
+                false => None,
+            };
+            progress.push(PagedBatchedPrefillProgress {
+                tokens_scheduled: 1,
+                tokens_processed: 1,
+                layers_processed,
+                decode_state,
+            });
+        }
+        Ok(Some(progress))
     }
 
     pub fn paged_batched_decode_step(
@@ -5918,6 +6171,7 @@ impl ModelRunner {
             block_size,
             prefill_split_snapshot,
             rolling_snapshot,
+            prefix_cache_registration_allowed,
             ..
         } = state;
 
@@ -5928,23 +6182,25 @@ impl ModelRunner {
             .context("failed to decode output tokens")?;
 
         let mut extra_registrations = Vec::new();
-        if let Some(reg) = build_extended_registration(
-            &prompt_tokens,
-            &generated_tokens,
-            &block_table,
-            block_size,
-            prefill_split_snapshot,
-        ) {
-            extra_registrations.push(reg);
-        }
-        if let Some(reg) = build_extended_registration(
-            &prompt_tokens,
-            &generated_tokens,
-            &block_table,
-            block_size,
-            rolling_snapshot,
-        ) {
-            extra_registrations.push(reg);
+        if prefix_cache_registration_allowed {
+            if let Some(reg) = build_extended_registration(
+                &prompt_tokens,
+                &generated_tokens,
+                &block_table,
+                block_size,
+                prefill_split_snapshot,
+            ) {
+                extra_registrations.push(reg);
+            }
+            if let Some(reg) = build_extended_registration(
+                &prompt_tokens,
+                &generated_tokens,
+                &block_table,
+                block_size,
+                rolling_snapshot,
+            ) {
+                extra_registrations.push(reg);
+            }
         }
 
         Ok(PrefixCachedGenerationOutput {
@@ -12011,6 +12267,42 @@ mod tests {
             build_extended_registration(&[1, 2, 3, 4, 5], &[6, 7, 8], &bt, 4, None).is_none(),
             "no snapshot → no extended registration"
         );
+    }
+
+    #[test]
+    fn resident_prefill_rows_never_capture_generic_prefix_snapshots() {
+        let make_state = |prefix_cache_registration_allowed| PagedBatchedDecodeState {
+            block_table: block_table_with(&[10]),
+            linear_state: empty_linear_state(),
+            seq_len: 3,
+            next_token: 7,
+            next_token_logprob: None,
+            generated_tokens: Vec::new(),
+            step_seed: None,
+            capture_behavior_logprobs: false,
+            registration: None,
+            allocated_blocks: vec![10],
+            prefill_duration: std::time::Duration::ZERO,
+            decode_duration: std::time::Duration::ZERO,
+            prompt_tokens: vec![1, 2, 3],
+            block_size: 4,
+            prefill_split_snapshot: None,
+            rolling_snapshot: None,
+            prefix_cache_registration_allowed,
+            id: 1,
+        };
+        let mut generic = make_state(true);
+        let mut resident = make_state(false);
+
+        complete_paged_batched_decode_step(
+            &mut [&mut generic, &mut resident],
+            std::time::Duration::from_millis(1),
+        );
+
+        assert_eq!(generic.seq_len, 4);
+        assert!(generic.rolling_snapshot.is_some());
+        assert_eq!(resident.seq_len, 4);
+        assert!(resident.rolling_snapshot.is_none());
     }
 
     #[test]
