@@ -1420,6 +1420,46 @@ pub fn vulkan_synchronize_queue(device_index: usize) -> Result<()> {
 /// no Vulkan device exists at `device_index`, or buffer allocation /
 /// upload fails.
 pub fn host_to_vulkan_copy(cpu: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
+    let vulkan_device = primary_vulkan_device(device_index)?;
+    host_to_vulkan_copy_with_lifetime(
+        cpu,
+        device_index,
+        vulkan_device,
+        VulkanAllocationLifetime::Transient,
+    )
+}
+
+/// Copy a CPU tensor into device-local storage that will outlive a request.
+///
+/// This is the explicit ownership boundary for runtime-loaded weights such as
+/// LoRA adapters. Unlike [`host_to_vulkan_copy`], it never admits the buffer
+/// to the transient recycler and therefore does not require a process-wide
+/// durable-allocation scope while live requests continue on other threads.
+pub fn host_to_vulkan_copy_durable(
+    cpu: &crate::Tensor,
+    device_index: usize,
+) -> Result<crate::Tensor> {
+    let vulkan_device = primary_vulkan_device(device_index)?;
+    host_to_vulkan_copy_with_lifetime(
+        cpu,
+        device_index,
+        vulkan_device,
+        VulkanAllocationLifetime::Durable,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum VulkanAllocationLifetime {
+    Transient,
+    Durable,
+}
+
+fn host_to_vulkan_copy_with_lifetime(
+    cpu: &crate::Tensor,
+    device_index: usize,
+    vulkan_device: Arc<VulkanDevice>,
+    lifetime: VulkanAllocationLifetime,
+) -> Result<crate::Tensor> {
     use crate::CpuStorage;
 
     // Materialize a packed, logical-row-major byte image on the host.
@@ -1455,23 +1495,29 @@ pub fn host_to_vulkan_copy(cpu: &crate::Tensor, device_index: usize) -> Result<c
     }
     let src = &all_bytes[start_bytes..end_bytes];
 
-    let vulkan_device = primary_vulkan_device(device_index)?;
     // Allocate at least 1 byte: a zero-length Vulkan buffer is invalid.
     let alloc_len = byte_len.max(1) as u64;
-    // This is the general CPU -> Vulkan ownership boundary and is used for
-    // long-lived model weights as well as activations. Do not retain these
-    // buffers in the transient recycler: a model load would otherwise pin the
-    // entire scratch budget with permanently borrowed weight buffers.
-    let buffer = VulkanBuffer::create_device_local(
-        vulkan_device.device(),
-        vulkan_device.device_local_mem_type(),
-        alloc_len,
-    )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "host_to_vulkan_copy: create_device_local({alloc_len}) failed: {e}"
-        ))
-    })?;
+    let buffer = match lifetime {
+        // Base-model preparation enters a durable allocation scope, which
+        // makes this call allocate directly. Request-time host tensors reuse
+        // the bounded recycler after that scope ends.
+        VulkanAllocationLifetime::Transient => {
+            kiln_vulkan_kernel::buffer_pool::pool_alloc_device_local(&vulkan_device, alloc_len)
+                .map_err(|e| Error::Msg(format!("host_to_vulkan_copy: allocation failed: {e}")))?
+        }
+        VulkanAllocationLifetime::Durable => Arc::new(
+            VulkanBuffer::create_device_local(
+                vulkan_device.device(),
+                vulkan_device.device_local_mem_type(),
+                alloc_len,
+            )
+            .map_err(|e| {
+                Error::Msg(format!(
+                    "host_to_vulkan_copy_durable: create_device_local({alloc_len}) failed: {e}"
+                ))
+            })?,
+        ),
+    };
     // H2D: stage `src` and copy into the device-local buffer. `src` may
     // be empty (a zero-element tensor); skip the transfer in that case
     // since the buffer was allocated at the 1-byte floor purely to be
@@ -1488,8 +1534,13 @@ pub fn host_to_vulkan_copy(cpu: &crate::Tensor, device_index: usize) -> Result<c
         .map_err(|e| Error::Msg(format!("host_to_vulkan_copy: H2D upload failed: {e}")))?;
     }
 
-    let storage =
-        VulkanStorage::from_buffer(vulkan_device, device_index, dtype, buffer, byte_len as u64)?;
+    let storage = VulkanStorage::from_arc_buffer(
+        vulkan_device,
+        device_index,
+        dtype,
+        buffer,
+        byte_len as u64,
+    )?;
     crate::Tensor::from_parts(
         Arc::new(storage),
         crate::Layout::contiguous(contig.shape().to_vec()),
@@ -3162,6 +3213,50 @@ mod tests {
             host_bf16_cpu.as_bytes(),
             bf16_bytes.as_slice(),
             "BF16 host→Vulkan→host must be byte-identical"
+        );
+    }
+
+    #[test]
+    fn durable_host_upload_does_not_join_the_transient_pool() {
+        let Some(dev) = maybe_vulkan_device() else {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        };
+        let cpu =
+            crate::Tensor::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], vec![4]).expect("CPU tensor");
+
+        let durable = host_to_vulkan_copy_with_lifetime(
+            &cpu,
+            0,
+            Arc::clone(&dev),
+            VulkanAllocationLifetime::Durable,
+        )
+        .expect("durable Vulkan upload");
+        let durable_storage = durable
+            .storage()
+            .as_any()
+            .downcast_ref::<VulkanStorage>()
+            .expect("durable upload storage");
+        let durable_buffer = durable_storage.buffer_arc();
+        assert_eq!(
+            Arc::strong_count(&durable_buffer),
+            2,
+            "durable upload must be owned only by its tensor and this test handle"
+        );
+
+        let transient =
+            host_to_vulkan_copy_with_lifetime(&cpu, 0, dev, VulkanAllocationLifetime::Transient)
+                .expect("transient Vulkan upload");
+        let transient_storage = transient
+            .storage()
+            .as_any()
+            .downcast_ref::<VulkanStorage>()
+            .expect("transient upload storage");
+        let transient_buffer = transient_storage.buffer_arc();
+        assert_eq!(
+            Arc::strong_count(&transient_buffer),
+            3,
+            "transient upload must retain exactly one recycler ownership reference"
         );
     }
 

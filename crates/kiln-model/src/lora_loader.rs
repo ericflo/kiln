@@ -9,8 +9,9 @@
 //! straight to kt via [`kiln_tensor::safetensors::tensor_from_view`] (the
 //! standalone `safetensors` crate parses the file format; the kt helper
 //! maps dtype + copies the byte slice into a `CpuStorage`). The tensor
-//! lands on CPU first, then `.to_device(device)` migrates to GPU — the
-//! same pattern the base-model weights use.
+//! lands on CPU first, then migrates to the requested device. Vulkan uses the
+//! explicit durable upload boundary so runtime-loaded adapter weights cannot
+//! pin the request scratch recycler.
 
 use crate::backend::{BackendRuntime, ResidencyBackend};
 use anyhow::{Context, Result, ensure};
@@ -840,14 +841,19 @@ fn parse_peft_key_strict(key: &str) -> Option<ParsedKey> {
 /// #1082: the standalone `safetensors` crate parses the file format and
 /// hands us a `TensorView`; [`kiln_tensor::safetensors::tensor_from_view`]
 /// maps the dtype and copies the byte slice into a `CpuStorage`-backed
-/// CPU tensor. We then migrate to `device` with an explicit
-/// `to_device` (no-op when `device` is `Cpu`).
+/// CPU tensor. We then migrate to `device`; the Vulkan branch uses a direct,
+/// durable allocation because these weights remain resident across requests.
 fn safetensor_to_kt(
     view: &safetensors::tensor::TensorView<'_>,
     device: kiln_tensor::Device,
 ) -> Result<KtTensor> {
     let cpu = kiln_tensor::safetensors::tensor_from_view(view)
         .context("failed to build kt tensor from safetensors view")?;
+    #[cfg(feature = "vulkan")]
+    if let kiln_tensor::Device::Vulkan(index) = device {
+        return kiln_tensor::host_to_vulkan_copy_durable(&cpu, index)
+            .context("failed to move durable LoRA tensor to Vulkan device");
+    }
     let tensor = cpu
         .to_device(device)
         .context("failed to move LoRA tensor to device")?;

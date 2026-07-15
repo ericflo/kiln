@@ -6730,7 +6730,6 @@ fn dispatch_gdn_gated_rms_norm_cached_bytes_core(
 ) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
-    let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
     // Compile shader
@@ -6741,13 +6740,13 @@ fn dispatch_gdn_gated_rms_norm_cached_bytes_core(
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
 
     // Create input buffers
-    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)?;
-    let z_buf = VulkanBuffer::create_device_local(device, device_local_mt, z_data.len() as u64)?;
+    let x_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, x_data.len() as u64)?;
+    let z_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, z_data.len() as u64)?;
 
     // Create output buffer
     let elem_count: usize = out_shape.iter().product();
     let output_size = (elem_count * 4) as u64; // f32
-    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, output_size)?;
+    let out_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, output_size)?;
 
     // Push constants: rows, hidden, eps
     let rows = elem_count / hidden;
@@ -7209,14 +7208,11 @@ pub fn dispatch_causal_conv1d_prefill_cached_weight_bytes(
         anyhow::bail!("causal_conv1d: only kernel_size=4 supported");
     }
 
-    let device = vk_device.device();
-    let device_local_mt = vk_device.device_local_mem_type();
-
-    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)?;
+    let x_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, x_data.len() as u64)?;
     let state_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, state_data.len() as u64)?;
+        crate::buffer_pool::pool_alloc_device_local(vk_device, state_data.len() as u64)?;
     let out_size = (batch * channels * seq_len * 4) as u64;
-    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)?;
+    let out_buf = crate::buffer_pool::pool_alloc_device_local(vk_device, out_size)?;
 
     let glsl_output = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -7743,7 +7739,7 @@ fn run_compute_pipeline_with_transfers_readbacks(
     }
     let readback_stage = if readback_total > 0 {
         Some(
-            VulkanBuffer::create_host_visible(device, host_visible_mt, readback_total)
+            crate::buffer_pool::pool_alloc_host_visible(device, host_visible_mt, readback_total)
                 .context("failed to create transfers-readbacks staging buffer")?,
         )
     } else {
@@ -7927,8 +7923,9 @@ fn run_compute_pipeline_with_transfers_readback(
 
     let (upload_stage, upload_offsets) =
         create_packed_upload_stage(device, host_visible_mt, uploads, "transfers-readback")?;
-    let readback_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, readback_size)
-        .context("failed to create transfers-readback readback staging buffer")?;
+    let readback_stage =
+        crate::buffer_pool::pool_alloc_host_visible(device, host_visible_mt, readback_size)
+            .context("failed to create transfers-readback readback staging buffer")?;
 
     let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
         spirv,
@@ -8473,7 +8470,7 @@ fn run_two_stage_compute_pipeline_with_transfers(
     }
     let readback_stage = if readback_total > 0 {
         Some(
-            VulkanBuffer::create_host_visible(device, host_visible_mt, readback_total)
+            crate::buffer_pool::pool_alloc_host_visible(device, host_visible_mt, readback_total)
                 .context("failed to create two-stage readback staging buffer")?,
         )
     } else {
