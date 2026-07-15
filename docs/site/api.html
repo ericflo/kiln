@@ -1574,8 +1574,10 @@ kiln serve --config kiln.toml</code></pre>
           latency. Non-batching paths return the actor fields as <code>null</code>. Both real-model
           streaming paths publish a performance object on the terminal chat chunk; explicit opt-in
           also emits a separate <code>kiln.token_timing</code> SSE object for each model token with a
-          bounded path source plus producer-ready/delivered, handler-received, and response-queue
-          times. Direct streams retain the same request summary while leaving actor-only phases
+          bounded path source, exact accepted <code>token_id</code>, plus producer-ready/delivered,
+          handler-received, and response-queue times. The token ID remains observable when a special
+          token decodes to an empty text fragment, without enabling logprobs or behavior capture.
+          Direct streams retain the same request summary while leaving actor-only phases
           <code>null</code> and classifying otherwise unpartitioned gaps as
           <code>unexplained</code>. Batching-engine streams also propagate exact, invocation-owned
           <code>gpu_lock_wait_ms</code> and <code>synchronization_ms</code> candidates. Sampling,

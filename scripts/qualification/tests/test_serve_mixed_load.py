@@ -1058,6 +1058,7 @@ class ServeMixedLoadTests(unittest.TestCase):
             "object": "kiln.token_timing",
             "source": "batching_engine",
             "token_index": 1,
+            "token_id": 4242,
             "ready_ms": 12.0,
             "producer_delivered_ms": 14.0,
             "handler_received_ms": 17.0,
@@ -1069,7 +1070,7 @@ class ServeMixedLoadTests(unittest.TestCase):
             "blocking_phase": None,
             "blocking_phase_ms": None,
         }
-        self.assertEqual(serve.parse_token_timing(timing, 1), (12.0, 5.0))
+        self.assertEqual(serve.parse_token_timing(timing, 1), (4242, 12.0, 5.0))
         self.assertIsNone(serve.parse_token_timing({"choices": []}, 1))
 
         timing["token_index"] = 2
@@ -1080,6 +1081,13 @@ class ServeMixedLoadTests(unittest.TestCase):
         with self.assertRaises(serve.QualificationError):
             serve.parse_token_timing(timing, 1)
         timing["queue_delay_ms"] = 5.0
+
+        for invalid_token_id in (True, -1, 0x1_0000_0000, 1.0):
+            timing["token_id"] = invalid_token_id
+            with self.subTest(token_id=invalid_token_id):
+                with self.assertRaises(serve.QualificationError):
+                    serve.parse_token_timing(timing, 1)
+        timing["token_id"] = 4242
 
         for invalid_index in (True, 1.0):
             timing["token_index"] = invalid_index
@@ -1097,7 +1105,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         })
         self.assertEqual(
             serve.parse_token_timing(timing, 2, previous_ready_ms=12.0),
-            (20.0, 5.0),
+            (4242, 20.0, 5.0),
         )
         with self.assertRaises(serve.QualificationError):
             serve.parse_token_timing(timing, 2, previous_ready_ms=21.0)

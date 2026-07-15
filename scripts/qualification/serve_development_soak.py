@@ -1542,6 +1542,7 @@ def invalid_stream_result_summary(
         f"completion_tokens={result.completion_tokens},"
         f"usage_records={result.usage_records},"
         f"token_timings={len(result.token_ready_times)},"
+        f"token_ids={result.token_ids!r},"
         f"semantic_events={len(result.semantic_times)},done={result.done},"
         f"cancelled={result.cancelled},actor_queue_ms={result.actor_queue_ms!r},"
         f"actor_admission_ms={result.actor_admission_ms!r},"

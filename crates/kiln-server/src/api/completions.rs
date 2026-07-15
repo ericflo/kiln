@@ -1216,6 +1216,7 @@ struct StreamingTokenTiming {
     object: &'static str,
     source: &'static str,
     token_index: u32,
+    token_id: u32,
     ready_ms: f64,
     producer_delivered_ms: f64,
     handler_received_ms: f64,
@@ -1240,6 +1241,7 @@ fn streaming_token_timing_json(
     enabled: bool,
     source: &'static str,
     token_index: u32,
+    token_id: u32,
     request_start: std::time::Instant,
     timing: EngineTokenTiming,
     handler_received_at: std::time::Instant,
@@ -1252,6 +1254,7 @@ fn streaming_token_timing_json(
             object: "kiln.token_timing",
             source,
             token_index,
+            token_id,
             ready_ms: instant_delta_ms(request_start, timing.ready_at),
             producer_delivered_ms: instant_delta_ms(request_start, producer_delivered_at),
             handler_received_ms: instant_delta_ms(request_start, handler_received_at),
@@ -7505,6 +7508,7 @@ async fn generate_real_batched_streaming(
                                             include_token_timing,
                                             "batching_engine",
                                             completion_token_count,
+                                            token,
                                             request_start,
                                             timing,
                                             handler_received_at,
@@ -9040,6 +9044,7 @@ async fn generate_real_streaming(
                                     include_token_timing,
                                     "direct",
                                     completion_token_count,
+                                    token.token_id,
                                     request_start,
                                     timing,
                                     handler_received_at,
@@ -14255,6 +14260,7 @@ mod tests {
                 false,
                 "batching_engine",
                 1,
+                42,
                 request_start,
                 engine_timing,
                 handler_received_at,
@@ -14267,6 +14273,7 @@ mod tests {
             true,
             "batching_engine",
             7,
+            4242,
             request_start,
             engine_timing,
             handler_received_at,
@@ -14282,10 +14289,11 @@ mod tests {
         assert_eq!(payloads.len(), 1);
         let payload = payloads.into_iter().next().unwrap();
         let object = payload.as_object().unwrap();
-        assert_eq!(object.len(), 13, "timing payload shape changed: {payload}");
+        assert_eq!(object.len(), 14, "timing payload shape changed: {payload}");
         assert_eq!(payload["object"], "kiln.token_timing");
         assert_eq!(payload["source"], "batching_engine");
         assert_eq!(payload["token_index"], 7);
+        assert_eq!(payload["token_id"], 4242);
         assert_eq!(payload["ready_ms"], 12.0);
         assert_eq!(payload["producer_delivered_ms"], 14.0);
         assert_eq!(payload["handler_received_ms"], 17.0);

@@ -621,13 +621,14 @@ def parse_token_timing(
     value: Any,
     expected_index: int,
     previous_ready_ms: float | None = None,
-) -> tuple[float, float] | None:
+) -> tuple[int, float, float] | None:
     if not isinstance(value, dict) or value.get("object") != "kiln.token_timing":
         return None
     if set(value) != {
         "object",
         "source",
         "token_index",
+        "token_id",
         "ready_ms",
         "producer_delivered_ms",
         "handler_received_ms",
@@ -649,6 +650,14 @@ def parse_token_timing(
         raise QualificationError(
             f"token timing index {token_index!r} does not match expected {expected_index}"
         )
+    token_id = value["token_id"]
+    if (
+        isinstance(token_id, bool)
+        or not isinstance(token_id, int)
+        or token_id < 0
+        or token_id > 0xFFFFFFFF
+    ):
+        raise QualificationError("token timing token_id is not a u32")
     source = value["source"]
     if source not in {"batching_engine", "direct"}:
         raise QualificationError("token timing source is not bounded")
@@ -719,7 +728,7 @@ def parse_token_timing(
         raise QualificationError("first token timing unexpectedly has a blocking phase")
     elif float(blocking_phase_ms) > numbers["ready_ms"] - previous_ready_ms + 0.05:
         raise QualificationError("token timing blocking phase exceeds its request-local gap")
-    return numbers["ready_ms"], numbers["queue_delay_ms"]
+    return token_id, numbers["ready_ms"], numbers["queue_delay_ms"]
 
 
 PERFORMANCE_METADATA_FIELDS = {
@@ -956,6 +965,7 @@ class StreamResult:
     done: bool
     cancelled: bool
     error: str | None
+    token_ids: list[int] = dataclasses.field(default_factory=list)
     actor_queue_ms: float | None = None
     actor_admission_ms: float | None = None
     actor_prefill_wall_ms: float | None = None
@@ -1182,6 +1192,7 @@ def run_stream(
     semantic_deltas: list[dict[str, Any]] = []
     token_ready_times: list[float] = []
     token_queue_delays_ms: list[float] = []
+    token_ids: list[int] = []
     previous_ready_ms: float | None = None
     prompt_tokens = 0
     completion_tokens = 0
@@ -1270,7 +1281,8 @@ def run_stream(
                     previous_ready_ms,
                 )
                 if timing is not None:
-                    ready_ms, queue_delay_ms = timing
+                    token_id, ready_ms, queue_delay_ms = timing
+                    token_ids.append(token_id)
                     previous_ready_ms = ready_ms
                     token_ready_times.append(started + ready_ms / 1000.0)
                     token_queue_delays_ms.append(queue_delay_ms)
@@ -1368,6 +1380,7 @@ def run_stream(
         done=done,
         cancelled=cancelled,
         error=error,
+        token_ids=token_ids,
         actor_queue_ms=actor_queue_ms,
         actor_admission_ms=actor_admission_ms,
         actor_prefill_wall_ms=actor_prefill_wall_ms,
