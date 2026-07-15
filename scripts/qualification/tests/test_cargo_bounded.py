@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -186,6 +188,120 @@ class BoundedCargoTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 2, completed.stderr)
         self.assertIn("requires transient-service", completed.stderr)
+
+    def test_transient_service_thermal_guard_stops_the_complete_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tool_dir = root / "tools"
+            tool_dir.mkdir()
+            systemctl_args = root / "systemctl.args"
+            (tool_dir / "systemd-run").write_text(
+                "#!/bin/sh\nexec sleep 30\n",
+                encoding="utf-8",
+            )
+            (tool_dir / "systemctl").write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$KILN_TEST_SYSTEMCTL_ARGS\"\n",
+                encoding="utf-8",
+            )
+            (tool_dir / "systemd-run").chmod(0o755)
+            (tool_dir / "systemctl").chmod(0o755)
+
+            hwmon = root / "hwmon" / "hwmon7"
+            hwmon.mkdir(parents=True)
+            (hwmon / "name").write_text("k10temp\n", encoding="utf-8")
+            (hwmon / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            temperature = hwmon / "temp1_input"
+            temperature.write_text("40000\n", encoding="utf-8")
+
+            def trip_sensor() -> None:
+                time.sleep(0.2)
+                replacement = hwmon / "temp1_input.next"
+                replacement.write_text("97000\n", encoding="utf-8")
+                os.replace(replacement, temperature)
+
+            updater = threading.Thread(target=trip_sensor)
+            updater.start()
+            environment = dict(os.environ)
+            environment.update(
+                {
+                    "CARGO": "/bin/true",
+                    "KILN_CARGO_EXECUTION_MODE": "transient-service",
+                    "KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS": "97000",
+                    "KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS": "50",
+                    "KILN_CARGO_HOST_THERMAL_SENSOR_LABEL": "Tctl",
+                    "KILN_CARGO_HOST_THERMAL_SENSOR_NAME": "k10temp",
+                    "KILN_CARGO_HWMON_ROOT": str(root / "hwmon"),
+                    "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
+                    "KILN_TEST_SYSTEMCTL_ARGS": str(systemctl_args),
+                    "PATH": f"{tool_dir}:{environment['PATH']}",
+                }
+            )
+            started = time.monotonic()
+            completed = subprocess.run(
+                [str(SCRIPT), "build"],
+                cwd=ROOT,
+                check=False,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+            updater.join(timeout=1)
+            self.assertEqual(completed.returncode, 3, completed.stderr)
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertIn("thermal guard tripped", completed.stderr)
+            self.assertIn("97000 millicelsius", completed.stderr)
+            self.assertIn("stop", systemctl_args.read_text(encoding="utf-8"))
+
+    def test_cancelled_scope_stops_its_named_unit_and_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tool_dir = root / "tools"
+            tool_dir.mkdir()
+            runner_pid_path = root / "runner.pid"
+            systemctl_args = root / "systemctl.args"
+            (tool_dir / "systemd-run").write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$KILN_TEST_RUNNER_PID\"\nexec sleep 30\n",
+                encoding="utf-8",
+            )
+            (tool_dir / "systemctl").write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$KILN_TEST_SYSTEMCTL_ARGS\"\n",
+                encoding="utf-8",
+            )
+            (tool_dir / "systemd-run").chmod(0o755)
+            (tool_dir / "systemctl").chmod(0o755)
+            empty_hwmon = root / "hwmon"
+            empty_hwmon.mkdir()
+            environment = dict(os.environ)
+            environment.update(
+                {
+                    "CARGO": "/bin/true",
+                    "KILN_CARGO_HWMON_ROOT": str(empty_hwmon),
+                    "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
+                    "KILN_TEST_RUNNER_PID": str(runner_pid_path),
+                    "KILN_TEST_SYSTEMCTL_ARGS": str(systemctl_args),
+                    "PATH": f"{tool_dir}:{environment['PATH']}",
+                }
+            )
+            process = subprocess.Popen(
+                [str(SCRIPT), "check"],
+                cwd=ROOT,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + 2
+            while not runner_pid_path.is_file() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(runner_pid_path.is_file())
+            runner_pid = int(runner_pid_path.read_text(encoding="utf-8"))
+            process.terminate()
+            process.communicate(timeout=3)
+            self.assertIn("stop", systemctl_args.read_text(encoding="utf-8"))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(runner_pid, 0)
 
 
 if __name__ == "__main__":

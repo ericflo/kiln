@@ -50,6 +50,10 @@ BUILD_CARGO_EXECUTION_MODE = "transient-service"
 BUILD_CARGO_PRIVATE_NETWORK = True
 BUILD_CARGO_ENVIRONMENT_POLICY = "closed-source-build-v1"
 BUILD_CARGO_SERVICE_RUNTIME_MAX_SECONDS = 840
+BUILD_CARGO_HOST_THERMAL_SENSOR_NAME = "k10temp"
+BUILD_CARGO_HOST_THERMAL_SENSOR_LABEL = "Tctl"
+BUILD_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS = 97_000
+BUILD_CARGO_HOST_THERMAL_POLL_MILLISECONDS = 250
 BUILD_TIMEOUT_SECONDS = 900.0
 STARTUP_TIMEOUT_SECONDS = 240.0
 REQUEST_TIMEOUT_SECONDS = 120.0
@@ -112,8 +116,49 @@ class SourceBuildSpec:
     cargo_private_network: bool = BUILD_CARGO_PRIVATE_NETWORK
     cargo_environment_policy: str = BUILD_CARGO_ENVIRONMENT_POLICY
     cargo_service_runtime_max_seconds: int = BUILD_CARGO_SERVICE_RUNTIME_MAX_SECONDS
+    cargo_host_thermal_sensor_name: str | None = None
+    cargo_host_thermal_sensor_label: str | None = None
+    cargo_host_thermal_limit_millicelsius: int | None = None
+    cargo_host_thermal_poll_milliseconds: int | None = None
     timeout_seconds: float = BUILD_TIMEOUT_SECONDS
     environment: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        thermal = (
+            self.cargo_host_thermal_sensor_name,
+            self.cargo_host_thermal_sensor_label,
+            self.cargo_host_thermal_limit_millicelsius,
+            self.cargo_host_thermal_poll_milliseconds,
+        )
+        configured = sum(value is not None for value in thermal)
+        if configured not in (0, len(thermal)):
+            raise ValueError("source-build thermal fields must be configured together")
+        if configured == 0:
+            return
+        if (
+            not isinstance(self.cargo_host_thermal_sensor_name, str)
+            or not self.cargo_host_thermal_sensor_name
+        ):
+            raise ValueError("source-build thermal sensor name must be non-empty")
+        if (
+            not isinstance(self.cargo_host_thermal_sensor_label, str)
+            or not self.cargo_host_thermal_sensor_label
+        ):
+            raise ValueError("source-build thermal sensor label must be non-empty")
+        limit = self.cargo_host_thermal_limit_millicelsius
+        poll = self.cargo_host_thermal_poll_milliseconds
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 200_000
+        ):
+            raise ValueError("source-build thermal limit must be in 1..=200000")
+        if (
+            isinstance(poll, bool)
+            or not isinstance(poll, int)
+            or not 50 <= poll <= 60_000
+        ):
+            raise ValueError("source-build thermal poll interval must be in 50..=60000")
 
     def effective_config(self) -> dict[str, Any]:
         config: dict[str, Any] = {
@@ -121,6 +166,20 @@ class SourceBuildSpec:
             "cargo_jobs": self.cargo_jobs,
             "cargo_execution_mode": self.cargo_execution_mode,
             "cargo_environment_policy": self.cargo_environment_policy,
+            **(
+                {
+                    "cargo_host_thermal_limit_millicelsius": (
+                        self.cargo_host_thermal_limit_millicelsius
+                    ),
+                    "cargo_host_thermal_poll_milliseconds": (
+                        self.cargo_host_thermal_poll_milliseconds
+                    ),
+                    "cargo_host_thermal_sensor_label": self.cargo_host_thermal_sensor_label,
+                    "cargo_host_thermal_sensor_name": self.cargo_host_thermal_sensor_name,
+                }
+                if self.cargo_host_thermal_sensor_name is not None
+                else {}
+            ),
             "cargo_memory_scope": self.cargo_memory_scope,
             "cargo_min_available_gib": self.cargo_min_available_gib,
             "cargo_private_network": self.cargo_private_network,
@@ -141,6 +200,10 @@ class SourceBuildSpec:
 ROCM_BUILD_SPEC = SourceBuildSpec(
     backend="ROCm",
     features=BUILD_FEATURES,
+    cargo_host_thermal_sensor_name=BUILD_CARGO_HOST_THERMAL_SENSOR_NAME,
+    cargo_host_thermal_sensor_label=BUILD_CARGO_HOST_THERMAL_SENSOR_LABEL,
+    cargo_host_thermal_limit_millicelsius=BUILD_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS,
+    cargo_host_thermal_poll_milliseconds=BUILD_CARGO_HOST_THERMAL_POLL_MILLISECONDS,
     environment=(
         ("rocm_archs", BUILD_ROCM_ARCHS),
         ("rocm_path", BUILD_ROCM_PATH),
@@ -150,6 +213,10 @@ VULKAN_BUILD_SPEC = SourceBuildSpec(
     backend="Vulkan",
     features="vulkan",
     cargo_service_runtime_max_seconds=840,
+    cargo_host_thermal_sensor_name=BUILD_CARGO_HOST_THERMAL_SENSOR_NAME,
+    cargo_host_thermal_sensor_label=BUILD_CARGO_HOST_THERMAL_SENSOR_LABEL,
+    cargo_host_thermal_limit_millicelsius=BUILD_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS,
+    cargo_host_thermal_poll_milliseconds=BUILD_CARGO_HOST_THERMAL_POLL_MILLISECONDS,
     timeout_seconds=900.0,
 )
 
@@ -2057,6 +2124,19 @@ def source_bound_build_environment(
             ),
         }
     )
+    if spec.cargo_host_thermal_sensor_name is not None:
+        environment.update(
+            {
+                "KILN_CARGO_HOST_THERMAL_SENSOR_NAME": spec.cargo_host_thermal_sensor_name,
+                "KILN_CARGO_HOST_THERMAL_SENSOR_LABEL": spec.cargo_host_thermal_sensor_label,
+                "KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS": str(
+                    spec.cargo_host_thermal_limit_millicelsius
+                ),
+                "KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS": str(
+                    spec.cargo_host_thermal_poll_milliseconds
+                ),
+            }
+        )
     for key, value in spec.environment:
         environment_key = {
             "rocm_archs": "KILN_ROCM_ARCHS",

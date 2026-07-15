@@ -24,6 +24,13 @@ Overrides:
                                   closed-qualification-test-v1, or inherit
   KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS
                                   Hard transient-service deadline (default: 3600)
+  KILN_CARGO_HOST_THERMAL_SENSOR_NAME
+  KILN_CARGO_HOST_THERMAL_SENSOR_LABEL
+  KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS
+  KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS
+                                  Package-temperature guard for scopes and services. All four
+                                  fields must be set together. If omitted, a unique
+                                  k10temp/Tctl sensor enables a 97000 mC, 250 ms guard.
 EOF
 }
 
@@ -39,16 +46,12 @@ if [[ "$execution_mode" != "scope" && "$execution_mode" != "transient-service" ]
     exit 2
 fi
 
-for tool in awk ps systemd-run; do
+for tool in awk ps sleep systemctl systemd-run; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "error: required tool '$tool' is not available" >&2
         exit 2
     fi
 done
-if [[ "$execution_mode" == "transient-service" ]] && ! command -v systemctl >/dev/null 2>&1; then
-    echo "error: required tool 'systemctl' is not available" >&2
-    exit 2
-fi
 
 cargo_executable="${CARGO:-}"
 if [[ -n "$cargo_executable" ]]; then
@@ -165,29 +168,178 @@ if [[ ! "$service_runtime_max_seconds" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-echo "bounded-cargo: mode=$execution_mode jobs=$jobs available=${available_gib}GiB reserve=${reserve_gib}GiB aggregate_limit=${limit_gib}GiB swap_limit=0 private_network=$private_network environment_policy=$environment_policy" >&2
+thermal_sensor_name="${KILN_CARGO_HOST_THERMAL_SENSOR_NAME:-}"
+thermal_sensor_label="${KILN_CARGO_HOST_THERMAL_SENSOR_LABEL:-}"
+thermal_limit_millicelsius="${KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS:-}"
+thermal_poll_milliseconds="${KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS:-}"
+thermal_fields_set=0
+for value in \
+    "$thermal_sensor_name" \
+    "$thermal_sensor_label" \
+    "$thermal_limit_millicelsius" \
+    "$thermal_poll_milliseconds"; do
+    [[ -n "$value" ]] && thermal_fields_set=$((thermal_fields_set + 1))
+done
+if (( thermal_fields_set != 0 && thermal_fields_set != 4 )); then
+    echo "error: all four KILN_CARGO_HOST_THERMAL_* fields must be set together" >&2
+    exit 2
+fi
+thermal_sensor_path=""
+thermal_poll_seconds=""
+thermal_config_source="explicit"
+if (( thermal_fields_set == 0 )); then
+    thermal_sensor_name="k10temp"
+    thermal_sensor_label="Tctl"
+    thermal_limit_millicelsius="97000"
+    thermal_poll_milliseconds="250"
+    thermal_config_source="automatic"
+fi
+if (( thermal_fields_set == 4 )) || [[ "$thermal_config_source" == "automatic" ]]; then
+    if [[ ! "$thermal_limit_millicelsius" =~ ^[1-9][0-9]*$ ]] \
+        || (( thermal_limit_millicelsius > 200000 )); then
+        echo "error: KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS must be in 1..=200000, got '$thermal_limit_millicelsius'" >&2
+        exit 2
+    fi
+    if [[ ! "$thermal_poll_milliseconds" =~ ^[1-9][0-9]*$ ]] \
+        || (( thermal_poll_milliseconds < 50 || thermal_poll_milliseconds > 60000 )); then
+        echo "error: KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS must be in 50..=60000, got '$thermal_poll_milliseconds'" >&2
+        exit 2
+    fi
+    hwmon_root="${KILN_CARGO_HWMON_ROOT:-/sys/class/hwmon}"
+    thermal_matches=()
+    for hwmon_dir in "$hwmon_root"/hwmon*; do
+        [[ -d "$hwmon_dir" && -r "$hwmon_dir/name" ]] || continue
+        IFS= read -r observed_name < "$hwmon_dir/name" || continue
+        [[ "$observed_name" == "$thermal_sensor_name" ]] || continue
+        for label_path in "$hwmon_dir"/temp*_label; do
+            [[ -r "$label_path" ]] || continue
+            IFS= read -r observed_label < "$label_path" || continue
+            [[ "$observed_label" == "$thermal_sensor_label" ]] || continue
+            input_path="${label_path%_label}_input"
+            [[ -r "$input_path" ]] || continue
+            thermal_matches+=("$input_path")
+        done
+    done
+    if (( ${#thermal_matches[@]} == 0 )) && [[ "$thermal_config_source" == "automatic" ]]; then
+        thermal_sensor_name=""
+        thermal_sensor_label=""
+        thermal_limit_millicelsius=""
+        thermal_poll_milliseconds=""
+    elif (( ${#thermal_matches[@]} != 1 )); then
+        echo "error: Cargo host thermal selector name='$thermal_sensor_name' label='$thermal_sensor_label' matched ${#thermal_matches[@]} readable sensors under '$hwmon_root'" >&2
+        exit 2
+    else
+        thermal_sensor_path="${thermal_matches[0]}"
+        IFS= read -r starting_temperature < "$thermal_sensor_path" || starting_temperature=""
+        if [[ ! "$starting_temperature" =~ ^[0-9]+$ ]] \
+            || (( starting_temperature == 0 || starting_temperature > 200000 )); then
+            echo "error: Cargo host thermal sensor '$thermal_sensor_path' returned implausible reading '$starting_temperature'" >&2
+            exit 2
+        fi
+        if (( starting_temperature >= thermal_limit_millicelsius )); then
+            echo "error: refusing Cargo at ${starting_temperature} millicelsius; thermal limit is ${thermal_limit_millicelsius}" >&2
+            exit 2
+        fi
+        thermal_poll_seconds="$(awk -v milliseconds="$thermal_poll_milliseconds" 'BEGIN { printf "%.3f", milliseconds / 1000 }')"
+    fi
+fi
+
+thermal_summary="disabled"
+if [[ -n "$thermal_sensor_path" ]]; then
+    thermal_summary="${thermal_config_source}:${thermal_sensor_name}/${thermal_sensor_label}:${thermal_limit_millicelsius}mC@${thermal_poll_milliseconds}ms"
+fi
+echo "bounded-cargo: mode=$execution_mode jobs=$jobs available=${available_gib}GiB reserve=${reserve_gib}GiB aggregate_limit=${limit_gib}GiB swap_limit=0 private_network=$private_network environment_policy=$environment_policy thermal=$thermal_summary" >&2
+read -r bounded_uuid < /proc/sys/kernel/random/uuid
 if [[ "$execution_mode" == "scope" ]]; then
-    exec systemd-run \
+    bounded_unit="kiln-cargo-bounded-${bounded_uuid//-/}.scope"
+else
+    bounded_unit="kiln-cargo-bounded-${bounded_uuid//-/}.service"
+fi
+bounded_runner_pid=""
+thermal_watchdog_pid=""
+thermal_trip_file="${TMPDIR:-/tmp}/kiln-cargo-bounded-${bounded_uuid//-/}.thermal-trip"
+cleanup_unit() {
+    if [[ -n "$thermal_watchdog_pid" ]]; then
+        kill "$thermal_watchdog_pid" >/dev/null 2>&1 || true
+        wait "$thermal_watchdog_pid" >/dev/null 2>&1 || true
+    fi
+    systemctl --user stop "$bounded_unit" >/dev/null 2>&1 || true
+    if [[ -n "$bounded_runner_pid" ]]; then
+        kill -TERM "$bounded_runner_pid" >/dev/null 2>&1 || true
+        wait "$bounded_runner_pid" >/dev/null 2>&1 || true
+    fi
+    rm -f "$thermal_trip_file"
+}
+trap cleanup_unit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+start_thermal_watchdog() {
+    [[ -n "$thermal_sensor_path" ]] || return 0
+    (
+        while kill -0 "$bounded_runner_pid" >/dev/null 2>&1; do
+            IFS= read -r current_temperature < "$thermal_sensor_path" || current_temperature=""
+            trip_reason=""
+            if [[ ! "$current_temperature" =~ ^[0-9]+$ ]] \
+                || (( current_temperature == 0 || current_temperature > 200000 )); then
+                trip_reason="sensor '$thermal_sensor_path' returned implausible reading '$current_temperature'"
+            elif (( current_temperature >= thermal_limit_millicelsius )); then
+                trip_reason="temperature ${current_temperature} millicelsius reached limit ${thermal_limit_millicelsius}"
+            fi
+            if [[ -n "$trip_reason" ]]; then
+                printf '%s\n' "$trip_reason" > "$thermal_trip_file"
+                echo "error: Cargo host thermal guard tripped: $trip_reason" >&2
+                systemctl --user stop "$bounded_unit" >/dev/null 2>&1 || true
+                kill -TERM "$bounded_runner_pid" >/dev/null 2>&1 || true
+                exit 0
+            fi
+            sleep "$thermal_poll_seconds"
+        done
+    ) &
+    thermal_watchdog_pid=$!
+}
+
+wait_for_bounded_runner() {
+    start_thermal_watchdog
+    if wait "$bounded_runner_pid"; then
+        bounded_status=0
+    else
+        bounded_status=$?
+    fi
+    if [[ -n "$thermal_watchdog_pid" ]]; then
+        kill "$thermal_watchdog_pid" >/dev/null 2>&1 || true
+        wait "$thermal_watchdog_pid" >/dev/null 2>&1 || true
+        thermal_watchdog_pid=""
+    fi
+    if [[ -f "$thermal_trip_file" ]]; then
+        return 3
+    fi
+    return "$bounded_status"
+}
+
+if [[ "$execution_mode" == "scope" ]]; then
+    systemd-run \
         --user \
         --scope \
         --quiet \
+        --unit "$bounded_unit" \
         -p "MemoryMax=${limit_gib}G" \
         -p MemorySwapMax=0 \
         -p OOMPolicy=kill \
-        "$cargo_executable" "$@"
+        "$cargo_executable" "$@" &
+    bounded_runner_pid=$!
+    if wait_for_bounded_runner; then
+        exit 0
+    else
+        exit $?
+    fi
 fi
 
 # A process in a bubblewrap PID namespace cannot be attached to the host user
 # manager as a scope. Qualification uses a transient service instead: Cargo is
 # still in one bounded cgroup, while PrivateNetwork independently preserves the
-# offline build boundary. The explicit unit and EXIT trap make a normal timeout
+# offline build boundary. The named unit and EXIT trap make client cancellation
 # stop the complete compiler/linker tree; RuntimeMaxSec bounds hard-kill cases.
-read -r service_uuid < /proc/sys/kernel/random/uuid
-service_unit="kiln-cargo-bounded-${service_uuid//-/}.service"
-cleanup_service() {
-    systemctl --user stop "$service_unit" >/dev/null 2>&1 || true
-}
-trap cleanup_service EXIT
 
 environment_args=()
 if [[ "$environment_policy" == "inherit" ]]; then
@@ -247,7 +399,7 @@ systemd-run \
     --pipe \
     --quiet \
     --same-dir \
-    --unit "$service_unit" \
+    --unit "$bounded_unit" \
     "${environment_args[@]}" \
     -p Type=exec \
     -p "MemoryMax=${limit_gib}G" \
@@ -258,4 +410,10 @@ systemd-run \
     -p TimeoutStopSec=15s \
     -p "RuntimeMaxSec=${service_runtime_max_seconds}s" \
     -p "$private_network_property" \
-    "$cargo_executable" "$@"
+    "$cargo_executable" "$@" &
+bounded_runner_pid=$!
+if wait_for_bounded_runner; then
+    exit 0
+else
+    exit $?
+fi

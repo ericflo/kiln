@@ -873,6 +873,10 @@ class ServeMixedLoadTests(unittest.TestCase):
             "cargo_jobs": 1,
             "cargo_execution_mode": "transient-service",
             "cargo_environment_policy": "closed-source-build-v1",
+            "cargo_host_thermal_limit_millicelsius": 97_000,
+            "cargo_host_thermal_poll_milliseconds": 250,
+            "cargo_host_thermal_sensor_label": "Tctl",
+            "cargo_host_thermal_sensor_name": "k10temp",
             "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
             "cargo_min_available_gib": 15,
             "cargo_private_network": True,
@@ -1037,6 +1041,16 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
         self.assertEqual(environment["KILN_CARGO_PRIVATE_NETWORK"], "1")
         self.assertEqual(environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "840")
+        self.assertEqual(
+            environment["KILN_CARGO_HOST_THERMAL_SENSOR_NAME"], "k10temp"
+        )
+        self.assertEqual(environment["KILN_CARGO_HOST_THERMAL_SENSOR_LABEL"], "Tctl")
+        self.assertEqual(
+            environment["KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS"], "97000"
+        )
+        self.assertEqual(
+            environment["KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS"], "250"
+        )
         self.assertEqual(environment["KILN_ROCM_ARCHS"], serve.BUILD_ROCM_ARCHS)
 
     def test_vulkan_source_build_is_bounded_without_rocm_environment(self) -> None:
@@ -1060,6 +1074,16 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
         self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
         self.assertEqual(environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "840")
+        self.assertEqual(
+            environment["KILN_CARGO_HOST_THERMAL_SENSOR_NAME"], "k10temp"
+        )
+        self.assertEqual(environment["KILN_CARGO_HOST_THERMAL_SENSOR_LABEL"], "Tctl")
+        self.assertEqual(
+            environment["KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS"], "97000"
+        )
+        self.assertEqual(
+            environment["KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS"], "250"
+        )
         self.assertNotIn("ROCM_PATH", environment)
         self.assertNotIn("KILN_ROCM_ARCHS", environment)
         self.assertEqual(
@@ -1069,6 +1093,10 @@ class ServeMixedLoadTests(unittest.TestCase):
                 "cargo_jobs": 1,
                 "cargo_execution_mode": "transient-service",
                 "cargo_environment_policy": "closed-source-build-v1",
+                "cargo_host_thermal_limit_millicelsius": 97_000,
+                "cargo_host_thermal_poll_milliseconds": 250,
+                "cargo_host_thermal_sensor_label": "Tctl",
+                "cargo_host_thermal_sensor_name": "k10temp",
                 "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
                 "cargo_min_available_gib": 15,
                 "cargo_private_network": True,
@@ -1093,6 +1121,23 @@ class ServeMixedLoadTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(serve.QualificationError, "at least 60 seconds"):
             serve.build_binary(1.0e18, spec)
+
+    def test_source_build_thermal_fields_are_one_typed_unit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "configured together"):
+            serve.SourceBuildSpec(
+                backend="test",
+                features="test",
+                cargo_host_thermal_sensor_name="k10temp",
+            )
+        with self.assertRaisesRegex(ValueError, "poll interval"):
+            serve.SourceBuildSpec(
+                backend="test",
+                features="test",
+                cargo_host_thermal_sensor_name="k10temp",
+                cargo_host_thermal_sensor_label="Tctl",
+                cargo_host_thermal_limit_millicelsius=97_000,
+                cargo_host_thermal_poll_milliseconds=0,
+            )
 
     def test_vulkan_server_environment_cannot_inherit_rocm_toolchain(self) -> None:
         with mock.patch.dict(

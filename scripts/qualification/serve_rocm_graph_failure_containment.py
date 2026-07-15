@@ -39,6 +39,14 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
         "cargo_jobs": mixed.BUILD_CARGO_JOBS,
         "cargo_execution_mode": mixed.BUILD_CARGO_EXECUTION_MODE,
         "cargo_environment_policy": mixed.BUILD_CARGO_ENVIRONMENT_POLICY,
+        "cargo_host_thermal_limit_millicelsius": (
+            mixed.BUILD_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS
+        ),
+        "cargo_host_thermal_poll_milliseconds": (
+            mixed.BUILD_CARGO_HOST_THERMAL_POLL_MILLISECONDS
+        ),
+        "cargo_host_thermal_sensor_label": mixed.BUILD_CARGO_HOST_THERMAL_SENSOR_LABEL,
+        "cargo_host_thermal_sensor_name": mixed.BUILD_CARGO_HOST_THERMAL_SENSOR_NAME,
         "cargo_memory_scope": mixed.BUILD_CARGO_MEMORY_SCOPE,
         "cargo_min_available_gib": mixed.BUILD_CARGO_MIN_AVAILABLE_GIB,
         "cargo_private_network": mixed.BUILD_CARGO_PRIVATE_NETWORK,

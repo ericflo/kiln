@@ -75,15 +75,22 @@ Cargo/rustc processes. Because the case retains bubblewrap PID isolation, the
 offline build runs as a transient systemd user service rather than attempting
 to attach the namespaced Cargo PID to a host scope. The service has an
 aggregate `MemoryMax`, host reserve, zero swap, `PrivateNetwork=yes`,
-control-group kill, and a hard runtime cap. Ordinary ROCm and Vulkan build
-services are capped at 840 seconds with a 900-second caller timeout; the
-real-ROCm fault corpus uses 1140 and 1200 seconds respectively. This
+control-group kill, a hard runtime cap, and a fail-closed package-temperature
+watchdog. The typed build spec selects exactly one Linux hwmon input by
+`name=k10temp` and `label=Tctl`, polls it every 250 ms, refuses to start at or
+above 97,000 millicelsius, and stops the complete transient service if a later
+reading reaches that limit. Missing, ambiguous, unreadable, non-integer, or
+implausible telemetry also prevents or terminates the build. Ordinary ROCm and
+Vulkan build services are capped at 840 seconds with a 900-second caller
+timeout; the real-ROCm fault corpus uses 1140 and 1200 seconds respectively. This
 60-second ordering ensures systemd can stop and collect the complete cgroup
 before an outer qualification timeout can kill the wrapper. The measured server
 still runs inside the case's separate network and PID namespaces. The committed
 effective build config records the wrapper, job count, floor, execution mode,
-private-network requirement, versioned environment policy, both deadlines, and
-memory policy. `closed-source-build-v1` retains only Cargo/Rustup homes, the
+private-network requirement, versioned environment policy, both deadlines,
+memory policy, and all four thermal-selector fields. The driver derives the
+wrapper's `KILN_CARGO_HOST_THERMAL_*` controls from those typed fields; ambient
+values cannot alter the selector or limit. `closed-source-build-v1` retains only Cargo/Rustup homes, the
 pinned PATH and ROCm architecture/path, locale, user/home, temporary-directory,
 and user-systemd connection variables. It excludes ambient compiler flags,
 target directories, credentials, and API tokens before invoking the wrapper;
@@ -92,6 +99,18 @@ service environment. Bounded stderr records the machine-specific
 available/reserve/limit values. Do not lower the floor or bypass the wrapper to
 obtain a receipt. Let the machine recover memory and rerun from the same clean
 commit.
+
+Outside a source-bound workload, `scripts/cargo-bounded.sh` also names every
+ordinary systemd scope and stops that complete unit from its `EXIT` trap, so a
+cancelled terminal or tool client cannot leave Cargo, rustc, or the linker
+running in an orphaned scope. When exactly one `k10temp/Tctl` input exists, the
+wrapper automatically applies the same 97,000-millicelsius, 250 ms guard to
+ordinary commands and reports `thermal=automatic:...` in its preamble. A host
+without that exact sensor runs with `thermal=disabled`; qualification source
+builds do not accept that fallback because their four explicit typed fields make
+missing or ambiguous telemetry a preflight failure. Operators may explicitly
+configure a different stable selector only by setting all four documented
+`KILN_CARGO_HOST_THERMAL_*` wrapper controls together.
 
 Every serving driver creates a collision-resistant mode-0700 workspace below
 `.qualification/serving` (the pressure driver uses
@@ -1190,9 +1209,11 @@ thermal-trip count, including startup or pre-measurement failures. The effective
 configuration records the sensor name, label, limit, and poll interval, so a
 receipt cannot silently inherit a different sensor or threshold. This guard
 covers model load, native prewarm, warmup, stabilization, measurement, and final
-drain. The preceding source build remains separately bounded by
-`scripts/cargo-bounded.sh`; the thermal guard does not claim to control that
-transient build service.
+drain. The preceding source build independently resolves the same stable sensor
+selector and enforces the same threshold and cadence around its complete
+transient compiler/linker service. A build trip exits with status 3, while a
+missing or invalid sensor fails preflight with status 2; neither can be recorded
+as a successful source-bound build.
 
 At the drained warmup baseline and after each of the at most eight Vulkan
 stabilization cycles, the driver also reads `/proc/<pid>/smaps`. This is bounded
