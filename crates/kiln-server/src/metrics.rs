@@ -2449,6 +2449,15 @@ impl Metrics {
                 value,
             );
         }
+        out.push_str("# HELP kiln_prefix_cache_snapshot_suppressions_total Block-aligned prefix snapshots rejected because backend-resident state was newer than the logical cache state.\n");
+        out.push_str("# TYPE kiln_prefix_cache_snapshot_suppressions_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prefix_cache_snapshot_suppressions_total {}",
+                stats.resident_prefix_snapshot_suppression_count
+            ),
+        );
 
         if let Some(stats) = gauges.vulkan_buffer_pool {
             out.push_str("# HELP kiln_vulkan_buffer_pool_limit_bytes Configured maximum bytes retained by the Vulkan scratch recycler.\n");
@@ -3654,6 +3663,7 @@ mod tests {
                 completed_row_preservation_count: 11,
                 completed_row_eviction_count: 1,
                 lease_drop_eviction_count: 6,
+                resident_prefix_snapshot_suppression_count: 9,
             },
             prefix_cache: PrefixCacheStats {
                 lookup_hits: 7,
@@ -3954,6 +3964,7 @@ mod tests {
             "kiln_batched_recurrent_state_cache_evictions_total{reason=\"explicit_invalidation\"} 1",
             "kiln_batched_recurrent_state_cache_evictions_total{reason=\"completed_row\"} 1",
             "kiln_batched_recurrent_state_cache_evictions_total{reason=\"lease_drop\"} 6",
+            "kiln_prefix_cache_snapshot_suppressions_total 9",
         ] {
             assert!(output.contains(expected), "missing metric: {expected}");
         }

@@ -709,6 +709,10 @@ pub struct BatchedStateCacheStats {
     pub completed_row_preservation_count: u64,
     pub completed_row_eviction_count: u64,
     pub lease_drop_eviction_count: u64,
+    /// Block-aligned prefix snapshots deliberately not captured because a
+    /// backend-resident GDN buffer, rather than the logical tensors, owned the
+    /// current recurrent and convolution state.
+    pub resident_prefix_snapshot_suppression_count: u64,
 }
 
 #[derive(Debug, Default)]
@@ -734,6 +738,7 @@ struct BatchedStateCacheCounters {
     completed_row_preservation_count: AtomicU64,
     completed_row_eviction_count: AtomicU64,
     lease_drop_eviction_count: AtomicU64,
+    resident_prefix_snapshot_suppression_count: AtomicU64,
 }
 
 impl BatchedStateCacheCounters {
@@ -786,6 +791,9 @@ impl BatchedStateCacheCounters {
                 .load(Ordering::Relaxed),
             completed_row_eviction_count: self.completed_row_eviction_count.load(Ordering::Relaxed),
             lease_drop_eviction_count: self.lease_drop_eviction_count.load(Ordering::Relaxed),
+            resident_prefix_snapshot_suppression_count: self
+                .resident_prefix_snapshot_suppression_count
+                .load(Ordering::Relaxed),
             ..BatchedStateCacheStats::default()
         }
     }
@@ -1025,18 +1033,33 @@ pub struct PagedBatchedDecodeState {
 }
 
 fn complete_paged_batched_decode_step(
+    backend: &dyn BackendRuntime,
+    resident_prefix_snapshot_suppression_count: &AtomicU64,
     states: &mut [&mut PagedBatchedDecodeState],
     decode_duration: std::time::Duration,
 ) {
     for state in states {
         state.seq_len += 1;
         state.decode_duration += decode_duration;
-        // Preserve the existing rolling prefix-cache snapshot semantics for
-        // both token-only and provenance-capturing decode paths.
+        // A resident Vulkan decode advances backend-private recurrent, conv,
+        // and KV buffers without writing the logical tensors or generic paged
+        // cache. Copying those logical tensors here would publish an internally
+        // inconsistent prefix entry. Prefill-side snapshots remain eligible
+        // because they are captured before resident decode takes authority.
         if state.prefix_cache_registration_allowed
             && state.block_size > 0
             && state.seq_len % state.block_size == 0
         {
+            if state.linear_state.has_any_gdn_state_resident_kt(backend) {
+                resident_prefix_snapshot_suppression_count.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    row_id = state.id,
+                    seq_len = state.seq_len,
+                    block_size = state.block_size,
+                    "suppressed stale rolling prefix snapshot while backend-resident GDN state is authoritative"
+                );
+                continue;
+            }
             match state.linear_state.snapshot() {
                 Ok(snap) => {
                     state.rolling_snapshot = Some(RollingPrefixSnapshot {
@@ -6033,7 +6056,14 @@ impl ModelRunner {
         };
         let decode_duration = started.elapsed();
 
-        complete_paged_batched_decode_step(states, decode_duration);
+        complete_paged_batched_decode_step(
+            self.backend.as_ref(),
+            &self
+                .batched_state_cache_counters
+                .resident_prefix_snapshot_suppression_count,
+            states,
+            decode_duration,
+        );
 
         Ok(sampled)
     }
@@ -6147,7 +6177,14 @@ impl ModelRunner {
         }
 
         let decode_duration = started.elapsed();
-        complete_paged_batched_decode_step(states, decode_duration);
+        complete_paged_batched_decode_step(
+            self.backend.as_ref(),
+            &self
+                .batched_state_cache_counters
+                .resident_prefix_snapshot_suppression_count,
+            states,
+            decode_duration,
+        );
         Ok(sampled)
     }
 
@@ -11813,6 +11850,7 @@ mod tests {
     struct NamedTestBackend {
         name: &'static str,
         device: kiln_tensor::Device,
+        resident_linear_state: bool,
     }
 
     impl BackendIdentity for NamedTestBackend {
@@ -11847,7 +11885,11 @@ mod tests {
 
     impl crate::backend::residency::ResidentRegistry for NamedTestBackend {}
 
-    impl crate::backend::ResidencyBackend for NamedTestBackend {}
+    impl crate::backend::ResidencyBackend for NamedTestBackend {
+        fn runtime_has_linear_attn_gdn_state_kt(&self, _key: kiln_tensor::TensorId) -> bool {
+            self.resident_linear_state
+        }
+    }
 
     impl crate::backend::SamplingBackend for NamedTestBackend {}
 
@@ -12029,6 +12071,7 @@ mod tests {
         let vulkan = NamedTestBackend {
             name: "vulkan",
             device: kiln_tensor::Device::Cpu,
+            resident_linear_state: false,
         };
 
         assert_eq!(decode_buffer_max_batch(&vulkan, None), 64);
@@ -12045,10 +12088,12 @@ mod tests {
         let vulkan_cpu_sentinel = NamedTestBackend {
             name: "vulkan",
             device: kiln_tensor::Device::Cpu,
+            resident_linear_state: false,
         };
         let metal = NamedTestBackend {
             name: "metal",
             device: kiln_tensor::Device::Metal(0),
+            resident_linear_state: false,
         };
 
         assert!(!decode_batcher_rowwise_retry_enabled(&vulkan_cpu_sentinel));
@@ -12110,6 +12155,7 @@ mod tests {
             let backend = NamedTestBackend {
                 name: backend_name,
                 device,
+                resident_linear_state: false,
             };
             assert_eq!(
                 decode_hot_path_fallback_policy_for_backend(&backend),
@@ -12120,6 +12166,7 @@ mod tests {
         let vulkan_cpu_sentinel = NamedTestBackend {
             name: "vulkan",
             device: kiln_tensor::Device::Cpu,
+            resident_linear_state: false,
         };
         assert_eq!(
             decode_hot_path_fallback_policy_for_backend(&vulkan_cpu_sentinel),
@@ -12150,6 +12197,7 @@ mod tests {
             let backend = NamedTestBackend {
                 name: backend_name,
                 device,
+                resident_linear_state: false,
             };
             let policy = decode_hot_path_fallback_policy_for_backend(&backend);
             assert_eq!(policy, FallbackPolicy::WarnAndCount);
@@ -12165,14 +12213,17 @@ mod tests {
         let metal = NamedTestBackend {
             name: "metal",
             device: kiln_tensor::Device::Metal(0),
+            resident_linear_state: false,
         };
         let vulkan = NamedTestBackend {
             name: "vulkan",
             device: kiln_tensor::Device::Cpu,
+            resident_linear_state: false,
         };
         let rocm = NamedTestBackend {
             name: "rocm",
             device: kiln_tensor::Device::Rocm(0),
+            resident_linear_state: false,
         };
 
         assert_eq!(
@@ -12313,7 +12364,7 @@ mod tests {
     }
 
     #[test]
-    fn resident_prefill_rows_never_capture_generic_prefix_snapshots() {
+    fn resident_authority_never_publishes_generic_prefix_snapshots() {
         let make_state = |prefix_cache_registration_allowed| PagedBatchedDecodeState {
             block_table: block_table_with(&[10]),
             linear_state: empty_linear_state(),
@@ -12335,17 +12386,47 @@ mod tests {
             id: 1,
         };
         let mut generic = make_state(true);
-        let mut resident = make_state(false);
+        let mut resident_prefill = make_state(false);
+        let logical_backend = NamedTestBackend {
+            name: "logical-test",
+            device: kiln_tensor::Device::Cpu,
+            resident_linear_state: false,
+        };
+        let suppression_count = AtomicU64::new(0);
 
         complete_paged_batched_decode_step(
-            &mut [&mut generic, &mut resident],
+            &logical_backend,
+            &suppression_count,
+            &mut [&mut generic, &mut resident_prefill],
             std::time::Duration::from_millis(1),
         );
 
         assert_eq!(generic.seq_len, 4);
         assert!(generic.rolling_snapshot.is_some());
-        assert_eq!(resident.seq_len, 4);
-        assert!(resident.rolling_snapshot.is_none());
+        assert_eq!(resident_prefill.seq_len, 4);
+        assert!(resident_prefill.rolling_snapshot.is_none());
+        assert_eq!(suppression_count.load(Ordering::Relaxed), 0);
+
+        let mut resident_decode = make_state(true);
+        resident_decode.linear_state = LinearAttentionState {
+            recurrent_states: vec![kiln_tensor::Tensor::from_vec(vec![0.0_f32], vec![1]).unwrap()],
+            conv_states: vec![kiln_tensor::Tensor::from_vec(vec![0.0_f32], vec![1]).unwrap()],
+        };
+        let resident_backend = NamedTestBackend {
+            name: "resident-test",
+            device: kiln_tensor::Device::Cpu,
+            resident_linear_state: true,
+        };
+        complete_paged_batched_decode_step(
+            &resident_backend,
+            &suppression_count,
+            &mut [&mut resident_decode],
+            std::time::Duration::from_millis(1),
+        );
+
+        assert_eq!(resident_decode.seq_len, 4);
+        assert!(resident_decode.rolling_snapshot.is_none());
+        assert_eq!(suppression_count.load(Ordering::Relaxed), 1);
     }
 
     #[test]

@@ -644,6 +644,7 @@ class ServeRocmSoakTests(unittest.TestCase):
                 take_miss_count=3,
                 take_miss_while_leased_count=2,
                 resident_prefix_view_count=4,
+                resident_prefix_snapshot_suppression_count=3,
                 fresh_assembly_count=1,
                 park_count=8,
                 park_replacement_eviction_count=2,
@@ -658,6 +659,12 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(
             trace["batched_state_cache_park_replacement_eviction_count_delta"], 2
         )
+        self.assertEqual(
+            trace[
+                "batched_state_cache_resident_prefix_snapshot_suppression_count_delta"
+            ],
+            3,
+        )
 
         metrics = soak.batched_state_cache_metric_values(before, after)
         expected = {
@@ -668,6 +675,12 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(set(metrics), expected)
         self.assertEqual(metrics["batched_state_cache_max_active_leases"], 2)
         self.assertEqual(metrics["batched_state_cache_take_miss_count"], 3)
+        self.assertEqual(
+            metrics[
+                "batched_state_cache_resident_prefix_snapshot_suppression_count"
+            ],
+            3,
+        )
         self.assertEqual(
             metrics["batched_state_cache_park_replacement_eviction_count"], 2
         )

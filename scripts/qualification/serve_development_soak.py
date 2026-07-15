@@ -306,6 +306,11 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batched_state_cache_rejected_missing_row_ids_count": ("count", "sum", True),
     "batched_state_cache_rejected_nonresident_cache_count": ("count", "sum", True),
     "batched_state_cache_rejected_nonresident_rows_count": ("count", "sum", True),
+    "batched_state_cache_resident_prefix_snapshot_suppression_count": (
+        "count",
+        "sum",
+        False,
+    ),
     "batched_state_cache_resident_capacity_reuse_count": ("count", "sum", False),
     "batched_state_cache_resident_end": ("count", "exact", False),
     "batched_state_cache_resident_prefix_view_count": ("count", "sum", False),
@@ -1365,6 +1370,7 @@ BATCHED_STATE_CACHE_COUNTER_FIELDS = (
     "completed_row_preservation_count",
     "completed_row_eviction_count",
     "lease_drop_eviction_count",
+    "resident_prefix_snapshot_suppression_count",
 )
 BATCHED_STATE_CACHE_FIELDS = (
     *BATCHED_STATE_CACHE_BOOL_FIELDS,
