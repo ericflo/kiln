@@ -1065,6 +1065,18 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(variant["id"], soak.VULKAN_RUNTIME.variant_id)
         self.assertEqual(variant["backend"], "vulkan")
         self.assertEqual(
+            variant["effective_config"]["server"][
+                "max_prefill_tokens_per_cycle"
+            ],
+            soak.VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE,
+        )
+        self.assertEqual(
+            soak.mixed.VARIANT_CONFIGS["stable"]["server"][
+                "max_prefill_tokens_per_cycle"
+            ],
+            soak.mixed.MAX_PREFILL_TOKENS_PER_CYCLE,
+        )
+        self.assertEqual(
             variant["effective_config"],
             soak.effective_config(
                 soak.QUALIFICATION_DURATION_SECONDS,

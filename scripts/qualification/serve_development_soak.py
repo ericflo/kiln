@@ -27,6 +27,7 @@ VARIANT_ENV = "KILN_QUALIFICATION_VARIANT_ID"
 CASE_ID = "continuous-mixed-load"
 RUNTIME_VARIANT = "autoscale-off"
 VULKAN_RUNTIME_VARIANT = "vulkan-development-soak"
+VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE = 128
 DEFAULT_MEMORY_GROWTH_LIMIT_BYTES = 512 * 1024 * 1024
 WAVE_CONCURRENCY = (1, 8, 12, 8)
 PROMPT_WORDS = (16, 32, 64, 128, 256, 384, 512, 768, 96, 192, 1024, 48)
@@ -85,6 +86,9 @@ def _vulkan_variant_config() -> dict[str, Any]:
         request_timeout_seconds=600,
     )
     config["build"] = mixed.VULKAN_BUILD_SPEC.effective_config()
+    config["server"]["max_prefill_tokens_per_cycle"] = (
+        VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE
+    )
     config["runtime"].update(
         {
             "prefix_cache_requested_enabled": True,

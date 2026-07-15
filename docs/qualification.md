@@ -1198,6 +1198,17 @@ python3 scripts/qualification/run.py \
 
 This arm uses the same source-built, one-process, post-warmup qualification
 model as the ROCm soak, but its hardware accounting is deliberately different.
+The checked profile selects a typed 128-token prompt-work ceiling while keeping
+the shared four-layer yield ceiling. On this Strix Halo, 64-token chunks made
+regular progress but could not finish the declared eight-way long-prompt wave
+before the unchanged 600-second request deadline. Repeated four-request A/B
+runs at 128 tokens passed eight exact semantic oracles with stable process
+history; 256 tokens was faster but corrupted every concurrent response while
+the exact same prompt remained correct in isolation. The soak therefore binds
+128 explicitly and fails if health/debug reports another value or provenance.
+This is a qualification operating point, not yet the product-wide default or a
+claim that larger Vulkan quanta are correct.
+
 ROCm's device-global memory counter cannot isolate another desktop process.
 The Vulkan driver therefore sums the server process's `drm-memory-vram`,
 `drm-memory-gtt`, and `drm-memory-cpu` records from `/proc/<pid>/fdinfo`,
