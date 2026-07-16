@@ -1191,6 +1191,70 @@ admitted wave can settle. The outer 3,300-second case timeout adds a separate
 180-second teardown margin. A setup failure records
 `soak_duration_seconds=0`; it cannot be mistaken for measured performance.
 
+### Vulkan Resident-Prefill Oracle
+
+Run the focused resident-state gate on a clean, pushed source tree before the
+Vulkan development soak:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant vulkan-resident-prefill-oracle \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  qualification/workloads/serving-vulkan-resident-prefill-v1.json
+```
+
+This is a source-bound `kind: correctness` gate for the experimental serving
+profile. It builds the Vulkan-only `kiln` binary through the bounded Cargo
+wrapper, verifies the executable and Vulkan execution identity, starts one
+server from one typed configuration, and keeps cross-request prefix reuse,
+graphs, KV resizing, and allocator reclaim disabled. Stable and maintenance
+profiles are outside this workload because their typed policy must keep
+resident prefill disabled with zero route activity.
+
+After a singleton oracle-valid warmup, the driver dispatches two four-request
+cohorts through thread barriers. Every row uses the same 16-word prompt length,
+while completion limits are `8/12/16/20` in the first cohort and
+`20/16/12/8` in the second. Equal prompt lengths make rows ready together;
+different completion lengths force each cohort to shrink through changing
+active-row sets and a singleton tail. Both cohorts remain in the same server
+process so the second repetition detects poisoned parked state, stale row
+identity, incorrect row strides, and unsafe capacity reuse. Every response
+must terminate by length at its exact limit and remain a prefix of the
+ascending zero-padded integer oracle. Terminal response metadata must attest
+resident-prefill use on at least two requests.
+
+Enablement is not execution evidence. The final health delta must report at
+least one resident forward, more resident rows than forwards, at least one
+completed row, and a maximum resident batch of at least two and at most four.
+Attempts must reconcile exactly with forwards plus initial declines when no
+route failure occurred. Initial declines, route failures, active resident rows
+at drain, batching errors, device faults, graph activity, external-yield sync
+failures or slow calls, response errors, and semantic-oracle failures must all
+be zero. The parked batched-state cache may retain reusable capacity, but it
+must end with zero active leases, no miss while leased, and no completion,
+replacement, or explicit-invalidation eviction. The direct recurrent-state
+registry, active KV blocks, unaccounted blocks, prefix-cache state bytes,
+prefix leases, and pending prefix releases must all end at zero.
+
+The same fail-closed host controls used by the Vulkan soak cover build, model
+load, prewarm, both cohorts, drain, and teardown: at least 8 GiB Linux
+`MemAvailable`, no more than 512 MiB new swap, and `k10temp/Tctl` below 97,000
+millicelsius. Process-scoped DRM sampling records baseline, end, peak, and peak
+growth and rejects more than 1 GiB of active growth. Shutdown must return zero
+without force, remove the private model snapshot, and leave no payload residue
+or request worker. The receipt retains the binary/config identities, a
+canonical semantic-output digest, per-cohort duration and route metadata, all
+resident counters, cache ownership, memory, temperature, synchronization, and
+lifecycle metrics.
+
+Passing this oracle permits the unchanged 30-minute development soak to test
+longer-lived allocator convergence, cancellation, latency, and memory behavior.
+It does not qualify stable-profile admission, eight-hour endurance, broad
+prompt-length coverage, or throughput competitiveness with vLLM.
+
 ### Vulkan Development Soak
 
 Run the Vulkan peer on a clean, pushed source tree after the serving baseline

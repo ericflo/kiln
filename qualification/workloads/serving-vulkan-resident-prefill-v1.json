@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "workload_id": "serving-vulkan-resident-prefill-v1",
+  "kind": "correctness",
+  "description": "Build one source-bound Vulkan server and prove repeated multi-row resident-prefill semantics, changing cohort tails, drained ownership, and host containment.",
+  "determinism": {
+    "seed": 20260716,
+    "seed_delivery": "argv",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "vulkan-resident-prefill-oracle",
+      "description": "Run two same-process four-row cohorts with equal prompt lengths and staggered completion lengths, then require positive multi-row resident execution and a complete drain.",
+      "backend": "vulkan",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "cargo_jobs": 1,
+          "cargo_cpu_quota_percent": 50,
+          "cargo_execution_mode": "transient-service",
+          "cargo_environment_policy": "closed-source-build-v1",
+          "cargo_host_thermal_limit_millicelsius": 97000,
+          "cargo_host_thermal_poll_milliseconds": 250,
+          "cargo_host_thermal_sensor_label": "Tctl",
+          "cargo_host_thermal_sensor_name": "k10temp",
+          "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
+          "cargo_min_available_gib": 15,
+          "cargo_private_network": true,
+          "cargo_service_runtime_max_seconds": 840,
+          "cargo_wrapper": "scripts/cargo-bounded.sh",
+          "features": "vulkan",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "timeout_seconds": 900
+        },
+        "runtime": {
+          "serving_profile": "experimental",
+          "kv_autoscale_requested": false,
+          "kv_autoscale_enabled": false,
+          "memory_reclaim_requested_mode": "off",
+          "memory_reclaim_mode": "off",
+          "rocm_graphs_requested": false,
+          "rocm_graphs_enabled": false,
+          "prefix_cache_requested_enabled": true,
+          "prefix_cache_effective_enabled": false,
+          "prefix_cache_effective_reason": "vulkan_correctness_quarantine"
+        },
+        "server": {
+          "chat_performance_metadata_enabled": true,
+          "debug_endpoints_enabled": true,
+          "default_thinking_enabled": false,
+          "http_send_buffer_bytes": 4096,
+          "log_format": "json",
+          "request_timeout_seconds": 600,
+          "stream_stall_grace_ms": 2000,
+          "max_decode_batch": 8,
+          "max_prefill_staging_slots": 4,
+          "max_active_requests": 12,
+          "max_prefill_staging_priority_burst": 4,
+          "max_prefill_tokens_per_cycle": 128,
+          "max_prefill_layers_per_cycle": 4
+        },
+        "workload": {
+          "cohort_max_tokens": {
+            "cohort_0": {
+              "slot_0": 8,
+              "slot_1": 12,
+              "slot_2": 16,
+              "slot_3": 20
+            },
+            "cohort_1": {
+              "slot_0": 20,
+              "slot_1": 16,
+              "slot_2": 12,
+              "slot_3": 8
+            }
+          },
+          "cohort_prompt_words": 16,
+          "expected_completion_tokens": 112,
+          "expected_finish_reason": "length",
+          "expected_request_count": 8,
+          "host_mem_available_floor_bytes": 8589934592,
+          "host_swap_growth_limit_bytes": 536870912,
+          "host_thermal_limit_millicelsius": 97000,
+          "ignore_eos": true,
+          "overall_timeout_seconds": 1800,
+          "request_timeout_seconds": 600,
+          "response_oracle": "ascending_zero_padded_integers_prefix_v1",
+          "same_process_repetitions": 2,
+          "simultaneous_dispatch": "per_cohort_thread_barrier",
+          "varying_completion_lengths": true,
+          "warmup_max_tokens": 4
+        },
+        "model": {
+          "vulkan_decode_weight_prewarm": true,
+          "vulkan_decode_weight_prewarm_mib_per_second": 256
+        },
+        "vulkan_buffer_pool_gb": 3.0
+      },
+      "cases": [
+        {
+          "id": "vulkan-resident-prefill-oracle",
+          "description": "Require exact response semantics in two changing cohorts, positive multi-row resident-prefill execution, zero route failures or declines, drained caches and KV ownership, bounded host resources, and clean teardown.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_vulkan_resident_prefill.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1"
+          },
+          "timeout_seconds": 2100,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no vulkan device|skipp(?:ed|ing).*vulkan|falling back to cpu)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "batched_state_cache_active_leases_end",
+              "batched_state_cache_completed_row_eviction_count",
+              "batched_state_cache_entry_present_end",
+              "batched_state_cache_explicit_invalidation_count",
+              "batched_state_cache_max_active_leases",
+              "batched_state_cache_park_replacement_eviction_count",
+              "batched_state_cache_resident_end",
+              "batched_state_cache_take_miss_while_leased_count",
+              "batching_error_count",
+              "batching_max_observed_active_requests",
+              "batching_max_observed_batch_size",
+              "binary_build_count",
+              "cohort_count",
+              "completion_token_count",
+              "device_fault_event_count",
+              "external_yield_sync_call_count",
+              "external_yield_sync_failure_count",
+              "external_yield_sync_max_ms",
+              "external_yield_sync_slow_count",
+              "external_yield_sync_total_ms",
+              "gpu_memory_baseline_bytes",
+              "gpu_memory_end_bytes",
+              "gpu_memory_peak_bytes",
+              "gpu_memory_peak_growth_bytes",
+              "gpu_memory_sampler_error_count",
+              "graph_activity_count",
+              "host_mem_available_end_bytes",
+              "host_mem_available_min_bytes",
+              "host_mem_available_start_bytes",
+              "host_memory_guard_trip_count",
+              "host_swap_growth_bytes",
+              "host_swap_used_end_bytes",
+              "host_swap_used_peak_bytes",
+              "host_swap_used_start_bytes",
+              "host_temperature_end_millicelsius",
+              "host_temperature_peak_millicelsius",
+              "host_temperature_start_millicelsius",
+              "host_thermal_guard_trip_count",
+              "kv_blocks_used_end",
+              "kv_unaccounted_blocks_end",
+              "length_terminated_request_count",
+              "policy_attestation_failure_count",
+              "prefix_cache_active_leases_end",
+              "prefix_cache_pending_release_entries_end",
+              "prefix_cache_state_bytes_end",
+              "request_count",
+              "request_failure_count",
+              "resident_prefill_active_rows_end",
+              "resident_prefill_attempt_count",
+              "resident_prefill_completed_row_count",
+              "resident_prefill_enabled",
+              "resident_prefill_forward_count",
+              "resident_prefill_initial_decline_count",
+              "resident_prefill_max_batch_size",
+              "resident_prefill_metadata_request_count",
+              "resident_prefill_route_failure_count",
+              "resident_prefill_row_count",
+              "resident_recurrent_state_allocation_bytes_end",
+              "resident_recurrent_state_buffer_bytes_end",
+              "resident_recurrent_state_entries_end",
+              "response_oracle_failure_count",
+              "shutdown_forced_count",
+              "shutdown_nonzero_count",
+              "snapshot_residue_count"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  }
+}
