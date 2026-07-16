@@ -1400,6 +1400,25 @@ starting reading as `host_thermal_pacing_*` metrics. A measured throughput resul
 therefore includes the idle time required to sustain this workload on the named
 host rather than reporting only its short-burst rate.
 
+The clean `1ea855a51` Strix Halo run disproved that boundary-only policy as a
+sufficient control. Six stabilization cycles completed 30 exact responses plus
+three cancellations and converged to two consecutive cycles with zero DRM
+growth, live-buffer growth, allocations, frees, pool misses, evictions, or
+uncached allocations. Measurement began after 1,085.45 setup seconds. Its first
+six waves then completed 15 exact responses plus one cancellation over 458.77
+seconds with process DRM fixed at 50,001,174,528 bytes and every post-baseline
+allocator counter still zero. The next 96-word singleton began below the pacing
+threshold but drove the package to exactly 97,000 millicelsius before returning
+to a harness boundary. The independent guard stopped the server; boundary
+pacing correctly reported zero events. The retained failed receipt is
+`qualification/receipts/vulkan/strix-halo/20260716t092911388875z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1.json`.
+It is strictly source/artifact/commit-valid, records at least 16,861,724,672
+bytes available, 103,718,912 bytes of swap growth, clean unforced teardown, no
+worker or snapshot residue, and no device or batching fault. The next control
+must pace an inference wave while it is active or enforce a cooler execution
+envelope. Raising the 97 C limit, deleting the 96-word supported prompt, or
+rerunning the unchanged boundary-only policy would not close this gate.
+
 At the drained warmup baseline and after each of the at most eight Vulkan
 stabilization cycles, the driver also reads `/proc/<pid>/smaps`. This is bounded
 diagnostic work, not a hot-loop sampler. Every mapping must contain Linux's
