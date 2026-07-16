@@ -542,11 +542,13 @@ mod tests {
 
         let make_row = |base: f32| -> Result<LinearAttentionState> {
             Ok(LinearAttentionState {
-                recurrent_states: vec![Tensor::from_vec(
-                    (0..8).map(|idx| base + idx as f32).collect::<Vec<_>>(),
-                    (1, 2, 2, 2),
-                )?
-                .to_dtype(DType::BF16)?],
+                recurrent_states: vec![
+                    Tensor::from_vec(
+                        (0..8).map(|idx| base + idx as f32).collect::<Vec<_>>(),
+                        (1, 2, 2, 2),
+                    )?
+                    .to_dtype(DType::BF16)?,
+                ],
                 conv_states: vec![Tensor::from_vec(
                     (0..4)
                         .map(|idx| base + 100.0 + idx as f32)
@@ -561,10 +563,7 @@ mod tests {
         assert!(row1.ensure_gdn_state_resident_kt(&backend)?);
 
         let batch = LinearAttentionState::from_batch_rows(&[&row0, &row1])?;
-        assert!(batch.assemble_gdn_state_resident_batch_rows_kt(
-            &backend,
-            &[&row0, &row1]
-        )?);
+        assert!(batch.assemble_gdn_state_resident_batch_rows_kt(&backend, &[&row0, &row1])?);
 
         let batch_recurrent = backend
             .linear_attn_recurrent_state_kt
@@ -585,8 +584,8 @@ mod tests {
         assert_eq!(
             read_f32_buffer(&backend, &batch_recurrent, 16)?,
             vec![
-                10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 20.0, 21.0, 22.0, 23.0,
-                24.0, 25.0, 26.0, 27.0,
+                10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0,
+                26.0, 27.0,
             ]
         );
         assert_eq!(
@@ -594,10 +593,10 @@ mod tests {
             vec![110.0, 111.0, 112.0, 113.0, 120.0, 121.0, 122.0, 123.0]
         );
 
-        assert!(batch.scatter_gdn_state_resident_batch_rows_kt(
-            &backend,
-            &mut [&mut row0, &mut row1]
-        )?);
+        assert!(
+            batch
+                .scatter_gdn_state_resident_batch_rows_kt(&backend, &mut [&mut row0, &mut row1])?
+        );
         for (row, expected_base) in [(&row0, 10.0), (&row1, 20.0)] {
             let recurrent = backend
                 .linear_attn_recurrent_state_kt

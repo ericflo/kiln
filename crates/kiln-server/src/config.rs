@@ -10445,10 +10445,7 @@ last_token_lm_head = true
         assert_eq!(json["profile"], "maintenance");
         assert_eq!(json["source"], "environment");
         assert_eq!(json["effective_policy"]["inference_admission"], false);
-        assert_eq!(
-            json["effective_policy"]["vulkan_resident_prefill"],
-            false
-        );
+        assert_eq!(json["effective_policy"]["vulkan_resident_prefill"], false);
         assert_eq!(
             json["effective_policy"]["exclusive_gpu_behavior"],
             "inference_disabled_drain_then_exclusive"
