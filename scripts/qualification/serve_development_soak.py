@@ -37,6 +37,7 @@ CANCELLATION_MAX_TOKENS = 512
 CANCELLATION_PROMPT_WORDS = 48
 QUALIFICATION_DURATION_SECONDS = 1800.0
 CASE_TEARDOWN_GRACE_SECONDS = 180.0
+REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS = 10.0
 MAX_STEADY_STATE_WARMUP_WAVES = 16
 GRAPH_CACHE_MAX = 12
 MIN_STABILIZATION_CYCLES = 4
@@ -293,6 +294,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "prompt_tokens_min": ("tokens", "min", False),
     "request_failure_count": ("count", "sum", True),
     "request_count": ("count", "sum", False),
+    "request_worker_residue_count": ("count", "max", True),
     "rss_baseline_bytes": ("bytes", "exact", True),
     "rss_end_bytes": ("bytes", "exact", True),
     "rss_growth_bytes": ("bytes", "exact", True),
@@ -392,6 +394,23 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "resident_prefill_max_batch_size": ("rows", "max", False),
     "resident_prefill_route_failure_count": ("count", "sum", True),
     "resident_prefill_row_count": ("rows", "sum", False),
+    "stabilization_resident_prefill_active_rows_end": ("rows", "exact", True),
+    "stabilization_resident_prefill_attempt_count": ("count", "sum", False),
+    "stabilization_resident_prefill_completed_row_count": (
+        "rows",
+        "sum",
+        False,
+    ),
+    "stabilization_resident_prefill_enabled": ("bool", "exact", False),
+    "stabilization_resident_prefill_forward_count": ("count", "sum", False),
+    "stabilization_resident_prefill_initial_decline_count": (
+        "count",
+        "sum",
+        True,
+    ),
+    "stabilization_resident_prefill_max_batch_size": ("rows", "max", False),
+    "stabilization_resident_prefill_route_failure_count": ("count", "sum", True),
+    "stabilization_resident_prefill_row_count": ("rows", "sum", False),
     **{
         f"vulkan_process_mapping_{category}_rss_growth_bytes": (
             "bytes",
@@ -438,6 +457,14 @@ class SoakError(RuntimeError):
     pass
 
 
+@dataclasses.dataclass
+class RequestWorkerEvidence:
+    peak_residue_count: int = 0
+
+    def observe(self, residue_count: int) -> None:
+        self.peak_residue_count = max(self.peak_residue_count, residue_count)
+
+
 def effective_config(
     minimum_duration_seconds: float,
     memory_growth_limit_bytes: int,
@@ -475,6 +502,9 @@ def effective_config(
             "response_oracle": mixed.RESPONSE_ORACLE,
             "response_oracle_integer_width": mixed.RESPONSE_ORACLE_INTEGER_WIDTH,
             "request_ignore_eos": True,
+            "request_worker_cleanup_timeout_seconds": (
+                REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS
+            ),
             "deadline_policy": "independent_setup_and_measurement",
             "measurement_deadline_seconds": int(
                 minimum_duration_seconds + runtime.request_timeout_seconds
@@ -1842,6 +1872,7 @@ def run_wave(
     phase: str = "measured",
     prompt_epoch: int | None = None,
     runtime: SoakRuntime = ROCM_RUNTIME,
+    worker_evidence: RequestWorkerEvidence | None = None,
 ) -> list[mixed.StreamResult]:
     concurrency = runtime.wave_concurrency[wave % len(runtime.wave_concurrency)]
     abort = threading.Event()
@@ -1886,8 +1917,10 @@ def run_wave(
             future.cancel()
         _, unfinished = concurrent.futures.wait(
             futures,
-            timeout=max(0.0, min(10.0, deadline - time.monotonic())),
+            timeout=REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS,
         )
+        if worker_evidence is not None:
+            worker_evidence.observe(len(unfinished))
         pool.shutdown(wait=False, cancel_futures=True)
     if primary_error is not None:
         if unfinished:
@@ -2045,6 +2078,15 @@ def resident_prefill_metric_values(
         "resident_prefill_row_count": mixed.counter_delta(
             before, after, "total_resident_prefill_rows"
         ),
+    }
+
+
+def stabilization_resident_prefill_metric_values(
+    before: dict[str, int | bool], after: dict[str, int | bool]
+) -> dict[str, int]:
+    return {
+        f"stabilization_{name}": value
+        for name, value in resident_prefill_metric_values(before, after).items()
     }
 
 
@@ -2208,6 +2250,9 @@ def execute(
     stabilization_max_rss_delta = 0
     stabilization_rss_growth = 0
     stabilization_vulkan_growth_cycles = 0
+    worker_evidence = RequestWorkerEvidence()
+    observed_stabilization_batching_start: dict[str, int | bool] | None = None
+    observed_stabilization_batching_end: dict[str, int | bool] | None = None
     observed_vulkan_buffers_start: dict[str, int] | None = None
     observed_vulkan_buffers_end: dict[str, int] | None = None
     observed_vulkan_pool_start: dict[str, Any] | None = None
@@ -2295,6 +2340,7 @@ def execute(
                 phase="warmup",
                 prompt_epoch=steady_state_warmup_waves,
                 runtime=runtime,
+                worker_evidence=worker_evidence,
             )
             bad_warm = [
                 result
@@ -2393,6 +2439,8 @@ def execute(
         )
         observed_batched_state_start = previous_batched_state
         observed_batched_state_end = previous_batched_state
+        observed_stabilization_batching_start = batching_warm
+        observed_stabilization_batching_end = batching_warm
         stabilization_started = time.monotonic()
         while stabilization_cycles < runtime.max_stabilization_cycles:
             cycle_failures: list[str] = []
@@ -2407,6 +2455,7 @@ def execute(
                     deadline=setup_deadline,
                     phase="stabilize",
                     runtime=runtime,
+                    worker_evidence=worker_evidence,
                 )
                 stabilization_requests += len(stable_results)
                 bad_stable = [
@@ -2442,6 +2491,7 @@ def execute(
                 )
                 graph_stable = mixed.graph_snapshot(health_start)
                 batching_stable = mixed.batching_snapshot(health_start)
+                observed_stabilization_batching_end = batching_stable
                 prefix_stable = prefix_cache_snapshot(health_start)
                 if batching_stable["prefix_cache_enabled"] != prefix_cache_enabled:
                     cycle_failures.append(
@@ -2771,6 +2821,7 @@ def execute(
                 base_seed=seed,
                 deadline=measurement_deadline,
                 runtime=runtime,
+                worker_evidence=worker_evidence,
             )
             all_results.extend(wave_results)
             bad = [
@@ -3121,6 +3172,7 @@ def execute(
             "prompt_tokens_min": min(prompt_tokens, default=0),
             "request_failure_count": request_failures,
             "request_count": len(all_results),
+            "request_worker_residue_count": worker_evidence.peak_residue_count,
             "rss_baseline_bytes": rss_start,
             "rss_end_bytes": rss_end,
             "rss_growth_bytes": max(0, rss_end - rss_start),
@@ -3148,6 +3200,26 @@ def execute(
             "zero_token_response_count": zero_tokens,
         }
         if runtime.backend == "vulkan":
+            assert observed_stabilization_batching_start is not None
+            assert observed_stabilization_batching_end is not None
+            stabilization_resident_values = (
+                stabilization_resident_prefill_metric_values(
+                    observed_stabilization_batching_start,
+                    observed_stabilization_batching_end,
+                )
+            )
+            values.update(stabilization_resident_values)
+            stabilization_contract_values = {
+                name.removeprefix("stabilization_"): value
+                for name, value in stabilization_resident_values.items()
+            }
+            failures.extend(
+                "stabilization " + failure
+                for failure in resident_prefill_contract_failures(
+                    stabilization_contract_values,
+                    max_configured_rows=max(runtime.wave_concurrency),
+                )
+            )
             values["prefix_cache_enabled"] = prefix_cache_capability_value(
                 batching_start, batching_end
             )
@@ -3414,6 +3486,7 @@ def execute(
         values["stabilization_rss_growth_bytes"] = stabilization_rss_growth
         values["stabilization_request_count"] = stabilization_requests
         values["stabilization_stable_cycle_count"] = stabilization_stable_cycles
+        values["request_worker_residue_count"] = worker_evidence.peak_residue_count
         if host_guard is not None:
             values.update(host_guard.metric_values())
         if thermal_guard is not None:
@@ -3449,6 +3522,16 @@ def execute(
                 )
             )
         if (
+            observed_stabilization_batching_start is not None
+            and observed_stabilization_batching_end is not None
+        ):
+            values.update(
+                stabilization_resident_prefill_metric_values(
+                    observed_stabilization_batching_start,
+                    observed_stabilization_batching_end,
+                )
+            )
+        if (
             observed_process_mappings_start is not None
             and observed_process_mappings_end is not None
         ):
@@ -3468,6 +3551,11 @@ def execute(
         failures.append(f"server shutdown returned {shutdown.returncode}")
     if snapshot_residue:
         failures.append("server left model snapshot residue: " + ", ".join(snapshot_residue))
+    if values["request_worker_residue_count"] != 0:
+        failures.append(
+            "request_worker_residue_count="
+            f"{values['request_worker_residue_count']}, expected 0"
+        )
     details = " | ".join(dict.fromkeys(failures)) if failures else None
     return metrics_from_values(values, runtime), mixed.bounded_details(details)
 

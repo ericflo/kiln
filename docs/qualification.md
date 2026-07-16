@@ -1289,17 +1289,22 @@ After those gates pass, the 30-minute measurement gets a fresh 2,400-second
 absolute deadline: 1,800 required seconds plus the unchanged 600-second
 per-request containment window. The outer case timeout is 4,380 seconds,
 leaving 180 seconds for cancellation, server join, private-snapshot cleanup,
-and result publication. Setup time is never reported as measured soak time.
+and result publication. Wave request threads get a fixed 10-second cleanup
+window inside that teardown allowance even when the setup or measurement work
+deadline has already expired. The driver sets their shared abort signal, waits
+for them, records `request_worker_residue_count`, and rejects any survivor; an
+expired work deadline therefore cannot erase its own cleanup budget. Setup time
+is never reported as measured soak time.
 Raw stdout and stderr artifacts are flushed after every captured chunk, so a
 monitor can follow structured progress while the case is still running rather
 than waiting for a user-space file buffer to fill.
 
 The clean 2026-07-16 run at commit `2587de1dd` is the pre-resident-prefill
-counterexample, not a passing soak. It completed 30 oracle-valid stabilization responses and
-one confirmed cancellation, then exhausted the 1,800-second setup envelope
-during the second cycle's final width-four wave. Measurement never started, so
-its zero measured request, wave, latency, and duration metrics are explicit
-partial-evidence sentinels. The successful width-eight wave reported
+counterexample, not a passing soak. It completed 30 oracle-valid stabilization
+responses and one confirmed cancellation, then exhausted the 1,800-second
+setup envelope during the second cycle's final width-four wave. Measurement
+never started, so its zero measured request, wave, latency, and duration metrics
+are explicit partial-evidence sentinels. The successful width-eight wave reported
 256.9-562.5 second TTFT for 472-1,240 prompt tokens. Actor telemetry showed
 continuous rowwise generic prefill in four-layer, 128-token slices of roughly
 1.4-2.3 seconds, not an unexplained stall or mid-request VRAM rebalance. The
@@ -1329,13 +1334,15 @@ eviction, explicit invalidation, or replacement eviction. The run had zero
 batching or device faults and zero unexplained ITL outliers; host availability
 stayed above 17,856,610,304 bytes, swap grew 12,288 bytes, and package
 temperature peaked at 96,000 millicelsius. Shutdown was unforced and zero with
-no snapshot residue or surviving process. Because the current result protocol
-publishes resident-route deltas only after stabilization succeeds, its zero
-resident-prefill metrics are partial-evidence sentinels rather than proof that
-the route was idle; the raw trace contains multi-row, full-stack resident
-forwards. The next harness revision must preserve these counters and give
-request threads bounded cleanup time after an expired work deadline. The
-performance gate itself remains unchanged: either improve this heterogeneous
+no snapshot residue or surviving process. Because that receipt predates the
+failure-path evidence repair, its zero resident-prefill metrics are partial-
+evidence sentinels rather than proof that the route was idle; the raw trace
+contains multi-row, full-stack resident forwards. Current workloads separately
+declare stabilization resident-prefill enablement, attempts, forwards, rows,
+completed rows, maximum width, declines, route failures, and active rows at the
+last drained boundary. Those deltas are published on both pass and failure,
+while the existing unprefixed fields remain measurement-only. The performance
+gate itself remains unchanged: either improve this heterogeneous
 region or publish and enforce a narrower supported Vulkan service envelope
 before qualifying that envelope.
 

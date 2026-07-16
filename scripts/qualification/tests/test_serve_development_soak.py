@@ -822,6 +822,10 @@ class ServeRocmSoakTests(unittest.TestCase):
             ),
             [],
         )
+        self.assertEqual(
+            soak.stabilization_resident_prefill_metric_values(before, after),
+            {f"stabilization_{name}": value for name, value in values.items()},
+        )
 
         single_row_only = dict(values)
         single_row_only["resident_prefill_row_count"] = single_row_only[
@@ -1017,13 +1021,14 @@ class ServeRocmSoakTests(unittest.TestCase):
 
     def test_wave_cleanup_preserves_the_primary_deadline_failure(self) -> None:
         entered = threading.Event()
-        release = threading.Event()
         finished = threading.Event()
 
-        def blocked_stream(*_args: object, **_kwargs: object) -> object:
+        def blocked_stream(*_args: object, **kwargs: object) -> object:
             entered.set()
             try:
-                release.wait(timeout=2.0)
+                abort_event = kwargs["abort_event"]
+                assert isinstance(abort_event, threading.Event)
+                abort_event.wait(timeout=2.0)
                 return object()
             finally:
                 finished.set()
@@ -1032,26 +1037,56 @@ class ServeRocmSoakTests(unittest.TestCase):
             self.assertTrue(entered.wait(timeout=1.0))
             raise TimeoutError("soak stabilize wave exceeded the setup deadline")
 
+        evidence = soak.RequestWorkerEvidence()
         with (
             mock.patch.object(soak.mixed, "run_stream", side_effect=blocked_stream),
             mock.patch.object(soak.mixed, "remaining_until", side_effect=expired),
         ):
+            with self.assertRaisesRegex(
+                TimeoutError, "soak stabilize wave exceeded the setup deadline"
+            ):
+                soak.run_wave(
+                    8420,
+                    wave=0,
+                    base_seed=7,
+                    deadline=time.monotonic() - 1.0,
+                    phase="stabilize",
+                    worker_evidence=evidence,
+                )
+        self.assertTrue(finished.wait(timeout=1.0))
+        self.assertEqual(evidence.peak_residue_count, 0)
+
+    def test_wave_cleanup_retains_worker_residue_evidence(self) -> None:
+        release = threading.Event()
+
+        def blocked_stream(*_args: object, **_kwargs: object) -> object:
+            release.wait(timeout=2.0)
+            return object()
+
+        evidence = soak.RequestWorkerEvidence()
+        with (
+            mock.patch.object(soak.mixed, "run_stream", side_effect=blocked_stream),
+            mock.patch.object(
+                soak.mixed,
+                "remaining_until",
+                side_effect=TimeoutError("deadline"),
+            ),
+            mock.patch.object(soak, "REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS", 0.0),
+        ):
             try:
                 with self.assertRaisesRegex(
-                    soak.SoakError,
-                    "TimeoutError: soak stabilize wave exceeded the setup deadline; "
-                    "1 request workers survived wave cleanup",
+                    soak.SoakError, "1 request workers survived wave cleanup"
                 ):
                     soak.run_wave(
                         8420,
                         wave=0,
                         base_seed=7,
                         deadline=time.monotonic() - 1.0,
-                        phase="stabilize",
+                        worker_evidence=evidence,
                     )
             finally:
                 release.set()
-        self.assertTrue(finished.wait(timeout=1.0))
+        self.assertEqual(evidence.peak_residue_count, 1)
 
     def test_cancellation_markers_are_unique_and_confirmation_is_required(self) -> None:
         def result(*_args: object, **kwargs: object) -> mock.Mock:
