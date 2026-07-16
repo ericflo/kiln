@@ -1398,12 +1398,14 @@ kiln_vulkan_buffer_pool_uncached_allocated_bytes_total
 
 #### Resumable GDN prefill residency telemetry
 
-Vulkan prompt prefill retains each GDN layer's recurrent state across actor
-token-chunk and layer-group yields. This is distinct from the persistent batched
-decode-state cache described below: a prompt row can own backend state while
-`caches.batched_recurrent_state.entry_present` is false. Trusted
-`GET /v1/debug/model-state` exposes the complete current direct registry at
-`caches.resident_recurrent_state`:
+Vulkan prompt-prefill residency is currently correctness-quarantined. Typed
+runtime policy prevents production requests from entering its request/layer
+scope, so ordinary prompt chunks materialize recurrent state before yielding.
+The direct-registry telemetry remains a closed contract for detecting accidental
+activation, retaining failed-experiment evidence, and qualifying a future
+repair. It is distinct from the persistent batched decode-state cache described
+below. Trusted `GET /v1/debug/model-state` exposes the complete current direct
+registry at `caches.resident_recurrent_state`:
 
 | Field | Meaning |
 |---|---|
@@ -1414,22 +1416,23 @@ decode-state cache described below: a prompt row can own backend state while
 The object is deliberately aggregate and bounded: it contains no request ID,
 prompt data, tensor ID, or per-layer label. Internally, a secondary tensor alias
 supports decode and handle-local lookup, but it is not the resumable-prefill
-owner. Nonzero values are expected while a prefill quantum is live. All three
-values must be zero after successful decode handoff, cancellation, generation
-error, actor discard, and final server drain. Cleanup is scoped to the stable
-request owner; clearing the whole registry would be an invalid implementation
-because it could corrupt concurrent rows.
+owner. All three values must remain zero throughout current production prompt
+execution and after successful decode handoff, cancellation, generation error,
+actor discard, and final server drain. A future explicitly test-enabled arm may
+observe nonzero values only while a prefill quantum is live. Its cleanup must be
+scoped to the stable request owner; clearing the whole registry would be an
+invalid implementation because it could corrupt concurrent rows.
 
-The internal migration rollback
-`KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` must disable both this
-request/layer prompt scope and the separate decode recurrent-state scope. A
-rollback arm that merely reports `resident_prefill_used=false` is insufficient:
-that field describes the native multi-row prefill route, not this direct GDN
-registry. A valid fully nonresident control additionally observes zero direct
-registry entries throughout the prompt and records no resident GDN use. The
-guard is startup-cached, so each A/B arm requires a fresh server process.
+No environment variable can enable the quarantined prompt scope. The internal
+migration rollback `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1`
+disables the separate decode recurrent-state experiment for a fully materialized
+control. A control that merely reports `resident_prefill_used=false` is
+insufficient: that field describes the native multi-row prefill route, not this
+direct GDN registry. A valid control additionally observes zero direct-registry
+ownership and records no direct resident GDN use. The decode guard is
+startup-cached, so each A/B arm requires a fresh server process.
 
-Device residency must preserve the ordinary external-dtype boundary. For a
+Any future device-resident repair must preserve the ordinary external-dtype boundary. For a
 BF16 recurrent tensor, every completed nonfinal token chunk performs a
 device-side F32 -> BF16 -> F32 round-to-nearest-even conversion before the row
 can resume; an F32 tensor is unchanged. Unsupported external dtypes materialize
@@ -1461,7 +1464,7 @@ workload retains final values as
 `resident_recurrent_state_allocation_bytes_end`; each has a required-zero
 acceptance threshold.
 
-The implementation's real-device parity regressions cover two prompt chunks,
+The quarantined implementation's real-device parity regressions cover two prompt chunks,
 multiple unrelated work-handle identities, reuse from an intentionally stale
 zero-valued host handle on a different thread, stable-key materialization into
 the caller's chosen handle, and a zero registry afterward. The BF16 arm compares
@@ -1474,7 +1477,10 @@ prove actor teardown or decode handoff. In particular, a cancellation probe
 must first observe a nonzero registry during prefill, abort before a semantic
 token is delivered, wait for the actor to drain, and then require both trusted
 debug and Prometheus ownership to return to zero before issuing a follow-up
-request in the same process.
+request in the same process. These focused tests pass bit-for-bit today, but
+the clean full-model q128 prompt-resident arm failed the semantic oracle while
+the fully materialized control passed. They therefore cannot authorize route
+activation without the full-model gate.
 
 #### Batched recurrent-state cache telemetry
 

@@ -61,10 +61,18 @@ This document is the spec + math reference.
 
 ## Resumable serving-state ownership (2026-07-16)
 
-The production Vulkan serving path keeps GDN recurrent state on the backend's
+**Status: production-quarantined.** The implementation below remains compiled
+and real-device tested, but typed runtime policy prevents production prompt
+prefill from entering it. The clean full-model q128 oracle passed only when the
+prompt route was fully materialized; the prompt-resident arm failed even with
+decode residency disabled. No environment variable or public setting can
+enable this path. Re-entry requires a clean full-model semantic pass before the
+cancellation and soak gates, not only the focused parity tests described below.
+
+The retained implementation can keep GDN recurrent state on the backend's
 existing logical device while the batching actor yields between prompt chunks
-or layer groups. This is a serving ownership optimization, not a new GDN
-algorithm and not a public configuration mode.
+or layer groups. This is a serving ownership experiment, not a new GDN
+algorithm or a public configuration mode.
 
 `VulkanBackend` owns a mutex-protected registry with two identities. Resumable
 prefill uses `(serving row ID, linear-attention layer index)` as the
@@ -88,7 +96,7 @@ thread-local guards around one forward call; authoritative keys and buffers are
 backend-local. Decode enters only the older TensorId-backed residency scope and
 cannot acquire a prefill owner accidentally.
 
-Within a resumable prompt:
+Within the explicitly test-enabled route:
 
 1. The first GDN chunk uploads activations and the CPU-hosted initial state.
 2. Later chunks upload only q/k/v/beta/g and reuse the mapped state buffer.
@@ -112,15 +120,13 @@ Within a resumable prompt:
    synchronization quarantines and deliberately retains ownership rather than
    freeing an in-flight buffer.
 
-A one-token final prompt chunk uses the same scoped recurrent kernel. Ordinary
-decode does not: its separate resident-state scope still requires the existing
-backend decode-residency opt-in. Prompt-prefill residency is default-on when
-Vulkan GDN is available; enabling it therefore cannot silently enable the
-previously rejected batched-decode experiment. The internal migration rollback
-`KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` disables both scopes so a
-same-binary qualification arm is genuinely nonresident. It is cached in the
-typed backend runtime configuration at construction and is not read in a hot
-path.
+A one-token final prompt chunk would use the same scoped recurrent kernel.
+Ordinary decode does not: its separate resident-state scope still requires the
+existing backend decode-residency opt-in. The typed prompt policy is hard false
+in production, including when the decode opt-in is present. The internal
+migration rollback `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` still
+disables decode residency for a fully materialized diagnostic arm. Both policy
+values are cached at backend construction and are not read in a hot path.
 
 Logical host tensors are stale while this direct registry is authoritative.
 Consequently, an in-place persistent-slot restore must preserve the secondary
@@ -143,9 +149,11 @@ Trusted `GET /v1/debug/model-state` publishes current direct-registry ownership
 at `caches.resident_recurrent_state`; Prometheus publishes the same entry,
 addressable-buffer-byte, and allocation-byte gauges. The persistent batched
 decode cache remains a separate object. All three direct-registry values must be
-zero at a drained request boundary. The Vulkan development-soak driver validates
-the object as a closed contract after startup, warmup, every cancellation and
-wave, and final shutdown. See [Local Hardware Qualification](qualification.md#resumable-gdn-prefill-residency-telemetry).
+zero at every production observation while the prompt route is quarantined, as
+well as at a drained request boundary in any future test-enabled arm. The
+Vulkan development-soak driver validates the object as a closed contract after
+startup, warmup, every cancellation and wave, and final shutdown. See
+[Local Hardware Qualification](qualification.md#resumable-gdn-prefill-residency-telemetry).
 
 Real-device tests deliberately resume a second chunk with a stale zero host
 tensor and a different `TensorId` on another thread, then materialize into the
@@ -153,9 +161,11 @@ original caller-selected BF16 handle and compare both chunk outputs plus final
 state with an oracle that performs the same host-side BF16 boundary between
 chunks. The same regression separately proves that unquantized F32 split and
 monolithic execution agree. A separate two-owner test evicts one request and
-proves the other remains resident. Production qualification additionally
-requires an aborted prefill to drain both debug and Prometheus gauges before a
-semantic follow-up runs in the same server process.
+proves the other remains resident. Those focused tests pass bit-for-bit but did
+not predict the full-model failure, so they are explicitly non-release evidence.
+Any future production qualification additionally requires an aborted prefill to
+drain both debug and Prometheus gauges before a semantic follow-up runs in the
+same server process.
 
 ## High-level architecture of one GDN layer
 

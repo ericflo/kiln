@@ -1155,11 +1155,11 @@ mod tests {
     }
 
     #[test]
-    fn recurrent_state_residency_rollback_disables_prefill_scopes() {
+    fn production_prefill_recurrent_state_residency_is_quarantined() {
         let mut backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         backend.recurrent_state_residency_enabled = false;
-        backend.prefill_recurrent_state_residency_enabled = false;
 
+        assert!(!backend.prefill_recurrent_state_residency_enabled);
         assert!(!ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(&backend));
         assert!(!ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(&backend, 17,));
         assert!(

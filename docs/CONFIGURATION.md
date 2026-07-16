@@ -1222,67 +1222,53 @@ names. Every change requires a restart; an existing job or request cannot
 observe a mid-process change.
 
 Vulkan resumable-prompt GDN state residency is intentionally absent from this
-configuration section. It is an internal, correctness-preserving ownership
-rule of the Vulkan batching path, not an operator-selected algorithm or an
-public tuning mode. While an admitted prompt yields across token chunks or
-layer groups, the backend keeps recurrent state on its existing logical device,
-reads back only the per-chunk output, and materializes state once before the
-successful decode handoff. Cancellation, errors, and discarded prefill rows
-evict the backend state. This applies to ordinary actor chunking regardless of
-whether `[streaming_prefill]` selects the separate tiled-forward algorithm. It
-does not enable Vulkan decode-state residency, which retains its separate
-experimental opt-in.
+configuration section because the production route is correctness-quarantined.
+There is no TOML field, canonical environment override, compatibility alias, or
+internal enable variable that can activate it. The typed Vulkan runtime policy
+sets prompt residency to false. Ordinary actor chunking therefore materializes
+each layer's recurrent state at the completed token-chunk boundary, including
+the BF16 dtype boundary, before a request can yield and resume. Layer-group
+yields inside one token chunk retain their existing in-progress state and do
+not add an extra numerical boundary.
 
-The internal migration guard
-`KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` is the one rollback for
-both prompt and decode recurrent-state residency. Without it, prompt residency
-is enabled when Vulkan GDN is available; decode residency still requires its
-existing opt-in. With it, neither scope can become active, including the
-request/layer prompt scope, so controlled same-binary qualification can measure
-a fully materialized baseline. Startup resolves the guard once into typed
-backend runtime configuration. It is inventoried as experimental/debug
-migration input in [Runtime Environment Inventory](RUNTIME_ENVIRONMENT_INVENTORY.md),
-not presented as a supported public configuration surface, and no forward path
-re-reads it.
+The quarantine is evidence-based. On the clean `967e1f799` Vulkan release,
+disabling both prompt and decode recurrent-state residency produced the exact
+required 32-token prefix `000000 000001 000002 000003 0000` for the 138-token
+q128 production prompt. The same binary with prompt residency active and decode
+residency disabled produced plausible but incorrect sequence text. The prior
+fully resident arm was more severely corrupt. Focused device tests still match
+the small host BF16 oracle bit-for-bit, which proves those tests are necessary
+but not sufficient; they do not justify exposing the full-model route.
 
-Residency does not change the model's external recurrent-state precision
-contract. After every completed nonfinal prompt token chunk, Vulkan applies the
-state dtype boundary before the request becomes resumable. BF16 state is rounded
-F32 -> BF16 -> F32 on-device with round-to-nearest-even semantics, so the F32
-accumulator remains resident without skipping the BF16 quantization that the
-ordinary materialized path performs. F32 state needs no conversion. A dtype
-without a resident boundary implementation is materialized at the boundary;
-Kiln does not retain wider precision as an implicit optimization. Layer-group
-yields inside one token chunk do not add a precision boundary, and the final
-chunk's normal materialization supplies the handoff boundary.
+The lower-level registry, stable `(serving row ID, linear-attention layer
+index)` ownership, TensorId alias transfer, device-side BF16 boundary, exact
+owner eviction, and observability remain compiled and test-covered so the fault
+can be investigated without reconstructing the experiment. Production cannot
+enter those prompt scopes. Re-enabling them requires a source change, the
+focused real-device suite, a clean full-model semantic pass with prompt
+residency enabled and decode residency disabled, the cancellation/drain probe,
+and the checked soak. A micro-kernel or small-state parity result alone is not a
+release gate.
 
-The host tensor is only a metadata handle while its recurrent buffer is
-resident. Resumable prefill therefore owns each buffer by the stable pair of
-the serving row ID and linear-attention layer index. The current `TensorId` is
-retained as a secondary alias for ordinary decode and for fast handle-local
-lookups, but dtype conversion, layout conversion, layer-group resumption, and a
-worker-thread change cannot change the prefill owner. Final handoff
-materializes by the stable pair. Cancellation and synchronized error cleanup
-evict every entry for that one row ID without touching concurrent rows.
-Materialization removes registry ownership only after readback and host-tensor
-reconstruction succeed; a failed handoff leaves the authoritative buffer
-registered for quarantine instead of publishing stale state.
-
-Functional tensor replacement still transfers the secondary `TensorId` alias
-atomically. A destination alias collision or failed transfer is an inference
-error, and the old alias remains aligned for synchronized cleanup. Operators do
-not configure either identity mechanism or the precision boundary. The
-internal rollback disables the residency optimization as a unit; it does not
-alter either semantic rule while residency is active.
+The historical decode residency experiment remains a separate opt-in behind
+`KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1`; the internal migration
+guard `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` disables that decode
+scope. Startup resolves both once into typed backend runtime configuration, and
+no forward path re-reads them. They are inventoried in
+[Runtime Environment Inventory](RUNTIME_ENVIRONMENT_INVENTORY.md) as migration
+inputs rather than supported public configuration. Neither variable can bypass
+the prompt-residency quarantine.
 
 Trusted `GET /v1/debug/model-state` exposes current ownership as
 `caches.resident_recurrent_state.entry_count`, `buffer_bytes`, and
 `allocation_bytes`. `/metrics` publishes the same state as
 `kiln_gdn_recurrent_state_resident_entries` and
 `kiln_gdn_recurrent_state_resident_bytes{kind="buffer|allocation"}`. A drained
-server must report zero for all three values. Their wire types are generated
-from `contracts/kiln-observability-v1.schema.json`; no copied environment
-variable or undocumented toggle controls them.
+server must report zero for all three values. While prompt residency is
+quarantined, production also expects zero throughout prompt execution; a
+nonzero value is an invalid route activation or ownership defect. Their wire
+types are generated from `contracts/kiln-observability-v1.schema.json`; no
+copied environment variable or undocumented toggle controls them.
 
 Kiln prompt-logprob teacher identity uses
 `kiln.prompt-logprobs.inference-config.v2` and hashes the complete resolved

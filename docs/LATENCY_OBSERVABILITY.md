@@ -324,23 +324,24 @@ claims for a particular accelerator.
 3. Correlate the same monotonic interval with typed actor, synchronization,
    graph, allocator, KV-resize, trim, adapter, and training telemetry.
 4. On Vulkan, inspect `caches.resident_recurrent_state` in trusted model-state
-   diagnostics. Nonzero entries during prefill are expected; nonzero entries or
-   bytes after the request drains indicate an ownership leak, not VRAM
-   rebalancing. Compare `buffer` with `allocation` bytes before attributing an
-   aligned recycler allocation to live tensor growth. If entry count grows by
-   roughly the number of GDN layers after cancellation, verify that prefill
-   entered an explicit request-owner scope, each recurrence entered its linear
-   layer scope, successful handoff materialized by `(request, layer)`, and
-   discard evicted that request owner. Tensor-handle rekeying is only a
-   secondary alias and must not be the sole cleanup authority. This signature
-   is an ownership defect, not allocator pressure.
+   diagnostics. Prompt residency is correctness-quarantined, so any nonzero
+   entry or byte count during current production prompt execution is unexpected
+   route activation or an ownership defect, not VRAM rebalancing. Compare
+   `buffer` with `allocation` bytes before attributing an aligned recycler
+   allocation to live tensor growth. In an explicitly test-enabled repair, if
+   entry count grows by roughly the number of GDN layers after cancellation,
+   verify that prefill entered an explicit request-owner scope, each recurrence
+   entered its linear layer scope, successful handoff materialized by
+   `(request, layer)`, and discard evicted that request owner. Tensor-handle
+   rekeying is only a secondary alias and must not be the sole cleanup authority.
 5. If ownership drains to zero but a same-process or standalone semantic oracle
-   fails after apparently correct prompt logits, compare the recurrent state's
-   external precision at every completed token-chunk boundary. Vulkan may keep
-   an F32 accumulator resident for a BF16 state, but it must still apply the
-   device-side BF16 round-to-nearest-even boundary before the next chunk. A
-   missing boundary can corrupt decode without producing a leak, allocation
-   spike, or synchronization counter.
+   fails in a test-enabled resident arm after apparently correct prompt logits,
+   compare the recurrent state's external precision at every completed
+   token-chunk boundary. An F32 accumulator for a BF16 state must still apply
+   the device-side BF16 round-to-nearest-even boundary before the next chunk.
+   The existing small-state test passes this check bit-for-bit but the full
+   model still fails, so precision parity alone is not evidence to lift the
+   quarantine.
 6. Change one source-bound configuration field per benchmark arm and preserve
    failed receipts. A temporal gap without a matching typed operation is not
    evidence of VRAM rebalancing.

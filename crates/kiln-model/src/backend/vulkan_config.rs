@@ -100,10 +100,11 @@ impl VulkanRuntimeConfig {
         let recurrent_state_residency_enabled = gdn_enabled
             && std::env::var("KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_ok()
             && !recurrent_state_residency_disabled;
-        // Resumable prompt residency is independently default-on, but the
-        // established rollback must disable both prompt and decode scopes.
-        let prefill_recurrent_state_residency_enabled =
-            gdn_enabled && !recurrent_state_residency_disabled;
+        // Full-model q128 qualification proved that the resumable prompt
+        // registry corrupts generation even though its focused parity tests
+        // pass. Keep the implementation testable, but do not expose a runtime
+        // switch that can activate a correctness-quarantined route.
+        let prefill_recurrent_state_residency_enabled = false;
         // Default ON: every Vulkan build that brings up a logical device wants
         // to route decode through the resident path. Pool feasibility is
         // checked later at first use; if the device can't fit the ring, the
