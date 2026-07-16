@@ -1221,6 +1221,26 @@ missing. No production model or trainer path re-reads these public environment
 names. Every change requires a restart; an existing job or request cannot
 observe a mid-process change.
 
+Vulkan resumable-prompt GDN state residency is intentionally absent from this
+configuration section. It is an internal, correctness-preserving ownership
+rule of the Vulkan batching path, not an operator-selected algorithm or an
+environment escape hatch. While an admitted prompt yields across token chunks
+or layer groups, the backend keeps recurrent state on its existing logical
+device, reads back only the per-chunk output, and materializes state once before
+the successful decode handoff. Cancellation, errors, and discarded prefill
+rows evict the backend state. This applies to ordinary actor chunking regardless
+of whether `[streaming_prefill]` selects the separate tiled-forward algorithm.
+It does not enable default Vulkan decode-state residency.
+
+Trusted `GET /v1/debug/model-state` exposes current ownership as
+`caches.resident_recurrent_state.entry_count`, `buffer_bytes`, and
+`allocation_bytes`. `/metrics` publishes the same state as
+`kiln_gdn_recurrent_state_resident_entries` and
+`kiln_gdn_recurrent_state_resident_bytes{kind="buffer|allocation"}`. A drained
+server must report zero for all three values. Their wire types are generated
+from `contracts/kiln-observability-v1.schema.json`; no copied environment
+variable or undocumented toggle controls them.
+
 Kiln prompt-logprob teacher identity uses
 `kiln.prompt-logprobs.inference-config.v2` and hashes the complete resolved
 execution policy: mode, threshold, every base/tape/detached tile variant, and
@@ -1449,10 +1469,12 @@ Kiln currently exposes several complementary, partial views:
 - `/health` and `/v1/debug/model-state` expose config hashes and other runtime
   identity data. Trusted debug additionally exposes the current and
   process-lifetime batched recurrent-state cache lifecycle at
-  `caches.batched_recurrent_state`; `/metrics` publishes the same
-  fixed-cardinality ownership, reuse, rejection, concurrency, and eviction
-  counters. The complete field and interpretation contract is in
-  [Local Hardware Qualification](qualification.md#batched-recurrent-state-cache-telemetry).
+  `caches.batched_recurrent_state`, plus the separate direct prompt/scoped-decode
+  GDN registry at `caches.resident_recurrent_state`; `/metrics` publishes the
+  same fixed-cardinality ownership, reuse, rejection, concurrency, and eviction
+  counters. The complete field and interpretation contracts are in
+  [resumable prefill residency telemetry](qualification.md#resumable-gdn-prefill-residency-telemetry)
+  and [batched recurrent-state cache telemetry](qualification.md#batched-recurrent-state-cache-telemetry).
 - Startup logs record serving-profile provenance and configured/backend/final
   decode-width sources.
 

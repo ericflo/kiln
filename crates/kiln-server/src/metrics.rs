@@ -2595,6 +2595,31 @@ impl Metrics {
             );
         }
 
+        let stats = gauges.resident_recurrent_state;
+        out.push_str("# HELP kiln_gdn_recurrent_state_resident_entries Direct backend-private GDN recurrent-state buffers currently owned by resumable prefill or scoped decode.\n");
+        out.push_str("# TYPE kiln_gdn_recurrent_state_resident_entries gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_gdn_recurrent_state_resident_entries {}",
+                stats.entry_count
+            ),
+        );
+        out.push_str("# HELP kiln_gdn_recurrent_state_resident_bytes Direct backend-private GDN recurrent-state bytes by buffer or allocation accounting kind.\n");
+        out.push_str("# TYPE kiln_gdn_recurrent_state_resident_bytes gauge\n");
+        for (kind, value) in [
+            ("buffer", stats.buffer_bytes),
+            ("allocation", stats.allocation_bytes),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_gdn_recurrent_state_resident_bytes",
+                "kind",
+                kind,
+                value,
+            );
+        }
+
         // --- Prefix cache ---
         out.push_str("# HELP kiln_prefix_cache_lookups_total Total prefix cache lookups.\n");
         out.push_str("# TYPE kiln_prefix_cache_lookups_total counter\n");
@@ -3097,6 +3122,7 @@ pub struct SnapshotGauges {
     pub vulkan_buffers: Option<kiln_model::VulkanBufferAllocationStats>,
     pub vulkan_buffer_pool: Option<kiln_model::VulkanBufferPoolStats>,
     pub batched_state_cache: kiln_model::BatchedStateCacheStats,
+    pub resident_recurrent_state: kiln_model::GdnRecurrentStateResidencyStats,
     pub prefix_cache: PrefixCacheStats,
     pub rendered_prompt_cache_hits: u64,
     pub rendered_prompt_cache_misses: u64,
@@ -3657,6 +3683,11 @@ mod tests {
                 uncached_allocation_count: 1,
                 uncached_allocated_bytes: 256,
             }),
+            resident_recurrent_state: kiln_model::GdnRecurrentStateResidencyStats {
+                entry_count: 24,
+                buffer_bytes: 1_572_864,
+                allocation_bytes: 1_671_168,
+            },
             batched_state_cache: kiln_model::BatchedStateCacheStats {
                 entry_present: true,
                 capacity_rows: 8,
@@ -3946,6 +3977,13 @@ mod tests {
         assert!(output.contains("kiln_vulkan_buffer_live_buffers{memory=\"device_local\"} 11"));
         assert!(output.contains("kiln_vulkan_buffer_live_bytes{memory=\"host_visible\"} 102"));
         assert!(output.contains("kiln_vulkan_buffer_peak_live_bytes 203"));
+        assert!(output.contains("kiln_gdn_recurrent_state_resident_entries 24"));
+        assert!(
+            output.contains("kiln_gdn_recurrent_state_resident_bytes{kind=\"buffer\"} 1572864")
+        );
+        assert!(
+            output.contains("kiln_gdn_recurrent_state_resident_bytes{kind=\"allocation\"} 1671168")
+        );
         assert!(
             output.contains("kiln_vulkan_buffer_allocations_total{memory=\"device_local\"} 21")
         );
@@ -4190,6 +4228,7 @@ mod tests {
             vulkan_buffers: None,
             vulkan_buffer_pool: None,
             batched_state_cache: kiln_model::BatchedStateCacheStats::default(),
+            resident_recurrent_state: kiln_model::GdnRecurrentStateResidencyStats::default(),
             prefix_cache: PrefixCacheStats::default(),
             rendered_prompt_cache_hits: 0,
             rendered_prompt_cache_misses: 0,

@@ -59,6 +59,58 @@ vk-native equivalent for both forward and backward.
 
 This document is the spec + math reference.
 
+## Resumable serving-state ownership (2026-07-16)
+
+The production Vulkan serving path keeps GDN recurrent state on the backend's
+existing logical device while the batching actor yields between prompt chunks
+or layer groups. This is a serving ownership optimization, not a new GDN
+algorithm and not a public configuration mode.
+
+Each logical recurrent-state tensor keeps one stable `TensorId`. The
+`VulkanBackend` owns a mutex-protected map from that ID to its current
+`VulkanBuffer`, so the worker that resumes, materializes, or discards a request
+does not need to be the thread that produced the previous quantum. Scope depth
+remains thread-local: it controls whether a particular forward may retain state,
+while the authoritative buffers are backend-local rather than thread-local.
+The two responsibilities must not be combined.
+
+Within a resumable prompt:
+
+1. The first GDN chunk uploads activations and the CPU-hosted initial state.
+2. Later chunks upload only q/k/v/beta/g and reuse the mapped state buffer.
+3. Every chunk reads its output back for the remaining host-driven layer path,
+   but it does not read the updated recurrent state back.
+4. The final successful prompt quantum materializes every GDN state once before
+   sampling, prefix publication, or decode handoff.
+5. After required device synchronization, forward errors, cancellation, actor
+   discard, and request teardown evict the exact tensor IDs without
+   materializing abandoned state. A failed synchronization quarantines and
+   deliberately retains ownership rather than freeing an in-flight buffer.
+
+A one-token final prompt chunk uses the same scoped recurrent kernel. Ordinary
+decode does not: its separate resident-state scope still requires the existing
+backend decode-residency policy. Prompt-prefill residency therefore cannot
+silently enable the previously rejected batched-decode experiment.
+
+Logical host tensors are stale while this direct registry is authoritative.
+The shared prefix-snapshot authority gate checks both the direct recurrent
+registry and the separate batched recurrent/convolution registry, suppressing
+whole-prompt, strict-split, chunk-split, and rolling snapshots until state has
+been materialized. Prefix-cache quarantine is not relied on for this invariant.
+
+Recycler buffers may be larger than their logical tensor. Materialization
+checks that the readback covers `element_count * sizeof(f32)`, truncates to that
+logical extent, and only then reconstructs the host tensor. Treating recycler
+capacity as tensor length is a correctness error.
+
+Trusted `GET /v1/debug/model-state` publishes current direct-registry ownership
+at `caches.resident_recurrent_state`; Prometheus publishes the same entry,
+addressable-buffer-byte, and allocation-byte gauges. The persistent batched
+decode cache remains a separate object. All three direct-registry values must be
+zero at a drained request boundary. The Vulkan development-soak driver validates
+the object as a closed contract after startup, warmup, every cancellation and
+wave, and final shutdown. See [Local Hardware Qualification](qualification.md#resumable-gdn-prefill-residency-telemetry).
+
 ## High-level architecture of one GDN layer
 
 ```text

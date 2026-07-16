@@ -323,7 +323,12 @@ claims for a particular accelerator.
    missing evidence, not as proof of a device or allocator fault.
 3. Correlate the same monotonic interval with typed actor, synchronization,
    graph, allocator, KV-resize, trim, adapter, and training telemetry.
-4. Change one source-bound configuration field per benchmark arm and preserve
+4. On Vulkan, inspect `caches.resident_recurrent_state` in trusted model-state
+   diagnostics. Nonzero entries during prefill are expected; nonzero entries or
+   bytes after the request drains indicate an ownership leak, not VRAM
+   rebalancing. Compare `buffer` with `allocation` bytes before attributing an
+   aligned recycler allocation to live tensor growth.
+5. Change one source-bound configuration field per benchmark arm and preserve
    failed receipts. A temporal gap without a matching typed operation is not
    evidence of VRAM rebalancing.
 

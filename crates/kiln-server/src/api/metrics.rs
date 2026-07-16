@@ -31,6 +31,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         backend_health_quarantined,
         external_yield_sync,
         batched_state_cache,
+        resident_recurrent_state,
     ) = match state.backend.as_ref() {
         ModelBackend::Mock { scheduler, .. } => {
             let sched = scheduler.lock().await;
@@ -48,6 +49,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 false,
                 Vec::new(),
                 kiln_model::BatchedStateCacheStats::default(),
+                kiln_model::GdnRecurrentStateResidencyStats::default(),
             )
         }
         ModelBackend::Real {
@@ -76,6 +78,9 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 None => BatchingEngineSnapshot::default(),
             };
             let backend_health_snapshot = backend_health.snapshot();
+            let runner = runner
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             (
                 0,
                 0,
@@ -88,10 +93,8 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 batching_engine_snapshot,
                 backend_health_snapshot.quarantined,
                 backend_health.external_yield_sync_stats(),
-                runner
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .batched_state_cache_stats(),
+                runner.batched_state_cache_stats(),
+                runner.gdn_recurrent_state_residency_stats(),
             )
         }
     };
@@ -142,6 +145,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         vulkan_buffers: kiln_model::vulkan_buffer_allocation_stats(),
         vulkan_buffer_pool: kiln_model::vulkan_buffer_pool_stats(),
         batched_state_cache,
+        resident_recurrent_state,
         prefix_cache,
         rendered_prompt_cache_hits,
         rendered_prompt_cache_misses,

@@ -1510,6 +1510,19 @@ pub trait SamplingBackend: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// Current direct backend-private GDN recurrent-state ownership.
+///
+/// `buffer_bytes` is the addressable device-buffer extent. `allocation_bytes`
+/// includes any Vulkan allocation alignment beyond that extent. Both return to
+/// zero when no resumable-prefill or scoped direct-decode state is resident.
+/// Persistent batched decode has a separate cache and telemetry contract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct GdnRecurrentStateResidencyStats {
+    pub entry_count: usize,
+    pub buffer_bytes: u64,
+    pub allocation_bytes: u64,
+}
+
 /// Focused `ResidencyBackend` facade over authoritative resident registries.
 #[allow(clippy::too_many_arguments)]
 pub trait ResidencyBackend:
@@ -1584,6 +1597,19 @@ pub trait ResidencyBackend:
     }
 
     fn runtime_exit_gdn_recurrent_resident_state_scope(&self) {}
+
+    /// Enter the backend-private state scope used only while prompt prefill is
+    /// resumable. This is separate from decode residency so a backend can keep
+    /// prefill state on device without changing its decode batching policy.
+    fn runtime_enter_gdn_prefill_resident_state_scope(&self) -> bool {
+        false
+    }
+
+    fn runtime_exit_gdn_prefill_resident_state_scope(&self) {}
+
+    fn runtime_gdn_recurrent_state_residency_stats(&self) -> GdnRecurrentStateResidencyStats {
+        GdnRecurrentStateResidencyStats::default()
+    }
 
     fn runtime_materialize_gdn_recurrent_resident_state(
         &self,

@@ -16,9 +16,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::vulkan_config::VulkanRuntimeConfig;
 use super::vulkan_residency::{
-    ResidentActivationEntry, contains_recurrent_state_resident_buffer,
-    enter_recurrent_state_resident_scope, exit_recurrent_state_resident_scope,
-    get_recurrent_state_resident_buffer, insert_recurrent_state_resident_buffer,
+    RecurrentStateResidentRegistry, ResidentActivationEntry,
+    contains_recurrent_state_resident_buffer, enter_recurrent_state_resident_scope,
+    exit_recurrent_state_resident_scope, get_recurrent_state_resident_buffer,
+    insert_recurrent_state_resident_buffer, recurrent_state_residency_stats,
     recurrent_state_resident_buffers_for, recurrent_state_resident_scope_active,
     remove_recurrent_state_resident_buffer, replace_recurrent_state_resident_buffer,
     take_recurrent_state_resident_buffer, with_resident_registry,
@@ -54,6 +55,9 @@ pub struct VulkanBackend {
     /// so the hot trait accessor does not bridge per call. (#1082)
     device_kt: kiln_tensor::Device,
     pub(super) resident_activation_registry: super::vulkan_residency::ResidentActivationRegistry,
+    /// Backend-owned recurrent state makes resumable prefill independent of
+    /// which serving worker resumes or discards the request.
+    pub(super) recurrent_state_resident_registry: RecurrentStateResidentRegistry,
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
     pub(super) gdn_enabled: bool,
@@ -193,6 +197,8 @@ impl VulkanBackend {
             device_kt,
             resident_activation_registry: super::vulkan_residency::new_resident_activation_registry(
             ),
+            recurrent_state_resident_registry:
+                super::vulkan_residency::new_recurrent_state_resident_registry(),
             gdn_enabled: config.gdn_enabled,
             gdn_prefill_in_proj_enabled: config.gdn_prefill_in_proj_enabled,
             gdn_gates_enabled: config.gdn_gates_enabled,
@@ -1253,29 +1259,49 @@ impl ResidencyBackend for VulkanBackend {
         }
     }
 
+    fn runtime_enter_gdn_prefill_resident_state_scope(&self) -> bool {
+        if !self.has_vulkan() || !self.gdn_enabled {
+            return false;
+        }
+        enter_recurrent_state_resident_scope();
+        true
+    }
+
+    fn runtime_exit_gdn_prefill_resident_state_scope(&self) {
+        exit_recurrent_state_resident_scope();
+    }
+
+    fn runtime_gdn_recurrent_state_residency_stats(
+        &self,
+    ) -> super::GdnRecurrentStateResidencyStats {
+        recurrent_state_residency_stats(&self.recurrent_state_resident_registry)
+    }
+
     fn runtime_materialize_gdn_recurrent_resident_state(
         &self,
         state_kt: &mut kiln_tensor::Tensor,
     ) -> Result<()> {
-        if !self.recurrent_state_residency_enabled {
-            return Ok(());
-        }
         // (#1082) kt-native: the recurrent-state resident cache is keyed on
         // the kt `TensorId` directly (stable across the state's lifetime), and the
         // materialized state is written back into the kt arg in place.
         let state_id = state_kt.id();
-        let resident_state = take_recurrent_state_resident_buffer(state_id);
+        let resident_state =
+            take_recurrent_state_resident_buffer(&self.recurrent_state_resident_registry, state_id);
         let Some(resident_state) = resident_state else {
             return Ok(());
         };
         let state_dims = state_kt.dims().to_vec();
         let state_dtype = state_kt.dtype();
+        let logical_bytes = state_kt
+            .elem_count()
+            .checked_mul(std::mem::size_of::<f32>())
+            .context("resident GDN recurrent state byte-size overflow")?;
 
         let vk_device = self
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let data = kiln_vulkan_kernel::VulkanBuffer::read_back(
+        let mut data = kiln_vulkan_kernel::VulkanBuffer::read_back(
             vk_device.device(),
             vk_device.host_visible_mem_type(),
             vk_device.queue(),
@@ -1283,26 +1309,26 @@ impl ResidencyBackend for VulkanBackend {
             &resident_state,
         )
         .context("failed to materialize resident GDN recurrent state")?;
+        anyhow::ensure!(
+            data.len() >= logical_bytes,
+            "resident GDN recurrent state readback returned {} bytes, expected at least {logical_bytes}",
+            data.len()
+        );
+        data.truncate(logical_bytes);
         *state_kt = kt_tensor_from_f32_bytes(&data, &state_dims, state_dtype)?;
         Ok(())
     }
 
     fn runtime_evict_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) {
-        if !self.recurrent_state_residency_enabled {
-            return;
-        }
         // (#1082) kt-native: key the cache on the kt `TensorId` directly.
         let state_id = state.id();
-        remove_recurrent_state_resident_buffer(state_id);
+        remove_recurrent_state_resident_buffer(&self.recurrent_state_resident_registry, state_id);
     }
 
     fn runtime_has_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) -> bool {
-        if !self.recurrent_state_residency_enabled {
-            return false;
-        }
         // (#1082) kt-native: key the cache on the kt `TensorId` directly.
         let state_id = state.id();
-        contains_recurrent_state_resident_buffer(state_id)
+        contains_recurrent_state_resident_buffer(&self.recurrent_state_resident_registry, state_id)
     }
 
     fn runtime_supports_resident_activation(&self) -> bool {
@@ -1394,7 +1420,10 @@ impl ResidencyBackend for VulkanBackend {
             }
         }
 
-        let row_buffers = recurrent_state_resident_buffers_for(rows.iter().map(|row| row.id()));
+        let row_buffers = recurrent_state_resident_buffers_for(
+            &self.recurrent_state_resident_registry,
+            rows.iter().map(|row| row.id()),
+        );
         let Some(row_buffers) = row_buffers else {
             return Ok(false);
         };
@@ -1413,7 +1442,11 @@ impl ResidencyBackend for VulkanBackend {
             row_bytes,
         )
         .context("failed to assemble resident GDN recurrent batch rows")?;
-        insert_recurrent_state_resident_buffer(batch.id(), batch_buffer);
+        insert_recurrent_state_resident_buffer(
+            &self.recurrent_state_resident_registry,
+            batch.id(),
+            batch_buffer,
+        );
         Ok(true)
     }
 
@@ -1438,7 +1471,10 @@ impl ResidencyBackend for VulkanBackend {
         if destinations.len() != batch_rows {
             return Ok(false);
         }
-        let batch_buffer = get_recurrent_state_resident_buffer(batch.id());
+        let batch_buffer = get_recurrent_state_resident_buffer(
+            &self.recurrent_state_resident_registry,
+            batch.id(),
+        );
         let Some(batch_buffer) = batch_buffer else {
             return Ok(false);
         };
@@ -1487,9 +1523,14 @@ impl ResidencyBackend for VulkanBackend {
             destinations.iter_mut().zip(staged_rows.into_iter())
         {
             **dst = placeholder;
-            replace_recurrent_state_resident_buffer(old_id, new_id, row_buffer);
+            replace_recurrent_state_resident_buffer(
+                &self.recurrent_state_resident_registry,
+                old_id,
+                new_id,
+                row_buffer,
+            );
         }
-        remove_recurrent_state_resident_buffer(batch.id());
+        remove_recurrent_state_resident_buffer(&self.recurrent_state_resident_registry, batch.id());
 
         Ok(true)
     }

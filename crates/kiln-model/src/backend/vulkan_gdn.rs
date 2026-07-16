@@ -4,7 +4,7 @@
 //! `backend/vulkan.rs` remains the `BackendRuntime` facade.
 
 use anyhow::{Context, Result};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use super::vulkan::VulkanBackend;
 use super::vulkan_residency::{
@@ -13,6 +13,7 @@ use super::vulkan_residency::{
 };
 use super::vulkan_tensor_bridge::{
     kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape,
+    upload_gdn_chunkwise_activations_from_cpu_bytes_vk,
     upload_gdn_chunkwise_inputs_from_cpu_bytes_vk, vk_f32_tensors_to_cpu_tensors_batched_vk,
 };
 
@@ -268,35 +269,55 @@ pub(super) fn gdn_chunkwise_forward(
     };
 
     let state_shape = state_kt.shape().to_vec();
-    let (q_vk, k_vk, v_vk, beta_vk, g_vk, mut state_vk) =
-        if let Some([q_vk, k_vk, v_vk, beta_vk, g_vk, state_vk]) =
-            upload_gdn_chunkwise_inputs_from_cpu_bytes_vk(vk_device, q, k, v, beta, g, state_kt)?
+    let load = |t: &kiln_tensor::Tensor| -> Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
+        let shape = t.shape().to_vec();
+        let data = t
+            .flatten_all()
+            .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: flatten: {e}"))?
+            .to_vec1::<f32>()
+            .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: to_vec1 f32: {e}"))?;
+        kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice_recycled(
+            &data,
+            shape,
+            vk_device.clone(),
+        )
+    };
+    let resident_scope_active = recurrent_state_resident_scope_active();
+    let state_id = state_kt.id();
+    let resident_state = resident_scope_active.then(|| {
+        get_recurrent_state_resident_buffer(&backend.recurrent_state_resident_registry, state_id)
+    });
+    let resident_state = resident_state.flatten();
+    let (q_vk, k_vk, v_vk, beta_vk, g_vk, mut state_vk) = if let Some(state_buffer) = resident_state
+    {
+        let (q_vk, k_vk, v_vk, beta_vk, g_vk) = if let Some([q_vk, k_vk, v_vk, beta_vk, g_vk]) =
+            upload_gdn_chunkwise_activations_from_cpu_bytes_vk(vk_device, q, k, v, beta, g)?
         {
-            (q_vk, k_vk, v_vk, beta_vk, g_vk, state_vk)
+            (q_vk, k_vk, v_vk, beta_vk, g_vk)
         } else {
-            let load =
-                |t: &kiln_tensor::Tensor| -> Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
-                    let shape = t.shape().to_vec();
-                    let data = t
-                        .flatten_all()
-                        .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: flatten: {e}"))?
-                        .to_vec1::<f32>()
-                        .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: to_vec1 f32: {e}"))?;
-                    kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice_recycled(
-                        &data,
-                        shape,
-                        vk_device.clone(),
-                    )
-                };
-            (
-                load(q)?,
-                load(k)?,
-                load(v)?,
-                load(beta)?,
-                load(g)?,
-                load(state_kt)?,
-            )
+            (load(q)?, load(k)?, load(v)?, load(beta)?, load(g)?)
         };
+        let state_vk = kiln_vulkan_kernel::vk_tensor::VkTensor::from_buffer(
+            state_buffer,
+            state_shape.clone(),
+            kiln_vulkan_kernel::vk_tensor::VkDType::F32,
+            vk_device.clone(),
+        );
+        (q_vk, k_vk, v_vk, beta_vk, g_vk, state_vk)
+    } else if let Some([q_vk, k_vk, v_vk, beta_vk, g_vk, state_vk]) =
+        upload_gdn_chunkwise_inputs_from_cpu_bytes_vk(vk_device, q, k, v, beta, g, state_kt)?
+    {
+        (q_vk, k_vk, v_vk, beta_vk, g_vk, state_vk)
+    } else {
+        (
+            load(q)?,
+            load(k)?,
+            load(v)?,
+            load(beta)?,
+            load(g)?,
+            load(state_kt)?,
+        )
+    };
 
     let out_vk = if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_ok() {
         if kiln_core::env_flag::env_flag("KILN_VULKAN_GDN_CHUNKWISE_FALLBACK", false) {
@@ -349,8 +370,27 @@ pub(super) fn gdn_chunkwise_forward(
         }
     };
 
-    // Read back output + the updated state together, then rebuild CPU-host
-    // kt tensors without decoding through an intermediate Vec<f32>.
+    if resident_scope_active {
+        anyhow::ensure!(
+            state_vk.shape() == state_shape.as_slice(),
+            "gdn_chunkwise_forward: resident state shape mismatch: got {:?}, expected {:?}",
+            state_vk.shape(),
+            state_shape
+        );
+        let mut outputs =
+            vk_f32_tensors_to_cpu_tensors_batched_vk(&[(&out_vk, "gdn_chunkwise_forward output")])?;
+        let out_kt = outputs
+            .pop()
+            .context("gdn_chunkwise_forward: resident output readback was empty")?;
+        insert_recurrent_state_resident_buffer(
+            &backend.recurrent_state_resident_registry,
+            state_id,
+            Arc::clone(state_vk.buffer()),
+        );
+        return Ok(Some(out_kt));
+    }
+
+    // Outside a resumable scope, read back output + updated state together.
     let [out_kt, new_state]: [kiln_tensor::Tensor; 2] =
         vk_f32_tensors_to_cpu_tensors_batched_vk(&[
             (&out_vk, "gdn_chunkwise_forward output"),
@@ -655,7 +695,10 @@ pub(super) fn gdn_decode_gates_recurrent_rmsnorm(
     let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
     if batch > 1 && fused_gdn_resident_state_enabled() && recurrent_state_resident_scope_active() {
         let state_id = state_kt.id();
-        let resident_state = get_recurrent_state_resident_buffer(state_id);
+        let resident_state = get_recurrent_state_resident_buffer(
+            &backend.recurrent_state_resident_registry,
+            state_id,
+        );
         let (batch_d, _, nv, dk) = q.dims4()?;
         let dv = v.dims4()?.3;
         let q_dtype = q.dtype();
@@ -685,7 +728,11 @@ pub(super) fn gdn_decode_gates_recurrent_rmsnorm(
             )
             .context("gdn_decode_gates_recurrent_rmsnorm resident-state kernel failed")?;
         let out = kt_tensor_from_f32_bytes(&out_data, &[batch_d, 1, nv, dv], q_dtype)?;
-        insert_recurrent_state_resident_buffer(state_id, resident_state);
+        insert_recurrent_state_resident_buffer(
+            &backend.recurrent_state_resident_registry,
+            state_id,
+            resident_state,
+        );
         return Ok(Some(out));
     }
     let (batch, _, nv, dk) = q.dims4()?;
@@ -745,9 +792,12 @@ pub(super) fn gdn_recurrent_step(
         .vulkan_device()
         .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-    if backend.recurrent_state_residency_enabled && recurrent_state_resident_scope_active() {
+    if recurrent_state_resident_scope_active() {
         let state_id = state_kt.id();
-        let resident_state = get_recurrent_state_resident_buffer(state_id);
+        let resident_state = get_recurrent_state_resident_buffer(
+            &backend.recurrent_state_resident_registry,
+            state_id,
+        );
 
         let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
         let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
@@ -781,7 +831,11 @@ pub(super) fn gdn_recurrent_step(
             .context("gdn_recurrent_step resident-state kernel failed")?;
         let out = kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?;
 
-        insert_recurrent_state_resident_buffer(state_id, resident_state);
+        insert_recurrent_state_resident_buffer(
+            &backend.recurrent_state_resident_registry,
+            state_id,
+            resident_state,
+        );
         return Ok(Some(out));
     }
 
@@ -895,12 +949,12 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
     let vk_device = backend
         .vulkan_device()
         .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-    if backend.recurrent_state_residency_enabled
-        && recurrent_state_resident_scope_active()
-        && state_kt.dtype() == q.dtype()
-    {
+    if recurrent_state_resident_scope_active() && state_kt.dtype() == q.dtype() {
         let state_id = state_kt.id();
-        let resident_state = get_recurrent_state_resident_buffer(state_id);
+        let resident_state = get_recurrent_state_resident_buffer(
+            &backend.recurrent_state_resident_registry,
+            state_id,
+        );
         let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
         let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
         let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
@@ -927,7 +981,11 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
         // Reconstruct the kt tensor and re-unsqueeze to match prior public shape.
         let out_no_seq = kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?;
         let out = out_no_seq.unsqueeze(1)?;
-        insert_recurrent_state_resident_buffer(state_id, resident_state);
+        insert_recurrent_state_resident_buffer(
+            &backend.recurrent_state_resident_registry,
+            state_id,
+            resident_state,
+        );
         return Ok(Some(out));
     }
     let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
@@ -1042,6 +1100,132 @@ pub(super) fn gdn_recurrent_qk_norm_prefill_native_head_last(
         *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
     }
     Ok(Some(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::ResidencyBackend;
+
+    fn tensor(data: Vec<f32>, shape: impl Into<kiln_tensor::Shape>) -> Result<kiln_tensor::Tensor> {
+        kiln_tensor::Tensor::from_vec(data, shape)
+            .map_err(|error| anyhow::anyhow!("create test tensor: {error}"))
+    }
+
+    fn values(tensor: &kiln_tensor::Tensor) -> Result<Vec<f32>> {
+        tensor
+            .flatten_all()
+            .map_err(|error| anyhow::anyhow!("flatten test tensor: {error}"))?
+            .to_vec1::<f32>()
+            .map_err(|error| anyhow::anyhow!("read test tensor: {error}"))
+    }
+
+    fn assert_close(label: &str, actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len(), "{label} length mismatch");
+        let max_error = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| (actual - expected).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_error <= 5e-4, "{label} max error {max_error}");
+    }
+
+    fn inputs(seed: usize, seq_len: usize) -> Result<[kiln_tensor::Tensor; 5]> {
+        let mk = |count: usize, scale: f32, offset: f32| {
+            (0..count)
+                .map(|idx| {
+                    let value = ((idx + seed * 17) % 23) as f32 / 23.0;
+                    offset + value * scale
+                })
+                .collect::<Vec<_>>()
+        };
+        Ok([
+            tensor(mk(seq_len * 2, 0.2, -0.1), (1, 1, seq_len, 2))?,
+            tensor(mk(seq_len * 2, 0.18, -0.09), (1, 1, seq_len, 2))?,
+            tensor(mk(seq_len * 2, 0.24, -0.12), (1, 1, seq_len, 2))?,
+            tensor(mk(seq_len, 0.3, 0.35), (1, 1, seq_len))?,
+            tensor(mk(seq_len, 0.02, -0.04), (1, 1, seq_len))?,
+        ])
+    }
+
+    #[test]
+    fn chunkwise_prefill_resident_state_matches_readback_across_threads() -> Result<()> {
+        let backend = Arc::new(VulkanBackend::new(kiln_tensor::Device::Cpu));
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping resident chunkwise test");
+            return Ok(());
+        }
+        let [q1, k1, v1, beta1, g1] = inputs(1, 5)?;
+        let [q2, k2, v2, beta2, g2] = inputs(2, 3)?;
+        let initial = vec![0.0f32; 4];
+
+        let mut baseline_state = tensor(initial.clone(), (1, 1, 2, 2))?;
+        let baseline_out1 =
+            gdn_chunkwise_forward(&backend, &q1, &k1, &v1, &beta1, &g1, &mut baseline_state, 4)?
+                .context("baseline first chunk declined")?;
+        let baseline_out2 =
+            gdn_chunkwise_forward(&backend, &q2, &k2, &v2, &beta2, &g2, &mut baseline_state, 4)?
+                .context("baseline second chunk declined")?;
+
+        let mut resident_state = tensor(initial, (1, 1, 2, 2))?;
+        let stable_id = resident_state.id();
+        assert!(ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(&*backend));
+        let resident_out1 =
+            gdn_chunkwise_forward(&backend, &q1, &k1, &v1, &beta1, &g1, &mut resident_state, 4)?
+                .context("resident first chunk declined")?;
+        let resident_out2 =
+            gdn_chunkwise_forward(&backend, &q2, &k2, &v2, &beta2, &g2, &mut resident_state, 4)?
+                .context("resident second chunk declined")?;
+        ResidencyBackend::runtime_exit_gdn_prefill_resident_state_scope(&*backend);
+
+        assert_eq!(resident_state.id(), stable_id);
+        assert!(ResidencyBackend::runtime_has_gdn_recurrent_resident_state(
+            &*backend,
+            &resident_state,
+        ));
+        let resident_stats =
+            ResidencyBackend::runtime_gdn_recurrent_state_residency_stats(&*backend);
+        assert_eq!(resident_stats.entry_count, 1);
+        assert!(resident_stats.buffer_bytes >= 4 * std::mem::size_of::<f32>() as u64);
+        assert!(resident_stats.allocation_bytes >= resident_stats.buffer_bytes);
+        assert_close(
+            "first output",
+            &values(&resident_out1)?,
+            &values(&baseline_out1)?,
+        );
+        assert_close(
+            "second output",
+            &values(&resident_out2)?,
+            &values(&baseline_out2)?,
+        );
+
+        let materialize_backend = Arc::clone(&backend);
+        let resident_state = std::thread::spawn(move || -> Result<kiln_tensor::Tensor> {
+            ResidencyBackend::runtime_materialize_gdn_recurrent_resident_state(
+                &*materialize_backend,
+                &mut resident_state,
+            )?;
+            Ok(resident_state)
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("cross-thread resident materialization panicked"))??;
+        assert!(!ResidencyBackend::runtime_has_gdn_recurrent_resident_state(
+            &*backend,
+            &resident_state,
+        ));
+        assert_eq!(
+            ResidencyBackend::runtime_gdn_recurrent_state_residency_stats(&*backend),
+            crate::backend::GdnRecurrentStateResidencyStats::default()
+        );
+        assert_close(
+            "final state",
+            &values(&resident_state)?,
+            &values(&baseline_state)?,
+        );
+
+        ResidencyBackend::runtime_evict_gdn_recurrent_resident_state(&*backend, &resident_state);
+        Ok(())
+    }
 }
 
 pub(super) fn gdn_gates(

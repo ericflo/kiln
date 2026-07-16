@@ -1396,6 +1396,54 @@ kiln_vulkan_buffer_pool_uncached_allocations_total
 kiln_vulkan_buffer_pool_uncached_allocated_bytes_total
 ```
 
+#### Resumable GDN prefill residency telemetry
+
+Vulkan prompt prefill retains each GDN layer's recurrent state across actor
+token-chunk and layer-group yields. This is distinct from the persistent batched
+decode-state cache described below: a prompt row can own backend state while
+`caches.batched_recurrent_state.entry_present` is false. Trusted
+`GET /v1/debug/model-state` exposes the complete current direct registry at
+`caches.resident_recurrent_state`:
+
+| Field | Meaning |
+|---|---|
+| `entry_count` | Stable tensor IDs currently mapped to backend-private recurrent-state buffers. |
+| `buffer_bytes` | Sum of addressable Vulkan buffer extents for those entries. |
+| `allocation_bytes` | Sum of Vulkan allocation requirements, including alignment beyond the addressable extent. This must be at least `buffer_bytes`. |
+
+The object is deliberately aggregate and bounded: it contains no request ID,
+prompt data, tensor ID, or per-layer label. Nonzero values are expected while a
+prefill quantum is live. All three values must be zero after successful decode
+handoff, cancellation, generation error, actor discard, and final server drain.
+An empty registry with nonzero bytes, a nonempty registry with zero buffer
+bytes, or allocation bytes below buffer bytes is internally inconsistent and
+fails qualification.
+
+Prometheus exports the same state:
+
+```text
+kiln_gdn_recurrent_state_resident_entries
+kiln_gdn_recurrent_state_resident_bytes{kind="buffer|allocation"}
+```
+
+The Vulkan development-soak driver treats the debug object as a closed
+contract. It validates exact field names and nonnegative integer types at
+startup, after steady warmup, at the stabilization baseline, after every
+stabilization wave and cancellation, at the measurement baseline, after every
+measured wave and cancellation, and at final drain. Any nonzero drained value
+fails immediately with the phase and all three ownership values. The checked-in
+workload retains final values as
+`resident_recurrent_state_entries_end`,
+`resident_recurrent_state_buffer_bytes_end`, and
+`resident_recurrent_state_allocation_bytes_end`; each has a required-zero
+acceptance threshold.
+
+The implementation's real-device parity regression covers two prompt chunks,
+stable tensor identity, output and final-state parity against per-chunk
+readback, materialization from a different thread, and a zero registry after
+materialization. The serving semantic oracle and cancellation workload remain
+required because a kernel parity test alone cannot prove actor teardown.
+
 #### Batched recurrent-state cache telemetry
 
 Native batched decode also owns a persistent `LinearAttentionState` cache for

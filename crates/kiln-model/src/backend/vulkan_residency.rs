@@ -25,16 +25,20 @@ impl ResidentActivationEntry {
 pub(super) type ResidentActivationRegistry =
     Mutex<HashMap<kiln_tensor::TensorId, ResidentActivationEntry>>;
 
+pub(super) type RecurrentStateResidentRegistry =
+    Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>;
+
 pub(super) fn new_resident_activation_registry() -> ResidentActivationRegistry {
+    Mutex::new(HashMap::new())
+}
+
+pub(super) fn new_recurrent_state_resident_registry() -> RecurrentStateResidentRegistry {
     Mutex::new(HashMap::new())
 }
 
 thread_local! {
     static RECURRENT_STATE_RESIDENT_SCOPE_DEPTH: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
-    static RECURRENT_STATE_RESIDENT_CACHE:
-        std::cell::RefCell<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
-        std::cell::RefCell::new(HashMap::new());
 }
 
 /// Helper: short, self-recovering accessor that wraps the registry's mutex.
@@ -69,60 +73,104 @@ pub(super) fn exit_recurrent_state_resident_scope() {
 }
 
 pub(super) fn get_recurrent_state_resident_buffer(
+    registry: &RecurrentStateResidentRegistry,
     id: kiln_tensor::TensorId,
 ) -> Option<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-    RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&id).cloned())
+    registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&id)
+        .cloned()
 }
 
 pub(super) fn take_recurrent_state_resident_buffer(
+    registry: &RecurrentStateResidentRegistry,
     id: kiln_tensor::TensorId,
 ) -> Option<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-    RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow_mut().remove(&id))
+    registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&id)
 }
 
 pub(super) fn insert_recurrent_state_resident_buffer(
+    registry: &RecurrentStateResidentRegistry,
     id: kiln_tensor::TensorId,
     buffer: Arc<kiln_vulkan_kernel::VulkanBuffer>,
 ) {
-    RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-        cache.borrow_mut().insert(id, buffer);
-    });
+    registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(id, buffer);
 }
 
-pub(super) fn remove_recurrent_state_resident_buffer(id: kiln_tensor::TensorId) {
-    RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-        cache.borrow_mut().remove(&id);
-    });
+pub(super) fn remove_recurrent_state_resident_buffer(
+    registry: &RecurrentStateResidentRegistry,
+    id: kiln_tensor::TensorId,
+) {
+    registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&id);
 }
 
-pub(super) fn contains_recurrent_state_resident_buffer(id: kiln_tensor::TensorId) -> bool {
-    RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().contains_key(&id))
+pub(super) fn contains_recurrent_state_resident_buffer(
+    registry: &RecurrentStateResidentRegistry,
+    id: kiln_tensor::TensorId,
+) -> bool {
+    registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains_key(&id)
+}
+
+pub(super) fn recurrent_state_residency_stats(
+    registry: &RecurrentStateResidentRegistry,
+) -> super::GdnRecurrentStateResidencyStats {
+    let cache = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.values().fold(
+        super::GdnRecurrentStateResidencyStats {
+            entry_count: cache.len(),
+            ..Default::default()
+        },
+        |mut stats, buffer| {
+            stats.buffer_bytes = stats.buffer_bytes.saturating_add(buffer.size());
+            stats.allocation_bytes = stats
+                .allocation_bytes
+                .saturating_add(buffer.allocation_size());
+            stats
+        },
+    )
 }
 
 pub(super) fn recurrent_state_resident_buffers_for<I>(
+    registry: &RecurrentStateResidentRegistry,
     ids: I,
 ) -> Option<Vec<Arc<kiln_vulkan_kernel::VulkanBuffer>>>
 where
     I: IntoIterator<Item = kiln_tensor::TensorId>,
 {
-    RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-        let cache = cache.borrow();
-        ids.into_iter()
-            .map(|id| cache.get(&id).cloned())
-            .collect::<Option<Vec<_>>>()
-    })
+    let cache = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ids.into_iter()
+        .map(|id| cache.get(&id).cloned())
+        .collect::<Option<Vec<_>>>()
 }
 
 pub(super) fn replace_recurrent_state_resident_buffer(
+    registry: &RecurrentStateResidentRegistry,
     old_id: kiln_tensor::TensorId,
     new_id: kiln_tensor::TensorId,
     buffer: Arc<kiln_vulkan_kernel::VulkanBuffer>,
 ) {
-    RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        cache.remove(&old_id);
-        cache.insert(new_id, buffer);
-    });
+    let mut cache = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.remove(&old_id);
+    cache.insert(new_id, buffer);
 }
 
 #[cfg(test)]

@@ -234,6 +234,7 @@ struct CacheDebugState {
     deterministic_chat_choices_entries: usize,
     deterministic_batch_entries: usize,
     batched_recurrent_state: kiln_model::BatchedStateCacheStats,
+    resident_recurrent_state: kiln_model::GdnRecurrentStateResidencyStats,
     rendered_prompt: PromptCacheDebugState,
     prompt_token: PromptCacheDebugState,
     prefix_cache: PrefixCacheDebugState,
@@ -575,12 +576,20 @@ fn cache_state(state: &AppState) -> CacheDebugState {
         state.rendered_prompt_cache.lock().unwrap().stats();
     let (prompt_token_hits, prompt_token_misses, prompt_token_entries) =
         state.prompt_token_cache.lock().unwrap().stats();
-    let batched_recurrent_state = match state.backend.as_ref() {
-        ModelBackend::Mock { .. } => kiln_model::BatchedStateCacheStats::default(),
-        ModelBackend::Real { runner, .. } => runner
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .batched_state_cache_stats(),
+    let (batched_recurrent_state, resident_recurrent_state) = match state.backend.as_ref() {
+        ModelBackend::Mock { .. } => (
+            kiln_model::BatchedStateCacheStats::default(),
+            kiln_model::GdnRecurrentStateResidencyStats::default(),
+        ),
+        ModelBackend::Real { runner, .. } => {
+            let runner = runner
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                runner.batched_state_cache_stats(),
+                runner.gdn_recurrent_state_residency_stats(),
+            )
+        }
     };
 
     CacheDebugState {
@@ -589,6 +598,7 @@ fn cache_state(state: &AppState) -> CacheDebugState {
         deterministic_chat_choices_entries: state.chat_choices_cache.lock().unwrap().stats(),
         deterministic_batch_entries: state.batch_cache.lock().unwrap().stats(),
         batched_recurrent_state,
+        resident_recurrent_state,
         rendered_prompt: PromptCacheDebugState {
             hits: rendered_prompt_hits,
             misses: rendered_prompt_misses,
@@ -991,6 +1001,15 @@ mod tests {
         assert_eq!(
             json["caches"]["batched_recurrent_state"]["entry_present"],
             false
+        );
+        assert_eq!(json["caches"]["resident_recurrent_state"]["entry_count"], 0);
+        assert_eq!(
+            json["caches"]["resident_recurrent_state"]["buffer_bytes"],
+            0
+        );
+        assert_eq!(
+            json["caches"]["resident_recurrent_state"]["allocation_bytes"],
+            0
         );
         assert_eq!(
             json["caches"]["batched_recurrent_state"]["active_leases"],

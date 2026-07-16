@@ -1754,6 +1754,39 @@
           "deterministic_chat_request_entries": 0,
           "deterministic_chat_choices_entries": 0,
           "deterministic_batch_entries": 0,
+          "batched_recurrent_state": {
+            "entry_present": false,
+            "capacity_rows": 0,
+            "logical_rows": 0,
+            "resident": false,
+            "active_leases": 0,
+            "max_active_leases": 0,
+            "take_hit_count": 0,
+            "take_miss_count": 0,
+            "take_miss_while_leased_count": 0,
+            "exact_reuse_count": 0,
+            "resident_capacity_reuse_count": 0,
+            "resident_prefix_view_count": 0,
+            "resident_refresh_count": 0,
+            "fresh_assembly_count": 0,
+            "rejected_missing_row_ids_count": 0,
+            "rejected_nonresident_rows_count": 0,
+            "rejected_nonresident_cache_count": 0,
+            "rejected_insufficient_capacity_count": 0,
+            "park_count": 0,
+            "park_replacement_eviction_count": 0,
+            "explicit_invalidation_count": 0,
+            "explicit_invalidation_eviction_count": 0,
+            "completed_row_preservation_count": 0,
+            "completed_row_eviction_count": 0,
+            "lease_drop_eviction_count": 0,
+            "resident_prefix_snapshot_suppression_count": 0
+          },
+          "resident_recurrent_state": {
+            "entry_count": 0,
+            "buffer_bytes": 0,
+            "allocation_bytes": 0
+          },
           "rendered_prompt": {
             "hits": 0,
             "misses": 0,
@@ -2233,6 +2266,121 @@
       },
       "description": "Canonical portable manifest for the exact loaded base-weight shards.",
       "x-kiln-rust-type": "BaseWeightShardManifest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "BatchedStateCacheStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_present",
+        "capacity_rows",
+        "logical_rows",
+        "resident",
+        "active_leases",
+        "max_active_leases",
+        "take_hit_count",
+        "take_miss_count",
+        "take_miss_while_leased_count",
+        "exact_reuse_count",
+        "resident_capacity_reuse_count",
+        "resident_prefix_view_count",
+        "resident_refresh_count",
+        "fresh_assembly_count",
+        "rejected_missing_row_ids_count",
+        "rejected_nonresident_rows_count",
+        "rejected_nonresident_cache_count",
+        "rejected_insufficient_capacity_count",
+        "park_count",
+        "park_replacement_eviction_count",
+        "explicit_invalidation_count",
+        "explicit_invalidation_eviction_count",
+        "completed_row_preservation_count",
+        "completed_row_eviction_count",
+        "lease_drop_eviction_count",
+        "resident_prefix_snapshot_suppression_count"
+      ],
+      "properties": {
+        "entry_present": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "capacity_rows": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "logical_rows": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "resident": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "active_leases": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_active_leases": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "take_hit_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "take_miss_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "take_miss_while_leased_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "exact_reuse_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "resident_capacity_reuse_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "resident_prefix_view_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "resident_refresh_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "fresh_assembly_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "rejected_missing_row_ids_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "rejected_nonresident_rows_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "rejected_nonresident_cache_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "rejected_insufficient_capacity_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "park_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "park_replacement_eviction_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "explicit_invalidation_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "explicit_invalidation_eviction_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "completed_row_preservation_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "completed_row_eviction_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "lease_drop_eviction_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "resident_prefix_snapshot_suppression_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Current ownership and process-lifetime lifecycle counters for the parked batched recurrent-state cache.",
+      "x-kiln-rust-type": "BatchedStateCacheStats",
       "x-kiln-field-schema-status": "complete"
     },
     "BatchingConfigResponse": {
@@ -2721,6 +2869,8 @@
         "deterministic_chat_request_entries",
         "deterministic_chat_choices_entries",
         "deterministic_batch_entries",
+        "batched_recurrent_state",
+        "resident_recurrent_state",
         "rendered_prompt",
         "prompt_token",
         "prefix_cache"
@@ -2738,6 +2888,12 @@
         "deterministic_batch_entries": {
           "$ref": "#/$defs/NonNegativeInteger"
         },
+        "batched_recurrent_state": {
+          "$ref": "#/$defs/BatchedStateCacheStats"
+        },
+        "resident_recurrent_state": {
+          "$ref": "#/$defs/GdnRecurrentStateResidencyStats"
+        },
         "rendered_prompt": {
           "$ref": "#/$defs/PromptCacheInfo"
         },
@@ -2748,7 +2904,7 @@
           "$ref": "#/$defs/PrefixCacheInfo"
         }
       },
-      "description": "Deterministic response, prompt, token, and prefix cache state.",
+      "description": "Deterministic response, prompt, token, prefix-cache, and backend recurrent-state ownership.",
       "x-kiln-rust-type": "CacheDebugState",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3723,6 +3879,29 @@
       "type": "number",
       "description": "A finite Rust floating-point value. serde_json rejects non-finite values.",
       "x-kiln-rust-type": "f32 | f64",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "GdnRecurrentStateResidencyStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_count",
+        "buffer_bytes",
+        "allocation_bytes"
+      ],
+      "properties": {
+        "entry_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "buffer_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "allocation_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Current direct backend-private GDN recurrent-state ownership across resumable prefill and scoped decode rows; the persistent batched cache is separate.",
+      "x-kiln-rust-type": "GdnRecurrentStateResidencyStats",
       "x-kiln-field-schema-status": "complete"
     },
     "GenerationConfig": {

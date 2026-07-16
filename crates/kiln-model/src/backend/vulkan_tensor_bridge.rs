@@ -136,6 +136,39 @@ pub(super) fn upload_gdn_chunkwise_inputs_from_cpu_bytes_vk(
     })
 }
 
+pub(super) fn upload_gdn_chunkwise_activations_from_cpu_bytes_vk(
+    vk_device: &Arc<kiln_vulkan_kernel::VulkanDevice>,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    g: &kiln_tensor::Tensor,
+) -> Result<Option<[kiln_vulkan_kernel::vk_tensor::VkTensor; 5]>> {
+    let Some(q_upload) = cpu_contiguous_f32_tensor_upload_vk(q) else {
+        return Ok(None);
+    };
+    let Some(k_upload) = cpu_contiguous_f32_tensor_upload_vk(k) else {
+        return Ok(None);
+    };
+    let Some(v_upload) = cpu_contiguous_f32_tensor_upload_vk(v) else {
+        return Ok(None);
+    };
+    let Some(beta_upload) = cpu_contiguous_f32_tensor_upload_vk(beta) else {
+        return Ok(None);
+    };
+    let Some(g_upload) = cpu_contiguous_f32_tensor_upload_vk(g) else {
+        return Ok(None);
+    };
+    let uploads = [q_upload, k_upload, v_upload, beta_upload, g_upload];
+    let tensors = upload_f32_tensors_from_cpu_bytes_vk(vk_device, &uploads)?;
+    tensors.try_into().map(Some).map_err(|tensors: Vec<_>| {
+        anyhow::anyhow!(
+            "Vulkan GDN chunkwise activation upload produced {} tensors, expected 5",
+            tensors.len()
+        )
+    })
+}
+
 fn cpu_f32_tensor_from_vk_bytes_vk(
     tensor: &kiln_vulkan_kernel::vk_tensor::VkTensor,
     mut bytes: Vec<u8>,

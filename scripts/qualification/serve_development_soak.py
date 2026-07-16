@@ -369,6 +369,9 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batched_state_cache_take_hit_count": ("count", "sum", False),
     "batched_state_cache_take_miss_count": ("count", "sum", True),
     "batched_state_cache_take_miss_while_leased_count": ("count", "sum", True),
+    "resident_recurrent_state_allocation_bytes_end": ("bytes", "exact", True),
+    "resident_recurrent_state_buffer_bytes_end": ("bytes", "exact", True),
+    "resident_recurrent_state_entries_end": ("entries", "exact", True),
     "host_mem_available_end_bytes": ("bytes", "exact", False),
     "host_mem_available_min_bytes": ("bytes", "min", False),
     "host_mem_available_start_bytes": ("bytes", "exact", False),
@@ -1526,6 +1529,73 @@ def batched_state_cache_snapshot(
     return snapshot
 
 
+RESIDENT_RECURRENT_STATE_FIELDS = (
+    "entry_count",
+    "buffer_bytes",
+    "allocation_bytes",
+)
+
+
+def resident_recurrent_state_snapshot(
+    debug: dict[str, Any], runtime: SoakRuntime = ROCM_RUNTIME
+) -> dict[str, int] | None:
+    if runtime.backend != "vulkan":
+        return None
+    caches = debug.get("caches")
+    if not isinstance(caches, dict):
+        raise SoakError("debug model state is missing caches")
+    raw = caches.get("resident_recurrent_state")
+    if not isinstance(raw, dict):
+        raise SoakError("debug caches.resident_recurrent_state is missing")
+    if set(raw) != set(RESIDENT_RECURRENT_STATE_FIELDS):
+        missing = sorted(set(RESIDENT_RECURRENT_STATE_FIELDS) - set(raw))
+        extra = sorted(set(raw) - set(RESIDENT_RECURRENT_STATE_FIELDS))
+        raise SoakError(
+            "resident recurrent-state field mismatch: "
+            f"missing={missing}, extra={extra}"
+        )
+    snapshot: dict[str, int] = {}
+    for field in RESIDENT_RECURRENT_STATE_FIELDS:
+        value = raw[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SoakError(
+                f"resident recurrent-state field {field} must be a nonnegative "
+                f"integer, got {value!r}"
+            )
+        snapshot[field] = value
+    if snapshot["allocation_bytes"] < snapshot["buffer_bytes"]:
+        raise SoakError("resident recurrent-state allocation bytes are below buffer bytes")
+    if snapshot["entry_count"] == 0 and (
+        snapshot["buffer_bytes"] != 0 or snapshot["allocation_bytes"] != 0
+    ):
+        raise SoakError("empty resident recurrent-state registry retains bytes")
+    if snapshot["entry_count"] > 0 and snapshot["buffer_bytes"] == 0:
+        raise SoakError("nonempty resident recurrent-state registry reports zero bytes")
+    return snapshot
+
+
+def resident_recurrent_state_drain_failures(
+    snapshot: dict[str, int] | None, phase: str
+) -> list[str]:
+    if snapshot is None:
+        return []
+    return [
+        f"{phase} retained backend-private recurrent state after drain: "
+        f"entries={snapshot['entry_count']}, buffer_bytes={snapshot['buffer_bytes']}, "
+        f"allocation_bytes={snapshot['allocation_bytes']}"
+    ] if any(snapshot.values()) else []
+
+
+def resident_recurrent_state_metric_values(
+    snapshot: dict[str, int],
+) -> dict[str, int]:
+    return {
+        "resident_recurrent_state_entries_end": snapshot["entry_count"],
+        "resident_recurrent_state_buffer_bytes_end": snapshot["buffer_bytes"],
+        "resident_recurrent_state_allocation_bytes_end": snapshot["allocation_bytes"],
+    }
+
+
 def batched_state_cache_counter_delta(
     before: dict[str, int | bool], after: dict[str, int | bool], field: str
 ) -> int:
@@ -2153,6 +2223,10 @@ def execute(
         )
         debug_start = mixed.json_request(port, "GET", "/v1/debug/model-state")
         batched_state_cache_snapshot(debug_start, runtime)
+        resident_startup = resident_recurrent_state_snapshot(debug_start, runtime)
+        failures.extend(
+            resident_recurrent_state_drain_failures(resident_startup, "startup")
+        )
         failures.extend(
             mixed.attest_runtime(
                 runtime.variant_id,
@@ -2248,6 +2322,7 @@ def execute(
             prefix_warm = prefix_cache_snapshot(health_start)
             debug_warm = mixed.json_request(port, "GET", "/v1/debug/model-state")
             batched_warm = batched_state_cache_snapshot(debug_warm, runtime)
+            resident_warm = resident_recurrent_state_snapshot(debug_warm, runtime)
             warm_failures.extend(
                 mixed.attest_runtime(
                     runtime.variant_id,
@@ -2258,6 +2333,11 @@ def execute(
             )
             if batched_warm is not None and batched_warm["active_leases"] != 0:
                 warm_failures.append("steady warmup retained a batched-state lease")
+            warm_failures.extend(
+                resident_recurrent_state_drain_failures(
+                    resident_warm, "steady warmup"
+                )
+            )
             if graph_warm["failures"] != 0 or graph_warm["fallback_total"] != 0:
                 warm_failures.append("graph failure or fallback occurred during steady warmup")
             leaked_warm = unaccounted_blocks(batching_warm, prefix_warm)
@@ -2302,6 +2382,14 @@ def execute(
         )
         previous_batched_state = batched_state_cache_snapshot(
             debug_stabilization_start, runtime
+        )
+        resident_stabilization_start = resident_recurrent_state_snapshot(
+            debug_stabilization_start, runtime
+        )
+        failures.extend(
+            resident_recurrent_state_drain_failures(
+                resident_stabilization_start, "stabilization baseline"
+            )
         )
         observed_batched_state_start = previous_batched_state
         observed_batched_state_end = previous_batched_state
@@ -2365,6 +2453,9 @@ def execute(
                 current_batched_state = batched_state_cache_snapshot(
                     debug_stable, runtime
                 )
+                current_resident_state = resident_recurrent_state_snapshot(
+                    debug_stable, runtime
+                )
                 observed_batched_state_end = current_batched_state
                 cycle_failures.extend(
                     mixed.attest_runtime(
@@ -2381,6 +2472,12 @@ def execute(
                     cycle_failures.append(
                         "stabilization retained a batched-state lease after drain"
                     )
+                cycle_failures.extend(
+                    resident_recurrent_state_drain_failures(
+                        current_resident_state,
+                        f"stabilization wave {stabilization_wave}",
+                    )
+                )
                 if (
                     graph_stable["failures"] != 0
                     or graph_stable["fallback_total"] != 0
@@ -2639,6 +2736,14 @@ def execute(
         batched_state_start = batched_state_cache_snapshot(
             debug_measurement_start, runtime
         )
+        resident_state_start = resident_recurrent_state_snapshot(
+            debug_measurement_start, runtime
+        )
+        baseline_resident_failures = resident_recurrent_state_drain_failures(
+            resident_state_start, "measurement baseline"
+        )
+        if baseline_resident_failures:
+            raise SoakError("; ".join(baseline_resident_failures))
         gpu_start = gpu_memory_bytes(port, process.pid, runtime)
         rss_start = process_memory_snapshot(process.pid).rss_bytes
         sampler.start()
@@ -2698,6 +2803,7 @@ def execute(
             )
             debug = mixed.json_request(port, "GET", "/v1/debug/model-state")
             batched_state = batched_state_cache_snapshot(debug, runtime)
+            resident_state = resident_recurrent_state_snapshot(debug, runtime)
             observed_batched_state_end = batched_state
             wave_failures.extend(
                 mixed.attest_runtime(
@@ -2752,6 +2858,11 @@ def execute(
                 wave_failures.append(
                     f"wave {wave} retained a batched-state lease after drain"
                 )
+            wave_failures.extend(
+                resident_recurrent_state_drain_failures(
+                    resident_state, f"measured wave {wave}"
+                )
+            )
             if batched_state_start is not None and batched_state is not None:
                 concurrent_misses = batched_state_cache_counter_delta(
                     batched_state_start,
@@ -2880,6 +2991,10 @@ def execute(
         vulkan_pool_end = vulkan_buffer_pool_snapshot(health_end, runtime)
         debug_end = mixed.json_request(port, "GET", "/v1/debug/model-state")
         batched_state_end = batched_state_cache_snapshot(debug_end, runtime)
+        resident_state_end = resident_recurrent_state_snapshot(debug_end, runtime)
+        failures.extend(
+            resident_recurrent_state_drain_failures(resident_state_end, "final drain")
+        )
         observed_batched_state_end = batched_state_end
         observed_process_mappings_end = (
             process_memory_mapping_snapshot(process.pid)
@@ -3049,6 +3164,8 @@ def execute(
                     max_configured_rows=max(runtime.wave_concurrency),
                 )
             )
+            assert resident_state_end is not None
+            values.update(resident_recurrent_state_metric_values(resident_state_end))
         if vulkan_buffers_start is not None and vulkan_buffers_end is not None:
             vulkan_live_start = vulkan_buffer_live_bytes(vulkan_buffers_start)
             vulkan_live_end = vulkan_buffer_live_bytes(vulkan_buffers_end)

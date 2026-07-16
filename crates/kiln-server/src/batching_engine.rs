@@ -1213,7 +1213,6 @@ impl DecodeForward for RealDecodeForward {
         if synchronized.is_ok()
             && progress.is_err()
             && let Some(prefill) = state.as_ref()
-            && prefill.resident_token_prefill_started()
         {
             runner_guard.release_paged_batched_prefill_state(prefill);
         }
@@ -1562,9 +1561,7 @@ impl DecodeForward for RealDecodeForward {
                     tracing::error!("discarded prefill ownership retained with unhealthy backend");
                     return;
                 }
-                if let Some(prefill) = state.as_ref()
-                    && prefill.resident_token_prefill_started()
-                {
+                if let Some(prefill) = state.as_ref() {
                     let (runner, _) = self.runner_guard_for_finish();
                     runner.release_paged_batched_prefill_state(prefill);
                 }

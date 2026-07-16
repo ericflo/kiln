@@ -22,8 +22,9 @@ use kiln_core::tokenizer::KilnTokenizer;
 #[cfg(test)]
 use crate::backend::capability::DecodeBatcherPolicy;
 use crate::backend::{
-    self, BackendIdentity, BackendRuntime, LinearBackend, ReplayBackend, ResidencyBackend,
-    SamplingBackend, StartupBackend, TrainingLossBackend, TrainingPrecisionPolicy,
+    self, BackendIdentity, BackendRuntime, GdnRecurrentStateResidencyStats, LinearBackend,
+    ReplayBackend, ResidencyBackend, SamplingBackend, StartupBackend, TrainingLossBackend,
+    TrainingPrecisionPolicy,
     capability::{
         BackendCapabilities, BackendCapabilityQueries, ReplayNativePrimitive, ReplayRequest,
         Support, decode_hot_path_fallback_policy_for_backend,
@@ -154,6 +155,26 @@ impl Drop for GdnRecurrentResidentStateScope<'_> {
     fn drop(&mut self) {
         if self.active {
             ResidencyBackend::runtime_exit_gdn_recurrent_resident_state_scope(self.backend);
+        }
+    }
+}
+
+struct GdnPrefillResidentStateScope<'a> {
+    backend: &'a dyn BackendRuntime,
+    active: bool,
+}
+
+impl<'a> GdnPrefillResidentStateScope<'a> {
+    fn new(backend: &'a dyn BackendRuntime) -> Self {
+        let active = ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(backend);
+        Self { backend, active }
+    }
+}
+
+impl Drop for GdnPrefillResidentStateScope<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            ResidencyBackend::runtime_exit_gdn_prefill_resident_state_scope(self.backend);
         }
     }
 }
@@ -1043,7 +1064,9 @@ fn capture_authoritative_prefix_snapshot(
     // state in backend-private storage without updating these logical tensors.
     // A snapshot is useful only while the logical representation is the
     // authority; publishing it otherwise poisons a later prefix-cache hit.
-    if linear_state.has_any_gdn_state_resident_kt(backend) {
+    if linear_state.has_any_gdn_state_resident_kt(backend)
+        || linear_state.has_any_gdn_recurrent_resident_state(backend)
+    {
         resident_prefix_snapshot_suppression_count.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(
             snapshot_kind,
@@ -3062,6 +3085,12 @@ impl ModelRunner {
         stats
     }
 
+    /// Snapshot direct backend-private recurrent-state owners, including
+    /// resumable prefill rows that are absent from the separate batched cache.
+    pub fn gdn_recurrent_state_residency_stats(&self) -> GdnRecurrentStateResidencyStats {
+        ResidencyBackend::runtime_gdn_recurrent_state_residency_stats(self.backend.as_ref())
+    }
+
     fn evict_cached_batched_state(&self, cached: CachedBatchedState) {
         cached
             .state
@@ -3338,9 +3367,12 @@ impl ModelRunner {
     }
 
     /// Release backend-private ownership for a prefill row that never reached
-    /// decode. Ordinary prefills have no resident row ownership, so this is a
-    /// cheap no-op outside the native Vulkan token-prefill route.
+    /// decode. This covers native token-prefill ownership and resumable GDN
+    /// state retained across ordinary prompt chunks.
     pub fn release_paged_batched_prefill_state(&self, state: &PagedBatchedPrefillState) {
+        state
+            .linear_state
+            .evict_gdn_recurrent_resident_states(&*self.backend);
         if state.resident_token_prefill_started {
             self.release_batched_decode_state(state.id, &state.linear_state);
         }
@@ -4184,6 +4216,9 @@ impl ModelRunner {
                             "batched prefill also failed before synchronization: {prepare_err:#}"
                         )));
                     }
+                    if let Some(prefill) = state.as_ref() {
+                        self.release_paged_batched_prefill_state(prefill);
+                    }
                     let allocated_blocks = state
                         .take()
                         .map(PagedBatchedPrefillState::into_allocated_blocks)
@@ -4962,6 +4997,26 @@ impl ModelRunner {
         max_layers: usize,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedPrefillProgress> {
+        let _resident_scope = GdnPrefillResidentStateScope::new(&*self.backend);
+        self.advance_paged_batched_prefill_with_layer_budget_inner(
+            prefill,
+            params,
+            paged_cache,
+            max_tokens,
+            max_layers,
+            cancel,
+        )
+    }
+
+    fn advance_paged_batched_prefill_with_layer_budget_inner(
+        &self,
+        prefill: &mut Option<PagedBatchedPrefillState>,
+        params: &SamplingParams,
+        paged_cache: &PagedKvCache,
+        max_tokens: usize,
+        max_layers: usize,
+        cancel: Option<&CancelHandle>,
+    ) -> Result<PagedBatchedPrefillProgress> {
         anyhow::ensure!(max_layers > 0, "prefill layer quantum must be positive");
         check_cancelled(cancel)?;
 
@@ -5098,6 +5153,10 @@ impl ModelRunner {
             });
         }
 
+        state
+            .linear_state
+            .materialize_gdn_recurrent_resident_states(&*self.backend)
+            .context("materialize resumable prefill GDN state before decode handoff")?;
         let logits = state
             .pending_logits
             .as_ref()
@@ -11929,6 +11988,7 @@ mod tests {
         name: &'static str,
         device: kiln_tensor::Device,
         resident_linear_state: bool,
+        resident_recurrent_state: bool,
     }
 
     impl BackendIdentity for NamedTestBackend {
@@ -11964,6 +12024,10 @@ mod tests {
     impl crate::backend::residency::ResidentRegistry for NamedTestBackend {}
 
     impl crate::backend::ResidencyBackend for NamedTestBackend {
+        fn runtime_has_gdn_recurrent_resident_state(&self, _state: &kiln_tensor::Tensor) -> bool {
+            self.resident_recurrent_state
+        }
+
         fn runtime_has_linear_attn_gdn_state_kt(&self, _key: kiln_tensor::TensorId) -> bool {
             self.resident_linear_state
         }
@@ -12150,6 +12214,7 @@ mod tests {
             name: "vulkan",
             device: kiln_tensor::Device::Cpu,
             resident_linear_state: false,
+            resident_recurrent_state: false,
         };
 
         assert_eq!(decode_buffer_max_batch(&vulkan, None), 64);
@@ -12167,11 +12232,13 @@ mod tests {
             name: "vulkan",
             device: kiln_tensor::Device::Cpu,
             resident_linear_state: false,
+            resident_recurrent_state: false,
         };
         let metal = NamedTestBackend {
             name: "metal",
             device: kiln_tensor::Device::Metal(0),
             resident_linear_state: false,
+            resident_recurrent_state: false,
         };
 
         assert!(!decode_batcher_rowwise_retry_enabled(&vulkan_cpu_sentinel));
@@ -12234,6 +12301,7 @@ mod tests {
                 name: backend_name,
                 device,
                 resident_linear_state: false,
+                resident_recurrent_state: false,
             };
             assert_eq!(
                 decode_hot_path_fallback_policy_for_backend(&backend),
@@ -12245,6 +12313,7 @@ mod tests {
             name: "vulkan",
             device: kiln_tensor::Device::Cpu,
             resident_linear_state: false,
+            resident_recurrent_state: false,
         };
         assert_eq!(
             decode_hot_path_fallback_policy_for_backend(&vulkan_cpu_sentinel),
@@ -12276,6 +12345,7 @@ mod tests {
                 name: backend_name,
                 device,
                 resident_linear_state: false,
+                resident_recurrent_state: false,
             };
             let policy = decode_hot_path_fallback_policy_for_backend(&backend);
             assert_eq!(policy, FallbackPolicy::WarnAndCount);
@@ -12292,16 +12362,19 @@ mod tests {
             name: "metal",
             device: kiln_tensor::Device::Metal(0),
             resident_linear_state: false,
+            resident_recurrent_state: false,
         };
         let vulkan = NamedTestBackend {
             name: "vulkan",
             device: kiln_tensor::Device::Cpu,
             resident_linear_state: false,
+            resident_recurrent_state: false,
         };
         let rocm = NamedTestBackend {
             name: "rocm",
             device: kiln_tensor::Device::Rocm(0),
             resident_linear_state: false,
+            resident_recurrent_state: false,
         };
 
         assert_eq!(
@@ -12451,11 +12524,19 @@ mod tests {
             name: "logical-test",
             device: kiln_tensor::Device::Cpu,
             resident_linear_state: false,
+            resident_recurrent_state: false,
         };
         let resident_backend = NamedTestBackend {
             name: "resident-test",
             device: kiln_tensor::Device::Cpu,
             resident_linear_state: true,
+            resident_recurrent_state: false,
+        };
+        let recurrent_resident_backend = NamedTestBackend {
+            name: "recurrent-resident-test",
+            device: kiln_tensor::Device::Cpu,
+            resident_linear_state: false,
+            resident_recurrent_state: true,
         };
         let suppression_count = AtomicU64::new(0);
 
@@ -12484,6 +12565,19 @@ mod tests {
             .is_none()
         );
         assert_eq!(suppression_count.load(Ordering::Relaxed), 1);
+
+        assert!(
+            capture_authoritative_prefix_snapshot(
+                &recurrent_resident_backend,
+                &suppression_count,
+                &linear_state,
+                "prompt-split",
+                32,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(suppression_count.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -12514,6 +12608,7 @@ mod tests {
             name: "logical-test",
             device: kiln_tensor::Device::Cpu,
             resident_linear_state: false,
+            resident_recurrent_state: false,
         };
         let suppression_count = AtomicU64::new(0);
 
@@ -12539,6 +12634,7 @@ mod tests {
             name: "resident-test",
             device: kiln_tensor::Device::Cpu,
             resident_linear_state: true,
+            resident_recurrent_state: false,
         };
         complete_paged_batched_decode_step(
             &resident_backend,

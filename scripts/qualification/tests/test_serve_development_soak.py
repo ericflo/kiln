@@ -47,7 +47,11 @@ def prefix_health(**overrides: int) -> dict:
     return {"prefix_cache": values}
 
 
-def batched_state_debug(**overrides: int | bool) -> dict:
+def batched_state_debug(
+    *,
+    resident_overrides: dict[str, int] | None = None,
+    **overrides: int | bool,
+) -> dict:
     values: dict[str, int | bool] = {
         "entry_present": True,
         "capacity_rows": 8,
@@ -58,7 +62,14 @@ def batched_state_debug(**overrides: int | bool) -> dict:
         **{field: 0 for field in soak.BATCHED_STATE_CACHE_COUNTER_FIELDS},
     }
     values.update(overrides)
-    return {"caches": {"batched_recurrent_state": values}}
+    resident = {"entry_count": 0, "buffer_bytes": 0, "allocation_bytes": 0}
+    resident.update(resident_overrides or {})
+    return {
+        "caches": {
+            "batched_recurrent_state": values,
+            "resident_recurrent_state": resident,
+        }
+    }
 
 
 class ServeRocmSoakTests(unittest.TestCase):
@@ -637,6 +648,73 @@ class ServeRocmSoakTests(unittest.TestCase):
         with self.assertRaisesRegex(soak.SoakError, "exceed the process peak"):
             soak.batched_state_cache_snapshot(
                 batched_state_debug(active_leases=2), soak.VULKAN_RUNTIME
+            )
+
+    def test_resident_recurrent_state_snapshot_is_closed_and_drain_gated(self) -> None:
+        snapshot = soak.resident_recurrent_state_snapshot(
+            batched_state_debug(), soak.VULKAN_RUNTIME
+        )
+        self.assertEqual(
+            snapshot,
+            {"entry_count": 0, "buffer_bytes": 0, "allocation_bytes": 0},
+        )
+        self.assertEqual(
+            soak.resident_recurrent_state_drain_failures(snapshot, "test drain"), []
+        )
+        self.assertIsNone(
+            soak.resident_recurrent_state_snapshot(
+                batched_state_debug(), soak.ROCM_RUNTIME
+            )
+        )
+
+        retained = soak.resident_recurrent_state_snapshot(
+            batched_state_debug(
+                resident_overrides={
+                    "entry_count": 2,
+                    "buffer_bytes": 1024,
+                    "allocation_bytes": 1280,
+                }
+            ),
+            soak.VULKAN_RUNTIME,
+        )
+        self.assertRegex(
+            soak.resident_recurrent_state_drain_failures(retained, "test drain")[0],
+            "entries=2, buffer_bytes=1024, allocation_bytes=1280",
+        )
+        self.assertEqual(
+            soak.resident_recurrent_state_metric_values(retained),
+            {
+                "resident_recurrent_state_entries_end": 2,
+                "resident_recurrent_state_buffer_bytes_end": 1024,
+                "resident_recurrent_state_allocation_bytes_end": 1280,
+            },
+        )
+
+        malformed = batched_state_debug()
+        malformed["caches"]["resident_recurrent_state"]["future"] = 0
+        with self.assertRaisesRegex(soak.SoakError, "field mismatch"):
+            soak.resident_recurrent_state_snapshot(malformed, soak.VULKAN_RUNTIME)
+        with self.assertRaisesRegex(soak.SoakError, "below buffer bytes"):
+            soak.resident_recurrent_state_snapshot(
+                batched_state_debug(
+                    resident_overrides={
+                        "entry_count": 1,
+                        "buffer_bytes": 1024,
+                        "allocation_bytes": 512,
+                    }
+                ),
+                soak.VULKAN_RUNTIME,
+            )
+        with self.assertRaisesRegex(soak.SoakError, "retains bytes"):
+            soak.resident_recurrent_state_snapshot(
+                batched_state_debug(
+                    resident_overrides={
+                        "entry_count": 0,
+                        "buffer_bytes": 1024,
+                        "allocation_bytes": 1024,
+                    }
+                ),
+                soak.VULKAN_RUNTIME,
             )
 
     def test_batched_state_cache_deltas_retain_lifecycle_attribution(self) -> None:

@@ -1273,14 +1273,49 @@ def build_definitions() -> None:
         "template_default_thinking_enabled": ref("Boolean"),
         "eval_mode_default_thinking_enabled": ref("Boolean"),
     }, "Resolved thinking defaults from request-independent startup policy.")
+    add_object("BatchedStateCacheStats", "BatchedStateCacheStats", {
+        "entry_present": ref("Boolean"),
+        "capacity_rows": ref("NonNegativeInteger"),
+        "logical_rows": ref("NonNegativeInteger"),
+        "resident": ref("Boolean"),
+        "active_leases": ref("NonNegativeInteger"),
+        "max_active_leases": ref("NonNegativeInteger"),
+        "take_hit_count": ref("NonNegativeInteger"),
+        "take_miss_count": ref("NonNegativeInteger"),
+        "take_miss_while_leased_count": ref("NonNegativeInteger"),
+        "exact_reuse_count": ref("NonNegativeInteger"),
+        "resident_capacity_reuse_count": ref("NonNegativeInteger"),
+        "resident_prefix_view_count": ref("NonNegativeInteger"),
+        "resident_refresh_count": ref("NonNegativeInteger"),
+        "fresh_assembly_count": ref("NonNegativeInteger"),
+        "rejected_missing_row_ids_count": ref("NonNegativeInteger"),
+        "rejected_nonresident_rows_count": ref("NonNegativeInteger"),
+        "rejected_nonresident_cache_count": ref("NonNegativeInteger"),
+        "rejected_insufficient_capacity_count": ref("NonNegativeInteger"),
+        "park_count": ref("NonNegativeInteger"),
+        "park_replacement_eviction_count": ref("NonNegativeInteger"),
+        "explicit_invalidation_count": ref("NonNegativeInteger"),
+        "explicit_invalidation_eviction_count": ref("NonNegativeInteger"),
+        "completed_row_preservation_count": ref("NonNegativeInteger"),
+        "completed_row_eviction_count": ref("NonNegativeInteger"),
+        "lease_drop_eviction_count": ref("NonNegativeInteger"),
+        "resident_prefix_snapshot_suppression_count": ref("NonNegativeInteger"),
+    }, "Current ownership and process-lifetime lifecycle counters for the parked batched recurrent-state cache.")
+    add_object("GdnRecurrentStateResidencyStats", "GdnRecurrentStateResidencyStats", {
+        "entry_count": ref("NonNegativeInteger"),
+        "buffer_bytes": ref("NonNegativeInteger"),
+        "allocation_bytes": ref("NonNegativeInteger"),
+    }, "Current direct backend-private GDN recurrent-state ownership across resumable prefill and scoped decode rows; the persistent batched cache is separate.")
     add_object("CacheDebugState", "CacheDebugState", {
         "deterministic_completion_entries": ref("NonNegativeInteger"),
         "deterministic_chat_request_entries": ref("NonNegativeInteger"),
         "deterministic_chat_choices_entries": ref("NonNegativeInteger"),
         "deterministic_batch_entries": ref("NonNegativeInteger"),
+        "batched_recurrent_state": ref("BatchedStateCacheStats"),
+        "resident_recurrent_state": ref("GdnRecurrentStateResidencyStats"),
         "rendered_prompt": ref("PromptCacheInfo"), "prompt_token": ref("PromptCacheInfo"),
         "prefix_cache": ref("PrefixCacheInfo"),
-    }, "Deterministic response, prompt, token, and prefix cache state.")
+    }, "Deterministic response, prompt, token, prefix-cache, and backend recurrent-state ownership.")
     add_object("TrainingDebugState", "TrainingDebugState", {
         "checkpoint_boundary_policy": ref("CheckpointBoundaryPolicy"),
     }, "Training checkpoint-boundary state published by the debug endpoint.")
