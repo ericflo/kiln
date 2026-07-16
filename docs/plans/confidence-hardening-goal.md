@@ -980,45 +980,19 @@ and exact resume. Cross-backend agreement alone is insufficient.
   records only a two-row maximum decode batch and 0.900 output tokens/second
   overall; this closes bounded Vulkan correctness, not the still-open
   high-concurrency performance claim.
-- [ ] Run a 30-minute development soak after each Vulkan fix.
-  Allocation telemetry classified the old curve: the recycler reached its
-  working-set high-water during the first two cycles, later cycles had exact
-  allocation/free byte conservation and zero live-buffer or process-DRM
-  growth, while anonymous pages became resident inside already-live unified
-  mappings. The recycler is now capped by typed
-  `memory.vulkan_buffer_pool_gb`, evicts only idle buffers, exposes exact
-  ownership and pressure counters, and participates in coordinated memory
-  reclaim. A current-source 70.845-second measured smoke stabilized in four
-  cycles with two flat endpoints, completed 22 measured requests with zero
-  failures, matched 120,768 allocations to 120,768 frees and
-  93,706,563,776 allocated bytes to the same freed-byte total, and ended with
-  zero live-buffer or pool growth. Retention was 2,275,606,528 bytes under the
-  3 GiB cap with zero eviction or uncached fallback; RSS grew 67,227,648 bytes,
-  the sampled active-scratch DRM peak grew 808,316,928 bytes under its explicit
-  1 GiB bound, minimum host availability stayed above 24 GiB, swap grew only
-  24,576 bytes, and teardown was clean. This accepts the bounded development
-  smoke and its memory model, not the required clean pushed-source 30-minute
-  receipt. The clean `2587de1dd` prompt-quarantined attempt then completed 30
-  exact stabilization responses and one confirmed cancellation, but consumed
-  the full 1,800-second setup envelope during its second cycle. Three rows from
-  the final width-four wave were still in prefill and were cancelled cleanly;
-  measurement never started. The first cycle also grew owned GPU memory by
-  91,250,688 bytes, above the unchanged 64 MiB stable-cycle delta, so it would
-  not have qualified even without the later deadline. This is a retained
-  throughput and working-set counterexample, not grounds to lengthen the
-  deadline or claim a soak pass. The clean `e83d89a09` focused resident-prefill
-  oracle subsequently passed both changing four-row cohorts with exact output,
-  a measured resident width of four, and complete recurrent/cache/KV drain.
-  That removes the corrected resident route's semantic blocker and admits the
-  unchanged development soak; it does not itself provide 30 minutes of measured
-  allocator, cancellation, latency, or memory evidence, so this item remains
-  open. The clean `7f8903097` rerun then completed Cycle 1 and the one-, four-,
-  and eight-way waves of Cycle 2, improving on the quarantined route, but the
-  fixed setup deadline expired with three workers in Cycle 2's final width-four
-  wave. Thirty completed stabilization responses and one cancellation were
-  oracle-valid; measurement still never began. This confirms that focused
-  resident correctness is necessary but insufficient for the declared
-  heterogeneous region, so the item remains open without deadline inflation.
+- [x] Run a 30-minute development soak after each Vulkan fix.
+  The strict current-source `e79d3686d` receipt completed six stabilization
+  cycles, 30 exact setup responses, three setup cancellations, and two flat
+  allocator/DRM endpoints before measuring for 1,804.61 seconds. Measurement
+  completed 51 exact responses, 816 tokens, five cancellations, and 21 drained
+  waves. Process DRM and Vulkan ownership ended byte-identical to baseline with
+  zero measured allocations, frees, recycler misses, evictions, or uncached
+  allocations. All 123 in-flight thermal pauses completed, none remained active,
+  the package stayed below the unchanged 97 C guard, and all 240 ITL outliers
+  were attributed. Teardown was unforced and left no process or snapshot residue.
+  The receipt and its exact hashes are retained in the evidence log below. Its
+  150,147.60 ms p99 TTFT remains a declared performance limitation rather than a
+  vLLM competitiveness or production-latency claim.
 - [ ] Run a final 8-hour Vulkan mixed-load soak.
 - [ ] Require zero silent hardware skips and zero unexplained ITL outliers by the
   ROCm attribution rule.
@@ -1036,10 +1010,9 @@ and exact resume. Cross-backend agreement alone is insufficient.
   `sha256:0b902c0d74a8ed54aefefcdab50adeb6fedd7adb3e45a2338c27276e90abeeaf`;
   every logit is compared and the declared ranking/error/cosine gates pass.
 - [x] Check in compact Vulkan receipts, update this document, commit, and push.
-  The current-source independent-oracle receipt is retained under
-  `qualification/receipts/vulkan/strix-halo/`; the remaining Vulkan artifacts
-  are the 30-minute development soak and final eight-hour soak rather than a
-  missing correctness receipt.
+  Current-source independent-oracle and accepted development-soak receipts are
+  retained under `qualification/receipts/vulkan/strix-halo/`; only the final
+  eight-hour endurance receipt remains for the local Vulkan phase.
 
 ## Phase 7: CUDA And Metal Handoffs
 
@@ -1049,6 +1022,11 @@ machine using the checkpoint rules above. Each CUDA or Metal defect, test,
 fix, measurement milestone, and receipt should land as soon as it is coherent
 and green; the final push on a machine is only the handoff marker, not the sole
 platform commit.
+
+The accepted source-bound Strix Halo ROCm baseline and `e79d3686d` Vulkan
+development soak now satisfy the local baseline prerequisite for CUDA handoff.
+CUDA work can begin from `origin/main` without waiting for the final eight-hour
+Vulkan endurance receipt or the remaining repository-wide cleanup phases.
 
 ### 7.1 RTX 4090 Laptop GPU, 16 GB
 
@@ -1441,13 +1419,12 @@ and GPU execution was not attempted under the current host pressure, so this
 makes no new compile, ROCm execution, parity, pause, memory, or throughput
 claim.
 
-Next large bite: once host memory is safely above the build floor, compile this
-exact source and run the Strix Halo legacy-versus-stream A/B, graph byte-budget
-stress, failure injection, and graduated concurrency. Then run the Vulkan
-contract on this machine. NVIDIA handoff does not need to wait for the entire
-repository cleanup, training program, or final long soaks; it starts after
-these local ROCm and Vulkan baseline checkpoints produce a source-bound commit
-that can be checked out on the CUDA host.
+The source-bound Strix Halo ROCm and Vulkan baseline checkpoints are now checked
+in and the NVIDIA handoff condition is satisfied. The final eight-hour Vulkan
+endurance gate remains local Phase 6 work, but it does not block checking out
+`origin/main` on a CUDA host. Remaining surface-area work continues from the
+typed startup boundary below rather than rerunning already accepted baseline
+receipts without a relevant code change.
 
 ### 8.2 One scheduling model
 
@@ -2230,6 +2207,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-16 | Boundary-only Vulkan pacing counterexample | `1ea855a51` | this receipt/evidence commit | Strix Halo Vulkan/RADV clean pushed-source development soak | retained failed receipt `qualification/receipts/vulkan/strix-halo/20260716t092911388875z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1.json` (`sha256:87af48038c9517575e4e73c15fed9a20acbb17696e7f727415cb46811c0e3048`); strict current-source/local-artifact/known-commit validation; case result `sha256:94574c23c110b86eca909b191f84cb60a7a91334bf1aaf5c3f024ea544b45c72`; release binary `sha256:cc8ae9388b3e11bc65ccad44e61cf78808de00d970679e51a5b3c34d7ea7aed7`; zero process residue | failed safely at the unchanged thermal cutoff; boundary-only pacing disproven | Six setup cycles completed 30 oracle-valid responses and three cancellations, covered every prompt cohort, and converged after 1,085.45 seconds to two consecutive cycles with zero DRM growth, live-buffer growth, allocations, frees, pool misses, evictions, or uncached allocations. Stabilization retained 520 resident forwards over 1,040 row-forwards, ten completed rows, maximum batch two, and zero decline or route failure. Six measured waves then completed 15 exact responses plus one cancellation over 458.77 seconds with process DRM fixed at 50,001,174,528 bytes and zero post-baseline allocation, free, or pool miss. The next 96-word singleton began while the package was below the pacing threshold but reached exactly 97,000 millicelsius inside that one active wave. The unchanged guard stopped the server and the driver failed closed; zero pacing events accurately prove that boundary-only sampling had no opportunity to intervene. Host availability stayed above 16,861,724,672 bytes, swap grew 103,718,912 bytes, shutdown was unforced and zero, the private snapshot was removed, and no worker or process survived. The next correction must provide in-flight pacing or a lower-power typed execution envelope while keeping the prompt set, deadlines, semantic oracle, and 97 C limit unchanged. |
 | 2026-07-16 | Continuous in-flight Vulkan thermal controller and partial-evidence boundary | `d222f7830` plus this source | this static checkpoint | portable ROCm/Vulkan qualification contract and permanent website; Strix Halo execution follows | 518 qualification tests; strict validation of all 19 workload manifests; canonical 101-field configuration-schema self-test; Python compilation; 10 docs-builder tests; 48-document/5-asset site build; diff hygiene | static contract passed; exact pushed-source Vulkan retry pending | The named Strix Halo controller now samples `k10temp/Tctl` every 250 ms outside the server process group, sends `SIGSTOP` to that complete group at 88,000 millicelsius even during active inference, and sends `SIGCONT` only at or below 80,000. The unchanged 97,000-millicelsius guard is evaluated first and releases a stopped group after `SIGTERM` so termination can execute. Setup, measurement, and request deadlines continue during every pause. Begin/end events provide explicit `host_thermal_pacing` attribution for overlapping ITL gaps; receipts retain active, started, completed, total, maximum, and start-temperature evidence, and a clean result requires no active pause plus exact started/completed equality. Teardown and hard-trip regressions prove stopped groups are released. Request evidence is now committed only after a complete drained wave, so a later failure retains exact response, latency, cancellation, memory, allocator, cache, and resident-route metrics through the preceding boundary while `measurement_final_snapshot_complete=0` distinguishes them from final-drain evidence. The effective config, both workload contracts, qualification reference, and serving-profile website document the signals, scope, cadence, hysteresis, deadline accounting, attribution, metrics, and named-host-only boundary. No prompt, concurrency, allocator allowance, deadline, semantic oracle, or 97 C limit changed. |
 | 2026-07-16 | Accepted continuously paced Vulkan development soak | `e79d3686d` | this receipt/evidence commit | Strix Halo Vulkan/RADV clean pushed source | retained receipt `qualification/receipts/vulkan/strix-halo/20260716t154944163408z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1.json` (`sha256:d7e4459d774e86dc6e560c834c8f4d847a1eb33ff7965dcd6b810d8274ba82ea`); strict current-source/local-artifact/known-commit validation; case result `sha256:bfc5defbb8889d2ebe73c0f5890fc6d0a0f378ed65487c0bd60245541f9bddbe`; command result `sha256:7ac83d16923dfd0fd397837c7d8b43e69cb4d104bcf62a8bb058bec756ff71fa`; release binary `sha256:cc8ae9388b3e11bc65ccad44e61cf78808de00d970679e51a5b3c34d7ea7aed7`; hosted repository-hygiene, qualification-contract, and Pages checks green; zero process residue | passed the exact 30-minute Vulkan development-soak contract; multi-hour endurance and performance comparison remain open | Six setup cycles completed 30 exact responses plus three cancellations and converged after 1,212.42 seconds. Cycles 5 and 6 had zero DRM/live-buffer growth, allocations, frees, pool misses, evictions, or uncached allocations; stabilization proved 128 resident forwards over 256 rows, eight completed rows, width two, and clean drain. Measurement ran 1,804.61 seconds and completed 51 exact responses, 816 completion tokens, five cancellations, and 21 drained waves. Process DRM began and ended at 50,840,551,424 bytes with a 98,304-byte peak delta; Vulkan ownership and 3.5 GiB pool retention were byte-stable with zero measured allocation/free/miss/eviction/uncached churn and 686,925 hits. RSS grew 11,317,248 bytes. The resident route made 992 forwards over 1,984 rows, completed 20 rows at width two, and recorded no decline, failure, or active row at drain. The external controller completed all 123 in-flight pauses over 72.13 seconds, with a 1.001-second maximum, 89,625-millicelsius hottest start, zero active pause, and no 97 C trip. All 240 ITL outliers were attributed and zero unexplained. Host availability stayed above 17,548,128,256 bytes; swap growth was 341,397,504 bytes inside the unchanged cap. Request, batching, device, non-finite, synchronization, ownership, worker, shutdown, and snapshot failures were all zero; teardown was unforced and left no process. Measured p99 TTFT was 150,147.60 ms, so this is a correctness/sustainability acceptance for the declared four-active point, not a vLLM competitiveness or production-latency claim. |
+| 2026-07-16 | Final Vulkan endurance qualification contract | `e356a6b35` plus this source | this static checkpoint | portable qualification tooling and permanent website; Strix Halo execution follows | 519 qualification tests; strict validation of all 20 workload manifests; Python compilation; 10 docs-builder tests; 48-document/5-asset website build; diff hygiene | static contract passed; source-bound eight-hour execution pending | A distinct `vulkan-endurance` identity now reuses the accepted driver's exact four-active-request Vulkan policy while fixing an eight-hour measured duration, 1,800-second setup envelope, 600-second final-request allowance, 180-second teardown allowance, and 31,380-second outer timeout in one checked-in manifest. Driver-contract tests bind the variant, duration, effective configuration, declared metric set, command, and timeout so the endurance profile cannot drift from executable behavior. The website documents the exact command, safety controls, partial-evidence boundary, acceptance rules, and non-claims. The accepted ROCm and Vulkan baseline receipts now explicitly unblock CUDA handoff while this local final endurance gate remains open. |
 
 ## Known Starting Defects
 

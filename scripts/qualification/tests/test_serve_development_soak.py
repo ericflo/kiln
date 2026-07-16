@@ -233,6 +233,10 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.runtime_for_variant(soak.VULKAN_RUNTIME.variant_id),
             soak.VULKAN_RUNTIME,
         )
+        self.assertIs(
+            soak.runtime_for_variant(soak.VULKAN_ENDURANCE_RUNTIME.variant_id),
+            soak.VULKAN_ENDURANCE_RUNTIME,
+        )
         with self.assertRaisesRegex(soak.SoakError, "must name one of"):
             soak.runtime_for_variant("unknown")
 
@@ -1471,6 +1475,54 @@ class ServeRocmSoakTests(unittest.TestCase):
             case["timeout_seconds"],
             soak.qualification_case_timeout_seconds(
                 soak.QUALIFICATION_DURATION_SECONDS, soak.VULKAN_RUNTIME
+            ),
+        )
+
+    def test_checked_in_vulkan_endurance_workload_matches_driver_contract(self) -> None:
+        path = ROOT / "qualification/workloads/serving-vulkan-endurance-v1.json"
+        workload = json.loads(path.read_text())
+        self.assertEqual(workload["workload_id"], "serving-vulkan-endurance-v1")
+        self.assertEqual(workload["kind"], "soak")
+        self.assertIsNone(workload["comparison_policy"])
+        self.assertEqual(len(workload["variants"]), 1)
+        variant = workload["variants"][0]
+        self.assertEqual(variant["id"], soak.VULKAN_ENDURANCE_RUNTIME.variant_id)
+        self.assertEqual(variant["backend"], "vulkan")
+        self.assertEqual(
+            variant["effective_config"],
+            soak.effective_config(
+                soak.VULKAN_ENDURANCE_DURATION_SECONDS,
+                soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+                soak.VULKAN_ENDURANCE_RUNTIME,
+            ),
+        )
+        self.assertEqual(len(variant["cases"]), 1)
+        case = variant["cases"][0]
+        self.assertEqual(case["id"], soak.CASE_ID)
+        self.assertEqual(
+            case["result_protocol"]["declared_metrics"],
+            sorted(soak.metric_definitions(soak.VULKAN_ENDURANCE_RUNTIME)),
+        )
+        self.assertEqual(
+            case["command"],
+            [
+                "python3",
+                "scripts/qualification/serve_development_soak.py",
+                "--model-path",
+                "${model_path}",
+                "--seed",
+                "${seed}",
+                "--minimum-duration-seconds",
+                "28800",
+                "--memory-growth-limit-bytes",
+                str(soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES),
+            ],
+        )
+        self.assertEqual(
+            case["timeout_seconds"],
+            soak.qualification_case_timeout_seconds(
+                soak.VULKAN_ENDURANCE_DURATION_SECONDS,
+                soak.VULKAN_ENDURANCE_RUNTIME,
             ),
         )
 

@@ -1872,6 +1872,51 @@ health, debug snapshot, lifecycle deltas, and memory deltas have been traced
 and stored, so the cycle that crosses the safety limit is not lost from the
 diagnostic evidence.
 
+### Vulkan Final Endurance Soak
+
+Run the final Strix Halo endurance gate from a clean, pushed source tree after
+the 30-minute Vulkan development soak passes:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant vulkan-endurance \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  qualification/workloads/serving-vulkan-endurance-v1.json
+```
+
+This is a distinct source-bound qualification identity, not a duration override
+on a development receipt. It deliberately retains the development soak's exact
+four-active-request service envelope, one/four-way prompt cohorts, periodic
+cancellation, semantic oracle, fixed KV and Vulkan recycler policy, resident
+route gates, 8 GiB host-memory floor, 512 MiB swap-growth cap, continuous
+88/80 C process-group pacing, and independent 97 C hard stop. The different
+deterministic seed and eight-hour duration exercise a longer request sequence
+without silently widening the already-qualified operating point.
+
+The timing contract gives build, startup, warmup, and stabilization 1,800
+seconds. Successful stabilization starts a fresh 29,400-second measurement
+deadline: 28,800 required seconds plus the unchanged 600-second request
+containment window. The outer case timeout is 31,380 seconds, adding a separate
+180 seconds for cancellation, process-group shutdown, private-snapshot cleanup,
+and result publication. Pacing counts against those deadlines. A setup failure
+still reports zero measured duration, and a measurement failure retains evidence
+only through the last fully completed and drained wave with
+`measurement_final_snapshot_complete=0`.
+
+A pass requires the same exact response, device, ownership, memory, thermal,
+worker, and lifecycle verdicts as the development soak across the full measured
+window. In particular, hardware absence or a Vulkan skip fails the required
+case; every ITL outlier must have a bounded known attribution; every thermal
+pause must be released; final health, debug, allocator, cache, process-memory,
+and DRM snapshots must complete; and teardown must leave no server, request
+worker, or private snapshot. This endurance result qualifies only this named
+host and declared experimental operating point. It does not establish a
+high-concurrency performance claim, stable-profile resident admission, or
+portability to CUDA, Metal, or another Vulkan machine.
+
 Never edit a receipt to make it pass. A failed receipt is useful evidence: keep
 it when it identifies a reproducible product defect, fix the defect in a new
 commit, and run a new receipt with a new ID.
