@@ -203,12 +203,12 @@
             }
           ],
           "default": "auto",
-          "description": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width.",
+          "description": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width. The Strix Halo Vulkan development-soak candidate sets 3; together with a prefill admission quantum of one, this yields four total active requests.",
           "x-kiln-path": "server.max_decode_batch",
           "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
           "x-kiln-canonical-env": "KILN_SERVER_MAX_DECODE_BATCH (implemented)",
           "x-kiln-environment": "KILN_MAX_DECODE_BATCH (deprecated compatibility)",
-          "x-kiln-validation": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width."
+          "x-kiln-validation": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width. The Strix Halo Vulkan development-soak candidate sets 3; together with a prefill admission quantum of one, this yields four total active requests."
         },
         "eval_mode": {
           "type": "boolean",
@@ -418,12 +418,12 @@
             }
           ],
           "default": "auto",
-          "description": "An integer must be 1..=65536 and caps how many queued prompts the actor admits in one cycle before returning to decode. auto is case-insensitive and uses the backend policy below. The selected value is then clamped to 1..=effective max_decode_batch; the diagnostics name effective_decode_width as final authority when it performs that clamp. Restart required.",
+          "description": "An integer must be 1..=65536 and caps how many queued prompts the actor admits in one cycle before returning to decode. auto is case-insensitive and uses the backend policy below. The selected value is then clamped to 1..=effective max_decode_batch; the diagnostics name effective_decode_width as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. The Strix Halo Vulkan development-soak candidate sets 1. Restart required.",
           "x-kiln-path": "batching.prefill_admission_quantum",
           "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
           "x-kiln-canonical-env": "KILN_BATCHING_PREFILL_ADMISSION_QUANTUM (implemented)",
           "x-kiln-environment": "KILN_BATCH_PREFILL_ADMISSION_QUANTUM (deprecated compatibility)",
-          "x-kiln-validation": "An integer must be 1..=65536 and caps how many queued prompts the actor admits in one cycle before returning to decode. auto is case-insensitive and uses the backend policy below. The selected value is then clamped to 1..=effective max_decode_batch; the diagnostics name effective_decode_width as final authority when it performs that clamp. Restart required."
+          "x-kiln-validation": "An integer must be 1..=65536 and caps how many queued prompts the actor admits in one cycle before returning to decode. auto is case-insensitive and uses the backend policy below. The selected value is then clamped to 1..=effective max_decode_batch; the diagnostics name effective_decode_width as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. The Strix Halo Vulkan development-soak candidate sets 1. Restart required."
         },
         "direct_decode_rendezvous_mode": {
           "type": "string",
