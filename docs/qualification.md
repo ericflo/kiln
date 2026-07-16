@@ -1230,6 +1230,25 @@ Raw stdout and stderr artifacts are flushed after every captured chunk, so a
 monitor can follow structured progress while the case is still running rather
 than waiting for a user-space file buffer to fill.
 
+The clean 2026-07-16 run at commit `2587de1dd` is the current counterexample,
+not a passing soak. It completed 30 oracle-valid stabilization responses and
+one confirmed cancellation, then exhausted the 1,800-second setup envelope
+during the second cycle's final width-four wave. Measurement never started, so
+its zero measured request, wave, latency, and duration metrics are explicit
+partial-evidence sentinels. The successful width-eight wave reported
+256.9-562.5 second TTFT for 472-1,240 prompt tokens. Actor telemetry showed
+continuous rowwise generic prefill in four-layer, 128-token slices of roughly
+1.4-2.3 seconds, not an unexplained stall or mid-request VRAM rebalance. The
+first complete cycle also grew process DRM by 91,250,688 bytes and therefore
+failed the unchanged 64 MiB stabilization-delta gate. The retained receipt is
+`qualification/receipts/vulkan/strix-halo/20260716t041351870594z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1.json`.
+It records clean bounded teardown, zero device faults, zero direct prompt-state
+ownership after drain, at least 20,062,093,312 bytes of available host memory,
+53,248 bytes of swap growth, and a 93,375 millicelsius package peak. The next
+qualification attempt requires a safe generic-prefill throughput correction
+or an explicitly narrower published service region; increasing the setup or
+request deadline would not resolve this gate.
+
 ROCm's device-global memory counter cannot isolate another desktop process.
 The Vulkan driver therefore sums the server process's `drm-memory-vram`,
 `drm-memory-gtt`, and `drm-memory-cpu` records from `/proc/<pid>/fdinfo`,
