@@ -82,6 +82,13 @@ vLLM comparison backlog; this profile does not reject longer prompts or promise
 their latency. There is no per-request or environment override for
 resident-prefill admission.
 
+The Strix Halo qualification harness applies host-specific thermal pacing to
+this candidate: it pauses before new inference work at 88 C and resumes at 80 C
+while retaining an independent fail-closed 97 C guard. Cooling consumes the
+existing setup or measurement deadline and is included in measured throughput.
+These thresholds belong to the named-machine workload contract, not to the
+portable `experimental` serving profile or its product configuration.
+
 The maintenance profile is intentionally not a serving profile. Inference
 prewarm is skipped, `/health` and `/v1/health` return HTTP 503 with
 `status: "maintenance"`, and completion, prompt-logprob, eval, and agent-run

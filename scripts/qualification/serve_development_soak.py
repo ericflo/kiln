@@ -60,6 +60,8 @@ HOST_GUARD_POLL_INTERVAL_SECONDS = 0.25
 HOST_THERMAL_LIMIT_MILLICELSIUS = 97_000
 HOST_THERMAL_SENSOR_NAME = "k10temp"
 HOST_THERMAL_SENSOR_LABEL = "Tctl"
+VULKAN_THERMAL_PACING_START_MILLICELSIUS = 88_000
+VULKAN_THERMAL_PACING_RESUME_MILLICELSIUS = 80_000
 PROCESS_MEMORY_MAPPING_CATEGORIES = (
     "anonymous",
     "device",
@@ -164,6 +166,8 @@ class SoakRuntime:
     host_thermal_limit_millicelsius: int | None = None
     host_thermal_sensor_name: str | None = None
     host_thermal_sensor_label: str | None = None
+    thermal_pacing_start_millicelsius: int | None = None
+    thermal_pacing_resume_millicelsius: int | None = None
 
 
 ROCM_RUNTIME = SoakRuntime(
@@ -224,6 +228,12 @@ VULKAN_RUNTIME = SoakRuntime(
     host_thermal_limit_millicelsius=HOST_THERMAL_LIMIT_MILLICELSIUS,
     host_thermal_sensor_name=HOST_THERMAL_SENSOR_NAME,
     host_thermal_sensor_label=HOST_THERMAL_SENSOR_LABEL,
+    thermal_pacing_start_millicelsius=(
+        VULKAN_THERMAL_PACING_START_MILLICELSIUS
+    ),
+    thermal_pacing_resume_millicelsius=(
+        VULKAN_THERMAL_PACING_RESUME_MILLICELSIUS
+    ),
 )
 RUNTIMES = {
     runtime.variant_id: runtime for runtime in (ROCM_RUNTIME, VULKAN_RUNTIME)
@@ -413,6 +423,14 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "host_temperature_peak_millicelsius": ("millicelsius", "max", True),
     "host_temperature_start_millicelsius": ("millicelsius", "exact", True),
     "host_thermal_guard_trip_count": ("count", "sum", True),
+    "host_thermal_pacing_event_count": ("count", "sum", True),
+    "host_thermal_pacing_max_seconds": ("s", "max", True),
+    "host_thermal_pacing_max_start_millicelsius": (
+        "millicelsius",
+        "max",
+        True,
+    ),
+    "host_thermal_pacing_seconds": ("s", "sum", True),
     "resident_prefill_active_rows_end": ("rows", "exact", True),
     "resident_prefill_attempt_count": ("count", "sum", False),
     "resident_prefill_completed_row_count": ("rows", "sum", False),
@@ -600,6 +618,12 @@ def effective_config(
                 "hwmon_name": runtime.host_thermal_sensor_name,
                 "label": runtime.host_thermal_sensor_label,
             },
+        }
+        effective["soak"]["host_thermal_pacing"] = {
+            "start_millicelsius": runtime.thermal_pacing_start_millicelsius,
+            "resume_millicelsius": runtime.thermal_pacing_resume_millicelsius,
+            "poll_interval_ms": int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
+            "deadline_accounting": "included",
         }
     if runtime.vulkan_allocation_growth_limit_count is not None:
         effective["soak"]["vulkan_allocation_growth_limit_count"] = (
@@ -1129,6 +1153,17 @@ class HostThermalGuard:
             "host_thermal_guard_trip_count": int(self.trip_reason is not None),
         }
 
+    def latest_temperature_millicelsius(self) -> int:
+        if self.trip_reason is not None:
+            raise SoakError(self.trip_reason)
+        if not self.samples:
+            self._sample()
+        if self.trip_reason is not None:
+            raise SoakError(self.trip_reason)
+        if not self.samples:
+            raise SoakError("host thermal guard has no temperature sample")
+        return self.samples[-1]
+
     def _trip(self, reason: str) -> None:
         if self.trip_reason is not None:
             return
@@ -1164,6 +1199,83 @@ class HostThermalGuard:
             self._sample()
             if self.trip_reason is not None:
                 return
+
+
+@dataclasses.dataclass
+class ThermalPacingEvidence:
+    event_count: int = 0
+    total_seconds: float = 0.0
+    max_seconds: float = 0.0
+    max_start_millicelsius: int = 0
+
+    def metric_values(self) -> dict[str, float | int]:
+        return {
+            "host_thermal_pacing_event_count": self.event_count,
+            "host_thermal_pacing_max_seconds": self.max_seconds,
+            "host_thermal_pacing_max_start_millicelsius": (
+                self.max_start_millicelsius
+            ),
+            "host_thermal_pacing_seconds": self.total_seconds,
+        }
+
+
+def wait_for_thermal_headroom(
+    guard: HostThermalGuard | None,
+    evidence: ThermalPacingEvidence,
+    runtime: SoakRuntime,
+    *,
+    deadline: float,
+    phase: str,
+) -> None:
+    start_limit = runtime.thermal_pacing_start_millicelsius
+    resume_limit = runtime.thermal_pacing_resume_millicelsius
+    if guard is None or start_limit is None or resume_limit is None:
+        return
+    if not 0 < resume_limit < start_limit < guard.limit_millicelsius:
+        raise SoakError(
+            "thermal pacing requires 0 < resume < start < safety limit"
+        )
+    temperature = guard.latest_temperature_millicelsius()
+    if temperature < start_limit:
+        return
+    pacing_started = time.monotonic()
+    evidence.event_count += 1
+    evidence.max_start_millicelsius = max(
+        evidence.max_start_millicelsius, temperature
+    )
+    mixed.trace(
+        "host_thermal_pacing_started",
+        phase=phase,
+        temperature_millicelsius=temperature,
+        start_millicelsius=start_limit,
+        resume_millicelsius=resume_limit,
+    )
+    completed = False
+    try:
+        while temperature > resume_limit:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SoakError(f"{phase} deadline expired during thermal pacing")
+            time.sleep(min(HOST_GUARD_POLL_INTERVAL_SECONDS, remaining))
+            temperature = guard.latest_temperature_millicelsius()
+        completed = True
+    finally:
+        elapsed = time.monotonic() - pacing_started
+        evidence.total_seconds += elapsed
+        evidence.max_seconds = max(evidence.max_seconds, elapsed)
+        if not completed:
+            mixed.trace(
+                "host_thermal_pacing_interrupted",
+                phase=phase,
+                duration_seconds=elapsed,
+                temperature_millicelsius=temperature,
+            )
+    mixed.trace(
+        "host_thermal_pacing_completed",
+        phase=phase,
+        duration_seconds=elapsed,
+        temperature_millicelsius=temperature,
+    )
 
 
 DRM_MEMORY_FIELDS = (
@@ -2328,6 +2440,7 @@ def execute(
     stabilization_max_rss_delta = 0
     stabilization_rss_growth = 0
     stabilization_vulkan_growth_cycles = 0
+    thermal_pacing = ThermalPacingEvidence()
     worker_evidence = RequestWorkerEvidence()
     observed_stabilization_batching_start: dict[str, int | bool] | None = None
     observed_stabilization_batching_end: dict[str, int | bool] | None = None
@@ -2361,6 +2474,13 @@ def execute(
         warmup: mixed.StreamResult | None = None
         health_start: dict[str, Any] | None = None
         for attempt in range(mixed.MAX_WARMUP_REQUESTS):
+            wait_for_thermal_headroom(
+                thermal_guard,
+                thermal_pacing,
+                runtime,
+                deadline=setup_deadline,
+                phase=f"warmup-{attempt + 1}",
+            )
             warmup = mixed.run_stream(
                 port,
                 name=f"soak-warmup-{attempt + 1}",
@@ -2410,6 +2530,13 @@ def execute(
                     "prefix cache did not reach steady-state capacity within "
                     f"{runtime.max_steady_state_warmup_waves} warmup waves"
                 )
+            wait_for_thermal_headroom(
+                thermal_guard,
+                thermal_pacing,
+                runtime,
+                deadline=setup_deadline,
+                phase=f"steady-state-warmup-{steady_state_warmup_waves}",
+            )
             warm_results = run_wave(
                 port,
                 wave=steady_state_warmup_waves,
@@ -2526,6 +2653,13 @@ def execute(
                 stabilization_wave = (
                     stabilization_cycles * len(runtime.wave_concurrency) + offset
                 )
+                wait_for_thermal_headroom(
+                    thermal_guard,
+                    thermal_pacing,
+                    runtime,
+                    deadline=setup_deadline,
+                    phase=f"stabilization-wave-{stabilization_wave}",
+                )
                 stable_results = run_wave(
                     port,
                     wave=stabilization_wave,
@@ -2549,6 +2683,13 @@ def execute(
                         )
                     )
                 if (stabilization_wave + 1) % runtime.cancel_every_waves == 0:
+                    wait_for_thermal_headroom(
+                        thermal_guard,
+                        thermal_pacing,
+                        runtime,
+                        deadline=setup_deadline,
+                        phase=f"stabilization-cancellation-{stabilization_wave}",
+                    )
                     cancellation_failure = run_cancellation(
                         port,
                         wave=stabilization_wave,
@@ -2921,6 +3062,13 @@ def execute(
 
         while wave == 0 or time.monotonic() - measurement_started < minimum_duration_seconds:
             wave_failures: list[str] = []
+            wait_for_thermal_headroom(
+                thermal_guard,
+                thermal_pacing,
+                runtime,
+                deadline=measurement_deadline,
+                phase=f"measurement-wave-{wave}",
+            )
             wave_results = run_wave(
                 port,
                 wave=wave,
@@ -2942,6 +3090,13 @@ def execute(
                 )
 
             if (wave + 1) % runtime.cancel_every_waves == 0:
+                wait_for_thermal_headroom(
+                    thermal_guard,
+                    thermal_pacing,
+                    runtime,
+                    deadline=measurement_deadline,
+                    phase=f"measurement-cancellation-{wave}",
+                )
                 cancellation_failure = run_cancellation(
                     port,
                     wave=wave,
@@ -3306,6 +3461,8 @@ def execute(
             "zero_token_response_count": zero_tokens,
         }
         if runtime.backend == "vulkan":
+            values.update(thermal_pacing.metric_values())
+        if runtime.backend == "vulkan":
             assert observed_stabilization_batching_start is not None
             assert observed_stabilization_batching_end is not None
             stabilization_resident_values = (
@@ -3593,6 +3750,8 @@ def execute(
         values["stabilization_request_count"] = stabilization_requests
         values["stabilization_stable_cycle_count"] = stabilization_stable_cycles
         values["request_worker_residue_count"] = worker_evidence.peak_residue_count
+        if runtime.backend == "vulkan":
+            values.update(thermal_pacing.metric_values())
         if host_guard is not None:
             values.update(host_guard.metric_values())
         if thermal_guard is not None:

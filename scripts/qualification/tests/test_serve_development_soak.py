@@ -217,6 +217,15 @@ class ServeRocmSoakTests(unittest.TestCase):
                 "sensor": {"hwmon_name": "k10temp", "label": "Tctl"},
             },
         )
+        self.assertEqual(
+            vulkan["soak"]["host_thermal_pacing"],
+            {
+                "start_millicelsius": 88_000,
+                "resume_millicelsius": 80_000,
+                "poll_interval_ms": 250,
+                "deadline_accounting": "included",
+            },
+        )
         self.assertNotIn(
             "host_mem_available_floor_bytes",
             soak.effective_config(
@@ -1486,6 +1495,74 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(
             guard.metric_values()["host_temperature_peak_millicelsius"], 97_000
         )
+
+    def test_thermal_pacing_waits_for_hysteretic_headroom(self) -> None:
+        guard = mock.Mock(spec=soak.HostThermalGuard)
+        guard.limit_millicelsius = 97_000
+        guard.latest_temperature_millicelsius.side_effect = [89_000, 85_000, 80_000]
+        evidence = soak.ThermalPacingEvidence()
+
+        with (
+            mock.patch.object(soak.time, "sleep") as sleep,
+            mock.patch.object(soak.mixed, "trace") as trace,
+        ):
+            soak.wait_for_thermal_headroom(
+                guard,
+                evidence,
+                soak.VULKAN_RUNTIME,
+                deadline=time.monotonic() + 1,
+                phase="fixture-wave",
+            )
+
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(evidence.event_count, 1)
+        self.assertEqual(evidence.max_start_millicelsius, 89_000)
+        self.assertGreaterEqual(evidence.total_seconds, 0)
+        self.assertEqual(evidence.max_seconds, evidence.total_seconds)
+        self.assertEqual(
+            evidence.metric_values()["host_thermal_pacing_event_count"], 1
+        )
+        self.assertEqual(trace.call_count, 2)
+
+        guard.latest_temperature_millicelsius.side_effect = None
+        guard.latest_temperature_millicelsius.return_value = 87_000
+        with mock.patch.object(soak.time, "sleep") as sleep:
+            soak.wait_for_thermal_headroom(
+                guard,
+                evidence,
+                soak.VULKAN_RUNTIME,
+                deadline=time.monotonic() + 1,
+                phase="fixture-below-start",
+            )
+        sleep.assert_not_called()
+        self.assertEqual(evidence.event_count, 1)
+
+    def test_thermal_pacing_cannot_extend_an_expired_deadline(self) -> None:
+        guard = mock.Mock(spec=soak.HostThermalGuard)
+        guard.limit_millicelsius = 97_000
+        guard.latest_temperature_millicelsius.return_value = 89_000
+        evidence = soak.ThermalPacingEvidence()
+
+        with (
+            mock.patch.object(soak.time, "sleep") as sleep,
+            mock.patch.object(soak.mixed, "trace"),
+            self.assertRaisesRegex(
+                soak.SoakError,
+                "fixture-wave deadline expired during thermal pacing",
+            ),
+        ):
+            soak.wait_for_thermal_headroom(
+                guard,
+                evidence,
+                soak.VULKAN_RUNTIME,
+                deadline=time.monotonic() - 1,
+                phase="fixture-wave",
+            )
+
+        sleep.assert_not_called()
+        self.assertEqual(evidence.event_count, 1)
+        self.assertGreaterEqual(evidence.total_seconds, 0)
+        self.assertEqual(evidence.max_seconds, evidence.total_seconds)
 
     def test_host_thermal_guard_fails_closed_on_ambiguous_sensor(self) -> None:
         process = mock.Mock(pid=9876)

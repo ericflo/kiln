@@ -1387,6 +1387,19 @@ transient compiler/linker service. A build trip exits with status 3, while a
 missing or invalid sensor fails preflight with status 2; neither can be recorded
 as a successful source-bound build.
 
+The Vulkan soak also paces inference work before each warmup, stabilization,
+cancellation, and measured wave. A reading at or above 88,000 millicelsius
+starts a cooling interval; new inference work does not begin until the same
+sensor reads at or below 80,000 millicelsius. This hysteresis prevents rapid
+stop/start oscillation while leaving the independent 97,000 millicelsius
+process-killing guard unchanged and continuously active. Cooling time consumes
+the existing setup or measurement deadline: pacing cannot extend a run, conceal
+an unsustainable workload, or turn a deadline failure into a pass. The receipt
+publishes pacing event count, total seconds, longest interval, and hottest
+starting reading as `host_thermal_pacing_*` metrics. A measured throughput result
+therefore includes the idle time required to sustain this workload on the named
+host rather than reporting only its short-burst rate.
+
 At the drained warmup baseline and after each of the at most eight Vulkan
 stabilization cycles, the driver also reads `/proc/<pid>/smaps`. This is bounded
 diagnostic work, not a hot-loop sampler. Every mapping must contain Linux's
