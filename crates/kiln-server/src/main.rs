@@ -626,6 +626,7 @@ async fn main() -> Result<()> {
         dynamic_kv_resize = effective_policy.dynamic_kv_resize,
         allocator_reclaim = effective_policy.allocator_reclaim,
         live_graph_capture = effective_policy.live_graph_capture,
+        vulkan_resident_prefill = effective_policy.vulkan_resident_prefill,
         exclusive_gpu_behavior = effective_policy.exclusive_gpu_behavior,
         "serving profile resolved"
     );

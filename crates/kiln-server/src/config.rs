@@ -1110,6 +1110,7 @@ impl ServingProfile {
                 dynamic_kv_resize: false,
                 allocator_reclaim: false,
                 live_graph_capture: false,
+                vulkan_resident_prefill: false,
                 exclusive_gpu_behavior: "reject",
             },
             Self::Experimental => ServingRuntimePolicy {
@@ -1119,6 +1120,7 @@ impl ServingProfile {
                 dynamic_kv_resize: true,
                 allocator_reclaim: true,
                 live_graph_capture: true,
+                vulkan_resident_prefill: true,
                 exclusive_gpu_behavior: "writer_priority",
             },
             Self::Maintenance => ServingRuntimePolicy {
@@ -1128,6 +1130,7 @@ impl ServingProfile {
                 dynamic_kv_resize: true,
                 allocator_reclaim: true,
                 live_graph_capture: false,
+                vulkan_resident_prefill: false,
                 exclusive_gpu_behavior: "inference_disabled_drain_then_exclusive",
             },
         }
@@ -1149,6 +1152,9 @@ pub struct ServingRuntimePolicy {
     pub dynamic_kv_resize: bool,
     pub allocator_reclaim: bool,
     pub live_graph_capture: bool,
+    /// Admit the corrected Vulkan-native token-prefill route. Stable serving
+    /// remains on generic prefill until the full release qualification closes.
+    pub vulkan_resident_prefill: bool,
     pub exclusive_gpu_behavior: &'static str,
 }
 
@@ -10387,6 +10393,7 @@ last_token_lm_head = true
                 dynamic_kv_resize: false,
                 allocator_reclaim: false,
                 live_graph_capture: false,
+                vulkan_resident_prefill: false,
                 exclusive_gpu_behavior: "reject",
             }
         );
@@ -10399,6 +10406,7 @@ last_token_lm_head = true
                 dynamic_kv_resize: true,
                 allocator_reclaim: true,
                 live_graph_capture: true,
+                vulkan_resident_prefill: true,
                 exclusive_gpu_behavior: "writer_priority",
             }
         );
@@ -10411,6 +10419,7 @@ last_token_lm_head = true
                 dynamic_kv_resize: true,
                 allocator_reclaim: true,
                 live_graph_capture: false,
+                vulkan_resident_prefill: false,
                 exclusive_gpu_behavior: "inference_disabled_drain_then_exclusive",
             }
         );
@@ -10436,6 +10445,10 @@ last_token_lm_head = true
         assert_eq!(json["profile"], "maintenance");
         assert_eq!(json["source"], "environment");
         assert_eq!(json["effective_policy"]["inference_admission"], false);
+        assert_eq!(
+            json["effective_policy"]["vulkan_resident_prefill"],
+            false
+        );
         assert_eq!(
             json["effective_policy"]["exclusive_gpu_behavior"],
             "inference_disabled_drain_then_exclusive"

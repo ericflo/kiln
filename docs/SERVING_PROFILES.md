@@ -31,6 +31,7 @@ alias and emits a startup warning. Do not use it in new deployments.
 | Dynamic physical KV resize | no | yes | yes |
 | Allocator reclaim | no | yes | yes |
 | Live graph capture | no | yes | no |
+| Vulkan resident token prefill | no | yes | no |
 | Exclusive GPU behavior | reject | writer priority | inference disabled, drain, then exclusive |
 
 The stable profile keeps ordinary logical scheduling available. On a backend
@@ -46,7 +47,13 @@ allowed.
 The experimental profile retains dynamic behavior for controlled development
 and comparison work. It is not the supported latency or correctness baseline.
 Writer-priority operations may interrupt inference progress, and live graph
-capture or physical memory changes may alter latency.
+capture or physical memory changes may alter latency. On Vulkan, experimental
+also admits native resident token prefill after the backend and request-level
+eligibility checks pass. This route batches one prompt token per active row and
+retains its KV and recurrent state on the Vulkan device. Stable serving keeps
+the generic layer-resumable prompt path authoritative until the resident route
+passes the final repeated-cohort and soak gates. There is no per-request or
+environment override for this policy.
 
 The maintenance profile is intentionally not a serving profile. Inference
 prewarm is skipped, `/health` and `/v1/health` return HTTP 503 with
@@ -97,6 +104,7 @@ override policy, and every effective policy field. The same
     "dynamic_kv_resize": false,
     "allocator_reclaim": false,
     "live_graph_capture": false,
+    "vulkan_resident_prefill": false,
     "exclusive_gpu_behavior": "reject"
   }
 }

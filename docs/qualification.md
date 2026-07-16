@@ -1598,11 +1598,14 @@ introduces a hidden device readback on the prefill or decode hot path.
 `resident_prefix_snapshot_suppression_count` and
 `kiln_prefix_cache_snapshot_suppressions_total` prove that guard fired. The
 counter is expected to rise only when an admitted cache encounters an otherwise
-eligible capture under native resident decode authority. Vulkan currently
-admits neither the cross-request prefix cache nor resident token-prefill, so its
-soak requires both advertised capabilities and every corresponding activity
-and residency counter to remain zero. If either route is later requalified,
-captures remain subject to the same authority gate. The suppression counter
+eligible capture under native resident decode authority. Vulkan still
+quarantines the cross-request prefix cache. Stable and maintenance profiles
+also quarantine resident token-prefill and require its advertised capability
+and every activity counter to remain zero. The experimental profile admits
+resident token-prefill after backend and request eligibility checks; its soak
+must instead prove at least one multi-row forward, positive row and completion
+counts, zero active rows at drain, and zero route failures or initial declines.
+Captures remain subject to the same authority gate. The suppression counter
 must be monotonic; a zero delta is meaningful only when the workload also proves
 that an eligible cache capture and resident execution occurred. Qualification
 retains its delta but does not treat a positive value as an error on an admitted

@@ -1918,6 +1918,10 @@ mod tests {
             json["serving_profile"]["effective_policy"]["allocator_reclaim"],
             false
         );
+        assert_eq!(
+            json["serving_profile"]["effective_policy"]["vulkan_resident_prefill"],
+            false
+        );
         assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
         assert!(json["http"]["send_buffer_requested_bytes"].is_null());
         assert!(json["http"]["send_buffer_kernel_readback_bytes"].is_null());

@@ -4320,6 +4320,8 @@ impl AppState {
                     .stream_stall_grace_ms(),
                 stream_stall_grace_source = %response_delivery_policy
                     .stream_stall_grace_source(),
+                resident_prefill_enabled = backend_name == "vulkan"
+                    && serving_policy.vulkan_resident_prefill,
                 "batching engine enabled; routing streaming and non-streaming real completions through the batching actor"
             );
             let forward = crate::batching_engine::RealDecodeForward::new(
@@ -4330,6 +4332,9 @@ impl AppState {
                     gpu_lock.clone(),
                     loaded_adapter.clone(),
                     serving_policy.dynamic_kv_resize,
+                )
+                .with_resident_prefill_enabled(
+                    backend_name == "vulkan" && serving_policy.vulkan_resident_prefill,
                 )
                 .with_rowwise_decode(batching_runtime_config.rowwise_decode.enabled);
             crate::batching_engine::BatchingEngineHandle::start_with_admission_config(

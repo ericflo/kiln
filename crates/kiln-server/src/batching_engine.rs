@@ -693,6 +693,9 @@ pub struct RealDecodeForward {
     gpu_lock: GpuCoordinationLock,
     loaded_adapter: Arc<RwLock<Option<LoadedAdapterIdentity>>>,
     allow_dynamic_kv_resize: bool,
+    // Resolved once from the immutable serving profile and selected backend.
+    // The actor publishes this same value through health/debug/metrics.
+    resident_prefill_enabled: bool,
     // When set, multi-row decode steps are dispatched as a loop of single-row
     // forwards instead of one batched forward. Startup configuration resolves
     // this once; the constructor default keeps library callers on true batched
@@ -723,8 +726,14 @@ impl RealDecodeForward {
             gpu_lock,
             loaded_adapter,
             allow_dynamic_kv_resize,
+            resident_prefill_enabled: false,
             rowwise_decode: DEFAULT_ROWWISE_DECODE,
         }
+    }
+
+    pub fn with_resident_prefill_enabled(mut self, enabled: bool) -> Self {
+        self.resident_prefill_enabled = enabled;
+        self
     }
 
     pub fn with_rowwise_decode(mut self, rowwise: bool) -> Self {
@@ -905,11 +914,7 @@ impl DecodeForward for RealDecodeForward {
     }
 
     fn resident_prefill_enabled(&self) -> bool {
-        // Guarded production-model runs demonstrated plausible but incorrect
-        // tokens from this route, including on its first use in a fresh
-        // process. Keep generic layer-resumable prefill authoritative until
-        // resident KV/GDN parity is proven across changing actor cohorts.
-        false
+        self.resident_prefill_enabled
     }
 
     fn grow_for_decode(&self, slots: &mut [&mut DecodeSlot]) -> Result<Vec<usize>> {

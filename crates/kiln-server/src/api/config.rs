@@ -1150,6 +1150,7 @@ mod tests {
             "dynamic_kv_resize",
             "allocator_reclaim",
             "live_graph_capture",
+            "vulkan_resident_prefill",
         ] {
             assert_eq!(policy[field], true, "unexpected {field}");
         }
