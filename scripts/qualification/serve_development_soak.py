@@ -29,8 +29,9 @@ RUNTIME_VARIANT = "autoscale-off"
 VULKAN_RUNTIME_VARIANT = "vulkan-development-soak"
 VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE = 128
 VULKAN_QUALIFIED_ACTIVE_REQUESTS = 4
-VULKAN_QUALIFIED_DECODE_BATCH = 3
-VULKAN_QUALIFIED_PREFILL_ADMISSION_QUANTUM = 1
+VULKAN_QUALIFIED_DECODE_BATCH = 2
+VULKAN_QUALIFIED_PREFILL_ADMISSION_QUANTUM = 2
+VULKAN_QUALIFIED_BUFFER_POOL_GB = 3.5
 VULKAN_QUALIFIED_WAVE_CONCURRENCY = (1, 4)
 VULKAN_QUALIFIED_PROMPT_WORDS = (16, 32, 64, 96)
 SLOT_BY_REQUEST = "slot_by_request"
@@ -124,7 +125,7 @@ def _vulkan_variant_config() -> dict[str, Any]:
             "prefix_cache_effective_reason": "vulkan_correctness_quarantine",
         }
     )
-    config["vulkan_buffer_pool_gb"] = 3.0
+    config["runtime"]["vulkan_buffer_pool_gb"] = VULKAN_QUALIFIED_BUFFER_POOL_GB
     return config
 
 
@@ -156,6 +157,7 @@ class SoakRuntime:
     stabilization_rss_delta_limit_bytes: int
     active_gpu_peak_growth_limit_bytes: int | None
     vulkan_allocation_growth_limit_count: int | None
+    vulkan_buffer_pool_gb: float
     setup_deadline_seconds: float
     host_mem_available_floor_bytes: int | None = None
     host_swap_growth_limit_bytes: int | None = None
@@ -188,6 +190,7 @@ ROCM_RUNTIME = SoakRuntime(
     stabilization_rss_delta_limit_bytes=STABILIZATION_RSS_DELTA_LIMIT_BYTES,
     active_gpu_peak_growth_limit_bytes=None,
     vulkan_allocation_growth_limit_count=None,
+    vulkan_buffer_pool_gb=3.0,
     setup_deadline_seconds=SETUP_DEADLINE_SECONDS,
 )
 VULKAN_RUNTIME = SoakRuntime(
@@ -214,6 +217,7 @@ VULKAN_RUNTIME = SoakRuntime(
     stabilization_rss_delta_limit_bytes=16 * 1024 * 1024,
     active_gpu_peak_growth_limit_bytes=VULKAN_ACTIVE_GPU_PEAK_GROWTH_LIMIT_BYTES,
     vulkan_allocation_growth_limit_count=0,
+    vulkan_buffer_pool_gb=VULKAN_QUALIFIED_BUFFER_POOL_GB,
     setup_deadline_seconds=1800.0,
     host_mem_available_floor_bytes=8 * 1024 * 1024 * 1024,
     host_swap_growth_limit_bytes=512 * 1024 * 1024,
@@ -562,7 +566,7 @@ def effective_config(
                 memory_growth_limit_bytes if runtime.backend == "vulkan" else None
             ),
             "steady_state_warmup_max_waves": runtime.max_steady_state_warmup_waves,
-            "vulkan_buffer_pool_gb": float(base.get("vulkan_buffer_pool_gb", 3.0)),
+            "vulkan_buffer_pool_gb": runtime.vulkan_buffer_pool_gb,
             "wave_concurrency": {
                 f"wave_{index}": concurrency
                 for index, concurrency in enumerate(runtime.wave_concurrency)
@@ -1779,6 +1783,12 @@ def vulkan_buffer_pool_snapshot(
             "Vulkan buffer pool exceeds its configured cap: "
             f"{snapshot['retained_bytes']} > {snapshot['max_retained_bytes']} bytes"
         )
+    expected_max_retained_bytes = round(runtime.vulkan_buffer_pool_gb * 1024**3)
+    if snapshot["max_retained_bytes"] != expected_max_retained_bytes:
+        raise SoakError(
+            "Vulkan buffer-pool configured cap mismatch: "
+            f"{snapshot['max_retained_bytes']} != {expected_max_retained_bytes} bytes"
+        )
     if snapshot["free_bytes"] + snapshot["borrowed_bytes"] != snapshot["retained_bytes"]:
         raise SoakError("Vulkan buffer-pool byte ownership does not reconcile")
     if (
@@ -1797,6 +1807,35 @@ def vulkan_buffer_pool_counter_delta(
     if end < start:
         raise SoakError(f"Vulkan buffer-pool counter {field} regressed: {start} -> {end}")
     return end - start
+
+
+def stabilization_cycle_is_stable(
+    runtime: SoakRuntime,
+    *,
+    gpu_delta: int,
+    rss_delta: int,
+    vulkan_live_bytes_delta: int = 0,
+    vulkan_allocation_count: int = 0,
+    vulkan_free_count: int = 0,
+    vulkan_pool_cache_miss_count: int = 0,
+    vulkan_pool_eviction_count: int = 0,
+    vulkan_pool_uncached_allocation_count: int = 0,
+) -> bool:
+    if gpu_delta > runtime.stabilization_gpu_delta_limit_bytes:
+        return False
+    if runtime.backend != "vulkan":
+        return rss_delta <= runtime.stabilization_rss_delta_limit_bytes
+    return all(
+        value == 0
+        for value in (
+            vulkan_live_bytes_delta,
+            vulkan_allocation_count,
+            vulkan_free_count,
+            vulkan_pool_cache_miss_count,
+            vulkan_pool_eviction_count,
+            vulkan_pool_uncached_allocation_count,
+        )
+    )
 
 
 def vulkan_buffer_pool_miss_trace_values(
@@ -2659,6 +2698,8 @@ def execute(
                 0, current_memory.rss_bytes - stabilization_memory_baseline.rss_bytes
             )
             vulkan_live_bytes_delta = 0
+            vulkan_allocation_count = 0
+            vulkan_free_count = 0
             if (
                 previous_vulkan_buffers is not None
                 and current_vulkan_buffers is not None
@@ -2670,14 +2711,42 @@ def execute(
                 )
                 if vulkan_live_bytes_delta > 0:
                     stabilization_vulkan_growth_cycles += 1
-            stable_cycle = gpu_delta <= runtime.stabilization_gpu_delta_limit_bytes
-            if runtime.backend == "vulkan":
-                stable_cycle = stable_cycle and vulkan_live_bytes_delta == 0
-            else:
-                stable_cycle = (
-                    stable_cycle
-                    and rss_delta <= runtime.stabilization_rss_delta_limit_bytes
+                vulkan_allocation_count = vulkan_buffer_counter_delta(
+                    previous_vulkan_buffers, current_vulkan_buffers, "allocations"
                 )
+                vulkan_free_count = vulkan_buffer_counter_delta(
+                    previous_vulkan_buffers, current_vulkan_buffers, "frees"
+                )
+            vulkan_pool_cache_miss_count = 0
+            vulkan_pool_eviction_count = 0
+            vulkan_pool_uncached_allocation_count = 0
+            if previous_vulkan_pool is not None and current_vulkan_pool is not None:
+                vulkan_pool_cache_miss_count = vulkan_buffer_pool_counter_delta(
+                    previous_vulkan_pool, current_vulkan_pool, "cache_misses"
+                )
+                vulkan_pool_eviction_count = vulkan_buffer_pool_counter_delta(
+                    previous_vulkan_pool, current_vulkan_pool, "eviction_count"
+                )
+                vulkan_pool_uncached_allocation_count = (
+                    vulkan_buffer_pool_counter_delta(
+                        previous_vulkan_pool,
+                        current_vulkan_pool,
+                        "uncached_allocation_count",
+                    )
+                )
+            stable_cycle = stabilization_cycle_is_stable(
+                runtime,
+                gpu_delta=gpu_delta,
+                rss_delta=rss_delta,
+                vulkan_live_bytes_delta=vulkan_live_bytes_delta,
+                vulkan_allocation_count=vulkan_allocation_count,
+                vulkan_free_count=vulkan_free_count,
+                vulkan_pool_cache_miss_count=vulkan_pool_cache_miss_count,
+                vulkan_pool_eviction_count=vulkan_pool_eviction_count,
+                vulkan_pool_uncached_allocation_count=(
+                    vulkan_pool_uncached_allocation_count
+                ),
+            )
             if stable_cycle:
                 stabilization_stable_cycles += 1
             else:
@@ -2713,14 +2782,8 @@ def execute(
                         current_vulkan_buffers,
                         "allocated_bytes",
                     ),
-                    vulkan_allocation_count=vulkan_buffer_counter_delta(
-                        previous_vulkan_buffers,
-                        current_vulkan_buffers,
-                        "allocations",
-                    ),
-                    vulkan_free_count=vulkan_buffer_counter_delta(
-                        previous_vulkan_buffers, current_vulkan_buffers, "frees"
-                    ),
+                    vulkan_allocation_count=vulkan_allocation_count,
+                    vulkan_free_count=vulkan_free_count,
                     vulkan_freed_bytes=vulkan_buffer_counter_delta(
                         previous_vulkan_buffers,
                         current_vulkan_buffers,
@@ -2749,6 +2812,7 @@ def execute(
                     vulkan_pool_evicted_bytes=vulkan_buffer_pool_counter_delta(
                         previous_vulkan_pool, current_vulkan_pool, "evicted_bytes"
                     ),
+                    vulkan_pool_eviction_count=vulkan_pool_eviction_count,
                     vulkan_pool_free_bytes=current_vulkan_pool["free_bytes"],
                     vulkan_pool_retained_bytes=current_vulkan_pool["retained_bytes"],
                     vulkan_pool_retained_bytes_delta=max(
@@ -2760,6 +2824,9 @@ def execute(
                         previous_vulkan_pool,
                         current_vulkan_pool,
                         "uncached_allocated_bytes",
+                    ),
+                    vulkan_pool_uncached_allocation_count=(
+                        vulkan_pool_uncached_allocation_count
                     ),
                 )
             if previous_batched_state is not None and current_batched_state is not None:

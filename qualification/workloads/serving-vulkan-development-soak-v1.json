@@ -53,7 +53,8 @@
           "prefix_cache_effective_enabled": false,
           "prefix_cache_effective_reason": "vulkan_correctness_quarantine",
           "rocm_graphs_requested": false,
-          "rocm_graphs_enabled": false
+          "rocm_graphs_enabled": false,
+          "vulkan_buffer_pool_gb": 3.5
         },
         "server": {
           "chat_performance_metadata_enabled": true,
@@ -63,15 +64,15 @@
           "log_format": "json",
           "request_timeout_seconds": 600,
           "stream_stall_grace_ms": 2000,
-          "max_decode_batch": 3,
-          "max_prefill_staging_slots": 1,
+          "max_decode_batch": 2,
+          "max_prefill_staging_slots": 2,
           "max_active_requests": 4,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 128,
           "max_prefill_layers_per_cycle": 4
         },
         "batching": {
-          "prefill_admission_quantum": 1
+          "prefill_admission_quantum": 2
         },
         "model": {
           "vulkan_decode_weight_prewarm": true,
@@ -118,7 +119,7 @@
           "stabilization_rss_growth_limit_bytes": 536870912,
           "steady_state_warmup_max_waves": 12,
           "vulkan_allocation_growth_limit_count": 0,
-          "vulkan_buffer_pool_gb": 3.0,
+          "vulkan_buffer_pool_gb": 3.5,
           "wave_concurrency": {
             "wave_0": 1,
             "wave_1": 4

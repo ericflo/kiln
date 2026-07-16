@@ -175,9 +175,11 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertFalse(vulkan["runtime"]["rocm_graphs_enabled"])
         self.assertEqual(vulkan["server"]["request_timeout_seconds"], 600)
         self.assertEqual(vulkan["server"]["max_active_requests"], 4)
-        self.assertEqual(vulkan["server"]["max_decode_batch"], 3)
-        self.assertEqual(vulkan["server"]["max_prefill_staging_slots"], 1)
-        self.assertEqual(vulkan["batching"]["prefill_admission_quantum"], 1)
+        self.assertEqual(vulkan["server"]["max_prefill_staging_slots"], 2)
+        self.assertEqual(vulkan["server"]["max_decode_batch"], 2)
+        self.assertEqual(vulkan["batching"]["prefill_admission_quantum"], 2)
+        self.assertEqual(vulkan["runtime"]["vulkan_buffer_pool_gb"], 3.5)
+        self.assertEqual(vulkan["soak"]["vulkan_buffer_pool_gb"], 3.5)
         self.assertEqual(
             vulkan["soak"]["wave_concurrency"], {"wave_0": 1, "wave_1": 4}
         )
@@ -242,8 +244,9 @@ class ServeRocmSoakTests(unittest.TestCase):
                 root / "snapshots",
             )
             parsed = parse_generated_toml(path.read_text(encoding="utf-8"))
-        self.assertEqual(parsed["server"]["max_decode_batch"], 3)
-        self.assertEqual(parsed["batching"]["prefill_admission_quantum"], 1)
+        self.assertEqual(parsed["server"]["max_decode_batch"], 2)
+        self.assertEqual(parsed["batching"]["prefill_admission_quantum"], 2)
+        self.assertEqual(parsed["memory"]["vulkan_buffer_pool_gb"], 3.5)
 
     def test_process_memory_snapshot_requires_and_converts_linux_fields(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -424,7 +427,9 @@ class ServeRocmSoakTests(unittest.TestCase):
         ) -> dict:
             return {
                 "vulkan_buffer_pool": {
-                    "max_retained_bytes": 4096,
+                    "max_retained_bytes": round(
+                        soak.VULKAN_QUALIFIED_BUFFER_POOL_GB * 1024**3
+                    ),
                     "bucket_count": 2,
                     "buffer_count": 3,
                     "retained_bytes": 3072,
@@ -503,6 +508,56 @@ class ServeRocmSoakTests(unittest.TestCase):
                 ),
                 soak.VULKAN_RUNTIME,
             )
+        wrong_limit = pool_health(
+            cache_misses=9,
+            device_misses=7,
+            host_misses=2,
+            last_miss=before_last,
+        )
+        wrong_limit["vulkan_buffer_pool"]["max_retained_bytes"] = 3 * 1024**3
+        with self.assertRaisesRegex(soak.SoakError, "configured cap mismatch"):
+            soak.vulkan_buffer_pool_snapshot(wrong_limit, soak.VULKAN_RUNTIME)
+
+    def test_vulkan_stabilization_rejects_allocator_churn(self) -> None:
+        stable = {
+            "gpu_delta": 0,
+            "rss_delta": 0,
+            "vulkan_live_bytes_delta": 0,
+            "vulkan_allocation_count": 0,
+            "vulkan_free_count": 0,
+            "vulkan_pool_cache_miss_count": 0,
+            "vulkan_pool_eviction_count": 0,
+            "vulkan_pool_uncached_allocation_count": 0,
+        }
+        self.assertTrue(
+            soak.stabilization_cycle_is_stable(soak.VULKAN_RUNTIME, **stable)
+        )
+        for field in (
+            "vulkan_live_bytes_delta",
+            "vulkan_allocation_count",
+            "vulkan_free_count",
+            "vulkan_pool_cache_miss_count",
+            "vulkan_pool_eviction_count",
+            "vulkan_pool_uncached_allocation_count",
+        ):
+            with self.subTest(field=field):
+                churn = {**stable, field: 1}
+                self.assertFalse(
+                    soak.stabilization_cycle_is_stable(
+                        soak.VULKAN_RUNTIME, **churn
+                    )
+                )
+        self.assertFalse(
+            soak.stabilization_cycle_is_stable(
+                soak.VULKAN_RUNTIME,
+                **{
+                    **stable,
+                    "gpu_delta": (
+                        soak.VULKAN_RUNTIME.stabilization_gpu_delta_limit_bytes + 1
+                    ),
+                },
+            )
+        )
 
     def test_process_drm_memory_deduplicates_client_ids_and_regions(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

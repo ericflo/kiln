@@ -59,20 +59,24 @@ existing typed controls:
 ```toml
 [server]
 serving_profile = "experimental"
-max_decode_batch = 3
+max_decode_batch = 2
 max_prefill_tokens_per_cycle = 128
 max_prefill_layers_per_cycle = 4
 
 [batching]
-prefill_admission_quantum = 1
+prefill_admission_quantum = 2
+
+[memory]
+vulkan_buffer_pool_gb = 3.5
 ```
 
-Decode width three plus one staged prompt yields a health-attested maximum of
-four active requests. Qualification alternates one/four-way waves; each pair
+Decode width two plus two staged prompts yields a health-attested maximum of
+four active requests and admits an equal pair together. Qualification alternates one/four-way waves; each pair
 uses one of the 16/32/64/96-word prompt slots, all four concurrent rows share
 that length with distinct identities, and cycles rotate every slot before
 repeating. This deliberately forces resident multirow execution and batch
-scratch growth before the measurement baseline. Larger active sets and
+scratch growth before the measurement baseline. The 3.5 GiB idle-buffer cap is
+specific to this candidate; the product default remains 3.0 GiB. Larger active sets and
 longer-prompt throughput remain explicitly unqualified and are retained in the
 vLLM comparison backlog; this profile does not reject longer prompts or promise
 their latency. There is no per-request or environment override for

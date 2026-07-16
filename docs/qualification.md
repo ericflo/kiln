@@ -1273,10 +1273,11 @@ python3 scripts/qualification/run.py \
 This arm uses the same source-built, one-process, post-warmup qualification
 model as the ROCm soak, but its hardware accounting is deliberately different.
 The checked profile selects a typed 128-token prompt-work ceiling while keeping
-the shared four-layer yield ceiling. It also sets `server.max_decode_batch=3`
-and `batching.prefill_admission_quantum=1`. The actor therefore admits at most
-three decode rows plus one staged prefill row, and health/debug must attest the
-derived one-slot staging and four-request active ceilings. On this Strix Halo, 64-token chunks made
+the shared four-layer yield ceiling. It also sets `server.max_decode_batch=2`
+and `batching.prefill_admission_quantum=2`. The actor therefore admits an equal
+pair together while retaining two decode rows plus two staged prefill rows, and
+health/debug must attest the derived two-slot staging and four-request active
+ceilings. On this Strix Halo, 64-token chunks made
 regular progress but could not finish the declared eight-way long-prompt wave
 before the unchanged 600-second request deadline. Repeated four-request A/B
 runs at 128 tokens passed eight exact semantic oracles with stable process
@@ -1419,10 +1420,13 @@ RSS gate.
 Vulkan stabilization alternates concurrency one and four with 16-token outputs
 and a cancellation every fourth wave. Each pair uses one shared prompt-length
 slot, rotating through 16/32/64/96 words; the source-bound configuration
-enforces decode width three, one staged prefill row, and four total active
+enforces decode width two, two staged prefill rows, and four total active
 requests. Stabilization must observe a multirow resident prefill before the
 baseline, which also forces batch-dependent scratch growth into the setup
-phase. Client concurrency above four may wait outside the active set, but this
+phase. The candidate explicitly raises the idle Vulkan scratch pool from the
+3.0 GiB product default to 3.5 GiB; health must attest the exact byte cap. The
+additional 512 MiB is bounded by the same host-memory, swap, process-DRM, and
+thermal guards. Client concurrency above four may wait outside the active set, but this
 workload makes no latency or throughput claim for that queue or for prompts
 beyond the declared slots. The retained width-eight/384-word counterexamples
 remain performance evidence and the separate vLLM comparison campaign remains
@@ -1432,8 +1436,10 @@ fill the inert cache. Instead, the driver requires
 `prefix_cache_enabled=false` and zero lookups, hits, misses, retained blocks,
 retained entries, state bytes, leases, and pending releases at initial warmup,
 every stabilization and measured drain, and final drain. It then requires two
-consecutive cycles with no positive live `VulkanBuffer` ownership growth and
-at most 64 MiB of process-scoped DRM growth. It cannot accept before four
+consecutive cycles with no live `VulkanBuffer` ownership growth, allocation,
+free, buffer-pool cache miss, eviction, or uncached allocation, plus at most
+64 MiB of process-scoped DRM growth. Net-zero bytes cannot hide allocator
+churn. It cannot accept before four
 cycles and fails after eight. RSS is a
 separate cumulative host-safety signal on unified memory: stabilization fails
 if process RSS grows by more than 512 MiB from its baseline, while the host
