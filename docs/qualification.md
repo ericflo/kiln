@@ -1420,6 +1420,15 @@ error, actor discard, and final server drain. Cleanup is scoped to the stable
 request owner; clearing the whole registry would be an invalid implementation
 because it could corrupt concurrent rows.
 
+The internal migration rollback
+`KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` must disable both this
+request/layer prompt scope and the separate decode recurrent-state scope. A
+rollback arm that merely reports `resident_prefill_used=false` is insufficient:
+that field describes the native multi-row prefill route, not this direct GDN
+registry. A valid fully nonresident control additionally observes zero direct
+registry entries throughout the prompt and records no resident GDN use. The
+guard is startup-cached, so each A/B arm requires a fresh server process.
+
 Device residency must preserve the ordinary external-dtype boundary. For a
 BF16 recurrent tensor, every completed nonfinal token chunk performs a
 device-side F32 -> BF16 -> F32 round-to-nearest-even conversion before the row

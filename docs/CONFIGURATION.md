@@ -1224,13 +1224,26 @@ observe a mid-process change.
 Vulkan resumable-prompt GDN state residency is intentionally absent from this
 configuration section. It is an internal, correctness-preserving ownership
 rule of the Vulkan batching path, not an operator-selected algorithm or an
-environment escape hatch. While an admitted prompt yields across token chunks
-or layer groups, the backend keeps recurrent state on its existing logical
-device, reads back only the per-chunk output, and materializes state once before
-the successful decode handoff. Cancellation, errors, and discarded prefill
-rows evict the backend state. This applies to ordinary actor chunking regardless
-of whether `[streaming_prefill]` selects the separate tiled-forward algorithm.
-It does not enable default Vulkan decode-state residency.
+public tuning mode. While an admitted prompt yields across token chunks or
+layer groups, the backend keeps recurrent state on its existing logical device,
+reads back only the per-chunk output, and materializes state once before the
+successful decode handoff. Cancellation, errors, and discarded prefill rows
+evict the backend state. This applies to ordinary actor chunking regardless of
+whether `[streaming_prefill]` selects the separate tiled-forward algorithm. It
+does not enable Vulkan decode-state residency, which retains its separate
+experimental opt-in.
+
+The internal migration guard
+`KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` is the one rollback for
+both prompt and decode recurrent-state residency. Without it, prompt residency
+is enabled when Vulkan GDN is available; decode residency still requires its
+existing opt-in. With it, neither scope can become active, including the
+request/layer prompt scope, so controlled same-binary qualification can measure
+a fully materialized baseline. Startup resolves the guard once into typed
+backend runtime configuration. It is inventoried as experimental/debug
+migration input in [Runtime Environment Inventory](RUNTIME_ENVIRONMENT_INVENTORY.md),
+not presented as a supported public configuration surface, and no forward path
+re-reads it.
 
 Residency does not change the model's external recurrent-state precision
 contract. After every completed nonfinal prompt token chunk, Vulkan applies the
@@ -1258,7 +1271,9 @@ registered for quarantine instead of publishing stale state.
 Functional tensor replacement still transfers the secondary `TensorId` alias
 atomically. A destination alias collision or failed transfer is an inference
 error, and the old alias remains aligned for synchronized cleanup. Operators do
-not configure either identity mechanism or the precision boundary.
+not configure either identity mechanism or the precision boundary. The
+internal rollback disables the residency optimization as a unit; it does not
+alter either semantic rule while residency is active.
 
 Trusted `GET /v1/debug/model-state` exposes current ownership as
 `caches.resident_recurrent_state.entry_count`, `buffer_bytes`, and

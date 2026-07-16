@@ -1148,10 +1148,29 @@ mod tests {
         ])
     }
 
+    fn resident_backend() -> Arc<VulkanBackend> {
+        let mut backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
+        backend.prefill_recurrent_state_residency_enabled = true;
+        Arc::new(backend)
+    }
+
+    #[test]
+    fn recurrent_state_residency_rollback_disables_prefill_scopes() {
+        let mut backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
+        backend.recurrent_state_residency_enabled = false;
+        backend.prefill_recurrent_state_residency_enabled = false;
+
+        assert!(!ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(&backend));
+        assert!(!ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(&backend, 17,));
+        assert!(
+            !ResidencyBackend::runtime_enter_gdn_prefill_resident_state_layer_scope(&backend, 0,)
+        );
+    }
+
     #[test]
     fn chunkwise_prefill_resident_state_uses_stable_owner_across_handles_and_threads() -> Result<()>
     {
-        let backend = Arc::new(VulkanBackend::new(kiln_tensor::Device::Cpu));
+        let backend = resident_backend();
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping resident chunkwise test");
             return Ok(());
@@ -1315,15 +1334,15 @@ mod tests {
         assert_eq!(resident_stats.entry_count, 1);
         assert!(resident_stats.buffer_bytes >= 4 * std::mem::size_of::<f32>() as u64);
         assert!(resident_stats.allocation_bytes >= resident_stats.buffer_bytes);
-        assert_close(
-            "first output",
-            &values(&resident_out1)?,
-            &values(&quantized_out1)?,
+        assert_eq!(
+            values(&resident_out1)?,
+            values(&quantized_out1)?,
+            "first output must be bit-exact"
         );
-        assert_close(
-            "second output",
-            &values(&resident_out2)?,
-            &values(&quantized_out2)?,
+        assert_eq!(
+            values(&resident_out2)?,
+            values(&quantized_out2)?,
+            "second output must be bit-exact"
         );
 
         let materialize_backend = Arc::clone(&backend);
@@ -1346,10 +1365,10 @@ mod tests {
             ResidencyBackend::runtime_gdn_recurrent_state_residency_stats(&*backend),
             crate::backend::GdnRecurrentStateResidencyStats::default()
         );
-        assert_close(
-            "final state",
-            &values(&resident_state.to_dtype(kiln_tensor::DType::F32)?)?,
-            &values(&quantized_state.to_dtype(kiln_tensor::DType::F32)?)?,
+        assert_eq!(
+            values(&resident_state.to_dtype(kiln_tensor::DType::F32)?)?,
+            values(&quantized_state.to_dtype(kiln_tensor::DType::F32)?)?,
+            "final BF16 state must be bit-exact"
         );
 
         ResidencyBackend::runtime_evict_gdn_recurrent_resident_state(&*backend, &resident_state);
@@ -1358,7 +1377,8 @@ mod tests {
 
     #[test]
     fn prefill_owner_eviction_is_exact() -> Result<()> {
-        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
+        let mut backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
+        backend.prefill_recurrent_state_residency_enabled = true;
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping resident owner eviction test");
             return Ok(());

@@ -26,6 +26,7 @@ pub(super) struct VulkanRuntimeConfig {
     pub(super) bf16_packed_full_attn_qkv_weights_enabled: bool,
     pub(super) bf16_packed_mlp_decode_weights_enabled: bool,
     pub(super) recurrent_state_residency_enabled: bool,
+    pub(super) prefill_recurrent_state_residency_enabled: bool,
     pub(super) resident_decode_enabled: bool,
 }
 
@@ -94,9 +95,15 @@ impl VulkanRuntimeConfig {
         // Device-resident recurrent state is correct but regressed the live
         // Strix Halo batcher A/B in A129 because row/batch buffer copies cost
         // more than the saved readback/upload at the current batch shape.
+        let recurrent_state_residency_disabled =
+            std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_ok();
         let recurrent_state_residency_enabled = gdn_enabled
             && std::env::var("KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_ok()
-            && std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_err();
+            && !recurrent_state_residency_disabled;
+        // Resumable prompt residency is independently default-on, but the
+        // established rollback must disable both prompt and decode scopes.
+        let prefill_recurrent_state_residency_enabled =
+            gdn_enabled && !recurrent_state_residency_disabled;
         // Default ON: every Vulkan build that brings up a logical device wants
         // to route decode through the resident path. Pool feasibility is
         // checked later at first use; if the device can't fit the ring, the
@@ -131,6 +138,7 @@ impl VulkanRuntimeConfig {
             bf16_packed_full_attn_qkv_weights_enabled,
             bf16_packed_mlp_decode_weights_enabled,
             recurrent_state_residency_enabled,
+            prefill_recurrent_state_residency_enabled,
             resident_decode_enabled,
         }
     }

@@ -89,6 +89,7 @@ pub struct VulkanBackend {
     pub(super) bf16_packed_full_attn_qkv_weights_enabled: bool,
     pub(super) bf16_packed_mlp_decode_weights_enabled: bool,
     pub(super) recurrent_state_residency_enabled: bool,
+    pub(super) prefill_recurrent_state_residency_enabled: bool,
     /// Cached `supports_resident_decode()` evaluation. The trait method
     /// is called per-call on the hot path; reading env vars and checking
     /// the device handle every time would be wasteful. Set at
@@ -230,6 +231,8 @@ impl VulkanBackend {
                 .bf16_packed_full_attn_qkv_weights_enabled,
             bf16_packed_mlp_decode_weights_enabled: config.bf16_packed_mlp_decode_weights_enabled,
             recurrent_state_residency_enabled: config.recurrent_state_residency_enabled,
+            prefill_recurrent_state_residency_enabled: config
+                .prefill_recurrent_state_residency_enabled,
             resident_decode_enabled: config.resident_decode_enabled,
             decode_resident_pool: OnceLock::new(),
             vk_paged_kv_cache: OnceLock::new(),
@@ -1299,7 +1302,10 @@ impl ResidencyBackend for VulkanBackend {
     }
 
     fn runtime_enter_gdn_prefill_resident_state_scope(&self, owner_id: u64) -> bool {
-        if !self.has_vulkan() || !self.gdn_enabled {
+        if !self.prefill_recurrent_state_residency_enabled
+            || !self.has_vulkan()
+            || !self.gdn_enabled
+        {
             return false;
         }
         enter_prefill_recurrent_state_resident_scope(owner_id);
@@ -1311,6 +1317,9 @@ impl ResidencyBackend for VulkanBackend {
     }
 
     fn runtime_enter_gdn_prefill_resident_state_layer_scope(&self, layer_idx: usize) -> bool {
+        if !self.prefill_recurrent_state_residency_enabled {
+            return false;
+        }
         enter_prefill_recurrent_state_layer_scope(layer_idx)
     }
 

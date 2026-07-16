@@ -114,8 +114,13 @@ Within a resumable prompt:
 
 A one-token final prompt chunk uses the same scoped recurrent kernel. Ordinary
 decode does not: its separate resident-state scope still requires the existing
-backend decode-residency policy. Prompt-prefill residency therefore cannot
-silently enable the previously rejected batched-decode experiment.
+backend decode-residency opt-in. Prompt-prefill residency is default-on when
+Vulkan GDN is available; enabling it therefore cannot silently enable the
+previously rejected batched-decode experiment. The internal migration rollback
+`KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` disables both scopes so a
+same-binary qualification arm is genuinely nonresident. It is cached in the
+typed backend runtime configuration at construction and is not read in a hot
+path.
 
 Logical host tensors are stale while this direct registry is authoritative.
 Consequently, an in-place persistent-slot restore must preserve the secondary
