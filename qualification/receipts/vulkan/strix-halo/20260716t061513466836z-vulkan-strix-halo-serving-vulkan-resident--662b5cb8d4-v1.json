@@ -1,0 +1,681 @@
+{
+  "artifacts": [
+    {
+      "bytes": 6319,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260716t061513466836z-vulkan-strix-halo-serving-vulkan-resident--662b5cb8d4-v1/environment.json",
+      "sha256": "sha256:fa1d68912f571cc1ce72a43894c276189d7a948a1421073a3860c02ffc17423f"
+    },
+    {
+      "bytes": 9172,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260716t061513466836z-vulkan-strix-halo-serving-vulkan-resident--662b5cb8d4-v1/cases/001-vulkan-resident-prefill-oracle-r001/stdout.log",
+      "sha256": "sha256:4cd48c9607384b4cd33e5156bf59cdb81d3c85c50367c19f826929c4c78ef4b2"
+    },
+    {
+      "bytes": 84659,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260716t061513466836z-vulkan-strix-halo-serving-vulkan-resident--662b5cb8d4-v1/cases/001-vulkan-resident-prefill-oracle-r001/stderr.log",
+      "sha256": "sha256:e289e72ba828b78270658d8e300a8b2dc34b92359d5fa0f001110666e47e6818"
+    },
+    {
+      "bytes": 14253,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260716t061513466836z-vulkan-strix-halo-serving-vulkan-resident--662b5cb8d4-v1/cases/001-vulkan-resident-prefill-oracle-r001/case-result.json",
+      "sha256": "sha256:b9ca1d79e30595e2bb8c9814f37811e7f90f232b2d99d68aec35758a8d2345f6"
+    },
+    {
+      "bytes": 10316,
+      "kind": "command_case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260716t061513466836z-vulkan-strix-halo-serving-vulkan-resident--662b5cb8d4-v1/cases/001-vulkan-resident-prefill-oracle-r001/command-result.json",
+      "sha256": "sha256:5eb011d7013402df179f9a72636bcec084628dc53853508dc198ba80f638d695"
+    },
+    {
+      "bytes": 7220,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260716t061513466836z-vulkan-strix-halo-serving-vulkan-resident--662b5cb8d4-v1/run-config.json",
+      "sha256": "sha256:eff07c7f597c2f76f4d81c64868d54c69d61555ebe98558c814f163db9f409e2"
+    }
+  ],
+  "created_at_utc": "2026-07-16T06:18:17.071Z",
+  "effective_config": {
+    "build": {
+      "binary": "kiln",
+      "cargo_cpu_quota_percent": 50,
+      "cargo_environment_policy": "closed-source-build-v1",
+      "cargo_execution_mode": "transient-service",
+      "cargo_host_thermal_limit_millicelsius": 97000,
+      "cargo_host_thermal_poll_milliseconds": 250,
+      "cargo_host_thermal_sensor_label": "Tctl",
+      "cargo_host_thermal_sensor_name": "k10temp",
+      "cargo_jobs": 1,
+      "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
+      "cargo_min_available_gib": 15,
+      "cargo_private_network": true,
+      "cargo_service_runtime_max_seconds": 840,
+      "cargo_wrapper": "scripts/cargo-bounded.sh",
+      "features": "vulkan",
+      "locked": true,
+      "no_default_features": true,
+      "offline": true,
+      "package": "kiln-server",
+      "profile": "release",
+      "timeout_seconds": 900
+    },
+    "model": {
+      "vulkan_decode_weight_prewarm": true,
+      "vulkan_decode_weight_prewarm_mib_per_second": 256
+    },
+    "runtime": {
+      "kv_autoscale_enabled": false,
+      "kv_autoscale_requested": false,
+      "memory_reclaim_mode": "off",
+      "memory_reclaim_requested_mode": "off",
+      "prefix_cache_effective_enabled": false,
+      "prefix_cache_effective_reason": "vulkan_correctness_quarantine",
+      "prefix_cache_requested_enabled": true,
+      "rocm_graphs_enabled": false,
+      "rocm_graphs_requested": false,
+      "serving_profile": "experimental"
+    },
+    "server": {
+      "chat_performance_metadata_enabled": true,
+      "debug_endpoints_enabled": true,
+      "default_thinking_enabled": false,
+      "http_send_buffer_bytes": 4096,
+      "log_format": "json",
+      "max_active_requests": 12,
+      "max_decode_batch": 8,
+      "max_prefill_layers_per_cycle": 4,
+      "max_prefill_staging_priority_burst": 4,
+      "max_prefill_staging_slots": 4,
+      "max_prefill_tokens_per_cycle": 128,
+      "request_timeout_seconds": 600,
+      "stream_stall_grace_ms": 2000
+    },
+    "vulkan_buffer_pool_gb": 3.0,
+    "workload": {
+      "cohort_max_tokens": {
+        "cohort_0": {
+          "slot_0": 8,
+          "slot_1": 12,
+          "slot_2": 16,
+          "slot_3": 20
+        },
+        "cohort_1": {
+          "slot_0": 20,
+          "slot_1": 16,
+          "slot_2": 12,
+          "slot_3": 8
+        }
+      },
+      "cohort_prompt_words": 16,
+      "expected_completion_tokens": 112,
+      "expected_finish_reason": "length",
+      "expected_request_count": 8,
+      "host_mem_available_floor_bytes": 8589934592,
+      "host_swap_growth_limit_bytes": 536870912,
+      "host_thermal_limit_millicelsius": 97000,
+      "ignore_eos": true,
+      "overall_timeout_seconds": 1800,
+      "request_timeout_seconds": 600,
+      "response_oracle": "ascending_zero_padded_integers_prefix_v1",
+      "same_process_repetitions": 2,
+      "simultaneous_dispatch": "per_cohort_thread_barrier",
+      "varying_completion_lengths": true,
+      "warmup_max_tokens": 4
+    }
+  },
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+      "shader": "2026.2"
+    },
+    "device": {
+      "architecture": "strix_halo",
+      "driver": "radv Mesa 26.1.3-arch1.2",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "driver": "Mesa 26.1.3-arch1.2",
+      "execution_environment_sha256": "sha256:4e2f59070351a66c62498c8952245ba078b66548fd1f7b7b4083b32b2ab41a93",
+      "vulkan_device": "1.4.348",
+      "vulkan_instance": "1.4.350"
+    }
+  },
+  "metrics": [],
+  "model": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "id": "Qwen3.5-4B",
+    "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "notes": [],
+  "qualification": {
+    "backend": "vulkan",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "--variant",
+      "vulkan-resident-prefill-oracle",
+      "--host-id",
+      "strix-halo",
+      "--model",
+      "/home/ericflo/Development/kiln/Qwen3.5-4B",
+      "--model-id",
+      "Qwen3.5-4B",
+      "qualification/workloads/serving-vulkan-resident-prefill-v1.json"
+    ],
+    "duration_seconds": 183.60472261700488,
+    "finished_at_utc": "2026-07-16T06:18:17.071Z",
+    "kind": "correctness",
+    "profile": "serving-vulkan-resident-prefill-v1",
+    "started_at_utc": "2026-07-16T06:15:13.466Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260716t061513466836z-vulkan-strix-halo-serving-vulkan-resident--662b5cb8d4-v1",
+  "results": [
+    {
+      "details": "{\"build_seconds\":0.5347359860024881,\"cohorts\":[{\"duration_seconds\":63.62017546899733,\"index\":0,\"max_tokens\":[8,12,16,20],\"resident_prefill_used\":[true,true,true,true]},{\"duration_seconds\":13.003975585001172,\"index\":1,\"max_tokens\":[20,16,12,8],\"resident_prefill_used\":[true,true,true,true]}],\"generated_config_sha256\":\"sha256:5743c22d2163c15629b1f7b13f754cac6dbb0f2ba54550f4a14c0aec899e4e6b\",\"kiln_binary_sha256\":\"sha256:cc8ae9388b3e11bc65ccad44e61cf78808de00d970679e51a5b3c34d7ea7aed7\",\"semantic_output_sha256\":\"sha256:eb5a1c396e61a5b0ea92f5cf38883556c3049fa1c8331956d80f55ec2be6841c\"}",
+      "duration_seconds": 169.75904303698917,
+      "id": "vulkan-resident-prefill-oracle",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "batched_state_cache_active_leases_end",
+          "unit": "leases",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batched_state_cache_completed_row_eviction_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "batched_state_cache_entry_present_end",
+          "unit": "entries",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batched_state_cache_explicit_invalidation_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "batched_state_cache_max_active_leases",
+          "unit": "leases",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batched_state_cache_park_replacement_eviction_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "batched_state_cache_resident_end",
+          "unit": "count",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batched_state_cache_take_miss_while_leased_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batching_error_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": false,
+          "name": "batching_max_observed_active_requests",
+          "unit": "requests",
+          "value": 4
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": false,
+          "name": "batching_max_observed_batch_size",
+          "unit": "rows",
+          "value": 4
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "binary_build_count",
+          "unit": "count",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "cohort_count",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "completion_token_count",
+          "unit": "tokens",
+          "value": 112
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "device_fault_event_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "external_yield_sync_call_count",
+          "unit": "count",
+          "value": 147
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "external_yield_sync_max_ms",
+          "unit": "ms",
+          "value": 0.024
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_slow_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_total_ms",
+          "unit": "ms",
+          "value": 0.79
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "gpu_memory_baseline_bytes",
+          "unit": "bytes",
+          "value": 51394244608
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "gpu_memory_end_bytes",
+          "unit": "bytes",
+          "value": 50363981824
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "gpu_memory_peak_bytes",
+          "unit": "bytes",
+          "value": 51477872640
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "gpu_memory_peak_growth_bytes",
+          "unit": "bytes",
+          "value": 83628032
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "gpu_memory_sampler_error_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_activity_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "host_mem_available_end_bytes",
+          "unit": "bytes",
+          "value": 22002601984
+        },
+        {
+          "aggregation": "min",
+          "lower_is_better": false,
+          "name": "host_mem_available_min_bytes",
+          "unit": "bytes",
+          "value": 18404433920
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "host_mem_available_start_bytes",
+          "unit": "bytes",
+          "value": 23518867456
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "host_memory_guard_trip_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "host_swap_growth_bytes",
+          "unit": "bytes",
+          "value": 107974656
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "host_swap_used_end_bytes",
+          "unit": "bytes",
+          "value": 1930149888
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "host_swap_used_peak_bytes",
+          "unit": "bytes",
+          "value": 1930158080
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "host_swap_used_start_bytes",
+          "unit": "bytes",
+          "value": 1822183424
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "host_temperature_end_millicelsius",
+          "unit": "millicelsius",
+          "value": 61875
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "host_temperature_peak_millicelsius",
+          "unit": "millicelsius",
+          "value": 93750
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "host_temperature_start_millicelsius",
+          "unit": "millicelsius",
+          "value": 89375
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "host_thermal_guard_trip_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_blocks_used_end",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_unaccounted_blocks_end",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "length_terminated_request_count",
+          "unit": "count",
+          "value": 8
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "policy_attestation_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_active_leases_end",
+          "unit": "leases",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_pending_release_entries_end",
+          "unit": "entries",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_state_bytes_end",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "request_count",
+          "unit": "count",
+          "value": 8
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "request_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "resident_prefill_active_rows_end",
+          "unit": "rows",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "resident_prefill_attempt_count",
+          "unit": "count",
+          "value": 22
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "resident_prefill_completed_row_count",
+          "unit": "rows",
+          "value": 8
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "resident_prefill_enabled",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "resident_prefill_forward_count",
+          "unit": "count",
+          "value": 22
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "resident_prefill_initial_decline_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": false,
+          "name": "resident_prefill_max_batch_size",
+          "unit": "rows",
+          "value": 4
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "resident_prefill_metadata_request_count",
+          "unit": "requests",
+          "value": 8
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "resident_prefill_route_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "resident_prefill_row_count",
+          "unit": "rows",
+          "value": 88
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "resident_recurrent_state_allocation_bytes_end",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "resident_recurrent_state_buffer_bytes_end",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "resident_recurrent_state_entries_end",
+          "unit": "entries",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "response_oracle_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_forced_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_nonzero_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "snapshot_residue_count",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "e83d89a0990e799477cb900c96f01785bc2a54f0",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:9e855071ecadcb6a2b02308b1b28915e34be5eed0d0205d3e74cce4d46f16c5c",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "serving-vulkan-resident-prefill-v1",
+    "parameters": {
+      "variant_id": "vulkan-resident-prefill-oracle"
+    },
+    "seed": 20260716,
+    "sha256": "sha256:1bb1a10ef6e4bcd4b499fc29ceb7efc07c4264354c551ea4e90324b1848b841c"
+  }
+}
