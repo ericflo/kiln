@@ -1294,8 +1294,8 @@ Raw stdout and stderr artifacts are flushed after every captured chunk, so a
 monitor can follow structured progress while the case is still running rather
 than waiting for a user-space file buffer to fill.
 
-The clean 2026-07-16 run at commit `2587de1dd` is the current counterexample,
-not a passing soak. It completed 30 oracle-valid stabilization responses and
+The clean 2026-07-16 run at commit `2587de1dd` is the pre-resident-prefill
+counterexample, not a passing soak. It completed 30 oracle-valid stabilization responses and
 one confirmed cancellation, then exhausted the 1,800-second setup envelope
 during the second cycle's final width-four wave. Measurement never started, so
 its zero measured request, wave, latency, and duration metrics are explicit
@@ -1312,6 +1312,32 @@ ownership after drain, at least 20,062,093,312 bytes of available host memory,
 qualification attempt requires a safe generic-prefill throughput correction
 or an explicitly narrower published service region; increasing the setup or
 request deadline would not resolve this gate.
+
+The clean `7f8903097` rerun after the focused resident-prefill oracle is the
+current counterexample. It advanced farther, completing all 17 responses and
+one confirmed cancellation in Cycle 1, then the one-, four-, and eight-way
+waves in Cycle 2. The setup deadline expired in Cycle 2's final four-way wave
+with three workers still awaiting completion. Thus 30 stabilization responses
+were oracle-valid, but only one complete cycle was eligible for memory
+attestation and measurement still never began. The retained receipt is
+`qualification/receipts/vulkan/strix-halo/20260716t062158784737z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1.json`.
+Cycle 1 grew process DRM by 96,256,000 bytes, live Vulkan ownership by
+95,944,768 bytes, and RSS by 319,447,040 bytes, so it correctly remained
+nonstable. It recorded 1,249 exact recurrent-cache reuses, 571 resident-capacity
+reuses, and 542 resident-prefix views with zero miss while leased, completion
+eviction, explicit invalidation, or replacement eviction. The run had zero
+batching or device faults and zero unexplained ITL outliers; host availability
+stayed above 17,856,610,304 bytes, swap grew 12,288 bytes, and package
+temperature peaked at 96,000 millicelsius. Shutdown was unforced and zero with
+no snapshot residue or surviving process. Because the current result protocol
+publishes resident-route deltas only after stabilization succeeds, its zero
+resident-prefill metrics are partial-evidence sentinels rather than proof that
+the route was idle; the raw trace contains multi-row, full-stack resident
+forwards. The next harness revision must preserve these counters and give
+request threads bounded cleanup time after an expired work deadline. The
+performance gate itself remains unchanged: either improve this heterogeneous
+region or publish and enforce a narrower supported Vulkan service envelope
+before qualifying that envelope.
 
 ROCm's device-global memory counter cannot isolate another desktop process.
 The Vulkan driver therefore sums the server process's `drm-memory-vram`,
