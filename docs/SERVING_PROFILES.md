@@ -95,6 +95,17 @@ completion. These signals and thresholds belong to the named-machine workload
 contract, not to the portable `experimental` serving profile or its product
 configuration.
 
+The clean pushed-source `e79d3686d` run passed this exact 30-minute development
+soak on the named Strix Halo. It completed 51 exact measured responses and five
+cancellations over 21 drained waves with byte-stable process DRM, zero measured
+Vulkan allocation/free/recycler-miss churn, zero unexplained ITL outliers, and
+123 matched in-flight thermal pauses below an 89.625 C peak. This accepts the
+declared development operating point and containment policy only. Its roughly
+150.15-second measured p99 TTFT remains a performance limitation; the result
+does not claim vLLM competitiveness, broader prompt/concurrency capacity,
+multi-hour endurance, stable-profile admission, or portability to another
+host.
+
 The maintenance profile is intentionally not a serving profile. Inference
 prewarm is skipped, `/health` and `/v1/health` return HTTP 503 with
 `status: "maintenance"`, and completion, prompt-logprob, eval, and agent-run

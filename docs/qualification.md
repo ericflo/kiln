@@ -1442,6 +1442,48 @@ policy would not close this gate. The continuous process-group controller must
 still pass a clean pushed-source run before it supports a Vulkan qualification
 claim.
 
+That gate passed on the clean pushed `e79d3686d` source. The retained receipt is
+`qualification/receipts/vulkan/strix-halo/20260716t154944163408z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1.json`.
+It is strictly current-source, local-artifact, and known-commit valid. Six setup
+cycles completed 30 exact responses and three cancellations, covered every
+prompt cohort, and converged after 1,212.42 seconds. Cycles 5 and 6 had zero DRM
+growth, live-buffer growth, allocations, frees, recycler misses, evictions, or
+uncached allocations; the final setup RSS delta was 401,408 bytes. Stabilization
+also proved 128 resident forwards over 256 row-forwards, eight completed rows,
+maximum width two, zero active rows at drain, and no decline or route failure.
+
+The fresh measured phase then ran for 1,804.61 seconds and completed 51 exact
+responses, 816 completion tokens, five cancellations, and 21 fully drained
+waves. Process DRM began and ended at exactly 50,840,551,424 bytes; its measured
+peak was only 98,304 bytes higher. Live Vulkan ownership and the 3.5 GiB recycler
+retention were byte-identical at baseline and final drain, with zero measured
+allocations, frees, cache misses, evictions, or uncached allocations and 686,925
+cache hits. RSS grew 11,317,248 bytes. The resident route made 992 forwards over
+1,984 row-forwards, completed 20 rows at width two, and ended with zero active
+rows, initial declines, or route failures. There were zero request, batching,
+device, non-finite-response, worker-residue, synchronization, shutdown, or
+snapshot failures, and every KV/cache ownership gauge drained to its declared
+state.
+
+The continuous controller started and completed exactly 123 pauses, totaling
+72.13 seconds; its longest pause was 1.001 seconds and its hottest starting
+sample was 89,625 millicelsius. No pause remained active and the unchanged 97 C
+guard did not trip. All 240 ITL outliers had bounded attribution and none was
+unexplained. Host availability stayed at or above 17,548,128,256 bytes and swap
+grew 341,397,504 bytes, inside their unchanged limits. Shutdown was unforced and
+zero, the private snapshot was removed, and no process survived. The case result
+hash is `sha256:bfc5defbb8889d2ebe73c0f5890fc6d0a0f378ed65487c0bd60245541f9bddbe`;
+the receipt file hash is
+`sha256:d7e4459d774e86dc6e560c834c8f4d847a1eb33ff7965dcd6b810d8274ba82ea`.
+
+This passes the 30-minute Vulkan development-soak contract for the exact named
+machine and declared four-active profile. It does not establish eight-hour
+endurance, stable-profile resident admission, broader prompt/concurrency
+coverage, CUDA or Metal parity, or throughput competitiveness with vLLM. In
+particular, measured p99 TTFT was 150,147.60 ms; this is acceptable for the
+current containment/correctness gate but remains an explicit performance
+backlog item rather than a production latency claim.
+
 At the drained warmup baseline and after each of the at most eight Vulkan
 stabilization cycles, the driver also reads `/proc/<pid>/smaps`. This is bounded
 diagnostic work, not a hot-loop sampler. Every mapping must contain Linux's
