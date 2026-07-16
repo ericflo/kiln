@@ -52,8 +52,27 @@ also admits native resident token prefill after the backend and request-level
 eligibility checks pass. This route batches one prompt token per active row and
 retains its KV and recurrent state on the Vulkan device. Stable serving keeps
 the generic layer-resumable prompt path authoritative until the resident route
-passes the final repeated-cohort and soak gates. There is no per-request or
-environment override for this policy.
+passes the final repeated-cohort and soak gates. The current Strix Halo
+development-soak candidate deliberately constrains the active region through
+existing typed controls:
+
+```toml
+[server]
+serving_profile = "experimental"
+max_decode_batch = 3
+max_prefill_tokens_per_cycle = 128
+max_prefill_layers_per_cycle = 4
+
+[batching]
+prefill_admission_quantum = 1
+```
+
+Decode width three plus one staged prompt yields a health-attested maximum of
+four active requests. Qualification alternates one/four-way waves over
+16/32/64/96-word prompt slots. Larger active sets and longer-prompt throughput
+remain explicitly unqualified and are retained in the vLLM comparison backlog;
+this profile does not reject longer prompts or promise their latency. There is
+no per-request or environment override for resident-prefill admission.
 
 The maintenance profile is intentionally not a serving profile. Inference
 prewarm is skipped, `/health` and `/v1/health` return HTTP 503 with

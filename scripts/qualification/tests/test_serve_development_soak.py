@@ -14,6 +14,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from scripts.qualification.tests.generated_toml import parse_generated_toml
+
 
 QUALIFICATION_DIR = Path(__file__).resolve().parents[1]
 ROOT = QUALIFICATION_DIR.parents[1]
@@ -172,6 +174,17 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(vulkan["build"]["features"], "vulkan")
         self.assertFalse(vulkan["runtime"]["rocm_graphs_enabled"])
         self.assertEqual(vulkan["server"]["request_timeout_seconds"], 600)
+        self.assertEqual(vulkan["server"]["max_active_requests"], 4)
+        self.assertEqual(vulkan["server"]["max_decode_batch"], 3)
+        self.assertEqual(vulkan["server"]["max_prefill_staging_slots"], 1)
+        self.assertEqual(vulkan["batching"]["prefill_admission_quantum"], 1)
+        self.assertEqual(
+            vulkan["soak"]["wave_concurrency"], {"wave_0": 1, "wave_1": 4}
+        )
+        self.assertEqual(
+            vulkan["soak"]["prompt_words"],
+            {"slot_0": 16, "slot_1": 32, "slot_2": 64, "slot_3": 96},
+        )
         self.assertEqual(
             vulkan["soak"]["deadline_policy"],
             "independent_setup_and_measurement",
@@ -210,6 +223,22 @@ class ServeRocmSoakTests(unittest.TestCase):
             ],
             123,
         )
+
+    def test_vulkan_launch_file_enforces_the_qualified_active_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "kiln.toml"
+            soak.mixed.write_server_config(
+                path,
+                soak.VULKAN_RUNTIME.variant_id,
+                root / "model",
+                8420,
+                root / "adapters",
+                root / "snapshots",
+            )
+            parsed = parse_generated_toml(path.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["server"]["max_decode_batch"], 3)
+        self.assertEqual(parsed["batching"]["prefill_admission_quantum"], 1)
 
     def test_process_memory_snapshot_requires_and_converts_linux_fields(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1003,12 +1032,12 @@ class ServeRocmSoakTests(unittest.TestCase):
         with mock.patch.object(soak.mixed, "run_stream", return_value=object()) as run:
             soak.run_wave(
                 8420,
-                wave=2,
+                wave=1,
                 base_seed=7,
                 deadline=time.monotonic() + 1.0,
                 runtime=soak.VULKAN_RUNTIME,
             )
-        self.assertEqual(run.call_count, 8)
+        self.assertEqual(run.call_count, 4)
         self.assertTrue(
             all(call.kwargs["max_tokens"] == 16 for call in run.call_args_list)
         )

@@ -2273,6 +2273,7 @@ def write_server_config(
     config = VARIANT_CONFIGS[variant]
     runtime = config["runtime"]
     server = config["server"]
+    batching = config.get("batching")
     model = config.get("model", {})
     if deterministic is None:
         deterministic = bool(server.get("deterministic", False))
@@ -2339,6 +2340,15 @@ def write_server_config(
         'format = "json"',
         "",
     ]
+    if batching is not None:
+        lines.extend(
+            [
+                "[batching]",
+                "prefill_admission_quantum = "
+                + str(batching["prefill_admission_quantum"]),
+                "",
+            ]
+        )
     path.write_text("\n".join(lines), encoding="utf-8")
 
 

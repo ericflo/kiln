@@ -15,7 +15,7 @@
   "variants": [
     {
       "id": "vulkan-development-soak",
-      "description": "Graph-disabled Vulkan development soak with fixed KV capacity and allocator reclaim disabled, bounded concurrency, periodic cancellation, and fail-closed host-memory and package-temperature guards.",
+      "description": "Graph-disabled Vulkan development soak for the declared four-active-request operating envelope, with fixed KV capacity, allocator reclaim disabled, alternating one/four-way waves, periodic cancellation, and fail-closed host-memory and package-temperature guards.",
       "backend": "vulkan",
       "device_requirement": "required",
       "skip_policy": "fail",
@@ -63,12 +63,15 @@
           "log_format": "json",
           "request_timeout_seconds": 600,
           "stream_stall_grace_ms": 2000,
-          "max_decode_batch": 8,
-          "max_prefill_staging_slots": 4,
-          "max_active_requests": 12,
+          "max_decode_batch": 3,
+          "max_prefill_staging_slots": 1,
+          "max_active_requests": 4,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 128,
           "max_prefill_layers_per_cycle": 4
+        },
+        "batching": {
+          "prefill_admission_quantum": 1
         },
         "model": {
           "vulkan_decode_weight_prewarm": true,
@@ -94,11 +97,7 @@
             "slot_0": 16,
             "slot_1": 32,
             "slot_2": 64,
-            "slot_3": 96,
-            "slot_4": 128,
-            "slot_5": 192,
-            "slot_6": 256,
-            "slot_7": 384
+            "slot_3": 96
           },
           "response_oracle": "ascending_zero_padded_integers_prefix_v1",
           "response_oracle_integer_width": 6,
@@ -121,9 +120,7 @@
           "vulkan_buffer_pool_gb": 3.0,
           "wave_concurrency": {
             "wave_0": 1,
-            "wave_1": 4,
-            "wave_2": 8,
-            "wave_3": 4
+            "wave_1": 4
           },
           "host_mem_available_floor_bytes": 8589934592,
           "host_swap_growth_limit_bytes": 536870912,

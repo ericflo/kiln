@@ -28,6 +28,11 @@ CASE_ID = "continuous-mixed-load"
 RUNTIME_VARIANT = "autoscale-off"
 VULKAN_RUNTIME_VARIANT = "vulkan-development-soak"
 VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE = 128
+VULKAN_QUALIFIED_ACTIVE_REQUESTS = 4
+VULKAN_QUALIFIED_DECODE_BATCH = 3
+VULKAN_QUALIFIED_PREFILL_ADMISSION_QUANTUM = 1
+VULKAN_QUALIFIED_WAVE_CONCURRENCY = (1, 4)
+VULKAN_QUALIFIED_PROMPT_WORDS = (16, 32, 64, 96)
 DEFAULT_MEMORY_GROWTH_LIMIT_BYTES = 512 * 1024 * 1024
 WAVE_CONCURRENCY = (1, 8, 12, 8)
 PROMPT_WORDS = (16, 32, 64, 128, 256, 384, 512, 768, 96, 192, 1024, 48)
@@ -91,6 +96,18 @@ def _vulkan_variant_config() -> dict[str, Any]:
     config["server"]["max_prefill_tokens_per_cycle"] = (
         VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE
     )
+    config["server"].update(
+        {
+            "max_decode_batch": VULKAN_QUALIFIED_DECODE_BATCH,
+            "max_active_requests": VULKAN_QUALIFIED_ACTIVE_REQUESTS,
+            "max_prefill_staging_slots": (
+                VULKAN_QUALIFIED_PREFILL_ADMISSION_QUANTUM
+            ),
+        }
+    )
+    config["batching"] = {
+        "prefill_admission_quantum": VULKAN_QUALIFIED_PREFILL_ADMISSION_QUANTUM,
+    }
     config["model"] = {
         "vulkan_decode_weight_prewarm": mixed.VULKAN_DECODE_WEIGHT_PREWARM,
         "vulkan_decode_weight_prewarm_mib_per_second": (
@@ -175,8 +192,8 @@ VULKAN_RUNTIME = SoakRuntime(
     gpu_memory_scope="server_process",
     gpu_memory_source="linux_proc_drm_fdinfo:vram+gtt+cpu",
     graph_execution_required=False,
-    wave_concurrency=(1, 4, 8, 4),
-    prompt_words=(16, 32, 64, 96, 128, 192, 256, 384),
+    wave_concurrency=VULKAN_QUALIFIED_WAVE_CONCURRENCY,
+    prompt_words=VULKAN_QUALIFIED_PROMPT_WORDS,
     max_tokens=16,
     cancel_every_waves=4,
     cancellation_max_tokens=256,
@@ -541,6 +558,8 @@ def effective_config(
             },
         },
     }
+    if "batching" in base:
+        effective["batching"] = base["batching"]
     if "model" in base:
         effective["model"] = base["model"]
     if runtime.host_mem_available_floor_bytes is not None:
