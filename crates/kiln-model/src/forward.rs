@@ -4359,6 +4359,18 @@ pub struct LinearAttentionState {
     pub conv_states: Vec<Tensor>,
 }
 
+/// Vulkan's tensor-keyed GDN registry normalizes recurrent and convolution
+/// state to f32 regardless of the logical tensor dtype. Batch row transfers
+/// must therefore use the resident representation's stride, not the host
+/// tensor's BF16/F16 stride.
+fn resident_gdn_f32_row_bytes(tensor: &Tensor, label: &'static str) -> Result<u64> {
+    tensor
+        .elem_count()
+        .checked_mul(std::mem::size_of::<f32>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .with_context(|| format!("linear-attention {label} resident row byte count overflow"))
+}
+
 /// Build a linear-attention snapshot without releasing partially submitted
 /// device-copy destinations on either an error or a panic.
 ///
@@ -4886,16 +4898,8 @@ impl LinearAttentionState {
             let batch_key = self.recurrent_states[layer_idx].id();
             let recurrent_row = &rows[0].recurrent_states[layer_idx];
             let conv_row = &rows[0].conv_states[layer_idx];
-            let recurrent_row_bytes = recurrent_row
-                .elem_count()
-                .checked_mul(recurrent_row.dtype().size_in_bytes())
-                .and_then(|bytes| u64::try_from(bytes).ok())
-                .context("linear-attention recurrent row byte count overflow")?;
-            let conv_row_bytes = conv_row
-                .elem_count()
-                .checked_mul(conv_row.dtype().size_in_bytes())
-                .and_then(|bytes| u64::try_from(bytes).ok())
-                .context("linear-attention convolution row byte count overflow")?;
+            let recurrent_row_bytes = resident_gdn_f32_row_bytes(recurrent_row, "recurrent")?;
+            let conv_row_bytes = resident_gdn_f32_row_bytes(conv_row, "convolution")?;
             assembled_any |= ResidencyBackend::runtime_assemble_linear_attn_gdn_state_batch_kt(
                 backend,
                 &row_keys,
@@ -5062,16 +5066,8 @@ impl LinearAttentionState {
             let batch_key = self.recurrent_states[layer_idx].id();
             let recurrent_row = &destinations[0].recurrent_states[layer_idx];
             let conv_row = &destinations[0].conv_states[layer_idx];
-            let recurrent_row_bytes = recurrent_row
-                .elem_count()
-                .checked_mul(recurrent_row.dtype().size_in_bytes())
-                .and_then(|bytes| u64::try_from(bytes).ok())
-                .context("linear-attention recurrent row byte count overflow")?;
-            let conv_row_bytes = conv_row
-                .elem_count()
-                .checked_mul(conv_row.dtype().size_in_bytes())
-                .and_then(|bytes| u64::try_from(bytes).ok())
-                .context("linear-attention convolution row byte count overflow")?;
+            let recurrent_row_bytes = resident_gdn_f32_row_bytes(recurrent_row, "recurrent")?;
+            let conv_row_bytes = resident_gdn_f32_row_bytes(conv_row, "convolution")?;
             scattered_any |= ResidencyBackend::runtime_scatter_linear_attn_gdn_state_batch_kt(
                 backend,
                 batch_key,
@@ -38761,6 +38757,18 @@ mod tests {
         assert_eq!(vulkan_fp16.recurrent_states[0].dtype(), DType::F16);
         assert_eq!(vulkan_fp16.conv_states[0].dtype(), DType::F32);
 
+        Ok(())
+    }
+
+    #[test]
+    fn resident_gdn_row_stride_uses_normalized_f32_storage() -> Result<()> {
+        let bf16 = Tensor::zeros((1, 2, 3, 4), DType::BF16, &Device::Cpu)?;
+        let f16 = Tensor::zeros((1, 3, 5), DType::F16, &Device::Cpu)?;
+        let f32 = Tensor::zeros((1, 7), DType::F32, &Device::Cpu)?;
+
+        assert_eq!(resident_gdn_f32_row_bytes(&bf16, "recurrent")?, 96);
+        assert_eq!(resident_gdn_f32_row_bytes(&f16, "recurrent")?, 60);
+        assert_eq!(resident_gdn_f32_row_bytes(&f32, "convolution")?, 28);
         Ok(())
     }
 

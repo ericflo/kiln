@@ -1689,6 +1689,8 @@ pub trait ResidencyBackend:
         Ok(false)
     }
 
+    /// Assemble tensor-keyed resident GDN rows. Byte counts describe the
+    /// backend's normalized f32 storage, not the logical tensor dtype.
     fn runtime_assemble_linear_attn_gdn_state_batch_kt(
         &self,
         _row_keys: &[kiln_tensor::TensorId],
@@ -1699,6 +1701,7 @@ pub trait ResidencyBackend:
         Ok(false)
     }
 
+    /// Scatter tensor-keyed resident GDN rows using normalized f32 strides.
     fn runtime_scatter_linear_attn_gdn_state_batch_kt(
         &self,
         _batch_key: kiln_tensor::TensorId,

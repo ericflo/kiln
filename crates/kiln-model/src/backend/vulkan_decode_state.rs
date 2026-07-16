@@ -342,6 +342,8 @@ impl VulkanBackend {
         &self,
         row_keys: &[kiln_tensor::TensorId],
         batch_key: kiln_tensor::TensorId,
+        // Tensor-keyed state is normalized to f32 when seeded. These strides
+        // intentionally do not follow the logical BF16/F16 tensor dtype.
         recurrent_row_bytes: u64,
         conv_row_bytes: u64,
     ) -> Result<bool> {
@@ -366,6 +368,7 @@ impl VulkanBackend {
         &self,
         batch_key: kiln_tensor::TensorId,
         row_keys: &[kiln_tensor::TensorId],
+        // See the assembly contract above: resident rows are always f32.
         recurrent_row_bytes: u64,
         conv_row_bytes: u64,
     ) -> Result<bool> {
@@ -470,8 +473,33 @@ impl VulkanBackend {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
+    use kiln_tensor::{DType, Tensor};
 
     use super::VulkanBackend;
+    use crate::forward::LinearAttentionState;
+
+    fn read_f32_buffer(
+        backend: &VulkanBackend,
+        buffer: &kiln_vulkan_kernel::VulkanBuffer,
+        elements: usize,
+    ) -> Result<Vec<f32>> {
+        let device = backend
+            .vulkan_device
+            .as_ref()
+            .expect("live Vulkan test validated device availability");
+        let bytes = kiln_vulkan_kernel::VulkanBuffer::read_back(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            buffer,
+        )?;
+        Ok(bytes
+            .chunks_exact(4)
+            .take(elements)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect())
+    }
 
     #[test]
     fn evict_linear_attention_state_releases_both_buffers_and_seed_marker() -> Result<()> {
@@ -501,6 +529,90 @@ mod tests {
         // and cancellation fences cannot resurrect or double-own state.
         backend.evict_linear_attn_gdn_state_kt(recurrent.id());
         assert_eq!(backend.linear_attn_gdn_state_entry_counts(), (0, 0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn bf16_logical_rows_keep_f32_resident_batch_strides() -> Result<()> {
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping live state-stride test");
+            return Ok(());
+        }
+
+        let make_row = |base: f32| -> Result<LinearAttentionState> {
+            Ok(LinearAttentionState {
+                recurrent_states: vec![Tensor::from_vec(
+                    (0..8).map(|idx| base + idx as f32).collect::<Vec<_>>(),
+                    (1, 2, 2, 2),
+                )?
+                .to_dtype(DType::BF16)?],
+                conv_states: vec![Tensor::from_vec(
+                    (0..4)
+                        .map(|idx| base + 100.0 + idx as f32)
+                        .collect::<Vec<_>>(),
+                    (1, 2, 2),
+                )?],
+            })
+        };
+        let mut row0 = make_row(10.0)?;
+        let mut row1 = make_row(20.0)?;
+        assert!(row0.ensure_gdn_state_resident_kt(&backend)?);
+        assert!(row1.ensure_gdn_state_resident_kt(&backend)?);
+
+        let batch = LinearAttentionState::from_batch_rows(&[&row0, &row1])?;
+        assert!(batch.assemble_gdn_state_resident_batch_rows_kt(
+            &backend,
+            &[&row0, &row1]
+        )?);
+
+        let batch_recurrent = backend
+            .linear_attn_recurrent_state_kt
+            .lock()
+            .expect("resident recurrent registry lock")
+            .get(&batch.recurrent_states[0].id())
+            .cloned()
+            .expect("assembled recurrent batch buffer");
+        let batch_conv = backend
+            .linear_attn_conv_state_kt
+            .lock()
+            .expect("resident convolution registry lock")
+            .get(&batch.recurrent_states[0].id())
+            .cloned()
+            .expect("assembled convolution batch buffer");
+        assert!(batch_recurrent.size() >= 16 * 4);
+        assert!(batch_conv.size() >= 8 * 4);
+        assert_eq!(
+            read_f32_buffer(&backend, &batch_recurrent, 16)?,
+            vec![
+                10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 20.0, 21.0, 22.0, 23.0,
+                24.0, 25.0, 26.0, 27.0,
+            ]
+        );
+        assert_eq!(
+            read_f32_buffer(&backend, &batch_conv, 8)?,
+            vec![110.0, 111.0, 112.0, 113.0, 120.0, 121.0, 122.0, 123.0]
+        );
+
+        assert!(batch.scatter_gdn_state_resident_batch_rows_kt(
+            &backend,
+            &mut [&mut row0, &mut row1]
+        )?);
+        for (row, expected_base) in [(&row0, 10.0), (&row1, 20.0)] {
+            let recurrent = backend
+                .linear_attn_recurrent_state_kt
+                .lock()
+                .expect("resident recurrent registry lock")
+                .get(&row.recurrent_states[0].id())
+                .cloned()
+                .expect("scattered recurrent row buffer");
+            assert_eq!(
+                read_f32_buffer(&backend, &recurrent, 8)?,
+                (0..8)
+                    .map(|idx| expected_base + idx as f32)
+                    .collect::<Vec<_>>()
+            );
+        }
         Ok(())
     }
 
