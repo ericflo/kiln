@@ -83,11 +83,17 @@ their latency. There is no per-request or environment override for
 resident-prefill admission.
 
 The Strix Halo qualification harness applies host-specific thermal pacing to
-this candidate: it pauses before new inference work at 88 C and resumes at 80 C
-while retaining an independent fail-closed 97 C guard. Cooling consumes the
-existing setup or measurement deadline and is included in measured throughput.
-These thresholds belong to the named-machine workload contract, not to the
-portable `experimental` serving profile or its product configuration.
+this candidate. Its external 250 ms controller sends `SIGSTOP` to the complete
+server process group at 88 C, including during active inference, and sends
+`SIGCONT` after the package cools to 80 C. The independent fail-closed 97 C
+guard remains active; if it trips while the server is stopped, termination is
+followed by a release signal so cleanup can execute. Cooling consumes the
+existing setup, measurement, and request deadlines, is included in measured
+throughput, and is explicitly attributed in latency evidence. Teardown must
+leave no active pause and every noninterrupted pause must have a matching
+completion. These signals and thresholds belong to the named-machine workload
+contract, not to the portable `experimental` serving profile or its product
+configuration.
 
 The maintenance profile is intentionally not a serving profile. Inference
 prewarm is skipped, `/health` and `/v1/health` return HTTP 503 with

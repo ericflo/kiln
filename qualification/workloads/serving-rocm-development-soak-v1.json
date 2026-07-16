@@ -198,6 +198,7 @@
               "kv_blocks_start",
               "kv_blocks_used_end",
               "kv_unaccounted_blocks_end",
+              "measurement_final_snapshot_complete",
               "non_finite_response_count",
               "prefix_cache_active_leases_end",
               "prefix_cache_baseline_cached_entries",

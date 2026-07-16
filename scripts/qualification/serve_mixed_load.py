@@ -3536,6 +3536,7 @@ def classify_itl_outliers(
         "graph_fallback",
         "graph_sync",
         "external_yield_sync",
+        "host_thermal_pacing",
         "client_backpressure_start",
         "client_backpressure_timeout",
     }

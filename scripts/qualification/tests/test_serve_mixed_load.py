@@ -2409,6 +2409,13 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             [100.0, 100.0], [result], [synchronization]
         )
         self.assertEqual((attributed, unexplained), (1, 0))
+        thermal_pacing = serve.ObservedEvent(
+            0.5, "host_thermal_pacing", "qualification pause"
+        )
+        attributed, unexplained = serve.classify_itl_outliers(
+            [100.0, 100.0], [result], [thermal_pacing]
+        )
+        self.assertEqual((attributed, unexplained), (1, 0))
         prefill = serve.ObservedEvent(0.7, "actor_prefill", "slow prefill")
         attributed, unexplained = serve.classify_itl_outliers(
             [100.0, 100.0], [result], [prefill]

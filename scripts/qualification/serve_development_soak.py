@@ -336,6 +336,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "rss_end_bytes": ("bytes", "exact", True),
     "rss_growth_bytes": ("bytes", "exact", True),
     "rss_peak_bytes": ("bytes", "max", True),
+    "measurement_final_snapshot_complete": ("bool", "exact", False),
     "shutdown_forced_count": ("count", "sum", True),
     "shutdown_nonzero_count": ("count", "sum", True),
     "snapshot_residue_count": ("count", "sum", True),
@@ -423,6 +424,8 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "host_temperature_peak_millicelsius": ("millicelsius", "max", True),
     "host_temperature_start_millicelsius": ("millicelsius", "exact", True),
     "host_thermal_guard_trip_count": ("count", "sum", True),
+    "host_thermal_pacing_active_end": ("bool", "exact", True),
+    "host_thermal_pacing_completed_event_count": ("count", "sum", False),
     "host_thermal_pacing_event_count": ("count", "sum", True),
     "host_thermal_pacing_max_seconds": ("s", "max", True),
     "host_thermal_pacing_max_start_millicelsius": (
@@ -624,6 +627,11 @@ def effective_config(
             "resume_millicelsius": runtime.thermal_pacing_resume_millicelsius,
             "poll_interval_ms": int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
             "deadline_accounting": "included",
+            "mode": "continuous_process_group_stop",
+            "scope": "server_process_group",
+            "pause_signal": "SIGSTOP",
+            "resume_signal": "SIGCONT",
+            "itl_attribution": "host_thermal_pacing",
         }
     if runtime.vulkan_allocation_growth_limit_count is not None:
         effective["soak"]["vulkan_allocation_growth_limit_count"] = (
@@ -1081,6 +1089,56 @@ def read_hwmon_temperature_millicelsius(path: Path) -> int:
     return value
 
 
+@dataclasses.dataclass
+class ThermalPacingEvidence:
+    event_count: int = 0
+    completed_event_count: int = 0
+    total_seconds: float = 0.0
+    max_seconds: float = 0.0
+    max_start_millicelsius: int = 0
+    active: bool = False
+    _lock: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+    )
+
+    def begin(self, temperature_millicelsius: int) -> None:
+        with self._lock:
+            if self.active:
+                raise SoakError("thermal pacing began while already active")
+            self.event_count += 1
+            self.max_start_millicelsius = max(
+                self.max_start_millicelsius, temperature_millicelsius
+            )
+            self.active = True
+
+    def finish(self, elapsed_seconds: float, *, completed: bool) -> None:
+        with self._lock:
+            if not self.active:
+                raise SoakError("thermal pacing finished while inactive")
+            if completed:
+                self.completed_event_count += 1
+            self.total_seconds += elapsed_seconds
+            self.max_seconds = max(self.max_seconds, elapsed_seconds)
+            self.active = False
+
+    def metric_values(self) -> dict[str, float | int]:
+        with self._lock:
+            return {
+                "host_thermal_pacing_active_end": int(self.active),
+                "host_thermal_pacing_completed_event_count": (
+                    self.completed_event_count
+                ),
+                "host_thermal_pacing_event_count": self.event_count,
+                "host_thermal_pacing_max_seconds": self.max_seconds,
+                "host_thermal_pacing_max_start_millicelsius": (
+                    self.max_start_millicelsius
+                ),
+                "host_thermal_pacing_seconds": self.total_seconds,
+            }
+
+
 class HostThermalGuard:
     def __init__(
         self,
@@ -1089,14 +1147,36 @@ class HostThermalGuard:
         hwmon_name: str,
         label: str,
         limit_millicelsius: int,
+        pacing_start_millicelsius: int | None = None,
+        pacing_resume_millicelsius: int | None = None,
         hwmon_root: Path = Path("/sys/class/hwmon"),
     ) -> None:
         if limit_millicelsius <= 0:
             raise SoakError("host thermal limit must be positive")
+        if (pacing_start_millicelsius is None) != (
+            pacing_resume_millicelsius is None
+        ):
+            raise SoakError("host thermal pacing requires both start and resume")
+        if (
+            pacing_start_millicelsius is not None
+            and pacing_resume_millicelsius is not None
+            and not (
+                0
+                < pacing_resume_millicelsius
+                < pacing_start_millicelsius
+                < limit_millicelsius
+            )
+        ):
+            raise SoakError(
+                "host thermal pacing requires 0 < resume < start < safety limit"
+            )
         self.process = process
         self.hwmon_name = hwmon_name
         self.label = label
         self.limit_millicelsius = limit_millicelsius
+        self.pacing_start_millicelsius = pacing_start_millicelsius
+        self.pacing_resume_millicelsius = pacing_resume_millicelsius
+        self.pacing_evidence = ThermalPacingEvidence()
         self.hwmon_root = hwmon_root
         self.input_path: Path | None = None
         self.stop = threading.Event()
@@ -1108,6 +1188,11 @@ class HostThermalGuard:
         )
         self._started = False
         self._closed = False
+        self._pacing_started_at: float | None = None
+        self._pacing_start_temperature = 0
+        self._pacing_phase = "startup"
+        self._pacing_events: list[mixed.ObservedEvent] = []
+        self._pacing_lock = threading.Lock()
 
     def start(self) -> None:
         self._sample()
@@ -1122,6 +1207,15 @@ class HostThermalGuard:
             limit_millicelsius=self.limit_millicelsius,
             poll_interval_ms=int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
         )
+        if self.pacing_start_millicelsius is not None:
+            mixed.trace(
+                "host_thermal_pacing_armed",
+                mode="continuous_process_group_stop",
+                start_millicelsius=self.pacing_start_millicelsius,
+                resume_millicelsius=self.pacing_resume_millicelsius,
+                pause_signal="SIGSTOP",
+                resume_signal="SIGCONT",
+            )
         self.thread.start()
         self._started = True
 
@@ -1129,14 +1223,18 @@ class HostThermalGuard:
         if self._closed:
             return
         self._closed = True
-        if self.trip_reason is None:
-            self._sample()
         self.stop.set()
-        if not self._started:
-            return
-        self.thread.join(timeout=10.0)
-        if self.thread.is_alive() and len(self.errors) < 8:
-            self.errors.append("host-thermal-guard thread did not stop within 10 seconds")
+        if self._started:
+            self.thread.join(timeout=10.0)
+            if self.thread.is_alive():
+                message = "host-thermal-guard thread did not stop within 10 seconds"
+                if len(self.errors) < 8:
+                    self.errors.append(message)
+                self._trip(message)
+        if self._pacing_started_at is not None:
+            self._resume_pacing(interrupted=True)
+        if self.trip_reason is None:
+            self._sample(allow_pacing=False)
 
     def metric_values(self) -> dict[str, int]:
         if not self.samples:
@@ -1153,28 +1251,129 @@ class HostThermalGuard:
             "host_thermal_guard_trip_count": int(self.trip_reason is not None),
         }
 
-    def latest_temperature_millicelsius(self) -> int:
-        if self.trip_reason is not None:
-            raise SoakError(self.trip_reason)
-        if not self.samples:
-            self._sample()
-        if self.trip_reason is not None:
-            raise SoakError(self.trip_reason)
-        if not self.samples:
-            raise SoakError("host thermal guard has no temperature sample")
-        return self.samples[-1]
+    def pacing_metric_values(self) -> dict[str, float | int]:
+        return self.pacing_evidence.metric_values()
+
+    def set_phase(self, phase: str) -> None:
+        if not phase:
+            raise SoakError("host thermal pacing phase must be nonempty")
+        with self._pacing_lock:
+            self._pacing_phase = phase
+
+    def pacing_events_since(self, started: float) -> list[mixed.ObservedEvent]:
+        with self._pacing_lock:
+            return [event for event in self._pacing_events if event.observed >= started]
 
     def _trip(self, reason: str) -> None:
         if self.trip_reason is not None:
             return
         self.trip_reason = reason
+        pacing_active = self._pacing_started_at is not None
         if self.process.poll() is None:
             try:
                 os.killpg(self.process.pid, signal.SIGTERM)
+            except OSError as exc:
+                if not isinstance(exc, ProcessLookupError) and len(self.errors) < 8:
+                    self.errors.append(f"failed to terminate server process group: {exc}")
+            if pacing_active:
+                try:
+                    os.killpg(self.process.pid, signal.SIGCONT)
+                except OSError as exc:
+                    if not isinstance(exc, ProcessLookupError) and len(self.errors) < 8:
+                        self.errors.append(
+                            f"failed to release paced server process group: {exc}"
+                        )
+        if pacing_active:
+            self._record_pacing_finish(interrupted=True)
+
+    def _pause_pacing(self, temperature: int) -> None:
+        if self._pacing_started_at is not None or self.process.poll() is not None:
+            return
+        try:
+            os.killpg(self.process.pid, signal.SIGSTOP)
+        except ProcessLookupError:
+            return
+        except OSError as exc:
+            message = f"failed to pause server process group: {exc}"
+            if len(self.errors) < 8:
+                self.errors.append(message)
+            self._trip(message)
+            return
+        started = time.monotonic()
+        with self._pacing_lock:
+            phase = self._pacing_phase
+            self._pacing_started_at = started
+            self._pacing_start_temperature = temperature
+            self._pacing_events.append(
+                mixed.ObservedEvent(
+                    started,
+                    "host_thermal_pacing",
+                    "host thermal pacing paused the server process group",
+                    {"phase": phase, "temperature_millicelsius": temperature},
+                )
+            )
+        self.pacing_evidence.begin(temperature)
+        mixed.trace(
+            "host_thermal_pacing_started",
+            phase=phase,
+            temperature_millicelsius=temperature,
+            start_millicelsius=self.pacing_start_millicelsius,
+            resume_millicelsius=self.pacing_resume_millicelsius,
+            scope="server_process_group",
+        )
+
+    def _record_pacing_finish(self, *, interrupted: bool) -> None:
+        with self._pacing_lock:
+            started = self._pacing_started_at
+            if started is None:
+                return
+            finished = time.monotonic()
+            elapsed = finished - started
+            phase = self._pacing_phase
+            start_temperature = self._pacing_start_temperature
+            self._pacing_started_at = None
+            self._pacing_start_temperature = 0
+            self._pacing_events.append(
+                mixed.ObservedEvent(
+                    finished,
+                    "host_thermal_pacing",
+                    "host thermal pacing resumed the server process group",
+                    {
+                        "duration_seconds": elapsed,
+                        "interrupted": interrupted,
+                        "phase": phase,
+                    },
+                )
+            )
+        self.pacing_evidence.finish(elapsed, completed=not interrupted)
+        mixed.trace(
+            (
+                "host_thermal_pacing_interrupted"
+                if interrupted
+                else "host_thermal_pacing_completed"
+            ),
+            phase=phase,
+            duration_seconds=elapsed,
+            start_temperature_millicelsius=start_temperature,
+        )
+
+    def _resume_pacing(self, *, interrupted: bool = False) -> None:
+        if self._pacing_started_at is None:
+            return
+        if self.process.poll() is None:
+            try:
+                os.killpg(self.process.pid, signal.SIGCONT)
             except ProcessLookupError:
                 pass
+            except OSError as exc:
+                message = f"failed to resume server process group: {exc}"
+                if len(self.errors) < 8:
+                    self.errors.append(message)
+                self._trip(message)
+                return
+        self._record_pacing_finish(interrupted=interrupted)
 
-    def _sample(self) -> None:
+    def _sample(self, *, allow_pacing: bool = True) -> None:
         try:
             if self.input_path is None:
                 self.input_path = resolve_hwmon_temperature_input(
@@ -1188,6 +1387,15 @@ class HostThermalGuard:
                     f"millicelsius at or above the {self.limit_millicelsius}-millicelsius "
                     "safety limit"
                 )
+                return
+            if not allow_pacing or self.pacing_start_millicelsius is None:
+                return
+            assert self.pacing_resume_millicelsius is not None
+            if self._pacing_started_at is None:
+                if temperature >= self.pacing_start_millicelsius:
+                    self._pause_pacing(temperature)
+            elif temperature <= self.pacing_resume_millicelsius:
+                self._resume_pacing()
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
             if len(self.errors) < 8:
@@ -1199,83 +1407,6 @@ class HostThermalGuard:
             self._sample()
             if self.trip_reason is not None:
                 return
-
-
-@dataclasses.dataclass
-class ThermalPacingEvidence:
-    event_count: int = 0
-    total_seconds: float = 0.0
-    max_seconds: float = 0.0
-    max_start_millicelsius: int = 0
-
-    def metric_values(self) -> dict[str, float | int]:
-        return {
-            "host_thermal_pacing_event_count": self.event_count,
-            "host_thermal_pacing_max_seconds": self.max_seconds,
-            "host_thermal_pacing_max_start_millicelsius": (
-                self.max_start_millicelsius
-            ),
-            "host_thermal_pacing_seconds": self.total_seconds,
-        }
-
-
-def wait_for_thermal_headroom(
-    guard: HostThermalGuard | None,
-    evidence: ThermalPacingEvidence,
-    runtime: SoakRuntime,
-    *,
-    deadline: float,
-    phase: str,
-) -> None:
-    start_limit = runtime.thermal_pacing_start_millicelsius
-    resume_limit = runtime.thermal_pacing_resume_millicelsius
-    if guard is None or start_limit is None or resume_limit is None:
-        return
-    if not 0 < resume_limit < start_limit < guard.limit_millicelsius:
-        raise SoakError(
-            "thermal pacing requires 0 < resume < start < safety limit"
-        )
-    temperature = guard.latest_temperature_millicelsius()
-    if temperature < start_limit:
-        return
-    pacing_started = time.monotonic()
-    evidence.event_count += 1
-    evidence.max_start_millicelsius = max(
-        evidence.max_start_millicelsius, temperature
-    )
-    mixed.trace(
-        "host_thermal_pacing_started",
-        phase=phase,
-        temperature_millicelsius=temperature,
-        start_millicelsius=start_limit,
-        resume_millicelsius=resume_limit,
-    )
-    completed = False
-    try:
-        while temperature > resume_limit:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise SoakError(f"{phase} deadline expired during thermal pacing")
-            time.sleep(min(HOST_GUARD_POLL_INTERVAL_SECONDS, remaining))
-            temperature = guard.latest_temperature_millicelsius()
-        completed = True
-    finally:
-        elapsed = time.monotonic() - pacing_started
-        evidence.total_seconds += elapsed
-        evidence.max_seconds = max(evidence.max_seconds, elapsed)
-        if not completed:
-            mixed.trace(
-                "host_thermal_pacing_interrupted",
-                phase=phase,
-                duration_seconds=elapsed,
-                temperature_millicelsius=temperature,
-            )
-    mixed.trace(
-        "host_thermal_pacing_completed",
-        phase=phase,
-        duration_seconds=elapsed,
-        temperature_millicelsius=temperature,
-    )
 
 
 DRM_MEMORY_FIELDS = (
@@ -2169,6 +2300,73 @@ def valid_stream_result(
     return not stream_result_violations(result, expected_completion_tokens)
 
 
+@dataclasses.dataclass(frozen=True)
+class MeasurementResultEvidence:
+    values: dict[str, float | int]
+    successes: list[mixed.StreamResult]
+    attributed_itl_outliers: int
+    unexplained_itl_outliers: int
+
+
+def measurement_result_evidence(
+    *,
+    warmup_itl_ms: list[float],
+    results: list[mixed.StreamResult],
+    measurement_events: list[mixed.ObservedEvent],
+    all_server_events: list[mixed.ObservedEvent],
+    expected_completion_tokens: int,
+    cancellation_count: int,
+    duration_seconds: float,
+    wave_count: int,
+    steady_state_warmup_request_count: int,
+    steady_state_warmup_wave_count: int,
+) -> MeasurementResultEvidence:
+    successes = [
+        result
+        for result in results
+        if valid_stream_result(result, expected_completion_tokens)
+    ]
+    attributed, unexplained = mixed.classify_itl_outliers(
+        warmup_itl_ms, successes, measurement_events
+    )
+    itls = [gap for result in successes for gap in result.itl_ms]
+    ttfts = [result.ttft_ms for result in successes]
+    prompt_tokens = [result.prompt_tokens for result in successes]
+    values: dict[str, float | int] = {
+        "attributed_itl_outlier_count": attributed,
+        "cancellation_confirmed_count": cancellation_count,
+        "completion_token_count": sum(
+            result.completion_tokens for result in successes
+        ),
+        "device_fault_event_count": sum(
+            event.category == "device_fault" for event in all_server_events
+        ),
+        "itl_ms_p50": mixed.percentile_r7(itls, 0.5),
+        "itl_ms_p99": mixed.percentile_r7(itls, 0.99),
+        "itl_ms_p999": mixed.percentile_r7(itls, 0.999),
+        "non_finite_response_count": sum(
+            result.error is not None and "non-finite" in result.error.lower()
+            for result in results
+        ),
+        "prompt_tokens_max": max(prompt_tokens, default=0),
+        "prompt_tokens_min": min(prompt_tokens, default=0),
+        "request_failure_count": len(results) - len(successes),
+        "request_count": len(results),
+        "soak_duration_seconds": duration_seconds,
+        "steady_state_warmup_request_count": steady_state_warmup_request_count,
+        "steady_state_warmup_wave_count": steady_state_warmup_wave_count,
+        "ttft_ms_p50": mixed.percentile_r7(ttfts, 0.5),
+        "ttft_ms_p99": mixed.percentile_r7(ttfts, 0.99),
+        "ttft_ms_p999": mixed.percentile_r7(ttfts, 0.999),
+        "unexplained_itl_outlier_count": unexplained,
+        "wave_count": wave_count,
+        "zero_token_response_count": sum(
+            result.completion_tokens == 0 for result in results
+        ),
+    }
+    return MeasurementResultEvidence(values, successes, attributed, unexplained)
+
+
 def invalid_stream_results_summary(
     results: list[mixed.StreamResult], expected_completion_tokens: int
 ) -> str:
@@ -2417,6 +2615,8 @@ def execute(
             hwmon_name=runtime.host_thermal_sensor_name or "",
             label=runtime.host_thermal_sensor_label or "",
             limit_millicelsius=runtime.host_thermal_limit_millicelsius,
+            pacing_start_millicelsius=runtime.thermal_pacing_start_millicelsius,
+            pacing_resume_millicelsius=runtime.thermal_pacing_resume_millicelsius,
         )
         if runtime.host_thermal_limit_millicelsius is not None
         else None
@@ -2440,7 +2640,6 @@ def execute(
     stabilization_max_rss_delta = 0
     stabilization_rss_growth = 0
     stabilization_vulkan_growth_cycles = 0
-    thermal_pacing = ThermalPacingEvidence()
     worker_evidence = RequestWorkerEvidence()
     observed_stabilization_batching_start: dict[str, int | bool] | None = None
     observed_stabilization_batching_end: dict[str, int | bool] | None = None
@@ -2452,6 +2651,32 @@ def execute(
     observed_batched_state_end: dict[str, int | bool] | None = None
     observed_process_mappings_start: ProcessMemoryMappingSnapshot | None = None
     observed_process_mappings_end: ProcessMemoryMappingSnapshot | None = None
+    warmup: mixed.StreamResult | None = None
+    health_start: dict[str, Any] | None = None
+    health_end: dict[str, Any] | None = None
+    graph_start: dict[str, int] | None = None
+    graph_end: dict[str, int] | None = None
+    batching_start: dict[str, int | bool] | None = None
+    batching_end: dict[str, int | bool] | None = None
+    prefix_start: dict[str, int] | None = None
+    prefix_end: dict[str, int] | None = None
+    vulkan_buffers_start: dict[str, int] | None = None
+    vulkan_buffers_end: dict[str, int] | None = None
+    vulkan_pool_start: dict[str, Any] | None = None
+    vulkan_pool_end: dict[str, Any] | None = None
+    batched_state_start: dict[str, int | bool] | None = None
+    batched_state_end: dict[str, int | bool] | None = None
+    resident_state_end: dict[str, int] | None = None
+    gpu_start: int | None = None
+    gpu_end: int | None = None
+    rss_start: int | None = None
+    rss_end: int | None = None
+    all_results: list[mixed.StreamResult] = []
+    rss_samples: list[int] = []
+    wave = 0
+    cancellations = 0
+    steady_state_warmup_requests = 0
+    steady_state_warmup_waves = 0
     try:
         mixed.wait_ready(port, process, server_log, setup_deadline)
         health_startup = mixed.read_stable_health(
@@ -2471,16 +2696,9 @@ def execute(
                 rocm_graph_cache_entries=runtime.graph_cache_max,
             )
         )
-        warmup: mixed.StreamResult | None = None
-        health_start: dict[str, Any] | None = None
         for attempt in range(mixed.MAX_WARMUP_REQUESTS):
-            wait_for_thermal_headroom(
-                thermal_guard,
-                thermal_pacing,
-                runtime,
-                deadline=setup_deadline,
-                phase=f"warmup-{attempt + 1}",
-            )
+            if thermal_guard is not None:
+                thermal_guard.set_phase(f"warmup-{attempt + 1}")
             warmup = mixed.run_stream(
                 port,
                 name=f"soak-warmup-{attempt + 1}",
@@ -2509,8 +2727,6 @@ def execute(
             raise SoakError(f"graph warmup did not {requirement}")
         assert warmup is not None and health_start is not None
 
-        steady_state_warmup_requests = 0
-        steady_state_warmup_waves = 0
         batching_warm = mixed.batching_snapshot(health_start)
         prefix_cache_enabled = batching_warm["prefix_cache_enabled"]
         assert isinstance(prefix_cache_enabled, bool)
@@ -2530,13 +2746,10 @@ def execute(
                     "prefix cache did not reach steady-state capacity within "
                     f"{runtime.max_steady_state_warmup_waves} warmup waves"
                 )
-            wait_for_thermal_headroom(
-                thermal_guard,
-                thermal_pacing,
-                runtime,
-                deadline=setup_deadline,
-                phase=f"steady-state-warmup-{steady_state_warmup_waves}",
-            )
+            if thermal_guard is not None:
+                thermal_guard.set_phase(
+                    f"steady-state-warmup-{steady_state_warmup_waves}"
+                )
             warm_results = run_wave(
                 port,
                 wave=steady_state_warmup_waves,
@@ -2653,13 +2866,10 @@ def execute(
                 stabilization_wave = (
                     stabilization_cycles * len(runtime.wave_concurrency) + offset
                 )
-                wait_for_thermal_headroom(
-                    thermal_guard,
-                    thermal_pacing,
-                    runtime,
-                    deadline=setup_deadline,
-                    phase=f"stabilization-wave-{stabilization_wave}",
-                )
+                if thermal_guard is not None:
+                    thermal_guard.set_phase(
+                        f"stabilization-wave-{stabilization_wave}"
+                    )
                 stable_results = run_wave(
                     port,
                     wave=stabilization_wave,
@@ -2683,13 +2893,10 @@ def execute(
                         )
                     )
                 if (stabilization_wave + 1) % runtime.cancel_every_waves == 0:
-                    wait_for_thermal_headroom(
-                        thermal_guard,
-                        thermal_pacing,
-                        runtime,
-                        deadline=setup_deadline,
-                        phase=f"stabilization-cancellation-{stabilization_wave}",
-                    )
+                    if thermal_guard is not None:
+                        thermal_guard.set_phase(
+                            f"stabilization-cancellation-{stabilization_wave}"
+                        )
                     cancellation_failure = run_cancellation(
                         port,
                         wave=stabilization_wave,
@@ -3013,12 +3220,15 @@ def execute(
             )
 
         graph_start = mixed.graph_snapshot(health_start)
+        graph_end = graph_start
         batching_start = mixed.batching_snapshot(health_start)
+        batching_end = batching_start
         if batching_start["prefix_cache_enabled"] != prefix_cache_enabled:
             raise SoakError(
                 "prefix cache enabled capability changed before measurement"
             )
         prefix_start = prefix_cache_snapshot(health_start)
+        prefix_end = prefix_start
         if not prefix_cache_enabled:
             disabled_failures = disabled_prefix_cache_failures(
                 prefix_start, phase="measurement baseline"
@@ -3026,23 +3236,29 @@ def execute(
             if disabled_failures:
                 raise SoakError("; ".join(disabled_failures))
         vulkan_buffers_start = vulkan_buffer_snapshot(health_start, runtime)
+        vulkan_buffers_end = vulkan_buffers_start
         vulkan_pool_start = vulkan_buffer_pool_snapshot(health_start, runtime)
+        vulkan_pool_end = vulkan_pool_start
         debug_measurement_start = mixed.json_request(
             port, "GET", "/v1/debug/model-state"
         )
         batched_state_start = batched_state_cache_snapshot(
             debug_measurement_start, runtime
         )
+        batched_state_end = batched_state_start
         resident_state_start = resident_recurrent_state_snapshot(
             debug_measurement_start, runtime
         )
+        resident_state_end = resident_state_start
         baseline_resident_failures = resident_recurrent_state_drain_failures(
             resident_state_start, "measurement baseline"
         )
         if baseline_resident_failures:
             raise SoakError("; ".join(baseline_resident_failures))
         gpu_start = gpu_memory_bytes(port, process.pid, runtime)
+        gpu_end = gpu_start
         rss_start = process_memory_snapshot(process.pid).rss_bytes
+        rss_end = rss_start
         sampler.start()
         measurement_started = time.monotonic()
         measurement_deadline = measurement_phase_deadline(
@@ -3055,20 +3271,12 @@ def execute(
             minimum_duration_seconds=minimum_duration_seconds,
             setup_elapsed_seconds=measurement_started - started,
         )
-        all_results: list[mixed.StreamResult] = []
         rss_samples = [rss_start]
-        wave = 0
-        cancellations = 0
 
         while wave == 0 or time.monotonic() - measurement_started < minimum_duration_seconds:
             wave_failures: list[str] = []
-            wait_for_thermal_headroom(
-                thermal_guard,
-                thermal_pacing,
-                runtime,
-                deadline=measurement_deadline,
-                phase=f"measurement-wave-{wave}",
-            )
+            if thermal_guard is not None:
+                thermal_guard.set_phase(f"measurement-wave-{wave}")
             wave_results = run_wave(
                 port,
                 wave=wave,
@@ -3077,7 +3285,6 @@ def execute(
                 runtime=runtime,
                 worker_evidence=worker_evidence,
             )
-            all_results.extend(wave_results)
             bad = [
                 result
                 for result in wave_results
@@ -3090,13 +3297,8 @@ def execute(
                 )
 
             if (wave + 1) % runtime.cancel_every_waves == 0:
-                wait_for_thermal_headroom(
-                    thermal_guard,
-                    thermal_pacing,
-                    runtime,
-                    deadline=measurement_deadline,
-                    phase=f"measurement-cancellation-{wave}",
-                )
+                if thermal_guard is not None:
+                    thermal_guard.set_phase(f"measurement-cancellation-{wave}")
                 cancellation_failure = run_cancellation(
                     port,
                     wave=wave,
@@ -3128,6 +3330,12 @@ def execute(
             graph = mixed.graph_snapshot(health)
             batching = mixed.batching_snapshot(health)
             prefix = prefix_cache_snapshot(health)
+            health_end = health
+            graph_end = graph
+            batching_end = batching
+            prefix_end = prefix
+            batched_state_end = batched_state
+            resident_state_end = resident_state
             if batching["prefix_cache_enabled"] != prefix_cache_enabled:
                 wave_failures.append(
                     f"prefix cache enabled capability changed in wave {wave}"
@@ -3210,6 +3418,10 @@ def execute(
             current_vulkan_buffers = vulkan_buffer_snapshot(health, runtime)
             current_vulkan_pool = vulkan_buffer_pool_snapshot(health, runtime)
             current_rss = current_memory.rss_bytes
+            gpu_end = current_gpu
+            rss_end = current_rss
+            vulkan_buffers_end = current_vulkan_buffers
+            vulkan_pool_end = current_vulkan_pool
             rss_samples.append(current_rss)
             if current_gpu > gpu_start + memory_growth_limit_bytes:
                 wave_failures.append(
@@ -3284,6 +3496,7 @@ def execute(
                         vulkan_pool_start, current_vulkan_pool
                     )
                 )
+            all_results.extend(wave_results)
             mixed.trace("soak_wave_complete", **wave_trace)
             wave += 1
             if wave_failures:
@@ -3317,14 +3530,8 @@ def execute(
             mixed.attest_runtime_execution(runtime.variant_id, health_start, health_end)
         )
         events = server_log.events_since(measurement_started)
-        successes = [
-            result
-            for result in all_results
-            if valid_stream_result(result, runtime.max_tokens)
-        ]
-        attributed, unexplained = mixed.classify_itl_outliers(
-            warmup.itl_ms, successes, events
-        )
+        if thermal_guard is not None:
+            events.extend(thermal_guard.pacing_events_since(measurement_started))
         all_server_events = server_log.events_since(started)
         gpu_end = gpu_memory_bytes(port, process.pid, runtime)
         rss_end = process_memory_snapshot(process.pid).rss_bytes
@@ -3337,18 +3544,26 @@ def execute(
         sync_values = mixed.external_yield_sync_metric_values(health_start, health_end)
         # Fallback stats are flattened by graph_snapshot with a `fallback_` prefix.
         fallback_delta = mixed.counter_delta(graph_start, graph_end, "fallback_total")
-        request_failures = len(all_results) - len(successes)
-        zero_tokens = sum(result.completion_tokens == 0 for result in all_results)
-        non_finite = sum(
-            result.error is not None and "non-finite" in result.error.lower()
-            for result in all_results
-        )
         duration = phase_elapsed_seconds(measurement_started)
-        itls = [gap for result in successes for gap in result.itl_ms]
-        ttfts = [result.ttft_ms for result in successes]
-        prompt_tokens = [result.prompt_tokens for result in successes]
+        result_evidence = measurement_result_evidence(
+            warmup_itl_ms=warmup.itl_ms,
+            results=all_results,
+            measurement_events=events,
+            all_server_events=all_server_events,
+            expected_completion_tokens=runtime.max_tokens,
+            cancellation_count=cancellations,
+            duration_seconds=duration,
+            wave_count=wave,
+            steady_state_warmup_request_count=steady_state_warmup_requests,
+            steady_state_warmup_wave_count=steady_state_warmup_waves,
+        )
+        successes = result_evidence.successes
+        attributed = result_evidence.attributed_itl_outliers
+        unexplained = result_evidence.unexplained_itl_outliers
+        request_failures = int(result_evidence.values["request_failure_count"])
+        zero_tokens = int(result_evidence.values["zero_token_response_count"])
         values = {
-            "attributed_itl_outlier_count": attributed,
+            **result_evidence.values,
             "batching_error_count": mixed.counter_delta(
                 batching_start, batching_end, "total_errors"
             ),
@@ -3356,11 +3571,6 @@ def execute(
                 "max_observed_active_requests"
             ],
             "batching_max_observed_batch_size": batching_end["max_observed_batch_size"],
-            "cancellation_confirmed_count": cancellations,
-            "completion_token_count": sum(result.completion_tokens for result in successes),
-            "device_fault_event_count": sum(
-                event.category == "device_fault" for event in all_server_events
-            ),
             "external_yield_sync_failure_count": sync_values[
                 "external_yield_sync_failure_count"
             ],
@@ -3398,16 +3608,12 @@ def execute(
             "gpu_memory_growth_bytes": max(0, gpu_end - gpu_start),
             "gpu_memory_peak_bytes": gpu_peak,
             "gpu_memory_peak_growth_bytes": max(0, gpu_peak - gpu_start),
-            "itl_ms_p50": mixed.percentile_r7(itls, 0.5),
-            "itl_ms_p99": mixed.percentile_r7(itls, 0.99),
-            "itl_ms_p999": mixed.percentile_r7(itls, 0.999),
             "kv_blocks_end": batching_end["blocks_total"],
             "kv_blocks_start": batching_start["blocks_total"],
             "kv_blocks_used_end": batching_end["blocks_used"],
             "kv_unaccounted_blocks_end": unaccounted_blocks(
                 batching_end, prefix_end
             ),
-            "non_finite_response_count": non_finite,
             "prefix_cache_active_leases_end": prefix_end["active_leases"],
             "prefix_cache_baseline_cached_entries": prefix_start["cached_entries"],
             "prefix_cache_baseline_state_bytes": prefix_start["cached_state_bytes"],
@@ -3429,21 +3635,15 @@ def execute(
                 "pending_release_entries"
             ],
             "prefix_cache_state_bytes_end": prefix_end["cached_state_bytes"],
-            "prompt_tokens_max": max(prompt_tokens, default=0),
-            "prompt_tokens_min": min(prompt_tokens, default=0),
-            "request_failure_count": request_failures,
-            "request_count": len(all_results),
             "request_worker_residue_count": worker_evidence.peak_residue_count,
             "rss_baseline_bytes": rss_start,
             "rss_end_bytes": rss_end,
             "rss_growth_bytes": max(0, rss_end - rss_start),
             "rss_peak_bytes": rss_peak,
+            "measurement_final_snapshot_complete": 1,
             "shutdown_forced_count": 0,
             "shutdown_nonzero_count": 0,
             "snapshot_residue_count": 0,
-            "soak_duration_seconds": duration,
-            "steady_state_warmup_request_count": steady_state_warmup_requests,
-            "steady_state_warmup_wave_count": steady_state_warmup_waves,
             "stabilization_cancellation_count": stabilization_cancellations,
             "stabilization_cycle_count": stabilization_cycles,
             "stabilization_final_gpu_delta_bytes": stabilization_final_gpu_delta,
@@ -3453,15 +3653,7 @@ def execute(
             "stabilization_rss_growth_bytes": stabilization_rss_growth,
             "stabilization_request_count": stabilization_requests,
             "stabilization_stable_cycle_count": stabilization_stable_cycles,
-            "ttft_ms_p50": mixed.percentile_r7(ttfts, 0.5),
-            "ttft_ms_p99": mixed.percentile_r7(ttfts, 0.99),
-            "ttft_ms_p999": mixed.percentile_r7(ttfts, 0.999),
-            "unexplained_itl_outlier_count": unexplained,
-            "wave_count": wave,
-            "zero_token_response_count": zero_tokens,
         }
-        if runtime.backend == "vulkan":
-            values.update(thermal_pacing.metric_values())
         if runtime.backend == "vulkan":
             assert observed_stabilization_batching_start is not None
             assert observed_stabilization_batching_end is not None
@@ -3572,6 +3764,7 @@ def execute(
             values.update(host_guard.metric_values())
         if thermal_guard is not None:
             values.update(thermal_guard.metric_values())
+            values.update(thermal_guard.pacing_metric_values())
         if duration < minimum_duration_seconds:
             failures.append(
                 f"soak duration {duration:.3f}s was below {minimum_duration_seconds:.3f}s"
@@ -3736,6 +3929,18 @@ def execute(
         observed_thermal = thermal_guard.metric_values()
         if observed_thermal["host_thermal_guard_trip_count"] != 0:
             failures.append("host thermal guard tripped during the soak")
+        observed_pacing = thermal_guard.pacing_metric_values()
+        if observed_pacing["host_thermal_pacing_active_end"] != 0:
+            failures.append("host thermal pacing remained active after teardown")
+        if (
+            observed_pacing["host_thermal_pacing_completed_event_count"]
+            != observed_pacing["host_thermal_pacing_event_count"]
+        ):
+            failures.append(
+                "host thermal pacing events did not all complete: "
+                f"{observed_pacing['host_thermal_pacing_completed_event_count']} != "
+                f"{observed_pacing['host_thermal_pacing_event_count']}"
+            )
 
     if values is None:
         values = {name: 0 for name in metric_definitions(runtime)}
@@ -3750,12 +3955,11 @@ def execute(
         values["stabilization_request_count"] = stabilization_requests
         values["stabilization_stable_cycle_count"] = stabilization_stable_cycles
         values["request_worker_residue_count"] = worker_evidence.peak_residue_count
-        if runtime.backend == "vulkan":
-            values.update(thermal_pacing.metric_values())
         if host_guard is not None:
             values.update(host_guard.metric_values())
         if thermal_guard is not None:
             values.update(thermal_guard.metric_values())
+            values.update(thermal_guard.pacing_metric_values())
         if (
             observed_vulkan_buffers_start is not None
             and observed_vulkan_buffers_end is not None
@@ -3806,6 +4010,181 @@ def execute(
                     observed_process_mappings_end,
                 )
             )
+        if measurement_started is not None:
+            assert warmup is not None
+            measurement_events = server_log.events_since(measurement_started)
+            if thermal_guard is not None:
+                measurement_events.extend(
+                    thermal_guard.pacing_events_since(measurement_started)
+                )
+            result_evidence = measurement_result_evidence(
+                warmup_itl_ms=warmup.itl_ms,
+                results=all_results,
+                measurement_events=measurement_events,
+                all_server_events=server_log.events_since(started),
+                expected_completion_tokens=runtime.max_tokens,
+                cancellation_count=cancellations,
+                duration_seconds=phase_elapsed_seconds(measurement_started),
+                wave_count=wave,
+                steady_state_warmup_request_count=steady_state_warmup_requests,
+                steady_state_warmup_wave_count=steady_state_warmup_waves,
+            )
+            values.update(result_evidence.values)
+            if gpu_start is not None and gpu_end is not None:
+                gpu_peak = max([gpu_start, gpu_end, *sampler.samples])
+                values.update(
+                    {
+                        "gpu_memory_baseline_bytes": gpu_start,
+                        "gpu_memory_end_bytes": gpu_end,
+                        "gpu_memory_growth_bytes": max(0, gpu_end - gpu_start),
+                        "gpu_memory_peak_bytes": gpu_peak,
+                        "gpu_memory_peak_growth_bytes": max(
+                            0, gpu_peak - gpu_start
+                        ),
+                    }
+                )
+            if rss_start is not None and rss_end is not None:
+                rss_peak = max([rss_start, rss_end, *rss_samples])
+                values.update(
+                    {
+                        "rss_baseline_bytes": rss_start,
+                        "rss_end_bytes": rss_end,
+                        "rss_growth_bytes": max(0, rss_end - rss_start),
+                        "rss_peak_bytes": rss_peak,
+                    }
+                )
+            if graph_start is not None and graph_end is not None:
+                values.update(
+                    {
+                        "graph_capture_failure_count": mixed.counter_delta(
+                            graph_start, graph_end, "capture_failures"
+                        ),
+                        "graph_capture_success_count": mixed.counter_delta(
+                            graph_start, graph_end, "capture_successes"
+                        ),
+                        "graph_fallback_count": mixed.counter_delta(
+                            graph_start, graph_end, "fallback_total"
+                        ),
+                        "graph_replay_failure_count": mixed.counter_delta(
+                            graph_start, graph_end, "replay_failures"
+                        ),
+                        "graph_replay_success_count": mixed.counter_delta(
+                            graph_start, graph_end, "replay_successes"
+                        ),
+                        "graph_retained_count_start": graph_start[
+                            "captured_graph_count"
+                        ],
+                        "graph_retained_count_end": graph_end[
+                            "captured_graph_count"
+                        ],
+                        "graph_slot_active_count_end": graph_end[
+                            "active_graph_slot_count"
+                        ],
+                        "graph_slot_count_start": graph_start["graph_slot_count"],
+                        "graph_slot_count_end": graph_end["graph_slot_count"],
+                        "graph_slot_create_count": mixed.counter_delta(
+                            graph_start, graph_end, "graph_slot_create_count"
+                        ),
+                        "graph_slot_idle_count_end": graph_end[
+                            "idle_graph_slot_count"
+                        ],
+                        "graph_slot_reuse_count": mixed.counter_delta(
+                            graph_start, graph_end, "graph_slot_reuse_count"
+                        ),
+                    }
+                )
+            if batching_start is not None and batching_end is not None:
+                values.update(
+                    {
+                        "batching_error_count": mixed.counter_delta(
+                            batching_start, batching_end, "total_errors"
+                        ),
+                        "batching_max_observed_active_requests": batching_end[
+                            "max_observed_active_requests"
+                        ],
+                        "batching_max_observed_batch_size": batching_end[
+                            "max_observed_batch_size"
+                        ],
+                        "kv_blocks_start": batching_start["blocks_total"],
+                        "kv_blocks_end": batching_end["blocks_total"],
+                        "kv_blocks_used_end": batching_end["blocks_used"],
+                    }
+                )
+                if runtime.backend == "vulkan":
+                    values["prefix_cache_enabled"] = prefix_cache_capability_value(
+                        batching_start, batching_end
+                    )
+                    values.update(
+                        resident_prefill_metric_values(batching_start, batching_end)
+                    )
+            if prefix_start is not None and prefix_end is not None:
+                values.update(
+                    {
+                        "kv_unaccounted_blocks_end": (
+                            unaccounted_blocks(batching_end, prefix_end)
+                            if batching_end is not None
+                            else 0
+                        ),
+                        "prefix_cache_active_leases_end": prefix_end["active_leases"],
+                        "prefix_cache_baseline_cached_entries": prefix_start[
+                            "cached_entries"
+                        ],
+                        "prefix_cache_baseline_state_bytes": prefix_start[
+                            "cached_state_bytes"
+                        ],
+                        "prefix_cache_cached_blocks_end": prefix_end["cached_blocks"],
+                        "prefix_cache_cached_entries_end": prefix_end[
+                            "cached_entries"
+                        ],
+                        "prefix_cache_hit_blocks": mixed.counter_delta(
+                            prefix_start, prefix_end, "hit_blocks"
+                        ),
+                        "prefix_cache_hit_tokens": mixed.counter_delta(
+                            prefix_start, prefix_end, "hit_tokens"
+                        ),
+                        "prefix_cache_lookup_hit_count": mixed.counter_delta(
+                            prefix_start, prefix_end, "lookup_hits"
+                        ),
+                        "prefix_cache_lookup_miss_count": mixed.counter_delta(
+                            prefix_start, prefix_end, "lookup_misses"
+                        ),
+                        "prefix_cache_pending_release_entries_end": prefix_end[
+                            "pending_release_entries"
+                        ],
+                        "prefix_cache_state_bytes_end": prefix_end[
+                            "cached_state_bytes"
+                        ],
+                    }
+                )
+            if health_start is not None and health_end is not None:
+                values.update(
+                    mixed.external_yield_sync_metric_values(health_start, health_end)
+                )
+            if vulkan_buffers_start is not None and vulkan_buffers_end is not None:
+                values.update(
+                    vulkan_buffer_metric_values(
+                        vulkan_buffers_start, vulkan_buffers_end
+                    )
+                )
+                values["vulkan_buffer_stabilization_growth_cycle_count"] = (
+                    stabilization_vulkan_growth_cycles
+                )
+            if vulkan_pool_start is not None and vulkan_pool_end is not None:
+                values.update(
+                    vulkan_buffer_pool_metric_values(
+                        vulkan_pool_start, vulkan_pool_end
+                    )
+                )
+            if batched_state_start is not None and batched_state_end is not None:
+                values.update(
+                    batched_state_cache_metric_values(
+                        batched_state_start, batched_state_end
+                    )
+                )
+            if resident_state_end is not None:
+                values.update(
+                    resident_recurrent_state_metric_values(resident_state_end)
+                )
     assert shutdown is not None
     values["shutdown_forced_count"] = int(shutdown.forced)
     values["shutdown_nonzero_count"] = int(shutdown.returncode != 0)
