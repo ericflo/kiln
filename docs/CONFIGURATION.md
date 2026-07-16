@@ -1233,11 +1233,21 @@ of whether `[streaming_prefill]` selects the separate tiled-forward algorithm.
 It does not enable default Vulkan decode-state residency.
 
 The host tensor is only a metadata handle while its recurrent buffer is
-resident. Functional dtype normalization can change that handle's `TensorId`;
-the backend atomically transfers ownership to each replacement and finally
-back to the persistent `LinearAttentionState` slot. Operators do not configure
-this mechanism. A collision or failed transfer is an inference error, and the
-still-aligned old owner remains available to synchronized error cleanup.
+resident. Resumable prefill therefore owns each buffer by the stable pair of
+the serving row ID and linear-attention layer index. The current `TensorId` is
+retained as a secondary alias for ordinary decode and for fast handle-local
+lookups, but dtype conversion, layout conversion, layer-group resumption, and a
+worker-thread change cannot change the prefill owner. Final handoff
+materializes by the stable pair. Cancellation and synchronized error cleanup
+evict every entry for that one row ID without touching concurrent rows.
+Materialization removes registry ownership only after readback and host-tensor
+reconstruction succeed; a failed handoff leaves the authoritative buffer
+registered for quarantine instead of publishing stale state.
+
+Functional tensor replacement still transfers the secondary `TensorId` alias
+atomically. A destination alias collision or failed transfer is an inference
+error, and the old alias remains aligned for synchronized cleanup. Operators do
+not configure either identity mechanism.
 
 Trusted `GET /v1/debug/model-state` exposes current ownership as
 `caches.resident_recurrent_state.entry_count`, `buffer_bytes`, and

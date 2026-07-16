@@ -165,8 +165,10 @@ struct GdnPrefillResidentStateScope<'a> {
 }
 
 impl<'a> GdnPrefillResidentStateScope<'a> {
-    fn new(backend: &'a dyn BackendRuntime) -> Self {
-        let active = ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(backend);
+    fn new(backend: &'a dyn BackendRuntime, owner_id: Option<u64>) -> Self {
+        let active = owner_id.is_some_and(|owner_id| {
+            ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(backend, owner_id)
+        });
         Self { backend, active }
     }
 }
@@ -3370,6 +3372,7 @@ impl ModelRunner {
     /// decode. This covers native token-prefill ownership and resumable GDN
     /// state retained across ordinary prompt chunks.
     pub fn release_paged_batched_prefill_state(&self, state: &PagedBatchedPrefillState) {
+        ResidencyBackend::runtime_evict_gdn_prefill_resident_state_owner(&*self.backend, state.id);
         state
             .linear_state
             .evict_gdn_recurrent_resident_states(&*self.backend);
@@ -4997,7 +5000,8 @@ impl ModelRunner {
         max_layers: usize,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedPrefillProgress> {
-        let _resident_scope = GdnPrefillResidentStateScope::new(&*self.backend);
+        let owner_id = prefill.as_ref().map(|state| state.id);
+        let _resident_scope = GdnPrefillResidentStateScope::new(&*self.backend, owner_id);
         self.advance_paged_batched_prefill_with_layer_budget_inner(
             prefill,
             params,
@@ -5155,7 +5159,7 @@ impl ModelRunner {
 
         state
             .linear_state
-            .materialize_gdn_recurrent_resident_states(&*self.backend)
+            .materialize_gdn_prefill_resident_states(&*self.backend, state.id)
             .context("materialize resumable prefill GDN state before decode handoff")?;
         let logits = state
             .pending_logits

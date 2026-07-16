@@ -25,20 +25,41 @@ impl ResidentActivationEntry {
 pub(super) type ResidentActivationRegistry =
     Mutex<HashMap<kiln_tensor::TensorId, ResidentActivationEntry>>;
 
-pub(super) type RecurrentStateResidentRegistry =
-    Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct PrefillRecurrentStateKey {
+    pub(super) owner_id: u64,
+    pub(super) layer_idx: usize,
+}
+
+#[derive(Debug)]
+struct RecurrentStateResidentEntry {
+    buffer: Arc<kiln_vulkan_kernel::VulkanBuffer>,
+    prefill_key: Option<PrefillRecurrentStateKey>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct RecurrentStateResidentEntries {
+    by_tensor: HashMap<kiln_tensor::TensorId, RecurrentStateResidentEntry>,
+    by_prefill: HashMap<PrefillRecurrentStateKey, kiln_tensor::TensorId>,
+}
+
+pub(super) type RecurrentStateResidentRegistry = Mutex<RecurrentStateResidentEntries>;
 
 pub(super) fn new_resident_activation_registry() -> ResidentActivationRegistry {
     Mutex::new(HashMap::new())
 }
 
 pub(super) fn new_recurrent_state_resident_registry() -> RecurrentStateResidentRegistry {
-    Mutex::new(HashMap::new())
+    Mutex::new(RecurrentStateResidentEntries::default())
 }
 
 thread_local! {
     static RECURRENT_STATE_RESIDENT_SCOPE_DEPTH: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static PREFILL_RECURRENT_STATE_OWNER_STACK: std::cell::RefCell<Vec<u64>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static PREFILL_RECURRENT_STATE_LAYER_STACK: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Helper: short, self-recovering accessor that wraps the registry's mutex.
@@ -72,25 +93,118 @@ pub(super) fn exit_recurrent_state_resident_scope() {
     });
 }
 
+pub(super) fn enter_prefill_recurrent_state_resident_scope(owner_id: u64) {
+    enter_recurrent_state_resident_scope();
+    PREFILL_RECURRENT_STATE_OWNER_STACK.with(|owners| owners.borrow_mut().push(owner_id));
+}
+
+pub(super) fn exit_prefill_recurrent_state_resident_scope() {
+    PREFILL_RECURRENT_STATE_OWNER_STACK.with(|owners| {
+        owners.borrow_mut().pop();
+    });
+    exit_recurrent_state_resident_scope();
+}
+
+pub(super) fn enter_prefill_recurrent_state_layer_scope(layer_idx: usize) -> bool {
+    let has_owner = PREFILL_RECURRENT_STATE_OWNER_STACK.with(|owners| !owners.borrow().is_empty());
+    if has_owner {
+        PREFILL_RECURRENT_STATE_LAYER_STACK.with(|layers| layers.borrow_mut().push(layer_idx));
+    }
+    has_owner
+}
+
+pub(super) fn exit_prefill_recurrent_state_layer_scope() {
+    PREFILL_RECURRENT_STATE_LAYER_STACK.with(|layers| {
+        layers.borrow_mut().pop();
+    });
+}
+
+fn active_prefill_recurrent_state_key() -> Option<PrefillRecurrentStateKey> {
+    let owner_id =
+        PREFILL_RECURRENT_STATE_OWNER_STACK.with(|owners| owners.borrow().last().copied())?;
+    let layer_idx =
+        PREFILL_RECURRENT_STATE_LAYER_STACK.with(|layers| layers.borrow().last().copied())?;
+    Some(PrefillRecurrentStateKey {
+        owner_id,
+        layer_idx,
+    })
+}
+
+fn remove_recurrent_state_entry(
+    entries: &mut RecurrentStateResidentEntries,
+    id: kiln_tensor::TensorId,
+) -> Option<RecurrentStateResidentEntry> {
+    let entry = entries.by_tensor.remove(&id)?;
+    if let Some(key) = entry.prefill_key
+        && entries.by_prefill.get(&key) == Some(&id)
+    {
+        entries.by_prefill.remove(&key);
+    }
+    Some(entry)
+}
+
 pub(super) fn get_recurrent_state_resident_buffer(
     registry: &RecurrentStateResidentRegistry,
     id: kiln_tensor::TensorId,
 ) -> Option<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-    registry
+    let entries = registry
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&id)
-        .cloned()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    active_prefill_recurrent_state_key()
+        .and_then(|key| entries.by_prefill.get(&key))
+        .and_then(|resident_id| entries.by_tensor.get(resident_id))
+        .or_else(|| entries.by_tensor.get(&id))
+        .map(|entry| Arc::clone(&entry.buffer))
 }
 
 pub(super) fn take_recurrent_state_resident_buffer(
     registry: &RecurrentStateResidentRegistry,
     id: kiln_tensor::TensorId,
 ) -> Option<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-    registry
+    let mut entries = registry
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&id)
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    remove_recurrent_state_entry(&mut entries, id).map(|entry| entry.buffer)
+}
+
+pub(super) fn get_prefill_recurrent_state_resident_buffer(
+    registry: &RecurrentStateResidentRegistry,
+    owner_id: u64,
+    layer_idx: usize,
+    fallback_id: kiln_tensor::TensorId,
+) -> Option<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+    let entries = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = PrefillRecurrentStateKey {
+        owner_id,
+        layer_idx,
+    };
+    entries
+        .by_prefill
+        .get(&key)
+        .and_then(|id| entries.by_tensor.get(id))
+        .or_else(|| entries.by_tensor.get(&fallback_id))
+        .map(|entry| Arc::clone(&entry.buffer))
+}
+
+pub(super) fn take_prefill_recurrent_state_resident_buffer(
+    registry: &RecurrentStateResidentRegistry,
+    owner_id: u64,
+    layer_idx: usize,
+    fallback_id: kiln_tensor::TensorId,
+) -> Option<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+    let mut entries = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = PrefillRecurrentStateKey {
+        owner_id,
+        layer_idx,
+    };
+    let id = entries.by_prefill.remove(&key).unwrap_or(fallback_id);
+    remove_recurrent_state_entry(&mut entries, id)
+        .or_else(|| remove_recurrent_state_entry(&mut entries, fallback_id))
+        .map(|entry| entry.buffer)
 }
 
 pub(super) fn insert_recurrent_state_resident_buffer(
@@ -98,10 +212,26 @@ pub(super) fn insert_recurrent_state_resident_buffer(
     id: kiln_tensor::TensorId,
     buffer: Arc<kiln_vulkan_kernel::VulkanBuffer>,
 ) {
-    registry
+    let mut entries = registry
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(id, buffer);
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    remove_recurrent_state_entry(&mut entries, id);
+    let prefill_key = active_prefill_recurrent_state_key();
+    if let Some(key) = prefill_key {
+        if let Some(previous_id) = entries.by_prefill.insert(key, id)
+            && previous_id != id
+        {
+            remove_recurrent_state_entry(&mut entries, previous_id);
+            entries.by_prefill.insert(key, id);
+        }
+    }
+    entries.by_tensor.insert(
+        id,
+        RecurrentStateResidentEntry {
+            buffer,
+            prefill_key,
+        },
+    );
 }
 
 /// Atomically transfer a recurrent buffer between tensor identities.
@@ -115,23 +245,27 @@ pub(super) fn rekey_recurrent_state_resident_buffer(
     old_id: kiln_tensor::TensorId,
     new_id: kiln_tensor::TensorId,
 ) -> anyhow::Result<bool> {
-    let mut cache = registry
+    let mut entries = registry
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if old_id == new_id {
-        return Ok(cache.contains_key(&old_id));
+        return Ok(entries.by_tensor.contains_key(&old_id));
     }
-    if !cache.contains_key(&old_id) {
+    if !entries.by_tensor.contains_key(&old_id) {
         return Ok(false);
     }
     anyhow::ensure!(
-        !cache.contains_key(&new_id),
+        !entries.by_tensor.contains_key(&new_id),
         "cannot rekey resident GDN state: destination TensorId already owns a buffer"
     );
-    let buffer = cache
+    let entry = entries
+        .by_tensor
         .remove(&old_id)
         .expect("resident GDN state disappeared while registry lock was held");
-    cache.insert(new_id, buffer);
+    if let Some(key) = entry.prefill_key {
+        entries.by_prefill.insert(key, new_id);
+    }
+    entries.by_tensor.insert(new_id, entry);
     Ok(true)
 }
 
@@ -139,38 +273,63 @@ pub(super) fn remove_recurrent_state_resident_buffer(
     registry: &RecurrentStateResidentRegistry,
     id: kiln_tensor::TensorId,
 ) {
-    registry
+    let mut entries = registry
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&id);
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    remove_recurrent_state_entry(&mut entries, id);
+}
+
+pub(super) fn remove_prefill_recurrent_state_resident_buffers(
+    registry: &RecurrentStateResidentRegistry,
+    owner_id: u64,
+) -> usize {
+    let mut entries = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ids: Vec<_> = entries
+        .by_tensor
+        .iter()
+        .filter_map(|(id, entry)| {
+            entry
+                .prefill_key
+                .is_some_and(|key| key.owner_id == owner_id)
+                .then_some(*id)
+        })
+        .collect();
+    let mut removed = 0;
+    for id in ids {
+        removed += usize::from(remove_recurrent_state_entry(&mut entries, id).is_some());
+    }
+    entries.by_prefill.retain(|key, _| key.owner_id != owner_id);
+    removed
 }
 
 pub(super) fn contains_recurrent_state_resident_buffer(
     registry: &RecurrentStateResidentRegistry,
     id: kiln_tensor::TensorId,
 ) -> bool {
-    registry
+    let entries = registry
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .contains_key(&id)
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    entries.by_tensor.contains_key(&id)
 }
 
 pub(super) fn recurrent_state_residency_stats(
     registry: &RecurrentStateResidentRegistry,
 ) -> super::GdnRecurrentStateResidencyStats {
-    let cache = registry
+    let entries = registry
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.values().fold(
+    entries.by_tensor.values().fold(
         super::GdnRecurrentStateResidencyStats {
-            entry_count: cache.len(),
+            entry_count: entries.by_tensor.len(),
             ..Default::default()
         },
-        |mut stats, buffer| {
-            stats.buffer_bytes = stats.buffer_bytes.saturating_add(buffer.size());
+        |mut stats, entry| {
+            stats.buffer_bytes = stats.buffer_bytes.saturating_add(entry.buffer.size());
             stats.allocation_bytes = stats
                 .allocation_bytes
-                .saturating_add(buffer.allocation_size());
+                .saturating_add(entry.buffer.allocation_size());
             stats
         },
     )
@@ -183,11 +342,16 @@ pub(super) fn recurrent_state_resident_buffers_for<I>(
 where
     I: IntoIterator<Item = kiln_tensor::TensorId>,
 {
-    let cache = registry
+    let entries = registry
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     ids.into_iter()
-        .map(|id| cache.get(&id).cloned())
+        .map(|id| {
+            entries
+                .by_tensor
+                .get(&id)
+                .map(|entry| Arc::clone(&entry.buffer))
+        })
         .collect::<Option<Vec<_>>>()
 }
 
@@ -197,11 +361,22 @@ pub(super) fn replace_recurrent_state_resident_buffer(
     new_id: kiln_tensor::TensorId,
     buffer: Arc<kiln_vulkan_kernel::VulkanBuffer>,
 ) {
-    let mut cache = registry
+    let mut entries = registry
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.remove(&old_id);
-    cache.insert(new_id, buffer);
+    let prefill_key =
+        remove_recurrent_state_entry(&mut entries, old_id).and_then(|entry| entry.prefill_key);
+    remove_recurrent_state_entry(&mut entries, new_id);
+    if let Some(key) = prefill_key {
+        entries.by_prefill.insert(key, new_id);
+    }
+    entries.by_tensor.insert(
+        new_id,
+        RecurrentStateResidentEntry {
+            buffer,
+            prefill_key,
+        },
+    );
 }
 
 #[cfg(test)]

@@ -1407,14 +1407,18 @@ decode-state cache described below: a prompt row can own backend state while
 
 | Field | Meaning |
 |---|---|
-| `entry_count` | Current tensor identities mapped to backend-private recurrent-state buffers. Functional dtype/layout replacements transfer ownership to their new identity atomically. |
+| `entry_count` | Current logical recurrent-state slots mapped to backend-private buffers. Resumable prefill owns a slot by request ID plus linear-layer index; the aggregate deliberately does not expose either value. |
 | `buffer_bytes` | Sum of addressable Vulkan buffer extents for those entries. |
 | `allocation_bytes` | Sum of Vulkan allocation requirements, including alignment beyond the addressable extent. This must be at least `buffer_bytes`. |
 
 The object is deliberately aggregate and bounded: it contains no request ID,
-prompt data, tensor ID, or per-layer label. Nonzero values are expected while a
-prefill quantum is live. All three values must be zero after successful decode
-handoff, cancellation, generation error, actor discard, and final server drain.
+prompt data, tensor ID, or per-layer label. Internally, a secondary tensor alias
+supports decode and handle-local lookup, but it is not the resumable-prefill
+owner. Nonzero values are expected while a prefill quantum is live. All three
+values must be zero after successful decode handoff, cancellation, generation
+error, actor discard, and final server drain. Cleanup is scoped to the stable
+request owner; clearing the whole registry would be an invalid implementation
+because it could corrupt concurrent rows.
 An empty registry with nonzero bytes, a nonempty registry with zero buffer
 bytes, or allocation bytes below buffer bytes is internally inconsistent and
 fails qualification.
@@ -1438,16 +1442,18 @@ workload retains final values as
 `resident_recurrent_state_allocation_bytes_end`; each has a required-zero
 acceptance threshold.
 
-The implementation's real-device parity regression covers two prompt chunks,
-multiple work-handle identities, restoration to one persistent slot, reuse from
-an intentionally stale zero-valued host handle, output and final-state parity
-against per-chunk readback, materialization from a different thread, and a zero
-registry after materialization. The serving semantic oracle and cancellation
-workload remain required because a kernel parity test alone cannot prove actor
-teardown. In particular, a cancellation probe must first observe a nonzero
-registry during prefill, abort before a semantic token is delivered, wait for
-the actor to drain, and then require both trusted debug and Prometheus ownership
-to return to zero before issuing a follow-up request in the same process.
+The implementation's real-device parity regressions cover two prompt chunks,
+multiple unrelated work-handle identities, reuse from an intentionally stale
+zero-valued host handle on a different thread, output and final-state parity
+against per-chunk readback, stable-key materialization into the caller's chosen
+handle, and a zero registry afterward. A second two-owner regression proves
+that evicting one interrupted row preserves the other row's state. The serving
+semantic oracle and cancellation workload remain required because kernel
+parity alone cannot prove actor teardown. In particular, a cancellation probe
+must first observe a nonzero registry during prefill, abort before a semantic
+token is delivered, wait for the actor to drain, and then require both trusted
+debug and Prometheus ownership to return to zero before issuing a follow-up
+request in the same process.
 
 #### Batched recurrent-state cache telemetry
 

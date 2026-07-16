@@ -1149,7 +1149,8 @@ mod tests {
     }
 
     #[test]
-    fn chunkwise_prefill_resident_state_survives_handle_rekeys_across_threads() -> Result<()> {
+    fn chunkwise_prefill_resident_state_uses_stable_owner_across_handles_and_threads() -> Result<()>
+    {
         let backend = Arc::new(VulkanBackend::new(kiln_tensor::Device::Cpu));
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping resident chunkwise test");
@@ -1167,6 +1168,8 @@ mod tests {
             gdn_chunkwise_forward(&backend, &q2, &k2, &v2, &beta2, &g2, &mut baseline_state, 4)?
                 .context("baseline second chunk declined")?;
 
+        let owner_id = 17;
+        let layer_idx = 0;
         let mut resident_state = tensor(initial.clone(), (1, 1, 2, 2))?;
         let stable_id = resident_state.id();
         // Model the inference wrapper's BF16 -> F32 normalization. The work
@@ -1175,7 +1178,14 @@ mod tests {
             .to_dtype(kiln_tensor::DType::BF16)?
             .to_dtype(kiln_tensor::DType::F32)?;
         assert_ne!(work_state.id(), stable_id);
-        assert!(ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(&*backend));
+        assert!(
+            ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(&*backend, owner_id,)
+        );
+        assert!(
+            ResidencyBackend::runtime_enter_gdn_prefill_resident_state_layer_scope(
+                &*backend, layer_idx,
+            )
+        );
         let resident_out1 =
             gdn_chunkwise_forward(&backend, &q1, &k1, &v1, &beta1, &g1, &mut work_state, 4)?
                 .context("resident first chunk declined")?;
@@ -1194,42 +1204,49 @@ mod tests {
             &*backend,
             &resident_state,
         ));
-
-        // The persistent host payload is intentionally stale while its Vulkan
-        // buffer is resident. Rekeying before the next chunk must preserve the
-        // first chunk's device state instead of uploading this zero handle.
-        let mut next_work_state = tensor(initial, (1, 1, 2, 2))?;
-        assert!(
-            ResidencyBackend::runtime_rekey_gdn_recurrent_resident_state(
-                &*backend,
-                &resident_state,
-                &next_work_state,
-            )?
-        );
-        let resident_out2 = gdn_chunkwise_forward(
-            &backend,
-            &q2,
-            &k2,
-            &v2,
-            &beta2,
-            &g2,
-            &mut next_work_state,
-            4,
-        )?
-        .context("resident second chunk declined")?;
-        assert!(
-            ResidencyBackend::runtime_rekey_gdn_recurrent_resident_state(
-                &*backend,
-                &next_work_state,
-                &resident_state,
-            )?
-        );
+        ResidencyBackend::runtime_exit_gdn_prefill_resident_state_layer_scope(&*backend);
         ResidencyBackend::runtime_exit_gdn_prefill_resident_state_scope(&*backend);
 
+        // Resume with an unrelated, stale zero handle on another worker. The
+        // request/layer key must find the first chunk's device state without a
+        // TensorId transfer at this boundary.
+        let resume_backend = Arc::clone(&backend);
+        let (resident_out2, resumed_state) = std::thread::spawn(move || {
+            let mut next_work_state = tensor(initial, (1, 1, 2, 2))?;
+            ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(
+                &*resume_backend,
+                owner_id,
+            );
+            ResidencyBackend::runtime_enter_gdn_prefill_resident_state_layer_scope(
+                &*resume_backend,
+                layer_idx,
+            );
+            let out = gdn_chunkwise_forward(
+                &resume_backend,
+                &q2,
+                &k2,
+                &v2,
+                &beta2,
+                &g2,
+                &mut next_work_state,
+                4,
+            )?
+            .context("resident second chunk declined")?;
+            ResidencyBackend::runtime_exit_gdn_prefill_resident_state_layer_scope(&*resume_backend);
+            ResidencyBackend::runtime_exit_gdn_prefill_resident_state_scope(&*resume_backend);
+            Ok::<_, anyhow::Error>((out, next_work_state))
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("cross-thread resident resume panicked"))??;
+
         assert_eq!(resident_state.id(), stable_id);
-        assert!(ResidencyBackend::runtime_has_gdn_recurrent_resident_state(
+        assert!(!ResidencyBackend::runtime_has_gdn_recurrent_resident_state(
             &*backend,
             &resident_state,
+        ));
+        assert!(ResidencyBackend::runtime_has_gdn_recurrent_resident_state(
+            &*backend,
+            &resumed_state,
         ));
         let resident_stats =
             ResidencyBackend::runtime_gdn_recurrent_state_residency_stats(&*backend);
@@ -1249,8 +1266,10 @@ mod tests {
 
         let materialize_backend = Arc::clone(&backend);
         let resident_state = std::thread::spawn(move || -> Result<kiln_tensor::Tensor> {
-            ResidencyBackend::runtime_materialize_gdn_recurrent_resident_state(
+            ResidencyBackend::runtime_materialize_gdn_prefill_resident_state(
                 &*materialize_backend,
+                owner_id,
+                layer_idx,
                 &mut resident_state,
             )?;
             Ok(resident_state)
@@ -1272,6 +1291,56 @@ mod tests {
         );
 
         ResidencyBackend::runtime_evict_gdn_recurrent_resident_state(&*backend, &resident_state);
+        Ok(())
+    }
+
+    #[test]
+    fn prefill_owner_eviction_is_exact() -> Result<()> {
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping resident owner eviction test");
+            return Ok(());
+        }
+        let [q, k, v, beta, g] = inputs(3, 3)?;
+        let mut state_a = tensor(vec![0.0; 4], (1, 1, 2, 2))?;
+        let mut state_b = tensor(vec![0.0; 4], (1, 1, 2, 2))?;
+
+        for (owner_id, state) in [(101, &mut state_a), (202, &mut state_b)] {
+            assert!(
+                ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(
+                    &backend, owner_id,
+                )
+            );
+            assert!(
+                ResidencyBackend::runtime_enter_gdn_prefill_resident_state_layer_scope(&backend, 0,)
+            );
+            gdn_chunkwise_forward(&backend, &q, &k, &v, &beta, &g, state, 4)?
+                .context("resident owner-eviction chunk declined")?;
+            ResidencyBackend::runtime_exit_gdn_prefill_resident_state_layer_scope(&backend);
+            ResidencyBackend::runtime_exit_gdn_prefill_resident_state_scope(&backend);
+        }
+        assert_eq!(
+            ResidencyBackend::runtime_gdn_recurrent_state_residency_stats(&backend).entry_count,
+            2
+        );
+
+        ResidencyBackend::runtime_evict_gdn_prefill_resident_state_owner(&backend, 101);
+        assert_eq!(
+            ResidencyBackend::runtime_gdn_recurrent_state_residency_stats(&backend).entry_count,
+            1
+        );
+        assert!(!ResidencyBackend::runtime_has_gdn_recurrent_resident_state(
+            &backend, &state_a,
+        ));
+        assert!(ResidencyBackend::runtime_has_gdn_recurrent_resident_state(
+            &backend, &state_b,
+        ));
+
+        ResidencyBackend::runtime_evict_gdn_prefill_resident_state_owner(&backend, 202);
+        assert_eq!(
+            ResidencyBackend::runtime_gdn_recurrent_state_residency_stats(&backend),
+            crate::backend::GdnRecurrentStateResidencyStats::default()
+        );
         Ok(())
     }
 }

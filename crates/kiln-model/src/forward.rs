@@ -5093,6 +5093,19 @@ impl LinearAttentionState {
         Ok(())
     }
 
+    pub fn materialize_gdn_prefill_resident_states(
+        &mut self,
+        backend: &dyn BackendRuntime,
+        owner_id: u64,
+    ) -> Result<()> {
+        for (layer_idx, state) in self.recurrent_states.iter_mut().enumerate() {
+            ResidencyBackend::runtime_materialize_gdn_prefill_resident_state(
+                backend, owner_id, layer_idx, state,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn evict_gdn_recurrent_resident_states(&self, backend: &dyn BackendRuntime) {
         for state in &self.recurrent_states {
             ResidencyBackend::runtime_evict_gdn_recurrent_resident_state(backend, state);
@@ -17348,6 +17361,28 @@ fn replace_gdn_recurrent_state_handle(
         .with_context(|| format!("GDN resident-state ownership transfer during {operation}"))?;
     *state = replacement;
     Ok(())
+}
+
+struct GdnPrefillResidentStateLayerScope<'a> {
+    backend: &'a dyn BackendRuntime,
+    active: bool,
+}
+
+impl<'a> GdnPrefillResidentStateLayerScope<'a> {
+    fn new(backend: &'a dyn BackendRuntime, layer_idx: usize) -> Self {
+        let active = ResidencyBackend::runtime_enter_gdn_prefill_resident_state_layer_scope(
+            backend, layer_idx,
+        );
+        Self { backend, active }
+    }
+}
+
+impl Drop for GdnPrefillResidentStateLayerScope<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            ResidencyBackend::runtime_exit_gdn_prefill_resident_state_layer_scope(self.backend);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -31508,23 +31543,29 @@ fn model_forward_paged_inner_bounded(
                 if capture_c41_taps {
                     crate::mtp_debug::capture_c41_layer1_tap("layer_1_post_input_norm", &normed)?;
                 }
-                let attn_out = gated_deltanet_forward_decode_if(
-                    backend,
-                    &normed,
-                    lin_weights,
-                    config,
-                    &mut state.recurrent_states[linear_attn_idx],
-                    &mut state.conv_states[linear_attn_idx],
-                    capture_b11_taps,
-                    capture_c41_taps,
-                    true,
-                    use_metal_decode_ffn,
-                    profile_gdn_stages.then_some((i, start_pos)),
-                    true,
-                    true,
-                    layer_lora,
-                )
-                .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
+                let attn_out = {
+                    let _prefill_resident_layer_scope =
+                        GdnPrefillResidentStateLayerScope::new(backend, linear_attn_idx);
+                    gated_deltanet_forward_decode_if(
+                        backend,
+                        &normed,
+                        lin_weights,
+                        config,
+                        &mut state.recurrent_states[linear_attn_idx],
+                        &mut state.conv_states[linear_attn_idx],
+                        capture_b11_taps,
+                        capture_c41_taps,
+                        true,
+                        use_metal_decode_ffn,
+                        profile_gdn_stages.then_some((i, start_pos)),
+                        true,
+                        true,
+                        layer_lora,
+                    )
+                    .with_context(|| {
+                        format!("gated deltanet layer {i} (linear attention, paged)")
+                    })?
+                };
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     residual_add(hidden, attn_out)?

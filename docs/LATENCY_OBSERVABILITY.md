@@ -328,10 +328,12 @@ claims for a particular accelerator.
    bytes after the request drains indicate an ownership leak, not VRAM
    rebalancing. Compare `buffer` with `allocation` bytes before attributing an
    aligned recycler allocation to live tensor growth. If entry count grows by
-   roughly the number of GDN layers after cancellation, inspect recurrent-state
-   handle rekeying across dtype normalization before investigating allocator
-   pressure: cleanup evicts the persistent IDs it owns, so buffers left under
-   temporary work IDs present exactly this signature.
+   roughly the number of GDN layers after cancellation, verify that prefill
+   entered an explicit request-owner scope, each recurrence entered its linear
+   layer scope, successful handoff materialized by `(request, layer)`, and
+   discard evicted that request owner. Tensor-handle rekeying is only a
+   secondary alias and must not be the sole cleanup authority. This signature
+   is an ownership defect, not allocator pressure.
 5. Change one source-bound configuration field per benchmark arm and preserve
    failed receipts. A temporal gap without a matching typed operation is not
    evidence of VRAM rebalancing.

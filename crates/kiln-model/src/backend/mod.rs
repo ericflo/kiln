@@ -1601,11 +1601,20 @@ pub trait ResidencyBackend:
     /// Enter the backend-private state scope used only while prompt prefill is
     /// resumable. This is separate from decode residency so a backend can keep
     /// prefill state on device without changing its decode batching policy.
-    fn runtime_enter_gdn_prefill_resident_state_scope(&self) -> bool {
+    fn runtime_enter_gdn_prefill_resident_state_scope(&self, _owner_id: u64) -> bool {
         false
     }
 
     fn runtime_exit_gdn_prefill_resident_state_scope(&self) {}
+
+    /// Bind one linear-attention layer to the active resumable-prefill owner.
+    /// Backends use this stable pair instead of a functional tensor handle that
+    /// may change while the request yields between layer groups.
+    fn runtime_enter_gdn_prefill_resident_state_layer_scope(&self, _layer_idx: usize) -> bool {
+        false
+    }
+
+    fn runtime_exit_gdn_prefill_resident_state_layer_scope(&self) {}
 
     fn runtime_gdn_recurrent_state_residency_stats(&self) -> GdnRecurrentStateResidencyStats {
         GdnRecurrentStateResidencyStats::default()
@@ -1628,6 +1637,22 @@ pub trait ResidencyBackend:
     ) -> Result<()> {
         Ok(())
     }
+
+    /// Materialize a resumable-prefill state by its stable request/layer key.
+    /// The default retains the TensorId-based behavior for backends that do not
+    /// maintain a separate prefill registry.
+    fn runtime_materialize_gdn_prefill_resident_state(
+        &self,
+        _owner_id: u64,
+        _layer_idx: usize,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<()> {
+        self.runtime_materialize_gdn_recurrent_resident_state(state)
+    }
+
+    /// Drop every backend-private recurrent state owned by one interrupted
+    /// prefill request without affecting concurrent decode or prefill rows.
+    fn runtime_evict_gdn_prefill_resident_state_owner(&self, _owner_id: u64) {}
 
     fn runtime_evict_gdn_recurrent_resident_state(&self, _state: &kiln_tensor::Tensor) {}
 

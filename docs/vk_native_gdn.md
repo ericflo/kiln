@@ -66,39 +66,44 @@ existing logical device while the batching actor yields between prompt chunks
 or layer groups. This is a serving ownership optimization, not a new GDN
 algorithm and not a public configuration mode.
 
-Each logical recurrent-state slot has a persistent `TensorId`, but functional
-dtype and layout operations can mint temporary work handles with different
-IDs. `VulkanBackend` owns a mutex-protected map from the *current* handle ID to
-its `VulkanBuffer`. Every handle replacement atomically transfers that map
-entry before the new handle is installed, and the outer GDN wrapper transfers
-it back to the persistent slot without copying the stale host payload. A
-destination ID that already owns a buffer is rejected while the registry lock
-is held. If conversion or transfer fails, the old handle and old key remain
-aligned so error cleanup can still evict the exact owner.
+`VulkanBackend` owns a mutex-protected registry with two identities. Resumable
+prefill uses `(serving row ID, linear-attention layer index)` as the
+authoritative key. The current `TensorId` is a secondary alias used by ordinary
+decode and fast handle-local operations. A functional dtype/layout operation,
+a retained layer-group boundary, or a worker-thread change may replace the host
+handle, but none can replace the request/layer owner.
 
-This explicit identity transfer is part of the correctness contract. Merely
-keying on whichever temporary tensor entered the Vulkan kernel leaks buffers at
-cancellation and causes later chunks to upload stale host state. The worker
-that resumes, materializes, or discards a request does not need to be the thread
-that produced the previous quantum. Scope depth remains thread-local: it
-controls whether a particular forward may retain state, while authoritative
-buffers and identity transfer are backend-local. The two responsibilities must
-not be combined.
+Registry insertion records both identities. A later prefill quantum first
+looks up the stable request/layer key and then moves its secondary alias to the
+current handle. Functional replacements also rekey that alias atomically; a
+destination ID that already owns a different buffer is rejected while the
+registry lock is held. This avoids uploading a stale host placeholder even if
+some wrapper fails to preserve a handle identity. Final materialization selects
+the stable key explicitly, and cancellation removes every entry tagged with
+that one request owner. It never clears unrelated entries.
+
+The worker that resumes, materializes, or discards a request does not need to
+be the thread that produced the previous quantum. Request and layer scopes are
+thread-local guards around one forward call; authoritative keys and buffers are
+backend-local. Decode enters only the older TensorId-backed residency scope and
+cannot acquire a prefill owner accidentally.
 
 Within a resumable prompt:
 
 1. The first GDN chunk uploads activations and the CPU-hosted initial state.
 2. Later chunks upload only q/k/v/beta/g and reuse the mapped state buffer.
-   Recurrence dtype normalization transfers the mapping to the normalized work
-   handle and then back to the persistent `LinearAttentionState` slot.
+   The serving row and linear-layer index select it even when the host handle is
+   unrelated to the handle used by the preceding quantum.
 3. Every chunk reads its output back for the remaining host-driven layer path,
    but it does not read the updated recurrent state back.
 4. The final successful prompt quantum materializes every GDN state once before
-   sampling, prefix publication, or decode handoff.
+   sampling, prefix publication, or decode handoff, selecting each entry by the
+   same request/layer pair rather than by the current host handle.
 5. After required device synchronization, forward errors, cancellation, actor
-   discard, and request teardown evict the exact tensor IDs without
-   materializing abandoned state. A failed synchronization quarantines and
-   deliberately retains ownership rather than freeing an in-flight buffer.
+   discard, and request teardown evict the exact request owner without
+   materializing abandoned state or touching concurrent owners. A failed
+   synchronization quarantines and deliberately retains ownership rather than
+   freeing an in-flight buffer.
 
 A one-token final prompt chunk uses the same scoped recurrent kernel. Ordinary
 decode does not: its separate resident-state scope still requires the existing
@@ -106,8 +111,10 @@ backend decode-residency policy. Prompt-prefill residency therefore cannot
 silently enable the previously rejected batched-decode experiment.
 
 Logical host tensors are stale while this direct registry is authoritative.
-Consequently, an in-place persistent-slot restore must transfer ownership and
-must not `slice_set` the temporary host payload into the persistent slot.
+Consequently, an in-place persistent-slot restore must preserve the secondary
+alias and must not `slice_set` the temporary host payload into the persistent
+slot. Correctness does not depend on that alias surviving: the stable
+request/layer key remains the handoff and teardown authority.
 The shared prefix-snapshot authority gate checks both the direct recurrent
 registry and the separate batched recurrent/convolution registry, suppressing
 whole-prompt, strict-split, chunk-split, and rolling snapshots until state has
@@ -115,8 +122,10 @@ been materialized. Prefix-cache quarantine is not relied on for this invariant.
 
 Recycler buffers may be larger than their logical tensor. Materialization
 checks that the readback covers `element_count * sizeof(f32)`, truncates to that
-logical extent, and only then reconstructs the host tensor. Treating recycler
-capacity as tensor length is a correctness error.
+logical extent, and only then reconstructs the host tensor and removes the
+registry entry. A readback or reconstruction failure leaves backend ownership
+registered for quarantine. Treating recycler capacity as tensor length or
+dropping ownership before reconstruction succeeds is a correctness error.
 
 Trusted `GET /v1/debug/model-state` publishes current direct-registry ownership
 at `caches.resident_recurrent_state`; Prometheus publishes the same entry,
@@ -125,6 +134,14 @@ decode cache remains a separate object. All three direct-registry values must be
 zero at a drained request boundary. The Vulkan development-soak driver validates
 the object as a closed contract after startup, warmup, every cancellation and
 wave, and final shutdown. See [Local Hardware Qualification](qualification.md#resumable-gdn-prefill-residency-telemetry).
+
+Real-device tests deliberately resume a second chunk with a stale zero host
+tensor and a different `TensorId` on another thread, then materialize into the
+original caller-selected handle and compare outputs plus final state with the
+readback baseline. A separate two-owner test evicts one request and proves the
+other remains resident. Production qualification additionally requires an
+aborted prefill to drain both debug and Prometheus gauges before a semantic
+follow-up runs in the same server process.
 
 ## High-level architecture of one GDN layer
 

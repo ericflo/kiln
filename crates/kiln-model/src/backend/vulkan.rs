@@ -17,13 +17,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 use super::vulkan_config::VulkanRuntimeConfig;
 use super::vulkan_residency::{
     RecurrentStateResidentRegistry, ResidentActivationEntry,
-    contains_recurrent_state_resident_buffer, enter_recurrent_state_resident_scope,
-    exit_recurrent_state_resident_scope, get_recurrent_state_resident_buffer,
-    insert_recurrent_state_resident_buffer, recurrent_state_residency_stats,
-    recurrent_state_resident_buffers_for, recurrent_state_resident_scope_active,
-    rekey_recurrent_state_resident_buffer, remove_recurrent_state_resident_buffer,
-    replace_recurrent_state_resident_buffer, take_recurrent_state_resident_buffer,
-    with_resident_registry,
+    contains_recurrent_state_resident_buffer, enter_prefill_recurrent_state_layer_scope,
+    enter_prefill_recurrent_state_resident_scope, enter_recurrent_state_resident_scope,
+    exit_prefill_recurrent_state_layer_scope, exit_prefill_recurrent_state_resident_scope,
+    exit_recurrent_state_resident_scope, get_prefill_recurrent_state_resident_buffer,
+    get_recurrent_state_resident_buffer, insert_recurrent_state_resident_buffer,
+    recurrent_state_residency_stats, recurrent_state_resident_buffers_for,
+    recurrent_state_resident_scope_active, rekey_recurrent_state_resident_buffer,
+    remove_prefill_recurrent_state_resident_buffers, remove_recurrent_state_resident_buffer,
+    replace_recurrent_state_resident_buffer, take_prefill_recurrent_state_resident_buffer,
+    take_recurrent_state_resident_buffer, with_resident_registry,
 };
 use super::vulkan_tensor_bridge::{
     kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape,
@@ -1244,6 +1247,40 @@ impl super::residency::ResidentRegistry for VulkanBackend {
     }
 }
 
+fn materialize_gdn_recurrent_state_buffer(
+    backend: &VulkanBackend,
+    state_kt: &mut kiln_tensor::Tensor,
+    resident_state: Arc<kiln_vulkan_kernel::VulkanBuffer>,
+) -> Result<()> {
+    let state_dims = state_kt.dims().to_vec();
+    let state_dtype = state_kt.dtype();
+    let logical_bytes = state_kt
+        .elem_count()
+        .checked_mul(std::mem::size_of::<f32>())
+        .context("resident GDN recurrent state byte-size overflow")?;
+
+    let vk_device = backend
+        .vulkan_device
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+    let mut data = kiln_vulkan_kernel::VulkanBuffer::read_back(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        &resident_state,
+    )
+    .context("failed to materialize resident GDN recurrent state")?;
+    anyhow::ensure!(
+        data.len() >= logical_bytes,
+        "resident GDN recurrent state readback returned {} bytes, expected at least {logical_bytes}",
+        data.len()
+    );
+    data.truncate(logical_bytes);
+    *state_kt = kt_tensor_from_f32_bytes(&data, &state_dims, state_dtype)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 impl ResidencyBackend for VulkanBackend {
     fn runtime_enter_gdn_recurrent_resident_state_scope(&self) -> bool {
@@ -1260,16 +1297,24 @@ impl ResidencyBackend for VulkanBackend {
         }
     }
 
-    fn runtime_enter_gdn_prefill_resident_state_scope(&self) -> bool {
+    fn runtime_enter_gdn_prefill_resident_state_scope(&self, owner_id: u64) -> bool {
         if !self.has_vulkan() || !self.gdn_enabled {
             return false;
         }
-        enter_recurrent_state_resident_scope();
+        enter_prefill_recurrent_state_resident_scope(owner_id);
         true
     }
 
     fn runtime_exit_gdn_prefill_resident_state_scope(&self) {
-        exit_recurrent_state_resident_scope();
+        exit_prefill_recurrent_state_resident_scope();
+    }
+
+    fn runtime_enter_gdn_prefill_resident_state_layer_scope(&self, layer_idx: usize) -> bool {
+        enter_prefill_recurrent_state_layer_scope(layer_idx)
+    }
+
+    fn runtime_exit_gdn_prefill_resident_state_layer_scope(&self) {
+        exit_prefill_recurrent_state_layer_scope();
     }
 
     fn runtime_gdn_recurrent_state_residency_stats(
@@ -1305,37 +1350,46 @@ impl ResidencyBackend for VulkanBackend {
         // materialized state is written back into the kt arg in place.
         let state_id = state_kt.id();
         let resident_state =
-            take_recurrent_state_resident_buffer(&self.recurrent_state_resident_registry, state_id);
+            get_recurrent_state_resident_buffer(&self.recurrent_state_resident_registry, state_id);
         let Some(resident_state) = resident_state else {
             return Ok(());
         };
-        let state_dims = state_kt.dims().to_vec();
-        let state_dtype = state_kt.dtype();
-        let logical_bytes = state_kt
-            .elem_count()
-            .checked_mul(std::mem::size_of::<f32>())
-            .context("resident GDN recurrent state byte-size overflow")?;
-
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let mut data = kiln_vulkan_kernel::VulkanBuffer::read_back(
-            vk_device.device(),
-            vk_device.host_visible_mem_type(),
-            vk_device.queue(),
-            vk_device.queue_family_index(),
-            &resident_state,
-        )
-        .context("failed to materialize resident GDN recurrent state")?;
-        anyhow::ensure!(
-            data.len() >= logical_bytes,
-            "resident GDN recurrent state readback returned {} bytes, expected at least {logical_bytes}",
-            data.len()
-        );
-        data.truncate(logical_bytes);
-        *state_kt = kt_tensor_from_f32_bytes(&data, &state_dims, state_dtype)?;
+        materialize_gdn_recurrent_state_buffer(self, state_kt, resident_state)?;
+        take_recurrent_state_resident_buffer(&self.recurrent_state_resident_registry, state_id);
         Ok(())
+    }
+
+    fn runtime_materialize_gdn_prefill_resident_state(
+        &self,
+        owner_id: u64,
+        layer_idx: usize,
+        state_kt: &mut kiln_tensor::Tensor,
+    ) -> Result<()> {
+        let fallback_id = state_kt.id();
+        let resident_state = get_prefill_recurrent_state_resident_buffer(
+            &self.recurrent_state_resident_registry,
+            owner_id,
+            layer_idx,
+            fallback_id,
+        );
+        let Some(resident_state) = resident_state else {
+            return Ok(());
+        };
+        materialize_gdn_recurrent_state_buffer(self, state_kt, resident_state)?;
+        take_prefill_recurrent_state_resident_buffer(
+            &self.recurrent_state_resident_registry,
+            owner_id,
+            layer_idx,
+            fallback_id,
+        );
+        Ok(())
+    }
+
+    fn runtime_evict_gdn_prefill_resident_state_owner(&self, owner_id: u64) {
+        remove_prefill_recurrent_state_resident_buffers(
+            &self.recurrent_state_resident_registry,
+            owner_id,
+        );
     }
 
     fn runtime_evict_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) {
