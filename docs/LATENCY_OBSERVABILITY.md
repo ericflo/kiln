@@ -334,7 +334,14 @@ claims for a particular accelerator.
    discard evicted that request owner. Tensor-handle rekeying is only a
    secondary alias and must not be the sole cleanup authority. This signature
    is an ownership defect, not allocator pressure.
-5. Change one source-bound configuration field per benchmark arm and preserve
+5. If ownership drains to zero but a same-process or standalone semantic oracle
+   fails after apparently correct prompt logits, compare the recurrent state's
+   external precision at every completed token-chunk boundary. Vulkan may keep
+   an F32 accumulator resident for a BF16 state, but it must still apply the
+   device-side BF16 round-to-nearest-even boundary before the next chunk. A
+   missing boundary can corrupt decode without producing a leak, allocation
+   spike, or synchronization counter.
+6. Change one source-bound configuration field per benchmark arm and preserve
    failed receipts. A temporal gap without a matching typed operation is not
    evidence of VRAM rebalancing.
 

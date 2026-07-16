@@ -1167,16 +1167,54 @@ mod tests {
         let baseline_out2 =
             gdn_chunkwise_forward(&backend, &q2, &k2, &v2, &beta2, &g2, &mut baseline_state, 4)?
                 .context("baseline second chunk declined")?;
-
+        let q_all = kiln_tensor::Tensor::cat(&[&q1, &q2], 2)?;
+        let k_all = kiln_tensor::Tensor::cat(&[&k1, &k2], 2)?;
+        let v_all = kiln_tensor::Tensor::cat(&[&v1, &v2], 2)?;
+        let beta_all = kiln_tensor::Tensor::cat(&[&beta1, &beta2], 2)?;
+        let g_all = kiln_tensor::Tensor::cat(&[&g1, &g2], 2)?;
+        let mut monolithic_state = tensor(initial.clone(), (1, 1, 2, 2))?;
+        let monolithic_out = gdn_chunkwise_forward(
+            &backend,
+            &q_all,
+            &k_all,
+            &v_all,
+            &beta_all,
+            &g_all,
+            &mut monolithic_state,
+            4,
+        )?
+        .context("monolithic baseline declined")?;
+        let split_out = kiln_tensor::Tensor::cat(&[&baseline_out1, &baseline_out2], 2)?;
+        assert_close(
+            "split versus monolithic output",
+            &values(&split_out)?,
+            &values(&monolithic_out)?,
+        );
+        assert_close(
+            "split versus monolithic state",
+            &values(&baseline_state)?,
+            &values(&monolithic_state)?,
+        );
+        let mut quantized_state =
+            tensor(initial.clone(), (1, 1, 2, 2))?.to_dtype(kiln_tensor::DType::BF16)?;
+        let mut quantized_work = quantized_state.to_dtype(kiln_tensor::DType::F32)?;
+        let quantized_out1 =
+            gdn_chunkwise_forward(&backend, &q1, &k1, &v1, &beta1, &g1, &mut quantized_work, 4)?
+                .context("quantized first chunk declined")?;
+        quantized_state = quantized_work.to_dtype(kiln_tensor::DType::BF16)?;
+        let mut quantized_work = quantized_state.to_dtype(kiln_tensor::DType::F32)?;
+        let quantized_out2 =
+            gdn_chunkwise_forward(&backend, &q2, &k2, &v2, &beta2, &g2, &mut quantized_work, 4)?
+                .context("quantized second chunk declined")?;
+        quantized_state = quantized_work.to_dtype(kiln_tensor::DType::BF16)?;
         let owner_id = 17;
         let layer_idx = 0;
-        let mut resident_state = tensor(initial.clone(), (1, 1, 2, 2))?;
+        let mut resident_state =
+            tensor(initial.clone(), (1, 1, 2, 2))?.to_dtype(kiln_tensor::DType::BF16)?;
         let stable_id = resident_state.id();
         // Model the inference wrapper's BF16 -> F32 normalization. The work
         // handle has a different TensorId from the persistent state slot.
-        let mut work_state = resident_state
-            .to_dtype(kiln_tensor::DType::BF16)?
-            .to_dtype(kiln_tensor::DType::F32)?;
+        let mut work_state = resident_state.to_dtype(kiln_tensor::DType::F32)?;
         assert_ne!(work_state.id(), stable_id);
         assert!(
             ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(&*backend, owner_id,)
@@ -1189,10 +1227,18 @@ mod tests {
         let resident_out1 =
             gdn_chunkwise_forward(&backend, &q1, &k1, &v1, &beta1, &g1, &mut work_state, 4)?
                 .context("resident first chunk declined")?;
+        let stale_external_state = work_state.to_dtype(kiln_tensor::DType::BF16)?;
         assert!(
             ResidencyBackend::runtime_rekey_gdn_recurrent_resident_state(
                 &*backend,
                 &work_state,
+                &stale_external_state,
+            )?
+        );
+        assert!(
+            ResidencyBackend::runtime_rekey_gdn_recurrent_resident_state(
+                &*backend,
+                &stale_external_state,
                 &resident_state,
             )?
         );
@@ -1205,6 +1251,12 @@ mod tests {
             &resident_state,
         ));
         ResidencyBackend::runtime_exit_gdn_prefill_resident_state_layer_scope(&*backend);
+        ResidencyBackend::runtime_apply_gdn_prefill_resident_state_boundary(
+            &*backend,
+            owner_id,
+            layer_idx,
+            &mut resident_state,
+        )?;
         ResidencyBackend::runtime_exit_gdn_prefill_resident_state_scope(&*backend);
 
         // Resume with an unrelated, stale zero handle on another worker. The
@@ -1212,7 +1264,9 @@ mod tests {
         // TensorId transfer at this boundary.
         let resume_backend = Arc::clone(&backend);
         let (resident_out2, resumed_state) = std::thread::spawn(move || {
-            let mut next_work_state = tensor(initial, (1, 1, 2, 2))?;
+            let persistent_state =
+                tensor(initial, (1, 1, 2, 2))?.to_dtype(kiln_tensor::DType::BF16)?;
+            let mut next_work_state = persistent_state.to_dtype(kiln_tensor::DType::F32)?;
             ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(
                 &*resume_backend,
                 owner_id,
@@ -1232,9 +1286,17 @@ mod tests {
                 4,
             )?
             .context("resident second chunk declined")?;
+            let stale_external_state = next_work_state.to_dtype(kiln_tensor::DType::BF16)?;
+            assert!(
+                ResidencyBackend::runtime_rekey_gdn_recurrent_resident_state(
+                    &*resume_backend,
+                    &next_work_state,
+                    &stale_external_state,
+                )?
+            );
             ResidencyBackend::runtime_exit_gdn_prefill_resident_state_layer_scope(&*resume_backend);
             ResidencyBackend::runtime_exit_gdn_prefill_resident_state_scope(&*resume_backend);
-            Ok::<_, anyhow::Error>((out, next_work_state))
+            Ok::<_, anyhow::Error>((out, stale_external_state))
         })
         .join()
         .map_err(|_| anyhow::anyhow!("cross-thread resident resume panicked"))??;
@@ -1256,12 +1318,12 @@ mod tests {
         assert_close(
             "first output",
             &values(&resident_out1)?,
-            &values(&baseline_out1)?,
+            &values(&quantized_out1)?,
         );
         assert_close(
             "second output",
             &values(&resident_out2)?,
-            &values(&baseline_out2)?,
+            &values(&quantized_out2)?,
         );
 
         let materialize_backend = Arc::clone(&backend);
@@ -1286,8 +1348,8 @@ mod tests {
         );
         assert_close(
             "final state",
-            &values(&resident_state)?,
-            &values(&baseline_state)?,
+            &values(&resident_state.to_dtype(kiln_tensor::DType::F32)?)?,
+            &values(&quantized_state.to_dtype(kiln_tensor::DType::F32)?)?,
         );
 
         ResidencyBackend::runtime_evict_gdn_recurrent_resident_state(&*backend, &resident_state);

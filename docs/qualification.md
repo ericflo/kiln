@@ -1419,6 +1419,16 @@ values must be zero after successful decode handoff, cancellation, generation
 error, actor discard, and final server drain. Cleanup is scoped to the stable
 request owner; clearing the whole registry would be an invalid implementation
 because it could corrupt concurrent rows.
+
+Device residency must preserve the ordinary external-dtype boundary. For a
+BF16 recurrent tensor, every completed nonfinal token chunk performs a
+device-side F32 -> BF16 -> F32 round-to-nearest-even conversion before the row
+can resume; an F32 tensor is unchanged. Unsupported external dtypes materialize
+at the boundary. Layer-group yields within a token chunk must not add rounding,
+and final materialization supplies the final chunk's handoff conversion. This
+rule is independent of registry counts: all gauges can drain correctly while a
+missing precision boundary still corrupts subsequent decode.
+
 An empty registry with nonzero bytes, a nonempty registry with zero buffer
 bytes, or allocation bytes below buffer bytes is internally inconsistent and
 fails qualification.
@@ -1444,12 +1454,14 @@ acceptance threshold.
 
 The implementation's real-device parity regressions cover two prompt chunks,
 multiple unrelated work-handle identities, reuse from an intentionally stale
-zero-valued host handle on a different thread, output and final-state parity
-against per-chunk readback, stable-key materialization into the caller's chosen
-handle, and a zero registry afterward. A second two-owner regression proves
-that evicting one interrupted row preserves the other row's state. The serving
-semantic oracle and cancellation workload remain required because kernel
-parity alone cannot prove actor teardown. In particular, a cancellation probe
+zero-valued host handle on a different thread, stable-key materialization into
+the caller's chosen handle, and a zero registry afterward. The BF16 arm compares
+both outputs and final state with a host-materialized oracle that explicitly
+quantizes between chunks; a separate F32 arm compares split execution with one
+monolithic chunk. A second two-owner regression proves that evicting one
+interrupted row preserves the other row's state. The serving semantic oracle
+and cancellation workload remain required because kernel parity alone cannot
+prove actor teardown or decode handoff. In particular, a cancellation probe
 must first observe a nonzero registry during prefill, abort before a semantic
 token is delivered, wait for the actor to drain, and then require both trusted
 debug and Prometheus ownership to return to zero before issuing a follow-up

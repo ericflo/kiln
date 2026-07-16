@@ -25,8 +25,9 @@ use super::vulkan_residency::{
     recurrent_state_residency_stats, recurrent_state_resident_buffers_for,
     recurrent_state_resident_scope_active, rekey_recurrent_state_resident_buffer,
     remove_prefill_recurrent_state_resident_buffers, remove_recurrent_state_resident_buffer,
-    replace_recurrent_state_resident_buffer, take_prefill_recurrent_state_resident_buffer,
-    take_recurrent_state_resident_buffer, with_resident_registry,
+    replace_prefill_recurrent_state_resident_buffer, replace_recurrent_state_resident_buffer,
+    take_prefill_recurrent_state_resident_buffer, take_recurrent_state_resident_buffer,
+    with_resident_registry,
 };
 use super::vulkan_tensor_bridge::{
     kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape,
@@ -1381,6 +1382,59 @@ impl ResidencyBackend for VulkanBackend {
             owner_id,
             layer_idx,
             fallback_id,
+        );
+        Ok(())
+    }
+
+    fn runtime_apply_gdn_prefill_resident_state_boundary(
+        &self,
+        owner_id: u64,
+        layer_idx: usize,
+        state_kt: &mut kiln_tensor::Tensor,
+    ) -> Result<()> {
+        match state_kt.dtype() {
+            kiln_tensor::DType::F32 => return Ok(()),
+            kiln_tensor::DType::BF16 => {}
+            _ => {
+                return self
+                    .runtime_materialize_gdn_prefill_resident_state(owner_id, layer_idx, state_kt);
+            }
+        }
+
+        let fallback_id = state_kt.id();
+        let resident_state = get_prefill_recurrent_state_resident_buffer(
+            &self.recurrent_state_resident_registry,
+            owner_id,
+            layer_idx,
+            fallback_id,
+        );
+        let Some(resident_state) = resident_state else {
+            return Ok(());
+        };
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let resident = kiln_vulkan_kernel::vk_tensor::VkTensor::from_buffer(
+            resident_state,
+            state_kt.dims().to_vec(),
+            kiln_vulkan_kernel::vk_tensor::VkDType::F32,
+            Arc::clone(vk_device),
+        );
+        let rounded_bf16 = kiln_vulkan_kernel::vk_ops::cast::vk_cast_f32_to_bf16_no_grad(&resident)
+            .context("round resident GDN prefill state to BF16 at token-chunk boundary")?;
+        let rounded_f32 =
+            kiln_vulkan_kernel::vk_ops::cast::vk_cast_bf16_to_f32_no_grad(&rounded_bf16)
+                .context("restore resident GDN prefill state to F32 after BF16 boundary")?;
+        anyhow::ensure!(
+            replace_prefill_recurrent_state_resident_buffer(
+                &self.recurrent_state_resident_registry,
+                owner_id,
+                layer_idx,
+                fallback_id,
+                Arc::clone(rounded_f32.buffer()),
+            ),
+            "resident GDN prefill state disappeared during BF16 boundary conversion"
         );
         Ok(())
     }

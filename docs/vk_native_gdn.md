@@ -95,7 +95,14 @@ Within a resumable prompt:
    The serving row and linear-layer index select it even when the host handle is
    unrelated to the handle used by the preceding quantum.
 3. Every chunk reads its output back for the remaining host-driven layer path,
-   but it does not read the updated recurrent state back.
+   but it does not read the updated recurrent state back. After a completed
+   nonfinal token chunk, the backend applies the external state's precision
+   boundary in place: BF16 state is rounded F32 -> BF16 -> F32 on the device,
+   with round-to-nearest-even semantics, while F32 is a no-op. This preserves
+   the numerical contract of ordinary chunked execution without transferring
+   the recurrent tensor to the host. An external dtype without a resident
+   conversion implementation is materialized instead of silently retaining
+   wider precision.
 4. The final successful prompt quantum materializes every GDN state once before
    sampling, prefix publication, or decode handoff, selecting each entry by the
    same request/layer pair rather than by the current host handle.
@@ -137,11 +144,13 @@ wave, and final shutdown. See [Local Hardware Qualification](qualification.md#re
 
 Real-device tests deliberately resume a second chunk with a stale zero host
 tensor and a different `TensorId` on another thread, then materialize into the
-original caller-selected handle and compare outputs plus final state with the
-readback baseline. A separate two-owner test evicts one request and proves the
-other remains resident. Production qualification additionally requires an
-aborted prefill to drain both debug and Prometheus gauges before a semantic
-follow-up runs in the same server process.
+original caller-selected BF16 handle and compare both chunk outputs plus final
+state with an oracle that performs the same host-side BF16 boundary between
+chunks. The same regression separately proves that unquantized F32 split and
+monolithic execution agree. A separate two-owner test evicts one request and
+proves the other remains resident. Production qualification additionally
+requires an aborted prefill to drain both debug and Prometheus gauges before a
+semantic follow-up runs in the same server process.
 
 ## High-level architecture of one GDN layer
 

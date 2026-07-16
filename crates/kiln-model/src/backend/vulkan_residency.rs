@@ -207,6 +207,42 @@ pub(super) fn take_prefill_recurrent_state_resident_buffer(
         .map(|entry| entry.buffer)
 }
 
+pub(super) fn replace_prefill_recurrent_state_resident_buffer(
+    registry: &RecurrentStateResidentRegistry,
+    owner_id: u64,
+    layer_idx: usize,
+    fallback_id: kiln_tensor::TensorId,
+    buffer: Arc<kiln_vulkan_kernel::VulkanBuffer>,
+) -> bool {
+    let mut entries = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = PrefillRecurrentStateKey {
+        owner_id,
+        layer_idx,
+    };
+    let id = entries
+        .by_prefill
+        .get(&key)
+        .copied()
+        .filter(|id| entries.by_tensor.contains_key(id))
+        .or_else(|| {
+            entries
+                .by_tensor
+                .contains_key(&fallback_id)
+                .then_some(fallback_id)
+        });
+    let Some(id) = id else {
+        return false;
+    };
+    entries
+        .by_tensor
+        .get_mut(&id)
+        .expect("resident GDN state disappeared while registry lock was held")
+        .buffer = buffer;
+    true
+}
+
 pub(super) fn insert_recurrent_state_resident_buffer(
     registry: &RecurrentStateResidentRegistry,
     id: kiln_tensor::TensorId,

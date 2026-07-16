@@ -1650,6 +1650,19 @@ pub trait ResidencyBackend:
         self.runtime_materialize_gdn_recurrent_resident_state(state)
     }
 
+    /// Apply the recurrent tensor's externally visible precision policy at a
+    /// completed resumable-prefill token-chunk boundary. A backend may keep
+    /// the result resident, but it must not silently retain wider precision
+    /// than the state tensor exposes to the ordinary chunked path.
+    fn runtime_apply_gdn_prefill_resident_state_boundary(
+        &self,
+        _owner_id: u64,
+        _layer_idx: usize,
+        _state: &mut kiln_tensor::Tensor,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Drop every backend-private recurrent state owned by one interrupted
     /// prefill request without affecting concurrent decode or prefill rows.
     fn runtime_evict_gdn_prefill_resident_state_owner(&self, _owner_id: u64) {}

@@ -1232,6 +1232,17 @@ rows evict the backend state. This applies to ordinary actor chunking regardless
 of whether `[streaming_prefill]` selects the separate tiled-forward algorithm.
 It does not enable default Vulkan decode-state residency.
 
+Residency does not change the model's external recurrent-state precision
+contract. After every completed nonfinal prompt token chunk, Vulkan applies the
+state dtype boundary before the request becomes resumable. BF16 state is rounded
+F32 -> BF16 -> F32 on-device with round-to-nearest-even semantics, so the F32
+accumulator remains resident without skipping the BF16 quantization that the
+ordinary materialized path performs. F32 state needs no conversion. A dtype
+without a resident boundary implementation is materialized at the boundary;
+Kiln does not retain wider precision as an implicit optimization. Layer-group
+yields inside one token chunk do not add a precision boundary, and the final
+chunk's normal materialization supplies the handoff boundary.
+
 The host tensor is only a metadata handle while its recurrent buffer is
 resident. Resumable prefill therefore owns each buffer by the stable pair of
 the serving row ID and linear-attention layer index. The current `TensorId` is
@@ -1247,7 +1258,7 @@ registered for quarantine instead of publishing stale state.
 Functional tensor replacement still transfers the secondary `TensorId` alias
 atomically. A destination alias collision or failed transfer is an inference
 error, and the old alias remains aligned for synchronized cleanup. Operators do
-not configure either identity mechanism.
+not configure either identity mechanism or the precision boundary.
 
 Trusted `GET /v1/debug/model-state` exposes current ownership as
 `caches.resident_recurrent_state.entry_count`, `buffer_bytes`, and

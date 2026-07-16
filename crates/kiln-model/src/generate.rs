@@ -5149,6 +5149,10 @@ impl ModelRunner {
         check_cancelled(cancel)?;
 
         if state.next_position < state.prompt_tokens.len() {
+            state
+                .linear_state
+                .apply_gdn_prefill_resident_state_boundary(&*self.backend, state.id)
+                .context("apply resumable prefill GDN state precision boundary")?;
             return Ok(PagedBatchedPrefillProgress {
                 tokens_scheduled,
                 tokens_processed: chunk_len,

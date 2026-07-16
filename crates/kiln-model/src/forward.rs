@@ -5106,6 +5106,19 @@ impl LinearAttentionState {
         Ok(())
     }
 
+    pub fn apply_gdn_prefill_resident_state_boundary(
+        &mut self,
+        backend: &dyn BackendRuntime,
+        owner_id: u64,
+    ) -> Result<()> {
+        for (layer_idx, state) in self.recurrent_states.iter_mut().enumerate() {
+            ResidencyBackend::runtime_apply_gdn_prefill_resident_state_boundary(
+                backend, owner_id, layer_idx, state,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn evict_gdn_recurrent_resident_states(&self, backend: &dyn BackendRuntime) {
         for state in &self.recurrent_states {
             ResidencyBackend::runtime_evict_gdn_recurrent_resident_state(backend, state);
