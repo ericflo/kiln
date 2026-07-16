@@ -1240,6 +1240,15 @@ fully resident arm was more severely corrupt. Focused device tests still match
 the small host BF16 oracle bit-for-bit, which proves those tests are necessary
 but not sufficient; they do not justify exposing the full-model route.
 
+The exact pushed quarantine revision `7dcad0d95` also passed without injecting
+the disable guard, while the checked profile retained its historical decode
+opt-in. It emitted the identical 32 token IDs and required text with no direct
+prompt-registry activation. This proves that neither public configuration nor
+the legacy decode opt-in can bypass the source quarantine. Its 31.34-second
+prefill was slower than the fully materialized rollback arm's 24.16 seconds, so
+the result is semantic acceptance only; it does not close the q128 performance
+or soak gates.
+
 The lower-level registry, stable `(serving row ID, linear-attention layer
 index)` ownership, TensorId alias transfer, device-side BF16 boundary, exact
 owner eviction, and observability remain compiled and test-covered so the fault

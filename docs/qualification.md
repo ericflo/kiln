@@ -1407,6 +1407,13 @@ repair. It is distinct from the persistent batched decode-state cache described
 below. Trusted `GET /v1/debug/model-state` exposes the complete current direct
 registry at `caches.resident_recurrent_state`:
 
+The clean `7dcad0d95` no-override qualification probe is the current quarantine
+acceptance anchor. With the checked profile's historical decode opt-in intact,
+the 138-token q128 request emitted the exact required 32-token ascending prefix,
+reported no semantic failure, and left no direct prompt-registry ownership or
+process residue. Its 31.34-second prefill does not satisfy a throughput or soak
+gate; those remain separate.
+
 | Field | Meaning |
 |---|---|
 | `entry_count` | Current logical recurrent-state slots mapped to backend-private buffers. Resumable prefill owns a slot by request ID plus linear-layer index; the aggregate deliberately does not expose either value. |

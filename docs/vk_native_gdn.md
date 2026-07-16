@@ -68,6 +68,10 @@ prompt route was fully materialized; the prompt-resident arm failed even with
 decode residency disabled. No environment variable or public setting can
 enable this path. Re-entry requires a clean full-model semantic pass before the
 cancellation and soak gates, not only the focused parity tests described below.
+The exact pushed `7dcad0d95` no-override server passed the required q128 oracle
+with the checked profile's decode opt-in still present, proving that ordinary
+startup cannot bypass the quarantine. That run is correctness evidence, not a
+latency or soak acceptance result.
 
 The retained implementation can keep GDN recurrent state on the backend's
 existing logical device while the batching actor yields between prompt chunks
