@@ -84,6 +84,7 @@
           "outlier_absolute_ms": 250,
           "outlier_history_size": 64,
           "outlier_multiplier": 5,
+          "prompt_assignment": "slot_by_request",
           "prompt_identity": "fixed_by_slot_measured_unique_by_epoch_warmup",
           "prompt_words": {
             "slot_0": 16,

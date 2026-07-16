@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import serve_mixed_load as mixed
 
@@ -33,6 +33,9 @@ VULKAN_QUALIFIED_DECODE_BATCH = 3
 VULKAN_QUALIFIED_PREFILL_ADMISSION_QUANTUM = 1
 VULKAN_QUALIFIED_WAVE_CONCURRENCY = (1, 4)
 VULKAN_QUALIFIED_PROMPT_WORDS = (16, 32, 64, 96)
+SLOT_BY_REQUEST = "slot_by_request"
+COHORT_BY_CYCLE = "cohort_by_cycle"
+PromptAssignment = Literal["slot_by_request", "cohort_by_cycle"]
 DEFAULT_MEMORY_GROWTH_LIMIT_BYTES = 512 * 1024 * 1024
 WAVE_CONCURRENCY = (1, 8, 12, 8)
 PROMPT_WORDS = (16, 32, 64, 128, 256, 384, 512, 768, 96, 192, 1024, 48)
@@ -138,6 +141,7 @@ class SoakRuntime:
     graph_execution_required: bool
     wave_concurrency: tuple[int, ...]
     prompt_words: tuple[int, ...]
+    prompt_assignment: PromptAssignment
     max_tokens: int
     cancel_every_waves: int
     cancellation_max_tokens: int
@@ -169,6 +173,7 @@ ROCM_RUNTIME = SoakRuntime(
     graph_execution_required=True,
     wave_concurrency=WAVE_CONCURRENCY,
     prompt_words=PROMPT_WORDS,
+    prompt_assignment=SLOT_BY_REQUEST,
     max_tokens=MAX_TOKENS,
     cancel_every_waves=CANCEL_EVERY_WAVES,
     cancellation_max_tokens=CANCELLATION_MAX_TOKENS,
@@ -194,6 +199,7 @@ VULKAN_RUNTIME = SoakRuntime(
     graph_execution_required=False,
     wave_concurrency=VULKAN_QUALIFIED_WAVE_CONCURRENCY,
     prompt_words=VULKAN_QUALIFIED_PROMPT_WORDS,
+    prompt_assignment=COHORT_BY_CYCLE,
     max_tokens=16,
     cancel_every_waves=4,
     cancellation_max_tokens=256,
@@ -511,7 +517,12 @@ def effective_config(
             "outlier_absolute_ms": int(mixed.OUTLIER_ABSOLUTE_MS),
             "outlier_history_size": mixed.OUTLIER_HISTORY_SIZE,
             "outlier_multiplier": int(mixed.OUTLIER_MULTIPLIER),
-            "prompt_identity": "fixed_by_slot_measured_unique_by_epoch_warmup",
+            "prompt_assignment": runtime.prompt_assignment,
+            "prompt_identity": (
+                "fixed_by_cycle_cohort_measured_unique_by_epoch_warmup"
+                if runtime.prompt_assignment == COHORT_BY_CYCLE
+                else "fixed_by_slot_measured_unique_by_epoch_warmup"
+            ),
             "prompt_words": {
                 f"slot_{index}": words
                 for index, words in enumerate(runtime.prompt_words)
@@ -1914,7 +1925,7 @@ def run_wave(
                     port,
                     name=role,
                     marker=mixed.workload_marker(base_seed, prompt_role),
-                    prompt_words=runtime.prompt_words[slot],
+                    prompt_words=prompt_words_for_wave(runtime, wave, slot),
                     max_tokens=runtime.max_tokens,
                     seed=base_seed + wave * 100 + slot,
                     absolute_deadline=deadline,
@@ -1952,6 +1963,15 @@ def run_wave(
         raise SoakError(f"{len(unfinished)} request workers survived wave cleanup")
     assert results is not None
     return results
+
+
+def prompt_words_for_wave(runtime: SoakRuntime, wave: int, slot: int) -> int:
+    if runtime.prompt_assignment == SLOT_BY_REQUEST:
+        return runtime.prompt_words[slot]
+    if runtime.prompt_assignment == COHORT_BY_CYCLE:
+        cycle = wave // len(runtime.wave_concurrency)
+        return runtime.prompt_words[cycle % len(runtime.prompt_words)]
+    raise SoakError(f"unsupported prompt assignment: {runtime.prompt_assignment!r}")
 
 
 def invalid_stream_result_summary(

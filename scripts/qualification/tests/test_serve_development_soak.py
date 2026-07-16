@@ -185,6 +185,11 @@ class ServeRocmSoakTests(unittest.TestCase):
             vulkan["soak"]["prompt_words"],
             {"slot_0": 16, "slot_1": 32, "slot_2": 64, "slot_3": 96},
         )
+        self.assertEqual(vulkan["soak"]["prompt_assignment"], "cohort_by_cycle")
+        self.assertEqual(
+            vulkan["soak"]["prompt_identity"],
+            "fixed_by_cycle_cohort_measured_unique_by_epoch_warmup",
+        )
         self.assertEqual(
             vulkan["soak"]["deadline_policy"],
             "independent_setup_and_measurement",
@@ -1046,6 +1051,23 @@ class ServeRocmSoakTests(unittest.TestCase):
                 call.kwargs["request_timeout_seconds"] == 600.0
                 for call in run.call_args_list
             )
+        )
+        self.assertEqual(
+            [call.kwargs["prompt_words"] for call in run.call_args_list],
+            [16, 16, 16, 16],
+        )
+
+        with mock.patch.object(soak.mixed, "run_stream", return_value=object()) as run:
+            soak.run_wave(
+                8420,
+                wave=3,
+                base_seed=7,
+                deadline=time.monotonic() + 1.0,
+                runtime=soak.VULKAN_RUNTIME,
+            )
+        self.assertEqual(
+            [call.kwargs["prompt_words"] for call in run.call_args_list],
+            [32, 32, 32, 32],
         )
 
     def test_wave_cleanup_preserves_the_primary_deadline_failure(self) -> None:

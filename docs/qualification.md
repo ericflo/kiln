@@ -1283,11 +1283,16 @@ runs at 128 tokens passed eight exact semantic oracles with stable process
 history; 256 tokens was faster but corrupted every concurrent response while
 the exact same prompt remained correct in isolation. The soak therefore binds
 128 explicitly and fails if health/debug reports another value or provenance.
-The candidate qualified load alternates one- and four-request waves over fixed
-16/32/64/96-word prompt slots with 16-token completions. This is an enforced
-qualification operating point, not the product-wide default or a claim that
-larger Vulkan quanta, more than four simultaneously active requests, or longer-
-prompt throughput are competitive or qualified.
+The candidate qualified load alternates one- and four-request waves with
+16-token completions. Each one/four pair selects one of the fixed
+16/32/64/96-word prompt slots; all four rows in the concurrent wave have the
+same prompt length and distinct fixed row identities, and successive cycles
+rotate through every slot before repeating. This forces an equal-ready resident
+cohort and establishes every declared prompt/batch scratch capacity before the
+measurement baseline. It is an enforced qualification operating point, not the
+product-wide default or a claim that larger Vulkan quanta, more than four
+simultaneously active requests, or longer-prompt throughput are competitive or
+qualified.
 
 Its timing envelopes are likewise independent and explicit in the effective
 configuration. Build, startup, warmup, and stabilization get 1,800 seconds.
@@ -1412,13 +1417,16 @@ attribute a safety failure; they do not weaken, replace, or exempt it from the
 RSS gate.
 
 Vulkan stabilization alternates concurrency one and four with 16-token outputs
-and a cancellation every fourth wave. The fixed prompt slots contain
-16/32/64/96 words; the source-bound configuration enforces decode width three,
-one staged prefill row, and four total active requests. Client concurrency above
-four may wait outside the active set, but this workload makes no latency or
-throughput claim for that queue or for prompts beyond the declared slots. The
-retained width-eight/384-word counterexamples remain performance evidence and
-the separate vLLM comparison campaign remains open. Cross-request prefix
+and a cancellation every fourth wave. Each pair uses one shared prompt-length
+slot, rotating through 16/32/64/96 words; the source-bound configuration
+enforces decode width three, one staged prefill row, and four total active
+requests. Stabilization must observe a multirow resident prefill before the
+baseline, which also forces batch-dependent scratch growth into the setup
+phase. Client concurrency above four may wait outside the active set, but this
+workload makes no latency or throughput claim for that queue or for prompts
+beyond the declared slots. The retained width-eight/384-word counterexamples
+remain performance evidence and the separate vLLM comparison campaign remains
+open. Cross-request prefix
 reuse is correctness-quarantined on this backend, so warmup does not try to
 fill the inert cache. Instead, the driver requires
 `prefix_cache_enabled=false` and zero lookups, hits, misses, retained blocks,
