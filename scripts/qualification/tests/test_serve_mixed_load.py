@@ -471,6 +471,43 @@ def debug_fixture(
 
 
 class ServeMixedLoadTests(unittest.TestCase):
+    def test_profile_policy_contract_is_independent_from_health_fixture(self) -> None:
+        self.assertEqual(
+            serve.PROFILE_POLICIES,
+            {
+                "experimental": {
+                    "inference_admission": True,
+                    "training_gpu_ownership": True,
+                    "adapter_weight_transitions": True,
+                    "dynamic_kv_resize": True,
+                    "allocator_reclaim": True,
+                    "live_graph_capture": True,
+                    "vulkan_resident_prefill": True,
+                    "exclusive_gpu_behavior": "writer_priority",
+                },
+                "stable": {
+                    "inference_admission": True,
+                    "training_gpu_ownership": False,
+                    "adapter_weight_transitions": False,
+                    "dynamic_kv_resize": False,
+                    "allocator_reclaim": False,
+                    "live_graph_capture": False,
+                    "vulkan_resident_prefill": False,
+                    "exclusive_gpu_behavior": "reject",
+                },
+                "maintenance": {
+                    "inference_admission": False,
+                    "training_gpu_ownership": True,
+                    "adapter_weight_transitions": True,
+                    "dynamic_kv_resize": True,
+                    "allocator_reclaim": True,
+                    "live_graph_capture": False,
+                    "vulkan_resident_prefill": False,
+                    "exclusive_gpu_behavior": "inference_disabled_drain_then_exclusive",
+                },
+            },
+        )
+
     def test_batching_snapshot_requires_explicit_prefix_cache_capability(self) -> None:
         health = health_fixture(kv_autoscale=False, rocm_graphs=False)
         snapshot = serve.batching_snapshot(health)

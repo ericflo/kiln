@@ -367,6 +367,7 @@ PROFILE_POLICIES: dict[str, dict[str, bool | str]] = {
         "dynamic_kv_resize": True,
         "allocator_reclaim": True,
         "live_graph_capture": True,
+        "vulkan_resident_prefill": True,
         "exclusive_gpu_behavior": "writer_priority",
     },
     "stable": {
@@ -376,6 +377,7 @@ PROFILE_POLICIES: dict[str, dict[str, bool | str]] = {
         "dynamic_kv_resize": False,
         "allocator_reclaim": False,
         "live_graph_capture": False,
+        "vulkan_resident_prefill": False,
         "exclusive_gpu_behavior": "reject",
     },
     "maintenance": {
@@ -385,6 +387,7 @@ PROFILE_POLICIES: dict[str, dict[str, bool | str]] = {
         "dynamic_kv_resize": True,
         "allocator_reclaim": True,
         "live_graph_capture": False,
+        "vulkan_resident_prefill": False,
         "exclusive_gpu_behavior": "inference_disabled_drain_then_exclusive",
     },
 }
