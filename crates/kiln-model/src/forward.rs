@@ -15557,7 +15557,13 @@ pub fn gdn_recurrent_forward_from_parts(
         input_dtype
     };
     if state_external_dtype != recurrence_dtype {
-        *recurrent_state = recurrent_state.to_dtype(recurrence_dtype)?;
+        let normalized_state = recurrent_state.to_dtype(recurrence_dtype)?;
+        replace_gdn_recurrent_state_handle(
+            backend,
+            recurrent_state,
+            normalized_state,
+            "normalize recurrent dtype",
+        )?;
     }
     let q = if q.dtype() == recurrence_dtype {
         q.clone()
@@ -15618,7 +15624,13 @@ pub fn gdn_recurrent_forward_from_parts(
     };
 
     if state_external_dtype != recurrence_dtype {
-        *recurrent_state = recurrent_state.to_dtype(state_external_dtype)?;
+        let external_state = recurrent_state.to_dtype(state_external_dtype)?;
+        replace_gdn_recurrent_state_handle(
+            backend,
+            recurrent_state,
+            external_state,
+            "restore external recurrent dtype",
+        )?;
     }
 
     if head_last {
@@ -17326,6 +17338,18 @@ pub fn gated_deltanet_forward_streaming(
     Ok(out)
 }
 
+fn replace_gdn_recurrent_state_handle(
+    backend: &dyn BackendRuntime,
+    state: &mut Tensor,
+    replacement: Tensor,
+    operation: &'static str,
+) -> Result<()> {
+    ResidencyBackend::runtime_rekey_gdn_recurrent_resident_state(backend, state, &replacement)
+        .with_context(|| format!("GDN resident-state ownership transfer during {operation}"))?;
+    *state = replacement;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 /// #1082 box-102 BUG2 fix: wrap the GDN decode so the recurrent + conv state
 /// update lands IN-PLACE in the caller's persistent buffers. The inner decode
@@ -17375,37 +17399,49 @@ fn gated_deltanet_forward_decode_if(
         lora,
     )?;
     if recurrent_state.id() != rs_persist.id() {
-        let src = recurrent_state.contiguous()?;
-        #[cfg(feature = "rocm")]
-        if matches!(src.device(), Device::Rocm(_)) {
-            synchronize_tensor_ready_for_model_handoff(
-                "box-102 GDN recurrent-state restore src",
-                &src,
-            )?;
-        }
-        // (#1082) Vulkan lacks `Tensor::slice_set`; the in-place buffer restore
-        // is only needed to preserve the persistent buffer identity on backends
-        // that support it. Assign the updated state directly when it is on Vulkan
-        // OR when it moved devices vs the persistent slot (#1443: the real-model
-        // GDN state is CPU-initialized but the forward produces a Vulkan state,
-        // so `slice_set` on the CPU `rs_persist` with a Vulkan `src` hit a device
-        // mismatch — gating on `rs_persist.device()` was the wrong tensor). The
-        // caller's `LinearAttentionState` holds the tensor by value and adopts
-        // the new one, so identity preservation is unnecessary for correctness.
-        if matches!(src.device(), Device::Vulkan(_)) || rs_persist.device() != src.device() {
-            *recurrent_state = src;
+        if ResidencyBackend::runtime_rekey_gdn_recurrent_resident_state(
+            backend,
+            recurrent_state,
+            &rs_persist,
+        )
+        .context("GDN resident-state ownership transfer to persistent slot")?
+        {
+            // The backend buffer is authoritative while resident. Restoring the
+            // persistent metadata handle must not copy its stale host payload.
+            *recurrent_state = rs_persist;
         } else {
-            rs_persist
-                .slice_set(&src, 0, 0)
-                .context("box-102: in-place GDN recurrent-state restore")?;
+            let src = recurrent_state.contiguous()?;
             #[cfg(feature = "rocm")]
-            if matches!(rs_persist.device(), Device::Rocm(_)) {
+            if matches!(src.device(), Device::Rocm(_)) {
                 synchronize_tensor_ready_for_model_handoff(
-                    "box-102 GDN recurrent-state restore dst",
-                    &rs_persist,
+                    "box-102 GDN recurrent-state restore src",
+                    &src,
                 )?;
             }
-            *recurrent_state = rs_persist;
+            // (#1082) Vulkan lacks `Tensor::slice_set`; the in-place buffer restore
+            // is only needed to preserve the persistent buffer identity on backends
+            // that support it. Assign the updated state directly when it is on Vulkan
+            // OR when it moved devices vs the persistent slot (#1443: the real-model
+            // GDN state is CPU-initialized but the forward produces a Vulkan state,
+            // so `slice_set` on the CPU `rs_persist` with a Vulkan `src` hit a device
+            // mismatch — gating on `rs_persist.device()` was the wrong tensor). The
+            // caller's `LinearAttentionState` holds the tensor by value and adopts
+            // the new one, so identity preservation is unnecessary for correctness.
+            if matches!(src.device(), Device::Vulkan(_)) || rs_persist.device() != src.device() {
+                *recurrent_state = src;
+            } else {
+                rs_persist
+                    .slice_set(&src, 0, 0)
+                    .context("box-102: in-place GDN recurrent-state restore")?;
+                #[cfg(feature = "rocm")]
+                if matches!(rs_persist.device(), Device::Rocm(_)) {
+                    synchronize_tensor_ready_for_model_handoff(
+                        "box-102 GDN recurrent-state restore dst",
+                        &rs_persist,
+                    )?;
+                }
+                *recurrent_state = rs_persist;
+            }
         }
     }
     if conv_state.id() != cv_persist.id() {
@@ -18548,7 +18584,13 @@ fn gated_deltanet_forward_decode_if_inner(
         input_dtype
     };
     if state_external_dtype != recurrence_dtype {
-        *recurrent_state = recurrent_state.to_dtype(recurrence_dtype)?;
+        let normalized_state = recurrent_state.to_dtype(recurrence_dtype)?;
+        replace_gdn_recurrent_state_handle(
+            backend,
+            recurrent_state,
+            normalized_state,
+            "normalize recurrent dtype",
+        )?;
     }
 
     let fused_decode_gates_recurrent_rmsnorm = {
@@ -19252,7 +19294,13 @@ fn gated_deltanet_forward_decode_if_inner(
     // Restore state to its original dtype so the caller's F32 invariant holds
     // across layer calls and across prefill/decode steps.
     if state_external_dtype != recurrence_dtype {
-        *recurrent_state = recurrent_state.to_dtype(state_external_dtype)?;
+        let external_state = recurrent_state.to_dtype(state_external_dtype)?;
+        replace_gdn_recurrent_state_handle(
+            backend,
+            recurrent_state,
+            external_state,
+            "restore external recurrent dtype",
+        )?;
     }
 
     // Transpose to [B, T, nv, dv] unless the Metal full-chunk path already

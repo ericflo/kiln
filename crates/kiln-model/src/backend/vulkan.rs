@@ -21,8 +21,9 @@ use super::vulkan_residency::{
     exit_recurrent_state_resident_scope, get_recurrent_state_resident_buffer,
     insert_recurrent_state_resident_buffer, recurrent_state_residency_stats,
     recurrent_state_resident_buffers_for, recurrent_state_resident_scope_active,
-    remove_recurrent_state_resident_buffer, replace_recurrent_state_resident_buffer,
-    take_recurrent_state_resident_buffer, with_resident_registry,
+    rekey_recurrent_state_resident_buffer, remove_recurrent_state_resident_buffer,
+    replace_recurrent_state_resident_buffer, take_recurrent_state_resident_buffer,
+    with_resident_registry,
 };
 use super::vulkan_tensor_bridge::{
     kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape,
@@ -1275,6 +1276,24 @@ impl ResidencyBackend for VulkanBackend {
         &self,
     ) -> super::GdnRecurrentStateResidencyStats {
         recurrent_state_residency_stats(&self.recurrent_state_resident_registry)
+    }
+
+    fn runtime_rekey_gdn_recurrent_resident_state(
+        &self,
+        old_state: &kiln_tensor::Tensor,
+        new_state: &kiln_tensor::Tensor,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            old_state.dims() == new_state.dims(),
+            "cannot rekey resident GDN state across shape change: {:?} -> {:?}",
+            old_state.dims(),
+            new_state.dims()
+        );
+        rekey_recurrent_state_resident_buffer(
+            &self.recurrent_state_resident_registry,
+            old_state.id(),
+            new_state.id(),
+        )
     }
 
     fn runtime_materialize_gdn_recurrent_resident_state(

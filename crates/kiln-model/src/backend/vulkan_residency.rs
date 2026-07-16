@@ -104,6 +104,37 @@ pub(super) fn insert_recurrent_state_resident_buffer(
         .insert(id, buffer);
 }
 
+/// Atomically transfer a recurrent buffer between tensor identities.
+///
+/// A resident host tensor is a metadata handle, not the authoritative state
+/// value. Functional dtype/layout operations mint a new `TensorId`; moving the
+/// registry entry with that identity change keeps later materialization and
+/// cancellation keyed to the handle retained by `LinearAttentionState`.
+pub(super) fn rekey_recurrent_state_resident_buffer(
+    registry: &RecurrentStateResidentRegistry,
+    old_id: kiln_tensor::TensorId,
+    new_id: kiln_tensor::TensorId,
+) -> anyhow::Result<bool> {
+    let mut cache = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if old_id == new_id {
+        return Ok(cache.contains_key(&old_id));
+    }
+    if !cache.contains_key(&old_id) {
+        return Ok(false);
+    }
+    anyhow::ensure!(
+        !cache.contains_key(&new_id),
+        "cannot rekey resident GDN state: destination TensorId already owns a buffer"
+    );
+    let buffer = cache
+        .remove(&old_id)
+        .expect("resident GDN state disappeared while registry lock was held");
+    cache.insert(new_id, buffer);
+    Ok(true)
+}
+
 pub(super) fn remove_recurrent_state_resident_buffer(
     registry: &RecurrentStateResidentRegistry,
     id: kiln_tensor::TensorId,

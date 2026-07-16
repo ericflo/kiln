@@ -1611,6 +1611,17 @@ pub trait ResidencyBackend:
         GdnRecurrentStateResidencyStats::default()
     }
 
+    /// Transfer backend-private recurrent-state ownership when a functional
+    /// tensor operation replaces the host-side metadata handle. Returns true
+    /// only when an existing resident buffer moved to `new_state`.
+    fn runtime_rekey_gdn_recurrent_resident_state(
+        &self,
+        _old_state: &kiln_tensor::Tensor,
+        _new_state: &kiln_tensor::Tensor,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     fn runtime_materialize_gdn_recurrent_resident_state(
         &self,
         _state: &mut kiln_tensor::Tensor,

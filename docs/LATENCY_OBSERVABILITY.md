@@ -327,7 +327,11 @@ claims for a particular accelerator.
    diagnostics. Nonzero entries during prefill are expected; nonzero entries or
    bytes after the request drains indicate an ownership leak, not VRAM
    rebalancing. Compare `buffer` with `allocation` bytes before attributing an
-   aligned recycler allocation to live tensor growth.
+   aligned recycler allocation to live tensor growth. If entry count grows by
+   roughly the number of GDN layers after cancellation, inspect recurrent-state
+   handle rekeying across dtype normalization before investigating allocator
+   pressure: cleanup evicts the persistent IDs it owns, so buffers left under
+   temporary work IDs present exactly this signature.
 5. Change one source-bound configuration field per benchmark arm and preserve
    failed receipts. A temporal gap without a matching typed operation is not
    evidence of VRAM rebalancing.

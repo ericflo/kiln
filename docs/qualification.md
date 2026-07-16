@@ -1407,7 +1407,7 @@ decode-state cache described below: a prompt row can own backend state while
 
 | Field | Meaning |
 |---|---|
-| `entry_count` | Stable tensor IDs currently mapped to backend-private recurrent-state buffers. |
+| `entry_count` | Current tensor identities mapped to backend-private recurrent-state buffers. Functional dtype/layout replacements transfer ownership to their new identity atomically. |
 | `buffer_bytes` | Sum of addressable Vulkan buffer extents for those entries. |
 | `allocation_bytes` | Sum of Vulkan allocation requirements, including alignment beyond the addressable extent. This must be at least `buffer_bytes`. |
 
@@ -1439,10 +1439,15 @@ workload retains final values as
 acceptance threshold.
 
 The implementation's real-device parity regression covers two prompt chunks,
-stable tensor identity, output and final-state parity against per-chunk
-readback, materialization from a different thread, and a zero registry after
-materialization. The serving semantic oracle and cancellation workload remain
-required because a kernel parity test alone cannot prove actor teardown.
+multiple work-handle identities, restoration to one persistent slot, reuse from
+an intentionally stale zero-valued host handle, output and final-state parity
+against per-chunk readback, materialization from a different thread, and a zero
+registry after materialization. The serving semantic oracle and cancellation
+workload remain required because a kernel parity test alone cannot prove actor
+teardown. In particular, a cancellation probe must first observe a nonzero
+registry during prefill, abort before a semantic token is delivered, wait for
+the actor to drain, and then require both trusted debug and Prometheus ownership
+to return to zero before issuing a follow-up request in the same process.
 
 #### Batched recurrent-state cache telemetry
 

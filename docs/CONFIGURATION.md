@@ -1232,6 +1232,13 @@ rows evict the backend state. This applies to ordinary actor chunking regardless
 of whether `[streaming_prefill]` selects the separate tiled-forward algorithm.
 It does not enable default Vulkan decode-state residency.
 
+The host tensor is only a metadata handle while its recurrent buffer is
+resident. Functional dtype normalization can change that handle's `TensorId`;
+the backend atomically transfers ownership to each replacement and finally
+back to the persistent `LinearAttentionState` slot. Operators do not configure
+this mechanism. A collision or failed transfer is an inference error, and the
+still-aligned old owner remains available to synchronized error cleanup.
+
 Trusted `GET /v1/debug/model-state` exposes current ownership as
 `caches.resident_recurrent_state.entry_count`, `buffer_bytes`, and
 `allocation_bytes`. `/metrics` publishes the same state as

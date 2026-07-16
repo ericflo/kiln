@@ -66,18 +66,31 @@ existing logical device while the batching actor yields between prompt chunks
 or layer groups. This is a serving ownership optimization, not a new GDN
 algorithm and not a public configuration mode.
 
-Each logical recurrent-state tensor keeps one stable `TensorId`. The
-`VulkanBackend` owns a mutex-protected map from that ID to its current
-`VulkanBuffer`, so the worker that resumes, materializes, or discards a request
-does not need to be the thread that produced the previous quantum. Scope depth
-remains thread-local: it controls whether a particular forward may retain state,
-while the authoritative buffers are backend-local rather than thread-local.
-The two responsibilities must not be combined.
+Each logical recurrent-state slot has a persistent `TensorId`, but functional
+dtype and layout operations can mint temporary work handles with different
+IDs. `VulkanBackend` owns a mutex-protected map from the *current* handle ID to
+its `VulkanBuffer`. Every handle replacement atomically transfers that map
+entry before the new handle is installed, and the outer GDN wrapper transfers
+it back to the persistent slot without copying the stale host payload. A
+destination ID that already owns a buffer is rejected while the registry lock
+is held. If conversion or transfer fails, the old handle and old key remain
+aligned so error cleanup can still evict the exact owner.
+
+This explicit identity transfer is part of the correctness contract. Merely
+keying on whichever temporary tensor entered the Vulkan kernel leaks buffers at
+cancellation and causes later chunks to upload stale host state. The worker
+that resumes, materializes, or discards a request does not need to be the thread
+that produced the previous quantum. Scope depth remains thread-local: it
+controls whether a particular forward may retain state, while authoritative
+buffers and identity transfer are backend-local. The two responsibilities must
+not be combined.
 
 Within a resumable prompt:
 
 1. The first GDN chunk uploads activations and the CPU-hosted initial state.
 2. Later chunks upload only q/k/v/beta/g and reuse the mapped state buffer.
+   Recurrence dtype normalization transfers the mapping to the normalized work
+   handle and then back to the persistent `LinearAttentionState` slot.
 3. Every chunk reads its output back for the remaining host-driven layer path,
    but it does not read the updated recurrent state back.
 4. The final successful prompt quantum materializes every GDN state once before
@@ -93,6 +106,8 @@ backend decode-residency policy. Prompt-prefill residency therefore cannot
 silently enable the previously rejected batched-decode experiment.
 
 Logical host tensors are stale while this direct registry is authoritative.
+Consequently, an in-place persistent-slot restore must transfer ownership and
+must not `slice_set` the temporary host payload into the persistent slot.
 The shared prefix-snapshot authority gate checks both the direct recurrent
 registry and the separate batched recurrent/convolution registry, suppressing
 whole-prompt, strict-split, chunk-split, and rolling snapshots until state has

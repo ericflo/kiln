@@ -1149,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn chunkwise_prefill_resident_state_matches_readback_across_threads() -> Result<()> {
+    fn chunkwise_prefill_resident_state_survives_handle_rekeys_across_threads() -> Result<()> {
         let backend = Arc::new(VulkanBackend::new(kiln_tensor::Device::Cpu));
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping resident chunkwise test");
@@ -1167,15 +1167,63 @@ mod tests {
             gdn_chunkwise_forward(&backend, &q2, &k2, &v2, &beta2, &g2, &mut baseline_state, 4)?
                 .context("baseline second chunk declined")?;
 
-        let mut resident_state = tensor(initial, (1, 1, 2, 2))?;
+        let mut resident_state = tensor(initial.clone(), (1, 1, 2, 2))?;
         let stable_id = resident_state.id();
+        // Model the inference wrapper's BF16 -> F32 normalization. The work
+        // handle has a different TensorId from the persistent state slot.
+        let mut work_state = resident_state
+            .to_dtype(kiln_tensor::DType::BF16)?
+            .to_dtype(kiln_tensor::DType::F32)?;
+        assert_ne!(work_state.id(), stable_id);
         assert!(ResidencyBackend::runtime_enter_gdn_prefill_resident_state_scope(&*backend));
         let resident_out1 =
-            gdn_chunkwise_forward(&backend, &q1, &k1, &v1, &beta1, &g1, &mut resident_state, 4)?
+            gdn_chunkwise_forward(&backend, &q1, &k1, &v1, &beta1, &g1, &mut work_state, 4)?
                 .context("resident first chunk declined")?;
-        let resident_out2 =
-            gdn_chunkwise_forward(&backend, &q2, &k2, &v2, &beta2, &g2, &mut resident_state, 4)?
-                .context("resident second chunk declined")?;
+        assert!(
+            ResidencyBackend::runtime_rekey_gdn_recurrent_resident_state(
+                &*backend,
+                &work_state,
+                &resident_state,
+            )?
+        );
+        assert!(!ResidencyBackend::runtime_has_gdn_recurrent_resident_state(
+            &*backend,
+            &work_state,
+        ));
+        assert!(ResidencyBackend::runtime_has_gdn_recurrent_resident_state(
+            &*backend,
+            &resident_state,
+        ));
+
+        // The persistent host payload is intentionally stale while its Vulkan
+        // buffer is resident. Rekeying before the next chunk must preserve the
+        // first chunk's device state instead of uploading this zero handle.
+        let mut next_work_state = tensor(initial, (1, 1, 2, 2))?;
+        assert!(
+            ResidencyBackend::runtime_rekey_gdn_recurrent_resident_state(
+                &*backend,
+                &resident_state,
+                &next_work_state,
+            )?
+        );
+        let resident_out2 = gdn_chunkwise_forward(
+            &backend,
+            &q2,
+            &k2,
+            &v2,
+            &beta2,
+            &g2,
+            &mut next_work_state,
+            4,
+        )?
+        .context("resident second chunk declined")?;
+        assert!(
+            ResidencyBackend::runtime_rekey_gdn_recurrent_resident_state(
+                &*backend,
+                &next_work_state,
+                &resident_state,
+            )?
+        );
         ResidencyBackend::runtime_exit_gdn_prefill_resident_state_scope(&*backend);
 
         assert_eq!(resident_state.id(), stable_id);
