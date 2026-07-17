@@ -1018,8 +1018,8 @@ def validate_observability_schema(schema: dict[str, Any]) -> list[str]:
     if not isinstance(definitions, dict):
         errors.append("observability schema $defs must be an object")
         return errors
-    if len(definitions) != 145:
-        errors.append(f"observability schema must contain 145 definitions, got {len(definitions)}")
+    if len(definitions) != 149:
+        errors.append(f"observability schema must contain 149 definitions, got {len(definitions)}")
     if list(definitions) != sorted(definitions):
         errors.append("observability schema definitions must be sorted")
     for name, definition in definitions.items():
