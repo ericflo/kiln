@@ -1798,8 +1798,6 @@ pub(crate) struct FlashAttnBackward {
     softmax_lse: kiln_tensor::Tensor,
     scale: f32,
     causal: bool,
-    heads_q: usize,
-    heads_kv: usize,
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -1829,27 +1827,6 @@ impl BackwardOp for FlashAttnBackward {
             dout.contiguous()?
         };
 
-        #[cfg(any(feature = "cuda", feature = "rocm"))]
-        let trace_timings =
-            kiln_core::env_flag::env_flag("KILN_TRACE_FLASH_ATTN_BWD_TIMINGS", false);
-        #[cfg(any(feature = "cuda", feature = "rocm"))]
-        let flash_started = if trace_timings {
-            match self.q.device() {
-                #[cfg(feature = "cuda")]
-                kiln_tensor::Device::Cuda(i) => {
-                    kiln_tensor::cuda_synchronize_default_stream(i)?;
-                }
-                #[cfg(feature = "rocm")]
-                kiln_tensor::Device::Rocm(i) => {
-                    kiln_tensor::rocm_synchronize_default_stream(i)?;
-                }
-                _ => {}
-            }
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-
         let (dq, dk, dv) = kiln_flash_attn::flash_attn_bwd_collapsed_gqa_kt(
             &dout,
             &self.q,
@@ -1871,39 +1848,6 @@ impl BackwardOp for FlashAttnBackward {
             .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
         ensure_tape_debug_finite("flash_attn_bwd dv collapsed", &dv)
             .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
-
-        #[cfg(any(feature = "cuda", feature = "rocm"))]
-        if let Some(started) = flash_started {
-            let is_gpu = match self.q.device() {
-                #[cfg(feature = "cuda")]
-                kiln_tensor::Device::Cuda(i) => {
-                    kiln_tensor::cuda_synchronize_default_stream(i)?;
-                    true
-                }
-                #[cfg(feature = "rocm")]
-                kiln_tensor::Device::Rocm(i) => {
-                    kiln_tensor::rocm_synchronize_default_stream(i)?;
-                    true
-                }
-                _ => false,
-            };
-            if is_gpu {
-                let q_shape = self.q.shape();
-                let k_shape = self.k.shape();
-                eprintln!(
-                    "kiln_flash_attn_bwd_timing phase=ffi batch={} seq_len_q={} seq_len_k={} \
-                     heads_q={} heads_kv={} head_dim={} causal={} elapsed_ms={:.3}",
-                    q_shape[0],
-                    q_shape[1],
-                    k_shape[1],
-                    self.heads_q,
-                    self.heads_kv,
-                    q_shape[3],
-                    self.causal,
-                    started.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-        }
 
         Ok(vec![Some(dq), Some(dk), Some(dv)])
     }
@@ -2034,8 +1978,6 @@ pub fn try_tape_flash_attn_kt(
                     softmax_lse: lse_kt,
                     scale: softmax_scale,
                     causal,
-                    heads_q: num_heads,
-                    heads_kv: num_kv_heads,
                 }),
             );
             Ok(out_kt)

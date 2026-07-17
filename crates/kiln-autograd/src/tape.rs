@@ -181,12 +181,6 @@ impl Tape {
 
         // #1082 CP-4 diagnostic: tape size + per-node processing trace.
         let cp4_dbg = std::env::var("KILN_CP4_DEBUG").is_ok();
-        let trace_node_timings = std::env::var("KILN_TRACE_TAPE_BACKWARD_TIMINGS")
-            .map(|v| {
-                let v = v.trim().to_ascii_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
-            })
-            .unwrap_or(false);
         if cp4_dbg {
             eprintln!(
                 "[CP4-DEBUG] backward_with_seeds: {} nodes on tape, {} seeds",
@@ -241,42 +235,7 @@ impl Tape {
             };
 
             // 3. Compute per-input grads.
-            let node_started = if trace_node_timings {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-            let grad_shape = if trace_node_timings {
-                Some(grad_output.shape().to_vec())
-            } else {
-                None
-            };
-            let grad_dtype = if trace_node_timings {
-                Some(grad_output.dtype())
-            } else {
-                None
-            };
-            if trace_node_timings {
-                eprintln!(
-                    "kiln_tape_backward_begin node_index={} op={} grad_shape={:?} grad_dtype={:?}",
-                    node_index,
-                    node.op.name(),
-                    grad_shape.as_ref().cloned().unwrap_or_default(),
-                    grad_dtype,
-                );
-            }
             let per_input = node.op.apply(&grad_output)?;
-            if let Some(started) = node_started {
-                eprintln!(
-                    "kiln_tape_backward_timing node_index={} op={} grad_shape={:?} \
-                     grad_dtype={:?} elapsed_ms={:.3}",
-                    node_index,
-                    node.op.name(),
-                    grad_shape.unwrap_or_default(),
-                    grad_dtype,
-                    started.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
             if per_input.len() != node.input_count_decl() {
                 return Err(Error::Msg(format!(
                     "kiln_autograd: tape node {} returned {} grads for {} inputs",

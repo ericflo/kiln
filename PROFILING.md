@@ -69,6 +69,20 @@
 > measurements using these names remain evidence only; current source no longer
 > recognizes the controls.
 
+> **SFT, tape-bridge, tape-backward, and flash-backward wall-clock traces were
+> retired on 2026-07-17.** `KILN_TRACE_SFT_TIMINGS`,
+> `KILN_TRACE_TAPE_BRIDGE_TIMINGS`, `KILN_TRACE_TAPE_BACKWARD_TIMINGS`, and
+> `KILN_TRACE_FLASH_ATTN_BWD_TIMINGS` inserted host clocks and stderr records
+> into the training forward/backward path; the flash trace also drained the GPU
+> queue around its FFI call. `KILN_TRACE_SFT_TIMINGS` implicitly activated the
+> bridge trace, so it could instrument more code than its name disclosed.
+> `KILN_ROCM_PD_SYNC` and `KILN_ROCM_PD_DEVSYNC`, closed ordering probes that
+> injected a stream or device-wide drain after every full-attention paged-decode
+> layer, were retired with the traces. Current source keeps anomaly and
+> finite-value diagnostics, checkpoint storage/replay, gradient computation and
+> merging, product latency metrics, and the qualified sync-free ROCm decode
+> route. Historical commands and measurements remain evidence only.
+
 > **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
 > priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are

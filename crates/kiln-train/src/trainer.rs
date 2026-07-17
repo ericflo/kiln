@@ -13688,10 +13688,6 @@ pub(crate) fn rms_norm_backward_pre_final_norm(
     Ok((u.broadcast_mul(&rms_inv)? - correction)?.detach())
 }
 
-fn trace_sft_timings() -> bool {
-    kiln_core::env_flag::env_flag("KILN_TRACE_SFT_TIMINGS", false)
-}
-
 fn debug_sft_finite_checks() -> bool {
     kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_FINITE", false)
 }
@@ -13959,21 +13955,6 @@ fn debug_sft_reverse_segment_idx(num_segments: usize) -> Option<usize> {
     let raw = std::env::var("KILN_DEBUG_SFT_REVERSE_SEGMENT_IDX").ok()?;
     let idx = raw.trim().parse::<usize>().ok()?;
     (idx < num_segments).then_some(idx)
-}
-
-fn log_sft_timing(enabled: bool, phase: &str, seq_len: usize, segments: usize, elapsed: Duration) {
-    if enabled {
-        eprintln!(
-            "kiln_sft_timing phase={phase} seq_len={seq_len} segments={segments} elapsed_ms={:.3}",
-            elapsed.as_secs_f64() * 1000.0
-        );
-    }
-}
-
-fn log_sft_timing_begin(enabled: bool, phase: &str, seq_len: usize, segments: usize) {
-    if enabled {
-        eprintln!("kiln_sft_timing phase={phase} seq_len={seq_len} segments={segments} begin=1");
-    }
 }
 
 fn dtype_size_bytes(dtype: DType) -> usize {
@@ -15658,36 +15639,14 @@ fn standard_forward_backward_tape_authoritative_kt(
     device: &Device,
     streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
-    let trace_timings = trace_sft_timings();
-    let total_start = Instant::now();
-    log_sft_timing_begin(
-        trace_timings,
-        "standard_tape_authoritative_total",
-        input_ids.len(),
-        1,
-    );
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
     ensure_sft_loss_route_supports_checkpointing(sft_loss_route, false)?;
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
-            log_sft_timing_begin(
-                trace_timings,
-                "standard_tape_forward_closure",
-                input_ids.len(),
-                1,
-            );
-            let closure_start = Instant::now();
             let loss_kt = match sft_loss_route {
                 SftFlceLossRoute::KtTapeFlce => {
-                    log_sft_timing_begin(
-                        trace_timings,
-                        "standard_no_head_forward",
-                        input_ids.len(),
-                        1,
-                    );
-                    let no_head_start = Instant::now();
                     let normed = model_forward_no_head_with_policy(
                         backend,
                         input_ids,
@@ -15699,19 +15658,10 @@ fn standard_forward_backward_tape_authoritative_kt(
                     )
                     .context("tape-authoritative(kt) no-head forward")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                    log_sft_timing(
-                        trace_timings,
-                        "standard_no_head_forward",
-                        input_ids.len(),
-                        1,
-                        no_head_start.elapsed(),
-                    );
                     // Default SFT records the kt FLCE loss root against final normed hidden
                     // instead of materializing `[1, T, V]` logits. The frozen tied head
                     // receives no gradient; the FLCE tape node returns `dhidden`, keeping
                     // the LoRA path connected through `model_forward_no_head`.
-                    log_sft_timing_begin(trace_timings, "standard_flce_tape", input_ids.len(), 1);
-                    let flce_start = Instant::now();
                     let loss = kiln_autograd::with_active_tape(|tape| {
                         kiln_flce_kernel::fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
                             &normed,
@@ -15732,13 +15682,6 @@ fn standard_forward_backward_tape_authoritative_kt(
                             "tape-authoritative(kt) SFT FLCE kt-tape: {e}"
                         ))
                     })?;
-                    log_sft_timing(
-                        trace_timings,
-                        "standard_flce_tape",
-                        input_ids.len(),
-                        1,
-                        flce_start.elapsed(),
-                    );
                     loss
                 }
                 SftFlceLossRoute::VulkanActiveRows => {
@@ -15809,36 +15752,13 @@ fn standard_forward_backward_tape_authoritative_kt(
                     })?
                 }
             };
-            log_sft_timing(
-                trace_timings,
-                "standard_tape_forward_closure",
-                input_ids.len(),
-                1,
-                closure_start.elapsed(),
-            );
-            log_sft_timing_begin(trace_timings, "standard_loss_to_scalar", input_ids.len(), 1);
-            let scalar_start = Instant::now();
             let loss_val = loss_kt
                 .to_scalar::<f32>()
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("loss_kt.to_scalar: {e}")))?
                 as f64;
-            log_sft_timing(
-                trace_timings,
-                "standard_loss_to_scalar",
-                input_ids.len(),
-                1,
-                scalar_start.elapsed(),
-            );
             Ok((loss_val, loss_kt))
         })
         .map_err(|e| anyhow::anyhow!("tape-authoritative(kt) backward: {e}"))?;
-    log_sft_timing(
-        trace_timings,
-        "standard_tape_authoritative_total",
-        input_ids.len(),
-        1,
-        total_start.elapsed(),
-    );
 
     // (#1082) Build a kt-native GradStore from the tape grads, keyed by each
     // LoRA `Parameter::tensor_id()`. The tape's `out` map mixes candle-keyed
@@ -15930,19 +15850,9 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     ensure_tape_forward_backward_supported("checkpointed SFT", weights, backend)?;
     ensure_sft_loss_route_supports_checkpointing(sft_loss_route, true)?;
 
-    let trace_timings = trace_sft_timings();
     let debug_finite = debug_sft_finite_checks();
     let debug_active_rows = debug_sft_active_rows();
     let active_shift_indices = sft_active_shift_indices(label_mask, device)?;
-    let total_start = Instant::now();
-    if trace_timings {
-        eprintln!(
-            "kiln_sft_timing phase=start seq_len={} segments={} elapsed_ms=0.000",
-            input_ids.len(),
-            num_segments
-        );
-    }
-
     let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
     let lora_detached = lora_weights_detached(params);
     let lora_weights = params.as_lora_weights();
@@ -15952,7 +15862,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     // recorded — only the boundary tensors are kept (the checkpointing memory
     // profile). A single threaded `LinearAttentionState` is fine: each GDN
     // layer's recurrence is internal to its own full-sequence pass.
-    let boundary_start = Instant::now();
     let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
     let spool_boundaries = if checkpoint_boundary_policy.recompute_for(input_ids.len()) {
         let resident_device_storage =
@@ -15963,19 +15872,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             model_config.hidden_size,
             dtype_size_bytes(embed_hidden.dtype()),
         );
-        if trace_timings {
-            eprintln!(
-                "kiln_sft_timing phase=boundary_storage seq_len={} segments={} storage={} anchor_stride={}",
-                input_ids.len(),
-                num_segments,
-                if resident_device_storage {
-                    "resident_device"
-                } else {
-                    "host_memory"
-                },
-                anchor_stride
-            );
-        }
         Some(StoredCheckpointBoundaries::new(
             num_segments,
             resident_device_storage,
@@ -16005,7 +15901,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     {
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
         for (seg_idx, &(start, end)) in segments.iter().enumerate() {
-            let segment_start = Instant::now();
             current = model_forward_segment_with_policy(
                 backend,
                 current,
@@ -16035,26 +15930,10 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             } else {
                 boundaries.push(Some(current.clone()));
             }
-            if trace_timings {
-                eprintln!(
-                    "kiln_sft_timing phase=boundary_segment seg_idx={seg_idx} layer_start={start} layer_end={end} seq_len={} segments={} elapsed_ms={:.3}",
-                    input_ids.len(),
-                    num_segments,
-                    segment_start.elapsed().as_secs_f64() * 1000.0
-                );
-            }
         }
     }
-    log_sft_timing(
-        trace_timings,
-        "boundary_forward",
-        input_ids.len(),
-        num_segments,
-        boundary_start.elapsed(),
-    );
     if let Some(debug_seg_idx) = debug_sft_reverse_segment_idx(num_segments) {
         let (start, end) = segments[debug_seg_idx];
-        let debug_start = Instant::now();
         let seg_input = if let Some(spool) = spool_boundaries.as_ref() {
             load_or_recompute_checkpoint_boundary(
                 spool,
@@ -16120,14 +15999,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
         })
         .map_err(|e| anyhow::anyhow!("ckpt-kt debug reverse segment {debug_seg_idx}: {e}"))?;
-        if trace_timings {
-            eprintln!(
-                "kiln_sft_timing phase=debug_reverse_segment seg_idx={debug_seg_idx} layer_start={start} layer_end={end} seq_len={} segments={} elapsed_ms={:.3}",
-                input_ids.len(),
-                num_segments,
-                debug_start.elapsed().as_secs_f64() * 1000.0
-            );
-        }
         return Ok((0.0, kiln_autograd::GradStore::new()));
     }
     let final_hidden_kt = current.clone();
@@ -16145,7 +16016,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let mut normed_for_tail = None;
     let mut flce_active_metadata_for_tail = None;
     let tail_grad_override: Option<Tensor>;
-    let tail_loss_start = Instant::now();
     let loss_val = match sft_loss_route {
         SftFlceLossRoute::KtTapeFlce => {
             tail_grad_override = None;
@@ -16261,14 +16131,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         input_ids.len(),
         num_segments
     );
-    log_sft_timing(
-        trace_timings,
-        "tail_loss",
-        input_ids.len(),
-        num_segments,
-        tail_loss_start.elapsed(),
-    );
-    let tail_grad_start = Instant::now();
     let tail_grad = if let Some(tail_grad) = tail_grad_override {
         Ok(tail_grad)
     } else {
@@ -16303,14 +16165,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     ensure_sft_debug_finite(debug_finite, "tail_upstream_grad", &upstream_grad)?;
     drop(final_hidden_kt);
     drop(current);
-    log_sft_timing(
-        trace_timings,
-        "tail_grad",
-        input_ids.len(),
-        num_segments,
-        tail_grad_start.elapsed(),
-    );
-
     // Step 3: reverse pass over segments via the kt tape. Each segment is
     // re-run under its OWN fresh tape (memory bounded to one segment), seeded at
     // its output with the upstream grad; we read the LoRA Var grads and the
@@ -16319,7 +16173,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let mut grads = kiln_autograd::GradStore::new();
     for seg_idx in (0..num_segments).rev() {
         let (start, end) = segments[seg_idx];
-        let reverse_start = Instant::now();
         let seg_input = if let Some(spool) = spool_boundaries.as_ref() {
             load_or_recompute_checkpoint_boundary(
                 spool,
@@ -16411,23 +16264,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 &upstream_grad,
             )?;
         }
-        if trace_timings {
-            eprintln!(
-                "kiln_sft_timing phase=reverse_segment seg_idx={seg_idx} layer_start={start} layer_end={end} seq_len={} segments={} elapsed_ms={:.3}",
-                input_ids.len(),
-                num_segments,
-                reverse_start.elapsed().as_secs_f64() * 1000.0
-            );
-        }
     }
-
-    log_sft_timing(
-        trace_timings,
-        "total_checkpointed_step",
-        input_ids.len(),
-        num_segments,
-        total_start.elapsed(),
-    );
 
     Ok((loss_val, grads))
 }

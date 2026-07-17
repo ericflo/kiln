@@ -2122,19 +2122,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_TRACE_TAPE_BACKWARD_TIMINGS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-autograd/src/tape.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var_os",
       "argument": "key",
       "argument_kind": "expression",
@@ -3043,19 +3030,6 @@
       "path": "crates/kiln-hip/build.rs",
       "phase": "build-time",
       "surface": "build-script"
-    },
-    {
-      "api": "var",
-      "argument": "name",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-kt-bridge/src/tape_bridge.rs",
-      "phase": "runtime",
-      "surface": "source"
     },
     {
       "api": "var",
@@ -3995,32 +3969,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_ROCM_PD_DEVSYNC",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ROCM_PD_SYNC",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_ROCM_SPLIT_Q_GATE_ROW_TILE_TOKENS",
       "argument_kind": "literal",
       "classification": "experimental_debug",
@@ -4529,19 +4477,6 @@
     {
       "api": "env_flag",
       "argument": "KILN_ROCM_TAPE_FLASH_MATERIALIZED",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_TRACE_FLASH_ATTN_BWD_TIMINGS",
       "argument_kind": "literal",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
@@ -6763,19 +6698,6 @@
       "surface": "source"
     },
     {
-      "api": "env_flag",
-      "argument": "KILN_TRACE_SFT_TIMINGS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "KILN_CP4_DEBUG",
       "argument_kind": "literal",
@@ -7153,11 +7075,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 287,
-    "literal_kiln_read_names": 159,
+    "literal_kiln_read_call_sites": 282,
+    "literal_kiln_read_names": 154,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 118,
+      "experimental_debug": 113,
       "public_stable": 1,
       "test_only": 41
     },
@@ -7167,13 +7089,13 @@
       "test_only": 247
     },
     "process_mutation_entries": 160,
-    "read_call_sites": 656,
+    "read_call_sites": 650,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 184,
+      "experimental_debug": 178,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 389
+    "read_entries": 383
   }
 }
