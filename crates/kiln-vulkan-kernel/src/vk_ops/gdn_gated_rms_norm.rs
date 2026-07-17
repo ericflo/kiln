@@ -92,7 +92,6 @@ pub fn vk_gdn_gated_rms_norm_no_grad(
 /// d_w reduction is done CPU-side (analogous to vk_gdn_gates_bwd —
 /// avoids needing VK_EXT_shader_atomic_float).
 ///
-/// CPU fallback accessible via KILN_VK_GDN_GATED_RMS_NORM_BWD_CPU=1.
 pub fn vk_gdn_gated_rms_norm_bwd_no_grad(
     d_out: &VkTensor, // [rows, hidden]
     x: &VkTensor,     // [rows, hidden]
@@ -104,10 +103,6 @@ pub fn vk_gdn_gated_rms_norm_bwd_no_grad(
     let hidden = *dims.last().context("empty shape")?;
     let rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
     let device = x.device();
-
-    if std::env::var("KILN_VK_GDN_GATED_RMS_NORM_BWD_CPU").is_ok() {
-        return cpu_gated_rms_norm_bwd(d_out, x, z, weight, eps);
-    }
 
     let d_x_buf = alloc_f32(device, rows * hidden)?;
     let d_z_buf = alloc_f32(device, rows * hidden)?;
@@ -215,7 +210,10 @@ pub fn vk_gdn_gated_rms_norm(
     ))
 }
 
-fn cpu_gated_rms_norm_bwd(
+/// Explicit CPU reference for tests and offline kernel diagnosis.
+///
+/// Production execution always uses [`vk_gdn_gated_rms_norm_bwd_no_grad`].
+pub fn vk_gdn_gated_rms_norm_bwd_cpu_reference(
     d_out: &VkTensor,
     x: &VkTensor,
     z: &VkTensor,

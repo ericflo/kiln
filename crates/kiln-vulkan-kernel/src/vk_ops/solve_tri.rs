@@ -10,8 +10,7 @@
 //! C ≤ 64 and dv ≤ 256 (the Qwen3.5-4B envelope) we tile dv in
 //! 64-element chunks. Larger dv just runs more workgroups.
 //!
-//! A CPU fallback is kept around (`vk_solve_tri_cpu_fallback`) for
-//! debugging or when the shader path is disabled via env.
+//! An explicit CPU reference is available for tests and offline diagnosis.
 
 use crate::vk_ops::dispatch_simple_2d;
 use crate::vk_tensor::{VkDType, VkTensor};
@@ -63,11 +62,6 @@ pub fn vk_solve_tri_no_grad(
     let device = a_strict.device();
     let out = alloc_f32(device, batch * heads * chunk * dv)?;
 
-    // Use CPU fallback if explicitly disabled via env (debug aid).
-    if std::env::var("KILN_VK_SOLVE_TRI_CPU").is_ok() {
-        return vk_solve_tri_cpu_fallback(a_strict, v_prime, beta, out, batch, heads, chunk, dv);
-    }
-
     // GPU path: vk_solve_tri_v2.comp (32 KB shared mem, well within
     // Strix Halo's per-workgroup cap).
     let dv_per_wg = 64u32;
@@ -94,19 +88,20 @@ pub fn vk_solve_tri_no_grad(
     ))
 }
 
-/// CPU forward-substitution fallback. Used when the GPU shader path
-/// is disabled or for testing.
-fn vk_solve_tri_cpu_fallback(
+/// Explicit CPU reference for tests and offline kernel diagnosis.
+///
+/// Production execution always uses [`vk_solve_tri_no_grad`].
+pub fn vk_solve_tri_cpu_reference(
     a_strict: &VkTensor,
     v_prime: &VkTensor,
     beta: &VkTensor,
-    out: Arc<VulkanBuffer>,
     batch: usize,
     heads: usize,
     chunk: usize,
     dv: usize,
 ) -> Result<VkTensor> {
     let device = a_strict.device();
+    let out = alloc_f32(device, batch * heads * chunk * dv)?;
     let a_data = a_strict.to_vec_f32()?;
     let v_data = v_prime.to_vec_f32()?;
     let b_data = beta.to_vec_f32()?;

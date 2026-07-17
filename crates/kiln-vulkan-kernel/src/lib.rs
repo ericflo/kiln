@@ -30,7 +30,10 @@ pub mod vk_tensor;
 pub use buffer::VulkanBuffer;
 pub use cmd_batch::{CommandBatch, KernelPlan, Workgroups};
 pub use decode_resident_pool::DecodeResidentPool;
-pub use device::VulkanDevice;
+pub use device::{
+    VULKAN_DEVICE_POLICY_SCHEMA_ID, VulkanDevice, VulkanDevicePolicy, install_vulkan_device_policy,
+    vulkan_device_policy,
+};
 pub use pipeline::ShaderPipeline;
 pub use vk_paged_kv_cache::VkPagedKvCache;
 

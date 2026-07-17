@@ -128,12 +128,32 @@ fn model_kt_api_mode(policy: ResolvedAcceleratorRuntimePolicy) -> kiln_model::Kt
     }
 }
 
+/// Install accelerator policy needed to select or create a primary device.
+///
+/// This must run before device probing: Vulkan physical-device selection and
+/// validation change which instance/device the process is allowed to create.
+pub fn install_pre_device_startup_policy(policy: ResolvedAcceleratorRuntimePolicy) -> Result<()> {
+    #[cfg(feature = "vulkan")]
+    kiln_model::install_vulkan_device_policy(kiln_model::VulkanDevicePolicy {
+        device_index: policy.vulkan_device_index.effective,
+        validation: policy.vulkan_validation.effective,
+    })
+    .context("failed to install Vulkan device policy before device selection")?;
+
+    #[cfg(not(feature = "vulkan"))]
+    let _ = policy;
+
+    Ok(())
+}
+
 /// Install immutable accelerator policy before model execution or primary
 /// device-context creation.
 pub fn install_startup_policy(
     device: kiln_tensor::Device,
     policy: ResolvedAcceleratorRuntimePolicy,
 ) -> Result<()> {
+    install_pre_device_startup_policy(policy)?;
+
     kiln_model::install_full_attention_score_budget_mib(
         policy.full_attention_score_budget_mib.effective,
     )

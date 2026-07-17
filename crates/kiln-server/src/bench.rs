@@ -2944,6 +2944,8 @@ fn main() -> Result<()> {
     let accelerator_runtime_policy = startup_config
         .accelerator
         .resolved_policy(startup_config.server.serving_profile);
+    kiln_server::accelerator_runtime::install_pre_device_startup_policy(accelerator_runtime_policy)
+        .context("install benchmark accelerator policy before device selection")?;
     let gradient_checkpoint_policy = kiln_train::GradientCheckpointPolicy::from_parts(
         startup_config.training.grad_checkpoint_segments,
         startup_config.training.no_grad_checkpoint,

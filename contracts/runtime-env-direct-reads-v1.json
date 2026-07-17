@@ -2560,84 +2560,6 @@
       "path": "crates/kiln-train/src/remote_teacher.rs",
       "phase": "runtime",
       "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_VULKAN_VALIDATION",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-vulkan-kernel/src/device.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_VULKAN_VALIDATION",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-vulkan-kernel/src/device.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_VK_GDN_CHUNK_PREP_BWD_CPU",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-vulkan-kernel/tests/vk_gdn_backward_parity.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_VK_GDN_STATE_EXIT_BWD_CPU",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-vulkan-kernel/tests/vk_gdn_backward_parity.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_VK_GDN_CHUNK_PREP_BWD_CPU",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-vulkan-kernel/tests/vk_gdn_backward_parity.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_VK_GDN_STATE_EXIT_BWD_CPU",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-vulkan-kernel/tests/vk_gdn_backward_parity.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
     }
   ],
   "reads": [
@@ -8102,45 +8024,6 @@
       "surface": "unit-test"
     },
     {
-      "api": "var",
-      "argument": "GGML_VK_VISIBLE_DEVICES",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/device.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VULKAN_DEVICE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/device.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VULKAN_VALIDATION",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/device.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "CARGO_MANIFEST_DIR",
       "argument_kind": "literal",
@@ -8193,84 +8076,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_VK_FLASH_ROWS_TILE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/attention.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_FLASH_ROW_WORK_TILE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/attention.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_GDN_CHUNK_PREP_BWD_CPU",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_GDN_CHUNK_SCAN_BWD_CPU",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_GDN_STATE_EXIT_BWD_CPU",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_SOLVE_TRI_TRANSPOSE_CPU",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "CARGO_MANIFEST_DIR",
       "argument_kind": "literal",
@@ -8281,32 +8086,6 @@
       "operation": "read",
       "path": "crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs",
       "phase": "compile-time",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_SOLVE_TRI_CPU",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_GDN_GATED_RMS_NORM_BWD_CPU",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/gdn_gated_rms_norm.rs",
-      "phase": "runtime",
       "surface": "source"
     },
     {
@@ -8323,19 +8102,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_VK_BF16W_ROW_TILE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/matmul_bf16w.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "CARGO_MANIFEST_DIR",
       "argument_kind": "literal",
@@ -8346,45 +8112,6 @@
       "operation": "read",
       "path": "crates/kiln-vulkan-kernel/src/vk_ops/mod.rs",
       "phase": "compile-time",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_ELEMENTWISE_TILE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/mod.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_EXP_TILE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/mod.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_SOLVE_TRI_CPU",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/vk_ops/solve_tri.rs",
-      "phase": "runtime",
       "surface": "source"
     },
     {
@@ -8440,27 +8167,27 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 342,
-    "literal_kiln_read_names": 213,
+    "literal_kiln_read_call_sites": 328,
+    "literal_kiln_read_names": 200,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 172,
+      "experimental_debug": 159,
       "public_stable": 1,
       "test_only": 41
     },
-    "process_mutation_call_sites": 359,
+    "process_mutation_call_sites": 351,
     "process_mutation_call_sites_by_classification": {
       "build_time": 8,
-      "test_only": 351
+      "test_only": 343
     },
-    "process_mutation_entries": 203,
-    "read_call_sites": 712,
+    "process_mutation_entries": 197,
+    "read_call_sites": 697,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 240,
+      "experimental_debug": 225,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 445
+    "read_entries": 430
   }
 }

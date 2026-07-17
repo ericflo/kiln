@@ -51,11 +51,7 @@ fn dispatch_fwd(
 }
 
 fn bf16w_row_tile_len() -> usize {
-    std::env::var("KILN_VK_BF16W_ROW_TILE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(128)
+    crate::kernels::bf16_weight_row_tile()
 }
 
 fn dispatch_fwd_rows(

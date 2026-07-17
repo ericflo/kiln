@@ -25,6 +25,7 @@ pub(super) fn new_backend_device() -> Option<Arc<kiln_vulkan_kernel::VulkanDevic
             tracing::info!(
                 vendor = dev.vendor_string(),
                 device = dev.device_name(),
+                physical_device_index = dev.physical_device_index(),
                 "Vulkan device initialized"
             );
             Some(Arc::new(dev))
@@ -43,6 +44,14 @@ pub(super) fn new_backend_device() -> Option<Arc<kiln_vulkan_kernel::VulkanDevic
 pub fn vulkan_is_available() -> bool {
     static VULKAN_AVAILABLE: OnceLock<bool> = OnceLock::new();
     *VULKAN_AVAILABLE.get_or_init(kiln_vulkan_kernel::VulkanDevice::probe)
+}
+
+/// Resolve the physical device selected by immutable Vulkan startup policy.
+///
+/// Unlike [`vulkan_is_available`], this preserves configuration and validation
+/// errors so startup cannot silently fall back to a different backend.
+pub fn vulkan_selected_device_index() -> Result<Option<usize>> {
+    kiln_vulkan_kernel::VulkanDevice::probe_selected_physical_device_index()
 }
 
 /// Return the selected Vulkan device name for diagnostics and benchmark output.

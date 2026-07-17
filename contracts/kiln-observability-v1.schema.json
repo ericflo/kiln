@@ -51,11 +51,27 @@
           "schema_id": "value",
           "version": 0,
           "vulkan_kernel_policy_schema_id": "value",
+          "vulkan_device_policy_schema_id": "value",
           "serving_profile": "stable",
           "serving_profile_source": "default",
           "kt_api_mode": {
             "configured": "auto",
             "effective": "auto",
+            "source": "default"
+          },
+          "full_attention_score_budget_mib": {
+            "configured": 0,
+            "effective": 0,
+            "source": "default"
+          },
+          "vulkan_device_index": {
+            "configured": 0,
+            "effective": 0,
+            "source": "default"
+          },
+          "vulkan_validation": {
+            "configured": false,
+            "effective": false,
             "source": "default"
           },
           "rocm_synchronization_mode": {
@@ -784,11 +800,27 @@
             "schema_id": "value",
             "version": 0,
             "vulkan_kernel_policy_schema_id": "value",
+            "vulkan_device_policy_schema_id": "value",
             "serving_profile": "stable",
             "serving_profile_source": "default",
             "kt_api_mode": {
               "configured": "auto",
               "effective": "auto",
+              "source": "default"
+            },
+            "full_attention_score_budget_mib": {
+              "configured": 0,
+              "effective": 0,
+              "source": "default"
+            },
+            "vulkan_device_index": {
+              "configured": 0,
+              "effective": 0,
+              "source": "default"
+            },
+            "vulkan_validation": {
+              "configured": false,
+              "effective": false,
               "source": "default"
             },
             "rocm_synchronization_mode": {
@@ -1371,11 +1403,27 @@
           "schema_id": "value",
           "version": 0,
           "vulkan_kernel_policy_schema_id": "value",
+          "vulkan_device_policy_schema_id": "value",
           "serving_profile": "stable",
           "serving_profile_source": "default",
           "kt_api_mode": {
             "configured": "auto",
             "effective": "auto",
+            "source": "default"
+          },
+          "full_attention_score_budget_mib": {
+            "configured": 0,
+            "effective": 0,
+            "source": "default"
+          },
+          "vulkan_device_index": {
+            "configured": 0,
+            "effective": 0,
+            "source": "default"
+          },
+          "vulkan_validation": {
+            "configured": false,
+            "effective": false,
             "source": "default"
           },
           "rocm_synchronization_mode": {
@@ -6617,6 +6665,29 @@
       "x-kiln-rust-type": "RequestThinkingBudget",
       "x-kiln-field-schema-status": "complete"
     },
+    "ResolvedAcceleratorBoolean": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "effective",
+        "source"
+      ],
+      "properties": {
+        "configured": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "effective": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        }
+      },
+      "description": "One configured/effective accelerator policy leaf and its startup source.",
+      "x-kiln-rust-type": "ResolvedAcceleratorValue<bool>",
+      "x-kiln-field-schema-status": "complete"
+    },
     "ResolvedAcceleratorInteger": {
       "type": "object",
       "additionalProperties": false,
@@ -6640,6 +6711,43 @@
       "x-kiln-rust-type": "ResolvedAcceleratorValue<usize | u64>",
       "x-kiln-field-schema-status": "complete"
     },
+    "ResolvedAcceleratorOptionalInteger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "effective",
+        "source"
+      ],
+      "properties": {
+        "configured": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        }
+      },
+      "description": "One configured/effective accelerator policy leaf and its startup source.",
+      "x-kiln-rust-type": "ResolvedAcceleratorValue<Option<usize>>",
+      "x-kiln-field-schema-status": "complete"
+    },
     "ResolvedAcceleratorRuntimePolicy": {
       "type": "object",
       "additionalProperties": false,
@@ -6647,9 +6755,13 @@
         "schema_id",
         "version",
         "vulkan_kernel_policy_schema_id",
+        "vulkan_device_policy_schema_id",
         "serving_profile",
         "serving_profile_source",
         "kt_api_mode",
+        "full_attention_score_budget_mib",
+        "vulkan_device_index",
+        "vulkan_validation",
         "rocm_synchronization_mode",
         "rocm_strided_batched_matmul_mode",
         "rocm_bf16_matmul_output_mode",
@@ -6667,6 +6779,9 @@
         "vulkan_kernel_policy_schema_id": {
           "$ref": "#/$defs/NonEmptyString"
         },
+        "vulkan_device_policy_schema_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
         "serving_profile": {
           "$ref": "#/$defs/ServingProfile"
         },
@@ -6675,6 +6790,15 @@
         },
         "kt_api_mode": {
           "$ref": "#/$defs/ResolvedKtApiMode"
+        },
+        "full_attention_score_budget_mib": {
+          "$ref": "#/$defs/ResolvedAcceleratorInteger"
+        },
+        "vulkan_device_index": {
+          "$ref": "#/$defs/ResolvedAcceleratorOptionalInteger"
+        },
+        "vulkan_validation": {
+          "$ref": "#/$defs/ResolvedAcceleratorBoolean"
         },
         "rocm_synchronization_mode": {
           "$ref": "#/$defs/ResolvedRocmSynchronizationMode"

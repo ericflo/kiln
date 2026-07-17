@@ -377,14 +377,15 @@ training request
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
           runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
-          to produce <code>kiln.accelerator-runtime-policy.v7</code>. The same resolved object is installed in
+          to produce <code>kiln.accelerator-runtime-policy.v8</code>. The same resolved object is installed in
           the tensor context, projected into the model graph runner, stored in server state, and returned by
           product diagnostics. Tensor, model, and kernel code do not re-read the public graph,
           synchronization, or matmul-route environment names during inference.
         </p>
         <pre class="mt-5"><code>typed [server] + [accelerator] configuration
   -> strict parse, source attribution, and serving-profile gate
-  -> immutable accelerator runtime policy v7
+  -> immutable accelerator runtime policy v8
+  -> Vulkan physical-device/validation policy installed before logical-device creation
   -> kiln-tensor adapter route set installed before model execution
   -> exact full-attention score geometry installed in model and ROCm flash planners
   -> primary ROCm context synchronization and matmul-route discipline
@@ -416,15 +417,28 @@ training request
           value rather than allowing different requests or model owners to execute different route mixtures.
         </p>
 
+        <h3 class="font-semibold mt-6 mb-3">Vulkan device creation is typed startup policy</h3>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          <code>accelerator.vulkan_device_index</code> is either automatic or a strict zero-based physical-device
+          index. Automatic selection preserves discrete-GPU preference and otherwise uses the first enumerated
+          device; an unavailable explicit index aborts startup rather than falling back. The canonical environment
+          name is mechanically derived as <code>KILN_ACCELERATOR_VULKAN_DEVICE_INDEX</code>, with
+          <code>KILN_VULKAN_DEVICE</code> retained only as a warning compatibility alias.
+          <code>accelerator.vulkan_validation</code> defaults false; true requires the experimental serving profile
+          and an installed Khronos validation layer or startup fails. Both values are installed under
+          <code>kiln.vulkan-device-policy.v1</code>, accept only an idempotent reinstall, and are reported in every
+          accelerator-policy diagnostic. The nonstandard <code>GGML_VK_VISIBLE_DEVICES</code> behavior is removed.
+        </p>
+
         <h3 class="font-semibold mt-6 mb-3">Vulkan kernels use one qualified source policy</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           Product Vulkan dispatch uses the typed, immutable
-          <code>kiln.vulkan-kernel-policy.v2</code> object. It is not a TOML, CLI, request, or environment
+          <code>kiln.vulkan-kernel-policy.v3</code> object. It is not a TOML, CLI, request, or environment
           surface. The Vulkan backend, kernel crate, and resident model planner share this one object, so the
           covered model-route and packed-weight selections, recurrence residency, batch thresholds, and
           split-K geometry cannot diverge or change between requests. A source change
           must version the policy and rerun Vulkan oracle, performance, development-soak, and endurance gates.
-          Accelerator policy v7 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
+          Accelerator policy v8 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
           health, trusted debug state, the CLI config check, and the dashboard.
         </p>
         <div class="overflow-x-auto mt-4">
@@ -435,12 +449,14 @@ training request
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Packed weights</td><td class="p-2">BF16-packed linear, GDN input projection, full-attention QKV, and MLP decode weights are enabled; the MLP BF16 gate/up with F32 down route is enabled.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Quarantined/slower routes</td><td class="p-2">Full-chunk GDN, single-token fused conv1d update, GDN forward substitution, batch-one fused GDN decode, standalone MLP gate/up, both recurrent-state residency routes, GDN chunkwise fallback, and the CPU-bridged/generic-tensor native Vulkan RMSNorm experiment are disabled. Device-resident model RMSNorm remains enabled.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Dispatch safety</td><td class="p-2">Linear submissions have a fixed 20,000,000,000-FLOP ceiling; oversized work is sub-chunked and no environment value can disable the guard.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Bounded tiling</td><td class="p-2">Flash attention uses 2048-row tiles with a 10,000,000-element row-work budget; frozen-BF16-weight matmul uses 128-row tiles; elementwise and exponentiation dispatches use 1,048,576 and 65,536 elements respectively.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">MLP</td><td class="p-2">BF16 four-row gate/up at batch 8, four-row down at 16, F32 down at 8, and eight-row at 256; enabled.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Linear</td><td class="p-2">BF16 four-row at batch 16 and eight-row at 64; enabled.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Full-attention QKV</td><td class="p-2">BF16 four-row at batch 2 and eight-row at 64; enabled.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">GDN</td><td class="p-2">Pair QKV/Z, two/four-row grouping, single-submit, parallel reduction, and Q/K-norm recurrence fusion enabled; eight-row grouping and input-projection/conv-split fusion disabled.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Paged attention</td><td class="p-2">Split-K chunks are 32 at batch one, 4 at batch 16+, and otherwise 2 for 64+ blocks or 4 for shorter sequences; maximum 256.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Submission/profile</td><td class="p-2">Qualified single-submit, chained-dispatch, and batched-transfer routes are enabled. Pair-row prefill starts at batch 8. Product kernel profiling is disabled.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">CPU references</td><td class="p-2">Backward GDN chunk stages, triangular solves, and gated RMSNorm expose explicit CPU-reference calls for parity and offline diagnosis. Production entry points always execute the GPU route; tests do not mutate process-global route variables.</td></tr>
             </tbody>
           </table>
         </div>
@@ -453,11 +469,10 @@ training request
           is a separate executable and is not a product configuration path.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          This is not yet the repository-wide environment boundary. Vulkan device selection/validation and the
-          remaining <code>KILN_VK_*</code> operator research controls are still enumerated in the generated
-          runtime environment inventory. They are not qualified public configuration, and any launch containing
-          one is not comparable to a qualified receipt. Phase 8.1 remains open until those reads are deleted or
-          moved behind an explicit typed qualification interface.
+          Serving and product kernel paths no longer read residual <code>KILN_VK_*</code> tiling or CPU-fallback
+          controls. The separate <code>vulkan_decode_microbench</code> research executable retains its own
+          <code>KILN_VK_MICROBENCH_*</code> experiment inputs; those are not server configuration and cannot produce
+          a qualified product receipt. Phase 8.1 remains open for non-Vulkan runtime controls elsewhere.
         </p>
 
         <h3 class="font-semibold mt-6 mb-3">Attention geometry cannot follow free-memory noise</h3>
@@ -471,7 +486,7 @@ training request
           tile size or route between layers or requests.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Policy v6 retains the deletion of eight permissive materialized-score, online-score, and tile environment controls
+          Policy v8 retains the deletion of eight permissive materialized-score, online-score, and tile environment controls
           rather than retaining aliases. The former planners could independently parse different values during
           execution and derive a materialized ceiling as high as 32 GiB from changing free memory. Real-device
           parity tests now force small multi-tile geometry with a scoped programmatic hook, so test coverage no

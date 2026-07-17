@@ -600,6 +600,9 @@ async fn main() -> Result<()> {
     let accelerator_runtime_policy = config
         .accelerator
         .resolved_policy(config.server.serving_profile);
+    kiln_server::accelerator_runtime::install_pre_device_startup_policy(
+        accelerator_runtime_policy,
+    )?;
 
     let validated_level = args.effective_log_level(&config.logging.level);
     if bootstrap_level != validated_level || bootstrap_logging.format != config.logging.format {

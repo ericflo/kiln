@@ -1678,6 +1678,27 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 accelerator_runtime.vulkan_kernel_policy_schema_id,
             );
             println!(
+                "  {} {}",
+                style("Vulkan device policy:").dim(),
+                accelerator_runtime.vulkan_device_policy_schema_id,
+            );
+            println!(
+                "  {} {} (source: {})",
+                style("Vulkan physical device:").dim(),
+                accelerator_runtime
+                    .vulkan_device_index
+                    .effective
+                    .map(|index| index.to_string())
+                    .unwrap_or_else(|| "auto".to_owned()),
+                accelerator_runtime.vulkan_device_index.source,
+            );
+            println!(
+                "  {} {} (source: {})",
+                style("Vulkan validation:").dim(),
+                accelerator_runtime.vulkan_validation.effective,
+                accelerator_runtime.vulkan_validation.source,
+            );
+            println!(
                 "  {} {} (source: {})",
                 style("Kiln-tensor API routes:").dim(),
                 accelerator_runtime.kt_api_mode.effective,

@@ -16,19 +16,19 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **712 direct read call sites** and
-**359 process-mutation call sites**. It can
-statically name **213 distinct literal `KILN_*`
-read names** across **342 call sites**.
+The scanner records **697 direct read call sites** and
+**351 process-mutation call sites**. It can
+statically name **200 distinct literal `KILN_*`
+read names** across **328 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 240 | 172 | 0 |
+| Experimental/debug migration | 225 | 159 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
-| Test only | 135 | 41 | 351 |
+| Test only | 135 | 41 | 343 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -72,12 +72,10 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-tensor/csrc/paged_decode_meta.cu` | 4 | 2 |
 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` | 4 | 4 |
 | `crates/kiln-train/src/lib.rs` | 4 | 4 |
-| `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs` | 4 | 4 |
 | `crates/kiln-flash-attn/src/rocm_sdpa.rs` | 3 | 1 |
 | `crates/kiln-flce-kernel/src/kt_api.rs` | 3 | 2 |
 | `crates/kiln-model/src/marlin_proj.rs` | 3 | 3 |
 | `crates/kiln-train/src/opd.rs` | 3 | 3 |
-| `crates/kiln-vulkan-kernel/src/device.rs` | 3 | 2 |
 | `crates/kiln-autograd/src/tape.rs` | 2 | 2 |
 | `crates/kiln-core/src/env_flag.rs` | 2 | 0 |
 | `crates/kiln-flash-attn/csrc/rocm_flash_api.cpp` | 2 | 0 |
@@ -89,8 +87,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-tensor/src/rocm_ops/concat.rs` | 2 | 2 |
 | `crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs` | 2 | 2 |
 | `crates/kiln-tensor/src/rocm_storage.rs` | 2 | 2 |
-| `crates/kiln-vulkan-kernel/src/vk_ops/attention.rs` | 2 | 2 |
-| `crates/kiln-vulkan-kernel/src/vk_ops/mod.rs` | 2 | 2 |
 | `crates/kiln-autograd/src/anomaly.rs` | 1 | 1 |
 | `crates/kiln-autograd/src/backwards/lora_delta_add.rs` | 1 | 0 |
 | `crates/kiln-blas/src/algo_cache.rs` | 1 | 0 |
@@ -110,10 +106,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-tensor/src/rocm_capture_alloc.rs` | 1 | 1 |
 | `crates/kiln-train/src/remote_teacher.rs` | 1 | 0 |
 | `crates/kiln-vulkan-blas/src/pipeline_cache.rs` | 1 | 0 |
-| `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs` | 1 | 1 |
-| `crates/kiln-vulkan-kernel/src/vk_ops/gdn_gated_rms_norm.rs` | 1 | 1 |
-| `crates/kiln-vulkan-kernel/src/vk_ops/matmul_bf16w.rs` | 1 | 1 |
-| `crates/kiln-vulkan-kernel/src/vk_ops/solve_tri.rs` | 1 | 1 |
 
 ## Literal `KILN_*` catalog
 
@@ -318,21 +310,8 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_TRACE_SFT_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-train/src/trainer.rs` |
 | `KILN_TRACE_TAPE_BACKWARD_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-autograd/src/tape.rs` |
 | `KILN_TRACE_TAPE_GDN_CONV_DECISIONS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_VK_BF16W_ROW_TILE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/matmul_bf16w.rs` |
-| `KILN_VK_ELEMENTWISE_TILE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/mod.rs` |
-| `KILN_VK_EXP_TILE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/mod.rs` |
-| `KILN_VK_FLASH_ROWS_TILE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/attention.rs` |
-| `KILN_VK_FLASH_ROW_WORK_TILE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/attention.rs` |
-| `KILN_VK_GDN_CHUNK_PREP_BWD_CPU` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs` |
-| `KILN_VK_GDN_CHUNK_SCAN_BWD_CPU` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs` |
-| `KILN_VK_GDN_GATED_RMS_NORM_BWD_CPU` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_gated_rms_norm.rs` |
-| `KILN_VK_GDN_STATE_EXIT_BWD_CPU` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs` |
 | `KILN_VK_MICROBENCH_BATCHES` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
 | `KILN_VK_MICROBENCH_ONLY` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
-| `KILN_VK_SOLVE_TRI_CPU` | Experimental/debug migration | 2 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs`, `crates/kiln-vulkan-kernel/src/vk_ops/solve_tri.rs` |
-| `KILN_VK_SOLVE_TRI_TRANSPOSE_CPU` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs` |
-| `KILN_VULKAN_DEVICE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/device.rs` |
-| `KILN_VULKAN_VALIDATION` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/device.rs` |
 | `KILN_W4A16` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |
 | `KILN_W4A16_GDN_OUT_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |
 
@@ -486,7 +465,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 20 |
 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` | `var` | `name` | Experimental/debug migration | 3 |
 | `crates/kiln-vulkan-kernel/src/cmd_batch.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 2 |
-| `crates/kiln-vulkan-kernel/src/device.rs` | `var` | `GGML_VK_VISIBLE_DEVICES` | Experimental/debug migration | 1 |
 | `crates/kiln-vulkan-kernel/src/kernels.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 103 |
 | `crates/kiln-vulkan-kernel/src/lib.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
 | `crates/kiln-vulkan-kernel/src/pipeline.rs` | `env!` | `OUT_DIR` | Build time/provenance | 1 |

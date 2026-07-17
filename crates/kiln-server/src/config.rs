@@ -125,8 +125,8 @@ pub const DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MIN: u64 = 64 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024 * 1024;
 /// Versioned schema identity shared by config, health, and debug diagnostics.
-pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v7";
-pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 7;
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v8";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 8;
 
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
@@ -1967,6 +1967,140 @@ impl<'de> Deserialize<'de> for FullAttentionScoreBudgetMib {
     }
 }
 
+/// Source-tracked Vulkan physical-device selection. `None` means automatic
+/// discrete-GPU preference; an explicit index is validated against the devices
+/// enumerated by Vulkan during startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VulkanDeviceIndexSetting {
+    index: Option<usize>,
+    source: ConfigValueSource,
+}
+
+impl VulkanDeviceIndexSetting {
+    pub const fn new(index: Option<usize>, source: ConfigValueSource) -> Self {
+        Self { index, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let index = if raw.trim().eq_ignore_ascii_case("auto") {
+            None
+        } else {
+            Some(parse_decimal_env::<usize>(
+                name,
+                raw,
+                "'auto' or a zero-based decimal physical-device index",
+            )?)
+        };
+        Ok(Self::new(index, ConfigValueSource::Environment))
+    }
+
+    pub const fn index(self) -> Option<usize> {
+        self.index
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for VulkanDeviceIndexSetting {
+    fn default() -> Self {
+        Self::new(None, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for VulkanDeviceIndexSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.index {
+            Some(index) => serializer.serialize_u64(index as u64),
+            None => serializer.serialize_str("auto"),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum VulkanDeviceIndexInput {
+    Index(usize),
+    Name(String),
+}
+
+impl<'de> Deserialize<'de> for VulkanDeviceIndexSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let index = match VulkanDeviceIndexInput::deserialize(deserializer)? {
+            VulkanDeviceIndexInput::Index(index) => Some(index),
+            VulkanDeviceIndexInput::Name(name) if name.eq_ignore_ascii_case("auto") => None,
+            VulkanDeviceIndexInput::Name(name) => {
+                return Err(serde::de::Error::custom(format!(
+                    "accelerator.vulkan_device_index must be 'auto' or a zero-based integer, got {name:?}"
+                )));
+            }
+        };
+        Ok(Self::new(index, ConfigValueSource::ConfigFile))
+    }
+}
+
+/// Source-tracked Vulkan validation-layer startup setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VulkanValidationSetting {
+    enabled: bool,
+    source: ConfigValueSource,
+}
+
+impl VulkanValidationSetting {
+    pub const fn new(enabled: bool, source: ConfigValueSource) -> Self {
+        Self { enabled, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        Ok(Self::new(
+            parse_required_bool_env(name, raw)?,
+            ConfigValueSource::Environment,
+        ))
+    }
+
+    pub const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for VulkanValidationSetting {
+    fn default() -> Self {
+        Self::new(false, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for VulkanValidationSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bool(self.enabled)
+    }
+}
+
+impl<'de> Deserialize<'de> for VulkanValidationSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::new(
+            bool::deserialize(deserializer)?,
+            ConfigValueSource::ConfigFile,
+        ))
+    }
+}
+
 /// One configured/effective accelerator policy leaf and its startup source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ResolvedAcceleratorValue<T> {
@@ -1981,10 +2115,13 @@ pub struct ResolvedAcceleratorRuntimePolicy {
     pub schema_id: &'static str,
     pub version: u32,
     pub vulkan_kernel_policy_schema_id: &'static str,
+    pub vulkan_device_policy_schema_id: &'static str,
     pub serving_profile: ServingProfile,
     pub serving_profile_source: ConfigValueSource,
     pub kt_api_mode: ResolvedAcceleratorValue<KtApiMode>,
     pub full_attention_score_budget_mib: ResolvedAcceleratorValue<usize>,
+    pub vulkan_device_index: ResolvedAcceleratorValue<Option<usize>>,
+    pub vulkan_validation: ResolvedAcceleratorValue<bool>,
     pub rocm_synchronization_mode: ResolvedAcceleratorValue<RocmSynchronizationMode>,
     pub rocm_strided_batched_matmul_mode: ResolvedAcceleratorValue<RocmStridedBatchedMatmulMode>,
     pub rocm_bf16_matmul_output_mode: ResolvedAcceleratorValue<RocmBf16MatmulOutputMode>,
@@ -2000,6 +2137,8 @@ pub struct ResolvedAcceleratorRuntimePolicy {
 pub struct AcceleratorRuntimeConfig {
     pub kt_api_mode: KtApiModeSetting,
     pub full_attention_score_budget_mib: FullAttentionScoreBudgetMib,
+    pub vulkan_device_index: VulkanDeviceIndexSetting,
+    pub vulkan_validation: VulkanValidationSetting,
     pub rocm_synchronization_mode: RocmSynchronizationModeSetting,
     pub rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting,
     pub rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting,
@@ -2026,6 +2165,7 @@ impl AcceleratorRuntimeConfig {
             schema_id: ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID,
             version: ACCELERATOR_RUNTIME_POLICY_VERSION,
             vulkan_kernel_policy_schema_id: kiln_model::VULKAN_KERNEL_POLICY_SCHEMA_ID,
+            vulkan_device_policy_schema_id: kiln_model::VULKAN_DEVICE_POLICY_SCHEMA_ID,
             serving_profile: serving_profile.profile(),
             serving_profile_source: serving_profile.source(),
             kt_api_mode: ResolvedAcceleratorValue {
@@ -2037,6 +2177,16 @@ impl AcceleratorRuntimeConfig {
                 configured: self.full_attention_score_budget_mib.mib(),
                 effective: self.full_attention_score_budget_mib.mib(),
                 source: self.full_attention_score_budget_mib.source(),
+            },
+            vulkan_device_index: ResolvedAcceleratorValue {
+                configured: self.vulkan_device_index.index(),
+                effective: self.vulkan_device_index.index(),
+                source: self.vulkan_device_index.source(),
+            },
+            vulkan_validation: ResolvedAcceleratorValue {
+                configured: self.vulkan_validation.enabled(),
+                effective: self.vulkan_validation.enabled(),
+                source: self.vulkan_validation.source(),
             },
             rocm_synchronization_mode: ResolvedAcceleratorValue {
                 configured: self.rocm_synchronization_mode.mode(),
@@ -2078,6 +2228,11 @@ impl AcceleratorRuntimeConfig {
             anyhow::bail!(
                 "accelerator.kt_api_mode={} requires server.serving_profile=experimental; got {profile}",
                 self.kt_api_mode.mode()
+            );
+        }
+        if self.vulkan_validation.enabled() && profile != ServingProfile::Experimental {
+            anyhow::bail!(
+                "accelerator.vulkan_validation=true requires server.serving_profile=experimental; got {profile}"
             );
         }
         if self.rocm_synchronization_mode.mode() == RocmSynchronizationMode::StreamOrdered
@@ -2126,6 +2281,8 @@ impl Default for AcceleratorRuntimeConfig {
         Self {
             kt_api_mode: KtApiModeSetting::default(),
             full_attention_score_budget_mib: FullAttentionScoreBudgetMib::default(),
+            vulkan_device_index: VulkanDeviceIndexSetting::default(),
+            vulkan_validation: VulkanValidationSetting::default(),
             rocm_synchronization_mode: RocmSynchronizationModeSetting::default(),
             rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting::default(),
             rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting::default(),
@@ -4802,6 +4959,20 @@ impl NormalizedEnvValue for FullAttentionScoreBudgetMib {
     }
 }
 
+impl NormalizedEnvValue for VulkanDeviceIndexSetting {
+    fn normalized_env_value(&self) -> String {
+        self.index()
+            .map(|index| index.to_string())
+            .unwrap_or_else(|| "auto".to_owned())
+    }
+}
+
+impl NormalizedEnvValue for VulkanValidationSetting {
+    fn normalized_env_value(&self) -> String {
+        self.enabled().normalized_env_value()
+    }
+}
+
 impl NormalizedEnvValue for RocmSynchronizationModeSetting {
     fn normalized_env_value(&self) -> String {
         self.mode().as_str().to_owned()
@@ -5126,6 +5297,12 @@ macro_rules! public_env_parser {
     (full_attention_score_budget_mib) => {
         FullAttentionScoreBudgetMib::from_named_environment_value
     };
+    (vulkan_device_index) => {
+        VulkanDeviceIndexSetting::from_named_environment_value
+    };
+    (vulkan_validation) => {
+        VulkanValidationSetting::from_named_environment_value
+    };
     (rocm_synchronization_mode) => {
         RocmSynchronizationModeSetting::from_named_environment_value
     };
@@ -5345,6 +5522,16 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     public_env_field!(
         full_attention_score_budget_mib,
         accelerator.full_attention_score_budget_mib
+    ),
+    public_env_field!(
+        vulkan_device_index,
+        accelerator.vulkan_device_index,
+        "KILN_VULKAN_DEVICE"
+    ),
+    public_env_field!(
+        vulkan_validation,
+        accelerator.vulkan_validation,
+        "KILN_VULKAN_VALIDATION"
     ),
     public_env_field!(
         rocm_synchronization_mode,
@@ -6741,6 +6928,8 @@ mod tests {
         "KILN_ACCELERATOR_ROCM_GRAPH_MODE",
         "KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE",
         "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE",
+        "KILN_ACCELERATOR_VULKAN_DEVICE_INDEX",
+        "KILN_ACCELERATOR_VULKAN_VALIDATION",
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES",
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES",
         "KILN_ADAPTERS_LIBRARY_URL",
@@ -7012,6 +7201,8 @@ mod tests {
         assert_eq!(config.server.slow_request_warn_secs, 30);
         assert_eq!(config.server.shutdown_timeout_secs, 5);
         assert_eq!(config.accelerator.kt_api_mode.mode(), KtApiMode::Auto);
+        assert_eq!(config.accelerator.vulkan_device_index.index(), None);
+        assert!(!config.accelerator.vulkan_validation.enabled());
         assert_eq!(
             config.accelerator.full_attention_score_budget_mib.mib(),
             kiln_model::DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB
@@ -7047,6 +7238,8 @@ mod tests {
         for source in [
             config.accelerator.kt_api_mode.source(),
             config.accelerator.full_attention_score_budget_mib.source(),
+            config.accelerator.vulkan_device_index.source(),
+            config.accelerator.vulkan_validation.source(),
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_strided_batched_matmul_mode.source(),
             config.accelerator.rocm_bf16_matmul_output_mode.source(),
@@ -7265,6 +7458,10 @@ mod tests {
                 resolved.vulkan_kernel_policy_schema_id,
                 kiln_model::VULKAN_KERNEL_POLICY_SCHEMA_ID
             );
+            assert_eq!(
+                resolved.vulkan_device_policy_schema_id,
+                kiln_model::VULKAN_DEVICE_POLICY_SCHEMA_ID
+            );
             assert_eq!(resolved.serving_profile, profile);
             assert_eq!(resolved.serving_profile_source, source);
             assert_eq!(
@@ -7280,6 +7477,22 @@ mod tests {
                 ResolvedAcceleratorValue {
                     configured: kiln_model::DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB,
                     effective: kiln_model::DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
+                resolved.vulkan_device_index,
+                ResolvedAcceleratorValue {
+                    configured: None,
+                    effective: None,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
+                resolved.vulkan_validation,
+                ResolvedAcceleratorValue {
+                    configured: false,
+                    effective: false,
                     source: ConfigValueSource::Default,
                 }
             );
@@ -7338,11 +7551,15 @@ mod tests {
             ConfigValueSource::Environment,
         )))
         .unwrap();
-        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v7");
-        assert_eq!(json["version"], 7);
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v8");
+        assert_eq!(json["version"], 8);
         assert_eq!(
             json["vulkan_kernel_policy_schema_id"],
-            "kiln.vulkan-kernel-policy.v2"
+            "kiln.vulkan-kernel-policy.v3"
+        );
+        assert_eq!(
+            json["vulkan_device_policy_schema_id"],
+            "kiln.vulkan-device-policy.v1"
         );
         assert_eq!(json["serving_profile"], "experimental");
         assert_eq!(json["serving_profile_source"], "environment");
@@ -7350,6 +7567,8 @@ mod tests {
         assert_eq!(json["kt_api_mode"]["effective"], "auto");
         assert_eq!(json["kt_api_mode"]["source"], "default");
         assert_eq!(json["full_attention_score_budget_mib"]["effective"], 2048);
+        assert!(json["vulkan_device_index"]["effective"].is_null());
+        assert_eq!(json["vulkan_validation"]["effective"], false);
         assert_eq!(json["rocm_graph_mode"]["configured"], "profile");
         assert_eq!(json["rocm_graph_mode"]["effective"], "lazy_capture_replay");
         assert_eq!(json["rocm_graph_mode"]["source"], "default");
@@ -7365,6 +7584,8 @@ serving_profile = "experimental"
 [accelerator]
 kt_api_mode = "all"
 full_attention_score_budget_mib = 64
+vulkan_device_index = 2
+vulkan_validation = true
 rocm_synchronization_mode = "stream_ordered"
 rocm_strided_batched_matmul_mode = "disabled"
 rocm_bf16_matmul_output_mode = "f32_then_cast"
@@ -7377,6 +7598,8 @@ rocm_graph_cache_max_bytes = 17179869184
         config.validate().unwrap();
         assert_eq!(config.accelerator.kt_api_mode.mode(), KtApiMode::All);
         assert_eq!(config.accelerator.full_attention_score_budget_mib.mib(), 64);
+        assert_eq!(config.accelerator.vulkan_device_index.index(), Some(2));
+        assert!(config.accelerator.vulkan_validation.enabled());
         assert_eq!(
             config.accelerator.full_attention_score_budget_mib.source(),
             ConfigValueSource::ConfigFile
@@ -7404,6 +7627,8 @@ rocm_graph_cache_max_bytes = 17179869184
         );
         for source in [
             config.accelerator.kt_api_mode.source(),
+            config.accelerator.vulkan_device_index.source(),
+            config.accelerator.vulkan_validation.source(),
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_strided_batched_matmul_mode.source(),
             config.accelerator.rocm_bf16_matmul_output_mode.source(),
@@ -7456,6 +7681,8 @@ rocm_graph_cache_max_bytes = 17179869184
             "[accelerator]\nfull_attention_score_budget_mib = 63\n".to_owned(),
             "[accelerator]\nfull_attention_score_budget_mib = 2049\n".to_owned(),
             "[accelerator]\nfull_attention_score_budget_mib = \"2048\"\n".to_owned(),
+            "[accelerator]\nvulkan_device_index = \"gpu\"\n".to_owned(),
+            "[accelerator]\nvulkan_validation = \"true\"\n".to_owned(),
             "[accelerator]\nrocm_synchronization_mode = \"eventually\"\n".to_owned(),
             "[accelerator]\nrocm_synchronization_mode = true\n".to_owned(),
             "[accelerator]\nrocm_strided_batched_matmul_mode = \"sometimes\"\n".to_owned(),
@@ -7530,6 +7757,15 @@ rocm_graph_cache_max_bytes = 17179869184
                 detail.contains("accelerator.rocm_synchronization_mode"),
                 "{detail}"
             );
+            assert!(detail.contains("experimental"), "{detail}");
+
+            let mut gated = KilnConfig::default();
+            gated.server.serving_profile =
+                ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
+            gated.accelerator.vulkan_validation =
+                VulkanValidationSetting::new(true, ConfigValueSource::ConfigFile);
+            let detail = gated.validate().unwrap_err().to_string();
+            assert!(detail.contains("accelerator.vulkan_validation"), "{detail}");
             assert!(detail.contains("experimental"), "{detail}");
 
             for (strided_mode, output_mode, expected_field) in [
@@ -7648,6 +7884,51 @@ rocm_graph_cache_max_bytes = 17179869184
             assert!(detail.contains(name), "{name}: {detail}");
             assert!(detail.contains(invalid), "{name}: {detail}");
         }
+    }
+
+    #[test]
+    fn vulkan_device_environment_is_typed_strict_and_alias_compatible() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+
+        environment.set("KILN_ACCELERATOR_VULKAN_DEVICE_INDEX", "3");
+        environment.set("KILN_ACCELERATOR_VULKAN_VALIDATION", "true");
+        let mut config = KilnConfig::default();
+        config.apply_env_overrides().unwrap();
+        assert_eq!(config.accelerator.vulkan_device_index.index(), Some(3));
+        assert!(config.accelerator.vulkan_validation.enabled());
+        assert_eq!(
+            config.accelerator.vulkan_device_index.source(),
+            ConfigValueSource::Environment
+        );
+        assert_eq!(
+            config.accelerator.vulkan_validation.source(),
+            ConfigValueSource::Environment
+        );
+
+        environment.remove("KILN_ACCELERATOR_VULKAN_DEVICE_INDEX");
+        environment.remove("KILN_ACCELERATOR_VULKAN_VALIDATION");
+        environment.set("KILN_VULKAN_DEVICE", "auto");
+        environment.set("KILN_VULKAN_VALIDATION", "off");
+        let mut legacy = KilnConfig::default();
+        legacy.apply_env_overrides().unwrap();
+        assert_eq!(legacy.accelerator.vulkan_device_index.index(), None);
+        assert!(!legacy.accelerator.vulkan_validation.enabled());
+
+        environment.set("KILN_ACCELERATOR_VULKAN_DEVICE_INDEX", "1");
+        let detail = KilnConfig::default()
+            .apply_env_overrides()
+            .unwrap_err()
+            .to_string();
+        assert!(detail.contains("conflicting"), "{detail}");
+
+        environment.remove("KILN_VULKAN_DEVICE");
+        environment.set("KILN_ACCELERATOR_VULKAN_DEVICE_INDEX", "gpu");
+        let detail = KilnConfig::default()
+            .apply_env_overrides()
+            .unwrap_err()
+            .to_string();
+        assert!(detail.contains("zero-based"), "{detail}");
     }
 
     #[test]
@@ -7823,7 +8104,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 100);
+        assert_eq!(original_len, 102);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -7858,8 +8139,8 @@ rocm_graph_cache_max_bytes = 17179869184
             })
             .count();
         assert_eq!(canonical_only_aliases, 22);
-        assert_eq!(compatibility_aliases, 74);
-        assert_eq!(compatibility_alias_fields, 69);
+        assert_eq!(compatibility_aliases, 76);
+        assert_eq!(compatibility_alias_fields, 71);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(
@@ -7894,7 +8175,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 105);
+        assert_eq!(serialized_leaves.len(), 107);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -7937,7 +8218,7 @@ rocm_graph_cache_max_bytes = 17179869184
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_one_hundred_public_fields() {
+    fn public_env_canonical_only_loads_all_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [

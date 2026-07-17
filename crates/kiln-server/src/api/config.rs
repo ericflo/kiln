@@ -973,12 +973,16 @@ mod tests {
         assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v7"
+            "kiln.accelerator-runtime-policy.v8"
         );
-        assert_eq!(json["accelerator_runtime"]["version"], 7);
+        assert_eq!(json["accelerator_runtime"]["version"], 8);
         assert_eq!(
             json["accelerator_runtime"]["vulkan_kernel_policy_schema_id"],
-            "kiln.vulkan-kernel-policy.v2"
+            "kiln.vulkan-kernel-policy.v3"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["vulkan_device_policy_schema_id"],
+            "kiln.vulkan-device-policy.v1"
         );
         assert_eq!(
             json["accelerator_runtime"]["kt_api_mode"]["effective"],
@@ -987,6 +991,11 @@ mod tests {
         assert_eq!(
             json["accelerator_runtime"]["full_attention_score_budget_mib"]["effective"],
             kiln_model::DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB
+        );
+        assert!(json["accelerator_runtime"]["vulkan_device_index"]["effective"].is_null());
+        assert_eq!(
+            json["accelerator_runtime"]["vulkan_validation"]["effective"],
+            false
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_graph_cache_max_bytes"]["effective"],

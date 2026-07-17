@@ -44,6 +44,7 @@ use crate::forward::GpuWeights;
 
 pub use super::vulkan_device::{
     precompile_custom_kernels, vulkan_device_name, vulkan_is_available,
+    vulkan_selected_device_index,
 };
 pub use super::vulkan_training::{dispatch_adamw_step_buffers, dispatch_sgd_step_buffers};
 
@@ -54,7 +55,7 @@ pub use super::vulkan_training::{dispatch_adamw_step_buffers, dispatch_sgd_step_
 #[derive(Debug)]
 pub struct VulkanBackend {
     /// `kiln_tensor::Device` form advertised by `BackendRuntime::device()`.
-    /// `kt::Device::Vulkan(0)` when the Vulkan logical device is up;
+    /// `kt::Device::Vulkan(index)` when the Vulkan logical device is up;
     /// `kt::Device::Cpu` otherwise, matching the CPU-fallback advertised
     /// by `name()` when `vulkan_device` is `None`. Cached at construction
     /// so the hot trait accessor does not bridge per call. (#1082)
@@ -184,17 +185,16 @@ impl VulkanBackend {
 
         let vulkan_device = vulkan_device::new_backend_device();
 
-        // Advertise `kt::Device::Vulkan(0)` when the logical device is up,
-        // matching what `for_device_kt` callers would have constructed.
+        // Advertise the physical-device index selected by immutable policy
+        // when the logical device is up.
         // When the device failed to come up we still need a sensible kt
         // identity for the BackendRuntime accessor; the CPU fallback path
         // returns `kt::Device::Cpu` so trait callers consistently see "no
         // Vulkan" without a separate predicate. (#1082)
-        let device_kt = if vulkan_device.is_some() {
-            kiln_tensor::Device::Vulkan(0)
-        } else {
-            device
-        };
+        let device_kt = vulkan_device
+            .as_ref()
+            .map(|device| kiln_tensor::Device::Vulkan(device.physical_device_index()))
+            .unwrap_or(device);
 
         Self {
             device_kt,

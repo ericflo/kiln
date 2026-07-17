@@ -14,6 +14,11 @@ use std::time::Instant;
 /// requires source review and new correctness/performance receipts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VulkanKernelPolicy {
+    pub flash_attention_row_tile: usize,
+    pub flash_attention_row_work_budget: usize,
+    pub bf16_weight_row_tile: usize,
+    pub elementwise_tile_elements: usize,
+    pub exp_tile_elements: usize,
     pub gdn_enabled: bool,
     pub gdn_prefill_in_proj_enabled: bool,
     pub gdn_gates_enabled: bool,
@@ -102,9 +107,14 @@ pub struct VulkanKernelPolicy {
     pub profile_resident_decode_timing: bool,
 }
 
-pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v2";
+pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v3";
 
 pub const QUALIFIED_VULKAN_KERNEL_POLICY: VulkanKernelPolicy = VulkanKernelPolicy {
+    flash_attention_row_tile: 2048,
+    flash_attention_row_work_budget: 10_000_000,
+    bf16_weight_row_tile: 128,
+    elementwise_tile_elements: 1 << 20,
+    exp_tile_elements: 65_536,
     gdn_enabled: true,
     gdn_prefill_in_proj_enabled: true,
     gdn_gates_enabled: true,
@@ -199,6 +209,26 @@ fn profile_vulkan_mlp_kernel_stages_enabled() -> bool {
 
 pub(crate) fn mlp_bf16_gate_up_rows4_enabled() -> bool {
     QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_gate_up_rows4
+}
+
+pub(crate) const fn flash_attention_row_tile() -> usize {
+    QUALIFIED_VULKAN_KERNEL_POLICY.flash_attention_row_tile
+}
+
+pub(crate) const fn flash_attention_row_work_budget() -> usize {
+    QUALIFIED_VULKAN_KERNEL_POLICY.flash_attention_row_work_budget
+}
+
+pub(crate) const fn bf16_weight_row_tile() -> usize {
+    QUALIFIED_VULKAN_KERNEL_POLICY.bf16_weight_row_tile
+}
+
+pub(crate) const fn elementwise_tile_elements() -> usize {
+    QUALIFIED_VULKAN_KERNEL_POLICY.elementwise_tile_elements
+}
+
+pub(crate) const fn exp_tile_elements() -> usize {
+    QUALIFIED_VULKAN_KERNEL_POLICY.exp_tile_elements
 }
 
 pub(crate) fn mlp_f32_down_rows4_enabled() -> bool {
@@ -486,8 +516,13 @@ mod qualified_policy_tests {
     fn qualified_policy_matches_product_kernel_selection() {
         assert_eq!(
             VULKAN_KERNEL_POLICY_SCHEMA_ID,
-            "kiln.vulkan-kernel-policy.v2"
+            "kiln.vulkan-kernel-policy.v3"
         );
+        assert_eq!(flash_attention_row_tile(), 2048);
+        assert_eq!(flash_attention_row_work_budget(), 10_000_000);
+        assert_eq!(bf16_weight_row_tile(), 128);
+        assert_eq!(elementwise_tile_elements(), 1 << 20);
+        assert_eq!(exp_tile_elements(), 65_536);
         assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_enabled);
         assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_prefill_in_proj_enabled);
         assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gates_enabled);

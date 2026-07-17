@@ -977,11 +977,6 @@ pub fn record_gdn_chunkwise_prefill_block_into(
             && state.dtype() == VkDType::F32,
         "record_gdn_chunkwise_prefill_block_into: F32-only"
     );
-    anyhow::ensure!(
-        std::env::var("KILN_VK_SOLVE_TRI_CPU").is_err(),
-        "record_gdn_chunkwise_prefill_block_into: KILN_VK_SOLVE_TRI_CPU requires fallback path"
-    );
-
     let batch = dims[0];
     let nv = dims[1];
     let seq_len = dims[2];

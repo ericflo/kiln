@@ -1972,6 +1972,8 @@ function renderRuntimeConfigBody(cfg) {
   const acceleratorRuntime = cfg.accelerator_runtime || {};
   const ktApiMode = acceleratorRuntime.kt_api_mode || {};
   const fullAttentionScoreBudget = acceleratorRuntime.full_attention_score_budget_mib || {};
+  const vulkanDeviceIndex = acceleratorRuntime.vulkan_device_index || {};
+  const vulkanValidation = acceleratorRuntime.vulkan_validation || {};
   const rocmSynchronization = acceleratorRuntime.rocm_synchronization_mode || {};
   const rocmStridedBatchedMatmul = acceleratorRuntime.rocm_strided_batched_matmul_mode || {};
   const rocmBf16MatmulOutput = acceleratorRuntime.rocm_bf16_matmul_output_mode || {};
@@ -2249,6 +2251,9 @@ function renderRuntimeConfigBody(cfg) {
         <div class="rc-group-title">Accelerator execution</div>
         ${runtimeConfigRow('Policy schema', `<strong>${escapeHtml(acceleratorRuntime.schema_id || '—')}</strong>${acceleratorRuntime.version == null ? '' : flagChip(`v${acceleratorRuntime.version}`, 'Accelerator runtime policy schema version.')}`, 'Versioned process-lifetime accelerator policy installed before device initialization.')}
         ${runtimeConfigRow('Vulkan kernel policy', `<strong>${escapeHtml(acceleratorRuntime.vulkan_kernel_policy_schema_id || '—')}</strong>`, 'Qualified immutable Vulkan kernel selection and dispatch policy compiled into this build.')}
+        ${runtimeConfigRow('Vulkan device policy', `<strong>${escapeHtml(acceleratorRuntime.vulkan_device_policy_schema_id || '—')}</strong>`, 'Immutable Vulkan physical-device and validation-layer policy installed before logical-device creation.')}
+        ${runtimeConfigRow('Vulkan physical device', `<strong>${vulkanDeviceIndex.effective == null ? 'automatic' : num(vulkanDeviceIndex.effective)}</strong>${srcChip(vulkanDeviceIndex.source)}`, 'Automatic prefers a discrete Vulkan GPU and otherwise selects the first enumerated device. An explicit zero-based index fails startup when unavailable.')}
+        ${runtimeConfigRow('Vulkan validation', `<strong>${vulkanValidation.effective === true ? 'enabled' : vulkanValidation.effective === false ? 'disabled' : '—'}</strong>${srcChip(vulkanValidation.source)}`, 'Validation layers are startup-only and require the experimental serving profile when enabled.')}
         ${runtimeConfigRow('Kiln-tensor API routes', `<strong>${escapeHtml(ktApiMode.effective || '—')}</strong>${srcChip(ktApiMode.source)}`, 'Immutable adapter route set. Auto uses qualified defaults, all includes experimental matmul and paged-KV routes, and disabled uses legacy fallbacks.')}
         ${runtimeConfigRow('Full-attention score ceiling', `<strong>${Number.isFinite(fullAttentionScoreBudget.effective) ? num(fullAttentionScoreBudget.effective) + ' MiB' : '—'}</strong>${srcChip(fullAttentionScoreBudget.source)}`, 'Immutable exact-attention scratch ceiling. ROCm online attention uses at most 1024 MiB and live pressure rejects admission instead of changing tile geometry.')}
         ${runtimeConfigRow('Synchronization', `<strong>${escapeHtml(rocmSynchronization.effective || '—')}</strong>${srcChip(rocmSynchronization.source)}`, 'Effective ROCm synchronization discipline. Stream-ordered mode is restricted to the experimental serving profile until locally qualified.')}

@@ -73,15 +73,18 @@ pub fn select_device_with_options_kt(cuda_graphs: bool) -> Result<kiln_tensor::D
     {
         // Vulkan: candle-core has no native Vulkan device, so we detect
         // availability ourselves. The Vulkan backend manages its own vk::Device.
-        if kiln_model::backend::vulkan::vulkan_is_available() {
-            tracing::info!("Vulkan available — using Vulkan GPU (AMD/Intel)");
+        if let Some(device_index) = kiln_model::backend::vulkan::vulkan_selected_device_index()? {
+            tracing::info!(
+                device_index,
+                "Vulkan available — using selected Vulkan physical device"
+            );
             // Tell the rest of the process (forward.rs, trainer.rs) that
             // Vulkan is active even though the candle device reports as
             // Device::Cpu. Lets `projection_original_drop_enabled_for_device`
             // and similar guards fire without having to thread a backend
             // handle through every call site.
             kiln_model::backend::mark_vulkan_active();
-            return Ok(kiln_tensor::Device::Vulkan(0));
+            return Ok(kiln_tensor::Device::Vulkan(device_index));
         }
     }
 

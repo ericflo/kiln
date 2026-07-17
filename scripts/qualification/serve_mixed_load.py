@@ -2306,6 +2306,8 @@ def write_server_config(
         "",
         "[accelerator]",
         "full_attention_score_budget_mib = 2048",
+        'vulkan_device_index = "auto"',
+        "vulkan_validation = false",
         f"rocm_synchronization_mode = {_toml_string(rocm_synchronization_mode)}",
         "rocm_strided_batched_matmul_mode = "
         + _toml_string(rocm_strided_batched_matmul_mode),
@@ -2597,9 +2599,10 @@ def accelerator_policy_attestation_failures(
         "profile" if graphs_requested else "disabled"
     )
     expected = {
-        "schema_id": "kiln.accelerator-runtime-policy.v7",
+        "schema_id": "kiln.accelerator-runtime-policy.v8",
         "version": 7,
-        "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v2",
+        "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
+        "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
         "serving_profile": serving_profile,
         "serving_profile_source": "config_file",
         "kt_api_mode": {
@@ -2610,6 +2613,16 @@ def accelerator_policy_attestation_failures(
         "full_attention_score_budget_mib": {
             "configured": 2048,
             "effective": 2048,
+            "source": "config_file",
+        },
+        "vulkan_device_index": {
+            "configured": None,
+            "effective": None,
+            "source": "config_file",
+        },
+        "vulkan_validation": {
+            "configured": False,
+            "effective": False,
             "source": "config_file",
         },
         "rocm_synchronization_mode": {

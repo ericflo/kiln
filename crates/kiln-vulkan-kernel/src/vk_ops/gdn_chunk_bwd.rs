@@ -62,10 +62,6 @@ pub fn vk_solve_tri_transpose_no_grad(
     let device = a_strict.device();
     let out = alloc_f32(device, batch * nv * chunk * dv)?;
 
-    if std::env::var("KILN_VK_SOLVE_TRI_TRANSPOSE_CPU").is_ok() {
-        return cpu_solve_tri_transpose(a_strict, beta, dw, out, batch, nv, chunk, dv);
-    }
-
     let dv_per_wg = 64u32;
     let dv_tiles = (dv as u32 + dv_per_wg - 1) / dv_per_wg;
     let push = [batch as u32, nv as u32, chunk as u32, dv as u32];
@@ -89,19 +85,20 @@ pub fn vk_solve_tri_transpose_no_grad(
     ))
 }
 
-/// CPU fallback for vk_solve_tri_transpose, accessible via
-/// KILN_VK_SOLVE_TRI_TRANSPOSE_CPU=1 for debugging.
-fn cpu_solve_tri_transpose(
+/// Explicit CPU reference for tests and offline kernel diagnosis.
+///
+/// Production execution always uses [`vk_solve_tri_transpose_no_grad`].
+pub fn vk_solve_tri_transpose_cpu_reference(
     a_strict: &VkTensor,
     beta: &VkTensor,
     dw: &VkTensor,
-    out: Arc<VulkanBuffer>,
     batch: usize,
     nv: usize,
     chunk: usize,
     dv: usize,
 ) -> Result<VkTensor> {
     let device = a_strict.device();
+    let out = alloc_f32(device, batch * nv * chunk * dv)?;
     let a = a_strict.to_vec_f32()?;
     let b = beta.to_vec_f32()?;
     let dw_d = dw.to_vec_f32()?;
@@ -157,10 +154,6 @@ pub fn vk_gdn_chunk_scan_bwd_no_grad(
     use crate::vk_ops::shape::vk_reshape;
 
     let device = d_out.device();
-    if std::env::var("KILN_VK_GDN_CHUNK_SCAN_BWD_CPU").is_ok() {
-        return cpu_chunk_scan_bwd(d_out, b_mask, w, batch, nv, chunk, dv);
-    }
-
     // dq_s_scaled = d_out (just clone/copy — no allocation needed semantically,
     // but we produce a fresh VkTensor with the same data via add-zero or
     // re-upload).
@@ -196,8 +189,10 @@ pub fn vk_gdn_chunk_scan_bwd_no_grad(
     Ok((dq_s_scaled, db_mask, d_w))
 }
 
-/// CPU fallback for vk_gdn_chunk_scan_bwd (debug aid).
-fn cpu_chunk_scan_bwd(
+/// Explicit CPU reference for tests and offline kernel diagnosis.
+///
+/// Production execution always uses [`vk_gdn_chunk_scan_bwd_no_grad`].
+pub fn vk_gdn_chunk_scan_bwd_cpu_reference(
     d_out: &VkTensor,
     b_mask: &VkTensor,
     w: &VkTensor,
@@ -260,7 +255,6 @@ fn cpu_chunk_scan_bwd(
 ///   dG[C-1]     += d_p_last  (composed by chunkwise op)
 ///   dG[i]       -= d_decay[i] (composed by chunkwise op)
 ///
-/// CPU fallback via KILN_VK_GDN_STATE_EXIT_BWD_CPU=1.
 pub fn vk_gdn_state_exit_bwd_no_grad(
     d_s_exit: &VkTensor,       // [B, nv, dk, dv]
     decay_last_col: &VkTensor, // [B, nv, C]
@@ -274,22 +268,6 @@ pub fn vk_gdn_state_exit_bwd_no_grad(
     dk: usize,
     dv: usize,
 ) -> Result<(VkTensor, VkTensor, VkTensor, VkTensor, VkTensor)> {
-    if std::env::var("KILN_VK_GDN_STATE_EXIT_BWD_CPU").is_ok() {
-        return cpu_state_exit_bwd(
-            d_s_exit,
-            decay_last_col,
-            k_chunk,
-            w,
-            s_in,
-            p_last,
-            batch,
-            nv,
-            chunk,
-            dk,
-            dv,
-        );
-    }
-
     let device = d_s_exit.device();
     let d_s_in = alloc_f32(device, batch * nv * dk * dv)?;
     let d_w = alloc_f32(device, batch * nv * chunk * dv)?;
@@ -348,7 +326,10 @@ pub fn vk_gdn_state_exit_bwd_no_grad(
     ))
 }
 
-fn cpu_state_exit_bwd(
+/// Explicit CPU reference for tests and offline kernel diagnosis.
+///
+/// Production execution always uses [`vk_gdn_state_exit_bwd_no_grad`].
+pub fn vk_gdn_state_exit_bwd_cpu_reference(
     d_s_exit: &VkTensor,
     decay_last_col: &VkTensor,
     k_chunk: &VkTensor,
@@ -428,8 +409,7 @@ fn cpu_state_exit_bwd(
 }
 
 /// Backward of the chunk_prep stage. GPU shader path with bounded
-/// shared memory (3 × 64 floats = 768 bytes); CPU fallback for
-/// debugging.
+/// shared memory (3 × 64 floats = 768 bytes).
 ///
 /// Returns: d_g, d_v, d_kkt, d_qkt, d_ks_entry, d_q_s.
 pub fn vk_gdn_chunk_prep_bwd_no_grad(
@@ -450,26 +430,6 @@ pub fn vk_gdn_chunk_prep_bwd_no_grad(
     chunk: usize,
     dv: usize,
 ) -> Result<(VkTensor, VkTensor, VkTensor, VkTensor, VkTensor, VkTensor)> {
-    if std::env::var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU").is_ok() {
-        return cpu_chunk_prep_bwd(
-            d_a_strict,
-            d_b_mask,
-            d_v_prime,
-            d_q_s_scaled,
-            d_decay_last_col,
-            d_p_last,
-            g,
-            v,
-            kkt,
-            qkt,
-            ks_entry,
-            q_s,
-            batch,
-            nv,
-            chunk,
-            dv,
-        );
-    }
     anyhow::ensure!(
         chunk <= 64,
         "vk_gdn_chunk_prep_bwd: chunk ≤ 64 (shader cap)"
@@ -553,7 +513,10 @@ pub fn vk_gdn_chunk_prep_bwd_no_grad(
     ))
 }
 
-fn cpu_chunk_prep_bwd(
+/// Explicit CPU reference for tests and offline kernel diagnosis.
+///
+/// Production execution always uses [`vk_gdn_chunk_prep_bwd_no_grad`].
+pub fn vk_gdn_chunk_prep_bwd_cpu_reference(
     d_a_strict: &VkTensor,       // [B, nv, C, C]
     d_b_mask: &VkTensor,         // [B, nv, C, C]
     d_v_prime: &VkTensor,        // [B, nv, C, dv]

@@ -179,7 +179,7 @@ disabled.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v7`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v8`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
 dashboard all report the same configured/effective/source values, plus the
 compiled Vulkan kernel-policy schema ID; lower model, tensor, and kernel paths
@@ -189,6 +189,8 @@ do not re-read these public environment names.
 |---|---|---|---|---|
 | `accelerator.kt_api_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_KT_API_MODE` (implemented) | none | `auto`, `all`, or `disabled`, case-insensitive. `auto` enables the qualified kiln-tensor adapter routes while leaving the experimental generic matmul and paged-KV routes inactive. `all` enables every adapter route; `disabled` forces legacy fallbacks. The two explicit modes require `server.serving_profile = "experimental"`. The mode is resolved before accelerator execution, remains immutable for the process lifetime, and is reported with source attribution. Restart required. |
 | `accelerator.full_attention_score_budget_mib` | unsigned integer MiB; `2048` | `KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB` (implemented) | none | `64..=2048`. Immutable ceiling for exact full-attention materialized score and scratch geometry across CPU, CUDA, ROCm, Metal, and Vulkan model routes. ROCm online attention derives `min(value, 1024)` MiB while retaining fixed qualified 2048-query/4096-key tiles. Runtime memory observations remain fail-closed admission and reservation checks; they never resize the geometry or switch to smaller tiles during a request. Restart required. |
+| `accelerator.vulkan_device_index` | `"auto"` or unsigned integer; `"auto"` | `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX` (implemented) | `KILN_VULKAN_DEVICE` (deprecated compatibility) | `auto` preserves automatic discrete-GPU preference and otherwise chooses the first enumerated Vulkan physical device. An integer strictly selects that zero-based Vulkan enumeration index. An unavailable index fails logical-device startup; it is never ignored or replaced with another device. The immutable selection is installed before Vulkan device creation and reported with source attribution. Restart required. |
+| `accelerator.vulkan_validation` | boolean; `false` | `KILN_ACCELERATOR_VULKAN_VALIDATION` (implemented) | `KILN_VULKAN_VALIDATION` (deprecated compatibility) | `true` requires `server.serving_profile = "experimental"` and enables `VK_LAYER_KHRONOS_validation` when the Vulkan instance is created. Startup fails if the layer is not installed. This is not mutable per request or dispatch. Restart required. |
 | `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
 | `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | `KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL` and `KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
 | `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | `KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT` and `KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT` (deprecated compatibility) | `auto`, `native_bf16`, or `f32_then_cast`, case-insensitive. `auto` applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
@@ -214,15 +216,28 @@ derived canonical environment name instead.
 aliases. Previously, model and ROCm flash paths parsed different permissive
 values during execution and recomputed score budgets from changing free-memory
 snapshots, permitting route geometry to change between layers or requests.
-The v7 policy fixes one bounded ceiling before execution; the ROCm allocator
+The v8 policy fixes one bounded ceiling before execution; the ROCm allocator
 governor may still reject a planned operation when its exact working set is no
 longer admissible, but it cannot silently shrink or expand that plan.
+
+### Vulkan device policy
+
+`kiln.vulkan-device-policy.v1` is the model/kernel boundary installed from the
+two typed fields above before the first logical Vulkan device is created. A
+same-value reinstall is idempotent; a conflicting late owner fails closed. The
+selected `VulkanDevice` retains its physical enumeration index for diagnostics.
+The removed `GGML_VK_VISIBLE_DEVICES` compatibility behavior is not a Vulkan
+loader contract and is not accepted as a Kiln alias. Use the typed field or its
+mechanically derived canonical environment name. External loader/driver
+selectors such as `MESA_VK_DEVICE_SELECT`, `DRI_PRIME`, and Vulkan ICD selectors
+remain identity remaps and cause device-scoped memory-probe validation to fail
+closed rather than claim the wrong physical device.
 
 ### Vulkan kernel policy
 
 Vulkan kernel selection is an immutable implementation contract, not a public
 configuration surface. Product execution uses
-`kiln.vulkan-kernel-policy.v2`, defined by the typed
+`kiln.vulkan-kernel-policy.v3`, defined by the typed
 `QUALIFIED_VULKAN_KERNEL_POLICY` object before any dispatch. There is no TOML,
 CLI, request, or environment override for its leaves. Changing one requires a
 reviewed source change, a new policy version, backend/oracle parity, and new
@@ -236,6 +251,7 @@ The qualified policy fixes these exact route decisions:
 | Packed model weights | BF16-packed linear, GDN input-projection, full-attention QKV, and MLP decode weights are enabled. The MLP BF16 gate/up with F32 down route is enabled. |
 | Quarantined or slower model routes | Full-chunk GDN, single-token fused conv1d update, GDN forward substitution, batch-one fused GDN decode, the standalone MLP gate/up route, decode recurrent-state residency, resumable-prefill recurrent-state residency, fallback after a failed/disabled single-submit GDN chunkwise route, and the CPU-bridged/generic-tensor native Vulkan RMSNorm experiment are disabled. The device-resident model RMSNorm route remains enabled. |
 | Dispatch safety | Vulkan linear submissions are capped at exactly 20,000,000,000 estimated FLOP and oversized work is sub-chunked. The former floating-point environment parser and its zero-means-unbounded escape are removed. |
+| Bounded operator tiling | Flash attention uses a 2048-row tile and a 10,000,000-element row-work budget. Frozen-BF16-weight matmul uses 128-row tiles. Generic elementwise work uses 1,048,576 elements per dispatch and exponentiation uses 65,536. All are positive immutable policy leaves. |
 | BF16 MLP | Four-row gate/up at batch 8, four-row down at batch 16, four-row F32 down at batch 8, and eight-row kernels at batch 256; all are enabled. |
 | BF16 linear | Four-row kernels at batch 16 and eight-row kernels at batch 64; both are enabled. |
 | BF16 full-attention QKV | Four-row kernels at batch 2 and eight-row kernels at batch 64; both are enabled. |
@@ -244,6 +260,7 @@ The qualified policy fixes these exact route decisions:
 | Submission and transfer fusion | Paged attention, Qwen RMSNorm, GDN gates/norm/input projection, MLP gate/up, causal conv1d, full-attention QKV, linear decode/argmax, chained MLP dispatch/transfer, and the applicable batched upload/transfer routes are enabled. |
 | Paged-attention split-K | Batch one uses 32 chunks. Batch 16 or wider uses 4. Smaller batches use 2 at 64 or more blocks per sequence and 4 otherwise, with an absolute 256-chunk bound. |
 | Prefill and profiling | Pair-row prefill matmul is enabled from batch 8. Kernel-stage and resident-decode profiling are disabled in product execution. |
+| CPU references | GDN chunk preparation/scan/state-exit backward, triangular solve/transpose, and gated RMSNorm backward expose explicit CPU-reference functions for parity tests and offline diagnosis. Production entry points always use the GPU implementations; no process environment value can switch a live request to CPU or race another test. |
 
 The former variables represented by this table, including the applicable
 `KILN_DISABLE_VULKAN_*`, `KILN_ENABLE_VULKAN_*`, kernel-threshold, split-K,
@@ -256,12 +273,12 @@ evidence; they do not describe current runtime controls. The research
 microbenchmark remains a separate executable surface and must not be treated as
 product configuration.
 
-This policy is not yet the repository-wide environment boundary. Vulkan device
-selection/validation and the remaining `KILN_VK_*` operator research controls
-are still listed in the generated [Runtime Environment Inventory](RUNTIME_ENVIRONMENT_INVENTORY.md).
-They are not qualified public configuration, and a launch containing one is not
-comparable to a qualified receipt. Phase 8.1 remains open until those reads are
-deleted or moved behind an explicit typed qualification interface.
+The serving library and product kernel paths no longer read residual
+`KILN_VK_*` tiling or CPU-fallback switches. `vulkan_decode_microbench` retains
+its explicitly research-only `KILN_VK_MICROBENCH_*` inputs and local experiment
+parameters; it is a separate executable, not server configuration, and a run
+using those inputs is not a product qualification receipt. Phase 8.1 remains
+open for non-Vulkan runtime controls elsewhere in the repository.
 
 ### ROCm synchronization semantics
 
@@ -741,17 +758,23 @@ pools, this bounds delayed anonymous/transparent-huge-page first touch without
 prefaulting the full configured cache; logical block ownership, prefix-cache
 leases, shrink retirement, and physical-resize safety are unchanged.
 
-Physical-device identity is currently fail-closed while backend selection and
-memory probes still expose unrelated logical ordinals. CUDA, ROCm, and Vulkan
-startup therefore accepts only logical device `0` when the relevant NVIDIA or
-DRM candidate set is provably singular. Multi-device hosts, nonzero ordinals,
-failed candidate enumeration, and visibility/remapping controls such as
-`CUDA_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`,
-`KILN_VULKAN_DEVICE`, or `GGML_VK_VISIBLE_DEVICES` are rejected before model
-upload. `Auto` probing remains diagnostic-only; CPU performs no accelerator
-probe, and Apple Silicon uses its single unified physical memory pool. This is
-an interim safety restriction until backend selection and probing share a
-typed PCI-address or UUID identity.
+Physical-device identity remains fail-closed where backend enumeration and OS
+memory probes expose unrelated logical ordinals. Typed
+`accelerator.vulkan_device_index` now selects and reports the same Vulkan index
+through kernel, model, and server code, but the subsequent memory-probe gate
+still accepts it only when ordinal zero is the sole relevant DRM candidate.
+This means an available nonzero Vulkan index is selected faithfully and then
+rejected before model upload rather than being budgeted against another GPU.
+CUDA and ROCm have the same single-candidate/ordinal-zero restriction.
+Multi-device hosts, failed candidate enumeration, and driver-level visibility
+or remapping controls such as `CUDA_VISIBLE_DEVICES`,
+`ROCR_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `MESA_VK_DEVICE_SELECT`, or
+`DRI_PRIME` are rejected. The deprecated `KILN_VULKAN_DEVICE` alias is typed
+application configuration, not a driver remap; `GGML_VK_VISIBLE_DEVICES` is
+ignored and no longer supported. `Auto` memory probing remains diagnostic-only;
+CPU performs no accelerator probe, and Apple Silicon uses its single unified
+physical memory pool. Multi-device startup remains unavailable until backend
+selection and probing share a typed PCI address or UUID.
 
 ## `[training]`
 
@@ -1365,7 +1388,7 @@ and the checked soak. A micro-kernel or small-state parity result alone is not a
 release gate.
 
 The historical decode residency experiment is also disabled by immutable
-`kiln.vulkan-kernel-policy.v2`. Its former enable and disable variables were
+`kiln.vulkan-kernel-policy.v3`. Its former enable and disable variables were
 deleted without aliases; neither decode nor prompt residency can be activated
 by process environment. Re-enabling either route requires a reviewed source
 policy version and the full evidence sequence above.

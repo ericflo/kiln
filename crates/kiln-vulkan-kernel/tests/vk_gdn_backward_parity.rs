@@ -7,6 +7,9 @@
 
 use anyhow::Result;
 use kiln_vulkan_kernel::vk_ops::conv1d::vk_causal_conv1d_bwd_no_grad;
+use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::{
+    vk_gdn_chunk_prep_bwd_cpu_reference, vk_gdn_chunk_prep_bwd_no_grad,
+};
 use kiln_vulkan_kernel::vk_ops::gdn_gates::vk_gdn_gates_bwd_no_grad;
 use kiln_vulkan_kernel::vk_ops::reverse_cumsum::vk_reverse_cumsum_no_grad;
 use kiln_vulkan_kernel::{VkTensor, VulkanBuffer, VulkanDevice};
@@ -357,8 +360,9 @@ fn vk_gdn_chunk_scan_bwd_matches_cpu() -> Result<()> {
 
 #[test]
 fn vk_gdn_state_exit_bwd_matches_cpu() -> Result<()> {
-    // Compare GPU shader to the CPU fallback (set via env var).
-    use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::vk_gdn_state_exit_bwd_no_grad;
+    use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::{
+        vk_gdn_state_exit_bwd_cpu_reference, vk_gdn_state_exit_bwd_no_grad,
+    };
     let Some(dev) = vk_dev() else { return Ok(()) };
     let batch = 1;
     let nv = 2;
@@ -395,18 +399,9 @@ fn vk_gdn_state_exit_bwd_matches_cpu() -> Result<()> {
         &dse_t, &dlc_t, &k_t, &w_t, &s_t, &pl_t, batch, nv, chunk, dk, dv,
     )?;
 
-    // CPU reference (run via env var). SAFETY: serial test execution
-    // (--test-threads=1 from CI command line), no concurrent
-    // access to the env. The env var is scoped to this test.
-    unsafe {
-        std::env::set_var("KILN_VK_GDN_STATE_EXIT_BWD_CPU", "1");
-    }
-    let (cd_si, cd_w, cd_k, cd_dec, cd_pl) = vk_gdn_state_exit_bwd_no_grad(
+    let (cd_si, cd_w, cd_k, cd_dec, cd_pl) = vk_gdn_state_exit_bwd_cpu_reference(
         &dse_t, &dlc_t, &k_t, &w_t, &s_t, &pl_t, batch, nv, chunk, dk, dv,
     )?;
-    unsafe {
-        std::env::remove_var("KILN_VK_GDN_STATE_EXIT_BWD_CPU");
-    }
 
     let max_err = |a: &[f32], b: &[f32]| -> f32 {
         a.iter()
@@ -426,7 +421,6 @@ fn vk_gdn_state_exit_bwd_matches_cpu() -> Result<()> {
 
 #[test]
 fn vk_gdn_chunk_prep_bwd_matches_finite_diff() -> Result<()> {
-    use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::vk_gdn_chunk_prep_bwd_no_grad;
     use kiln_vulkan_kernel::vk_ops::gdn_chunk_prep::vk_gdn_chunk_prep_no_grad;
     let Some(dev) = vk_dev() else { return Ok(()) };
 
@@ -562,7 +556,6 @@ fn vk_gdn_chunk_prep_bwd_matches_finite_diff() -> Result<()> {
 fn vk_gdn_chunk_prep_bwd_per_branch_isolation() -> Result<()> {
     // Run with only ONE branch's input non-zero. If GPU ≠ CPU on dg
     // for one branch, that branch's logic is wrong.
-    use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::vk_gdn_chunk_prep_bwd_no_grad;
     let Some(dev) = vk_dev() else { return Ok(()) };
     let batch = 1;
     let nv = 1;
@@ -615,15 +608,9 @@ fn vk_gdn_chunk_prep_bwd_per_branch_isolation() -> Result<()> {
         let (g_dg, _, _, _, _, _) = vk_gdn_chunk_prep_bwd_no_grad(
             das, dbm, dvp, dqss, ddec, dpl, &g, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv,
         )?;
-        unsafe {
-            std::env::set_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU", "1");
-        }
-        let (c_dg, _, _, _, _, _) = vk_gdn_chunk_prep_bwd_no_grad(
+        let (c_dg, _, _, _, _, _) = vk_gdn_chunk_prep_bwd_cpu_reference(
             das, dbm, dvp, dqss, ddec, dpl, &g, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv,
         )?;
-        unsafe {
-            std::env::remove_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU");
-        }
         let g_data = g_dg.to_vec_f32()?;
         let c_data = c_dg.to_vec_f32()?;
         println!("Branch {name}: GPU dg={:?}", g_data);
@@ -701,7 +688,6 @@ fn vk_gdn_chunk_prep_bwd_per_branch_isolation() -> Result<()> {
 
 #[test]
 fn vk_gdn_chunk_prep_bwd_gpu_matches_cpu() -> Result<()> {
-    use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::vk_gdn_chunk_prep_bwd_no_grad;
     let Some(dev) = vk_dev() else { return Ok(()) };
     let batch = 1;
     let nv = 1;
@@ -752,16 +738,9 @@ fn vk_gdn_chunk_prep_bwd_gpu_matches_cpu() -> Result<()> {
         &das, &dbm, &dvp, &dqss, &ddec, &dpl, &g, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv,
     )?;
 
-    // CPU
-    unsafe {
-        std::env::set_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU", "1");
-    }
-    let (c_dg, c_dv, c_dkkt, c_dqkt, c_dks, c_dqs) = vk_gdn_chunk_prep_bwd_no_grad(
+    let (c_dg, c_dv, c_dkkt, c_dqkt, c_dks, c_dqs) = vk_gdn_chunk_prep_bwd_cpu_reference(
         &das, &dbm, &dvp, &dqss, &ddec, &dpl, &g, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv,
     )?;
-    unsafe {
-        std::env::remove_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU");
-    }
 
     let g_data = g_dg.to_vec_f32()?;
     let c_data = c_dg.to_vec_f32()?;

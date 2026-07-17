@@ -48,8 +48,6 @@ use crate::VulkanDevice;
 use anyhow::{Context, Result};
 use ash::vk;
 
-const DEFAULT_1D_TILE_ELEMENTS: usize = 1 << 20;
-
 /// Upper bound for long 1D elementwise-style dispatches.
 ///
 /// Some Vulkan drivers are much happier with many moderate dispatches than
@@ -57,20 +55,12 @@ const DEFAULT_1D_TILE_ELEMENTS: usize = 1 << 20;
 /// covered; each element is still computed exactly once by the same shader
 /// logic.
 pub(crate) fn vk_1d_tile_elements() -> usize {
-    std::env::var("KILN_VK_ELEMENTWISE_TILE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(DEFAULT_1D_TILE_ELEMENTS)
-        .clamp(256, u32::MAX as usize)
+    crate::kernels::elementwise_tile_elements().clamp(256, u32::MAX as usize)
 }
 
 pub(crate) fn vk_exp_tile_elements() -> usize {
-    std::env::var("KILN_VK_EXP_TILE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or_else(|| vk_1d_tile_elements().min(65_536))
+    crate::kernels::exp_tile_elements()
+        .min(vk_1d_tile_elements())
         .clamp(256, u32::MAX as usize)
 }
 

@@ -378,7 +378,7 @@ curl -s http://localhost:8420/v1/chat/completions \
           </div>
           <div>
             <div class="label mb-2">Fix</div>
-            <p>Download the matching artifact from <a href="https://github.com/ericflo/kiln/releases">GitHub releases</a>. Linux Vulkan startup currently requires logical device <code>0</code> and exactly one matching physical DRM device; device-remapping variables such as <code>KILN_VULKAN_DEVICE</code> and <code>GGML_VK_VISIBLE_DEVICES</code> are rejected until backend and memory-probe selection share a PCI address or UUID. CUDA/ROCm container visibility variables are subject to the same interim guard, so use a bare-host GPU launch or CPU container until typed physical-device identity is available.</p>
+            <p>Download the matching artifact from <a href="https://github.com/ericflo/kiln/releases">GitHub releases</a>. Select Vulkan through typed <code>accelerator.vulkan_device_index</code>; <code>auto</code> preserves discrete-GPU preference and an explicit unavailable index fails immediately. The memory-probe identity gate currently permits startup only when the selected index is zero and exactly one relevant physical DRM device exists. An available nonzero or multi-device selection therefore fails before model upload instead of measuring another GPU. <code>KILN_VULKAN_DEVICE</code> is only a deprecated typed-config alias, <code>GGML_VK_VISIBLE_DEVICES</code> is unsupported, and driver remaps such as <code>MESA_VK_DEVICE_SELECT</code> or <code>DRI_PRIME</code> are rejected. CUDA/ROCm visibility variables remain subject to the same interim identity guard, so use a bare-host single-GPU launch or CPU until PCI-address/UUID-bound probing is available.</p>
           </div>
         </div>
       </article>
@@ -456,20 +456,22 @@ curl -s http://localhost:8420/metrics \
         </p>
         <h3 id="vulkan-kernel-policy-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan kernel-policy diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-          The production selections documented for <code>kiln.vulkan-kernel-policy.v2</code> are fixed. Their
+          The production selections documented for <code>kiln.vulkan-kernel-policy.v3</code> are fixed. Their
           former <code>KILN_DISABLE_VULKAN_*</code>, <code>KILN_ENABLE_VULKAN_*</code>, kernel-threshold,
           split-K, stage-profile, packed-weight, recurrence, and resident-decode variables are not controls and
           must not be used to explain a run. The backend, kernel, and resident-model planners share one source
           object for those decisions; malformed shell values cannot select a fallback.
         </p>
         <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
-  | jq '.accelerator_runtime | {schema_id, version, vulkan_kernel_policy_schema_id}'</code></pre>
+  | jq '.accelerator_runtime | {schema_id, version, vulkan_kernel_policy_schema_id, vulkan_device_policy_schema_id, vulkan_device_index, vulkan_validation}'</code></pre>
         <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
           <li>Remove old kernel switches from launch scripts. They have no compatibility aliases or replacement fields.</li>
           <li>Compare the binary/source commit and policy schema before comparing receipts. A route change requires a reviewed source revision and renewed Vulkan parity, performance, and soak evidence.</li>
           <li>Use typed batching, memory, prewarm, and accelerator fields for supported operator decisions. Do not infer a hidden model-route or kernel override from a throughput change.</li>
           <li>Historical optimization logs and the Vulkan microbenchmark document research experiments; neither defines the product runtime contract.</li>
-          <li>Device selection/validation and remaining <code>KILN_VK_*</code> operator research controls are still migration work in the generated environment inventory. A process launched with one is unqualified and its receipt must not be compared to the qualified baseline.</li>
+          <li>Select a device with typed <code>accelerator.vulkan_device_index = "auto"</code> or a strict zero-based index. Invalid explicit indices fail startup; they never fall through to another GPU.</li>
+          <li>Enable validation only with typed <code>accelerator.vulkan_validation = true</code> under the experimental profile. Startup fails when the Khronos validation layer is unavailable, so diagnostics cannot claim validation that was not active.</li>
+          <li>The serving/kernel product no longer reads residual <code>KILN_VK_*</code> tiling or CPU-fallback controls. <code>KILN_VK_MICROBENCH_*</code> belongs only to the separate research executable and cannot define a qualified product receipt.</li>
         </ul>
         <h3 id="vulkan-prefix-cache-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan prefix-cache diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">

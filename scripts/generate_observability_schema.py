@@ -424,6 +424,8 @@ def build_definitions() -> None:
         ),
         ("ResolvedRocmGraphMode", "RocmGraphMode", ref("RocmGraphMode")),
         ("ResolvedAcceleratorInteger", "usize | u64", ref("NonNegativeInteger")),
+        ("ResolvedAcceleratorOptionalInteger", "Option<usize>", nullable(ref("NonNegativeInteger"))),
+        ("ResolvedAcceleratorBoolean", "bool", ref("Boolean")),
     ):
         add_object(
             name,
@@ -442,9 +444,13 @@ def build_definitions() -> None:
             "schema_id": ref("NonEmptyString"),
             "version": ref("NonNegativeInteger"),
             "vulkan_kernel_policy_schema_id": ref("NonEmptyString"),
+            "vulkan_device_policy_schema_id": ref("NonEmptyString"),
             "serving_profile": ref("ServingProfile"),
             "serving_profile_source": ref("ConfigValueSource"),
             "kt_api_mode": ref("ResolvedKtApiMode"),
+            "full_attention_score_budget_mib": ref("ResolvedAcceleratorInteger"),
+            "vulkan_device_index": ref("ResolvedAcceleratorOptionalInteger"),
+            "vulkan_validation": ref("ResolvedAcceleratorBoolean"),
             "rocm_synchronization_mode": ref("ResolvedRocmSynchronizationMode"),
             "rocm_strided_batched_matmul_mode": ref(
                 "ResolvedRocmStridedBatchedMatmulMode"

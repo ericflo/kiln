@@ -124,6 +124,14 @@ full_attention_score_budget_mib = 2048 # Exact-attention score/scratch ceiling (
                                       # rejects admission instead of changing tile geometry during
                                       # a request. Restart required. Override with
                                       # KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB.
+vulkan_device_index = "auto"          # auto or a strict zero-based Vulkan physical-device index.
+                                      # Auto prefers a discrete GPU, then the first enumerated device.
+                                      # Override with KILN_ACCELERATOR_VULKAN_DEVICE_INDEX;
+                                      # KILN_VULKAN_DEVICE is a deprecated startup alias.
+vulkan_validation = false             # Enable VK_LAYER_KHRONOS_validation at instance creation.
+                                      # True requires server.serving_profile="experimental".
+                                      # Override with KILN_ACCELERATOR_VULKAN_VALIDATION;
+                                      # KILN_VULKAN_VALIDATION is a deprecated startup alias.
 rocm_synchronization_mode = "legacy_host_barriers" # Qualified default. `stream_ordered` removes
                                       # only proven same-stream host barriers and uses a primary-
                                       # stream external-yield wait; it requires

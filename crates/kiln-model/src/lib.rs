@@ -117,7 +117,14 @@ pub use weights::{ModelSnapshotCleanup, ModelWeights};
 #[cfg(feature = "vulkan")]
 pub use kiln_vulkan_kernel::kernels::VULKAN_KERNEL_POLICY_SCHEMA_ID;
 #[cfg(not(feature = "vulkan"))]
-pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v2";
+pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v3";
+
+#[cfg(feature = "vulkan")]
+pub use kiln_vulkan_kernel::{
+    VULKAN_DEVICE_POLICY_SCHEMA_ID, VulkanDevicePolicy, install_vulkan_device_policy,
+};
+#[cfg(not(feature = "vulkan"))]
+pub const VULKAN_DEVICE_POLICY_SCHEMA_ID: &str = "kiln.vulkan-device-policy.v1";
 
 #[cfg(feature = "vulkan")]
 pub use kiln_vulkan_kernel::buffer::VulkanBufferAllocationStats;

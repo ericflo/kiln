@@ -46,20 +46,13 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
 }
 
 fn flash_rows_tile(rows: usize) -> usize {
-    std::env::var("KILN_VK_FLASH_ROWS_TILE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(2048)
-        .clamp(1, rows.max(1))
+    crate::kernels::flash_attention_row_tile().clamp(1, rows.max(1))
 }
 
 fn flash_row_work_budget(rows: usize, row_tile: usize) -> usize {
-    std::env::var("KILN_VK_FLASH_ROW_WORK_TILE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or_else(|| row_tile.saturating_mul(rows.max(1)).min(10_000_000))
+    row_tile
+        .saturating_mul(rows.max(1))
+        .min(crate::kernels::flash_attention_row_work_budget())
         .max(1)
 }
 

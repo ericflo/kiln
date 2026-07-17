@@ -4,7 +4,40 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+
+pub const VULKAN_DEVICE_POLICY_SCHEMA_ID: &str = "kiln.vulkan-device-policy.v1";
+
+/// Immutable Vulkan instance/device selection installed before model startup.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VulkanDevicePolicy {
+    /// `None` preserves automatic discrete-GPU preference. `Some(index)` is a
+    /// strict zero-based physical-device selection.
+    pub device_index: Option<usize>,
+    pub validation: bool,
+}
+
+static VULKAN_DEVICE_POLICY: OnceLock<VulkanDevicePolicy> = OnceLock::new();
+
+/// Install process-lifetime Vulkan device policy. Reinstalling the same policy
+/// is idempotent; a conflicting late install fails closed.
+pub fn install_vulkan_device_policy(policy: VulkanDevicePolicy) -> Result<()> {
+    if let Some(installed) = VULKAN_DEVICE_POLICY.get() {
+        anyhow::ensure!(
+            *installed == policy,
+            "Vulkan device policy is already installed as {installed:?}; refusing conflicting late policy {policy:?}"
+        );
+        return Ok(());
+    }
+    match VULKAN_DEVICE_POLICY.set(policy) {
+        Ok(()) => Ok(()),
+        Err(policy) => install_vulkan_device_policy(policy),
+    }
+}
+
+pub fn vulkan_device_policy() -> VulkanDevicePolicy {
+    *VULKAN_DEVICE_POLICY.get_or_init(VulkanDevicePolicy::default)
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct PipelineKey {
@@ -36,6 +69,7 @@ pub struct VulkanDevice {
     instance: ash::Instance,
     #[allow(dead_code)]
     physical_device: vk::PhysicalDevice,
+    physical_device_index: usize,
     device: Arc<ash::Device>,
     queue: vk::Queue,
     queue_family_index: u32,
@@ -96,6 +130,7 @@ impl std::fmt::Debug for VulkanDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VulkanDevice")
             .field("device_name", &self.device_name)
+            .field("physical_device_index", &self.physical_device_index)
             .field("vendor_id", &self.vendor_id)
             .field(
                 "max_compute_shared_memory_size",
@@ -115,41 +150,6 @@ impl std::fmt::Debug for VulkanDevice {
 }
 
 impl VulkanDevice {
-    /// Select an explicit Vulkan physical-device index from environment-style
-    /// values without touching Vulkan. `KILN_VULKAN_DEVICE` wins over the
-    /// llama.cpp-compatible `GGML_VK_VISIBLE_DEVICES`; the latter may contain a
-    /// comma-separated list, so pick the first visible index that exists.
-    pub fn explicit_device_index_from_env_values(
-        device_count: usize,
-        kiln_vulkan_device: Option<&str>,
-        ggml_vk_visible_devices: Option<&str>,
-    ) -> Option<(usize, &'static str)> {
-        if device_count == 0 {
-            return None;
-        }
-
-        if let Some(dev_str) = kiln_vulkan_device {
-            if let Ok(idx) = dev_str.trim().parse::<usize>() {
-                if idx < device_count {
-                    return Some((idx, "KILN_VULKAN_DEVICE"));
-                }
-            }
-        }
-
-        if let Some(visible) = ggml_vk_visible_devices {
-            for idx in visible
-                .split(',')
-                .filter_map(|s| s.trim().parse::<usize>().ok())
-            {
-                if idx < device_count {
-                    return Some((idx, "GGML_VK_VISIBLE_DEVICES"));
-                }
-            }
-        }
-
-        None
-    }
-
     /// Cheap probe: check if Vulkan is available without creating a logical device.
     ///
     /// Creates a minimal Vulkan instance and enumerates physical devices.
@@ -159,30 +159,75 @@ impl VulkanDevice {
     /// The instance is explicitly destroyed on every path (ash 0.37 does not
     /// auto-destroy on drop) so no Vulkan instance handle is leaked.
     pub fn probe() -> bool {
+        Self::probe_selected_physical_device_index()
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// Enumerate and resolve the immutable physical-device policy without
+    /// creating a logical device. Configuration errors are returned rather
+    /// than being collapsed into "Vulkan unavailable".
+    pub fn probe_selected_physical_device_index() -> Result<Option<usize>> {
         let entry = match unsafe { ash::Entry::load() } {
             Ok(e) => e,
-            Err(_) => return false,
+            Err(_) => return Ok(None),
         };
+
+        let policy = vulkan_device_policy();
 
         let app_info = vk::ApplicationInfo::default()
             .application_name(CStr::from_bytes_with_nul(b"Kiln Probe\0").unwrap())
             .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
             .api_version(vk::make_api_version(0, 1, 2, 0));
 
-        let instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
+        let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
+        let mut layer_ptrs: Vec<*const i8> = Vec::new();
+        if policy.validation {
+            let layers = unsafe {
+                entry
+                    .enumerate_instance_layer_properties()
+                    .context("failed to enumerate Vulkan instance layers during startup probe")?
+            };
+            let available = layers.iter().any(|layer| {
+                let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
+                name == validation_layer.as_c_str()
+            });
+            anyhow::ensure!(
+                available,
+                "accelerator.vulkan_validation=true but VK_LAYER_KHRONOS_validation is not installed; install the Vulkan SDK validation-layer package or disable the typed setting"
+            );
+            layer_ptrs.push(validation_layer.as_ptr());
+        }
+
+        let mut instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
+        if !layer_ptrs.is_empty() {
+            instance_info = instance_info.enabled_layer_names(&layer_ptrs);
+        }
 
         let instance = match unsafe { entry.create_instance(&instance_info, None) } {
             Ok(i) => i,
-            Err(_) => return false,
+            Err(error) if policy.validation => {
+                return Err(error).context(
+                    "failed to create Vulkan startup-probe instance with typed validation enabled",
+                );
+            }
+            Err(_) => return Ok(None),
         };
 
-        let available = unsafe { instance.enumerate_physical_devices() }
-            .map(|d| !d.is_empty())
-            .unwrap_or(false);
+        let result = (|| {
+            let physical_devices = unsafe { instance.enumerate_physical_devices() }
+                .context("failed to enumerate Vulkan physical devices during startup probe")?;
+            if physical_devices.is_empty() {
+                return Ok(None);
+            }
+            Self::select_physical_device_index(&instance, &physical_devices, policy.device_index)
+                .map(Some)
+        })();
         unsafe {
             instance.destroy_instance(None);
         }
-        available
+        result
     }
 
     /// Create a new Vulkan device, selecting the best available GPU.
@@ -196,14 +241,14 @@ impl VulkanDevice {
             .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
             .api_version(vk::make_api_version(0, 1, 2, 0));
 
-        // Optional: enable Vulkan validation layers when KILN_VULKAN_VALIDATION
-        // is set (truthy values: 1, true, on, yes). Useful for diagnosing
-        // OOB descriptor access / shader hangs that trigger driver hard
-        // recoveries (e.g. radv/amdgpu "context is lost" — see
-        // VK_ERROR_DEVICE_LOST handling in submit_and_wait()).
+        let policy = vulkan_device_policy();
+
+        // Optional validation is startup-authoritative. It is useful for
+        // diagnosing OOB descriptor access or shader hangs that trigger driver
+        // recoveries (see VK_ERROR_DEVICE_LOST handling in submit_and_wait()).
         let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
         let mut layer_ptrs: Vec<*const i8> = Vec::new();
-        if validation_requested() {
+        if policy.validation {
             let layers = unsafe {
                 entry
                     .enumerate_instance_layer_properties()
@@ -217,13 +262,12 @@ impl VulkanDevice {
                 layer_ptrs.push(validation_layer.as_ptr());
                 tracing::info!(
                     layer = "VK_LAYER_KHRONOS_validation",
-                    "enabling Vulkan validation layer (KILN_VULKAN_VALIDATION set)"
+                    policy_schema_id = VULKAN_DEVICE_POLICY_SCHEMA_ID,
+                    "enabling Vulkan validation layer"
                 );
             } else {
-                tracing::warn!(
-                    "KILN_VULKAN_VALIDATION set but VK_LAYER_KHRONOS_validation \
-                     is not installed; install the Vulkan SDK / validation \
-                     layer package and try again"
+                anyhow::bail!(
+                    "accelerator.vulkan_validation=true but VK_LAYER_KHRONOS_validation is not installed; install the Vulkan SDK validation-layer package or disable the typed setting"
                 );
             }
         }
@@ -253,7 +297,8 @@ impl VulkanDevice {
         }
 
         // Select physical device
-        let physical_device = Self::select_physical_device(&instance, &physical_devices)?;
+        let (physical_device, physical_device_index) =
+            Self::select_physical_device(&instance, &physical_devices, policy.device_index)?;
 
         // Get device properties (includes limits for shared-memory budget checks)
         let properties = unsafe { instance.get_physical_device_properties(physical_device) };
@@ -361,6 +406,7 @@ impl VulkanDevice {
             entry,
             instance,
             physical_device,
+            physical_device_index,
             device,
             queue,
             queue_family_index: compute_family,
@@ -396,56 +442,56 @@ impl VulkanDevice {
     fn select_physical_device(
         instance: &ash::Instance,
         physical_devices: &[vk::PhysicalDevice],
-    ) -> Result<vk::PhysicalDevice> {
-        let kiln_vulkan_device = std::env::var("KILN_VULKAN_DEVICE").ok();
-        let ggml_vk_visible_devices = std::env::var("GGML_VK_VISIBLE_DEVICES").ok();
-        if let Some((idx, source)) = Self::explicit_device_index_from_env_values(
-            physical_devices.len(),
-            kiln_vulkan_device.as_deref(),
-            ggml_vk_visible_devices.as_deref(),
-        ) {
+        configured_index: Option<usize>,
+    ) -> Result<(vk::PhysicalDevice, usize)> {
+        let index =
+            Self::select_physical_device_index(instance, physical_devices, configured_index)?;
+        Ok((physical_devices[index], index))
+    }
+
+    fn select_physical_device_index(
+        instance: &ash::Instance,
+        physical_devices: &[vk::PhysicalDevice],
+        configured_index: Option<usize>,
+    ) -> Result<usize> {
+        if let Some(idx) = configured_index {
+            anyhow::ensure!(
+                idx < physical_devices.len(),
+                "accelerator.vulkan_device_index={idx} is unavailable; Vulkan enumerated {} physical device(s)",
+                physical_devices.len()
+            );
             tracing::info!(
                 device_index = idx,
-                source,
-                "using explicit Vulkan device selection"
+                policy_schema_id = VULKAN_DEVICE_POLICY_SCHEMA_ID,
+                "using configured Vulkan physical device"
             );
-            return Ok(physical_devices[idx]);
-        }
-
-        if let Some(value) = kiln_vulkan_device.as_deref() {
-            tracing::warn!(
-                value,
-                device_count = physical_devices.len(),
-                "ignoring invalid KILN_VULKAN_DEVICE; expected a zero-based Vulkan physical-device index"
-            );
-        } else if let Some(value) = ggml_vk_visible_devices.as_deref() {
-            tracing::warn!(
-                value,
-                device_count = physical_devices.len(),
-                "ignoring GGML_VK_VISIBLE_DEVICES; no listed Vulkan physical-device index is available"
-            );
+            return Ok(idx);
         }
 
         // Prefer discrete GPU
-        for &dev in physical_devices {
+        for (index, &dev) in physical_devices.iter().enumerate() {
             let props = unsafe { instance.get_physical_device_properties(dev) };
             if props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
                 let name = extract_device_name(&props.device_name);
-                tracing::info!(device = %name, "selected discrete GPU");
-                return Ok(dev);
+                tracing::info!(device = %name, device_index = index, "automatically selected discrete GPU");
+                return Ok(index);
             }
         }
 
         // Fall back to first device
         let props = unsafe { instance.get_physical_device_properties(physical_devices[0]) };
         let name = extract_device_name(&props.device_name);
-        tracing::info!(device = %name, "selected first Vulkan device");
-        Ok(physical_devices[0])
+        tracing::info!(device = %name, device_index = 0, "automatically selected first Vulkan device");
+        Ok(0)
     }
 
     /// Get the Vulkan device.
     pub fn device(&self) -> &Arc<ash::Device> {
         &self.device
+    }
+
+    pub fn physical_device_index(&self) -> usize {
+        self.physical_device_index
     }
 
     /// Get the physical device handle.
@@ -838,8 +884,8 @@ impl VulkanDevice {
             anyhow::bail!(
                 "vulkan device terminally lost (VK_ERROR_DEVICE_LOST observed earlier). \
                  Restart the kiln server to recover. \
-                 To diagnose the original GPU fault, set KILN_VULKAN_VALIDATION=1 \
-                 and reproduce — validation layers will surface OOB descriptor \
+                 To diagnose the original GPU fault, set \
+                 accelerator.vulkan_validation=true and reproduce; validation layers will surface OOB descriptor \
                  access or shader timeouts before the driver hard-recovers."
             );
         }
@@ -899,19 +945,9 @@ impl VulkanDevice {
             "vulkan device terminally lost during {op} ({label}): \
              VK_ERROR_DEVICE_LOST. The VkDevice is unrecoverable per the \
              Vulkan spec; restart the kiln server to recover. Set \
-             KILN_VULKAN_VALIDATION=1 to enable validation layers and \
+             accelerator.vulkan_validation=true to enable validation layers and \
              capture the originating fault on the next reproduction."
         )
-    }
-}
-
-fn validation_requested() -> bool {
-    match std::env::var("KILN_VULKAN_VALIDATION") {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            !matches!(v.as_str(), "" | "0" | "false" | "off" | "no")
-        }
-        Err(_) => false,
     }
 }
 
@@ -966,31 +1002,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_vulkan_device_prefers_kiln_env() {
+    fn default_vulkan_device_policy_is_automatic_without_validation() {
+        assert_eq!(VulkanDevicePolicy::default().device_index, None);
+        assert!(!VulkanDevicePolicy::default().validation);
         assert_eq!(
-            VulkanDevice::explicit_device_index_from_env_values(4, Some("2"), Some("1,3")),
-            Some((2, "KILN_VULKAN_DEVICE"))
+            VULKAN_DEVICE_POLICY_SCHEMA_ID,
+            "kiln.vulkan-device-policy.v1"
         );
     }
 
     #[test]
-    fn explicit_vulkan_device_uses_first_valid_ggml_visible_device() {
-        assert_eq!(
-            VulkanDevice::explicit_device_index_from_env_values(4, None, Some("99, 3, 1")),
-            Some((3, "GGML_VK_VISIBLE_DEVICES"))
-        );
-    }
+    fn vulkan_device_policy_install_is_idempotent_and_conflicts_fail_closed() {
+        let policy = VulkanDevicePolicy::default();
+        install_vulkan_device_policy(policy).unwrap();
+        install_vulkan_device_policy(policy).unwrap();
 
-    #[test]
-    fn explicit_vulkan_device_ignores_invalid_or_missing_values() {
-        assert_eq!(
-            VulkanDevice::explicit_device_index_from_env_values(2, Some("amd"), Some("4")),
-            None
+        let error = install_vulkan_device_policy(VulkanDevicePolicy {
+            device_index: Some(1),
+            validation: false,
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("refusing conflicting late policy")
         );
-        assert_eq!(
-            VulkanDevice::explicit_device_index_from_env_values(0, Some("0"), Some("0")),
-            None
-        );
+        assert_eq!(vulkan_device_policy(), policy);
     }
 
     #[test]
@@ -1055,36 +1092,5 @@ mod tests {
         // Marking again must be idempotent (no panic, flag stays true).
         dev.mark_terminally_lost();
         assert!(dev.is_terminally_lost());
-    }
-
-    #[test]
-    fn test_validation_requested_env_parsing() {
-        // Pure parser test, no Vulkan involvement.
-        let cases = [
-            ("", false),
-            ("0", false),
-            ("false", false),
-            ("FALSE", false),
-            ("off", false),
-            ("no", false),
-            ("1", true),
-            ("true", true),
-            ("yes", true),
-            ("on", true),
-        ];
-        for (raw, expected) in cases {
-            // SAFETY: tests in the same module run serially under the
-            // default cargo-test runner; use a fixed env var name here so
-            // we don't collide with the real KILN_VULKAN_VALIDATION at
-            // runtime.
-            unsafe { std::env::set_var("KILN_VULKAN_VALIDATION", raw) };
-            assert_eq!(
-                validation_requested(),
-                expected,
-                "validation_requested({raw:?}) expected {expected}"
-            );
-        }
-        unsafe { std::env::remove_var("KILN_VULKAN_VALIDATION") };
-        assert!(!validation_requested());
     }
 }
