@@ -2264,6 +2264,8 @@ def write_server_config(
     *,
     deterministic: bool | None = None,
     rocm_synchronization_mode: str | None = None,
+    rocm_strided_batched_matmul_mode: str = "auto",
+    rocm_bf16_matmul_output_mode: str = "auto",
     rocm_graph_mode: str | None = None,
     rocm_graph_cache_entries: int = 8,
     rocm_graph_cache_max_bytes: int = 1 << 30,
@@ -2304,6 +2306,9 @@ def write_server_config(
         "",
         "[accelerator]",
         f"rocm_synchronization_mode = {_toml_string(rocm_synchronization_mode)}",
+        "rocm_strided_batched_matmul_mode = "
+        + _toml_string(rocm_strided_batched_matmul_mode),
+        "rocm_bf16_matmul_output_mode = " + _toml_string(rocm_bf16_matmul_output_mode),
         f"rocm_graph_mode = {_toml_string(rocm_graph_mode)}",
         f"rocm_graph_cache_entries = {rocm_graph_cache_entries}",
         f"rocm_graph_cache_max_bytes = {rocm_graph_cache_max_bytes}",
@@ -2591,13 +2596,23 @@ def accelerator_policy_attestation_failures(
         "profile" if graphs_requested else "disabled"
     )
     expected = {
-        "schema_id": "kiln.accelerator-runtime-policy.v2",
-        "version": 2,
+        "schema_id": "kiln.accelerator-runtime-policy.v3",
+        "version": 3,
         "serving_profile": serving_profile,
         "serving_profile_source": "config_file",
         "rocm_synchronization_mode": {
             "configured": synchronization_mode,
             "effective": synchronization_mode,
+            "source": "config_file",
+        },
+        "rocm_strided_batched_matmul_mode": {
+            "configured": "auto",
+            "effective": "auto",
+            "source": "config_file",
+        },
+        "rocm_bf16_matmul_output_mode": {
+            "configured": "auto",
+            "effective": "auto",
             "source": "config_file",
         },
         "rocm_graph_mode": {

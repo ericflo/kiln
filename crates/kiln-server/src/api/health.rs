@@ -2029,7 +2029,7 @@ mod tests {
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v2"
+            "kiln.accelerator-runtime-policy.v3"
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["rocm_graph_cache_max_bytes"]["effective"],
@@ -2038,6 +2038,14 @@ mod tests {
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["rocm_synchronization_mode"]["effective"],
             "legacy_host_barriers"
+        );
+        assert_eq!(
+            json["decode_runtime"]["accelerator_runtime"]["rocm_strided_batched_matmul_mode"]["effective"],
+            "auto"
+        );
+        assert_eq!(
+            json["decode_runtime"]["accelerator_runtime"]["rocm_bf16_matmul_output_mode"]["effective"],
+            "auto"
         );
         assert_eq!(
             json["decode_runtime"]["rocm_synchronization"]["active"],

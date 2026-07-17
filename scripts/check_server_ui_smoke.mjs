@@ -1633,6 +1633,30 @@ async function startServer({
             reclaim_disabled_by_serving_profile: true,
           },
         },
+        accelerator_runtime: {
+          schema_id: 'kiln.accelerator-runtime-policy.v3',
+          version: 3,
+          serving_profile: 'stable',
+          serving_profile_source: 'default',
+          rocm_synchronization_mode: {
+            configured: 'legacy_host_barriers',
+            effective: 'legacy_host_barriers',
+            source: 'default',
+          },
+          rocm_strided_batched_matmul_mode: {
+            configured: 'auto',
+            effective: 'auto',
+            source: 'default',
+          },
+          rocm_bf16_matmul_output_mode: {
+            configured: 'auto',
+            effective: 'auto',
+            source: 'default',
+          },
+          rocm_graph_mode: { configured: 'profile', effective: 'disabled', source: 'default' },
+          rocm_graph_cache_entries: { configured: 8, effective: 8, source: 'default' },
+          rocm_graph_cache_max_bytes: { configured: GIB, effective: GIB, source: 'default' },
+        },
         kv_cache: { num_blocks: 1024, num_blocks_source: 'auto', fp8_enabled: true },
         batching: {
           configuration: {
@@ -2736,6 +2760,14 @@ async function expectDirectDecodeRendezvousRuntimeConfig(page, scenarioLabel) {
   await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths configured[\s\S]*off[\s\S]*config_file/, `${prefix} should render configured mixed-length policy and source`);
   await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths backend[\s\S]*on[\s\S]*backend_policy/, `${prefix} should render backend mixed-length policy and source`);
   await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths effective[\s\S]*off[\s\S]*config_file/, `${prefix} should render effective mixed-length policy and source`);
+}
+
+async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
+  const prefix = `${scenarioLabel} ROCm matmul runtime config`;
+  const selector = '#runtime-config-body';
+  await waitForPanelText(page, selector, /ROCm execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v3[\s\S]*v3/, `${prefix} should render policy schema v3`);
+  await waitForPanelText(page, selector, /ROCm execution[\s\S]*Strided batched matmul[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable strided-batched route and source`);
+  await waitForPanelText(page, selector, /ROCm execution[\s\S]*BF16 matmul output[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable BF16-output route and source`);
 }
 
 async function expectStreamingPrefillRuntimeConfig(page, scenarioLabel) {
@@ -4241,6 +4273,7 @@ async function runSmoke(baseUrl, {
     await waitForPanelText(page, '#runtime-config-body', /Prefill effective[\s\S]*16[\s\S]*effective_decode_width/, 'Runtime config should render bounded effective prefill quantum and source');
     await waitForPanelText(page, '#runtime-config-body', /Burst prefill[\s\S]*on/, 'Runtime config should render backend burst-prefill policy');
     await expectDirectDecodeRendezvousRuntimeConfig(page, 'Desktop');
+    await expectRocmMatmulRuntimeConfig(page, 'Desktop');
     await expectStreamingPrefillRuntimeConfig(page, 'Desktop');
     await expectCheckpointBoundaryRuntimeConfig(page, 'Desktop');
     await expectCheckpointBoundaryRuntimeConfigLayout(page, 'Desktop');

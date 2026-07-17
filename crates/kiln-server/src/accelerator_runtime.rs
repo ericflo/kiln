@@ -140,9 +140,33 @@ pub fn install_startup_policy(
                 kiln_tensor::RocmSynchronizationMode::StreamOrdered
             }
         };
+        let strided_batched_mode = match policy.rocm_strided_batched_matmul_mode.effective {
+            crate::config::RocmStridedBatchedMatmulMode::Auto => {
+                kiln_tensor::RocmStridedBatchedMatmulMode::Auto
+            }
+            crate::config::RocmStridedBatchedMatmulMode::Enabled => {
+                kiln_tensor::RocmStridedBatchedMatmulMode::Enabled
+            }
+            crate::config::RocmStridedBatchedMatmulMode::Disabled => {
+                kiln_tensor::RocmStridedBatchedMatmulMode::Disabled
+            }
+        };
+        let bf16_output_mode = match policy.rocm_bf16_matmul_output_mode.effective {
+            crate::config::RocmBf16MatmulOutputMode::Auto => {
+                kiln_tensor::RocmBf16MatmulOutputMode::Auto
+            }
+            crate::config::RocmBf16MatmulOutputMode::NativeBf16 => {
+                kiln_tensor::RocmBf16MatmulOutputMode::NativeBf16
+            }
+            crate::config::RocmBf16MatmulOutputMode::F32ThenCast => {
+                kiln_tensor::RocmBf16MatmulOutputMode::F32ThenCast
+            }
+        };
         kiln_tensor::primary_rocm_context_with_execution_policy(
             device_index,
-            kiln_tensor::RocmExecutionPolicy::new(synchronization_mode),
+            kiln_tensor::RocmExecutionPolicy::new(synchronization_mode).with_matmul_policy(
+                kiln_tensor::RocmMatmulPolicy::new(strided_batched_mode, bf16_output_mode),
+            ),
         )
         .with_context(|| {
             format!(

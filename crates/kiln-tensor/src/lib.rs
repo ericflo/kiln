@@ -159,8 +159,9 @@ pub use fp8::{
 };
 #[cfg(feature = "rocm")]
 pub use kiln_hip::{
-    ROCM_SYNC_REASON_COUNT, RocmExecutionPolicy, RocmStreamId, RocmStreamSubmission,
-    RocmSyncReason, RocmSyncReasonStats, RocmSyncTelemetrySnapshot, RocmSynchronizationMode,
+    ROCM_SYNC_REASON_COUNT, RocmBf16MatmulOutputMode, RocmExecutionPolicy, RocmMatmulPolicy,
+    RocmStreamId, RocmStreamSubmission, RocmStridedBatchedMatmulMode, RocmSyncReason,
+    RocmSyncReasonStats, RocmSyncTelemetrySnapshot, RocmSynchronizationMode,
 };
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;

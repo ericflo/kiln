@@ -8792,32 +8792,6 @@
     },
     {
       "api": "var",
-      "argument": "name",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/rocm_matmul.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_TRACE_ROCM_MATMUL_FALLBACK",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/rocm_matmul.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_DISABLE_ROCM_CONCAT_SAFE_ROW_ASSEMBLY",
       "argument_kind": "literal",
       "classification": "experimental_debug",
@@ -10676,11 +10650,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 528,
-    "literal_kiln_read_names": 365,
+    "literal_kiln_read_call_sites": 527,
+    "literal_kiln_read_names": 364,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 324,
+      "experimental_debug": 323,
       "public_stable": 1,
       "test_only": 41
     },
@@ -10690,13 +10664,13 @@
       "test_only": 353
     },
     "process_mutation_entries": 205,
-    "read_call_sites": 903,
+    "read_call_sites": 901,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 431,
+      "experimental_debug": 429,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 615
+    "read_entries": 613
   }
 }

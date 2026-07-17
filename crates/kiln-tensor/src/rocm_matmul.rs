@@ -164,15 +164,6 @@ fn rocm_matmul_execution_error(
     ))
 }
 
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
-
 const ROCM_MATMUL_OUTPUT_ELEMS_SYNC_THRESHOLD: u128 = 1_048_576;
 const ROCM_MATMUL_WORK_SYNC_THRESHOLD: u128 = 268_435_456;
 
@@ -194,12 +185,12 @@ fn should_skip_rocm_strided_batched_matmul(
     batch: usize,
     dtype: DType,
     out_dtype: DType,
-    op: &str,
+    mode: crate::RocmStridedBatchedMatmulMode,
 ) -> bool {
-    if batch <= 1 || env_truthy("KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL") {
+    if batch <= 1 || mode == crate::RocmStridedBatchedMatmulMode::Enabled {
         return false;
     }
-    if env_truthy("KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL") {
+    if mode == crate::RocmStridedBatchedMatmulMode::Disabled {
         return true;
     }
 
@@ -225,13 +216,6 @@ fn should_skip_rocm_strided_batched_matmul(
             (dtype, out_dtype),
             (DType::BF16, DType::F32) | (DType::F32, DType::F32)
         );
-
-    if large_attention_like && env_truthy("KILN_TRACE_ROCM_MATMUL_FALLBACK") {
-        eprintln!(
-            "kiln_rocm_matmul_skip_strided_batch op={op} m={m} n={n} k={k} batch={batch} \
-             dtype={dtype} out_dtype={out_dtype} output_elems={output_elems} work={work}"
-        );
-    }
 
     large_attention_like
 }
@@ -315,16 +299,15 @@ fn rocm_bf16_output_matmul_via_f32(
     batch: usize,
     dtype: DType,
     out_dtype: DType,
-    op: &str,
+    mode: crate::RocmBf16MatmulOutputMode,
 ) -> bool {
-    if dtype != DType::BF16
-        || out_dtype != DType::BF16
-        || env_truthy("KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT")
-    {
+    if dtype != DType::BF16 || out_dtype != DType::BF16 {
         return false;
     }
-    if env_truthy("KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT") {
-        return true;
+    match mode {
+        crate::RocmBf16MatmulOutputMode::NativeBf16 => return false,
+        crate::RocmBf16MatmulOutputMode::F32ThenCast => return true,
+        crate::RocmBf16MatmulOutputMode::Auto => {}
     }
 
     // ROCm 7.2 hipBLASLt on gfx115x can return non-finite BF16 output for
@@ -342,11 +325,6 @@ fn rocm_bf16_output_matmul_via_f32(
     let large_projection = m >= 1024 && n >= 512 && k >= 512 && work >= (1u128 << 31);
     let large_output = m >= 512 && n >= 512 && output_elems >= 1_048_576;
     let tall_skinny_lora_compression = m >= 1024 && n <= 64 && k >= 512;
-    if (large_projection || large_output || tall_skinny_lora_compression)
-        && env_truthy("KILN_TRACE_ROCM_BF16_MATMUL_F32_OUTPUT")
-    {
-        eprintln!("kiln_rocm_bf16_matmul_f32_output op={op} m={m} n={n} k={k} batch={batch}");
-    }
     large_projection || large_output || tall_skinny_lora_compression
 }
 
@@ -823,7 +801,15 @@ fn rocm_matmul_dispatch(
         .iter()
         .product::<usize>()
         .max(1);
-    if rocm_bf16_output_matmul_via_f32(m, n, k, batch, dtype, out_dtype, op) {
+    if rocm_bf16_output_matmul_via_f32(
+        m,
+        n,
+        k,
+        batch,
+        dtype,
+        out_dtype,
+        ctx.execution_policy().matmul.bf16_output_mode,
+    ) {
         // ROCm 7.2's BF16-output hipBLASLt path is unstable for large GEMMs,
         // so this branch computes FP32 output and casts back. Keep the
         // matmul->cast handoff explicit: hipBLASLt and the cast kernel both
@@ -891,7 +877,17 @@ fn rocm_matmul_dispatch(
     )?;
     let request = rocm_blaslt_request(request);
 
-    if batch > 1 && !should_skip_rocm_strided_batched_matmul(m, n, k, batch, dtype, out_dtype, op) {
+    if batch > 1
+        && !should_skip_rocm_strided_batched_matmul(
+            m,
+            n,
+            k,
+            batch,
+            dtype,
+            out_dtype,
+            ctx.execution_policy().matmul.strided_batched_mode,
+        )
+    {
         let a_ptr = (a_base + a_off_root) as *const core::ffi::c_void;
         let b_ptr = (b_base + b_off_root) as *const core::ffi::c_void;
         let c_ptr = out_base as *mut core::ffi::c_void;
@@ -904,16 +900,6 @@ fn rocm_matmul_dispatch(
                 storage_arc,
                 Layout::contiguous(out_shape),
                 TensorId::next(),
-            );
-        } else if std::env::var("KILN_TRACE_ROCM_MATMUL_FALLBACK")
-            .as_deref()
-            .is_ok_and(|v| matches!(v, "1" | "true" | "TRUE" | "yes" | "on"))
-        {
-            eprintln!(
-                "kiln_rocm_matmul_fallback op={op} m={m} n={n} k={k} batch={batch} \
-                 dtype={dtype} out_dtype={out_dtype} a_layout={a_layout:?} \
-                 b_layout={b_layout:?} error={:?}",
-                batched.err(),
             );
         }
     }
@@ -1206,4 +1192,99 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
     )?;
     let storage_arc: Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(out_shape), TensorId::next())
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn strided_batched_route_is_a_pure_function_of_shape_and_installed_mode() {
+        let risky = (128, 128, 2048, 64, DType::BF16, DType::F32);
+        assert!(should_skip_rocm_strided_batched_matmul(
+            risky.0,
+            risky.1,
+            risky.2,
+            risky.3,
+            risky.4,
+            risky.5,
+            crate::RocmStridedBatchedMatmulMode::Auto,
+        ));
+        assert!(!should_skip_rocm_strided_batched_matmul(
+            risky.0,
+            risky.1,
+            risky.2,
+            risky.3,
+            risky.4,
+            risky.5,
+            crate::RocmStridedBatchedMatmulMode::Enabled,
+        ));
+        assert!(should_skip_rocm_strided_batched_matmul(
+            8,
+            8,
+            8,
+            2,
+            DType::BF16,
+            DType::BF16,
+            crate::RocmStridedBatchedMatmulMode::Disabled,
+        ));
+        assert!(!should_skip_rocm_strided_batched_matmul(
+            risky.0,
+            risky.1,
+            risky.2,
+            1,
+            risky.4,
+            risky.5,
+            crate::RocmStridedBatchedMatmulMode::Disabled,
+        ));
+    }
+
+    #[test]
+    fn bf16_output_route_is_a_pure_function_of_shape_dtype_and_installed_mode() {
+        assert!(rocm_bf16_output_matmul_via_f32(
+            1024,
+            1024,
+            1024,
+            1,
+            DType::BF16,
+            DType::BF16,
+            crate::RocmBf16MatmulOutputMode::Auto,
+        ));
+        assert!(!rocm_bf16_output_matmul_via_f32(
+            16,
+            16,
+            16,
+            1,
+            DType::BF16,
+            DType::BF16,
+            crate::RocmBf16MatmulOutputMode::Auto,
+        ));
+        assert!(!rocm_bf16_output_matmul_via_f32(
+            1024,
+            1024,
+            1024,
+            1,
+            DType::BF16,
+            DType::BF16,
+            crate::RocmBf16MatmulOutputMode::NativeBf16,
+        ));
+        assert!(rocm_bf16_output_matmul_via_f32(
+            16,
+            16,
+            16,
+            1,
+            DType::BF16,
+            DType::BF16,
+            crate::RocmBf16MatmulOutputMode::F32ThenCast,
+        ));
+        assert!(!rocm_bf16_output_matmul_via_f32(
+            1024,
+            1024,
+            1024,
+            1,
+            DType::F32,
+            DType::BF16,
+            crate::RocmBf16MatmulOutputMode::F32ThenCast,
+        ));
+    }
 }

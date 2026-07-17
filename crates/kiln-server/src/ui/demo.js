@@ -151,11 +151,13 @@
     '/v1/config': () => ({
       serving_profile: { profile: 'stable', source: 'default' },
       accelerator_runtime: {
-        schema_id: 'kiln.accelerator-runtime-policy.v2',
-        version: 2,
+        schema_id: 'kiln.accelerator-runtime-policy.v3',
+        version: 3,
         serving_profile: 'stable',
         serving_profile_source: 'default',
         rocm_synchronization_mode: { configured: 'legacy_host_barriers', effective: 'legacy_host_barriers', source: 'default' },
+        rocm_strided_batched_matmul_mode: { configured: 'auto', effective: 'auto', source: 'default' },
+        rocm_bf16_matmul_output_mode: { configured: 'auto', effective: 'auto', source: 'default' },
         rocm_graph_mode: { configured: 'profile', effective: 'disabled', source: 'default' },
         rocm_graph_cache_entries: { configured: 8, effective: 8, source: 'default' },
         rocm_graph_cache_max_bytes: { configured: GIB, effective: GIB, source: 'default' },

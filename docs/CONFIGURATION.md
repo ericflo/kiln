@@ -119,18 +119,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 101 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 103 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 101 fixed fields:
+credential. Of the 103 fixed fields:
 
-- 96 implement the canonical mechanical environment name;
-- 66 also retain one or more deprecated compatibility spellings (70 aliases
+- 98 implement the canonical mechanical environment name;
+- 69 also retain one or more deprecated compatibility spellings (74 aliases
   total);
 - 5 are config-file-only and have no environment override;
-- the 70 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+- the 74 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 101 fixed fields and both dynamic credential fields.
+The tables below cover all 103 fixed fields and both dynamic credential fields.
 The schema additionally records the accepted deprecated TOML-only
 `streaming_prefill.enabled` compatibility field so validators match the loader.
 
@@ -179,7 +179,7 @@ disabled.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v2`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v3`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
 dashboard all report the same configured/effective/source values; lower model,
 tensor, and kernel paths do not re-read these public environment names.
@@ -187,6 +187,8 @@ tensor, and kernel paths do not re-read these public environment names.
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
 |---|---|---|---|---|
 | `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
+| `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | `KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL` and `KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
+| `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | `KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT` and `KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT` (deprecated compatibility) | `auto`, `native_bf16`, or `f32_then_cast`, case-insensitive. `auto` applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
 | `accelerator.rocm_graph_mode` | string enum; `"profile"` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` (implemented) | `KILN_ROCM_GRAPHS` and `KILN_ROCM_GRAPH_CAPTURE` (deprecated compatibility) | `profile`, `disabled`, `warmup_then_eager`, or `lazy_capture_replay`, case-insensitive. `profile` resolves to `disabled` under stable/maintenance and `lazy_capture_replay` under experimental. The two explicit non-disabled modes require the experimental profile. Restart required. |
 | `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | `KILN_ROCM_GRAPH_CACHE_MAX` (deprecated compatibility) | `1..=64`. Bounds retained native graph entries in every product and embedding constructor; zero or unbounded capacities are rejected. Restart required. |
 | `accelerator.rocm_graph_cache_max_bytes` | unsigned integer bytes; `1073741824` (1 GiB) | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` (implemented) | none | `67108864..=17179869184` (64 MiB through 16 GiB). Independently bounds requested physical bytes retained by graph-owned stable tensors, capture arenas, private-stream hipBLASLt workspaces, and owner slot state. Opaque HIP graph/exec/stream/event overhead is counted as objects and remains subject to live driver-pressure policy. Restart required. |
@@ -208,6 +210,24 @@ global-state drains. External yield waits for the primary producer stream
 rather than the whole device. A replayed graph records completion on its
 capture stream and makes the primary stream wait on that event before the
 external-yield stream wait, so replay work is included.
+
+### ROCm matmul route semantics
+
+Both matmul fields default to `auto`, preserving the routes used by the accepted
+Strix Halo ROCm receipts. The strided-batched guard uses per-row GEMMs for
+large attention-shaped BF16/F32 batches where ROCm 7.2 hipBLASLt has returned
+incorrect values. The BF16-output guard requests F32 output followed by an
+on-device BF16 cast for large projections, large outputs, and tall low-rank
+compression shapes where the native BF16 epilogue has returned non-finite
+values. These are deterministic shape and dtype decisions; they do not inspect
+live memory and cannot change after the primary ROCm context is created.
+
+The explicit routes exist for controlled A/B qualification, require
+`server.serving_profile = "experimental"`, and are reported with source
+attribution by `kiln config`, `/v1/config`, health, and trusted debug state. The
+former force/disable variables are warning compatibility aliases resolved once
+by the typed startup registry. The two ad hoc trace variables were deleted;
+they are not configuration and no matmul path reads the process environment.
 
 The primary ROCm context stores the immutable policy. A second caller asking
 for a different policy on the same device receives a startup error naming the
@@ -1520,7 +1540,7 @@ Explicit source tracking (`default`, `config_file`, or `environment`) currently
 exists for `server.serving_profile`, `server.deterministic`,
 `server.stream_stall_grace_ms`, the three server batching/prefill budgets,
 `server.max_decode_batch`, all eight `[batching]` fields, all six
-`[streaming_prefill]` fields, all four `[accelerator]` fields, and
+`[streaming_prefill]` fields, all six `[accelerator]` fields, and
 `memory.reclaim_mode`. Other fields have
 resolved values but do not yet carry per-field source metadata.
 

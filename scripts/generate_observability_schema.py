@@ -166,6 +166,18 @@ def build_definitions() -> None:
         "The process-lifetime ROCm synchronization policy.",
     )
     add_enum(
+        "RocmStridedBatchedMatmulMode",
+        "RocmStridedBatchedMatmulMode",
+        ["auto", "enabled", "disabled"],
+        "The process-lifetime ROCm strided-batched matmul route.",
+    )
+    add_enum(
+        "RocmBf16MatmulOutputMode",
+        "RocmBf16MatmulOutputMode",
+        ["auto", "native_bf16", "f32_then_cast"],
+        "The process-lifetime ROCm BF16-output matmul route.",
+    )
+    add_enum(
         "RocmGraphMode",
         "RocmGraphMode",
         ["profile", "disabled", "warmup_then_eager", "lazy_capture_replay"],
@@ -393,6 +405,16 @@ def build_definitions() -> None:
     )
     for name, rust_value, value_schema in (
         ("ResolvedRocmSynchronizationMode", "RocmSynchronizationMode", ref("RocmSynchronizationMode")),
+        (
+            "ResolvedRocmStridedBatchedMatmulMode",
+            "RocmStridedBatchedMatmulMode",
+            ref("RocmStridedBatchedMatmulMode"),
+        ),
+        (
+            "ResolvedRocmBf16MatmulOutputMode",
+            "RocmBf16MatmulOutputMode",
+            ref("RocmBf16MatmulOutputMode"),
+        ),
         ("ResolvedRocmGraphMode", "RocmGraphMode", ref("RocmGraphMode")),
         ("ResolvedAcceleratorInteger", "usize | u64", ref("NonNegativeInteger")),
     ):
@@ -415,6 +437,10 @@ def build_definitions() -> None:
             "serving_profile": ref("ServingProfile"),
             "serving_profile_source": ref("ConfigValueSource"),
             "rocm_synchronization_mode": ref("ResolvedRocmSynchronizationMode"),
+            "rocm_strided_batched_matmul_mode": ref(
+                "ResolvedRocmStridedBatchedMatmulMode"
+            ),
+            "rocm_bf16_matmul_output_mode": ref("ResolvedRocmBf16MatmulOutputMode"),
             "rocm_graph_mode": ref("ResolvedRocmGraphMode"),
             "rocm_graph_cache_entries": ref("ResolvedAcceleratorInteger"),
             "rocm_graph_cache_max_bytes": ref("ResolvedAcceleratorInteger"),

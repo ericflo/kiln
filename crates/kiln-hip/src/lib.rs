@@ -536,11 +536,57 @@ pub enum RocmSynchronizationMode {
     StreamOrdered,
 }
 
+/// Route policy for hipBLASLt strided-batched matmul.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RocmStridedBatchedMatmulMode {
+    /// Use the qualified shape and dtype guard for known-unsafe gfx115x cases.
+    #[default]
+    Auto,
+    /// Always use hipBLASLt strided batching when the logical batch is larger
+    /// than one. This is an experimental correctness-comparison route.
+    Enabled,
+    /// Always issue one hipBLASLt operation per logical batch row.
+    Disabled,
+}
+
+/// Output route for BF16-input, BF16-output hipBLASLt matmul.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RocmBf16MatmulOutputMode {
+    /// Use the qualified size guard for ROCm 7.2's unstable BF16 epilogue.
+    #[default]
+    Auto,
+    /// Always request native BF16 output from hipBLASLt.
+    NativeBf16,
+    /// Always request F32 output and cast it to BF16 on the device.
+    F32ThenCast,
+}
+
+/// Immutable ROCm matmul route policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RocmMatmulPolicy {
+    pub strided_batched_mode: RocmStridedBatchedMatmulMode,
+    pub bf16_output_mode: RocmBf16MatmulOutputMode,
+}
+
+impl RocmMatmulPolicy {
+    pub const fn new(
+        strided_batched_mode: RocmStridedBatchedMatmulMode,
+        bf16_output_mode: RocmBf16MatmulOutputMode,
+    ) -> Self {
+        Self {
+            strided_batched_mode,
+            bf16_output_mode,
+        }
+    }
+}
+
 /// Immutable execution policy installed when a [`RocmContext`] is created.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RocmExecutionPolicy {
     /// Synchronization discipline for steady-state ROCm execution.
     pub synchronization_mode: RocmSynchronizationMode,
+    /// Matmul route policy fixed before the primary context is created.
+    pub matmul: RocmMatmulPolicy,
 }
 
 impl RocmExecutionPolicy {
@@ -548,7 +594,17 @@ impl RocmExecutionPolicy {
     pub const fn new(synchronization_mode: RocmSynchronizationMode) -> Self {
         Self {
             synchronization_mode,
+            matmul: RocmMatmulPolicy::new(
+                RocmStridedBatchedMatmulMode::Auto,
+                RocmBf16MatmulOutputMode::Auto,
+            ),
         }
+    }
+
+    /// Attach an immutable matmul route policy before context creation.
+    pub const fn with_matmul_policy(mut self, matmul: RocmMatmulPolicy) -> Self {
+        self.matmul = matmul;
+        self
     }
 }
 

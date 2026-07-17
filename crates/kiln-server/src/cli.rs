@@ -1674,6 +1674,20 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 accelerator_runtime.rocm_synchronization_mode.source,
             );
             println!(
+                "  {} {} (source: {})",
+                style("ROCm strided batched matmul:").dim(),
+                accelerator_runtime
+                    .rocm_strided_batched_matmul_mode
+                    .effective,
+                accelerator_runtime.rocm_strided_batched_matmul_mode.source,
+            );
+            println!(
+                "  {} {} (source: {})",
+                style("ROCm BF16 matmul output:").dim(),
+                accelerator_runtime.rocm_bf16_matmul_output_mode.effective,
+                accelerator_runtime.rocm_bf16_matmul_output_mode.source,
+            );
+            println!(
                 "  {} {} -> {} (source: {})",
                 style("ROCm graph mode:").dim(),
                 accelerator_runtime.rocm_graph_mode.configured,

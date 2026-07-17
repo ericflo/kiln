@@ -106,6 +106,16 @@ pub const ROCM_GRAPH_CAPTURE_ENV: &str = "KILN_ROCM_GRAPH_CAPTURE";
 /// Compatibility alias for canonical
 /// `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES`.
 pub const ROCM_GRAPH_CACHE_MAX_ENV: &str = "KILN_ROCM_GRAPH_CACHE_MAX";
+/// Compatibility aliases for canonical
+/// `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE`.
+pub const FORCE_ROCM_STRIDED_BATCHED_MATMUL_ENV: &str = "KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL";
+pub const DISABLE_ROCM_STRIDED_BATCHED_MATMUL_ENV: &str =
+    "KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL";
+/// Compatibility aliases for canonical
+/// `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE`.
+pub const FORCE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV: &str = "KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT";
+pub const DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV: &str =
+    "KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT";
 /// Stable default number of process-lifetime ROCm graph-cache entries.
 pub const DEFAULT_ROCM_GRAPH_CACHE_ENTRIES: usize = 8;
 pub const ROCM_GRAPH_CACHE_ENTRIES_MIN: usize = 1;
@@ -115,8 +125,8 @@ pub const DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MIN: u64 = 64 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024 * 1024;
 /// Versioned schema identity shared by config, health, and debug diagnostics.
-pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v2";
-pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 2;
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v3";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 3;
 
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
@@ -1352,6 +1362,233 @@ impl<'de> Deserialize<'de> for RocmSynchronizationModeSetting {
     }
 }
 
+/// Startup-authoritative route selection for ROCm strided-batched matmul.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RocmStridedBatchedMatmulMode {
+    /// Apply the qualified gfx115x shape and dtype guard.
+    #[default]
+    Auto,
+    /// Always use the strided-batched hipBLASLt route when batch is greater
+    /// than one. This requires the experimental serving profile.
+    Enabled,
+    /// Always issue one hipBLASLt operation per logical batch row. This
+    /// requires the experimental serving profile.
+    Disabled,
+}
+
+impl RocmStridedBatchedMatmulMode {
+    fn parse(raw: &str, label: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "enabled" => Ok(Self::Enabled),
+            "disabled" => Ok(Self::Disabled),
+            _ => anyhow::bail!("{label} must be one of auto, enabled, or disabled; got {raw:?}"),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+impl fmt::Display for RocmStridedBatchedMatmulMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Source-tracked ROCm strided-batched matmul route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RocmStridedBatchedMatmulModeSetting {
+    mode: RocmStridedBatchedMatmulMode,
+    source: ConfigValueSource,
+}
+
+impl RocmStridedBatchedMatmulModeSetting {
+    pub const fn new(mode: RocmStridedBatchedMatmulMode, source: ConfigValueSource) -> Self {
+        Self { mode, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let mode = match name {
+            FORCE_ROCM_STRIDED_BATCHED_MATMUL_ENV => {
+                if parse_required_bool_env(name, raw)? {
+                    RocmStridedBatchedMatmulMode::Enabled
+                } else {
+                    RocmStridedBatchedMatmulMode::Auto
+                }
+            }
+            DISABLE_ROCM_STRIDED_BATCHED_MATMUL_ENV => {
+                if parse_required_bool_env(name, raw)? {
+                    RocmStridedBatchedMatmulMode::Disabled
+                } else {
+                    RocmStridedBatchedMatmulMode::Auto
+                }
+            }
+            _ => RocmStridedBatchedMatmulMode::parse(raw, name)?,
+        };
+        Ok(Self::new(mode, ConfigValueSource::Environment))
+    }
+
+    pub const fn mode(self) -> RocmStridedBatchedMatmulMode {
+        self.mode
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for RocmStridedBatchedMatmulModeSetting {
+    fn default() -> Self {
+        Self::new(
+            RocmStridedBatchedMatmulMode::Auto,
+            ConfigValueSource::Default,
+        )
+    }
+}
+
+impl Serialize for RocmStridedBatchedMatmulModeSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.mode.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RocmStridedBatchedMatmulModeSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let mode = RocmStridedBatchedMatmulMode::parse(
+            &raw,
+            "accelerator.rocm_strided_batched_matmul_mode",
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(Self::new(mode, ConfigValueSource::ConfigFile))
+    }
+}
+
+/// Startup-authoritative BF16-output route for ROCm matmul.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RocmBf16MatmulOutputMode {
+    /// Apply the qualified ROCm 7.2 shape guard.
+    #[default]
+    Auto,
+    /// Always request native BF16 output from hipBLASLt. This requires the
+    /// experimental serving profile.
+    NativeBf16,
+    /// Always request F32 output and cast it to BF16 on-device. This requires
+    /// the experimental serving profile.
+    F32ThenCast,
+}
+
+impl RocmBf16MatmulOutputMode {
+    fn parse(raw: &str, label: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "native_bf16" => Ok(Self::NativeBf16),
+            "f32_then_cast" => Ok(Self::F32ThenCast),
+            _ => anyhow::bail!(
+                "{label} must be one of auto, native_bf16, or f32_then_cast; got {raw:?}"
+            ),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::NativeBf16 => "native_bf16",
+            Self::F32ThenCast => "f32_then_cast",
+        }
+    }
+}
+
+impl fmt::Display for RocmBf16MatmulOutputMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Source-tracked ROCm BF16-output matmul route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RocmBf16MatmulOutputModeSetting {
+    mode: RocmBf16MatmulOutputMode,
+    source: ConfigValueSource,
+}
+
+impl RocmBf16MatmulOutputModeSetting {
+    pub const fn new(mode: RocmBf16MatmulOutputMode, source: ConfigValueSource) -> Self {
+        Self { mode, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let mode = match name {
+            FORCE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV => {
+                if parse_required_bool_env(name, raw)? {
+                    RocmBf16MatmulOutputMode::F32ThenCast
+                } else {
+                    RocmBf16MatmulOutputMode::Auto
+                }
+            }
+            DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV => {
+                if parse_required_bool_env(name, raw)? {
+                    RocmBf16MatmulOutputMode::NativeBf16
+                } else {
+                    RocmBf16MatmulOutputMode::Auto
+                }
+            }
+            _ => RocmBf16MatmulOutputMode::parse(raw, name)?,
+        };
+        Ok(Self::new(mode, ConfigValueSource::Environment))
+    }
+
+    pub const fn mode(self) -> RocmBf16MatmulOutputMode {
+        self.mode
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for RocmBf16MatmulOutputModeSetting {
+    fn default() -> Self {
+        Self::new(RocmBf16MatmulOutputMode::Auto, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for RocmBf16MatmulOutputModeSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.mode.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RocmBf16MatmulOutputModeSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let mode =
+            RocmBf16MatmulOutputMode::parse(&raw, "accelerator.rocm_bf16_matmul_output_mode")
+                .map_err(serde::de::Error::custom)?;
+        Ok(Self::new(mode, ConfigValueSource::ConfigFile))
+    }
+}
+
 /// Configured ROCm graph lifecycle.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1592,6 +1829,8 @@ pub struct ResolvedAcceleratorRuntimePolicy {
     pub serving_profile: ServingProfile,
     pub serving_profile_source: ConfigValueSource,
     pub rocm_synchronization_mode: ResolvedAcceleratorValue<RocmSynchronizationMode>,
+    pub rocm_strided_batched_matmul_mode: ResolvedAcceleratorValue<RocmStridedBatchedMatmulMode>,
+    pub rocm_bf16_matmul_output_mode: ResolvedAcceleratorValue<RocmBf16MatmulOutputMode>,
     pub rocm_graph_mode: ResolvedAcceleratorValue<RocmGraphMode>,
     pub rocm_graph_cache_entries: ResolvedAcceleratorValue<usize>,
     pub rocm_graph_cache_max_bytes: ResolvedAcceleratorValue<u64>,
@@ -1603,6 +1842,8 @@ pub struct ResolvedAcceleratorRuntimePolicy {
 #[serde(default, deny_unknown_fields)]
 pub struct AcceleratorRuntimeConfig {
     pub rocm_synchronization_mode: RocmSynchronizationModeSetting,
+    pub rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting,
+    pub rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting,
     pub rocm_graph_mode: RocmGraphModeSetting,
     pub rocm_graph_cache_entries: RocmGraphCacheEntries,
     pub rocm_graph_cache_max_bytes: RocmGraphCacheMaxBytes,
@@ -1632,6 +1873,16 @@ impl AcceleratorRuntimeConfig {
                 effective: self.rocm_synchronization_mode.mode(),
                 source: self.rocm_synchronization_mode.source(),
             },
+            rocm_strided_batched_matmul_mode: ResolvedAcceleratorValue {
+                configured: self.rocm_strided_batched_matmul_mode.mode(),
+                effective: self.rocm_strided_batched_matmul_mode.mode(),
+                source: self.rocm_strided_batched_matmul_mode.source(),
+            },
+            rocm_bf16_matmul_output_mode: ResolvedAcceleratorValue {
+                configured: self.rocm_bf16_matmul_output_mode.mode(),
+                effective: self.rocm_bf16_matmul_output_mode.mode(),
+                source: self.rocm_bf16_matmul_output_mode.source(),
+            },
             rocm_graph_mode: ResolvedAcceleratorValue {
                 configured: configured_graph_mode,
                 effective: effective_graph_mode,
@@ -1660,6 +1911,22 @@ impl AcceleratorRuntimeConfig {
                 "accelerator.rocm_synchronization_mode=stream_ordered requires server.serving_profile=experimental; got {profile}"
             );
         }
+        if self.rocm_strided_batched_matmul_mode.mode() != RocmStridedBatchedMatmulMode::Auto
+            && profile != ServingProfile::Experimental
+        {
+            anyhow::bail!(
+                "accelerator.rocm_strided_batched_matmul_mode={} requires server.serving_profile=experimental; got {profile}",
+                self.rocm_strided_batched_matmul_mode.mode()
+            );
+        }
+        if self.rocm_bf16_matmul_output_mode.mode() != RocmBf16MatmulOutputMode::Auto
+            && profile != ServingProfile::Experimental
+        {
+            anyhow::bail!(
+                "accelerator.rocm_bf16_matmul_output_mode={} requires server.serving_profile=experimental; got {profile}",
+                self.rocm_bf16_matmul_output_mode.mode()
+            );
+        }
         if matches!(
             self.rocm_graph_mode.mode(),
             RocmGraphMode::WarmupThenEager | RocmGraphMode::LazyCaptureReplay
@@ -1679,6 +1946,8 @@ impl Default for AcceleratorRuntimeConfig {
     fn default() -> Self {
         Self {
             rocm_synchronization_mode: RocmSynchronizationModeSetting::default(),
+            rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting::default(),
+            rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting::default(),
             rocm_graph_mode: RocmGraphModeSetting::default(),
             rocm_graph_cache_entries: RocmGraphCacheEntries::default(),
             rocm_graph_cache_max_bytes: RocmGraphCacheMaxBytes::default(),
@@ -4346,6 +4615,18 @@ impl NormalizedEnvValue for RocmSynchronizationModeSetting {
     }
 }
 
+impl NormalizedEnvValue for RocmStridedBatchedMatmulModeSetting {
+    fn normalized_env_value(&self) -> String {
+        self.mode().as_str().to_owned()
+    }
+}
+
+impl NormalizedEnvValue for RocmBf16MatmulOutputModeSetting {
+    fn normalized_env_value(&self) -> String {
+        self.mode().as_str().to_owned()
+    }
+}
+
 impl NormalizedEnvValue for RocmGraphModeSetting {
     fn normalized_env_value(&self) -> String {
         self.mode().as_str().to_owned()
@@ -4649,6 +4930,12 @@ macro_rules! public_env_parser {
     (rocm_synchronization_mode) => {
         RocmSynchronizationModeSetting::from_named_environment_value
     };
+    (rocm_strided_batched_matmul_mode) => {
+        RocmStridedBatchedMatmulModeSetting::from_named_environment_value
+    };
+    (rocm_bf16_matmul_output_mode) => {
+        RocmBf16MatmulOutputModeSetting::from_named_environment_value
+    };
     (rocm_graph_mode) => {
         RocmGraphModeSetting::from_named_environment_value
     };
@@ -4858,6 +5145,24 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     public_env_field!(
         rocm_synchronization_mode,
         accelerator.rocm_synchronization_mode
+    ),
+    public_env_field!(
+        reject_multiple_aliases,
+        rocm_strided_batched_matmul_mode,
+        accelerator.rocm_strided_batched_matmul_mode,
+        [
+            FORCE_ROCM_STRIDED_BATCHED_MATMUL_ENV,
+            DISABLE_ROCM_STRIDED_BATCHED_MATMUL_ENV
+        ]
+    ),
+    public_env_field!(
+        reject_multiple_aliases,
+        rocm_bf16_matmul_output_mode,
+        accelerator.rocm_bf16_matmul_output_mode,
+        [
+            FORCE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV,
+            DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV
+        ]
     ),
     public_env_field!(
         reject_multiple_aliases,
@@ -6224,9 +6529,11 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     const EXPECTED_PUBLIC_ENV_NAMES: &[&str] = &[
+        "KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE",
         "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES",
         "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES",
         "KILN_ACCELERATOR_ROCM_GRAPH_MODE",
+        "KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE",
         "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE",
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES",
         "KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES",
@@ -6503,6 +6810,14 @@ mod tests {
             RocmSynchronizationMode::LegacyHostBarriers
         );
         assert_eq!(
+            config.accelerator.rocm_strided_batched_matmul_mode.mode(),
+            RocmStridedBatchedMatmulMode::Auto
+        );
+        assert_eq!(
+            config.accelerator.rocm_bf16_matmul_output_mode.mode(),
+            RocmBf16MatmulOutputMode::Auto
+        );
+        assert_eq!(
             config.accelerator.rocm_graph_mode.mode(),
             RocmGraphMode::Profile
         );
@@ -6516,6 +6831,8 @@ mod tests {
         );
         for source in [
             config.accelerator.rocm_synchronization_mode.source(),
+            config.accelerator.rocm_strided_batched_matmul_mode.source(),
+            config.accelerator.rocm_bf16_matmul_output_mode.source(),
             config.accelerator.rocm_graph_mode.source(),
             config.accelerator.rocm_graph_cache_entries.source(),
             config.accelerator.rocm_graph_cache_max_bytes.source(),
@@ -6738,6 +7055,22 @@ mod tests {
                 }
             );
             assert_eq!(
+                resolved.rocm_strided_batched_matmul_mode,
+                ResolvedAcceleratorValue {
+                    configured: RocmStridedBatchedMatmulMode::Auto,
+                    effective: RocmStridedBatchedMatmulMode::Auto,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
+                resolved.rocm_bf16_matmul_output_mode,
+                ResolvedAcceleratorValue {
+                    configured: RocmBf16MatmulOutputMode::Auto,
+                    effective: RocmBf16MatmulOutputMode::Auto,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
                 resolved.rocm_graph_mode,
                 ResolvedAcceleratorValue {
                     configured: RocmGraphMode::Profile,
@@ -6768,8 +7101,8 @@ mod tests {
             ConfigValueSource::Environment,
         )))
         .unwrap();
-        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v2");
-        assert_eq!(json["version"], 2);
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v3");
+        assert_eq!(json["version"], 3);
         assert_eq!(json["serving_profile"], "experimental");
         assert_eq!(json["serving_profile_source"], "environment");
         assert_eq!(json["rocm_graph_mode"]["configured"], "profile");
@@ -6786,6 +7119,8 @@ serving_profile = "experimental"
 
 [accelerator]
 rocm_synchronization_mode = "stream_ordered"
+rocm_strided_batched_matmul_mode = "disabled"
+rocm_bf16_matmul_output_mode = "f32_then_cast"
 rocm_graph_mode = "warmup_then_eager"
 rocm_graph_cache_entries = 64
 rocm_graph_cache_max_bytes = 17179869184
@@ -6798,6 +7133,14 @@ rocm_graph_cache_max_bytes = 17179869184
             RocmSynchronizationMode::StreamOrdered
         );
         assert_eq!(
+            config.accelerator.rocm_strided_batched_matmul_mode.mode(),
+            RocmStridedBatchedMatmulMode::Disabled
+        );
+        assert_eq!(
+            config.accelerator.rocm_bf16_matmul_output_mode.mode(),
+            RocmBf16MatmulOutputMode::F32ThenCast
+        );
+        assert_eq!(
             config.accelerator.rocm_graph_mode.mode(),
             RocmGraphMode::WarmupThenEager
         );
@@ -6808,6 +7151,8 @@ rocm_graph_cache_max_bytes = 17179869184
         );
         for source in [
             config.accelerator.rocm_synchronization_mode.source(),
+            config.accelerator.rocm_strided_batched_matmul_mode.source(),
+            config.accelerator.rocm_bf16_matmul_output_mode.source(),
             config.accelerator.rocm_graph_mode.source(),
             config.accelerator.rocm_graph_cache_entries.source(),
             config.accelerator.rocm_graph_cache_max_bytes.source(),
@@ -6840,6 +7185,10 @@ rocm_graph_cache_max_bytes = 17179869184
         for document in [
             "[accelerator]\nrocm_synchronization_mode = \"eventually\"\n".to_owned(),
             "[accelerator]\nrocm_synchronization_mode = true\n".to_owned(),
+            "[accelerator]\nrocm_strided_batched_matmul_mode = \"sometimes\"\n".to_owned(),
+            "[accelerator]\nrocm_strided_batched_matmul_mode = true\n".to_owned(),
+            "[accelerator]\nrocm_bf16_matmul_output_mode = \"bf16\"\n".to_owned(),
+            "[accelerator]\nrocm_bf16_matmul_output_mode = false\n".to_owned(),
             "[accelerator]\nrocm_graph_mode = \"automatic\"\n".to_owned(),
             "[accelerator]\nrocm_graph_mode = false\n".to_owned(),
             "[accelerator]\nrocm_graph_cache_entries = 0\n".to_owned(),
@@ -6897,6 +7246,36 @@ rocm_graph_cache_max_bytes = 17179869184
                 "{detail}"
             );
             assert!(detail.contains("experimental"), "{detail}");
+
+            for (strided_mode, output_mode, expected_field) in [
+                (
+                    RocmStridedBatchedMatmulMode::Enabled,
+                    RocmBf16MatmulOutputMode::Auto,
+                    "accelerator.rocm_strided_batched_matmul_mode",
+                ),
+                (
+                    RocmStridedBatchedMatmulMode::Auto,
+                    RocmBf16MatmulOutputMode::NativeBf16,
+                    "accelerator.rocm_bf16_matmul_output_mode",
+                ),
+            ] {
+                let mut gated = KilnConfig::default();
+                gated.server.serving_profile =
+                    ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
+                gated.accelerator.rocm_strided_batched_matmul_mode =
+                    RocmStridedBatchedMatmulModeSetting::new(
+                        strided_mode,
+                        ConfigValueSource::ConfigFile,
+                    );
+                gated.accelerator.rocm_bf16_matmul_output_mode =
+                    RocmBf16MatmulOutputModeSetting::new(
+                        output_mode,
+                        ConfigValueSource::ConfigFile,
+                    );
+                let detail = gated.validate().unwrap_err().to_string();
+                assert!(detail.contains(expected_field), "{detail}");
+                assert!(detail.contains("experimental"), "{detail}");
+            }
 
             for allowed_mode in [RocmGraphMode::Profile, RocmGraphMode::Disabled] {
                 let mut allowed = KilnConfig::default();
@@ -6987,6 +7366,115 @@ rocm_graph_cache_max_bytes = 17179869184
     }
 
     #[test]
+    fn rocm_matmul_environment_aliases_are_strict_source_tracked_and_conflict_checked() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+
+        for (name, raw, expected) in [
+            (
+                FORCE_ROCM_STRIDED_BATCHED_MATMUL_ENV,
+                "true",
+                RocmStridedBatchedMatmulMode::Enabled,
+            ),
+            (
+                FORCE_ROCM_STRIDED_BATCHED_MATMUL_ENV,
+                "false",
+                RocmStridedBatchedMatmulMode::Auto,
+            ),
+            (
+                DISABLE_ROCM_STRIDED_BATCHED_MATMUL_ENV,
+                "true",
+                RocmStridedBatchedMatmulMode::Disabled,
+            ),
+        ] {
+            environment.set(name, raw);
+            let mut config = KilnConfig::default();
+            config.apply_env_overrides().unwrap();
+            assert_eq!(
+                config.accelerator.rocm_strided_batched_matmul_mode.mode(),
+                expected
+            );
+            assert_eq!(
+                config.accelerator.rocm_strided_batched_matmul_mode.source(),
+                ConfigValueSource::Environment
+            );
+            environment.remove(name);
+        }
+
+        for (name, raw, expected) in [
+            (
+                FORCE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV,
+                "true",
+                RocmBf16MatmulOutputMode::F32ThenCast,
+            ),
+            (
+                FORCE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV,
+                "false",
+                RocmBf16MatmulOutputMode::Auto,
+            ),
+            (
+                DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV,
+                "true",
+                RocmBf16MatmulOutputMode::NativeBf16,
+            ),
+        ] {
+            environment.set(name, raw);
+            let mut config = KilnConfig::default();
+            config.apply_env_overrides().unwrap();
+            assert_eq!(
+                config.accelerator.rocm_bf16_matmul_output_mode.mode(),
+                expected
+            );
+            assert_eq!(
+                config.accelerator.rocm_bf16_matmul_output_mode.source(),
+                ConfigValueSource::Environment
+            );
+            environment.remove(name);
+        }
+
+        for (first, second, field) in [
+            (
+                FORCE_ROCM_STRIDED_BATCHED_MATMUL_ENV,
+                DISABLE_ROCM_STRIDED_BATCHED_MATMUL_ENV,
+                "accelerator.rocm_strided_batched_matmul_mode",
+            ),
+            (
+                FORCE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV,
+                DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV,
+                "accelerator.rocm_bf16_matmul_output_mode",
+            ),
+        ] {
+            environment.set(first, "true");
+            environment.set(second, "true");
+            let detail = format!(
+                "{:#}",
+                KilnConfig::default().apply_env_overrides().unwrap_err()
+            );
+            assert!(detail.contains(field), "{detail}");
+            assert!(detail.contains(first), "{detail}");
+            assert!(detail.contains(second), "{detail}");
+            environment.remove(first);
+            environment.remove(second);
+        }
+
+        for name in [
+            FORCE_ROCM_STRIDED_BATCHED_MATMUL_ENV,
+            DISABLE_ROCM_STRIDED_BATCHED_MATMUL_ENV,
+            FORCE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV,
+            DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV,
+        ] {
+            environment.set(name, "sometimes");
+            let detail = format!(
+                "{:#}",
+                KilnConfig::default().apply_env_overrides().unwrap_err()
+            );
+            assert!(detail.contains(name), "{detail}");
+            assert!(detail.contains("sometimes"), "{detail}");
+            environment.remove(name);
+        }
+    }
+
+    #[test]
     fn speculative_draft_geometry_is_validated_against_the_selected_model() {
         let model = kiln_core::config::ModelConfig::qwen3_5_4b();
         let disabled = SpeculativeDecodingConfig {
@@ -7050,7 +7538,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 96);
+        assert_eq!(original_len, 98);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -7085,8 +7573,8 @@ rocm_graph_cache_max_bytes = 17179869184
             })
             .count();
         assert_eq!(canonical_only_aliases, 22);
-        assert_eq!(compatibility_aliases, 70);
-        assert_eq!(compatibility_alias_fields, 67);
+        assert_eq!(compatibility_aliases, 74);
+        assert_eq!(compatibility_alias_fields, 69);
 
         for field in PUBLIC_ENV_FIELDS {
             assert_eq!(
@@ -7121,7 +7609,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 101);
+        assert_eq!(serialized_leaves.len(), 103);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS

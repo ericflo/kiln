@@ -190,13 +190,23 @@ def health_fixture(
         },
     }
     accelerator_runtime = {
-        "schema_id": "kiln.accelerator-runtime-policy.v2",
-        "version": 2,
+        "schema_id": "kiln.accelerator-runtime-policy.v3",
+        "version": 3,
         "serving_profile": serving_profile,
         "serving_profile_source": "config_file",
         "rocm_synchronization_mode": {
             "configured": "legacy_host_barriers",
             "effective": "legacy_host_barriers",
+            "source": "config_file",
+        },
+        "rocm_strided_batched_matmul_mode": {
+            "configured": "auto",
+            "effective": "auto",
+            "source": "config_file",
+        },
+        "rocm_bf16_matmul_output_mode": {
+            "configured": "auto",
+            "effective": "auto",
             "source": "config_file",
         },
         "rocm_graph_mode": {
@@ -358,13 +368,23 @@ def debug_fixture(
 
     return {
         "accelerator_runtime": {
-            "schema_id": "kiln.accelerator-runtime-policy.v2",
-            "version": 2,
+            "schema_id": "kiln.accelerator-runtime-policy.v3",
+            "version": 3,
             "serving_profile": serving_profile,
             "serving_profile_source": "config_file",
             "rocm_synchronization_mode": {
                 "configured": "legacy_host_barriers",
                 "effective": "legacy_host_barriers",
+                "source": "config_file",
+            },
+            "rocm_strided_batched_matmul_mode": {
+                "configured": "auto",
+                "effective": "auto",
+                "source": "config_file",
+            },
+            "rocm_bf16_matmul_output_mode": {
+                "configured": "auto",
+                "effective": "auto",
                 "source": "config_file",
             },
             "rocm_graph_mode": {
@@ -1830,6 +1850,14 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     )
                     self.assertEqual(parsed["model"]["served_model_id"], serve.MODEL_ID)
                     self.assertEqual(
+                        parsed["accelerator"]["rocm_strided_batched_matmul_mode"],
+                        "auto",
+                    )
+                    self.assertEqual(
+                        parsed["accelerator"]["rocm_bf16_matmul_output_mode"],
+                        "auto",
+                    )
+                    self.assertEqual(
                         parsed["accelerator"]["rocm_graph_mode"],
                         "profile" if expected["rocm_graphs_requested"] else "disabled",
                     )
@@ -1854,6 +1882,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 root / "snapshots",
                 deterministic=True,
                 rocm_synchronization_mode="stream_ordered",
+                rocm_strided_batched_matmul_mode="enabled",
+                rocm_bf16_matmul_output_mode="native_bf16",
                 rocm_graph_mode="disabled",
                 rocm_graph_cache_entries=12,
                 rocm_graph_cache_max_bytes=64 << 20,
@@ -1866,6 +1896,14 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(
             parsed["accelerator"]["rocm_synchronization_mode"],
             "stream_ordered",
+        )
+        self.assertEqual(
+            parsed["accelerator"]["rocm_strided_batched_matmul_mode"],
+            "enabled",
+        )
+        self.assertEqual(
+            parsed["accelerator"]["rocm_bf16_matmul_output_mode"],
+            "native_bf16",
         )
         self.assertEqual(parsed["accelerator"]["rocm_graph_mode"], "disabled")
         self.assertEqual(parsed["accelerator"]["rocm_graph_cache_entries"], 12)

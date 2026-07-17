@@ -973,9 +973,9 @@ mod tests {
         assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v2"
+            "kiln.accelerator-runtime-policy.v3"
         );
-        assert_eq!(json["accelerator_runtime"]["version"], 2);
+        assert_eq!(json["accelerator_runtime"]["version"], 3);
         assert_eq!(
             json["accelerator_runtime"]["rocm_graph_cache_max_bytes"]["effective"],
             crate::config::DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES
@@ -993,6 +993,14 @@ mod tests {
         assert_eq!(
             json["accelerator_runtime"]["rocm_synchronization_mode"]["effective"],
             "legacy_host_barriers"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["rocm_strided_batched_matmul_mode"]["effective"],
+            "auto"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["rocm_bf16_matmul_output_mode"]["effective"],
+            "auto"
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_graph_mode"]["effective"],

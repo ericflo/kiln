@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **903 direct read call sites** and
+The scanner records **901 direct read call sites** and
 **361 process-mutation call sites**. It can
-statically name **365 distinct literal `KILN_*`
-read names** across **528 call sites**.
+statically name **364 distinct literal `KILN_*`
+read names** across **527 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 431 | 324 | 0 |
+| Experimental/debug migration | 429 | 323 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 135 | 41 | 353 |
 
@@ -92,7 +92,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-server/src/api/debug_model_state.rs` | 2 | 1 |
 | `crates/kiln-server/src/cli.rs` | 2 | 0 |
 | `crates/kiln-tensor/src/metal_kernels.rs` | 2 | 2 |
-| `crates/kiln-tensor/src/rocm_matmul.rs` | 2 | 1 |
 | `crates/kiln-tensor/src/rocm_ops/concat.rs` | 2 | 2 |
 | `crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs` | 2 | 2 |
 | `crates/kiln-tensor/src/rocm_storage.rs` | 2 | 2 |
@@ -443,7 +442,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_TRACE_LINEAR_SEGMENT_STAGE_LAYER` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_TRACE_MODEL_SEGMENT_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_TRACE_ROCM_FLASH_FWD` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_TRACE_ROCM_MATMUL_FALLBACK` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_matmul.rs` |
 | `KILN_TRACE_SFT_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-train/src/trainer.rs` |
 | `KILN_TRACE_TAPE_BACKWARD_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-autograd/src/tape.rs` |
 | `KILN_TRACE_TAPE_GDN_CONV_DECISIONS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
@@ -630,7 +628,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-tensor/build.rs` | `var` | `OUT_DIR` | Build time/provenance | 2 |
 | `crates/kiln-tensor/build.rs` | `var_os` | `NVCC` | Build time/provenance | 1 |
 | `crates/kiln-tensor/src/metal_rt/commands.rs` | `var` | `CANDLE_METAL_COMPUTE_PER_BUFFER` | Experimental/debug migration | 1 |
-| `crates/kiln-tensor/src/rocm_matmul.rs` | `var` | `name` | Experimental/debug migration | 1 |
 | `crates/kiln-tensor/src/vk_shaders.rs` | `env!` | `OUT_DIR` | Build time/provenance | 1 |
 | `crates/kiln-tensor/tests/rocm_paged_attn_decode_parity.rs` | `var_os` | `key` | Test only | 1 |
 | `crates/kiln-train/src/opd.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |

@@ -366,13 +366,23 @@
               <h4 class="font-semibold mb-2"><code>accelerator_runtime</code>: immutable ROCm execution policy</h4>
               <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
   "accelerator_runtime": {
-    "schema_id": "kiln.accelerator-runtime-policy.v2",
-    "version": 2,
+    "schema_id": "kiln.accelerator-runtime-policy.v3",
+    "version": 3,
     "serving_profile": "stable",
     "serving_profile_source": "default",
     "rocm_synchronization_mode": {
       "configured": "legacy_host_barriers",
       "effective": "legacy_host_barriers",
+      "source": "default"
+    },
+    "rocm_strided_batched_matmul_mode": {
+      "configured": "auto",
+      "effective": "auto",
+      "source": "default"
+    },
+    "rocm_bf16_matmul_output_mode": {
+      "configured": "auto",
+      "effective": "auto",
       "source": "default"
     },
     "rocm_graph_mode": {
@@ -401,18 +411,29 @@
                 hard admission limits: 1&ndash;64 entries and 64 MiB&ndash;16 GiB respectively. Stable paged metadata is a
                 correctness invariant rather than a switch.
               </p>
-              <h5 class="font-semibold mt-4 mb-2">All four typed <code>[accelerator]</code> fields</h5>
+              <h5 class="font-semibold mt-4 mb-2">All six typed <code>[accelerator]</code> fields</h5>
               <div class="overflow-x-auto">
                 <table class="w-full text-xs" style="color: var(--fg-dim);">
                   <thead style="color: var(--fg);"><tr><th class="text-left p-2">TOML field</th><th class="text-left p-2">Default and validation</th><th class="text-left p-2">Canonical environment name</th></tr></thead>
                   <tbody>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_synchronization_mode</code></td><td class="p-2"><code>legacy_host_barriers</code>; also accepts experimental-only <code>stream_ordered</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE</code></td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_strided_batched_matmul_mode</code></td><td class="p-2"><code>auto</code>; explicit <code>enabled</code> or <code>disabled</code> routes require the experimental profile.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE</code></td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_bf16_matmul_output_mode</code></td><td class="p-2"><code>auto</code>; explicit <code>native_bf16</code> or <code>f32_then_cast</code> routes require the experimental profile.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_mode</code></td><td class="p-2"><code>profile</code>; accepts <code>disabled</code>, <code>warmup_then_eager</code>, or <code>lazy_capture_replay</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_MODE</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_cache_entries</code></td><td class="p-2"><code>8</code>; unsigned integer in <code>1..=64</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_cache_max_bytes</code></td><td class="p-2"><code>1073741824</code> (1 GiB); unsigned integer bytes in <code>67108864..=17179869184</code> (64 MiB&ndash;16 GiB).</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES</code></td></tr>
                   </tbody>
                 </table>
               </div>
+              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Both matmul fields default to <code>auto</code>. The strided-batched selector applies the
+                qualified gfx115x large-attention correctness guard, while the BF16-output selector applies
+                the ROCm 7.2 large-projection and low-rank workaround. These are immutable shape/dtype
+                decisions stored in the primary context; they do not consult live memory or process
+                environment during inference. Four former force/disable variables are strict warning
+                aliases resolved only at startup. Conflicting aliases fail startup. The two former ad hoc
+                trace variables were removed rather than promoted to configuration.
+              </p>
               <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 The byte limit counts requested physical bytes held by graph-stable direct I/O tensors,
                 freeze-pointer capture arenas, each retained private-stream hipBLASLt workspace, and recurrent/conv
@@ -605,11 +626,12 @@
                 endpoints load atomics only and never synchronize the accelerator.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Configure the four fields under <code>[accelerator]</code>. Canonical environment names derive
+                Configure the six fields under <code>[accelerator]</code>. Canonical environment names derive
                 mechanically as <code>KILN_ACCELERATOR_&lt;FIELD&gt;</code>. Historical
                 <code>KILN_ROCM_GRAPHS</code>, <code>KILN_ROCM_GRAPH_CAPTURE</code>, and
-                <code>KILN_ROCM_GRAPH_CACHE_MAX</code> are strict deprecated startup aliases, not hot runtime
-                switches. See the <a href="docs/configuration/" class="link">complete accelerator configuration contract</a>
+                <code>KILN_ROCM_GRAPH_CACHE_MAX</code>, plus the four old matmul force/disable names,
+                are strict deprecated startup aliases, not hot runtime switches. See the
+                <a href="docs/configuration/" class="link">complete accelerator configuration contract</a>
                 for mode semantics, validation, local A/B gates, and migration behavior.
               </p>
             </section>

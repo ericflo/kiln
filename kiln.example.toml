@@ -120,6 +120,14 @@ rocm_synchronization_mode = "legacy_host_barriers" # Qualified default. `stream_
                                       # server.serving_profile="experimental" until local ROCm
                                       # parity/latency/memory qualification passes. Override with
                                       # KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE.
+rocm_strided_batched_matmul_mode = "auto" # auto | enabled | disabled. Auto preserves the
+                                      # qualified gfx115x correctness guard; explicit routes
+                                      # require the experimental profile. Override mechanically
+                                      # with KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE.
+rocm_bf16_matmul_output_mode = "auto" # auto | native_bf16 | f32_then_cast. Auto preserves the
+                                      # qualified ROCm 7.2 BF16-output workaround; explicit
+                                      # routes require the experimental profile. Override with
+                                      # KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE.
 rocm_graph_mode = "profile"           # profile | disabled | warmup_then_eager |
                                       # lazy_capture_replay. Profile resolves to disabled under
                                       # stable/maintenance and lazy capture/replay under

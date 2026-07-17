@@ -977,11 +977,19 @@ mod tests {
         assert_eq!(json["decode_runtime"]["max_decode_batch"]["effective"], 8);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v2"
+            "kiln.accelerator-runtime-policy.v3"
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_graph_cache_max_bytes"]["effective"],
             crate::config::DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["rocm_strided_batched_matmul_mode"]["effective"],
+            "auto"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["rocm_bf16_matmul_output_mode"]["effective"],
+            "auto"
         );
         assert_eq!(json["rocm_synchronization"]["active"], false);
         assert_eq!(json["rocm_synchronization"]["cleanup_quarantined"], false);

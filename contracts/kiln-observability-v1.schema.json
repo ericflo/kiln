@@ -57,6 +57,16 @@
             "effective": "legacy_host_barriers",
             "source": "default"
           },
+          "rocm_strided_batched_matmul_mode": {
+            "configured": "auto",
+            "effective": "auto",
+            "source": "default"
+          },
+          "rocm_bf16_matmul_output_mode": {
+            "configured": "auto",
+            "effective": "auto",
+            "source": "default"
+          },
           "rocm_graph_mode": {
             "configured": "profile",
             "effective": "profile",
@@ -774,6 +784,16 @@
               "effective": "legacy_host_barriers",
               "source": "default"
             },
+            "rocm_strided_batched_matmul_mode": {
+              "configured": "auto",
+              "effective": "auto",
+              "source": "default"
+            },
+            "rocm_bf16_matmul_output_mode": {
+              "configured": "auto",
+              "effective": "auto",
+              "source": "default"
+            },
             "rocm_graph_mode": {
               "configured": "profile",
               "effective": "profile",
@@ -1343,6 +1363,16 @@
           "rocm_synchronization_mode": {
             "configured": "legacy_host_barriers",
             "effective": "legacy_host_barriers",
+            "source": "default"
+          },
+          "rocm_strided_batched_matmul_mode": {
+            "configured": "auto",
+            "effective": "auto",
+            "source": "default"
+          },
+          "rocm_bf16_matmul_output_mode": {
+            "configured": "auto",
+            "effective": "auto",
             "source": "default"
           },
           "rocm_graph_mode": {
@@ -6590,6 +6620,8 @@
         "serving_profile",
         "serving_profile_source",
         "rocm_synchronization_mode",
+        "rocm_strided_batched_matmul_mode",
+        "rocm_bf16_matmul_output_mode",
         "rocm_graph_mode",
         "rocm_graph_cache_entries",
         "rocm_graph_cache_max_bytes"
@@ -6610,6 +6642,12 @@
         "rocm_synchronization_mode": {
           "$ref": "#/$defs/ResolvedRocmSynchronizationMode"
         },
+        "rocm_strided_batched_matmul_mode": {
+          "$ref": "#/$defs/ResolvedRocmStridedBatchedMatmulMode"
+        },
+        "rocm_bf16_matmul_output_mode": {
+          "$ref": "#/$defs/ResolvedRocmBf16MatmulOutputMode"
+        },
         "rocm_graph_mode": {
           "$ref": "#/$defs/ResolvedRocmGraphMode"
         },
@@ -6622,6 +6660,29 @@
       },
       "description": "Versioned process-lifetime accelerator policy.",
       "x-kiln-rust-type": "ResolvedAcceleratorRuntimePolicy",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ResolvedRocmBf16MatmulOutputMode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "effective",
+        "source"
+      ],
+      "properties": {
+        "configured": {
+          "$ref": "#/$defs/RocmBf16MatmulOutputMode"
+        },
+        "effective": {
+          "$ref": "#/$defs/RocmBf16MatmulOutputMode"
+        },
+        "source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        }
+      },
+      "description": "One configured/effective accelerator policy leaf and its startup source.",
+      "x-kiln-rust-type": "ResolvedAcceleratorValue<RocmBf16MatmulOutputMode>",
       "x-kiln-field-schema-status": "complete"
     },
     "ResolvedRocmGraphMode": {
@@ -6647,6 +6708,29 @@
       "x-kiln-rust-type": "ResolvedAcceleratorValue<RocmGraphMode>",
       "x-kiln-field-schema-status": "complete"
     },
+    "ResolvedRocmStridedBatchedMatmulMode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "effective",
+        "source"
+      ],
+      "properties": {
+        "configured": {
+          "$ref": "#/$defs/RocmStridedBatchedMatmulMode"
+        },
+        "effective": {
+          "$ref": "#/$defs/RocmStridedBatchedMatmulMode"
+        },
+        "source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        }
+      },
+      "description": "One configured/effective accelerator policy leaf and its startup source.",
+      "x-kiln-rust-type": "ResolvedAcceleratorValue<RocmStridedBatchedMatmulMode>",
+      "x-kiln-field-schema-status": "complete"
+    },
     "ResolvedRocmSynchronizationMode": {
       "type": "object",
       "additionalProperties": false,
@@ -6668,6 +6752,17 @@
       },
       "description": "One configured/effective accelerator policy leaf and its startup source.",
       "x-kiln-rust-type": "ResolvedAcceleratorValue<RocmSynchronizationMode>",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RocmBf16MatmulOutputMode": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "native_bf16",
+        "f32_then_cast"
+      ],
+      "description": "The process-lifetime ROCm BF16-output matmul route.",
+      "x-kiln-rust-type": "RocmBf16MatmulOutputMode",
       "x-kiln-field-schema-status": "complete"
     },
     "RocmGraphFallbackStats": {
@@ -7771,6 +7866,17 @@
       ],
       "description": "A closed reason why a ROCm graph snapshot could not be acquired.",
       "x-kiln-rust-type": "RocmGraphUnavailableReason",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "RocmStridedBatchedMatmulMode": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "enabled",
+        "disabled"
+      ],
+      "description": "The process-lifetime ROCm strided-batched matmul route.",
+      "x-kiln-rust-type": "RocmStridedBatchedMatmulMode",
       "x-kiln-field-schema-status": "complete"
     },
     "RocmSynchronizationMode": {

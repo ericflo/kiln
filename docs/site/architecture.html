@@ -377,15 +377,15 @@ training request
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
           runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
-          to produce <code>kiln.accelerator-runtime-policy.v2</code>. The same resolved object is installed in
+          to produce <code>kiln.accelerator-runtime-policy.v3</code>. The same resolved object is installed in
           the tensor context, projected into the model graph runner, stored in server state, and returned by
-          product diagnostics. Tensor, model, and kernel code do not re-read the public graph or
-          synchronization environment names during inference.
+          product diagnostics. Tensor, model, and kernel code do not re-read the public graph,
+          synchronization, or matmul-route environment names during inference.
         </p>
         <pre class="mt-5"><code>typed [server] + [accelerator] configuration
   -> strict parse, source attribution, and serving-profile gate
-  -> immutable accelerator runtime policy v2
-  -> primary ROCm context synchronization discipline
+  -> immutable accelerator runtime policy v3
+  -> primary ROCm context synchronization and matmul-route discipline
   -> ModelRunner graph lifecycle and bounded graph cache
   -> /v1/config + /health + trusted debug + dashboard + Prometheus</code></pre>
 
@@ -403,6 +403,17 @@ training request
             <p>The primary context stores the policy. A later owner requesting another policy for the same device receives an error naming the installed and requested values; multiple model/runtime owners cannot silently mix ordering disciplines.</p>
           </div>
         </div>
+
+        <h3 class="font-semibold mt-6 mb-3">Matmul route choice is fixed before inference</h3>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          The primary context also owns <code>rocm_strided_batched_matmul_mode</code> and
+          <code>rocm_bf16_matmul_output_mode</code>. Their stable <code>auto</code> defaults preserve the
+          qualified gfx115x large-attention per-row fallback and the ROCm 7.2 F32-output-then-BF16-cast
+          workaround. Explicit comparison routes require the experimental serving profile. A later owner
+          cannot install different synchronization or matmul policy on the same device, and a GEMM cannot
+          observe a shell mutation between layers or requests. Route decisions use only immutable policy,
+          shape, and dtype; they do not read live memory. The obsolete matmul trace variables were deleted.
+        </p>
 
         <h3 class="font-semibold mt-6 mb-3">Graph lifecycle is a separate axis</h3>
         <div class="overflow-x-auto">
@@ -589,7 +600,7 @@ training request
           <table class="w-full text-sm" style="color: var(--fg-dim);">
             <thead style="color: var(--fg);"><tr><th class="text-left p-2">Surface</th><th class="text-left p-2">Contract</th></tr></thead>
             <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /v1/config</code></td><td class="p-2">Top-level <code>accelerator_runtime</code> schema v2 exposes configured/effective/source values for synchronization, graph mode, entry capacity, and retained-byte budget. Product snapshot fields are <code>rocm_graphs</code> plus <code>rocm_graphs_unavailable_reason</code> for full cache statistics, and <code>rocm_graph_telemetry</code> plus <code>rocm_graph_telemetry_unavailable_reason</code> for the separate phase/transient channel. The full-stat read is nonblocking; the phase read is independent of both runner locks. The complete config handler still reads unrelated training-capability state.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /v1/config</code></td><td class="p-2">Top-level <code>accelerator_runtime</code> schema v3 exposes configured/effective/source values for synchronization, both matmul routes, graph mode, entry capacity, and retained-byte budget. Product snapshot fields are <code>rocm_graphs</code> plus <code>rocm_graphs_unavailable_reason</code> for full cache statistics, and <code>rocm_graph_telemetry</code> plus <code>rocm_graph_telemetry_unavailable_reason</code> for the separate phase/transient channel. The full-stat read is nonblocking; the phase read is independent of both runner locks. The complete config handler still reads unrelated training-capability state.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /health</code></td><td class="p-2"><code>decode_runtime.accelerator_runtime</code>, <code>decode_runtime.rocm_synchronization</code>, and <code>decode_runtime.rocm_graphs</code> combine immutable intent with live wait/skip and quarantine state. The graph object flattens full statistics and phase telemetry but preserves separate <code>unavailable_reason</code>, <code>phase_telemetry_available</code>, and <code>phase_telemetry_unavailable_reason</code> authorities; <code>state</code> is busy only for lock contention and unavailable for no-runner or poisoned-lock state.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Trusted debug</td><td class="p-2"><code>/v1/debug/model-state</code> repeats top-level <code>accelerator_runtime</code>, <code>rocm_synchronization</code>, and the same four graph value/reason fields as config; it does not reintroduce raw runtime flags.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /metrics</code></td><td class="p-2">Synchronization policy/availability/quarantine and 23 fixed-reason wait/skip families sit beside two graph availability gauges and two five-reason one-hot missing-data families. Full graph state/capacity/owner/retained/cache/capture/replay/fallback families and phase/current/transient families are independently governed.</td></tr>
