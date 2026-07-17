@@ -176,6 +176,7 @@ CONTROL_ENTRYPOINTS = (
 CONTROL_COMPONENT_TYPES = {name: name for name in CONTROL_ENTRYPOINTS}
 CONTROL_COMPONENT_TYPES["CorrectionRowInput"] = "CorrectionRow"
 CONTROL_COMPONENT_TYPES["Vec_TrainingStatus"] = "Vec<TrainingStatus>"
+EXPECTED_OBSERVABILITY_DEFINITION_COUNT = 153
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
     "complete": 133,
     "migration_pending": 0,
@@ -1018,8 +1019,11 @@ def validate_observability_schema(schema: dict[str, Any]) -> list[str]:
     if not isinstance(definitions, dict):
         errors.append("observability schema $defs must be an object")
         return errors
-    if len(definitions) != 151:
-        errors.append(f"observability schema must contain 151 definitions, got {len(definitions)}")
+    if len(definitions) != EXPECTED_OBSERVABILITY_DEFINITION_COUNT:
+        errors.append(
+            "observability schema must contain "
+            f"{EXPECTED_OBSERVABILITY_DEFINITION_COUNT} definitions, got {len(definitions)}"
+        )
     if list(definitions) != sorted(definitions):
         errors.append("observability schema definitions must be sorted")
     for name, definition in definitions.items():
