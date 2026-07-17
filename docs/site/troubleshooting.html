@@ -681,6 +681,17 @@ kiln serve --config rocm-graph-eager.toml
           <code>memory_governor_selector_mismatch</code> fails closed and is a configuration/topology fault, not
           evidence that the graph cache byte limit is too low.
         </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          The committed Strix Halo ROCm development soak provisions 24 entries as two exact geometries for each
+          of 12 declared active owners; this is qualification headroom, not the product default. It also runs the
+          same independent host controller as the Vulkan soak: sample every 250 ms, terminate below 8 GiB
+          <code>MemAvailable</code>, fail the result above 512 MiB swap growth, and pace the complete server group at
+          88,000/80,000 millicelsius and fail closed at 97,000 millicelsius. Pacing time remains inside request
+          and phase deadlines and is emitted as <code>host_thermal_pacing</code>, so a sustainable throughput result
+          cannot discard cooling time or mislabel a controlled pause as unexplained inference latency. A memory
+          hard-stop follows <code>SIGTERM</code> with <code>SIGCONT</code> so a thermally stopped group can execute
+          shutdown immediately.
+        </p>
 
         <h3 class="font-semibold mt-6 mb-3">Capture exact graph memory diagnostics</h3>
         <pre><code>curl -s http://localhost:8420/v1/config \
@@ -788,6 +799,9 @@ curl -s http://localhost:8420/metrics \
           Ordinary entry or byte pressure evicts deterministic least-recently-used idle owners as whole units.
           If those cannot make room, an exact-geometry miss may settle and retire the candidate row's older graph
           entries while preserving its active slot, assignment, and continuity; no other active owner is chosen.
+          Independently, one active owner may retain at most two exact attention geometries. A third miss triggers
+          the same settled graph-only path at <code>pre_capture_owner_geometry_limit</code> before candidate
+          allocation, even when the global entry ceiling still has room; a cache hit is never retired.
           Correlate a pause with the structured <code>rocm_graph_cache_eviction</code> event: a nonzero
           <code>active_graph_only_owner_count</code> identifies this prior-geometry path, while the boundary,
           removed counts, released bytes, and typed reason identify the exact transaction.

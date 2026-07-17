@@ -192,7 +192,7 @@ tensor, and kernel paths do not re-read these public environment names.
 | `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | `KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL` and `KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
 | `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | `KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT` and `KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT` (deprecated compatibility) | `auto`, `native_bf16`, or `f32_then_cast`, case-insensitive. `auto` applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
 | `accelerator.rocm_graph_mode` | string enum; `"profile"` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` (implemented) | `KILN_ROCM_GRAPHS` and `KILN_ROCM_GRAPH_CAPTURE` (deprecated compatibility) | `profile`, `disabled`, `warmup_then_eager`, or `lazy_capture_replay`, case-insensitive. `profile` resolves to `disabled` under stable/maintenance and `lazy_capture_replay` under experimental. The two explicit non-disabled modes require the experimental profile. Restart required. |
-| `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | `KILN_ROCM_GRAPH_CACHE_MAX` (deprecated compatibility) | `1..=64`. Bounds retained native graph entries in every product and embedding constructor; zero or unbounded capacities are rejected. Restart required. |
+| `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | `KILN_ROCM_GRAPH_CACHE_MAX` (deprecated compatibility) | `1..=64`. Bounds total retained native graph entries in every product and embedding constructor; zero or unbounded capacities are rejected. Independently, one active owner may retain at most two exact attention geometries so a small owner set cannot monopolize the global cache. Restart required. |
 | `accelerator.rocm_graph_cache_max_bytes` | unsigned integer bytes; `1073741824` (1 GiB) | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` (implemented) | none | `67108864..=17179869184` (64 MiB through 16 GiB). Independently bounds requested physical bytes retained by graph-owned stable tensors, capture arenas, private-stream hipBLASLt workspaces, and owner slot state. Opaque HIP graph/exec/stream/event overhead is counted as objects and remains subject to live driver-pressure policy. Restart required. |
 
 `accelerator.kt_api_mode` replaces the former `KILN_USE_KT_API_*`,
@@ -338,6 +338,16 @@ Aggregate byte-budget suppression clears after ownership or budget relief;
 global-reservation denial retries after the matching device reports enough
 cached headroom. A selector mismatch remains fail-closed rather than consuming
 another accelerator's budget. None repeats a full warm pass on every token.
+
+The per-owner retention bound applies before candidate allocation even when the
+global entry and byte limits still have room. A cache hit is never retired. On a
+third distinct exact-geometry miss for one active owner, the runner settles and
+retires that owner's two older graph entries under boundary
+`pre_capture_owner_geometry_limit`, preserves the live slot and timeline, and
+then evaluates the new candidate against the unchanged process-wide limits.
+Decode sequence length is monotonic, so this prevents historical buckets from
+concentrating in a few rows while retaining a current plus transition/reuse
+working set. It does not evict another active owner's graph.
 
 Ordinary budget eviction is deterministic least-recently-used eviction of
 idle owners as a unit, including every graph for the owner and its retained

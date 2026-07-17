@@ -50,7 +50,10 @@ VULKAN_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
 CASE_TEARDOWN_GRACE_SECONDS = 180.0
 REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS = 10.0
 MAX_STEADY_STATE_WARMUP_WAVES = 16
-GRAPH_CACHE_MAX = 12
+ROCM_GRAPH_GEOMETRIES_PER_ACTIVE_REQUEST = 2
+ROCM_GRAPH_CACHE_MAX = (
+    mixed.MAX_ACTIVE_REQUESTS * ROCM_GRAPH_GEOMETRIES_PER_ACTIVE_REQUEST
+)
 MIN_STABILIZATION_CYCLES = 4
 MAX_STABILIZATION_CYCLES = 8
 REQUIRED_STABLE_CYCLES = 2
@@ -62,8 +65,10 @@ HOST_GUARD_POLL_INTERVAL_SECONDS = 0.25
 HOST_THERMAL_LIMIT_MILLICELSIUS = 97_000
 HOST_THERMAL_SENSOR_NAME = "k10temp"
 HOST_THERMAL_SENSOR_LABEL = "Tctl"
-VULKAN_THERMAL_PACING_START_MILLICELSIUS = 88_000
-VULKAN_THERMAL_PACING_RESUME_MILLICELSIUS = 80_000
+HOST_MEMORY_AVAILABLE_FLOOR_BYTES = 8 * 1024 * 1024 * 1024
+HOST_SWAP_GROWTH_LIMIT_BYTES = 512 * 1024 * 1024
+HOST_THERMAL_PACING_START_MILLICELSIUS = 88_000
+HOST_THERMAL_PACING_RESUME_MILLICELSIUS = 80_000
 PROCESS_MEMORY_MAPPING_CATEGORIES = (
     "anonymous",
     "device",
@@ -189,7 +194,7 @@ ROCM_RUNTIME = SoakRuntime(
     cancellation_prompt_words=CANCELLATION_PROMPT_WORDS,
     request_timeout_seconds=mixed.REQUEST_TIMEOUT_SECONDS,
     max_steady_state_warmup_waves=MAX_STEADY_STATE_WARMUP_WAVES,
-    graph_cache_max=GRAPH_CACHE_MAX,
+    graph_cache_max=ROCM_GRAPH_CACHE_MAX,
     min_stabilization_cycles=MIN_STABILIZATION_CYCLES,
     max_stabilization_cycles=MAX_STABILIZATION_CYCLES,
     required_stable_cycles=REQUIRED_STABLE_CYCLES,
@@ -199,6 +204,17 @@ ROCM_RUNTIME = SoakRuntime(
     vulkan_allocation_growth_limit_count=None,
     vulkan_buffer_pool_gb=3.0,
     setup_deadline_seconds=SETUP_DEADLINE_SECONDS,
+    host_mem_available_floor_bytes=HOST_MEMORY_AVAILABLE_FLOOR_BYTES,
+    host_swap_growth_limit_bytes=HOST_SWAP_GROWTH_LIMIT_BYTES,
+    host_thermal_limit_millicelsius=HOST_THERMAL_LIMIT_MILLICELSIUS,
+    host_thermal_sensor_name=HOST_THERMAL_SENSOR_NAME,
+    host_thermal_sensor_label=HOST_THERMAL_SENSOR_LABEL,
+    thermal_pacing_start_millicelsius=(
+        HOST_THERMAL_PACING_START_MILLICELSIUS
+    ),
+    thermal_pacing_resume_millicelsius=(
+        HOST_THERMAL_PACING_RESUME_MILLICELSIUS
+    ),
 )
 VULKAN_RUNTIME = SoakRuntime(
     variant_id=VULKAN_RUNTIME_VARIANT,
@@ -226,16 +242,16 @@ VULKAN_RUNTIME = SoakRuntime(
     vulkan_allocation_growth_limit_count=0,
     vulkan_buffer_pool_gb=VULKAN_QUALIFIED_BUFFER_POOL_GB,
     setup_deadline_seconds=1800.0,
-    host_mem_available_floor_bytes=8 * 1024 * 1024 * 1024,
-    host_swap_growth_limit_bytes=512 * 1024 * 1024,
+    host_mem_available_floor_bytes=HOST_MEMORY_AVAILABLE_FLOOR_BYTES,
+    host_swap_growth_limit_bytes=HOST_SWAP_GROWTH_LIMIT_BYTES,
     host_thermal_limit_millicelsius=HOST_THERMAL_LIMIT_MILLICELSIUS,
     host_thermal_sensor_name=HOST_THERMAL_SENSOR_NAME,
     host_thermal_sensor_label=HOST_THERMAL_SENSOR_LABEL,
     thermal_pacing_start_millicelsius=(
-        VULKAN_THERMAL_PACING_START_MILLICELSIUS
+        HOST_THERMAL_PACING_START_MILLICELSIUS
     ),
     thermal_pacing_resume_millicelsius=(
-        VULKAN_THERMAL_PACING_RESUME_MILLICELSIUS
+        HOST_THERMAL_PACING_RESUME_MILLICELSIUS
     ),
 )
 VULKAN_ENDURANCE_RUNTIME = dataclasses.replace(
@@ -367,8 +383,37 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "wave_count": ("count", "sum", False),
     "zero_token_response_count": ("count", "sum", True),
 }
+HOST_SAFETY_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
+    "host_mem_available_end_bytes": ("bytes", "exact", False),
+    "host_mem_available_min_bytes": ("bytes", "min", False),
+    "host_mem_available_start_bytes": ("bytes", "exact", False),
+    "host_memory_guard_trip_count": ("count", "sum", True),
+    "host_swap_growth_bytes": ("bytes", "max", True),
+    "host_swap_used_end_bytes": ("bytes", "exact", True),
+    "host_swap_used_peak_bytes": ("bytes", "max", True),
+    "host_swap_used_start_bytes": ("bytes", "exact", True),
+    "host_temperature_end_millicelsius": ("millicelsius", "exact", True),
+    "host_temperature_peak_millicelsius": ("millicelsius", "max", True),
+    "host_temperature_start_millicelsius": ("millicelsius", "exact", True),
+    "host_thermal_guard_trip_count": ("count", "sum", True),
+    "host_thermal_pacing_active_end": ("bool", "exact", True),
+    "host_thermal_pacing_completed_event_count": ("count", "sum", False),
+    "host_thermal_pacing_event_count": ("count", "sum", True),
+    "host_thermal_pacing_max_seconds": ("s", "max", True),
+    "host_thermal_pacing_max_start_millicelsius": (
+        "millicelsius",
+        "max",
+        True,
+    ),
+    "host_thermal_pacing_seconds": ("s", "sum", True),
+}
+ROCM_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
+    **METRIC_DEFINITIONS,
+    **HOST_SAFETY_METRIC_DEFINITIONS,
+}
 VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     **METRIC_DEFINITIONS,
+    **HOST_SAFETY_METRIC_DEFINITIONS,
     "prefix_cache_enabled": ("bool", "exact", True),
     "resident_prefill_enabled": ("bool", "exact", False),
     "batched_state_cache_active_leases_end": ("leases", "exact", True),
@@ -420,28 +465,6 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "resident_recurrent_state_allocation_bytes_end": ("bytes", "exact", True),
     "resident_recurrent_state_buffer_bytes_end": ("bytes", "exact", True),
     "resident_recurrent_state_entries_end": ("entries", "exact", True),
-    "host_mem_available_end_bytes": ("bytes", "exact", False),
-    "host_mem_available_min_bytes": ("bytes", "min", False),
-    "host_mem_available_start_bytes": ("bytes", "exact", False),
-    "host_memory_guard_trip_count": ("count", "sum", True),
-    "host_swap_growth_bytes": ("bytes", "max", True),
-    "host_swap_used_end_bytes": ("bytes", "exact", True),
-    "host_swap_used_peak_bytes": ("bytes", "max", True),
-    "host_swap_used_start_bytes": ("bytes", "exact", True),
-    "host_temperature_end_millicelsius": ("millicelsius", "exact", True),
-    "host_temperature_peak_millicelsius": ("millicelsius", "max", True),
-    "host_temperature_start_millicelsius": ("millicelsius", "exact", True),
-    "host_thermal_guard_trip_count": ("count", "sum", True),
-    "host_thermal_pacing_active_end": ("bool", "exact", True),
-    "host_thermal_pacing_completed_event_count": ("count", "sum", False),
-    "host_thermal_pacing_event_count": ("count", "sum", True),
-    "host_thermal_pacing_max_seconds": ("s", "max", True),
-    "host_thermal_pacing_max_start_millicelsius": (
-        "millicelsius",
-        "max",
-        True,
-    ),
-    "host_thermal_pacing_seconds": ("s", "sum", True),
     "resident_prefill_active_rows_end": ("rows", "exact", True),
     "resident_prefill_attempt_count": ("count", "sum", False),
     "resident_prefill_completed_row_count": ("rows", "sum", False),
@@ -527,6 +550,18 @@ def effective_config(
     runtime: SoakRuntime = ROCM_RUNTIME,
 ) -> dict[str, Any]:
     base = mixed.VARIANT_CONFIGS[runtime.variant_id]
+    if runtime.backend == "rocm":
+        expected_graph_cache_max = (
+            base["server"]["max_active_requests"]
+            * ROCM_GRAPH_GEOMETRIES_PER_ACTIVE_REQUEST
+        )
+        if runtime.graph_cache_max != expected_graph_cache_max:
+            raise SoakError(
+                "ROCm graph cache must reserve exactly "
+                f"{ROCM_GRAPH_GEOMETRIES_PER_ACTIVE_REQUEST} geometries for each "
+                "declared active request: "
+                f"{runtime.graph_cache_max} != {expected_graph_cache_max}"
+            )
     effective = {
         "build": base["build"],
         "runtime": base["runtime"],
@@ -606,6 +641,10 @@ def effective_config(
         effective["batching"] = base["batching"]
     if "model" in base:
         effective["model"] = base["model"]
+    if runtime.backend == "rocm":
+        effective["soak"]["rocm_graph_geometries_per_active_request"] = (
+            ROCM_GRAPH_GEOMETRIES_PER_ACTIVE_REQUEST
+        )
     if runtime.host_mem_available_floor_bytes is not None:
         effective["soak"]["host_mem_available_floor_bytes"] = (
             runtime.host_mem_available_floor_bytes
@@ -1029,6 +1068,10 @@ class HostMemoryGuard:
         if self.process.poll() is None:
             try:
                 os.killpg(self.process.pid, signal.SIGTERM)
+                # SIGTERM remains pending for a group stopped by the independent
+                # thermal pacer. SIGCONT is harmless for a running group and
+                # guarantees a paced group can execute fail-closed shutdown.
+                os.killpg(self.process.pid, signal.SIGCONT)
             except ProcessLookupError:
                 pass
 
@@ -2441,11 +2484,11 @@ def run_cancellation(
 def metric_definitions(
     runtime: SoakRuntime = ROCM_RUNTIME,
 ) -> dict[str, tuple[str, str, bool]]:
-    return (
-        VULKAN_METRIC_DEFINITIONS
-        if runtime.host_mem_available_floor_bytes is not None
-        else METRIC_DEFINITIONS
-    )
+    if runtime.backend == "rocm":
+        return ROCM_METRIC_DEFINITIONS
+    if runtime.backend == "vulkan":
+        return VULKAN_METRIC_DEFINITIONS
+    raise SoakError(f"unsupported soak metric backend {runtime.backend!r}")
 
 
 def resident_prefill_metric_values(
@@ -2492,6 +2535,16 @@ def stabilization_resident_prefill_metric_values(
         f"stabilization_{name}": value
         for name, value in resident_prefill_metric_values(before, after).items()
     }
+
+
+def partial_stabilization_resident_prefill_metric_values(
+    runtime: SoakRuntime,
+    before: dict[str, int | bool] | None,
+    after: dict[str, int | bool] | None,
+) -> dict[str, int]:
+    if runtime.backend != "vulkan" or before is None or after is None:
+        return {}
+    return stabilization_resident_prefill_metric_values(before, after)
 
 
 def resident_prefill_contract_failures(
@@ -4016,16 +4069,13 @@ def execute(
                     observed_batched_state_start, observed_batched_state_end
                 )
             )
-        if (
-            observed_stabilization_batching_start is not None
-            and observed_stabilization_batching_end is not None
-        ):
-            values.update(
-                stabilization_resident_prefill_metric_values(
-                    observed_stabilization_batching_start,
-                    observed_stabilization_batching_end,
-                )
+        values.update(
+            partial_stabilization_resident_prefill_metric_values(
+                runtime,
+                observed_stabilization_batching_start,
+                observed_stabilization_batching_end,
             )
+        )
         if (
             observed_process_mappings_start is not None
             and observed_process_mappings_end is not None

@@ -248,6 +248,51 @@ class ServeRocmSoakTests(unittest.TestCase):
         with self.assertRaisesRegex(soak.SoakError, "must name one of"):
             soak.runtime_for_variant("unknown")
 
+        rocm = soak.effective_config(
+            soak.QUALIFICATION_DURATION_SECONDS,
+            soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+            soak.ROCM_RUNTIME,
+        )
+        self.assertEqual(rocm["server"]["max_active_requests"], 12)
+        self.assertEqual(rocm["soak"]["rocm_graph_cache_entries"], 24)
+        self.assertEqual(
+            rocm["soak"]["rocm_graph_geometries_per_active_request"], 2
+        )
+        self.assertEqual(
+            rocm["soak"]["host_mem_available_floor_bytes"], 8 * 1024**3
+        )
+        self.assertEqual(
+            rocm["soak"]["host_swap_growth_limit_bytes"], 512 * 1024**2
+        )
+        self.assertEqual(
+            rocm["soak"]["host_thermal_guard"],
+            {
+                "limit_millicelsius": 97_000,
+                "poll_interval_ms": 250,
+                "sensor": {"hwmon_name": "k10temp", "label": "Tctl"},
+            },
+        )
+        self.assertEqual(
+            rocm["soak"]["host_thermal_pacing"],
+            {
+                "start_millicelsius": 88_000,
+                "resume_millicelsius": 80_000,
+                "poll_interval_ms": 250,
+                "deadline_accounting": "included",
+                "mode": "continuous_process_group_stop",
+                "scope": "server_process_group",
+                "pause_signal": "SIGSTOP",
+                "resume_signal": "SIGCONT",
+                "itl_attribution": "host_thermal_pacing",
+            },
+        )
+        with self.assertRaisesRegex(soak.SoakError, "reserve exactly 2 geometries"):
+            soak.effective_config(
+                soak.QUALIFICATION_DURATION_SECONDS,
+                soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+                soak.dataclasses.replace(soak.ROCM_RUNTIME, graph_cache_max=12),
+            )
+
         vulkan = soak.effective_config(
             soak.QUALIFICATION_DURATION_SECONDS,
             soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
@@ -312,13 +357,6 @@ class ServeRocmSoakTests(unittest.TestCase):
                 "resume_signal": "SIGCONT",
                 "itl_attribution": "host_thermal_pacing",
             },
-        )
-        self.assertNotIn(
-            "host_mem_available_floor_bytes",
-            soak.effective_config(
-                soak.QUALIFICATION_DURATION_SECONDS,
-                soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
-            )["soak"],
         )
         self.assertEqual(
             soak.effective_config(60.0, 123)["soak"][
@@ -1011,6 +1049,24 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.stabilization_resident_prefill_metric_values(before, after),
             {f"stabilization_{name}": value for name, value in values.items()},
         )
+        self.assertEqual(
+            soak.partial_stabilization_resident_prefill_metric_values(
+                soak.ROCM_RUNTIME, before, after
+            ),
+            {},
+        )
+        self.assertEqual(
+            soak.partial_stabilization_resident_prefill_metric_values(
+                soak.VULKAN_RUNTIME, before, after
+            ),
+            {f"stabilization_{name}": value for name, value in values.items()},
+        )
+        self.assertEqual(
+            soak.partial_stabilization_resident_prefill_metric_values(
+                soak.VULKAN_RUNTIME, before, None
+            ),
+            {},
+        )
 
         single_row_only = dict(values)
         single_row_only["resident_prefill_row_count"] = single_row_only[
@@ -1404,7 +1460,7 @@ class ServeRocmSoakTests(unittest.TestCase):
         )
         self.assertEqual(
             case["result_protocol"]["declared_metrics"],
-            sorted(soak.METRIC_DEFINITIONS),
+            sorted(soak.metric_definitions(soak.ROCM_RUNTIME)),
         )
         self.assertEqual(
             case["command"],
@@ -1577,7 +1633,10 @@ class ServeRocmSoakTests(unittest.TestCase):
         ):
             guard._sample()
             guard._sample()
-        killpg.assert_called_once_with(1234, signal.SIGTERM)
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(1234, signal.SIGTERM), mock.call(1234, signal.SIGCONT)],
+        )
         self.assertIn("below", guard.trip_reason or "")
         self.assertEqual(guard.metric_values()["host_memory_guard_trip_count"], 1)
         self.assertEqual(guard.metric_values()["host_swap_growth_bytes"], 150)
@@ -1814,10 +1873,14 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertTrue(guard.errors)
 
     def test_metric_contract_is_closed_sorted_and_finite(self) -> None:
-        values = {name: 0 for name in soak.METRIC_DEFINITIONS}
+        values = {name: 0 for name in soak.metric_definitions(soak.ROCM_RUNTIME)}
         metrics = soak.metrics_from_values(values)
         self.assertEqual(
-            [metric["name"] for metric in metrics], sorted(soak.METRIC_DEFINITIONS)
+            [metric["name"] for metric in metrics], sorted(values)
+        )
+        self.assertEqual(
+            set(soak.HOST_SAFETY_METRIC_DEFINITIONS),
+            set(soak.ROCM_METRIC_DEFINITIONS) - set(soak.METRIC_DEFINITIONS),
         )
 
         missing = dict(values)

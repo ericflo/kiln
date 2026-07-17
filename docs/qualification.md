@@ -1134,10 +1134,18 @@ python3 scripts/qualification/run.py \
   qualification/workloads/serving-rocm-development-soak-v1.json
 ```
 
-The driver builds once, starts one server process with a 12-graph residency
-limit, warms ROCm graphs, and fills the bounded prefix cache to its declared
+The driver builds once and starts one server process with 12 active-request
+slots. Its graph-required operating point reserves two exact attention
+geometries per active owner, so the checked effective configuration derives a
+24-entry graph ceiling as `12 * 2` rather than carrying a magic number. The
+runtime independently enforces the same two-geometry per-owner retention bound:
+on a third distinct miss it settles and retires only that active owner's older
+graphs while preserving its recurrent-state slot and continuity timeline. The
+driver warms ROCm graphs and fills the bounded prefix cache to its declared
 entry/state capacity before recording the post-warmup memory baseline or
-starting the 30-minute measurement clock.
+starting the 30-minute measurement clock. The 24-entry ceiling is qualification
+headroom for this declared workload, not a new product default or evidence that
+arbitrary deployments require the same value.
 It then exercises complete fixed-prompt concurrency cycles, including periodic
 cancellation, until GPU-used and server-RSS deltas remain within 64 MiB and 16
 MiB respectively for two consecutive cycles. This convergence requires at
@@ -1153,7 +1161,7 @@ Slot prompts repeat across waves so prefix hits and cached-block reuse are
 measured. After each wave, the driver requires the engine to drain, every used
 KV block to be owned by the prefix cache, zero active cache leases or pending
 releases, stable cache residency, zero active graph slots or row timelines,
-at most 12 retained graphs and slots, the process to remain alive, and
+at most 24 retained graphs and slots, the process to remain alive, and
 runtime/debug policy attestations to remain consistent. Idle slots and their
 native graphs remain resident for reuse. The final drain requires every
 retained slot to be idle, and the measured phase must exercise slot reuse.
@@ -1177,6 +1185,13 @@ graph/slot residency and reuse, external-yield synchronization, memory
 baselines/peaks, request/token counts, and cancellation count. Shutdown must
 return zero without force after the decode worker is joined, and snapshot
 cleanup must leave no residue.
+
+ROCm results always declare the base serving metrics plus the shared host
+memory, swap, temperature, and thermal-pacing metrics. Vulkan alone declares
+the resident-prefill, process-DRM, allocator, and mapping extensions. The same
+backend-specific schema is used for both complete and partial results, so a
+later failure cannot replace retained ROCm warmup evidence with a metric-set
+mismatch caused by Vulkan-only fields.
 
 This `kind: soak` workload is intentionally a non-comparative pass/fail gate,
 so its `comparison_policy` is null. Do not use it to claim relative throughput
@@ -1364,13 +1379,18 @@ region or publish and enforce a narrower supported Vulkan service envelope
 before qualifying that envelope.
 
 ROCm's device-global memory counter cannot isolate another desktop process.
-The Vulkan driver therefore sums the server process's `drm-memory-vram`,
+The Vulkan driver therefore additionally sums the server process's `drm-memory-vram`,
 `drm-memory-gtt`, and `drm-memory-cpu` records from `/proc/<pid>/fdinfo`,
 deduplicated by DRM client ID. It samples `VmRSS`, `RssAnon`, `RssFile`,
-`RssShmem`, and `VmSwap` from `/proc/<pid>/status` separately. A 250 ms host
-guard sends `SIGTERM` to the complete server process group if Linux
+`RssShmem`, and `VmSwap` from `/proc/<pid>/status` separately.
+
+Both committed Strix Halo development soaks use the same independent 250 ms
+host controller. Its memory guard sends `SIGTERM` to the complete server process
+group if Linux
 `MemAvailable` falls below 8 GiB; missing or malformed host telemetry also
-fails closed. The receipt records the starting, minimum, and ending available
+fails closed. It follows termination with `SIGCONT`, which is harmless for a
+running group and lets a thermally paced group execute shutdown immediately.
+The receipt records the starting, minimum, and ending available
 memory, starting/peak/ending swap use, and swap growth. More than 512 MiB of
 new swap is a failure even when the 8 GiB floor was not crossed.
 
@@ -1392,7 +1412,7 @@ transient compiler/linker service. A build trip exits with status 3, while a
 missing or invalid sensor fails preflight with status 2; neither can be recorded
 as a successful source-bound build.
 
-The Vulkan soak also uses that continuously scheduled 250 ms controller for
+Both the ROCm and Vulkan soaks also use that continuously scheduled controller for
 hysteretic pacing. At or above 88,000 millicelsius it sends `SIGSTOP` to the
 complete server process group, including an inference wave already in progress.
 The Python qualification controller is outside that process group, so sensor,

@@ -979,6 +979,25 @@ fn append_active_candidate_owner(
     }
 }
 
+/// Bound exact attention geometries retained by one decode owner. Decode
+/// sequence length is monotonic, so retaining unbounded historical buckets for
+/// one row only consumes capacity needed by other active rows. Two entries keep
+/// the current geometry plus one transition/reuse geometry without allowing a
+/// small owner set to monopolize the process-wide cache.
+#[cfg(feature = "rocm")]
+const MAX_RETAINED_GRAPH_GEOMETRIES_PER_OWNER: usize = 2;
+
+#[cfg(feature = "rocm")]
+fn owner_geometry_retirement_required(
+    candidate_is_active: bool,
+    requested_geometry_is_cached: bool,
+    retained_geometry_count: usize,
+) -> bool {
+    candidate_is_active
+        && !requested_geometry_is_cached
+        && retained_geometry_count >= MAX_RETAINED_GRAPH_GEOMETRIES_PER_OWNER
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RocmGraphFallbackReason {
     ColdCacheHostRoundTrip,
@@ -2532,6 +2551,28 @@ impl RocmGraphRunner {
         &mut self,
         key: &RocmGraphCacheKey,
     ) -> Result<Option<RocmGraphFallbackReason>> {
+        let candidate_is_active = self
+            .graph_slots
+            .get(&key.owner)
+            .is_some_and(|slot| slot.assigned_row.is_some());
+        let retained_geometry_count = self
+            .captured
+            .keys()
+            .filter(|captured_key| captured_key.owner == key.owner)
+            .count();
+        if owner_geometry_retirement_required(
+            candidate_is_active,
+            self.captured.contains_key(key),
+            retained_geometry_count,
+        ) {
+            self.evict_graph_owners(
+                &HashSet::from([key.owner]),
+                "pre_capture_owner_geometry_limit",
+                RocmGraphEvictionReason::Budget,
+                false,
+            )?;
+        }
+
         let current = self.memory_accounting(&HashSet::new(), None);
         let entry_saturated = self.captured.len() >= self.max_cached_graphs();
         let byte_saturated = current.retained_bytes >= self.max_retained_bytes();
@@ -5729,6 +5770,16 @@ mod tests {
         append_active_candidate_owner(&mut owners, candidate, true);
         append_active_candidate_owner(&mut owners, RocmGraphOwner::Slot(12), false);
         assert_eq!(owners, vec![idle_oldest, idle_newest, candidate]);
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn active_owner_geometry_retention_is_bounded_without_evicting_hits() {
+        assert!(!owner_geometry_retirement_required(true, false, 1));
+        assert!(owner_geometry_retirement_required(true, false, 2));
+        assert!(owner_geometry_retirement_required(true, false, 3));
+        assert!(!owner_geometry_retirement_required(true, true, 2));
+        assert!(!owner_geometry_retirement_required(false, false, 2));
     }
 
     #[test]

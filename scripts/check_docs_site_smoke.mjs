@@ -1212,6 +1212,30 @@ function validateSftLossRouteDocumentationSourceContract() {
   if (!nativeSftLink || !staticArchitectureHtml.includes(`href="${nativeSftLink}"`)) {
     fail('docs/site/architecture.html: missing generated Native SFT profile route-contract link');
   }
+  const missingRocmGraphTerms = missingNormalizedTerms(staticArchitectureText, [
+    'at most two exact attention geometries',
+    'pre_capture_owner_geometry_limit',
+    'preserves its live slot and timeline',
+    'unchanged global entry and byte limits',
+  ]);
+  if (missingRocmGraphTerms.length > 0) {
+    fail(`docs/site/architecture.html: ROCm owner-geometry contract missing terms: ${missingRocmGraphTerms.join(', ')}`);
+  }
+
+  const troubleshootingHtml = readFileSync(resolve(repoRoot, 'docs/site/troubleshooting.html'), 'utf8');
+  const troubleshootingText = normalizedHtmlText(troubleshootingHtml);
+  const missingRocmSafetyTerms = missingNormalizedTerms(troubleshootingText, [
+    '24 entries as two exact geometries',
+    '12 declared active owners',
+    '8 GiB MemAvailable',
+    '512 MiB swap growth',
+    '88,000/80,000 millicelsius',
+    '97,000 millicelsius',
+    'host_thermal_pacing',
+  ]);
+  if (missingRocmSafetyTerms.length > 0) {
+    fail(`docs/site/troubleshooting.html: Strix Halo qualification safety contract missing terms: ${missingRocmSafetyTerms.join(', ')}`);
+  }
 
   const apiHtml = readFileSync(resolve(repoRoot, 'docs/site/api.html'), 'utf8');
   const apiText = normalizedHtmlText(apiHtml);
