@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **673 direct read call sites** and
+The scanner records **668 direct read call sites** and
 **255 process-mutation call sites**. It can
-statically name **176 distinct literal `KILN_*`
-read names** across **304 call sites**.
+statically name **171 distinct literal `KILN_*`
+read names** across **299 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 201 | 135 | 0 |
+| Experimental/debug migration | 196 | 130 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 135 | 41 | 247 |
 
@@ -56,15 +56,15 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/forward.rs` | 48 | 43 |
+| `crates/kiln-model/src/forward.rs` | 46 | 41 |
 | `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
 | `crates/kiln-model/src/backend/rocm.rs` | 11 | 9 |
 | `crates/kiln-model/src/backend/capability.rs` | 9 | 1 |
 | `crates/kiln-model/src/tape_forward.rs` | 9 | 8 |
 | `crates/kiln-server/src/bench.rs` | 9 | 8 |
-| `crates/kiln-model/src/cuda_graph.rs` | 8 | 8 |
 | `crates/kiln-train/src/trainer.rs` | 8 | 8 |
 | `crates/kiln-model/src/metal_graph.rs` | 6 | 4 |
+| `crates/kiln-model/src/cuda_graph.rs` | 5 | 5 |
 | `crates/kiln-model/src/generate.rs` | 5 | 3 |
 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` | 5 | 2 |
 | `crates/kiln-model/src/rocm_w8_proj.rs` | 4 | 4 |
@@ -118,8 +118,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_BENCH_FORCE_MTP` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
 | `KILN_BENCH_LOG_ITL` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
 | `KILN_BENCH_LOG_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
-| `KILN_BOX102_LMHEAD_NO_FASTPATH` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_BOX102_TOKPROBE` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
 | `KILN_C1_ATTR_PATH` | Experimental/debug migration | 2 | `crates/kiln-model/src/c1_attr.rs`, `crates/kiln-server/src/bench.rs` |
 | `KILN_CHECKPOINT_KILL_CHILD_ROOT` | Test only | 1 | `crates/kiln-train/src/checkpoint.rs` |
 | `KILN_CHECKPOINT_KILL_CHILD_STAGE` | Test only | 1 | `crates/kiln-train/src/checkpoint.rs` |
@@ -134,14 +132,11 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_CUDA_GRAPH_CACHE_MAX` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
 | `KILN_CUDA_GRAPH_STABLE_PAGED_METADATA` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
 | `KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DEBUG_BATCHED_HIDDEN` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
 | `KILN_DEBUG_ENDPOINTS` | Experimental/debug migration | 1 | `crates/kiln-server/src/api/debug_model_state.rs` |
 | `KILN_DEBUG_FLCE_STATS` | Experimental/debug migration | 1 | `crates/kiln-flce-kernel/src/kt_api.rs` |
 | `KILN_DEBUG_FLCE_STATS_LABEL` | Experimental/debug migration | 1 | `crates/kiln-flce-kernel/src/kt_api.rs` |
 | `KILN_DEBUG_FULL_ATTN_FINITE` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DEBUG_FULL_ATTN_STATS_LABEL` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DEBUG_GDN_STATE` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
-| `KILN_DEBUG_LAYER_NORMS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DEBUG_ROCM_FLASH_STATS_LABEL` | Experimental/debug migration | 1 | `crates/kiln-flash-attn/src/rocm_sdpa.rs` |
 | `KILN_DEBUG_SFT_ACTIVE_ROWS` | Experimental/debug migration | 1 | `crates/kiln-train/src/trainer.rs` |
 | `KILN_DEBUG_SFT_FINITE` | Experimental/debug migration | 4 | `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/tape_forward.rs`, `crates/kiln-train/src/trainer.rs` |

@@ -9,6 +9,17 @@
 > execution uses the canonical normalization and BF16 projection path, with its
 > single-token attention invariant enforced by a private scoped runtime guard.
 
+> **Box-102 CUDA graph localization controls were retired on 2026-07-17.**
+> `KILN_BOX102_TOKPROBE`, `KILN_BOX102_LMHEAD_NO_FASTPATH`,
+> `KILN_DEBUG_LAYER_NORMS`, `KILN_DEBUG_GDN_STATE`, and
+> `KILN_DEBUG_BATCHED_HIDDEN` were one-off probes for a closed investigation,
+> not product configuration. Current source no longer performs their duplicate
+> eager replay, captured per-layer reductions, device-to-host readbacks, or
+> diagnostic LM-head route override. The resulting graph-stable input/state
+> ownership and eager post-graph LM-head fixes remain in production. Historical
+> commands and output below describe the evidence that established those fixes;
+> they are not runnable operator instructions.
+
 > **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
 > priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are

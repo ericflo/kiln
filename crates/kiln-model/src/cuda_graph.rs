@@ -1008,7 +1008,6 @@ impl CudaGraphRunner {
                 );
                 return Ok(None);
             }
-            Self::debug_dump_batched_hidden("replay", sequence_lengths, &captured.output_hidden);
             let replay_logits = match crate::forward::lm_head_from_batched_hidden_eager(
                 backend,
                 &captured.output_hidden,
@@ -1340,81 +1339,6 @@ impl CudaGraphRunner {
                             .context("sync per-replay input writes before CUDA graph launch")?;
                     }
 
-                    // #1082 box-102 TOKPROBE (KILN_BOX102_TOKPROBE=1): after the
-                    // per-replay update_token_buffer + default-stream sync, read
-                    // token_buffer device->host and compare to the intended
-                    // token_id. This isolates the BUG2 doubling root cause:
-                    //   buffer_holds == [token_id]  => update+sync are correct;
-                    //     the captured embedding kernel must be reading a STALE
-                    //     copy (baked capture-time token / an arena-copied index
-                    //     tensor) rather than this persistent buffer's device ptr.
-                    //   buffer_holds != [token_id]  => update_token_buffer /
-                    //     cuda_synchronize_default_stream is not landing before
-                    //     the readback (ordering/allocation bug in the write path).
-                    // Graph replay runs captured KERNELS only, so this Rust-side
-                    // readback is the only way to observe the buffer the kernels see.
-                    if std::env::var("KILN_BOX102_TOKPROBE").ok().as_deref() == Some("1") {
-                        let holds = captured.token_buffer.to_vec::<u32>().ok();
-                        eprintln!(
-                            "[BOX102-TOKPROBE] replay seq_len={seq_len} intended_token={token_id} buffer_holds={holds:?}"
-                        );
-                    }
-
-                    // #1082 box-102 SAME-STEP differential (KILN_DEBUG_LAYER_NORMS):
-                    // run the EAGER forward on THIS replay step's identical inputs
-                    // (snapshot + restore linear_state; the KV write is idempotent
-                    // for the same token→slot), dump its per-layer norms, then let
-                    // the replay below dump its own (via debug_dump_gdn_state). The
-                    // FIRST layer where EAGER ≠ replay is the box-102 root cause —
-                    // eager is the correct reference (PASS1==FIRSTLAUNCH proved the
-                    // captured compute matches eager on the capture step).
-                    if crate::forward::read_layer_norm_debug().is_some() {
-                        if let Ok(snap) = linear_state.snapshot() {
-                            let elog = Self::eager_forward(
-                                backend,
-                                token_id,
-                                weights,
-                                config,
-                                paged_cache,
-                                block_table,
-                                seq_len,
-                                linear_state,
-                                lora,
-                            );
-                            if let Some(n) = crate::forward::read_layer_norm_debug() {
-                                eprintln!("SAMESTEP EAGER step={seq_len} {n:?}");
-                            }
-                            // #1082 iter-2: sign-sensitive element-sum at every
-                            // recorded slot (0-31 blocks + slot 40 final_norm/
-                            // lm_head input). A ROTATED hidden has matching sumsq
-                            // (above) but a DIVERGING sum (here) — the first slot
-                            // where the sum differs localizes the divergence.
-                            if let Some(s) = crate::forward::read_layer_sum_debug() {
-                                eprintln!("SAMESTEP EAGER_SUM step={seq_len} {s:?}");
-                            }
-                            // Dump the eager LOGITS sumsq AND sum — the per-layer
-                            // probe stops at the blocks, so this catches a stale
-                            // final_norm/lm_head/output_logits on the replay side.
-                            if let Ok(el) = &elog {
-                                let ess = el
-                                    .sqr()
-                                    .and_then(|s| s.sum_all())
-                                    .and_then(|s| s.to_dtype(kiln_tensor::DType::F32))
-                                    .and_then(|s| s.to_vec::<f32>())
-                                    .ok();
-                                let esum = el
-                                    .to_dtype(kiln_tensor::DType::F32)
-                                    .and_then(|s| s.sum_all())
-                                    .and_then(|s| s.to_vec::<f32>())
-                                    .ok();
-                                eprintln!(
-                                    "SAMESTEP EAGER_LOGITS step={seq_len} sumsq={ess:?} sum={esum:?}"
-                                );
-                            }
-                            *linear_state = snap;
-                        }
-                    }
-
                     let mut plan = CudaDecodeReplayPlan::new(captured);
                     let replay_key = kiln_graph::ReplayPlan::key(&plan);
                     let replay_inputs =
@@ -1441,34 +1365,6 @@ impl CudaGraphRunner {
                                 config,
                             )
                             .context("box-102 fix: eager lm_head on replayed hidden")?;
-                            if let Some(n) = crate::forward::read_layer_norm_debug() {
-                                eprintln!("SAMESTEP REPLAY step={seq_len} {n:?}");
-                                // #1082 iter-2: sign-sensitive element-sum on the
-                                // REPLAY path. Blocks 0-31 come from the captured
-                                // graph; slot 40 from the eager `final_norm` in
-                                // `lm_head_from_hidden_eager` above.
-                                if let Some(s) = crate::forward::read_layer_sum_debug() {
-                                    eprintln!("SAMESTEP REPLAY_SUM step={seq_len} {s:?}");
-                                }
-                                // Replay LOGITS sumsq AND sum — now computed by the
-                                // EAGER lm_head on the replayed hidden, so they
-                                // should MATCH SAMESTEP EAGER_LOGITS (the fix).
-                                let rss = replay_logits
-                                    .sqr()
-                                    .and_then(|s| s.sum_all())
-                                    .and_then(|s| s.to_dtype(kiln_tensor::DType::F32))
-                                    .and_then(|s| s.to_vec::<f32>())
-                                    .ok();
-                                let rsum = replay_logits
-                                    .to_dtype(kiln_tensor::DType::F32)
-                                    .and_then(|s| s.sum_all())
-                                    .and_then(|s| s.to_vec::<f32>())
-                                    .ok();
-                                eprintln!(
-                                    "SAMESTEP REPLAY_LOGITS step={seq_len} sumsq={rss:?} sum={rsum:?}"
-                                );
-                            }
-                            Self::debug_dump_gdn_state("replay", seq_len, linear_state);
                             return Ok(replay_logits);
                         }
                         Err(e) => {
@@ -2013,14 +1909,6 @@ impl CudaGraphRunner {
             Ok::<(), anyhow::Error>(())
         });
         warm_result.context("freeze-pointers warm (Record) pass failed")?;
-        // #1082 box-102 differential: Pass-1 (warm/EAGER) per-layer norms for
-        // THIS capture-step input. Compared below against the first captured
-        // launch's norms (same input) → first diverging layer = the broken
-        // captured op. If these PASS1 norms look sane (monotonic, distinct per
-        // layer) the per-layer probe is NOT an arena-aliasing artifact.
-        if let Some(n) = crate::forward::read_layer_norm_debug() {
-            eprintln!("BOX102DIFF PASS1 {n:?}");
-        }
         // Restore the GDN recurrent state so the captured pass advances it
         // exactly once (KV writes are idempotent and need no restore).
         *linear_state = gdn_snapshot;
@@ -2160,12 +2048,6 @@ impl CudaGraphRunner {
                     config,
                 )
                 .context("box-102 fix: eager lm_head on captured hidden (first launch)")?;
-                // #1082 box-102 differential: first CAPTURED-launch per-layer
-                // norms for the SAME capture-step input as PASS1 above (blocks
-                // 0-31 from the captured graph; slot 40 from the eager lm_head).
-                if let Some(n) = crate::forward::read_layer_norm_debug() {
-                    eprintln!("BOX102DIFF FIRSTLAUNCH {n:?}");
-                }
                 let max_seqlen_k = key.max_seqlen_k;
                 let replay_state = Self::replay_state_for_capture(
                     &key,
@@ -2596,7 +2478,6 @@ impl CudaGraphRunner {
         stream
             .synchronize()
             .map_err(|e| anyhow::anyhow!("sync after first batched captured-graph launch: {e}"))?;
-        Self::debug_dump_batched_hidden("capture", sequence_lengths, &captured.output_hidden);
         // #1082 bs>1 greedy-coherence fix: scatter the post-step persistent GDN
         // slot back into the caller's per-row `linear_states` so this capture
         // step advances them by exactly one token — same as the replay path's
@@ -2667,81 +2548,7 @@ impl CudaGraphRunner {
             None, // no pre-allocated position buffer — creates one internally
         )
         .context("eager decode forward pass failed");
-        if out.is_ok() {
-            // `debug_dump_gdn_state` is `#[cfg(feature = "cuda")]`; gate the call
-            // so the eager path (compiled on every backend, incl. Vulkan/Metal)
-            // still builds. Debug-only, default-off.
-            #[cfg(feature = "cuda")]
-            Self::debug_dump_gdn_state("eager", seq_len, linear_state);
-        }
         out
-    }
-
-    /// #1082 box-102 BUG2 probe (gated by `KILN_DEBUG_GDN_STATE=1`): dump the
-    /// sum-of-squares of layer-0 GDN recurrent + conv state after a decode
-    /// step. Compares the eager path (state advances every step) against the
-    /// captured-graph replay path: if the replay state norm is FROZEN across
-    /// steps, the recurrent state is not surviving replay (the captured graph
-    /// updates an arena buffer but the Rust-side `linear_state` swap never runs
-    /// on replay) — the leading hypothesis for the token-doubling correctness
-    /// bug. Off by default; zero cost on the production path.
-    #[cfg(feature = "cuda")]
-    fn debug_dump_gdn_state(tag: &str, seq_len: usize, linear_state: &LinearAttentionState) {
-        if std::env::var("KILN_DEBUG_GDN_STATE").ok().as_deref() == Some("1") {
-            fn sumsq(t: &Tensor) -> f64 {
-                match t
-                    .to_dtype(kiln_tensor::DType::F32)
-                    .and_then(|f| f.to_vec::<f32>())
-                {
-                    Ok(v) => v.iter().map(|x| (*x as f64) * (*x as f64)).sum(),
-                    Err(_) => -1.0,
-                }
-            }
-            let r = linear_state
-                .recurrent_states
-                .first()
-                .map(sumsq)
-                .unwrap_or(-1.0);
-            let c = linear_state.conv_states.first().map(sumsq).unwrap_or(-1.0);
-            eprintln!("GDNSTATE [{tag}] step={seq_len} rs0_sumsq={r:.6} conv0_sumsq={c:.6}");
-        }
-        // #1082 box-102 BUG2 localization: per-layer hidden-state norms
-        // (gated by KILN_DEBUG_LAYER_NORMS inside read_layer_norm_debug).
-        if let Some(norms) = crate::forward::read_layer_norm_debug() {
-            let shown: Vec<String> = norms.iter().take(32).map(|x| format!("{x:.3}")).collect();
-            eprintln!("LAYERNORM [{tag}] step={seq_len} [{}]", shown.join(","));
-        }
-    }
-
-    /// #1082 Phase 5 bs>1 coherence localization (gated by
-    /// `KILN_DEBUG_BATCHED_HIDDEN=1`): dump the per-row sum-of-squares of the
-    /// post-transformer `output_hidden` ([batch,1,hidden]) right after the
-    /// graph launch + sync, BEFORE the eager lm_head. Called from BOTH the
-    /// replay tail and the capture first-launch tail. Diffing the per-step
-    /// fingerprints of a NO_REPLAY=0 (reuse) run vs a NO_REPLAY=1 (fresh
-    /// capture) run localizes the FIRST decode step where a reused graph
-    /// launch diverges from a fresh capture for identical input — the steps
-    /// before that first divergence have byte-identical tokens (hence identical
-    /// per-row state), so that step isolates graph-reuse-vs-fresh on identical
-    /// input. Off by default; zero cost on the production path.
-    #[cfg(feature = "cuda")]
-    fn debug_dump_batched_hidden(tag: &str, sequence_lengths: &[usize], output_hidden: &Tensor) {
-        if std::env::var("KILN_DEBUG_BATCHED_HIDDEN").ok().as_deref() != Some("1") {
-            return;
-        }
-        let batch = output_hidden.dims().first().copied().unwrap_or(0);
-        let mut parts: Vec<String> = Vec::with_capacity(batch);
-        for i in 0..batch {
-            let ss = output_hidden
-                .narrow(0, i, 1)
-                .and_then(|r| r.to_dtype(kiln_tensor::DType::F32))
-                .and_then(|r| r.to_vec::<f32>())
-                .map(|v| v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>())
-                .unwrap_or(-1.0);
-            let sl = sequence_lengths.get(i).copied().unwrap_or(0);
-            parts.push(format!("r{i}@{sl}={ss:.5}"));
-        }
-        eprintln!("BHID [{tag}] [{}]", parts.join(" "));
     }
 
     #[cfg(feature = "cuda")]
