@@ -2097,19 +2097,6 @@
     },
     {
       "api": "var",
-      "argument": "var",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-autograd/src/backwards/lora_delta_add.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_CP4_DEBUG",
       "argument_kind": "literal",
       "classification": "experimental_debug",
@@ -4207,7 +4194,7 @@
       "argument_kind": "expression",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 2,
+      "count": 1,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-model/src/generate.rs",
@@ -4347,19 +4334,6 @@
     {
       "api": "var",
       "argument": "KILN_METAL_GRAPH_STABLE_PAGED_METADATA",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/metal_graph.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_PROFILE_METAL_GRAPH_STAGES",
       "argument_kind": "literal",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
@@ -7075,11 +7049,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 282,
-    "literal_kiln_read_names": 154,
+    "literal_kiln_read_call_sites": 281,
+    "literal_kiln_read_names": 153,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 113,
+      "experimental_debug": 112,
       "public_stable": 1,
       "test_only": 41
     },
@@ -7089,13 +7063,13 @@
       "test_only": 247
     },
     "process_mutation_entries": 160,
-    "read_call_sites": 650,
+    "read_call_sites": 647,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 178,
+      "experimental_debug": 175,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 383
+    "read_entries": 381
   }
 }

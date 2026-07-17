@@ -187,20 +187,6 @@ impl Drop for GdnPrefillResidentStateScope<'_> {
     }
 }
 
-fn env_truthy_for_profile(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
-        })
-        .unwrap_or(false)
-}
-
-fn profile_decode_batcher_stages_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_DECODE_BATCHER_STAGES"))
-}
-
 /// #1082 CRASHER FIX: detect whether any row's KV pages are NOT physically
 /// contiguous within a kBlockN-token tile — the contract the vendored FA2
 /// split-KV paged-decode kernel silently assumes (it reads each tile as one
@@ -301,20 +287,6 @@ fn gdn_batched_decode_row_loop_debug_enabled() -> bool {
             _ => false,
         }
     })
-}
-
-fn finish_decode_batcher_stage_profile(
-    stage: &str,
-    batch: usize,
-    start: Option<std::time::Instant>,
-) {
-    let Some(start) = start else {
-        return;
-    };
-    eprintln!(
-        "kiln_profile_decode_batcher_stage stage={stage} batch={batch} elapsed_ms={:.3}",
-        start.elapsed().as_secs_f64() * 1000.0
-    );
 }
 
 /// Holds loaded model weights and tokenizer, provides text generation.
@@ -2237,18 +2209,13 @@ fn decode_batch_jobs_with_runner(
     counters: &DecodeBatcherCounters,
 ) -> Result<Vec<TokenId>> {
     counters.runner_calls.fetch_add(1, Ordering::Relaxed);
-    let profile_stages = profile_decode_batcher_stages_enabled();
-    let total_start = profile_stages.then(std::time::Instant::now);
-    let stage_start = profile_stages.then(std::time::Instant::now);
     let input_tokens: Vec<TokenId> = jobs.iter().map(|job| job.input_token).collect();
     let seq_lens: Vec<usize> = jobs.iter().map(|job| job.seq_len).collect();
     let block_tables: Vec<BlockTable> = jobs.iter().map(|job| job.block_table.clone()).collect();
     let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
     let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
         && jobs.iter().all(|job| job.skip_gdn_state_readback);
-    finish_decode_batcher_stage_profile("job_metadata", jobs.len(), stage_start);
 
-    let stage_start = profile_stages.then(std::time::Instant::now);
     let _skip_scope = crate::forward::VulkanSkipGdnStateReadbackScope::new(skip_gdn_state_readback);
     let tokens = if runner.has_linear_attention_layers() {
         let mut linear_states: Vec<&mut LinearAttentionState> =
@@ -2270,8 +2237,6 @@ fn decode_batch_jobs_with_runner(
             &mut no_linear_states,
         )
     };
-    finish_decode_batcher_stage_profile("runner_call", jobs.len(), stage_start);
-    finish_decode_batcher_stage_profile("worker_total", jobs.len(), total_start);
     tokens
 }
 
@@ -6612,8 +6577,6 @@ impl ModelRunner {
     ) -> Result<Vec<TokenId>> {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let batch = input_tokens.len();
-        let profile_stages = profile_decode_batcher_stages_enabled();
-        let total_start = profile_stages.then(std::time::Instant::now);
         anyhow::ensure!(batch > 0, "batched decode requires at least one row");
         anyhow::ensure!(
             block_tables.len() == batch && seq_lens.len() == batch,
@@ -6647,7 +6610,6 @@ impl ModelRunner {
             row_ids.is_some(),
             resident_decode_supported,
         ) {
-            let stage_start = profile_stages.then(std::time::Instant::now);
             let pc_guard = lock_paged_cache(paged_cache)?;
             #[cfg(feature = "metal")]
             let token = {
@@ -6723,8 +6685,6 @@ impl ModelRunner {
                 }
             })
             .context("single-row greedy decode forward pass (paged) failed")?;
-            finish_decode_batcher_stage_profile("single_forward", batch, stage_start);
-            finish_decode_batcher_stage_profile("decode_total", batch, total_start);
             return Ok(vec![token]);
         }
 
@@ -6762,7 +6722,6 @@ impl ModelRunner {
             if n_noncontig == batch {
                 // Every row fragmented (or debug row-loop-all): the original
                 // contiguity-safe per-row loop, unchanged.
-                let stage_start = profile_stages.then(std::time::Instant::now);
                 let mut tokens = Vec::with_capacity(batch);
                 for row in 0..batch {
                     let linear_state =
@@ -6791,12 +6750,6 @@ impl ModelRunner {
                     };
                     tokens.push(token);
                 }
-                finish_decode_batcher_stage_profile(
-                    "cuda_gdn_row_loop_forward",
-                    batch,
-                    stage_start,
-                );
-                finish_decode_batcher_stage_profile("decode_total", batch, total_start);
                 return Ok(tokens);
             } else if n_noncontig > 0 {
                 // MIXED: row-loop only the fragmented rows; batch the contiguous
@@ -6804,7 +6757,6 @@ impl ModelRunner {
                 // subset, which falls straight through to it). Scatter back to
                 // input order. This is what keeps the fast path alive at n=64 when
                 // only a handful of rows hold freshly-recycled pages.
-                let stage_start = profile_stages.then(std::time::Instant::now);
                 let mut out = vec![0u32; batch];
                 // Disjoint partition of the &mut linear states in one pass.
                 let mut contig_idx: Vec<usize> = Vec::new();
@@ -6864,18 +6816,11 @@ impl ModelRunner {
                 for (k, &row) in contig_idx.iter().enumerate() {
                     out[row] = contig_out[k];
                 }
-                finish_decode_batcher_stage_profile(
-                    "cuda_gdn_partition_forward",
-                    batch,
-                    stage_start,
-                );
-                finish_decode_batcher_stage_profile("decode_total", batch, total_start);
                 return Ok(out);
             }
             // n_noncontig == 0: all rows contiguous -> fall through to fast path.
         }
 
-        let stage_start = profile_stages.then(std::time::Instant::now);
         if has_linear_layers {
             if ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
                 && ReplayBackend::runtime_decode_resident_pool_ready(
@@ -6907,7 +6852,7 @@ impl ModelRunner {
             && linear_states
                 .iter()
                 .all(|state| state.has_all_gdn_state_resident_kt(&*self.backend));
-        let (mut batch_state, batched_state_cache_hit) = if has_linear_layers {
+        let (mut batch_state, _) = if has_linear_layers {
             self.prepare_batched_linear_state(linear_states, all_rows_resident, row_ids)?
         } else {
             (
@@ -6919,17 +6864,6 @@ impl ModelRunner {
                 false,
             )
         };
-        if batched_state_cache_hit {
-            finish_decode_batcher_stage_profile(
-                "batch_state_assemble_cache_hit",
-                batch,
-                stage_start,
-            );
-        } else {
-            finish_decode_batcher_stage_profile("batch_state_assemble", batch, stage_start);
-        }
-
-        let stage_start = profile_stages.then(std::time::Instant::now);
         let tokens = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             let graph_tokens = if paged_decode_replay_primitive_enabled(
@@ -6977,22 +6911,13 @@ impl ModelRunner {
                 .context("batched greedy decode forward pass (paged) failed")?,
             }
         };
-        finish_decode_batcher_stage_profile("batched_forward", batch, stage_start);
-
         if let Some(state) = batch_state.as_ref() {
-            let stage_start = profile_stages.then(std::time::Instant::now);
             if fast_batched_linear_state_scatter_enabled() {
                 if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
                     state.scatter_batch_rows_replace(linear_states)?;
                 }
-                finish_decode_batcher_stage_profile(
-                    "batch_state_scatter_replace",
-                    batch,
-                    stage_start,
-                );
             } else {
                 state.scatter_batch_rows(linear_states)?;
-                finish_decode_batcher_stage_profile("batch_state_scatter_copy", batch, stage_start);
             }
         }
         // Park the (now updated) batched state back in the cache so the
@@ -7005,7 +6930,6 @@ impl ModelRunner {
         if let (Some(state), Some(ids)) = (batch_state.take_for_cache(), row_ids) {
             self.park_batched_state(state, ids);
         }
-        finish_decode_batcher_stage_profile("decode_total", batch, total_start);
 
         Ok(tokens)
     }
@@ -7041,8 +6965,6 @@ impl ModelRunner {
 
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let batch = input_tokens.len();
-        let profile_stages = profile_decode_batcher_stages_enabled();
-        let total_start = profile_stages.then(std::time::Instant::now);
         anyhow::ensure!(batch > 0, "batched sample decode requires at least one row");
         anyhow::ensure!(
             block_tables.len() == batch
@@ -7101,7 +7023,6 @@ impl ModelRunner {
             );
         }
 
-        let stage_start = profile_stages.then(std::time::Instant::now);
         if has_linear_layers {
             if ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
                 && ReplayBackend::runtime_decode_resident_pool_ready(
@@ -7134,36 +7055,18 @@ impl ModelRunner {
             && linear_states
                 .iter()
                 .all(|state| state.has_all_gdn_state_resident_kt(&*self.backend));
-        let (mut batch_state, batched_state_cache_hit) =
-            if has_linear_layers && !single_row_direct_state {
-                self.prepare_batched_linear_state(linear_states, all_rows_resident, row_ids)?
-            } else {
-                (
-                    ResidentBatchedStateLease::new(
-                        None,
-                        self.backend.as_ref(),
-                        &self.batched_state_cache_counters,
-                    ),
-                    false,
-                )
-            };
-        if single_row_direct_state {
-            finish_decode_batcher_stage_profile(
-                "sample_batch_state_direct_row",
-                batch,
-                stage_start,
-            );
-        } else if batched_state_cache_hit {
-            finish_decode_batcher_stage_profile(
-                "sample_batch_state_assemble_cache_hit",
-                batch,
-                stage_start,
-            );
+        let (mut batch_state, _) = if has_linear_layers && !single_row_direct_state {
+            self.prepare_batched_linear_state(linear_states, all_rows_resident, row_ids)?
         } else {
-            finish_decode_batcher_stage_profile("sample_batch_state_assemble", batch, stage_start);
-        }
-
-        let stage_start = profile_stages.then(std::time::Instant::now);
+            (
+                ResidentBatchedStateLease::new(
+                    None,
+                    self.backend.as_ref(),
+                    &self.batched_state_cache_counters,
+                ),
+                false,
+            )
+        };
         let mut tokens = None;
         #[cfg(feature = "metal")]
         if paged_decode_replay_primitive_enabled(
@@ -7258,33 +7161,20 @@ impl ModelRunner {
         let Some(tokens) = tokens else {
             return Ok(None);
         };
-        finish_decode_batcher_stage_profile("sample_batched_forward", batch, stage_start);
 
         if let Some(state) = batch_state.as_ref() {
-            let stage_start = profile_stages.then(std::time::Instant::now);
             if fast_batched_linear_state_scatter_enabled() {
                 if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
                     state.scatter_batch_rows_replace(linear_states)?;
                 }
-                finish_decode_batcher_stage_profile(
-                    "sample_batch_state_scatter_replace",
-                    batch,
-                    stage_start,
-                );
             } else {
                 state.scatter_batch_rows(linear_states)?;
-                finish_decode_batcher_stage_profile(
-                    "sample_batch_state_scatter_copy",
-                    batch,
-                    stage_start,
-                );
             }
         }
 
         if let (Some(state), Some(ids)) = (batch_state.take_for_cache(), row_ids) {
             self.park_batched_state(state, ids);
         }
-        finish_decode_batcher_stage_profile("sample_decode_total", batch, total_start);
 
         Ok(Some(tokens))
     }
@@ -7306,8 +7196,6 @@ impl ModelRunner {
     ) -> Result<kiln_tensor::Tensor> {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let batch = input_tokens.len();
-        let profile_stages = profile_decode_batcher_stages_enabled();
-        let total_start = profile_stages.then(std::time::Instant::now);
         anyhow::ensure!(batch > 0, "batched hidden decode requires at least one row");
         anyhow::ensure!(
             block_tables.len() == batch && seq_lens.len() == batch,
@@ -7327,7 +7215,6 @@ impl ModelRunner {
             );
         }
 
-        let stage_start = profile_stages.then(std::time::Instant::now);
         if has_linear_layers {
             if ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
                 && ReplayBackend::runtime_decode_resident_pool_ready(
@@ -7360,36 +7247,18 @@ impl ModelRunner {
                 .iter()
                 .all(|state| state.has_all_gdn_state_resident_kt(&*self.backend));
         let single_row_direct_state = has_linear_layers && batch == 1;
-        let (mut batch_state, batched_state_cache_hit) =
-            if has_linear_layers && !single_row_direct_state {
-                self.prepare_batched_linear_state(linear_states, all_rows_resident, row_ids)?
-            } else {
-                (
-                    ResidentBatchedStateLease::new(
-                        None,
-                        self.backend.as_ref(),
-                        &self.batched_state_cache_counters,
-                    ),
-                    false,
-                )
-            };
-        if single_row_direct_state {
-            finish_decode_batcher_stage_profile(
-                "hidden_batch_state_direct_row",
-                batch,
-                stage_start,
-            );
-        } else if batched_state_cache_hit {
-            finish_decode_batcher_stage_profile(
-                "hidden_batch_state_assemble_cache_hit",
-                batch,
-                stage_start,
-            );
+        let (mut batch_state, _) = if has_linear_layers && !single_row_direct_state {
+            self.prepare_batched_linear_state(linear_states, all_rows_resident, row_ids)?
         } else {
-            finish_decode_batcher_stage_profile("hidden_batch_state_assemble", batch, stage_start);
-        }
-
-        let stage_start = profile_stages.then(std::time::Instant::now);
+            (
+                ResidentBatchedStateLease::new(
+                    None,
+                    self.backend.as_ref(),
+                    &self.batched_state_cache_counters,
+                ),
+                false,
+            )
+        };
         let hidden = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             let linear_state_for_forward = if single_row_direct_state {
@@ -7411,33 +7280,19 @@ impl ModelRunner {
             )
             .context("batched hidden decode forward pass (paged) failed")?
         };
-        finish_decode_batcher_stage_profile("hidden_batched_forward", batch, stage_start);
-
         if let Some(state) = batch_state.as_ref() {
-            let stage_start = profile_stages.then(std::time::Instant::now);
             if fast_batched_linear_state_scatter_enabled() {
                 if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
                     state.scatter_batch_rows_replace(linear_states)?;
                 }
-                finish_decode_batcher_stage_profile(
-                    "hidden_batch_state_scatter_replace",
-                    batch,
-                    stage_start,
-                );
             } else {
                 state.scatter_batch_rows(linear_states)?;
-                finish_decode_batcher_stage_profile(
-                    "hidden_batch_state_scatter_copy",
-                    batch,
-                    stage_start,
-                );
             }
         }
 
         if let (Some(state), Some(ids)) = (batch_state.take_for_cache(), row_ids) {
             self.park_batched_state(state, ids);
         }
-        finish_decode_batcher_stage_profile("hidden_decode_total", batch, total_start);
 
         Ok(hidden)
     }

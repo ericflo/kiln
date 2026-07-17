@@ -83,6 +83,19 @@
 > merging, product latency metrics, and the qualified sync-free ROCm decode
 > route. Historical commands and measurements remain evidence only.
 
+> **Residual decode and backward profiling controls were retired on
+> 2026-07-17.** `KILN_TRACE_LORA_DELTA_BWD_TIMINGS`,
+> `KILN_PROFILE_DECODE_BATCHER_STAGES`, `KILN_PROFILE_METAL_GRAPH_STAGES`,
+> `KILN_TRACE_ROCM_FLASH_FWD`, `KILN_TRACE_ROCM_FLASH_BWD`, and
+> `KILN_TRACE_ROCM_FLASH_ONLINE_BWD` inserted unstructured host-wall timing or
+> route records into production code. The two ROCm backward traces also drained
+> the compute stream at 22 timing boundaries, perturbing the work they measured.
+> Current source retains the same LoRA gradients, decode routes, state assembly
+> and scatter, Metal graph operations, ROCm memory admission, attention math,
+> finite-value diagnostics, structured product counters, and NVTX ranges without
+> those investigation branches. Historical commands and measurements remain
+> evidence only; current source no longer recognizes the controls.
+
 > **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
 > priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are

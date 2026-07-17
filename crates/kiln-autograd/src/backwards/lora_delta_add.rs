@@ -74,15 +74,6 @@ use kiln_tensor::{Result, Tensor, bail};
 
 use crate::BackwardOp;
 
-fn trace_enabled(var: &str) -> bool {
-    std::env::var(var)
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
-        })
-        .unwrap_or(false)
-}
-
 /// Fused backward for `out = base + scale * (x @ A^T @ B^T)`.
 ///
 /// 4 inputs in order `[base, x, A, B]`. `base` is the leading
@@ -171,49 +162,23 @@ impl BackwardOp for LoraDeltaAddBackward {
 
         // ---- backward composition ------------------------------------
         //
-        let trace_timings = trace_enabled("KILN_TRACE_LORA_DELTA_BWD_TIMINGS");
-        let mut stage_started = std::time::Instant::now();
-        let mut log_stage = |phase: &str, tensor: &Tensor| {
-            if trace_timings {
-                eprintln!(
-                    "kiln_lora_delta_bwd_timing phase={} rows={} in_features={} \
-                     out_features={} rank={} out_shape={:?} out_dtype={:?} elapsed_ms={:.3}",
-                    phase,
-                    rows,
-                    in_features,
-                    out_features,
-                    rank,
-                    tensor.shape(),
-                    tensor.dtype(),
-                    stage_started.elapsed().as_secs_f64() * 1000.0,
-                );
-                stage_started = std::time::Instant::now();
-            }
-        };
-
         // Recompute h = x @ A^T without materialising A^T.
         let h = matmul_rhs_transposed(&x, &a)?; // [rows, rank]
-        log_stage("h_rhs_t_matmul", &h);
 
         // grad_d = scale * grad_out.  Single elementwise pass.
         let g_scaled = mul_scalar(grad_output, self.scale)?; // [rows, out_features]
-        log_stage("grad_d_scale", &g_scaled);
 
         // grad_h = grad_d @ B  (B is [out_features, rank]).
         let grad_h = matmul(&g_scaled, &b)?; // [rows, rank]
-        log_stage("grad_h_matmul", &grad_h);
 
         // grad_x = grad_h @ A  (A is [rank, in_features]).
         let grad_x = matmul(&grad_h, &a)?; // [rows, in_features]
-        log_stage("grad_x_matmul", &grad_x);
 
         // grad_A = grad_h^T @ x  (shape [rank, in_features]).
         let grad_a = matmul_lhs_transposed(&grad_h, &x)?; // [rank, in_features]
-        log_stage("grad_a_lhs_t_matmul", &grad_a);
 
         // grad_B = grad_d^T @ h  (shape [out_features, rank]).
         let grad_b = matmul_lhs_transposed(&g_scaled, &h)?; // [out_features, rank]
-        log_stage("grad_b_lhs_t_matmul", &grad_b);
 
         // grad_base = grad_out  (the additive identity passes the
         // upstream grad straight through with no allocation).

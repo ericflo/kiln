@@ -39,22 +39,6 @@ fn metal_graphs_env_on() -> bool {
 }
 
 #[cfg(feature = "metal")]
-fn profile_metal_graph_stages_enabled() -> bool {
-    std::env::var("KILN_PROFILE_METAL_GRAPH_STAGES").is_ok()
-}
-
-#[cfg(feature = "metal")]
-fn finish_metal_graph_stage_profile(stage: &str, batch: usize, start: Option<std::time::Instant>) {
-    let Some(start) = start else {
-        return;
-    };
-    eprintln!(
-        "kiln_profile_metal_graph_stage stage={stage} batch={batch} elapsed_ms={:.3}",
-        start.elapsed().as_secs_f64() * 1000.0
-    );
-}
-
-#[cfg(feature = "metal")]
 pub(crate) fn replay_paged_decode_icb_graph_through_replay_plan(
     graph: &crate::backend::metal::MetalPagedDecodeIcbGraph,
     max_seqlen_k: u32,
@@ -684,9 +668,7 @@ impl MetalGraphRunner {
                 v: buffers.stable_v.as_slice(),
                 graphs: buffers.icb_graphs.as_mut_slice(),
             };
-            let profile_stages = profile_metal_graph_stages_enabled();
             let sample_result = (|| -> Result<Vec<TokenId>> {
-                let stage_start = profile_stages.then(std::time::Instant::now);
                 let hidden =
                     model_forward_paged_decode_contiguous_batch_hidden_with_stable_buffers(
                         backend,
@@ -709,11 +691,7 @@ impl MetalGraphRunner {
                         &buffers.kv_slot,
                         Some(metal_icb_inputs),
                     )?;
-                finish_metal_graph_stage_profile("greedy_hidden", batch, stage_start);
-                let stage_start = profile_stages.then(std::time::Instant::now);
                 let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-                finish_metal_graph_stage_profile("greedy_final_norm", batch, stage_start);
-                let stage_start = profile_stages.then(std::time::Instant::now);
                 let token = SamplingBackend::runtime_linear_decode_sample(
                     backend,
                     &normed,
@@ -730,7 +708,6 @@ impl MetalGraphRunner {
                     0,
                 )?
                 .context("Metal graph greedy sampler tail declined top-k=1")?;
-                finish_metal_graph_stage_profile("greedy_sample_tail", batch, stage_start);
                 Ok(vec![token])
             })();
             match sample_result {
@@ -902,9 +879,7 @@ impl MetalGraphRunner {
             v: buffers.stable_v.as_slice(),
             graphs: buffers.icb_graphs.as_mut_slice(),
         };
-        let profile_stages = profile_metal_graph_stages_enabled();
         let sample_result = (|| -> Result<Option<Vec<TokenId>>> {
-            let stage_start = profile_stages.then(std::time::Instant::now);
             let hidden = model_forward_paged_decode_contiguous_batch_hidden_with_stable_buffers(
                 backend,
                 token_ids,
@@ -926,11 +901,7 @@ impl MetalGraphRunner {
                 &buffers.kv_slot,
                 Some(metal_icb_inputs),
             )?;
-            finish_metal_graph_stage_profile("sample_hidden", batch, stage_start);
-            let stage_start = profile_stages.then(std::time::Instant::now);
             let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-            finish_metal_graph_stage_profile("sample_final_norm", batch, stage_start);
-            let stage_start = profile_stages.then(std::time::Instant::now);
             let tokens = SamplingBackend::runtime_linear_decode_sample_batch(
                 backend,
                 &normed,
@@ -947,7 +918,6 @@ impl MetalGraphRunner {
                 min_p,
                 seeds,
             )?;
-            finish_metal_graph_stage_profile("sample_tail", batch, stage_start);
             Ok(tokens)
         })();
 

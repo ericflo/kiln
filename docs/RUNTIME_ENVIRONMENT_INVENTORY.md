@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **650 direct read call sites** and
+The scanner records **647 direct read call sites** and
 **255 process-mutation call sites**. It can
-statically name **154 distinct literal `KILN_*`
-read names** across **282 call sites**.
+statically name **153 distinct literal `KILN_*`
+read names** across **281 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 178 | 113 | 0 |
+| Experimental/debug migration | 175 | 112 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 135 | 41 | 247 |
 
@@ -63,10 +63,10 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-server/src/bench.rs` | 9 | 8 |
 | `crates/kiln-model/src/tape_forward.rs` | 8 | 7 |
 | `crates/kiln-train/src/trainer.rs` | 7 | 7 |
-| `crates/kiln-model/src/metal_graph.rs` | 6 | 4 |
 | `crates/kiln-model/src/cuda_graph.rs` | 5 | 5 |
-| `crates/kiln-model/src/generate.rs` | 5 | 3 |
+| `crates/kiln-model/src/metal_graph.rs` | 5 | 3 |
 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` | 5 | 2 |
+| `crates/kiln-model/src/generate.rs` | 4 | 3 |
 | `crates/kiln-model/src/rocm_w8_proj.rs` | 4 | 4 |
 | `crates/kiln-tensor/csrc/paged_decode_meta.cu` | 4 | 2 |
 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` | 4 | 4 |
@@ -86,7 +86,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs` | 2 | 2 |
 | `crates/kiln-tensor/src/rocm_storage.rs` | 2 | 2 |
 | `crates/kiln-autograd/src/anomaly.rs` | 1 | 1 |
-| `crates/kiln-autograd/src/backwards/lora_delta_add.rs` | 1 | 0 |
 | `crates/kiln-autograd/src/tape.rs` | 1 | 1 |
 | `crates/kiln-blas/src/algo_cache.rs` | 1 | 0 |
 | `crates/kiln-core/src/config_hashes.rs` | 1 | 0 |
@@ -209,7 +208,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_MTP_BYTE_EQ_MODEL` | Test only | 1 | `crates/kiln-model/tests/mtp_byte_eq.rs` |
 | `KILN_OPD_SAMPLER_SEGMENTS` | Experimental/debug migration | 1 | `crates/kiln-train/src/opd.rs` |
 | `KILN_OPD_USE_CHAT_TEMPLATE_RENDER` | Experimental/debug migration | 1 | `crates/kiln-train/src/opd.rs` |
-| `KILN_PROFILE_METAL_GRAPH_STAGES` | Experimental/debug migration | 1 | `crates/kiln-model/src/metal_graph.rs` |
 | `KILN_QUALIFICATION` | Experimental/debug migration, Test only | 28 | `crates/kiln-model/src/rocm_graph.rs`, `crates/kiln-model/tests/adamw_pytorch_oracle.rs`, `crates/kiln-model/tests/rocm_kv_physical_resize.rs`, `crates/kiln-model/tests/vk_resident_decode_parity.rs`, `crates/kiln-server/src/bench.rs`, `crates/kiln-server/tests/real_model_integration.rs`, `crates/kiln-tensor/src/ops/log_softmax.rs`, `crates/kiln-tensor/tests/log_softmax_backend_stability.rs`, `crates/kiln-tensor/tests/metal_ops_parity.rs`, `crates/kiln-tensor/tests/rocm_matmul_parity.rs`, `crates/kiln-tensor/tests/rocm_storage_smoke.rs`, `crates/kiln-train/src/grpo_tape_shim.rs`, `crates/kiln-train/src/opd.rs`, `crates/kiln-train/src/trainer.rs`, `crates/kiln-vulkan-kernel/tests/support/mod.rs`, `crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` |
 | `KILN_QUALIFICATION_CASE_RESULT` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
 | `KILN_QUALIFICATION_HF_LOGITS_PATH` | Test only | 1 | `crates/kiln-model/tests/vk_resident_decode_parity.rs` |
@@ -276,7 +274,6 @@ dynamic helper cannot conceal source growth.
 
 | Owner | API | Argument | Class | Call sites |
 |---|---|---|---|---:|
-| `crates/kiln-autograd/src/backwards/lora_delta_add.rs` | `var` | `var` | Experimental/debug migration | 1 |
 | `crates/kiln-autograd/src/tape.rs` | `var_os` | `key` | Test only | 1 |
 | `crates/kiln-blas/build.rs` | `var` | `var` | Build time/provenance | 1 |
 | `crates/kiln-blas/build.rs` | `var` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
@@ -335,7 +332,7 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-model/src/backend/rocm.rs` | `var` | `legacy_cuda_name` | Experimental/debug migration | 1 |
 | `crates/kiln-model/src/backend/rocm.rs` | `var` | `rocm_name` | Experimental/debug migration | 1 |
 | `crates/kiln-model/src/forward.rs` | `var` | `name` | Experimental/debug migration | 1 |
-| `crates/kiln-model/src/generate.rs` | `var` | `name` | Experimental/debug migration | 2 |
+| `crates/kiln-model/src/generate.rs` | `var` | `name` | Experimental/debug migration | 1 |
 | `crates/kiln-model/src/generate.rs` | `var` | `key` | Test only | 1 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | `var_os` | `HOME` | Experimental/debug migration | 1 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | `var_os` | `XDG_CACHE_HOME` | Experimental/debug migration | 1 |
