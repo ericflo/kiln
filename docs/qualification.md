@@ -1310,6 +1310,11 @@ is never reported as measured soak time.
 Raw stdout and stderr artifacts are flushed after every captured chunk, so a
 monitor can follow structured progress while the case is still running rather
 than waiting for a user-space file buffer to fill.
+Steady-state warmup counts are committed after each response cohort has fully
+completed and the server has drained, before the drained health snapshot is
+judged. A graph, ownership, or cache-policy failure in that snapshot therefore
+retains the completed request and wave counts while still failing the case;
+requests from an incomplete or undrained cohort are never counted.
 
 The clean 2026-07-16 run at commit `2587de1dd` is the pre-resident-prefill
 counterexample, not a passing soak. It completed 30 oracle-valid stabilization

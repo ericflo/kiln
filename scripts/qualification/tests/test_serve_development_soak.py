@@ -75,6 +75,14 @@ def batched_state_debug(
 
 
 class ServeRocmSoakTests(unittest.TestCase):
+    def test_drained_warmup_evidence_survives_later_policy_failure(self) -> None:
+        requests, waves = soak.record_drained_warmup_wave(
+            9,
+            2,
+            [mock.sentinel.result] * 12,
+        )
+        self.assertEqual((requests, waves), (21, 3))
+
     def test_invalid_stream_diagnostic_names_every_contract_dimension(self) -> None:
         result = soak.mixed.StreamResult(
             name="soak-stabilize-w00010-r01",

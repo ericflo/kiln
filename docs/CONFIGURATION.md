@@ -321,8 +321,11 @@ HIP exposes the allocator overhead of those opaque objects; live driver memory
 pressure remains a separate complementary signal.
 
 Before native capture, the runner reclaims eligible idle owners at entry/byte
-saturation, performs one settled warm Record pass, measures the candidate's
-exact queryable allocation identities, rechecks matching-device pressure, and
+saturation. If all owners are active, the row requesting a new exact attention
+geometry may retire its own prior graph entries after device settlement; its
+recurrent-state slot and decode-continuity timeline remain intact. The runner
+then performs one settled warm Record pass, measures the candidate's exact
+queryable allocation identities, rechecks matching-device pressure, and
 atomically reserves global governor headroom. Native capture begins only after
 that sequence admits it. A governor device-selector mismatch fails closed rather
 than consuming another accelerator's headroom. The Record pass necessarily
@@ -338,7 +341,14 @@ another accelerator's budget. None repeats a full warm pass on every token.
 
 Ordinary budget eviction is deterministic least-recently-used eviction of
 idle owners as a unit, including every graph for the owner and its retained
-slot state. It never evicts an active owner merely to admit another graph.
+slot state. Those owners are always considered before the active candidate
+owner. On an exact-geometry miss, admission may settle and retire that active
+owner's older graph entries as the final reclaim option, but never its live slot,
+row assignment, or continuity state, and never any other active owner.
+Every completed transaction emits `rocm_graph_cache_eviction` with its
+`boundary`, typed `reason`, removed graph/slot counts, released requested bytes,
+and `active_graph_only_owner_count`. A nonzero active count identifies the
+settled prior-geometry retirement path rather than an idle-owner eviction.
 Moderate pressure permits retained replay but blocks cache growth. Tight
 pressure additionally reclaims eligible idle owners while preserving an active
 cache hit. Critical or unavailable pressure disables replay,

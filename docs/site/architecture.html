@@ -509,13 +509,18 @@ training request
         <h3 class="font-semibold mt-6 mb-3">Admission, LRU eviction, and pressure are owner-aware</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           Entry saturation and known byte saturation first reclaim deterministic least-recently-used idle owners,
-          oldest access tick then slot ID, before allocating a new candidate. After one settled warm Record pass
-          makes every candidate allocation measurable, pre-native admission performs exact deduplicated
-          accounting, matching-device pressure reconciliation, an atomic process-wide governor reservation, and
-          any remaining safe idle-owner eviction. Native capture does not begin unless that plan fits both hard
-          limits. Each eviction removes an idle owner as one unit: all of its graphs plus reclaimable slot state.
-          The active candidate owner and every other owner assigned to a live decode row are protected; ordinary
-          budget pressure never evicts active work merely to admit a new shape.
+          oldest access tick then slot ID, before allocating a new candidate. If all owners are active, the row
+          requesting a new exact attention geometry is the final reclaim candidate: after device settlement its
+          prior graph entries may be retired while its recurrent-state slot, row assignment, and continuity
+          timeline remain intact. After one settled warm Record pass makes every candidate allocation measurable,
+          pre-native admission performs exact deduplicated accounting, matching-device pressure reconciliation,
+          an atomic process-wide governor reservation, and the same ordered reclaim plan. Native capture does not
+          begin unless that plan fits both hard limits. No other active owner is eligible, and ordinary budget
+          pressure never discards live recurrent state merely to admit a new shape.
+          Each completed transaction emits <code>rocm_graph_cache_eviction</code> with its boundary, typed reason,
+          removed graph and slot counts, released requested bytes, and
+          <code>active_graph_only_owner_count</code>. A nonzero active count makes this settled transition visible
+          instead of presenting its synchronization time as an unexplained inference pause.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           Capture and cache admission are deliberately separate outcomes. <code>capture_successes</code> means
@@ -534,7 +539,7 @@ training request
           <table class="w-full text-sm" style="color: var(--fg-dim);">
             <thead style="color: var(--fg);"><tr><th class="text-left p-2">Governor result</th><th class="text-left p-2">Graph policy</th></tr></thead>
             <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Comfortable</td><td class="p-2">Normal cache hit, capture, bounded admission, and idle-owner LRU behavior.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Comfortable</td><td class="p-2">Normal cache hit, capture, bounded admission, idle-owner LRU, then settled prior-geometry retirement for the active candidate owner when required.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Moderate</td><td class="p-2">Permit an already-retained replay, but block cache growth and use typed eager fallback on a miss.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Tight</td><td class="p-2">Evict every eligible idle owner. Permit only an already-retained replay for the active owner; a cache miss uses eager execution and no new capture.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Critical or unavailable</td><td class="p-2">Treat unknown pressure as critical, settle and remove every graph, preserve active slot state, and use eager execution only after cleanup proves safe.</td></tr>

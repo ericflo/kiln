@@ -75,6 +75,39 @@ class ServeRocmGraphFailureContainmentTests(unittest.TestCase):
         self.assertEqual(failure.parse_passed_tests(output), set(failure.TESTS))
         self.assertEqual(failure.parse_passed_tests(output.replace(" ... ok", " ... FAILED")), set())
 
+    def test_rocm_unavailable_pattern_rejects_device_skips_not_runtime_skips(self) -> None:
+        for output in (
+            "no ROCm device available; skipping parity test",
+            "ROCm is not available; skipping",
+            "skipping required ROCm hardware test",
+        ):
+            self.assertIsNotNone(failure.ROCM_UNAVAILABLE_PATTERN.search(output))
+        self.assertIsNone(
+            failure.ROCM_UNAVAILABLE_PATTERN.search(
+                '{"message":"ROCm graph capture skipped: bounded cache has no settled '
+                'eviction path","target":"kiln_model::rocm_graph"}'
+            )
+        )
+
+    def test_rocm_serving_manifests_share_the_precise_unavailable_pattern(self) -> None:
+        found = 0
+        for path in sorted((ROOT / "qualification/workloads").glob("*.json")):
+            if not path.name.startswith("serving") or "rocm" not in path.name:
+                continue
+            manifest = json.loads(path.read_text())
+            for variant in manifest.get("variants", []):
+                for case in variant.get("cases", []):
+                    for assertion in case.get("output_assertions", []):
+                        pattern = assertion.get("pattern")
+                        if isinstance(pattern, str) and "no rocm device" in pattern:
+                            found += 1
+                            self.assertEqual(
+                                pattern,
+                                failure.ROCM_UNAVAILABLE_PATTERN.pattern,
+                                path.name,
+                            )
+        self.assertEqual(found, 12)
+
     def test_metrics_distinguish_each_containment_claim(self) -> None:
         values = {
             metric["name"]: metric["value"]

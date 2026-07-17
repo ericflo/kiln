@@ -2255,6 +2255,14 @@ def run_wave(
     return results
 
 
+def record_drained_warmup_wave(
+    request_count: int,
+    wave_count: int,
+    results: list[mixed.StreamResult],
+) -> tuple[int, int]:
+    return request_count + len(results), wave_count + 1
+
+
 def prompt_words_for_wave(runtime: SoakRuntime, wave: int, slot: int) -> int:
     if runtime.prompt_assignment == SLOT_BY_REQUEST:
         return runtime.prompt_words[slot]
@@ -2821,10 +2829,18 @@ def execute(
                 warm_failures.append("steady warmup retained active prefix-cache leases")
             if prefix_warm["pending_release_entries"] != 0:
                 warm_failures.append("steady warmup retained pending prefix releases")
+            # Commit evidence only after the whole response cohort has drained.
+            # A policy failure discovered in that drained snapshot must not erase
+            # the requests that actually completed.
+            steady_state_warmup_requests, steady_state_warmup_waves = (
+                record_drained_warmup_wave(
+                    steady_state_warmup_requests,
+                    steady_state_warmup_waves,
+                    warm_results,
+                )
+            )
             if warm_failures:
                 raise SoakError("; ".join(warm_failures))
-            steady_state_warmup_requests += len(warm_results)
-            steady_state_warmup_waves += 1
             mixed.trace(
                 "soak_steady_state_warmup",
                 cached_entries=prefix_warm["cached_entries"],
@@ -3962,6 +3978,8 @@ def execute(
         values["stabilization_rss_growth_bytes"] = stabilization_rss_growth
         values["stabilization_request_count"] = stabilization_requests
         values["stabilization_stable_cycle_count"] = stabilization_stable_cycles
+        values["steady_state_warmup_request_count"] = steady_state_warmup_requests
+        values["steady_state_warmup_wave_count"] = steady_state_warmup_waves
         values["request_worker_residue_count"] = worker_evidence.peak_residue_count
         if host_guard is not None:
             values.update(host_guard.metric_values())

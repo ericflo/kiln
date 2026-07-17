@@ -968,6 +968,17 @@ fn sort_idle_owner_lru(records: &mut [(u64, u64, RocmGraphOwner)]) {
     records.sort_unstable_by_key(|(last_used, slot_id, _)| (*last_used, *slot_id));
 }
 
+#[cfg(feature = "rocm")]
+fn append_active_candidate_owner(
+    owners: &mut Vec<RocmGraphOwner>,
+    candidate_owner: RocmGraphOwner,
+    has_reclaimable_graphs: bool,
+) {
+    if has_reclaimable_graphs && !owners.contains(&candidate_owner) {
+        owners.push(candidate_owner);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RocmGraphFallbackReason {
     ColdCacheHostRoundTrip,
@@ -2359,6 +2370,27 @@ impl RocmGraphRunner {
         owners.into_iter().map(|(_, _, owner)| owner).collect()
     }
 
+    /// Prefer reclaiming idle owners. If none provide enough room, the owner
+    /// requesting a new geometry may safely retire its prior graph entries
+    /// after device settlement. Its active recurrent-state slot and continuity
+    /// timeline remain owned by the same row.
+    #[cfg(feature = "rocm")]
+    fn admission_owner_lru(&self, key: &RocmGraphCacheKey) -> Vec<RocmGraphOwner> {
+        let mut owners = self.idle_owner_lru(key.owner);
+        let candidate_is_active = self
+            .graph_slots
+            .get(&key.owner)
+            .is_some_and(|slot| slot.assigned_row.is_some());
+        let has_reclaimable_graphs = candidate_is_active
+            && !self.captured.contains_key(key)
+            && self
+                .captured
+                .keys()
+                .any(|captured_key| captured_key.owner == key.owner);
+        append_active_candidate_owner(&mut owners, key.owner, has_reclaimable_graphs);
+        owners
+    }
+
     #[cfg(feature = "rocm")]
     fn retained_entry_count_excluding(&self, excluded: &HashSet<RocmGraphOwner>) -> usize {
         self.captured
@@ -2367,9 +2399,10 @@ impl RocmGraphRunner {
             .count()
     }
 
-    /// Plan all ordinary cache evictions before mutating ownership. Only idle
-    /// owners are candidates, and an owner is evicted as a unit so its slot-state
-    /// allocation is actually reclaimable.
+    /// Plan all ordinary cache evictions before mutating ownership. Idle owners
+    /// are considered first as reclaimable units. The active candidate owner is
+    /// considered last, and only for graph-only retirement that preserves its
+    /// slot state and decode continuity.
     #[cfg(feature = "rocm")]
     fn plan_candidate_admission(
         &self,
@@ -2396,7 +2429,7 @@ impl RocmGraphRunner {
 
         let mut excluded = HashSet::new();
         let mut plan = RocmGraphAdmissionPlan::default();
-        let mut victims = self.idle_owner_lru(key.owner).into_iter();
+        let mut victims = self.admission_owner_lru(key).into_iter();
         loop {
             let entry_count = self
                 .retained_entry_count_excluding(&excluded)
@@ -2467,7 +2500,7 @@ impl RocmGraphRunner {
                 &owners,
                 "pre_capture_budget_reservation",
                 RocmGraphEvictionReason::Budget,
-                true,
+                false,
             )?;
         }
 
@@ -2497,7 +2530,7 @@ impl RocmGraphRunner {
     #[cfg(feature = "rocm")]
     fn reserve_capture_entry_capacity(
         &mut self,
-        protected_owner: RocmGraphOwner,
+        key: &RocmGraphCacheKey,
     ) -> Result<Option<RocmGraphFallbackReason>> {
         let current = self.memory_accounting(&HashSet::new(), None);
         let entry_saturated = self.captured.len() >= self.max_cached_graphs();
@@ -2509,8 +2542,9 @@ impl RocmGraphRunner {
         let mut projected_entries = self.captured.len();
         let mut victims = Vec::new();
         let mut excluded = HashSet::new();
+        let mut retained_slots = HashSet::new();
         let mut projected = current;
-        for owner in self.idle_owner_lru(protected_owner) {
+        for owner in self.admission_owner_lru(key) {
             projected_entries = projected_entries.saturating_sub(
                 self.captured
                     .keys()
@@ -2519,7 +2553,11 @@ impl RocmGraphRunner {
             );
             victims.push(owner);
             excluded.insert(owner);
-            projected = self.memory_accounting(&excluded, None);
+            if owner == key.owner {
+                retained_slots.insert(owner);
+            }
+            projected =
+                self.memory_accounting_with_retained_slots(&excluded, None, &retained_slots, None);
             if projected_entries < self.max_cached_graphs()
                 && projected.complete
                 && projected.retained_bytes < self.max_retained_bytes()
@@ -2545,7 +2583,7 @@ impl RocmGraphRunner {
             &victims.into_iter().collect(),
             "pre_capture_entry_reservation",
             RocmGraphEvictionReason::Budget,
-            true,
+            false,
         )?;
         Ok(None)
     }
@@ -2553,7 +2591,7 @@ impl RocmGraphRunner {
     #[cfg(feature = "rocm")]
     fn pre_capture_rejection(
         &mut self,
-        protected_owner: RocmGraphOwner,
+        key: &RocmGraphCacheKey,
     ) -> Option<RocmGraphFallbackReason> {
         let current = self.memory_accounting(&HashSet::new(), None);
         if self.captured.len() < self.max_cached_graphs()
@@ -2562,7 +2600,7 @@ impl RocmGraphRunner {
         {
             return None;
         }
-        if !self.idle_owner_lru(protected_owner).is_empty() {
+        if !self.admission_owner_lru(key).is_empty() {
             return None;
         }
         let (rejection, reason) = if !current.complete {
@@ -2623,6 +2661,14 @@ impl RocmGraphRunner {
             .difference(&prospective_selected_slots)
             .copied()
             .collect();
+        let active_graph_only_owner_count = retained_slot_owners
+            .iter()
+            .filter(|owner| {
+                self.graph_slots
+                    .get(owner)
+                    .is_some_and(|slot| slot.assigned_row.is_some())
+            })
+            .count();
         let context = keys
             .first()
             .and_then(|key| self.captured.get(key))
@@ -2709,6 +2755,16 @@ impl RocmGraphRunner {
                 released.retained_bytes,
                 reason,
             );
+            tracing::info!(
+                event = "rocm_graph_cache_eviction",
+                boundary,
+                ?reason,
+                removed_graph_count,
+                removed_slot_count,
+                active_graph_only_owner_count,
+                released_bytes = released.retained_bytes,
+                "ROCm graph cache eviction completed"
+            );
             return Ok(released);
         };
         if context.cleanup_quarantined() {
@@ -2742,6 +2798,16 @@ impl RocmGraphRunner {
 
         self.counters
             .record_cache_eviction(removed_graph_count, released.retained_bytes, reason);
+        tracing::info!(
+            event = "rocm_graph_cache_eviction",
+            boundary,
+            ?reason,
+            removed_graph_count,
+            removed_slot_count,
+            active_graph_only_owner_count,
+            released_bytes = released.retained_bytes,
+            "ROCm graph cache eviction completed"
+        );
         self.cache_full_warned = false;
         Ok(released)
     }
@@ -2897,7 +2963,7 @@ impl RocmGraphRunner {
                 &owners,
                 "cache_budget_eviction",
                 RocmGraphEvictionReason::Budget,
-                true,
+                false,
             ) {
                 drop(native_capture_timer.take());
                 return match self.release_uncached_candidate(
@@ -3322,7 +3388,7 @@ impl RocmGraphRunner {
                 );
             }
 
-            if let Some(reason) = self.pre_capture_rejection(owner) {
+            if let Some(reason) = self.pre_capture_rejection(&cache_key) {
                 if !self.cache_full_warned {
                     self.cache_full_warned = true;
                     let memory = self.memory_accounting(&HashSet::new(), None);
@@ -3332,7 +3398,7 @@ impl RocmGraphRunner {
                         max_cached_graphs = self.max_cached_graphs(),
                         max_retained_bytes = self.max_retained_bytes(),
                         reason = reason.as_str(),
-                        "ROCm graph capture skipped: bounded cache has no idle-owner eviction path"
+                        "ROCm graph capture skipped: bounded cache has no settled eviction path"
                     );
                 }
                 return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
@@ -3643,7 +3709,7 @@ impl RocmGraphRunner {
                 );
             }
 
-            if let Some(reason) = self.pre_capture_rejection(owner) {
+            if let Some(reason) = self.pre_capture_rejection(&cache_key) {
                 if !self.cache_full_warned {
                     self.cache_full_warned = true;
                     let memory = self.memory_accounting(&HashSet::new(), None);
@@ -3653,7 +3719,7 @@ impl RocmGraphRunner {
                         max_cached_graphs = self.max_cached_graphs(),
                         max_retained_bytes = self.max_retained_bytes(),
                         reason = reason.as_str(),
-                        "ROCm graph capture skipped: bounded cache has no idle-owner eviction path"
+                        "ROCm graph capture skipped: bounded cache has no settled eviction path"
                     );
                 }
                 return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
@@ -3988,7 +4054,7 @@ impl RocmGraphRunner {
                 );
             }
 
-            if let Some(reason) = self.pre_capture_rejection(owner) {
+            if let Some(reason) = self.pre_capture_rejection(&cache_key) {
                 if !self.cache_full_warned {
                     self.cache_full_warned = true;
                     let memory = self.memory_accounting(&HashSet::new(), None);
@@ -3998,7 +4064,7 @@ impl RocmGraphRunner {
                         max_cached_graphs = self.max_cached_graphs(),
                         max_retained_bytes = self.max_retained_bytes(),
                         reason = reason.as_str(),
-                        "ROCm graph capture skipped: bounded cache has no idle-owner eviction path"
+                        "ROCm graph capture skipped: bounded cache has no settled eviction path"
                     );
                 }
                 return self.run_eager_fallback(reason, seq_len, std::time::Duration::ZERO, || {
@@ -4900,6 +4966,7 @@ impl RocmGraphRunner {
             _ => anyhow::bail!("ROCm graphs require a Rocm device"),
         };
         let key = RocmGraphKey::new(paged_cache, seq_len);
+        let cache_key = RocmGraphCacheKey::new(owner, key.clone());
         let pre_candidate_headroom_timer = self
             .phase_telemetry
             .timer(RocmGraphPhase::PreCandidateHeadroom);
@@ -4918,7 +4985,7 @@ impl RocmGraphRunner {
         if let Some(reason) = self.reservation_retry_suppressed(&key) {
             return Ok(RocmCaptureStep::fallback(reason));
         }
-        if let Some(reason) = self.reserve_capture_entry_capacity(owner)? {
+        if let Some(reason) = self.reserve_capture_entry_capacity(&cache_key)? {
             return Ok(RocmCaptureStep::fallback(reason));
         }
         drop(pre_candidate_headroom_timer);
@@ -5264,7 +5331,6 @@ impl RocmGraphRunner {
         };
         self.reservation_denied_bytes.remove(&key);
         self.reservation_denied_wide_bytes = None;
-        let cache_key = RocmGraphCacheKey::new(owner, key.clone());
         if let Some(reason) = self.reserve_capture_candidate(&cache_key, &reserved_accounting)? {
             drop(pre_native_reservation_timer);
             return Ok(RocmCaptureStep::fallback_after_candidate(
@@ -5647,6 +5713,22 @@ mod tests {
                 RocmGraphOwner::Slot(2),
             ]
         );
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn active_candidate_owner_is_the_last_admission_victim() {
+        let idle_oldest = RocmGraphOwner::Slot(4);
+        let idle_newest = RocmGraphOwner::Slot(9);
+        let candidate = RocmGraphOwner::Slot(7);
+        let mut owners = vec![idle_oldest, idle_newest];
+
+        append_active_candidate_owner(&mut owners, candidate, true);
+        assert_eq!(owners, vec![idle_oldest, idle_newest, candidate]);
+
+        append_active_candidate_owner(&mut owners, candidate, true);
+        append_active_candidate_owner(&mut owners, RocmGraphOwner::Slot(12), false);
+        assert_eq!(owners, vec![idle_oldest, idle_newest, candidate]);
     }
 
     #[test]
@@ -6079,8 +6161,15 @@ mod tests {
         assert_eq!(after.retained_slot_state_bytes, budget);
         assert_eq!(after.retained_bytes, budget);
         assert!(after.peak_retained_bytes >= after.retained_bytes);
+        let requested = RocmGraphCacheKey::new(
+            owner,
+            RocmGraphKey {
+                max_seqlen_k: 512,
+                max_blocks_per_seq: 8,
+            },
+        );
         assert_eq!(
-            runner.pre_capture_rejection(owner),
+            runner.pre_capture_rejection(&requested),
             Some(RocmGraphFallbackReason::GraphCacheByteBudget)
         );
         assert_eq!(runner.counters.byte_budget_rejections, 0);

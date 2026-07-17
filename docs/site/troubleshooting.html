@@ -669,7 +669,9 @@ kiln serve --config rocm-graph-eager.toml
           (<code>67108864</code>). That arm tests rejection, idle-owner eviction, and eager fallback; it is not a
           throughput target. Never raise the byte limit merely because a pause occurred. First require matching
           byte-budget rejections or evictions, accounting completeness, and sufficient live memory headroom.
-          Entry/known-byte saturation should reclaim eligible idle owners before candidate allocation. After the
+          Entry/known-byte saturation should reclaim eligible idle owners before candidate allocation. If every
+          owner is active, the candidate row may instead retire its own prior exact geometries after settlement;
+          its live recurrent-state slot and continuity timeline must remain. After the
           settled warm pass, exact accounting, matching-device pressure, and atomic governor reservation should
           reject an inadmissible candidate before native capture. A defensive post-capture rejection is still
           possible if concurrent state changes. A candidate-alone byte or incomplete-accounting result makes that
@@ -783,9 +785,13 @@ curl -s http://localhost:8420/metrics \
           do not treat the byte-accounting total as whole-process VRAM residency.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Ordinary entry or byte pressure evicts deterministic least-recently-used idle owners as whole units;
-          it never chooses an owner assigned to a live decode row. Moderate pressure permits retained replay but
-          blocks cache growth. Tight pressure evicts all eligible idle owners,
+          Ordinary entry or byte pressure evicts deterministic least-recently-used idle owners as whole units.
+          If those cannot make room, an exact-geometry miss may settle and retire the candidate row's older graph
+          entries while preserving its active slot, assignment, and continuity; no other active owner is chosen.
+          Correlate a pause with the structured <code>rocm_graph_cache_eviction</code> event: a nonzero
+          <code>active_graph_only_owner_count</code> identifies this prior-geometry path, while the boundary,
+          removed counts, released bytes, and typed reason identify the exact transaction.
+          Moderate pressure permits retained replay but blocks cache growth. Tight pressure evicts all eligible idle owners,
           permits an already-retained active-owner replay, and sends a miss to eager without capture. Critical or
           unavailable pressure settles and removes every graph, preserves active recurrent slot state, and uses
           eager execution only after cleanup proves safe. Rising <code>budget_evictions</code>,

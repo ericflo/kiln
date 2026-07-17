@@ -28,6 +28,10 @@ TESTS = (
     "graph_parity_across_buckets_prefix_cancellation_and_adapter_boundary",
     "stale_pool_generation_refuses_native_replay_and_falls_back_eager",
 )
+ROCM_UNAVAILABLE_PATTERN = re.compile(
+    r"(?i)(no rocm device|rocm (?:device )?(?:is )?(?:not available|unavailable)|"
+    r"skipp(?:ed|ing)[^\r\n]{0,160}rocm (?:device|test|hardware))"
+)
 
 
 class FailureContainmentError(RuntimeError):
@@ -175,7 +179,7 @@ def execute() -> tuple[list[dict[str, Any]], str | None]:
         failures.append("graph lifecycle parity evidence marker is missing")
     if "[rocm-stale-generation]" not in output:
         failures.append("stale-generation containment evidence marker is missing")
-    if re.search(r"(?i)(no rocm device|skipp(?:ed|ing).*rocm)", output):
+    if ROCM_UNAVAILABLE_PATTERN.search(output):
         failures.append("required ROCm execution was skipped or unavailable")
     if failures:
         tail = output[-4000:].replace("\n", " | ")

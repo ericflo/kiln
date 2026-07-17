@@ -155,7 +155,7 @@
             {
               "stream": "combined",
               "match": "forbidden",
-              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+              "pattern": "(?i)(no rocm device|rocm (?:device )?(?:is )?(?:not available|unavailable)|skipp(?:ed|ing)[^\\r\\n]{0,160}rocm (?:device|test|hardware))"
             }
           ],
           "result_protocol": {
