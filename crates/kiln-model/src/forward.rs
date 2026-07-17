@@ -14,7 +14,6 @@ use kiln_core::model_provenance::BaseWeightShardManifest;
 use kiln_tensor::{D, DType, Device, Tensor};
 use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
 use crate::backend::BackendIdentity;
 use crate::backend::capability::{
@@ -5133,10 +5132,6 @@ pub fn tape_streaming_tile_tokens_for(device: &Device) -> usize {
     StreamingPrefillExecutionPolicy::for_device(*device).tape_tile_tokens()
 }
 
-fn trace_model_segment_timings() -> bool {
-    kiln_core::env_flag::env_flag("KILN_TRACE_MODEL_SEGMENT_TIMINGS", false)
-}
-
 fn trace_full_attn_tile_dispatch() -> bool {
     kiln_core::env_flag::env_flag("KILN_TRACE_FULL_ATTN_TILES", false)
         || kiln_core::env_flag::env_flag("KILN_TRACE_ROCM_FLASH_FWD", false)
@@ -5144,32 +5139,6 @@ fn trace_full_attn_tile_dispatch() -> bool {
 
 fn trace_full_attn_stage_timings() -> bool {
     kiln_core::env_flag::env_flag("KILN_TRACE_FULL_ATTN_STAGE_TIMINGS", false)
-        || trace_model_segment_timings()
-}
-
-fn trace_linear_segment_stages_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        kiln_core::env_flag::env_flag("KILN_TRACE_LINEAR_SEGMENT_STAGES", false)
-            || kiln_core::env_flag::env_flag("KILN_TRACE_LINEAR_LAYER_STAGES", false)
-    })
-}
-
-fn trace_linear_segment_stage_layer_enabled(layer_idx: usize) -> bool {
-    if !trace_linear_segment_stages_enabled() {
-        return false;
-    }
-
-    let filter = std::env::var("KILN_TRACE_LINEAR_SEGMENT_STAGE_LAYER")
-        .or_else(|_| std::env::var("KILN_TRACE_LINEAR_LAYER_STAGE_LAYER"));
-    match filter {
-        Ok(value) => value
-            .trim()
-            .parse::<usize>()
-            .map(|target| target == layer_idx)
-            .unwrap_or(true),
-        Err(_) => true,
-    }
 }
 
 fn debug_full_attn_finite_checks() -> bool {
@@ -5438,62 +5407,6 @@ fn summarize_full_attn_debug_values(tensor: &Tensor) -> Result<(bool, String)> {
         coord(max_abs_idx)
     );
     Ok((first_bad.is_none(), summary))
-}
-
-fn start_linear_segment_stage_trace(
-    enabled: bool,
-    seq_len: usize,
-    segment_start: usize,
-    segment_end: usize,
-    layer_idx: usize,
-    stage: &str,
-) -> Option<std::time::Instant> {
-    if !enabled {
-        return None;
-    }
-    eprintln!(
-        "kiln_linear_segment_stage_begin seq_len={seq_len} segment_layers={segment_start}..{segment_end} layer_idx={layer_idx} stage={stage}"
-    );
-    Some(std::time::Instant::now())
-}
-
-fn finish_linear_segment_stage_trace(
-    enabled: bool,
-    seq_len: usize,
-    segment_start: usize,
-    segment_end: usize,
-    layer_idx: usize,
-    stage: &str,
-    start: Option<std::time::Instant>,
-) {
-    if !enabled {
-        return;
-    }
-    let Some(start) = start else {
-        return;
-    };
-    eprintln!(
-        "kiln_linear_segment_stage_end seq_len={seq_len} segment_layers={segment_start}..{segment_end} layer_idx={layer_idx} stage={stage} elapsed_ms={:.3}",
-        start.elapsed().as_secs_f64() * 1000.0
-    );
-}
-
-fn log_model_segment_timing(
-    enabled: bool,
-    phase: &str,
-    seq_len: usize,
-    segment_start: usize,
-    segment_end: usize,
-    layer_idx: usize,
-    layer_kind: &str,
-    elapsed: Duration,
-) {
-    if enabled {
-        eprintln!(
-            "kiln_model_segment_timing phase={phase} seq_len={seq_len} segment_layers={segment_start}..{segment_end} layer_idx={layer_idx} layer_kind={layer_kind} elapsed_ms={:.3}",
-            elapsed.as_secs_f64() * 1000.0
-        );
-    }
 }
 
 /// Compatibility default for streaming LM-head execution.
@@ -24474,7 +24387,6 @@ pub fn model_forward_segment_with_policy(
     // hidden activations still stay at full T shape, but the large per-call
     // attention/GDN scratch allocations are bounded by the backend tile policy.
     let (_, seq_len, _) = hidden.dims3()?;
-    let stream_device = hidden.device().clone();
     let streaming = streaming_prefill.enabled_for(seq_len);
     #[cfg(any(
         feature = "cuda",
@@ -24500,29 +24412,12 @@ pub fn model_forward_segment_with_policy(
         0
     };
     let stream_active = streaming && stream_tile > 0 && seq_len > stream_tile;
-    let trace_segment_timings = trace_model_segment_timings();
     let debug_segment_finite = debug_full_attn_finite_checks();
-    if trace_segment_timings {
-        eprintln!(
-            "kiln_model_segment_streaming seq_len={} segment_layers={}..{} device={} device_kind={:?} streaming={} stream_tile={} stream_active={} tape_scope_active={}",
-            seq_len,
-            start_layer,
-            end_layer,
-            stream_device.short_name(),
-            streaming_prefill_device_kind(&stream_device),
-            streaming,
-            stream_tile,
-            stream_active,
-            tape_scope_active
-        );
-    }
 
     for i in start_layer..end_layer {
-        let layer_start = std::time::Instant::now();
         let layer = &weights.layers[i];
         let layer_lora: Option<(&LoraLayerWeights, f32)> =
             lora.and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
-        let trace_linear_segment_stages = trace_linear_segment_stage_layer_enabled(i);
 
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
@@ -24546,16 +24441,6 @@ pub fn model_forward_segment_with_policy(
                 )
                 .with_context(|| format!("segment transformer block {i} (full attention)"))?;
                 full_attn_idx += 1;
-                log_model_segment_timing(
-                    trace_segment_timings,
-                    "layer",
-                    seq_len,
-                    start_layer,
-                    end_layer,
-                    i,
-                    "full_attention",
-                    layer_start.elapsed(),
-                );
             }
             GpuAttentionWeights::Linear(lin_weights) => {
                 let state = linear_state.as_mut().ok_or_else(|| {
@@ -24567,26 +24452,8 @@ pub fn model_forward_segment_with_policy(
                     &hidden,
                 )?;
                 let normed = {
-                    let stage_trace = start_linear_segment_stage_trace(
-                        trace_linear_segment_stages,
-                        seq_len,
-                        start_layer,
-                        end_layer,
-                        i,
-                        "pre_attn_norm",
-                    );
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
-                    let out = rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?;
-                    finish_linear_segment_stage_trace(
-                        trace_linear_segment_stages,
-                        seq_len,
-                        start_layer,
-                        end_layer,
-                        i,
-                        "pre_attn_norm",
-                        stage_trace,
-                    );
-                    out
+                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
                 };
                 ensure_full_attn_debug_finite(
                     debug_segment_finite,
@@ -24598,14 +24465,6 @@ pub fn model_forward_segment_with_policy(
                     &normed,
                 )?;
                 let gdn_profile_context = profile_gdn_segment_layer_enabled(i).then_some((i, 0));
-                let stage_trace = start_linear_segment_stage_trace(
-                    trace_linear_segment_stages,
-                    seq_len,
-                    start_layer,
-                    end_layer,
-                    i,
-                    "gdn_attention",
-                );
                 let attn_out = if stream_active {
                     gated_deltanet_forward_streaming(
                         backend,
@@ -24636,15 +24495,6 @@ pub fn model_forward_segment_with_policy(
                     )
                     .with_context(|| format!("segment gated deltanet layer {i}"))?
                 };
-                finish_linear_segment_stage_trace(
-                    trace_linear_segment_stages,
-                    seq_len,
-                    start_layer,
-                    end_layer,
-                    i,
-                    "gdn_attention",
-                    stage_trace,
-                );
                 ensure_full_attn_debug_finite(
                     debug_segment_finite,
                     format!("layer {i} gdn attention"),
@@ -24655,26 +24505,8 @@ pub fn model_forward_segment_with_policy(
                     &attn_out,
                 )?;
                 hidden = {
-                    let stage_trace = start_linear_segment_stage_trace(
-                        trace_linear_segment_stages,
-                        seq_len,
-                        start_layer,
-                        end_layer,
-                        i,
-                        "attn_residual",
-                    );
                     kiln_nvtx::range!(c"kiln/residual");
-                    let out = residual_add(hidden, attn_out)?;
-                    finish_linear_segment_stage_trace(
-                        trace_linear_segment_stages,
-                        seq_len,
-                        start_layer,
-                        end_layer,
-                        i,
-                        "attn_residual",
-                        stage_trace,
-                    );
-                    out
+                    residual_add(hidden, attn_out)?
                 };
                 ensure_full_attn_debug_finite(
                     debug_segment_finite,
@@ -24686,30 +24518,12 @@ pub fn model_forward_segment_with_policy(
                     &hidden,
                 )?;
                 let normed_post = {
-                    let stage_trace = start_linear_segment_stage_trace(
-                        trace_linear_segment_stages,
-                        seq_len,
-                        start_layer,
-                        end_layer,
-                        i,
-                        "pre_mlp_norm",
-                    );
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
-                    let out = rms_norm(
+                    rms_norm(
                         &hidden,
                         &layer.post_attention_layernorm,
                         config.rms_norm_eps,
-                    )?;
-                    finish_linear_segment_stage_trace(
-                        trace_linear_segment_stages,
-                        seq_len,
-                        start_layer,
-                        end_layer,
-                        i,
-                        "pre_mlp_norm",
-                        stage_trace,
-                    );
-                    out
+                    )?
                 };
                 ensure_full_attn_debug_finite(
                     debug_segment_finite,
@@ -24720,32 +24534,14 @@ pub fn model_forward_segment_with_policy(
                     &format!("layer {i} gdn post_attn_norm"),
                     &normed_post,
                 )?;
-                let stage_trace = start_linear_segment_stage_trace(
-                    trace_linear_segment_stages,
-                    seq_len,
-                    start_layer,
-                    end_layer,
-                    i,
-                    "mlp",
-                );
-                let mlp_profile_context = trace_linear_segment_stages.then_some((i, 0));
                 let ffn_out = swiglu_ffn_backend_profiled(
                     backend,
                     &normed_post,
                     &layer.mlp,
                     layer_lora,
                     false,
-                    mlp_profile_context,
+                    None,
                 )?;
-                finish_linear_segment_stage_trace(
-                    trace_linear_segment_stages,
-                    seq_len,
-                    start_layer,
-                    end_layer,
-                    i,
-                    "mlp",
-                    stage_trace,
-                );
                 ensure_full_attn_debug_finite(
                     debug_segment_finite,
                     format!("layer {i} gdn mlp"),
@@ -24756,26 +24552,8 @@ pub fn model_forward_segment_with_policy(
                     &ffn_out,
                 )?;
                 hidden = {
-                    let stage_trace = start_linear_segment_stage_trace(
-                        trace_linear_segment_stages,
-                        seq_len,
-                        start_layer,
-                        end_layer,
-                        i,
-                        "mlp_residual",
-                    );
                     kiln_nvtx::range!(c"kiln/residual");
-                    let out = residual_add(hidden, ffn_out)?;
-                    finish_linear_segment_stage_trace(
-                        trace_linear_segment_stages,
-                        seq_len,
-                        start_layer,
-                        end_layer,
-                        i,
-                        "mlp_residual",
-                        stage_trace,
-                    );
-                    out
+                    residual_add(hidden, ffn_out)?
                 };
                 ensure_full_attn_debug_finite(
                     debug_segment_finite,
@@ -24787,16 +24565,6 @@ pub fn model_forward_segment_with_policy(
                     &hidden,
                 )?;
                 linear_attn_idx += 1;
-                log_model_segment_timing(
-                    trace_segment_timings,
-                    "layer",
-                    seq_len,
-                    start_layer,
-                    end_layer,
-                    i,
-                    "linear_attention",
-                    layer_start.elapsed(),
-                );
             }
         }
     }

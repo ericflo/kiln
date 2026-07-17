@@ -40,6 +40,15 @@
 > for product diagnostics. Historical output below remains investigation
 > evidence; current source no longer recognizes the control.
 
+> **Model and linear-segment wall-clock traces were retired on 2026-07-17.**
+> `KILN_TRACE_MODEL_SEGMENT_TIMINGS`, `KILN_TRACE_LINEAR_SEGMENT_STAGES`,
+> `KILN_TRACE_LINEAR_LAYER_STAGES`, `KILN_TRACE_LINEAR_SEGMENT_STAGE_LAYER`,
+> and `KILN_TRACE_LINEAR_LAYER_STAGE_LAYER` inserted per-layer host clocks and
+> stderr output into training forwards. The linear switches also implicitly
+> activated the MLP stage profiler. Current source keeps the same compute calls,
+> finite-value guards, synchronization boundaries, and NVTX ranges without that
+> hidden coupling. Historical reports using these names remain evidence only.
+
 > **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
 > priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are

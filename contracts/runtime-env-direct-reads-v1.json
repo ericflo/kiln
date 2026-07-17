@@ -3735,45 +3735,6 @@
     },
     {
       "api": "env_flag",
-      "argument": "KILN_TRACE_LINEAR_LAYER_STAGES",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_TRACE_LINEAR_SEGMENT_STAGES",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_TRACE_MODEL_SEGMENT_TIMINGS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
       "argument": "KILN_TRACE_ROCM_FLASH_FWD",
       "argument_kind": "literal",
       "classification": "experimental_debug",
@@ -4139,32 +4100,6 @@
     {
       "api": "var",
       "argument": "KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_TRACE_LINEAR_LAYER_STAGE_LAYER",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_TRACE_LINEAR_SEGMENT_STAGE_LAYER",
       "argument_kind": "literal",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
@@ -7270,11 +7205,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 296,
-    "literal_kiln_read_names": 168,
+    "literal_kiln_read_call_sites": 291,
+    "literal_kiln_read_names": 163,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 127,
+      "experimental_debug": 122,
       "public_stable": 1,
       "test_only": 41
     },
@@ -7284,13 +7219,13 @@
       "test_only": 247
     },
     "process_mutation_entries": 160,
-    "read_call_sites": 665,
+    "read_call_sites": 660,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 193,
+      "experimental_debug": 188,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 398
+    "read_entries": 393
   }
 }
