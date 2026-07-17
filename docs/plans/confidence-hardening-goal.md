@@ -993,9 +993,21 @@ and exact resume. Cross-backend agreement alone is insufficient.
   The receipt and its exact hashes are retained in the evidence log below. Its
   150,147.60 ms p99 TTFT remains a declared performance limitation rather than a
   vLLM competitiveness or production-latency claim.
-- [ ] Run a final 8-hour Vulkan mixed-load soak.
-- [ ] Require zero silent hardware skips and zero unexplained ITL outliers by the
+- [x] Run a final 8-hour Vulkan mixed-load soak.
+  The clean pushed `3897239fe` source measured for 28,867.72 seconds and
+  completed 820 exact responses, 13,120 completion tokens, 82 cancellations,
+  and 328 fully drained waves. Process DRM and Vulkan ownership ended
+  byte-identical to baseline with zero measured allocation, free, recycler
+  miss, eviction, or uncached-allocation activity. RSS grew 21,610,496 bytes,
+  final snapshots completed, and teardown was unforced and residue-free. The
+  retained receipt and exact artifact hashes are recorded in the evidence log.
+- [x] Require zero silent hardware skips and zero unexplained ITL outliers by the
   ROCm attribution rule.
+  The final required-device case selected the real RADV Strix Halo device,
+  reported no unsupported or skipped arm, and passed its forbidden-skip output
+  assertion. All 3,907 ITL outliers had a bounded known attribution and zero
+  were unexplained. All 1,063 thermal pacing events completed, no pause remained
+  active, and the unchanged 97 C guard did not trip.
 - [x] Compare Vulkan outputs to CPU/HF oracles, not merely to another Kiln GPU
   backend.
   The paired HF/TRL route receipts prove lifecycle and structural integrity,
@@ -1010,9 +1022,8 @@ and exact resume. Cross-backend agreement alone is insufficient.
   `sha256:0b902c0d74a8ed54aefefcdab50adeb6fedd7adb3e45a2338c27276e90abeeaf`;
   every logit is compared and the declared ranking/error/cosine gates pass.
 - [x] Check in compact Vulkan receipts, update this document, commit, and push.
-  Current-source independent-oracle and accepted development-soak receipts are
-  retained under `qualification/receipts/vulkan/strix-halo/`; only the final
-  eight-hour endurance receipt remains for the local Vulkan phase.
+  Current-source independent-oracle, development-soak, and final endurance
+  receipts are retained under `qualification/receipts/vulkan/strix-halo/`.
 
 ## Phase 7: CUDA And Metal Handoffs
 
@@ -1023,10 +1034,10 @@ fix, measurement milestone, and receipt should land as soon as it is coherent
 and green; the final push on a machine is only the handoff marker, not the sole
 platform commit.
 
-The accepted source-bound Strix Halo ROCm baseline and `e79d3686d` Vulkan
-development soak now satisfy the local baseline prerequisite for CUDA handoff.
-CUDA work can begin from `origin/main` without waiting for the final eight-hour
-Vulkan endurance receipt or the remaining repository-wide cleanup phases.
+The accepted source-bound Strix Halo ROCm baseline, `e79d3686d` Vulkan
+development soak, and `3897239fe` final Vulkan endurance run satisfy the local
+platform prerequisite for CUDA handoff. CUDA work can begin from `origin/main`
+without waiting for the remaining repository-wide cleanup phases.
 
 ### 7.1 RTX 4090 Laptop GPU, 16 GB
 
@@ -1419,12 +1430,12 @@ and GPU execution was not attempted under the current host pressure, so this
 makes no new compile, ROCm execution, parity, pause, memory, or throughput
 claim.
 
-The source-bound Strix Halo ROCm and Vulkan baseline checkpoints are now checked
-in and the NVIDIA handoff condition is satisfied. The final eight-hour Vulkan
-endurance gate remains local Phase 6 work, but it does not block checking out
-`origin/main` on a CUDA host. Remaining surface-area work continues from the
-typed startup boundary below rather than rerunning already accepted baseline
-receipts without a relevant code change.
+The source-bound Strix Halo ROCm and Vulkan baseline checkpoints and final
+Vulkan endurance gate are now complete, and the NVIDIA handoff condition is
+satisfied. Remaining surface-area work continues from the typed startup
+boundary below rather than rerunning accepted receipts without a relevant code
+change. The separate final 24-hour ROCm phase soak remains open where explicitly
+listed; it does not invalidate the accepted development baseline or block CUDA.
 
 ### 8.2 One scheduling model
 
@@ -2208,6 +2219,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-16 | Continuous in-flight Vulkan thermal controller and partial-evidence boundary | `d222f7830` plus this source | this static checkpoint | portable ROCm/Vulkan qualification contract and permanent website; Strix Halo execution follows | 518 qualification tests; strict validation of all 19 workload manifests; canonical 101-field configuration-schema self-test; Python compilation; 10 docs-builder tests; 48-document/5-asset site build; diff hygiene | static contract passed; exact pushed-source Vulkan retry pending | The named Strix Halo controller now samples `k10temp/Tctl` every 250 ms outside the server process group, sends `SIGSTOP` to that complete group at 88,000 millicelsius even during active inference, and sends `SIGCONT` only at or below 80,000. The unchanged 97,000-millicelsius guard is evaluated first and releases a stopped group after `SIGTERM` so termination can execute. Setup, measurement, and request deadlines continue during every pause. Begin/end events provide explicit `host_thermal_pacing` attribution for overlapping ITL gaps; receipts retain active, started, completed, total, maximum, and start-temperature evidence, and a clean result requires no active pause plus exact started/completed equality. Teardown and hard-trip regressions prove stopped groups are released. Request evidence is now committed only after a complete drained wave, so a later failure retains exact response, latency, cancellation, memory, allocator, cache, and resident-route metrics through the preceding boundary while `measurement_final_snapshot_complete=0` distinguishes them from final-drain evidence. The effective config, both workload contracts, qualification reference, and serving-profile website document the signals, scope, cadence, hysteresis, deadline accounting, attribution, metrics, and named-host-only boundary. No prompt, concurrency, allocator allowance, deadline, semantic oracle, or 97 C limit changed. |
 | 2026-07-16 | Accepted continuously paced Vulkan development soak | `e79d3686d` | this receipt/evidence commit | Strix Halo Vulkan/RADV clean pushed source | retained receipt `qualification/receipts/vulkan/strix-halo/20260716t154944163408z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1.json` (`sha256:d7e4459d774e86dc6e560c834c8f4d847a1eb33ff7965dcd6b810d8274ba82ea`); strict current-source/local-artifact/known-commit validation; case result `sha256:bfc5defbb8889d2ebe73c0f5890fc6d0a0f378ed65487c0bd60245541f9bddbe`; command result `sha256:7ac83d16923dfd0fd397837c7d8b43e69cb4d104bcf62a8bb058bec756ff71fa`; release binary `sha256:cc8ae9388b3e11bc65ccad44e61cf78808de00d970679e51a5b3c34d7ea7aed7`; hosted repository-hygiene, qualification-contract, and Pages checks green; zero process residue | passed the exact 30-minute Vulkan development-soak contract; multi-hour endurance and performance comparison remain open | Six setup cycles completed 30 exact responses plus three cancellations and converged after 1,212.42 seconds. Cycles 5 and 6 had zero DRM/live-buffer growth, allocations, frees, pool misses, evictions, or uncached allocations; stabilization proved 128 resident forwards over 256 rows, eight completed rows, width two, and clean drain. Measurement ran 1,804.61 seconds and completed 51 exact responses, 816 completion tokens, five cancellations, and 21 drained waves. Process DRM began and ended at 50,840,551,424 bytes with a 98,304-byte peak delta; Vulkan ownership and 3.5 GiB pool retention were byte-stable with zero measured allocation/free/miss/eviction/uncached churn and 686,925 hits. RSS grew 11,317,248 bytes. The resident route made 992 forwards over 1,984 rows, completed 20 rows at width two, and recorded no decline, failure, or active row at drain. The external controller completed all 123 in-flight pauses over 72.13 seconds, with a 1.001-second maximum, 89,625-millicelsius hottest start, zero active pause, and no 97 C trip. All 240 ITL outliers were attributed and zero unexplained. Host availability stayed above 17,548,128,256 bytes; swap growth was 341,397,504 bytes inside the unchanged cap. Request, batching, device, non-finite, synchronization, ownership, worker, shutdown, and snapshot failures were all zero; teardown was unforced and left no process. Measured p99 TTFT was 150,147.60 ms, so this is a correctness/sustainability acceptance for the declared four-active point, not a vLLM competitiveness or production-latency claim. |
 | 2026-07-16 | Final Vulkan endurance qualification contract | `e356a6b35` plus this source | this static checkpoint | portable qualification tooling and permanent website; Strix Halo execution follows | 519 qualification tests; strict validation of all 20 workload manifests; Python compilation; 10 docs-builder tests; 48-document/5-asset website build; diff hygiene | static contract passed; source-bound eight-hour execution pending | A distinct `vulkan-endurance` identity now reuses the accepted driver's exact four-active-request Vulkan policy while fixing an eight-hour measured duration, 1,800-second setup envelope, 600-second final-request allowance, 180-second teardown allowance, and 31,380-second outer timeout in one checked-in manifest. Driver-contract tests bind the variant, duration, effective configuration, declared metric set, command, and timeout so the endurance profile cannot drift from executable behavior. The website documents the exact command, safety controls, partial-evidence boundary, acceptance rules, and non-claims. The accepted ROCm and Vulkan baseline receipts now explicitly unblock CUDA handoff while this local final endurance gate remains open. |
+| 2026-07-16 | Accepted final Vulkan endurance soak | `3897239fe` | this receipt/evidence commit | Strix Halo Vulkan/RADV clean pushed source | retained receipt `qualification/receipts/vulkan/strix-halo/20260716t165320275412z-vulkan-strix-halo-serving-vulkan-endurance-7db5d986fd-v1.json` (`sha256:118274f07578024cd1a65af2342a388f8be66dee636853d6e0d99698575ce604`); strict current-source/local-artifact/known-commit validation before documentation edits; case result `sha256:8429d459a0267e334ead07e46c4f5f0df3d38e6bddaf467c0c29638fcfd791df`; command result `sha256:a5bff4479fea604270817199bd42c90b936f10c29ada510cfc120ad4a2bdc049`; release binary `sha256:cc8ae9388b3e11bc65ccad44e61cf78808de00d970679e51a5b3c34d7ea7aed7`; hosted repository-hygiene, qualification-contract, and Pages checks green for the source; zero process residue | passed the exact eight-hour Vulkan endurance contract; performance and portability claims remain open | Six setup cycles completed 30 exact responses plus three cancellations and converged after 1,099.02 seconds. Cycles 5 and 6 had exact zero DRM/live-buffer growth, allocations, frees, pool misses, evictions, and uncached allocations; the final RSS delta was 282,624 bytes. Measurement ran 28,867.72 seconds and completed 820 exact responses, 13,120 completion tokens, 82 cancellations, and 328 drained waves. Process DRM began and ended at 51,510,386,688 bytes with a 98,304-byte peak delta. Vulkan ownership and 3.5 GiB pool retention were byte-stable with zero measured allocation/free/miss/eviction/uncached churn and 11,366,760 hits. RSS grew 21,610,496 bytes. The resident route made 18,512 forwards over 37,024 rows, completed 320 rows at width two, and recorded no decline, failure, or active row at drain. All 1,063 thermal pauses completed over 758.36 seconds, no pause remained active, the package peaked at 90,125 millicelsius, and the unchanged 97 C guard did not trip. All 3,907 ITL outliers were attributed and zero unexplained. Host availability stayed above 17,928,245,248 bytes; host swap growth was 24,604,672 bytes and server `smaps` swap growth was zero. Final snapshots completed; request, batching, device, non-finite, synchronization, graph, ownership, worker, shutdown, and snapshot failures were all zero; teardown was unforced and residue-free. Aggregate output goodput was 0.454 tokens/second and p99 TTFT was 152,290.00 ms, so this accepts named-host endurance, not vLLM competitiveness or production latency. |
 
 ## Known Starting Defects
 

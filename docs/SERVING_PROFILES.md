@@ -101,10 +101,21 @@ cancellations over 21 drained waves with byte-stable process DRM, zero measured
 Vulkan allocation/free/recycler-miss churn, zero unexplained ITL outliers, and
 123 matched in-flight thermal pauses below an 89.625 C peak. This accepts the
 declared development operating point and containment policy only. Its roughly
-150.15-second measured p99 TTFT remains a performance limitation; the result
-does not claim vLLM competitiveness, broader prompt/concurrency capacity,
-multi-hour endurance, stable-profile admission, or portability to another
-host.
+150.15-second measured p99 TTFT remains a performance limitation; that
+development receipt alone does not establish multi-hour endurance.
+
+The clean pushed-source `3897239fe` final endurance run subsequently measured
+the same operating point for 28,867.72 seconds. It completed 820 exact responses,
+13,120 completion tokens, 82 cancellations, and 328 drained waves with byte-flat
+process DRM and live Vulkan ownership, zero measured allocation/free/recycler-
+miss/eviction/uncached churn, zero unexplained ITL outliers, and 1,063 matched
+thermal pauses below a 90.125 C peak. RSS grew 21,610,496 bytes, host availability
+stayed above 17,928,245,248 bytes, the server added no swap, final snapshots
+completed, and teardown was clean. This accepts eight-hour endurance for this
+named host and exact experimental operating point. Its 0.454 aggregate output
+tokens/second and 152.29-second p99 TTFT remain performance limitations; the
+result does not claim vLLM competitiveness, broader prompt/concurrency capacity,
+stable-profile admission, or portability to another host.
 
 The maintenance profile is intentionally not a serving profile. Inference
 prewarm is skipped, `/health` and `/v1/health` return HTTP 503 with

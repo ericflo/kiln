@@ -1917,6 +1917,55 @@ host and declared experimental operating point. It does not establish a
 high-concurrency performance claim, stable-profile resident admission, or
 portability to CUDA, Metal, or another Vulkan machine.
 
+The clean pushed `3897239fe` source passed this contract on the named Strix
+Halo. The retained receipt is
+`qualification/receipts/vulkan/strix-halo/20260716t165320275412z-vulkan-strix-halo-serving-vulkan-endurance-7db5d986fd-v1.json`
+with file hash
+`sha256:118274f07578024cd1a65af2342a388f8be66dee636853d6e0d99698575ce604`.
+Before any evidence documentation changed the tree, strict current-source,
+local-artifact, and known-commit validation passed. The required case selected
+`AMD Radeon 8060S Graphics (RADV STRIX_HALO)`, reported no unsupported arm, and
+left no server, qualification worker, compiler, or transient build unit.
+
+Setup completed six cycles, 30 exact responses, and three cancellations in
+1,099.02 seconds. The first four cycles established the fixed working set;
+cycles five and six had zero DRM or live-buffer growth, allocation, free,
+recycler miss, eviction, or uncached allocation. The final stabilization RSS
+delta was 282,624 bytes and the second flat cycle admitted measurement. Setup
+also exercised 520 resident forwards over 1,040 rows, completed ten rows at
+width two, and ended with no active row, initial decline, or route failure.
+
+Measurement ran for 28,867.72 seconds and completed 820 exact responses,
+13,120 completion tokens, 82 confirmed cancellations, and 328 fully drained
+waves. Process DRM began and ended at exactly 51,510,386,688 bytes, with only a
+98,304-byte sampled active peak. Live Vulkan ownership began and ended at
+51,492,696,448 bytes; the recycler retained exactly 3,574,202,368 bytes at both
+boundaries. Across the measured window there were zero Vulkan allocations,
+frees, cache misses, evictions, or uncached allocations and 11,366,760 recycler
+hits. RSS grew 21,610,496 bytes from a 398,393,344-byte baseline and peaked at
+468,049,920 bytes. The resident route made 18,512 forwards over 37,024 rows,
+completed 320 rows at width two, and drained with no decline, failure, or active
+row.
+
+The external controller completed all 1,063 pacing events and left none active.
+Cooling consumed 758.36 seconds of the unchanged deadlines; the longest pause
+was 1.502 seconds, the highest pacing start and sampled package peak were
+90,125 millicelsius, and the 97 C guard never tripped. All 3,907 ITL outliers
+were attributed and none was unexplained. Host availability stayed at or above
+17,928,245,248 bytes, host swap growth was 24,604,672 bytes inside the 512 MiB
+cap, and the server's `smaps` swap growth was zero. Request, batching, device,
+non-finite-response, synchronization, graph, ownership, worker, shutdown, and
+snapshot failures were all zero; final snapshots completed, shutdown was
+unforced and zero, and the private snapshot was removed.
+
+This result establishes eight-hour endurance only for this declared
+four-active-request operating point on this named host. It does not make the
+point fast: aggregate measured completion goodput was 0.454 tokens/second,
+p99 TTFT was 152,290.00 ms, and p99 ITL was 2,477.96 ms, including required
+cooling time. Those values remain explicit performance limitations and do not
+support a vLLM competitiveness, production-latency, higher-concurrency, broader
+prompt, stable-profile, or cross-machine claim.
+
 Never edit a receipt to make it pass. A failed receipt is useful evidence: keep
 it when it identifies a reproducible product defect, fix the defect in a new
 commit, and run a new receipt with a new ID.
