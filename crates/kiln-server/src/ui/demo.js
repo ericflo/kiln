@@ -151,8 +151,9 @@
     '/v1/config': () => ({
       serving_profile: { profile: 'stable', source: 'default' },
       accelerator_runtime: {
-        schema_id: 'kiln.accelerator-runtime-policy.v5',
-        version: 5,
+        schema_id: 'kiln.accelerator-runtime-policy.v6',
+        version: 6,
+        vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v1',
         serving_profile: 'stable',
         serving_profile_source: 'default',
         kt_api_mode: { configured: 'auto', effective: 'auto', source: 'default' },

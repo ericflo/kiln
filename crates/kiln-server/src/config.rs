@@ -125,8 +125,8 @@ pub const DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MIN: u64 = 64 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024 * 1024;
 /// Versioned schema identity shared by config, health, and debug diagnostics.
-pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v5";
-pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 5;
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v6";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 6;
 
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
@@ -1980,6 +1980,7 @@ pub struct ResolvedAcceleratorValue<T> {
 pub struct ResolvedAcceleratorRuntimePolicy {
     pub schema_id: &'static str,
     pub version: u32,
+    pub vulkan_kernel_policy_schema_id: &'static str,
     pub serving_profile: ServingProfile,
     pub serving_profile_source: ConfigValueSource,
     pub kt_api_mode: ResolvedAcceleratorValue<KtApiMode>,
@@ -2024,6 +2025,7 @@ impl AcceleratorRuntimeConfig {
         ResolvedAcceleratorRuntimePolicy {
             schema_id: ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID,
             version: ACCELERATOR_RUNTIME_POLICY_VERSION,
+            vulkan_kernel_policy_schema_id: kiln_model::VULKAN_KERNEL_POLICY_SCHEMA_ID,
             serving_profile: serving_profile.profile(),
             serving_profile_source: serving_profile.source(),
             kt_api_mode: ResolvedAcceleratorValue {
@@ -7259,6 +7261,10 @@ mod tests {
             let resolved = accelerator.resolved_policy(ServingProfileSetting::new(profile, source));
             assert_eq!(resolved.schema_id, ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID);
             assert_eq!(resolved.version, ACCELERATOR_RUNTIME_POLICY_VERSION);
+            assert_eq!(
+                resolved.vulkan_kernel_policy_schema_id,
+                kiln_model::VULKAN_KERNEL_POLICY_SCHEMA_ID
+            );
             assert_eq!(resolved.serving_profile, profile);
             assert_eq!(resolved.serving_profile_source, source);
             assert_eq!(
@@ -7332,8 +7338,12 @@ mod tests {
             ConfigValueSource::Environment,
         )))
         .unwrap();
-        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v5");
-        assert_eq!(json["version"], 5);
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v6");
+        assert_eq!(json["version"], 6);
+        assert_eq!(
+            json["vulkan_kernel_policy_schema_id"],
+            "kiln.vulkan-kernel-policy.v1"
+        );
         assert_eq!(json["serving_profile"], "experimental");
         assert_eq!(json["serving_profile_source"], "environment");
         assert_eq!(json["kt_api_mode"]["configured"], "auto");

@@ -3,166 +3,188 @@ use crate::device::VulkanDevice;
 use anyhow::{Context, Result};
 use ash::vk;
 use half::bf16;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 
-const DEFAULT_MLP_BF16_DOWN_ROWS4_MIN_BATCH: usize = 16;
-const DEFAULT_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH: usize = 8;
-const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
-const DEFAULT_MLP_F32_DOWN_ROWS4_MIN_BATCH: usize = 8;
-const DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH: usize = 2;
-const DEFAULT_LINEAR_DECODE_BF16W_ROWS4_MIN_BATCH: usize = 16;
-const DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
-const DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
-const DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
-
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
-        })
-        .unwrap_or(false)
+/// Immutable kernel selection used by production Vulkan execution.
+///
+/// These values are the exact defaults exercised by the Strix Halo
+/// qualification receipts. Kernel selection is an implementation contract,
+/// not a per-dispatch process-environment experiment: changing this policy
+/// requires source review and new correctness/performance receipts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VulkanKernelPolicy {
+    pub mlp_bf16_gate_up_rows4: bool,
+    pub mlp_f32_down_rows4: bool,
+    pub mlp_bf16_down_rows4: bool,
+    pub mlp_bf16_rows8: bool,
+    pub mlp_bf16_rows8_min_batch: usize,
+    pub mlp_bf16_gate_up_rows4_min_batch: usize,
+    pub mlp_bf16_down_rows4_min_batch: usize,
+    pub mlp_f32_down_rows4_min_batch: usize,
+    pub linear_decode_bf16w_rows4: bool,
+    pub linear_decode_bf16w_rows8: bool,
+    pub linear_bf16_rows4_min_batch: usize,
+    pub linear_bf16_rows8_min_batch: usize,
+    pub gdn_in_proj_rows4_min_batch: usize,
+    pub gdn_in_proj_rows8_min_batch: usize,
+    pub full_attn_qkv_bf16w_rows4: bool,
+    pub full_attn_qkv_bf16w_rows8: bool,
+    pub full_attn_qkv_bf16_rows4_min_batch: usize,
+    pub full_attn_qkv_bf16_rows8_min_batch: usize,
+    pub paged_attn_single_submit: bool,
+    pub qwen_rmsnorm_single_submit: bool,
+    pub gdn_gates_single_submit: bool,
+    pub gdn_gated_norm_single_submit: bool,
+    pub mlp_gate_up_single_submit: bool,
+    pub causal_conv1d_single_submit: bool,
+    pub mlp_chained_dispatch: bool,
+    pub mlp_chained_transfer_submit: bool,
+    pub gdn_decode_host_visible_state: bool,
+    pub gdn_decode_fused_single_submit: bool,
+    pub gdn_recurrent_host_visible_state: bool,
+    pub gdn_recurrent_host_visible_batch_state: bool,
+    pub gdn_recurrent_single_submit: bool,
+    pub gdn_recurrent_parallel_reduce: bool,
+    pub linear_decode_single_submit: bool,
+    pub linear_decode_argmax_single_submit: bool,
+    pub full_attn_qkv_single_submit: bool,
+    pub gdn_in_proj_single_submit: bool,
+    pub gdn_in_proj_batch_pair_qkv_z: bool,
+    pub gdn_in_proj_batch_row_pair: bool,
+    pub gdn_in_proj_batch_row_quad: bool,
+    pub gdn_in_proj_batch_row_octet: bool,
+    pub gdn_gates_batched_transfers: bool,
+    pub gdn_gated_norm_batched_uploads: bool,
+    pub gdn_chunk_batched_transfers: bool,
+    pub paged_attn_batched_uploads: bool,
+    pub prefill_row_pair_matmul: bool,
+    pub gdn_qk_norm_recurrent_fusion: bool,
+    pub gdn_in_proj_conv_split_fusion: bool,
+    pub profile_mlp_kernel_stages: bool,
+    pub profile_gdn_in_proj_kernel_stages: bool,
+    pub profile_gdn_recurrent_kernel_stages: bool,
+    pub profile_resident_decode_timing: bool,
 }
 
+pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v1";
+
+pub const QUALIFIED_VULKAN_KERNEL_POLICY: VulkanKernelPolicy = VulkanKernelPolicy {
+    mlp_bf16_gate_up_rows4: true,
+    mlp_f32_down_rows4: true,
+    mlp_bf16_down_rows4: true,
+    mlp_bf16_rows8: true,
+    mlp_bf16_rows8_min_batch: 256,
+    mlp_bf16_gate_up_rows4_min_batch: 8,
+    mlp_bf16_down_rows4_min_batch: 16,
+    mlp_f32_down_rows4_min_batch: 8,
+    linear_decode_bf16w_rows4: true,
+    linear_decode_bf16w_rows8: true,
+    linear_bf16_rows4_min_batch: 16,
+    linear_bf16_rows8_min_batch: 64,
+    gdn_in_proj_rows4_min_batch: 16,
+    gdn_in_proj_rows8_min_batch: 64,
+    full_attn_qkv_bf16w_rows4: true,
+    full_attn_qkv_bf16w_rows8: true,
+    full_attn_qkv_bf16_rows4_min_batch: 2,
+    full_attn_qkv_bf16_rows8_min_batch: 64,
+    paged_attn_single_submit: true,
+    qwen_rmsnorm_single_submit: true,
+    gdn_gates_single_submit: true,
+    gdn_gated_norm_single_submit: true,
+    mlp_gate_up_single_submit: true,
+    causal_conv1d_single_submit: true,
+    mlp_chained_dispatch: true,
+    mlp_chained_transfer_submit: true,
+    gdn_decode_host_visible_state: false,
+    gdn_decode_fused_single_submit: false,
+    gdn_recurrent_host_visible_state: true,
+    gdn_recurrent_host_visible_batch_state: false,
+    gdn_recurrent_single_submit: true,
+    gdn_recurrent_parallel_reduce: true,
+    linear_decode_single_submit: true,
+    linear_decode_argmax_single_submit: true,
+    full_attn_qkv_single_submit: true,
+    gdn_in_proj_single_submit: true,
+    gdn_in_proj_batch_pair_qkv_z: true,
+    gdn_in_proj_batch_row_pair: true,
+    gdn_in_proj_batch_row_quad: true,
+    gdn_in_proj_batch_row_octet: false,
+    gdn_gates_batched_transfers: true,
+    gdn_gated_norm_batched_uploads: true,
+    gdn_chunk_batched_transfers: true,
+    paged_attn_batched_uploads: true,
+    prefill_row_pair_matmul: true,
+    gdn_qk_norm_recurrent_fusion: true,
+    gdn_in_proj_conv_split_fusion: false,
+    profile_mlp_kernel_stages: false,
+    profile_gdn_in_proj_kernel_stages: false,
+    profile_gdn_recurrent_kernel_stages: false,
+    profile_resident_decode_timing: false,
+};
+
 fn profile_vulkan_mlp_kernel_stages_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy("KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES"))
+    QUALIFIED_VULKAN_KERNEL_POLICY.profile_mlp_kernel_stages
 }
 
 pub(crate) fn mlp_bf16_gate_up_rows4_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_gate_up_rows4
 }
 
 pub(crate) fn mlp_f32_down_rows4_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_f32_down_rows4
 }
 
 pub(crate) fn mlp_bf16_down_rows4_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_down_rows4
 }
 
 pub(crate) fn mlp_bf16_rows8_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_rows8
 }
 
 pub(crate) fn mlp_bf16_rows8_min_batch() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("KILN_VULKAN_MLP_BF16_ROWS8_MIN_BATCH")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_MLP_BF16_ROWS8_MIN_BATCH)
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_rows8_min_batch
 }
 
 pub(crate) fn mlp_bf16_gate_up_rows4_min_batch() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("KILN_VULKAN_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH)
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_gate_up_rows4_min_batch
 }
 
 pub(crate) fn mlp_bf16_down_rows4_min_batch() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("KILN_VULKAN_MLP_BF16_DOWN_ROWS4_MIN_BATCH")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_MLP_BF16_DOWN_ROWS4_MIN_BATCH)
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_down_rows4_min_batch
 }
 
 pub(crate) fn mlp_f32_down_rows4_min_batch() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("KILN_VULKAN_MLP_F32_DOWN_ROWS4_MIN_BATCH")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_MLP_F32_DOWN_ROWS4_MIN_BATCH)
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_f32_down_rows4_min_batch
 }
 
 pub(crate) fn linear_decode_bf16w_rows4_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4").is_err()
-            && std::env::var("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4").is_err()
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_bf16w_rows4
 }
 
 pub(crate) fn linear_decode_bf16w_rows8_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS8").is_err()
-            && std::env::var("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS8").is_err()
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_bf16w_rows8
 }
 
 pub(crate) fn linear_decode_bf16w_rows8_min_batch() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("KILN_VULKAN_LINEAR_BF16_ROWS8_MIN_BATCH")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH)
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.linear_bf16_rows8_min_batch
 }
 
 pub(crate) fn linear_decode_bf16w_rows4_min_batch() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("KILN_VULKAN_LINEAR_BF16_ROWS4_MIN_BATCH")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_LINEAR_DECODE_BF16W_ROWS4_MIN_BATCH)
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.linear_bf16_rows4_min_batch
 }
 
 pub(crate) fn gdn_in_proj_rows4_min_batch() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("KILN_VULKAN_GDN_IN_PROJ_ROWS4_MIN_BATCH")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH)
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_rows4_min_batch
 }
 
 pub(crate) fn gdn_in_proj_rows8_min_batch() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("KILN_VULKAN_GDN_IN_PROJ_ROWS8_MIN_BATCH")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH)
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_rows8_min_batch
 }
 
 pub(crate) fn full_attn_qkv_bf16w_rows4_min_batch() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH)
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_bf16_rows4_min_batch
 }
 
 const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 32;
@@ -172,79 +194,60 @@ const PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS: usize = 64;
 pub(crate) const PAGED_ATTN_SPLITK_MAX_CHUNKS: usize = 256;
 
 pub fn paged_attn_decode_splitk_chunks(batch_size: usize, max_blocks_per_seq: usize) -> usize {
-    std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or(if batch_size <= 1 {
-            PAGED_ATTN_SPLITK_CHUNKS_B1
-        } else if batch_size >= 16 {
-            PAGED_ATTN_SPLITK_CHUNKS_BATCHED
-        } else if max_blocks_per_seq >= PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS {
-            PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG
-        } else {
-            PAGED_ATTN_SPLITK_CHUNKS_BATCHED
-        })
-        .min(PAGED_ATTN_SPLITK_MAX_CHUNKS)
+    (if batch_size <= 1 {
+        PAGED_ATTN_SPLITK_CHUNKS_B1
+    } else if batch_size >= 16 {
+        PAGED_ATTN_SPLITK_CHUNKS_BATCHED
+    } else if max_blocks_per_seq >= PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS {
+        PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG
+    } else {
+        PAGED_ATTN_SPLITK_CHUNKS_BATCHED
+    })
+    .min(PAGED_ATTN_SPLITK_MAX_CHUNKS)
 }
 
 fn paged_attn_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PAGED_ATTN_SINGLE_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.paged_attn_single_submit
 }
 
 fn qwen_rmsnorm_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_QWEN_RMSNORM_SINGLE_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.qwen_rmsnorm_single_submit
 }
 
 fn gdn_gates_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_GATES_SINGLE_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gates_single_submit
 }
 
 fn gdn_gated_norm_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_GATED_NORM_SINGLE_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gated_norm_single_submit
 }
 
 fn mlp_gate_up_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_GATE_UP_SINGLE_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_gate_up_single_submit
 }
 
 fn causal_conv1d_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_CAUSAL_CONV1D_SINGLE_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.causal_conv1d_single_submit
 }
 
 pub(crate) fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_bf16w_rows4
 }
 
 fn mlp_chained_dispatch_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_CHAINED_DISPATCH").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_chained_dispatch
 }
 
 fn mlp_chained_transfer_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_CHAINED_TRANSFER_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_chained_transfer_submit
 }
 
 fn profile_vulkan_gdn_in_proj_kernel_stages_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy("KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES"))
+    QUALIFIED_VULKAN_KERNEL_POLICY.profile_gdn_in_proj_kernel_stages
 }
 
 fn profile_vulkan_gdn_recurrent_kernel_stages_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy("KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES"))
+    QUALIFIED_VULKAN_KERNEL_POLICY.profile_gdn_recurrent_kernel_stages
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -317,28 +320,19 @@ fn finish_vulkan_gdn_recurrent_kernel_stage_profile(
 }
 
 fn gdn_decode_host_visible_state_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_ENABLE_VULKAN_GDN_HOST_VISIBLE_STATE").is_ok())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_decode_host_visible_state
 }
 
 fn gdn_decode_fused_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_ENABLE_VULKAN_GDN_DECODE_FUSED_SINGLE_SUBMIT").is_ok())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_decode_fused_single_submit
 }
 
 fn gdn_recurrent_host_visible_state_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_STATE").is_err()
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_host_visible_state
 }
 
 fn gdn_recurrent_host_visible_batch_state_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_ENABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_BATCH_STATE").is_ok()
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_host_visible_batch_state
 }
 
 fn gdn_recurrent_use_host_visible_state(batch: usize) -> bool {
@@ -347,15 +341,11 @@ fn gdn_recurrent_use_host_visible_state(batch: usize) -> bool {
 }
 
 fn gdn_recurrent_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_SINGLE_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_single_submit
 }
 
 fn gdn_recurrent_parallel_reduce_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_parallel_reduce
 }
 
 pub(crate) fn use_gdn_recurrent_parallel_reduce(dk: usize, dv: usize) -> bool {
@@ -363,86 +353,86 @@ pub(crate) fn use_gdn_recurrent_parallel_reduce(dk: usize, dv: usize) -> bool {
 }
 
 fn linear_decode_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE_SINGLE_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_single_submit
 }
 
 fn linear_decode_argmax_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_LINEAR_ARGMAX_SINGLE_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_argmax_single_submit
 }
 
 fn full_attn_qkv_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_SINGLE_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_single_submit
 }
 
 fn gdn_in_proj_single_submit_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_single_submit
 }
 
 pub(crate) fn gdn_in_proj_batch_pair_qkv_z_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_pair_qkv_z
 }
 
 pub(crate) fn gdn_in_proj_batch_row_pair_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_row_pair
 }
 
 pub(crate) fn gdn_in_proj_batch_row_quad_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_row_quad
 }
 
 pub(crate) fn gdn_in_proj_batch_row_octet_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET")
-            && std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET").is_err()
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_row_octet
 }
 
 fn gdn_gates_batched_transfers_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_GATES_BATCHED_TRANSFERS").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gates_batched_transfers
 }
 
 fn gdn_gated_norm_batched_uploads_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_GDN_GATED_NORM_BATCHED_UPLOADS").is_err()
-    })
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gated_norm_batched_uploads
 }
 
 fn gdn_chunk_batched_transfers_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_chunk_batched_transfers
 }
 
 fn paged_attn_batched_uploads_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PAGED_ATTN_BATCHED_UPLOADS").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.paged_attn_batched_uploads
 }
 
 fn prefill_row_pair_matmul_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL").is_err())
+    QUALIFIED_VULKAN_KERNEL_POLICY.prefill_row_pair_matmul
 }
 
 pub(crate) fn use_prefill_row_pair_matmul(batch: usize) -> bool {
     batch >= 8 && prefill_row_pair_matmul_enabled()
+}
+
+#[cfg(test)]
+mod qualified_policy_tests {
+    use super::*;
+
+    #[test]
+    fn qualified_policy_matches_product_kernel_selection() {
+        assert_eq!(
+            VULKAN_KERNEL_POLICY_SCHEMA_ID,
+            "kiln.vulkan-kernel-policy.v1"
+        );
+        assert!(linear_decode_bf16w_rows4_enabled());
+        assert!(linear_decode_bf16w_rows8_enabled());
+        assert_eq!(linear_decode_bf16w_rows4_min_batch(), 16);
+        assert_eq!(linear_decode_bf16w_rows8_min_batch(), 64);
+        assert!(gdn_in_proj_batch_pair_qkv_z_enabled());
+        assert!(gdn_in_proj_batch_row_pair_enabled());
+        assert!(gdn_in_proj_batch_row_quad_enabled());
+        assert!(!gdn_in_proj_batch_row_octet_enabled());
+        assert_eq!(paged_attn_decode_splitk_chunks(1, 4), 32);
+        assert_eq!(paged_attn_decode_splitk_chunks(4, 32), 4);
+        assert_eq!(paged_attn_decode_splitk_chunks(4, 64), 2);
+        assert_eq!(paged_attn_decode_splitk_chunks(16, 64), 4);
+        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.profile_mlp_kernel_stages);
+        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.profile_resident_decode_timing);
+    }
 }
 
 /// Pre-create the validated built-in compute pipelines on this Vulkan device.

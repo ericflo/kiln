@@ -190,8 +190,9 @@ def health_fixture(
         },
     }
     accelerator_runtime = {
-        "schema_id": "kiln.accelerator-runtime-policy.v5",
-        "version": 5,
+        "schema_id": "kiln.accelerator-runtime-policy.v6",
+        "version": 6,
+        "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v1",
         "serving_profile": serving_profile,
         "serving_profile_source": "config_file",
         "kt_api_mode": {
@@ -378,8 +379,9 @@ def debug_fixture(
 
     return {
         "accelerator_runtime": {
-            "schema_id": "kiln.accelerator-runtime-policy.v5",
-            "version": 5,
+            "schema_id": "kiln.accelerator-runtime-policy.v6",
+            "version": 6,
+            "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v1",
             "serving_profile": serving_profile,
             "serving_profile_source": "config_file",
             "kt_api_mode": {

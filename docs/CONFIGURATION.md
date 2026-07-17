@@ -179,10 +179,11 @@ disabled.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v5`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v6`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
-dashboard all report the same configured/effective/source values; lower model,
-tensor, and kernel paths do not re-read these public environment names.
+dashboard all report the same configured/effective/source values, plus the
+compiled Vulkan kernel-policy schema ID; lower model, tensor, and kernel paths
+do not re-read these public environment names.
 
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
 |---|---|---|---|---|
@@ -213,9 +214,42 @@ derived canonical environment name instead.
 aliases. Previously, model and ROCm flash paths parsed different permissive
 values during execution and recomputed score budgets from changing free-memory
 snapshots, permitting route geometry to change between layers or requests.
-The v5 policy fixes one bounded ceiling before execution; the ROCm allocator
+The v6 policy fixes one bounded ceiling before execution; the ROCm allocator
 governor may still reject a planned operation when its exact working set is no
 longer admissible, but it cannot silently shrink or expand that plan.
+
+### Vulkan kernel policy
+
+Vulkan kernel selection is an immutable implementation contract, not a public
+configuration surface. Product execution uses
+`kiln.vulkan-kernel-policy.v1`, defined by the typed
+`QUALIFIED_VULKAN_KERNEL_POLICY` object before any dispatch. There is no TOML,
+CLI, request, or environment override for its leaves. Changing one requires a
+reviewed source change, a new policy version, backend/oracle parity, and new
+Vulkan performance and soak receipts.
+
+The qualified policy fixes these exact route decisions:
+
+| Family | Qualified selection |
+|---|---|
+| BF16 MLP | Four-row gate/up at batch 8, four-row down at batch 16, four-row F32 down at batch 8, and eight-row kernels at batch 256; all are enabled. |
+| BF16 linear | Four-row kernels at batch 16 and eight-row kernels at batch 64; both are enabled. |
+| BF16 full-attention QKV | Four-row kernels at batch 2 and eight-row kernels at batch 64; both are enabled. |
+| GDN input projection | Pair QKV/Z, two-row grouping, and four-row grouping are enabled; eight-row grouping is disabled. Four-row selection starts at batch 16 and its eight-row threshold remains 64 for a future qualified policy. |
+| GDN recurrence | Single-submit and parallel reduction are enabled. Host-visible recurrence is enabled for batch one and disabled for batched state. Q/K-normalization recurrence fusion is enabled; input-projection/conv-split fusion is disabled. |
+| Submission and transfer fusion | Paged attention, Qwen RMSNorm, GDN gates/norm/input projection, MLP gate/up, causal conv1d, full-attention QKV, linear decode/argmax, chained MLP dispatch/transfer, and the applicable batched upload/transfer routes are enabled. |
+| Paged-attention split-K | Batch one uses 32 chunks. Batch 16 or wider uses 4. Smaller batches use 2 at 64 or more blocks per sequence and 4 otherwise, with an absolute 256-chunk bound. |
+| Prefill and profiling | Pair-row prefill matmul is enabled from batch 8. Kernel-stage and resident-decode profiling are disabled in product execution. |
+
+The former `KILN_DISABLE_VULKAN_*`, `KILN_ENABLE_VULKAN_*`, Vulkan kernel
+threshold, split-K, and kernel-stage profiling variables read by
+`kiln-vulkan-kernel::kernels` and the resident model path were deleted without
+aliases or replacement fields. They permitted route mixtures and permissive
+integer fallback below the typed startup boundary, and the model duplicated a
+different copy of several thresholds. Historical optimization documents may
+name those variables as experiment evidence; they do not describe current
+runtime controls. The research microbenchmark remains a separate executable
+surface and must not be treated as product configuration.
 
 ### ROCm synchronization semantics
 

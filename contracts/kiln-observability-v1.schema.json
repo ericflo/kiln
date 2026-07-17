@@ -50,6 +50,7 @@
         "accelerator_runtime": {
           "schema_id": "value",
           "version": 0,
+          "vulkan_kernel_policy_schema_id": "value",
           "serving_profile": "stable",
           "serving_profile_source": "default",
           "kt_api_mode": {
@@ -782,6 +783,7 @@
           "accelerator_runtime": {
             "schema_id": "value",
             "version": 0,
+            "vulkan_kernel_policy_schema_id": "value",
             "serving_profile": "stable",
             "serving_profile_source": "default",
             "kt_api_mode": {
@@ -1368,6 +1370,7 @@
         "accelerator_runtime": {
           "schema_id": "value",
           "version": 0,
+          "vulkan_kernel_policy_schema_id": "value",
           "serving_profile": "stable",
           "serving_profile_source": "default",
           "kt_api_mode": {
@@ -6643,6 +6646,7 @@
       "required": [
         "schema_id",
         "version",
+        "vulkan_kernel_policy_schema_id",
         "serving_profile",
         "serving_profile_source",
         "kt_api_mode",
@@ -6659,6 +6663,9 @@
         },
         "version": {
           "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "vulkan_kernel_policy_schema_id": {
+          "$ref": "#/$defs/NonEmptyString"
         },
         "serving_profile": {
           "$ref": "#/$defs/ServingProfile"

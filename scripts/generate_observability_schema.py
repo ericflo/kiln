@@ -441,6 +441,7 @@ def build_definitions() -> None:
         {
             "schema_id": ref("NonEmptyString"),
             "version": ref("NonNegativeInteger"),
+            "vulkan_kernel_policy_schema_id": ref("NonEmptyString"),
             "serving_profile": ref("ServingProfile"),
             "serving_profile_source": ref("ConfigValueSource"),
             "kt_api_mode": ref("ResolvedKtApiMode"),

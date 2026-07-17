@@ -454,6 +454,21 @@ curl -s http://localhost:8420/metrics \
           decode width. Malformed canonical or deprecated values fail startup instead of silently selecting a
           fallback.
         </p>
+        <h3 id="vulkan-kernel-policy-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan kernel-policy diagnosis</h3>
+        <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+          Production kernel selection is fixed by <code>kiln.vulkan-kernel-policy.v1</code>. Old
+          <code>KILN_DISABLE_VULKAN_*</code>, <code>KILN_ENABLE_VULKAN_*</code>, kernel-threshold, split-K,
+          and stage-profile variables are not controls and must not be used to explain a run. The kernel and
+          resident-model planners share one source object; malformed shell values cannot select a fallback.
+        </p>
+        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
+  | jq '.accelerator_runtime | {schema_id, version, vulkan_kernel_policy_schema_id}'</code></pre>
+        <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
+          <li>Remove old kernel switches from launch scripts. They have no compatibility aliases or replacement fields.</li>
+          <li>Compare the binary/source commit and policy schema before comparing receipts. A route change requires a reviewed source revision and renewed Vulkan parity, performance, and soak evidence.</li>
+          <li>Use typed batching, memory, prewarm, and accelerator fields for supported operator decisions. Do not infer a hidden kernel override from a throughput change.</li>
+          <li>Historical optimization logs and the Vulkan microbenchmark document research experiments; neither defines the product runtime contract.</li>
+        </ul>
         <h3 id="vulkan-prefix-cache-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan prefix-cache diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
           Vulkan currently correctness-quarantines all cross-request prompt, KV, and recurrent-state reuse.

@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **826 direct read call sites** and
+The scanner records **767 direct read call sites** and
 **359 process-mutation call sites**. It can
-statically name **301 distinct literal `KILN_*`
-read names** across **452 call sites**.
+statically name **253 distinct literal `KILN_*`
+read names** across **396 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 354 | 260 | 0 |
+| Experimental/debug migration | 295 | 212 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 135 | 41 | 351 |
 
@@ -57,11 +57,9 @@ boundary. This table is the prioritized deletion/migration queue.
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
 | `crates/kiln-model/src/forward.rs` | 61 | 49 |
-| `crates/kiln-vulkan-kernel/src/kernels.rs` | 47 | 46 |
 | `crates/kiln-model/src/backend/vulkan_config.rs` | 27 | 27 |
 | `crates/kiln-model/src/mtp_debug.rs` | 24 | 24 |
 | `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
-| `crates/kiln-model/src/vk_decode_resident.rs` | 12 | 10 |
 | `crates/kiln-model/src/backend/rocm.rs` | 11 | 9 |
 | `crates/kiln-model/src/backend/capability.rs` | 10 | 2 |
 | `crates/kiln-model/src/tape_forward.rs` | 9 | 8 |
@@ -215,56 +213,23 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_DISABLE_VULKAN_BF16_PACKED_GDN_IN_PROJ_WEIGHTS` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_CAUSAL_CONV1D_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_CONV1D_PREFILL_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_DISABLE_VULKAN_FULL_ATTN_QKV` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_FULL_ATTN_QKV_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_DISABLE_VULKAN_GDN_CHUNKWISE_FORWARD` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_gdn.rs` |
 | `KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT` | Experimental/debug migration | 2 | `crates/kiln-model/src/backend/vulkan_gdn.rs`, `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs` |
-| `KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_gdn.rs` |
-| `KILN_DISABLE_VULKAN_GDN_GATED_NORM_BATCHED_UPLOADS` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_GDN_GATED_NORM_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_GDN_GATES_BATCHED_TRANSFERS` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_GDN_GATES_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_GDN_PREFILL_IN_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_STATE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_GDN_RECURRENT_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_GDN_RECURRENT_STEP_F32` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/capability.rs` |
 | `KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_DISABLE_VULKAN_LINEAR_ARGMAX_BATCH` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_LINEAR_ARGMAX_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS8` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_LINEAR_DECODE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS8` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_LINEAR_DECODE_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_F32_DOWN` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_MLP_BF16_ROWS8` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_MLP_CHAINED_DISPATCH` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_MLP_CHAINED_TRANSFER_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_MLP_DECODE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_MLP_GATE_UP_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_PAGED_ATTN_BATCHED_UPLOADS` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_BATCH` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_PAGED_ATTN_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_attention.rs` |
-| `KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_DISABLE_VULKAN_QWEN_RMSNORM_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_DISABLE_VULKAN_SKIP_FINAL_GDN_STATE_READBACK` | Experimental/debug migration | 1 | `crates/kiln-model/src/generate.rs` |
 | `KILN_DOCTEST_PYTHON` | Experimental/debug migration | 1 | `crates/kiln-eval/src/scorers/python_doctest.rs` |
 | `KILN_DROP_PROJECTION_ORIGINALS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
@@ -277,11 +242,8 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_ENABLE_VULKAN_FUSED_CONV1D` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_ENABLE_VULKAN_FUSED_CONV1D_UPDATE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_ENABLE_VULKAN_GDN_FORWARD_SUB` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_ENABLE_VULKAN_GDN_HOST_VISIBLE_STATE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_ENABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_BATCH_STATE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_ENABLE_VULKAN_MLP_GATE_UP` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_EVAL_MODE` | Test only | 1 | `crates/kiln-server/src/config.rs` |
@@ -405,28 +367,16 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_VK_MICROBENCH_BATCHES` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
 | `KILN_VK_MICROBENCH_ONLY` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
 | `KILN_VK_NATIVE_PHASE_TIMING` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_VK_RESIDENT_DECODE_BLOCK` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_VK_RESIDENT_DECODE_GDN` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_VK_RESIDENT_DECODE_GDN_FULL_BLOCK` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_VK_RESIDENT_DECODE_NATIVE` | Experimental/debug migration | 8 | `crates/kiln-model/src/forward.rs` |
-| `KILN_VK_RESIDENT_DECODE_TIMING` | Experimental/debug migration | 1 | `crates/kiln-model/src/vk_decode_resident.rs` |
 | `KILN_VK_SOLVE_TRI_CPU` | Experimental/debug migration | 2 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs`, `crates/kiln-vulkan-kernel/src/vk_ops/solve_tri.rs` |
 | `KILN_VK_SOLVE_TRI_TRANSPOSE_CPU` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs` |
 | `KILN_VK_TRACE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_attention.rs` |
 | `KILN_VULKAN_DEVICE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/device.rs` |
-| `KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH` | Experimental/debug migration | 2 | `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH` | Experimental/debug migration | 1 | `crates/kiln-model/src/vk_decode_resident.rs` |
 | `KILN_VULKAN_GDN_CHUNKWISE_FALLBACK` | Experimental/debug migration | 3 | `crates/kiln-model/src/backend/vulkan_gdn.rs`, `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs` |
-| `KILN_VULKAN_GDN_IN_PROJ_ROWS4_MIN_BATCH` | Experimental/debug migration | 2 | `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_VULKAN_GDN_IN_PROJ_ROWS8_MIN_BATCH` | Experimental/debug migration | 2 | `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_VULKAN_LINEAR_BF16_ROWS4_MIN_BATCH` | Experimental/debug migration | 2 | `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_VULKAN_LINEAR_BF16_ROWS8_MIN_BATCH` | Experimental/debug migration | 2 | `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_VULKAN_LINEAR_MAX_GFLOP` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_linear.rs` |
-| `KILN_VULKAN_MLP_BF16_DOWN_ROWS4_MIN_BATCH` | Experimental/debug migration | 2 | `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_VULKAN_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH` | Experimental/debug migration | 2 | `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_VULKAN_MLP_BF16_ROWS8_MIN_BATCH` | Experimental/debug migration | 2 | `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/kernels.rs` |
-| `KILN_VULKAN_MLP_F32_DOWN_ROWS4_MIN_BATCH` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/kernels.rs` |
 | `KILN_VULKAN_RESIDENT_DECODE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_VULKAN_SDPA` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan.rs` |
 | `KILN_VULKAN_VALIDATION` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/device.rs` |
@@ -506,7 +456,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-model/src/generate.rs` | `var` | `key` | Test only | 1 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | `var_os` | `HOME` | Experimental/debug migration | 1 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | `var_os` | `XDG_CACHE_HOME` | Experimental/debug migration | 1 |
-| `crates/kiln-model/src/vk_decode_resident.rs` | `var` | `name` | Experimental/debug migration | 2 |
 | `crates/kiln-model/tests/backend_capability_contract.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 1 |
 | `crates/kiln-mps/build.rs` | `var` | `CARGO_CFG_TARGET_OS` | Build time/provenance | 1 |
 | `crates/kiln-mps/build.rs` | `var` | `CARGO_CFG_TARGET_VENDOR` | Build time/provenance | 1 |
@@ -587,7 +536,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-vulkan-kernel/src/cmd_batch.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 2 |
 | `crates/kiln-vulkan-kernel/src/device.rs` | `var` | `GGML_VK_VISIBLE_DEVICES` | Experimental/debug migration | 1 |
 | `crates/kiln-vulkan-kernel/src/kernels.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 103 |
-| `crates/kiln-vulkan-kernel/src/kernels.rs` | `var` | `name` | Experimental/debug migration | 1 |
 | `crates/kiln-vulkan-kernel/src/lib.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
 | `crates/kiln-vulkan-kernel/src/pipeline.rs` | `env!` | `OUT_DIR` | Build time/provenance | 1 |
 | `crates/kiln-vulkan-kernel/src/resident.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 63 |

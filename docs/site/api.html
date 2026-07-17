@@ -366,8 +366,9 @@
               <h4 class="font-semibold mb-2"><code>accelerator_runtime</code>: immutable accelerator execution policy</h4>
               <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
   "accelerator_runtime": {
-    "schema_id": "kiln.accelerator-runtime-policy.v5",
-    "version": 5,
+    "schema_id": "kiln.accelerator-runtime-policy.v6",
+    "version": 6,
+    "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v1",
     "serving_profile": "stable",
     "serving_profile_source": "default",
     "kt_api_mode": {
@@ -454,7 +455,7 @@
                 ROCm online-score, and tile-size environment controls. Those controls are not aliases. They
                 previously let the model and ROCm flash planners parse different permissive values during
                 execution and derive geometry from changing free-memory snapshots, including a materialized
-                ceiling as high as 32 GiB. Policy v5 installs one bounded ceiling before execution. The memory
+                ceiling as high as 32 GiB. Policy v6 installs one bounded ceiling before execution. The memory
                 governor can reject a plan whose exact working set is no longer available, but it cannot
                 silently shrink, expand, or retile that plan between layers or requests.
               </p>

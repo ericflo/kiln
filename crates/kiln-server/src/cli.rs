@@ -1668,6 +1668,16 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 config.memory.cuda_graphs
             );
             println!(
+                "  {} {}",
+                style("Accelerator policy schema:").dim(),
+                accelerator_runtime.schema_id,
+            );
+            println!(
+                "  {} {}",
+                style("Vulkan kernel policy:").dim(),
+                accelerator_runtime.vulkan_kernel_policy_schema_id,
+            );
+            println!(
                 "  {} {} (source: {})",
                 style("Kiln-tensor API routes:").dim(),
                 accelerator_runtime.kt_api_mode.effective,

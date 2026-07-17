@@ -115,6 +115,11 @@ pub use speculative::SpeculativeConfig;
 pub use weights::{ModelSnapshotCleanup, ModelWeights};
 
 #[cfg(feature = "vulkan")]
+pub use kiln_vulkan_kernel::kernels::VULKAN_KERNEL_POLICY_SCHEMA_ID;
+#[cfg(not(feature = "vulkan"))]
+pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v1";
+
+#[cfg(feature = "vulkan")]
 pub use kiln_vulkan_kernel::buffer::VulkanBufferAllocationStats;
 #[cfg(feature = "vulkan")]
 pub use kiln_vulkan_kernel::buffer_pool::{
