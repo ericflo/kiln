@@ -525,11 +525,12 @@ training request
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           Owner fairness is enforced before candidate allocation even when the global cache has room. One active
           owner may retain at most two exact attention geometries. A cache hit is untouched; on a third distinct
-          miss, the runner settles and retires that owner&rsquo;s older graph entries under
+          miss, the runner deterministically selects the least-recent geometry, settles and retires only that
+          entry under
           <code>pre_capture_owner_geometry_limit</code>, preserves its live slot and timeline, and then evaluates
-          the candidate against the unchanged global entry and byte limits. Decode length is monotonic, so this
-          bounds historical buckets without evicting another active owner or making the configured entry ceiling
-          a per-owner allowance.
+          the candidate against the unchanged global entry and byte limits. The other retained geometry remains
+          replayable. Decode length is monotonic, so this bounds historical buckets without flushing the owner,
+          evicting another active owner, or making the configured entry ceiling a per-owner allowance.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           Capture and cache admission are deliberately separate outcomes. <code>capture_successes</code> means

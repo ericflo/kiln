@@ -1198,12 +1198,16 @@ so its `comparison_policy` is null. Do not use it to claim relative throughput
 or latency; use the serving benchmark protocol for those claims. The 30-minute
 receipt also does not replace the final 24-hour ROCm phase soak.
 
-Setup and measurement use independent absolute deadlines. The ROCm setup
-envelope is 1,200 seconds for build, startup, warmup, and stabilization. Only
-after stabilization passes does a fresh 1,920-second measurement envelope
-begin: 1,800 required seconds plus one 120-second request deadline so the last
-admitted wave can settle. The outer 3,300-second case timeout adds a separate
-180-second teardown margin. A setup failure records
+Build, runtime setup, and measurement use independent absolute deadlines. The
+exact source-bound build has its own 900-second limit from the checked build
+specification. A successful build starts a fresh 1,200-second runtime setup
+envelope for server startup, warmup, and stabilization; compilation time cannot
+consume the runtime evidence budget. Only after stabilization passes does a
+fresh 1,920-second measurement envelope begin: 1,800 required seconds plus one
+120-second request deadline so the last admitted wave can settle. The outer
+4,200-second case timeout is exactly those three limits plus a separate
+180-second teardown margin. Thermal pacing remains charged to the runtime setup
+or measurement phase in which it occurs. A setup failure records
 `soak_duration_seconds=0`; it cannot be mistaken for measured performance.
 
 ### Vulkan Resident-Prefill Oracle
@@ -1311,15 +1315,17 @@ simultaneously active requests, or longer-prompt throughput are competitive or
 qualified.
 
 Its timing envelopes are likewise independent and explicit in the effective
-configuration. Build, startup, warmup, and stabilization get 1,800 seconds.
-After those gates pass, the 30-minute measurement gets a fresh 2,400-second
-absolute deadline: 1,800 required seconds plus the unchanged 600-second
-per-request containment window. The outer case timeout is 4,380 seconds,
-leaving 180 seconds for cancellation, server join, private-snapshot cleanup,
-and result publication. Wave request threads get a fixed 10-second cleanup
-window inside that teardown allowance even when the setup or measurement work
-deadline has already expired. The driver sets their shared abort signal, waits
-for them, records `request_worker_residue_count`, and rejects any survivor; an
+configuration. The exact source build gets the checked 900-second build limit;
+after it succeeds, startup, warmup, and stabilization get a fresh 1,800
+seconds. After those gates pass, the 30-minute measurement gets a fresh
+2,400-second absolute deadline: 1,800 required seconds plus the unchanged
+600-second per-request containment window. The outer case timeout is 5,280
+seconds, exactly those limits plus 180 seconds for cancellation, server join,
+private-snapshot cleanup, and result publication. Wave request threads get a
+fixed 10-second cleanup window inside that teardown allowance even when the
+setup or measurement work deadline has already expired. The driver sets their
+shared abort signal, waits for them, records `request_worker_residue_count`, and
+rejects any survivor; an
 expired work deadline therefore cannot erase its own cleanup budget. Setup time
 is never reported as measured soak time.
 Raw stdout and stderr artifacts are flushed after every captured chunk, so a
@@ -1921,14 +1927,15 @@ route gates, 8 GiB host-memory floor, 512 MiB swap-growth cap, continuous
 deterministic seed and eight-hour duration exercise a longer request sequence
 without silently widening the already-qualified operating point.
 
-The timing contract gives build, startup, warmup, and stabilization 1,800
-seconds. Successful stabilization starts a fresh 29,400-second measurement
-deadline: 28,800 required seconds plus the unchanged 600-second request
-containment window. The outer case timeout is 31,380 seconds, adding a separate
-180 seconds for cancellation, process-group shutdown, private-snapshot cleanup,
-and result publication. Pacing counts against those deadlines. A setup failure
-still reports zero measured duration, and a measurement failure retains evidence
-only through the last fully completed and drained wave with
+The timing contract gives the exact source build its checked 900-second limit,
+then gives startup, warmup, and stabilization a fresh 1,800 seconds. Successful
+stabilization starts a fresh 29,400-second measurement deadline: 28,800 required
+seconds plus the unchanged 600-second request containment window. The outer
+case timeout is 32,280 seconds, exactly those limits plus a separate 180 seconds
+for cancellation, process-group shutdown, private-snapshot cleanup, and result
+publication. Pacing counts against runtime setup and measurement deadlines. A
+setup failure still reports zero measured duration, and a measurement failure
+retains evidence only through the last fully completed and drained wave with
 `measurement_final_snapshot_complete=0`.
 
 A pass requires the same exact response, device, ownership, memory, thermal,

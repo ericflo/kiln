@@ -105,9 +105,9 @@
           "response_oracle_integer_width": 6,
           "request_ignore_eos": true,
           "request_worker_cleanup_timeout_seconds": 10.0,
-          "deadline_policy": "independent_setup_and_measurement",
+          "deadline_policy": "independent_build_setup_and_measurement",
           "measurement_deadline_seconds": 2400,
-          "qualification_case_timeout_seconds": 4380,
+          "qualification_case_timeout_seconds": 5280,
           "setup_deadline_seconds": 1800,
           "teardown_grace_seconds": 180,
           "stabilization_gpu_delta_limit_bytes": 67108864,
@@ -170,7 +170,7 @@
             "CARGO_NET_OFFLINE": "true",
             "PYTHONUNBUFFERED": "1"
           },
-          "timeout_seconds": 4380,
+          "timeout_seconds": 5280,
           "expected_exit_codes": [
             0
           ],

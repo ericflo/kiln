@@ -273,8 +273,29 @@ def runtime_for_variant(variant: str) -> SoakRuntime:
         ) from exc
 
 
+def build_phase_deadline(started: float, runtime: SoakRuntime) -> float:
+    return started + runtime.build_spec.timeout_seconds
+
+
 def setup_phase_deadline(started: float, runtime: SoakRuntime) -> float:
     return started + runtime.setup_deadline_seconds
+
+
+def build_binary_for_soak(
+    runtime: SoakRuntime,
+) -> tuple[Path, str, float, float, float]:
+    build_started = time.monotonic()
+    binary, binary_hash, build_seconds = mixed.build_binary(
+        build_phase_deadline(build_started, runtime), runtime.build_spec
+    )
+    setup_started = time.monotonic()
+    return (
+        binary,
+        binary_hash,
+        build_seconds,
+        setup_started,
+        setup_phase_deadline(setup_started, runtime),
+    )
 
 
 def measurement_phase_deadline(
@@ -290,7 +311,8 @@ def qualification_case_timeout_seconds(
     runtime: SoakRuntime,
 ) -> int:
     return math.ceil(
-        runtime.setup_deadline_seconds
+        runtime.build_spec.timeout_seconds
+        + runtime.setup_deadline_seconds
         + minimum_duration_seconds
         + runtime.request_timeout_seconds
         + CASE_TEARDOWN_GRACE_SECONDS
@@ -601,7 +623,7 @@ def effective_config(
             "request_worker_cleanup_timeout_seconds": (
                 REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS
             ),
-            "deadline_policy": "independent_setup_and_measurement",
+            "deadline_policy": "independent_build_setup_and_measurement",
             "measurement_deadline_seconds": int(
                 minimum_duration_seconds + runtime.request_timeout_seconds
             ),
@@ -2643,10 +2665,8 @@ def execute(
     memory_growth_limit_bytes: int,
     runtime: SoakRuntime = ROCM_RUNTIME,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    started = time.monotonic()
-    setup_deadline = setup_phase_deadline(started, runtime)
-    binary, binary_hash, build_seconds = mixed.build_binary(
-        setup_deadline, runtime.build_spec
+    binary, binary_hash, build_seconds, runtime_started, setup_deadline = (
+        build_binary_for_soak(runtime)
     )
     mixed.trace(
         "soak_binary_built",
@@ -3346,7 +3366,7 @@ def execute(
             deadline_seconds=minimum_duration_seconds
             + runtime.request_timeout_seconds,
             minimum_duration_seconds=minimum_duration_seconds,
-            setup_elapsed_seconds=measurement_started - started,
+            setup_elapsed_seconds=measurement_started - runtime_started,
         )
         rss_samples = [rss_start]
 
@@ -3609,7 +3629,7 @@ def execute(
         events = server_log.events_since(measurement_started)
         if thermal_guard is not None:
             events.extend(thermal_guard.pacing_events_since(measurement_started))
-        all_server_events = server_log.events_since(started)
+        all_server_events = server_log.events_since(runtime_started)
         gpu_end = gpu_memory_bytes(port, process.pid, runtime)
         rss_end = process_memory_snapshot(process.pid).rss_bytes
         if thermal_guard is not None:
@@ -4097,7 +4117,7 @@ def execute(
                 warmup_itl_ms=warmup.itl_ms,
                 results=all_results,
                 measurement_events=measurement_events,
-                all_server_events=server_log.events_since(started),
+                all_server_events=server_log.events_since(runtime_started),
                 expected_completion_tokens=runtime.max_tokens,
                 cancellation_count=cancellations,
                 duration_seconds=phase_elapsed_seconds(measurement_started),

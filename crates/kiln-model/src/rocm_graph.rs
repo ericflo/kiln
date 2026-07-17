@@ -998,6 +998,23 @@ fn owner_geometry_retirement_required(
         && retained_geometry_count >= MAX_RETAINED_GRAPH_GEOMETRIES_PER_OWNER
 }
 
+#[cfg(feature = "rocm")]
+fn oldest_owner_geometry_key<'a>(
+    owner: RocmGraphOwner,
+    geometries: impl Iterator<Item = (&'a RocmGraphCacheKey, u64)>,
+) -> Option<RocmGraphCacheKey> {
+    geometries
+        .filter(|(key, _)| key.owner == owner)
+        .min_by_key(|(key, last_used_tick)| {
+            (
+                *last_used_tick,
+                key.graph.max_seqlen_k,
+                key.graph.max_blocks_per_seq,
+            )
+        })
+        .map(|(key, _)| key.clone())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RocmGraphFallbackReason {
     ColdCacheHostRoundTrip,
@@ -2279,12 +2296,32 @@ impl RocmGraphRunner {
         retained_slot_owners: &HashSet<RocmGraphOwner>,
         candidate_slot: Option<RocmGraphCandidateSlot<'_>>,
     ) -> RocmGraphMemoryAccounting {
+        self.memory_accounting_with_exclusions(
+            excluded_owners,
+            &HashSet::new(),
+            candidate,
+            retained_slot_owners,
+            candidate_slot,
+        )
+    }
+
+    #[cfg(feature = "rocm")]
+    fn memory_accounting_with_exclusions(
+        &self,
+        excluded_owners: &HashSet<RocmGraphOwner>,
+        excluded_keys: &HashSet<RocmGraphCacheKey>,
+        candidate: Option<(&RocmGraphCacheKey, &RocmGraphEntryAccounting)>,
+        retained_slot_owners: &HashSet<RocmGraphOwner>,
+        candidate_slot: Option<RocmGraphCandidateSlot<'_>>,
+    ) -> RocmGraphMemoryAccounting {
         const OPAQUE_NATIVE_OBJECTS_PER_GRAPH: usize = 5; // graph, exec, stream, two events
 
         let included = || {
             self.captured
                 .iter()
-                .filter(|(key, _)| !excluded_owners.contains(&key.owner))
+                .filter(|(key, _)| {
+                    !excluded_owners.contains(&key.owner) && !excluded_keys.contains(*key)
+                })
                 .map(|(key, captured)| (key, &captured.accounting))
                 .chain(candidate.into_iter())
         };
@@ -2565,11 +2602,17 @@ impl RocmGraphRunner {
             self.captured.contains_key(key),
             retained_geometry_count,
         ) {
-            self.evict_graph_owners(
-                &HashSet::from([key.owner]),
+            let victim = oldest_owner_geometry_key(
+                key.owner,
+                self.captured
+                    .iter()
+                    .map(|(captured_key, captured)| (captured_key, captured.last_used_tick)),
+            )
+            .context("active ROCm graph owner reached its geometry limit without a victim")?;
+            self.evict_graph_keys(
+                vec![victim],
                 "pre_capture_owner_geometry_limit",
                 RocmGraphEvictionReason::Budget,
-                false,
             )?;
         }
 
@@ -2681,12 +2724,59 @@ impl RocmGraphRunner {
         reason: RocmGraphEvictionReason,
         remove_selected_slots: bool,
     ) -> Result<RocmGraphMemoryAccounting> {
-        let keys: Vec<_> = self
-            .captured
-            .keys()
-            .filter(|key| owners.contains(&key.owner))
-            .cloned()
-            .collect();
+        self.evict_graph_entries(owners, boundary, reason, remove_selected_slots, None)
+    }
+
+    /// Retire selected geometries while retaining their active owner's slot and
+    /// every other cached geometry. This is the narrow owner-limit path; broad
+    /// budget, pressure, invalidation, and recovery still operate on owners.
+    #[cfg(feature = "rocm")]
+    fn evict_graph_keys(
+        &mut self,
+        keys: Vec<RocmGraphCacheKey>,
+        boundary: &'static str,
+        reason: RocmGraphEvictionReason,
+    ) -> Result<RocmGraphMemoryAccounting> {
+        anyhow::ensure!(!keys.is_empty(), "{boundary}: no ROCm graph keys selected");
+        anyhow::ensure!(
+            keys.iter().all(|key| self.captured.contains_key(key)),
+            "{boundary}: selected ROCm graph key is no longer retained"
+        );
+        let owners: HashSet<_> = keys.iter().map(|key| key.owner).collect();
+        anyhow::ensure!(
+            owners.iter().all(|owner| self
+                .graph_slots
+                .get(owner)
+                .is_some_and(|slot| slot.assigned_row.is_some())),
+            "{boundary}: geometry-only ROCm graph eviction requires active owners"
+        );
+        self.evict_graph_entries(
+            &owners,
+            boundary,
+            reason,
+            false,
+            Some(keys.into_iter().collect()),
+        )
+    }
+
+    #[cfg(feature = "rocm")]
+    fn evict_graph_entries(
+        &mut self,
+        owners: &HashSet<RocmGraphOwner>,
+        boundary: &'static str,
+        reason: RocmGraphEvictionReason,
+        remove_selected_slots: bool,
+        selected_keys: Option<HashSet<RocmGraphCacheKey>>,
+    ) -> Result<RocmGraphMemoryAccounting> {
+        let keys: Vec<_> = match selected_keys.as_ref() {
+            Some(selected) => selected.iter().cloned().collect(),
+            None => self
+                .captured
+                .keys()
+                .filter(|key| owners.contains(&key.owner))
+                .cloned()
+                .collect(),
+        };
         let prospective_selected_slots: HashSet<_> = owners
             .iter()
             .copied()
@@ -2732,8 +2822,17 @@ impl RocmGraphRunner {
                 })
             });
         let before = self.memory_accounting(&HashSet::new(), None);
-        let after =
-            self.memory_accounting_with_retained_slots(owners, None, &retained_slot_owners, None);
+        let after = if let Some(selected) = selected_keys.as_ref() {
+            self.memory_accounting_with_exclusions(
+                &HashSet::new(),
+                selected,
+                None,
+                &HashSet::new(),
+                None,
+            )
+        } else {
+            self.memory_accounting_with_retained_slots(owners, None, &retained_slot_owners, None)
+        };
         let released = RocmGraphMemoryAccounting {
             stable_io_bytes: before.stable_io_bytes.saturating_sub(after.stable_io_bytes),
             capture_arena_bytes: before
@@ -5780,6 +5879,47 @@ mod tests {
         assert!(owner_geometry_retirement_required(true, false, 3));
         assert!(!owner_geometry_retirement_required(true, true, 2));
         assert!(!owner_geometry_retirement_required(false, false, 2));
+
+        let owner = RocmGraphOwner::Slot(7);
+        let other = RocmGraphOwner::Slot(8);
+        let older_wide = RocmGraphCacheKey::new(
+            owner,
+            RocmGraphKey {
+                max_seqlen_k: 512,
+                max_blocks_per_seq: 8,
+            },
+        );
+        let older_narrow = RocmGraphCacheKey::new(
+            owner,
+            RocmGraphKey {
+                max_seqlen_k: 256,
+                max_blocks_per_seq: 4,
+            },
+        );
+        let current = RocmGraphCacheKey::new(
+            owner,
+            RocmGraphKey {
+                max_seqlen_k: 1024,
+                max_blocks_per_seq: 16,
+            },
+        );
+        let unrelated = RocmGraphCacheKey::new(
+            other,
+            RocmGraphKey {
+                max_seqlen_k: 128,
+                max_blocks_per_seq: 2,
+            },
+        );
+        let geometries = [
+            (&current, 9),
+            (&unrelated, 1),
+            (&older_wide, 3),
+            (&older_narrow, 3),
+        ];
+        assert_eq!(
+            oldest_owner_geometry_key(owner, geometries.into_iter()),
+            Some(older_narrow)
+        );
     }
 
     #[test]

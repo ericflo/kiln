@@ -321,10 +321,10 @@ class ServeRocmSoakTests(unittest.TestCase):
         )
         self.assertEqual(
             vulkan["soak"]["deadline_policy"],
-            "independent_setup_and_measurement",
+            "independent_build_setup_and_measurement",
         )
         self.assertEqual(vulkan["soak"]["measurement_deadline_seconds"], 2400)
-        self.assertEqual(vulkan["soak"]["qualification_case_timeout_seconds"], 4380)
+        self.assertEqual(vulkan["soak"]["qualification_case_timeout_seconds"], 5280)
         self.assertEqual(vulkan["soak"]["teardown_grace_seconds"], 180)
         self.assertEqual(vulkan["soak"]["gpu_memory_scope"], "server_process")
         self.assertEqual(vulkan["soak"]["stabilization_min_cycles"], 4)
@@ -1593,6 +1593,9 @@ class ServeRocmSoakTests(unittest.TestCase):
     def test_phase_deadlines_and_case_timeout_are_independent(self) -> None:
         started = 100.0
         self.assertEqual(
+            soak.build_phase_deadline(started, soak.VULKAN_RUNTIME), 1000.0
+        )
+        self.assertEqual(
             soak.setup_phase_deadline(started, soak.VULKAN_RUNTIME), 1900.0
         )
         self.assertEqual(
@@ -1605,17 +1608,33 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.qualification_case_timeout_seconds(
                 soak.QUALIFICATION_DURATION_SECONDS, soak.VULKAN_RUNTIME
             ),
-            4380,
+            5280,
         )
         self.assertEqual(
             soak.qualification_case_timeout_seconds(
                 soak.QUALIFICATION_DURATION_SECONDS, soak.ROCM_RUNTIME
             ),
-            3300,
+            4200,
         )
         self.assertEqual(soak.phase_elapsed_seconds(None, 500.0), 0.0)
         self.assertEqual(soak.phase_elapsed_seconds(475.0, 500.0), 25.0)
         self.assertEqual(soak.phase_elapsed_seconds(501.0, 500.0), 0.0)
+
+    def test_runtime_setup_clock_starts_after_source_build(self) -> None:
+        binary = ROOT / "target/release/kiln"
+        with (
+            mock.patch.object(soak.time, "monotonic", side_effect=[100.0, 700.0]),
+            mock.patch.object(
+                soak.mixed,
+                "build_binary",
+                return_value=(binary, "sha256:" + "a" * 64, 600.0),
+            ) as build_binary,
+        ):
+            result = soak.build_binary_for_soak(soak.VULKAN_RUNTIME)
+
+        build_binary.assert_called_once_with(1000.0, soak.VULKAN_RUNTIME.build_spec)
+        self.assertEqual(result[3], 700.0)
+        self.assertEqual(result[4], 2500.0)
 
     def test_host_memory_guard_terminates_below_the_floor_and_records_pressure(
         self,

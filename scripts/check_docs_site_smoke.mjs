@@ -1214,6 +1214,9 @@ function validateSftLossRouteDocumentationSourceContract() {
   }
   const missingRocmGraphTerms = missingNormalizedTerms(staticArchitectureText, [
     'at most two exact attention geometries',
+    'least-recent geometry',
+    'retires only that entry',
+    'other retained geometry remains replayable',
     'pre_capture_owner_geometry_limit',
     'preserves its live slot and timeline',
     'unchanged global entry and byte limits',
@@ -1232,6 +1235,8 @@ function validateSftLossRouteDocumentationSourceContract() {
     '88,000/80,000 millicelsius',
     '97,000 millicelsius',
     'host_thermal_pacing',
+    'runtime setup clock starts only after the exact source-bound build succeeds',
+    'outer containment timeout is derived from all phase limits',
   ]);
   if (missingRocmSafetyTerms.length > 0) {
     fail(`docs/site/troubleshooting.html: Strix Halo qualification safety contract missing terms: ${missingRocmSafetyTerms.join(', ')}`);
