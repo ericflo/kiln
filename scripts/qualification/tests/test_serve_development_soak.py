@@ -256,7 +256,12 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(rocm["server"]["max_active_requests"], 12)
         self.assertEqual(rocm["soak"]["rocm_graph_cache_entries"], 24)
         self.assertEqual(
-            rocm["soak"]["rocm_graph_geometries_per_active_request"], 2
+            rocm["soak"]["rocm_graph_admission_policy"],
+            "idle_owner_lru_then_active_fair_lru",
+        )
+        self.assertEqual(rocm["soak"]["rocm_graph_active_owner_floor"], 1)
+        self.assertEqual(
+            rocm["soak"]["rocm_graph_transition_headroom_entries"], 12
         )
         self.assertEqual(
             rocm["soak"]["host_mem_available_floor_bytes"], 8 * 1024**3
@@ -286,7 +291,9 @@ class ServeRocmSoakTests(unittest.TestCase):
                 "itl_attribution": "host_thermal_pacing",
             },
         )
-        with self.assertRaisesRegex(soak.SoakError, "reserve exactly 2 geometries"):
+        with self.assertRaisesRegex(
+            soak.SoakError, "one protected geometry.*transition headroom"
+        ):
             soak.effective_config(
                 soak.QUALIFICATION_DURATION_SECONDS,
                 soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,

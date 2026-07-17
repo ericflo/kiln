@@ -50,9 +50,12 @@ VULKAN_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
 CASE_TEARDOWN_GRACE_SECONDS = 180.0
 REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS = 10.0
 MAX_STEADY_STATE_WARMUP_WAVES = 16
-ROCM_GRAPH_GEOMETRIES_PER_ACTIVE_REQUEST = 2
+ROCM_GRAPH_ADMISSION_POLICY = "idle_owner_lru_then_active_fair_lru"
+ROCM_GRAPH_ACTIVE_OWNER_FLOOR = 1
+ROCM_GRAPH_TRANSITION_HEADROOM_ENTRIES = mixed.MAX_ACTIVE_REQUESTS
 ROCM_GRAPH_CACHE_MAX = (
-    mixed.MAX_ACTIVE_REQUESTS * ROCM_GRAPH_GEOMETRIES_PER_ACTIVE_REQUEST
+    mixed.MAX_ACTIVE_REQUESTS * ROCM_GRAPH_ACTIVE_OWNER_FLOOR
+    + ROCM_GRAPH_TRANSITION_HEADROOM_ENTRIES
 )
 MIN_STABILIZATION_CYCLES = 4
 MAX_STABILIZATION_CYCLES = 8
@@ -575,13 +578,13 @@ def effective_config(
     if runtime.backend == "rocm":
         expected_graph_cache_max = (
             base["server"]["max_active_requests"]
-            * ROCM_GRAPH_GEOMETRIES_PER_ACTIVE_REQUEST
+            * ROCM_GRAPH_ACTIVE_OWNER_FLOOR
+            + ROCM_GRAPH_TRANSITION_HEADROOM_ENTRIES
         )
         if runtime.graph_cache_max != expected_graph_cache_max:
             raise SoakError(
-                "ROCm graph cache must reserve exactly "
-                f"{ROCM_GRAPH_GEOMETRIES_PER_ACTIVE_REQUEST} geometries for each "
-                "declared active request: "
+                "ROCm graph cache must reserve one protected geometry for each "
+                "declared active request plus the declared transition headroom: "
                 f"{runtime.graph_cache_max} != {expected_graph_cache_max}"
             )
     effective = {
@@ -664,8 +667,14 @@ def effective_config(
     if "model" in base:
         effective["model"] = base["model"]
     if runtime.backend == "rocm":
-        effective["soak"]["rocm_graph_geometries_per_active_request"] = (
-            ROCM_GRAPH_GEOMETRIES_PER_ACTIVE_REQUEST
+        effective["soak"]["rocm_graph_admission_policy"] = (
+            ROCM_GRAPH_ADMISSION_POLICY
+        )
+        effective["soak"]["rocm_graph_active_owner_floor"] = (
+            ROCM_GRAPH_ACTIVE_OWNER_FLOOR
+        )
+        effective["soak"]["rocm_graph_transition_headroom_entries"] = (
+            ROCM_GRAPH_TRANSITION_HEADROOM_ENTRIES
         )
     if runtime.host_mem_available_floor_bytes is not None:
         effective["soak"]["host_mem_available_floor_bytes"] = (

@@ -1135,12 +1135,14 @@ python3 scripts/qualification/run.py \
 ```
 
 The driver builds once and starts one server process with 12 active-request
-slots. Its graph-required operating point reserves two exact attention
-geometries per active owner, so the checked effective configuration derives a
-24-entry graph ceiling as `12 * 2` rather than carrying a magic number. The
-runtime independently enforces the same two-geometry per-owner retention bound:
-on a third distinct miss it settles and retires only that active owner's older
-graphs while preserving its recurrent-state slot and continuity timeline. The
+slots. Its graph-required operating point reserves one protected geometry for
+each declared active owner plus 12 transition entries, so the checked effective
+configuration derives a 24-entry ceiling as `12 * 1 + 12` rather than carrying
+a magic number. Runtime admission consumes unused global headroom freely. Only
+at entry or byte saturation does it reclaim idle owners, followed by the
+minimum deterministic fair-LRU active entries; the incoming candidate counts
+toward its owner's share and one graph remains protected for every active owner.
+Every narrow retirement preserves recurrent-state slots and continuity. The
 driver warms ROCm graphs and fills the bounded prefix cache to its declared
 entry/state capacity before recording the post-warmup memory baseline or
 starting the 30-minute measurement clock. The 24-entry ceiling is qualification

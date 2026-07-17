@@ -509,28 +509,27 @@ training request
         <h3 class="font-semibold mt-6 mb-3">Admission, LRU eviction, and pressure are owner-aware</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           Entry saturation and known byte saturation first reclaim deterministic least-recently-used idle owners,
-          oldest access tick then slot ID, before allocating a new candidate. If all owners are active, the row
-          requesting a new exact attention geometry is the final reclaim candidate: after device settlement its
-          prior graph entries may be retired while its recurrent-state slot, row assignment, and continuity
-          timeline remain intact. After one settled warm Record pass makes every candidate allocation measurable,
+          oldest access tick then slot ID, before allocating a new candidate. If those cannot make room, admission
+          orders active entries by projected owner count, then exact LRU and stable owner/geometry tie-breakers.
+          The incoming candidate counts toward its owner's share; only the minimum selected entries are retired,
+          one projected graph remains for every active owner, and all recurrent-state slots, row assignments, and
+          continuity timelines remain intact. After one settled warm Record pass makes every candidate allocation measurable,
           pre-native admission performs exact deduplicated accounting, matching-device pressure reconciliation,
           an atomic process-wide governor reservation, and the same ordered reclaim plan. Native capture does not
-          begin unless that plan fits both hard limits. No other active owner is eligible, and ordinary budget
-          pressure never discards live recurrent state merely to admit a new shape.
+          begin unless that plan fits both hard limits. Ordinary budget pressure never discards live recurrent
+          state merely to admit a new shape.
           Each completed transaction emits <code>rocm_graph_cache_eviction</code> with its boundary, typed reason,
           removed graph and slot counts, released requested bytes, and
           <code>active_graph_only_owner_count</code>. A nonzero active count makes this settled transition visible
           instead of presenting its synchronization time as an unexplained inference pause.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Owner fairness is enforced before candidate allocation even when the global cache has room. One active
-          owner may retain at most two exact attention geometries. A cache hit is untouched; on a third distinct
-          miss, the runner deterministically selects the least-recent geometry, settles and retires only that
-          entry under
-          <code>pre_capture_owner_geometry_limit</code>, preserves its live slot and timeline, and then evaluates
-          the candidate against the unchanged global entry and byte limits. The other retained geometry remains
-          replayable. Decode length is monotonic, so this bounds historical buckets without flushing the owner,
-          evicting another active owner, or making the configured entry ceiling a per-owner allowance.
+          Fairness is enforced only at actual global entry or byte saturation, so lightly occupied owners can keep
+          reusable exact geometries without forced recapture. Idle owners remain the first victims. Narrow active
+          relief runs at <code>pre_capture_active_fair_share</code>, preserves each live slot and timeline, and
+          guarantees one retained graph per active owner after the incoming candidate. The selected owner may
+          differ from the candidate owner when it holds a larger surplus; no unused global headroom is converted
+          into an artificial per-owner ceiling.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           Capture and cache admission are deliberately separate outcomes. <code>capture_successes</code> means

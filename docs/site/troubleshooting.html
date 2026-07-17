@@ -669,9 +669,10 @@ kiln serve --config rocm-graph-eager.toml
           (<code>67108864</code>). That arm tests rejection, idle-owner eviction, and eager fallback; it is not a
           throughput target. Never raise the byte limit merely because a pause occurred. First require matching
           byte-budget rejections or evictions, accounting completeness, and sufficient live memory headroom.
-          Entry/known-byte saturation should reclaim eligible idle owners before candidate allocation. If every
-          owner is active, the candidate row may instead retire its own prior exact geometries after settlement;
-          its live recurrent-state slot and continuity timeline must remain. After the
+          Entry/known-byte saturation should reclaim eligible idle owners before candidate allocation. If those
+          cannot make room, fair active relief may retire the minimum selected exact geometries after settlement;
+          one projected graph per active owner plus every live recurrent-state slot and continuity timeline must
+          remain. After the
           settled warm pass, exact accounting, matching-device pressure, and atomic governor reservation should
           reject an inadmissible candidate before native capture. A defensive post-capture rejection is still
           possible if concurrent state changes. A candidate-alone byte or incomplete-accounting result makes that
@@ -682,10 +683,11 @@ kiln serve --config rocm-graph-eager.toml
           evidence that the graph cache byte limit is too low.
         </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          The committed Strix Halo ROCm development soak provisions 24 entries as two exact geometries for each
-          of 12 declared active owners; this is qualification headroom, not the product default. A third miss
-          retires exactly that owner's least-recent geometry after settlement, preserving the other geometry,
-          every other owner, and the live recurrent-state slot. It also runs the
+          The committed Strix Halo ROCm development soak provisions 24 entries as one protected geometry for each
+          of 12 declared active owners plus 12 transition entries; this is qualification headroom, not the product
+          default. Unused global headroom remains shared. At saturation, idle owners precede minimum fair-LRU
+          active relief, which preserves one projected graph per active owner and every live recurrent-state slot.
+          It also runs the
           same independent host controller as the Vulkan soak: sample every 250 ms, terminate below 8 GiB
           <code>MemAvailable</code>, fail the result above 512 MiB swap growth, and pace the complete server group at
           88,000/80,000 millicelsius and fail closed at 97,000 millicelsius. Pacing time remains inside request
@@ -805,11 +807,11 @@ curl -s http://localhost:8420/metrics \
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           Ordinary entry or byte pressure evicts deterministic least-recently-used idle owners as whole units.
-          If those cannot make room, an exact-geometry miss may settle and retire the candidate row's older graph
-          entries while preserving its active slot, assignment, and continuity; no other active owner is chosen.
-          Independently, one active owner may retain at most two exact attention geometries. A third miss triggers
-          the same settled graph-only path at <code>pre_capture_owner_geometry_limit</code> before candidate
-          allocation, even when the global entry ceiling still has room; a cache hit is never retired.
+          If those cannot make room at actual saturation, an exact-geometry miss uses deterministic fair-LRU active
+          relief. The incoming candidate counts toward its owner's projected share; the most represented owner and
+          then its oldest geometry are selected until the candidate fits, while every active owner retains one
+          projected graph. Boundary <code>pre_capture_active_fair_share</code> preserves active slots, assignments,
+          and continuity. A cache hit is never retired, and unused global headroom never triggers active eviction.
           Correlate a pause with the structured <code>rocm_graph_cache_eviction</code> event: a nonzero
           <code>active_graph_only_owner_count</code> identifies this prior-geometry path, while the boundary,
           removed counts, released bytes, and typed reason identify the exact transaction.

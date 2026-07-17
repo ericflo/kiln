@@ -401,12 +401,12 @@
           "minimum": 1,
           "maximum": 64,
           "default": 8,
-          "description": "1..=64. Bounds retained native graph entries in every product and embedding constructor; zero or unbounded capacities are rejected. Restart required.",
+          "description": "1..=64. Bounds retained native graph entries in every product and embedding constructor. At saturation, admission reclaims idle owners first and then the minimum fair-LRU active entries while preserving one graph per active owner after the incoming candidate. Zero or unbounded capacities are rejected. Restart required.",
           "x-kiln-path": "accelerator.rocm_graph_cache_entries",
           "x-kiln-type-and-default": "unsigned integer; 8",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES (implemented)",
           "x-kiln-environment": "KILN_ROCM_GRAPH_CACHE_MAX (deprecated compatibility)",
-          "x-kiln-validation": "1..=64. Bounds retained native graph entries in every product and embedding constructor; zero or unbounded capacities are rejected. Restart required."
+          "x-kiln-validation": "1..=64. Bounds retained native graph entries in every product and embedding constructor. At saturation, admission reclaims idle owners first and then the minimum fair-LRU active entries while preserving one graph per active owner after the incoming candidate. Zero or unbounded capacities are rejected. Restart required."
         },
         "rocm_graph_cache_max_bytes": {
           "type": "integer",

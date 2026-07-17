@@ -1795,7 +1795,10 @@ impl<'de> Deserialize<'de> for RocmGraphModeSetting {
     }
 }
 
-/// Validated source-tracked ROCm graph-cache capacity.
+/// Validated source-tracked process-wide ROCm graph-cache capacity.
+///
+/// Saturated admission reclaims idle owners before minimum fair-LRU active
+/// entries and preserves one projected graph for every active owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RocmGraphCacheEntries {
     entries: usize,
