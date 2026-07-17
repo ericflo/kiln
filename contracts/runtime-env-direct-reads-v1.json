@@ -3735,19 +3735,6 @@
     },
     {
       "api": "env_flag",
-      "argument": "KILN_TRACE_GDN_BACKWARD_TIMINGS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
       "argument": "KILN_TRACE_LINEAR_LAYER_STAGES",
       "argument_kind": "literal",
       "classification": "experimental_debug",
@@ -7283,11 +7270,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 297,
-    "literal_kiln_read_names": 169,
+    "literal_kiln_read_call_sites": 296,
+    "literal_kiln_read_names": 168,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 128,
+      "experimental_debug": 127,
       "public_stable": 1,
       "test_only": 41
     },
@@ -7297,13 +7284,13 @@
       "test_only": 247
     },
     "process_mutation_entries": 160,
-    "read_call_sites": 666,
+    "read_call_sites": 665,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 194,
+      "experimental_debug": 193,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 399
+    "read_entries": 398
   }
 }

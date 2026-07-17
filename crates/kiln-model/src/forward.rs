@@ -5478,62 +5478,6 @@ fn finish_linear_segment_stage_trace(
     );
 }
 
-fn trace_gdn_backward_timings_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| kiln_core::env_flag::env_flag("KILN_TRACE_GDN_BACKWARD_TIMINGS", false))
-}
-
-fn start_gdn_backward_trace(
-    enabled: bool,
-    phase: &str,
-    seq_len: usize,
-    total_chunks: usize,
-    chunk_idx: Option<usize>,
-    chunk_len: usize,
-    device: &Device,
-) -> Option<std::time::Instant> {
-    if !enabled {
-        return None;
-    }
-    match chunk_idx {
-        Some(chunk_idx) => eprintln!(
-            "kiln_gdn_backward_begin phase={phase} seq_len={seq_len} chunk_idx={chunk_idx} chunk_len={chunk_len} total_chunks={total_chunks} device={device:?}"
-        ),
-        None => eprintln!(
-            "kiln_gdn_backward_begin phase={phase} seq_len={seq_len} chunk_idx=none chunk_len={chunk_len} total_chunks={total_chunks} device={device:?}"
-        ),
-    }
-    Some(std::time::Instant::now())
-}
-
-fn finish_gdn_backward_trace(
-    enabled: bool,
-    phase: &str,
-    seq_len: usize,
-    total_chunks: usize,
-    chunk_idx: Option<usize>,
-    chunk_len: usize,
-    device: &Device,
-    start: Option<std::time::Instant>,
-) {
-    if !enabled {
-        return;
-    }
-    let Some(start) = start else {
-        return;
-    };
-    match chunk_idx {
-        Some(chunk_idx) => eprintln!(
-            "kiln_gdn_backward_end phase={phase} seq_len={seq_len} chunk_idx={chunk_idx} chunk_len={chunk_len} total_chunks={total_chunks} device={device:?} elapsed_ms={:.3}",
-            start.elapsed().as_secs_f64() * 1000.0
-        ),
-        None => eprintln!(
-            "kiln_gdn_backward_end phase={phase} seq_len={seq_len} chunk_idx=none chunk_len={chunk_len} total_chunks={total_chunks} device={device:?} elapsed_ms={:.3}",
-            start.elapsed().as_secs_f64() * 1000.0
-        ),
-    }
-}
-
 fn log_model_segment_timing(
     enabled: bool,
     phase: &str,
@@ -13231,17 +13175,6 @@ pub fn gdn_recurrent_backward_no_grad(
     let full_chunks = seq_len / chunk_size;
     let tail = seq_len - full_chunks * chunk_size;
     let total_chunks = full_chunks + if tail > 0 { 1 } else { 0 };
-    let trace_enabled = trace_gdn_backward_timings_enabled();
-    let trace_device = q.device();
-    let total_trace = start_gdn_backward_trace(
-        trace_enabled,
-        "total",
-        seq_len,
-        total_chunks,
-        None,
-        seq_len,
-        &trace_device,
-    );
 
     let q = q.to_dtype(DType::F32)?;
     let k = k.to_dtype(DType::F32)?;
@@ -13277,15 +13210,6 @@ pub fn gdn_recurrent_backward_no_grad(
     for ci in 0..total_chunks {
         let chunk = if ci >= full_chunks { tail } else { chunk_size };
         let t_off = ci * chunk_size;
-        let chunk_trace = start_gdn_backward_trace(
-            trace_enabled,
-            "snapshot_chunk",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-        );
         state_snapshots.push(state.clone());
         let q_c = q.narrow(2, t_off, chunk)?.contiguous()?;
         let k_c = k.narrow(2, t_off, chunk)?.contiguous()?;
@@ -13303,16 +13227,6 @@ pub fn gdn_recurrent_backward_no_grad(
         let w_weighted = w.broadcast_mul(&decay_last_col.unsqueeze(3)?)?;
         let delta_state = kiln_tensor::ops::matmul_lhs_transposed(&k_c, &w_weighted)?;
         state = (state_scaled + delta_state)?;
-        finish_gdn_backward_trace(
-            trace_enabled,
-            "snapshot_chunk",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-            chunk_trace,
-        );
     }
 
     let mut dq_chunks: Vec<Option<Tensor>> = (0..total_chunks).map(|_| None).collect();
@@ -13342,24 +13256,6 @@ pub fn gdn_recurrent_backward_no_grad(
         } else {
             tail_reverse_indices.as_ref()
         };
-        let reverse_trace = start_gdn_backward_trace(
-            trace_enabled,
-            "reverse_chunk",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-        );
-        let sub_trace = start_gdn_backward_trace(
-            trace_enabled,
-            "reverse_inputs_and_prep",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-        );
         let s_in = &state_snapshots[ci];
         let q_c = q.narrow(2, t_off, chunk)?.contiguous()?;
         let k_c = k.narrow(2, t_off, chunk)?.contiguous()?;
@@ -13374,26 +13270,7 @@ pub fn gdn_recurrent_backward_no_grad(
         let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last) =
             gdn_chunk_prep_f32(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?;
         let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, chunk)?.contiguous()?;
-        finish_gdn_backward_trace(
-            trace_enabled,
-            "reverse_inputs_and_prep",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-            sub_trace,
-        );
 
-        let sub_trace = start_gdn_backward_trace(
-            trace_enabled,
-            "reverse_direct_scan",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-        );
         let dq_s_scaled = d_out.clone();
         let d_w_scan = kiln_tensor::ops::matmul_lhs_transposed(&b_mask, &d_out)?;
         let d_b_mask = kiln_tensor::ops::matmul_rhs_transposed(&d_out, &w)?;
@@ -13404,26 +13281,7 @@ pub fn gdn_recurrent_backward_no_grad(
         let mut d_p_last_acc = Tensor::zeros((batch, heads), DType::F32, q.device())?;
         let mut dk_state_extra: Option<Tensor> = None;
         let mut ds_state_extra: Option<Tensor> = None;
-        finish_gdn_backward_trace(
-            trace_enabled,
-            "reverse_direct_scan",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-            sub_trace,
-        );
 
-        let sub_trace = start_gdn_backward_trace(
-            trace_enabled,
-            "reverse_state_carry",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-        );
         if let Some(d_s_exit) = d_s_carry.as_ref() {
             let p_last_u = p_last.unsqueeze(2)?.unsqueeze(3)?;
             ds_state_extra = Some(d_s_exit.broadcast_mul(&p_last_u)?);
@@ -13479,26 +13337,6 @@ pub fn gdn_recurrent_backward_no_grad(
                 d_decay_last_col_acc = prod_kc.sum(LAST_DIM)?;
             }
         }
-        finish_gdn_backward_trace(
-            trace_enabled,
-            "reverse_state_carry",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-            sub_trace,
-        );
-
-        let sub_trace = start_gdn_backward_trace(
-            trace_enabled,
-            "reverse_tri_beta",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-        );
         let dr = solve_tri_transpose_f32(backend, &a_strict, &beta_c, &d_w_acc)?.contiguous()?;
         let a_w = a_strict.matmul(&w)?;
         let pre_beta = (&v_prime - &a_w)?;
@@ -13550,26 +13388,7 @@ pub fn gdn_recurrent_backward_no_grad(
         let d_a_strict = dr_w_t
             .broadcast_mul(&beta_c_neg.unsqueeze(3)?)?
             .broadcast_mul(strict_mask)?;
-        finish_gdn_backward_trace(
-            trace_enabled,
-            "reverse_tri_beta",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-            sub_trace,
-        );
 
-        let sub_trace = start_gdn_backward_trace(
-            trace_enabled,
-            "reverse_g_acc_initial",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-        );
         let big_g = g_c.cumsum(LAST_DIM)?;
         // Phase 7 (#1082): route the `big_g.exp()` step through
         // `try_kt_exp` when stable KT routes are enabled. Mirrors the prefill
@@ -13647,26 +13466,7 @@ pub fn gdn_recurrent_backward_no_grad(
         #[cfg(not(feature = "cuda"))]
         let qss_sum = qss_prod.sum(LAST_DIM)?;
         d_g_acc = (&d_g_acc + &qss_sum)?;
-        finish_gdn_backward_trace(
-            trace_enabled,
-            "reverse_g_acc_initial",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-            sub_trace,
-        );
 
-        let sub_trace = start_gdn_backward_trace(
-            trace_enabled,
-            "reverse_decay_masks",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-        );
         let big_g_col = big_g.unsqueeze(3)?;
         let big_g_row = big_g.unsqueeze(2)?;
         let decay_delta = big_g_col.broadcast_sub(&big_g_row)?;
@@ -13778,26 +13578,7 @@ pub fn gdn_recurrent_backward_no_grad(
             .broadcast_mul(last_mask)?;
         d_g_acc = (&d_g_acc + &p_last_term)?;
         let d_g = reverse_cumsum_time(&d_g_acc, reverse_indices)?;
-        finish_gdn_backward_trace(
-            trace_enabled,
-            "reverse_decay_masks",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-            sub_trace,
-        );
 
-        let sub_trace = start_gdn_backward_trace(
-            trace_enabled,
-            "reverse_final_matmuls",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-        );
         let d_k_from_kkt =
             (&d_kkt.matmul(&k_c)? + &kiln_tensor::ops::matmul_lhs_transposed(&d_kkt, &k_c)?)?;
         let d_k_from_qkt = kiln_tensor::ops::matmul_lhs_transposed(&d_qkt, &q_c)?;
@@ -13813,16 +13594,6 @@ pub fn gdn_recurrent_backward_no_grad(
         if let Some(extra) = ds_state_extra.as_ref() {
             d_s_in = (&d_s_in + extra)?;
         }
-        finish_gdn_backward_trace(
-            trace_enabled,
-            "reverse_final_matmuls",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-            sub_trace,
-        );
 
         dq_chunks[ci] = Some(d_q);
         dk_chunks[ci] = Some(d_k);
@@ -13832,16 +13603,6 @@ pub fn gdn_recurrent_backward_no_grad(
         d_s_carry = Some(d_s_in);
 
         let _ = q_s_scaled;
-        finish_gdn_backward_trace(
-            trace_enabled,
-            "reverse_chunk",
-            seq_len,
-            total_chunks,
-            Some(ci),
-            chunk,
-            &trace_device,
-            reverse_trace,
-        );
     }
 
     // Phase 7 (#1082): when stable KT routes are enabled and every chunk is a
@@ -13872,40 +13633,11 @@ pub fn gdn_recurrent_backward_no_grad(
         Ok(Tensor::cat(&refs, 2)?)
     };
 
-    let collect_trace = start_gdn_backward_trace(
-        trace_enabled,
-        "collect_grads",
-        seq_len,
-        total_chunks,
-        None,
-        seq_len,
-        &trace_device,
-    );
     let dq = collect(&dq_chunks, "dq")?;
     let dk = collect(&dk_chunks, "dk")?;
     let dv = collect(&dv_chunks, "dv")?;
     let dbeta = collect(&dbeta_chunks, "dbeta")?;
     let dg = collect(&dg_chunks, "dg")?;
-    finish_gdn_backward_trace(
-        trace_enabled,
-        "collect_grads",
-        seq_len,
-        total_chunks,
-        None,
-        seq_len,
-        &trace_device,
-        collect_trace,
-    );
-    finish_gdn_backward_trace(
-        trace_enabled,
-        "total",
-        seq_len,
-        total_chunks,
-        None,
-        seq_len,
-        &trace_device,
-        total_trace,
-    );
 
     Ok(GdnRecurrentBackwardGrads {
         dq,

@@ -32,6 +32,14 @@
 > records below retain the historical commands and measurements but do not
 > describe current executable controls.
 
+> **The GDN backward wall-clock trace was retired on 2026-07-17.**
+> `KILN_TRACE_GDN_BACKWARD_TIMINGS` wrapped the no-grad reverse scan in eleven
+> nested host timers and stderr branches. It was a one-off implementation trace,
+> not supported product configuration, and has no typed replacement. Use NVTX
+> ranges for accelerator attribution and the versioned observability surfaces
+> for product diagnostics. Historical output below remains investigation
+> evidence; current source no longer recognizes the control.
+
 > **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
 > priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are
