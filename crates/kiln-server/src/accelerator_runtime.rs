@@ -5,7 +5,7 @@ use serde::Serialize;
 
 #[cfg(feature = "rocm")]
 use crate::config::RocmSynchronizationMode;
-use crate::config::{ResolvedAcceleratorRuntimePolicy, RocmGraphMode};
+use crate::config::{KtApiMode, ResolvedAcceleratorRuntimePolicy, RocmGraphMode};
 
 /// Stable backend-health detail used when ROCm cannot prove safe cleanup.
 pub const ROCM_CLEANUP_QUARANTINE_REASON: &str =
@@ -120,12 +120,28 @@ pub fn model_rocm_graph_policy(
     .context("invalid resolved ROCm graph execution policy")
 }
 
-/// Install the immutable ROCm policy before any tensor creates the primary
-/// context. Non-ROCm devices are unchanged.
+fn model_kt_api_mode(policy: ResolvedAcceleratorRuntimePolicy) -> kiln_model::KtApiMode {
+    match policy.kt_api_mode.effective {
+        KtApiMode::Auto => kiln_model::KtApiMode::Auto,
+        KtApiMode::All => kiln_model::KtApiMode::All,
+        KtApiMode::Disabled => kiln_model::KtApiMode::Disabled,
+    }
+}
+
+/// Install immutable accelerator policy before model execution or primary
+/// device-context creation.
 pub fn install_startup_policy(
     device: kiln_tensor::Device,
     policy: ResolvedAcceleratorRuntimePolicy,
 ) -> Result<()> {
+    if matches!(
+        device,
+        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Rocm(_)
+    ) {
+        kiln_model::install_kt_api_mode(model_kt_api_mode(policy))
+            .context("failed to install kiln-tensor API route policy")?;
+    }
+
     let kiln_tensor::Device::Rocm(device_index) = device else {
         return Ok(());
     };
@@ -240,7 +256,27 @@ pub fn rocm_synchronization_runtime_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AcceleratorRuntimeConfig, ServingProfile, ServingProfileSetting};
+    use crate::config::{
+        AcceleratorRuntimeConfig, ConfigValueSource, KtApiModeSetting, ServingProfile,
+        ServingProfileSetting,
+    };
+
+    #[test]
+    fn kt_api_modes_map_exactly_to_the_model_authority() {
+        for (configured, expected) in [
+            (KtApiMode::Auto, kiln_model::KtApiMode::Auto),
+            (KtApiMode::All, kiln_model::KtApiMode::All),
+            (KtApiMode::Disabled, kiln_model::KtApiMode::Disabled),
+        ] {
+            let mut config = AcceleratorRuntimeConfig::default();
+            config.kt_api_mode = KtApiModeSetting::new(configured, ConfigValueSource::ConfigFile);
+            let policy = config.resolved_policy(ServingProfileSetting::new(
+                ServingProfile::Experimental,
+                ConfigValueSource::ConfigFile,
+            ));
+            assert_eq!(model_kt_api_mode(policy), expected);
+        }
+    }
 
     #[test]
     fn default_graph_policy_is_eager_for_stable_and_lazy_only_for_experimental() {

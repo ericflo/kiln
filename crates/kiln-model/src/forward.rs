@@ -361,807 +361,10 @@ fn cuda_fused_attn_sigmoid_mul_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_ATTN_SIGMOID_MUL").is_ok())
 }
 
-/// Phase 7 meta-flag: enable ALL the per-family kt-API migrations
-/// at once. Set `KILN_USE_KT_API_ALL=1` to exercise the entire
-/// adapter-routed path end-to-end. Each per-family flag also
-/// short-circuits true when this is set.
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_use_kt_api_all() -> bool {
-    if cuda_kt_api_master_off() {
-        return false;
-    }
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ALL").is_ok())
-}
-
-/// Phase 7 master kill-switch (#1082): when `KILN_DISABLE_KT_API_ALL=1`,
-/// EVERY per-family `cuda_use_kt_api_*` gate returns false, forcing the
-/// pure candle-op forward path. Used to A/B the candle reference and by
-/// the `cuda_training_forward_uses_projection_and_flce_backend_hooks`
-/// test to exercise the candle backend-hooks (linear_prefill / FLCE
-/// provider / flash-decline) that the default-on kt-API gates otherwise
-/// route around. Disable value wins over `KILN_USE_KT_API_ALL`.
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_kt_api_master_off() -> bool {
-    static OFF: OnceLock<bool> = OnceLock::new();
-    *OFF.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ALL").is_ok())
-}
-
-/// Phase 7 default-on (#1082): softmax-last-dim through the kt-API
-/// + adapters. Routes [`cuda_softmax_last_dim`] through
-/// `kiln_tensor::cuda_softmax_last_axis` for compatible CUDA tensors.
-/// Pays one dtod memcpy on the output direction (input goes zero-copy
-/// through the kt-bridge borrow adapter). Escape hatch:
-/// `KILN_DISABLE_KT_API_SOFTMAX=1`.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_softmax() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SOFTMAX").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): lm_head argmax (1-D flattened
-/// logits) through the kt-API + adapters. Routes
-/// [`lm_head_argmax`]'s final `argmax(0)` through
-/// `kiln_tensor::cuda_argmax_last_axis` (which is the only axis
-/// on a 1-D tensor). Returns the scalar I64 token id back through
-/// the kt-bridge copy-back adapter.
-///
-/// Bit-exact by construction: argmax is order-deterministic over
-/// the full input (first-occurrence wins for ties). Both candle
-/// and kt walk the same vocab vector and return the same index.
-/// Same flip rationale as the sampling-level greedy argmax
-/// default-on (`c250abb5`, `4eda8a24`).
-///
-/// Escape hatch: `KILN_DISABLE_KT_API_ARGMAX=1`.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_argmax() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Bit-exact deterministic argmax.
-    // Escape hatch: `KILN_DISABLE_KT_API_ARGMAX=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ARGMAX").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): l2-normalize (last-axis) through the
-/// kt-API + adapters. Routes [`l2_normalize`]'s F32
-/// `x / sqrt(sum(x^2) + eps)` composite through
-/// `kiln_tensor::cuda_l2norm_last_axis`. Escape hatch:
-/// `KILN_DISABLE_KT_API_L2_NORMALIZE=1`. Distinct from the
-/// existing `KILN_USE_KT_API_L2_QK_NORM` gate which targets the
-/// *fused* GDN q+k variant (`fused_l2_qk_norm`) — this one
-/// migrates the *non-fused* single-tensor primitive, which is also
-/// called outside the GDN qk path.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_l2_normalize() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_L2_NORMALIZE").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): token-embedding lookup (dim-0
-/// `index_select`) through the kt-API + adapters. Bit-exact
-/// memcpy gather via `kiln_tensor::cuda_index_select_dim0` —
-/// identical byte output to candle's `index_select` (no
-/// arithmetic, no reordering). Production callers in
-/// [`embedding_lookup_with_index`] (bs=1 decode + batched
-/// embedding lookup). Escape hatch:
-/// `KILN_DISABLE_KT_API_EMBEDDING=1`.
-///
-/// _Historical opt-in docstring (kept for the read-through):_
-///
-/// Originally Phase 7 opt-in: set
-/// `KILN_USE_KT_API_EMBEDDING=1` (or `KILN_USE_KT_API_ALL=1`) to
-/// enable; default off. Routes the `embed_weights.index_select(&index, 0)`
-/// call inside [`embedding_lookup`] and
-/// [`embedding_lookup_with_index`] through
-/// `kiln_tensor::cuda_index_select_dim0` via the kt-bridge borrow
-/// adapter. Pays one dtod memcpy on the output direction (the
-/// gathered embedding rows).
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_embedding() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Bit-exact memcpy gather via
-    // `cuda_index_select_dim0`. Escape hatch: `KILN_DISABLE_KT_API_EMBEDDING=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_EMBEDDING").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 (#1082) opt-in: LM head matmul (final projection from
-/// `[B*T, hidden]` to `[B*T, vocab]`) through the kt-API + adapters.
-/// Set `KILN_USE_KT_API_LM_HEAD=1` (or `KILN_USE_KT_API_ALL=1`) to
-/// enable; default off. Routes the [`lm_head_forward`] matmul
-/// (`x @ embed_tokens_t`) through `kiln_tensor::cuda_matmul`
-/// (cublasLt) directly, ahead of the existing
-/// `broadcast_matmul_cpu_compatible` dispatch. The LM head matmul is
-/// the single highest-impact production matmul site in `forward.rs`:
-/// `KILN_USE_KT_API_MATMUL=1` already catches matmul via the
-/// `linear_prefill_apply` fallback path, but the LM head goes through
-/// its own `lm_head_forward` / `lm_head_forward_backend_decode_if`
-/// dispatch and was therefore previously routed through the candle
-/// matmul path. Mirrors the [`cuda_use_kt_api_embedding`] gate
-/// (lm_head's mirror op on the input side). NVTX range
-/// `kiln/lm_head_kt` brackets the migrated call so nsys traces
-/// separate the path from the candle baseline.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_lm_head() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LM_HEAD").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): the consolidated SwiGLU FFN region
-/// (`down @ (silu(gate @ x) * (up @ x))`) through the kt-API +
-/// adapters. Routes the whole gate/up/down projection + silu*mul
-/// composite through the kt substrate (`kiln_tensor::cuda_matmul`
-/// for each projection, `kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt`
-/// / `kiln_tensor::ops::mul_sigmoid_gate` for the SwiGLU activation)
-/// keeping the gate/up intermediates as `KtTensor` storage across the
-/// region instead of bridging candle↔kt at every individual op.
-///
-/// This is the region-2 sibling of [`cuda_use_kt_api_embedding`] /
-/// [`cuda_use_kt_api_lm_head`] (regions 0/1): the per-op kt-API gates
-/// ([`cuda_use_kt_api_matmul`] + the inline `fused_mlp_silu_mul_kt`
-/// dispatch) already route the individual MLP ops through kt, but each
-/// op paid a candle↔kt borrow-in + dtod copy-out at its boundary. The
-/// consolidated path collapses the two intermediate dtod copies
-/// (gate/up matmul outputs and the silu*mul output) into a single
-/// candle→kt borrow at the region input and one kt→candle copy at the
-/// region output.
-///
-/// Bit-exact by construction: each sub-op bottoms out in the SAME kt
-/// substrate kernel the per-op gates already dispatch to (cublasLt
-/// matmul; `kiln_fused_mlp_silu_mul_bf16` FFI symbol for the BF16
-/// silu*mul; the `cuda_activation_unary(0)` + `cuda_elementwise_binary(2)`
-/// substrate composite for other dtypes). The only difference is the
-/// elision of the intermediate round-trips through candle storage.
-///
-/// Restricted to the production inference fast path: no LoRA, no
-/// Marlin-packed projections, no autograd-tracked input, and no active
-/// tape recording scope (all those route through the existing candle /
-/// tape-wired path so adapter grads and Marlin int4 dispatch are
-/// preserved). Escape hatch: `KILN_DISABLE_KT_API_SWIGLU_FFN=1`.
-/// NVTX range `kiln/swiglu_ffn_kt` brackets the migrated region so
-/// nsys traces separate it from the candle baseline.
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_use_kt_api_swiglu_ffn() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SWIGLU_FFN").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): the two cublasLt batched matmuls of the
-/// GQA full-attention **naive-SDPA fallback** (region 3 of the methodical
-/// kiln-model bare-Tensor migration) through the kt-API + adapters.
-///
-/// This is the region-3 sibling of [`cuda_use_kt_api_embedding`] /
-/// [`cuda_use_kt_api_lm_head`] / [`cuda_use_kt_api_swiglu_ffn`] (regions
-/// 0/1/2). It targets ONLY the score matmul (`q @ kᵀ`) and the value
-/// matmul (`softmax @ v`) of [`gqa_attention_core_prefill`]'s non-flash
-/// fallback — the same `cuda_matmul` (cublasLt) entry the lm_head / SwiGLU
-/// matmul migrations already dispatch to, so it is bit-exact with the
-/// candle `broadcast_matmul` it replaces (both bottom out in cublas GEMM on
-/// the GQA-expanded, head-first operands).
-///
-/// EXTREMELY conservative by design — this is the riskiest forward region
-/// (flash / tape / GQA-expand / flash-decline-counter interactions). The
-/// helper [`try_kt_gqa_sdpa_matmuls`] is invoked ONLY on the plain
-/// inference fallback (head_dim ∉ {128,256}, or no flash backend) and
-/// declines (`Ok(None)`, falling through to candle) on EVERY one of:
-/// - the gate is off (`KILN_DISABLE_KT_API_GQA_SDPA=1` /
-///   `KILN_DISABLE_KT_API_ALL=1`);
-/// - non-CUDA device, or a non-{BF16,F16,F32} / mixed dtype;
-/// - autograd-tracked `q` (candle `loss.backward()` parity oracle must keep
-///   the differentiable composite) OR an active tape recording scope (the
-///   `try_tape_sdpa_fallback_cuda` adapter records the analytic backward on
-///   the candle `attn_output`, so the candle ops must run unchanged).
-///
-/// It deliberately does NOT touch the flash-attn offer/decline ordering,
-/// `cuda_flash_attention_training_bf16`, the `try_tape_*` adapters, or the
-/// scale / causal-mask / softmax ops between the two matmuls (those stay on
-/// their existing candle / kt-softmax-gated path — reproducing the scale
-/// (affine div) and the broadcast `-inf` mask in a different kt kernel
-/// risks rounding divergence from the candle parity oracle and is left
-/// candle on purpose). Escape hatch: `KILN_DISABLE_KT_API_GQA_SDPA=1`.
-/// NVTX range `kiln/gqa_sdpa_kt` brackets the two migrated matmuls.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_gqa_sdpa() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_GQA_SDPA").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 (#1082) opt-in: LoRA delta composite
-/// (`(x @ A^T) @ B^T * scale`) through the kt-API + adapters.
-/// Set `KILN_USE_KT_API_LORA_DELTA=1` (or `KILN_USE_KT_API_ALL=1`)
-/// to enable; default off. Routes the
-/// [`crate::lora_loader::compute_lora_delta`] three-step composite
-/// (`hidden = x @ A^T`, `delta_pre = hidden @ B^T`,
-/// `delta = delta_pre * scale`) through the request-routed kt
-/// matmul/scalar ops ahead of the candle composite.
-///
-/// LoRA delta is a hot inference + training path: every layer
-/// with a LoRA-targeted projection (q/k/v/o + gate/up/down) runs
-/// this composite per forward pass. The scale factor folds into a
-/// single fused kt scalar op instead of candle's `tensor * f64`
-/// broadcast path. Mirrors the [`cuda_use_kt_api_lm_head`] gate
-/// (LM head matmul migration). NVTX range `kiln/lora_delta_kt`
-/// brackets the migrated call so nsys traces separate the path
-/// from the candle baseline.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_lora_delta() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LORA_DELTA").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): LoRA base + delta accumulator
-/// (`base + delta`) through the kt-API + adapters. Routes the
-/// final `(base + delta)?` step in [`add_lora_delta_to_base`]
-/// (and analogous call sites that add a LoRA delta on top of a
-/// base linear) through `kiln_tensor::cuda_elementwise_binary`
-/// with kind tag 0 (Add). Single-kernel `a + b` dispatch —
-/// bit-exact to the candle `Add<Tensor>` composite (both use
-/// the same CUDA elementwise-add intrinsic). Only the Rust shell
-/// types and the kt-bridge dtod-copy at the output boundary
-/// differ.
-///
-/// LoRA-augmented projections run this accumulator every forward
-/// call on every layer with a LoRA target (q/k/v/o + gate/up/
-/// down). Three production call sites in forward.rs hit this
-/// helper. Same flip rationale as the max_binary default-on
-/// (`1f557773`): bit-exact shared-kernel dispatch.
-///
-/// Escape hatch: `KILN_DISABLE_KT_API_LORA_ADD=1`.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_lora_add() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Single-kernel
-    // `cuda_elementwise_binary` kind 0 dispatch; bit-exact to
-    // candle Add<Tensor>. Escape hatch: `KILN_DISABLE_KT_API_LORA_ADD=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LORA_ADD").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): last-dim `Tensor::cat` through the
-/// kt-API + adapters. Routes the rotary-embedding output concat
-/// in [`apply_rope`] (the `[r1, r2]` / `[r1, r2, x_pass]` join
-/// along the trailing axis) through `kiln_tensor::cuda_concat`.
-/// Bit-exact to the candle `Tensor::cat` composite (memcpy
-/// concatenation; same byte layout). Falls through on
-/// precondition fail. Escape hatch:
-/// `KILN_DISABLE_KT_API_CONCAT_LAST_DIM=1`.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_concat_last_dim() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Bit-exact memcpy concat via
-    // `cuda_concat`. Escape hatch: `KILN_DISABLE_KT_API_CONCAT_LAST_DIM=1`.
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CONCAT_LAST_DIM").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 opt-in: `sqr().sum_keepdim(-1)` composite through the
-/// kt-API + adapters. Set `KILN_USE_KT_API_SUM_SQ_LAST_DIM=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `x_f32.sqr()?.sum_keepdim(D::Minus1)` two-op composite in the
-/// [`l2_normalize`] candle fallback through
-/// `kiln_tensor::cuda_sum_squared_last_axis` (single kernel) plus
-/// a zero-cost `unsqueeze` to restore the trailing-dim shape.
-/// Falls through to the candle composite when any precondition
-/// fails so behavior is identical with the gate off.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_sum_sq_last_dim() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SUM_SQ_LAST_DIM").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 opt-in: `mean_keepdim(-1)` through the kt-API +
-/// adapters. Set `KILN_USE_KT_API_MEAN_LAST_DIM=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `x_f32.mean_keepdim(D::Minus1)` reduction in the variance step
-/// of [`rms_norm_fallback`] through
-/// `kiln_tensor::cuda_mean_last_axis` plus a zero-cost
-/// `unsqueeze(-1)` to restore the trailing-dim shape. Falls
-/// through to the candle composite when any precondition fails so
-/// behavior is identical with the gate off.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_mean_last_dim() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MEAN_LAST_DIM").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 opt-in: `sum_keepdim(-1)` through the kt-API +
-/// adapters. Set `KILN_USE_KT_API_SUM_LAST_DIM=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `exp_shifted.sum_keepdim(D::Minus1)` reduction in the
-/// [`cuda_softmax_last_dim`] candle-composite fallback path through
-/// `kiln_tensor::cuda_sum_last_axis` plus a zero-cost
-/// `unsqueeze(-1)` to restore the trailing-dim shape. Falls
-/// through to the candle composite when any precondition fails so
-/// behavior is identical with the gate off.
-///
-/// Distinct from `KILN_USE_KT_API_SUM_SQ_LAST_DIM` (the
-/// `sqr().sum_keepdim(-1)` two-op composite migration): this gate
-/// targets the *plain* `sum_keepdim(-1)` site, which is reached
-/// after a separate `exp()` step on `shifted = x - max(x)` so the
-/// fused sum-squared kernel is not applicable.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_sum_last_dim() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SUM_LAST_DIM").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 opt-in: `Tensor::sum(axis)` (non-keepdim, arbitrary axis)
-/// through the kt-API + adapters. Set `KILN_USE_KT_API_SUM_AXIS=1`
-/// (or `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `tensor.sum(axis)` candle calls in the GDN single-token conv
-/// path (`output = window.broadcast_mul(&w_expanded)?.sum(2)?`,
-/// computing the per-channel dot-product over the kernel dim) and
-/// other less-trafficked specdec / MTP-debug audit paths through
-/// `kiln_tensor::cuda_sum_axis` via the kt-bridge borrow adapter.
-/// Pays one dtod memcpy on the output direction (the kt allocation
-/// is freshly-owned). Falls through to the candle composite when
-/// any precondition fails so behavior is identical with the gate
-/// off.
-///
-/// Distinct from [`cuda_use_kt_api_sum_last_dim`]: that gate
-/// targets the *trailing-axis with keepdim* shape used by the
-/// softmax-fallback composite, where the helper re-applies
-/// `unsqueeze(-1)` to restore the keepdim shape. This gate
-/// targets the *arbitrary-axis without keepdim* shape, mirroring
-/// candle's `Tensor::sum(axis)` semantics directly.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_sum_axis() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SUM_AXIS").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 opt-in: `max_keepdim(-1)` through the kt-API + adapters.
-/// Set `KILN_USE_KT_API_MAX_LAST_DIM=1` (or `KILN_USE_KT_API_ALL=1`)
-/// to enable; default off. Routes the `x.max_keepdim(D::Minus1)`
-/// reduction (the softmax-stabilization max step in the candle
-/// composite fallback for [`cuda_softmax_last_dim`]) through
-/// `kiln_tensor::cuda_max_axis` plus a zero-cost `unsqueeze(-1)` to
-/// restore the trailing-dim shape. Falls through to the candle
-/// composite when any precondition fails so behavior is identical
-/// with the gate off.
-///
-/// Mirrors [`cuda_use_kt_api_mean_last_dim`] and
-/// [`cuda_use_kt_api_sum_last_dim`]. The kt kernel
-/// (`reduce_arbitrary_axis`, commit `7ca6cabd`) supports any axis
-/// including non-trailing, but this gate only targets the trailing
-/// axis since that's the only `max_keepdim` shape forward.rs uses.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_max_last_dim() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_LAST_DIM").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): `Tensor::cat` along axis 0
-/// through the kt-API + adapters. Routes `Tensor::cat(&refs, 0)`
-/// production sites (batch-state assembly in `from_batch_rows`
-/// and debug instrumentation) through
-/// `kiln_tensor::cuda_concat` axis=0. Bit-exact memcpy
-/// concatenation; same byte layout as candle. Falls through on
-/// precondition fail. Escape hatch: `KILN_DISABLE_KT_API_CAT_DIM0=1`.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_cat_dim0() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Bit-exact memcpy concat axis=0.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM0").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): `Tensor::cat` along axis 2
-/// through the kt-API + adapters. Routes the depthwise conv1d
-/// `conv_state + new tokens` time-axis join in
-/// prefill/decode and the GDN backward future-row windowing
-/// through `kiln_tensor::cuda_concat` axis=2. Bit-exact memcpy
-/// concatenation. Falls through on precondition fail. Escape
-/// hatch: `KILN_DISABLE_KT_API_CAT_DIM2=1`.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_cat_dim2() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Bit-exact memcpy concat axis=2.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM2").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): `Tensor::cat` along axis 1
-/// through the kt-API + adapters. Routes the production
-/// `Tensor::cat(&refs, 1)` sites (streaming GDN tile outputs
-/// along T, chunked CUDA training MLP concat, chunked
-/// full-attention pre-o cat) through `kiln_tensor::cuda_concat`
-/// axis=1. Bit-exact memcpy concatenation. Falls through on
-/// precondition fail. Escape hatch: `KILN_DISABLE_KT_API_CAT_DIM1=1`.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_cat_dim1() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Bit-exact memcpy concat axis=1.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM1").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): `tensor + constant` (scalar-add)
-/// through the kt-API + adapters. Default ON because the kt path is a
-/// single-kernel `out = x + c` dispatch via
-/// `kiln_tensor::cuda_scalar_op` with `ScalarKind::AddScalar` (kind 0)
-/// — bit-equivalent to the candle overloaded `Tensor + f64` op which
-/// also resolves to a single elementwise-add kernel on supported
-/// dtypes. Both paths convert the f64 addend to f32 at the kernel
-/// boundary in the same way for non-f64 tensors. Only the Rust shell
-/// types and the kt-bridge dtod-copy at the output boundary differ.
-/// Escape hatch:
-/// `KILN_DISABLE_KT_API_ADD_SCALAR=1`.
-///
-/// Production call sites include sigmoid and softplus denominator
-/// construction plus the RMSNorm variance epsilon
-/// `(variance + eps)` shape.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_add_scalar() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Single-kernel scalar-add dispatch
-    // (`cuda_scalar_op` kind 0); bit-equivalent to candle
-    // `Tensor + f64`. Escape hatch:
-    // `KILN_DISABLE_KT_API_ADD_SCALAR=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ADD_SCALAR").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): elementwise `Tensor::neg()` through
-/// the kt-API + adapters. Default ON because the kt path bottoms out
-/// in `kiln_tensor::cuda_activation_unary` with kind tag 12 (Neg) —
-/// a single-kernel dispatch identical to the candle backend's `.neg()`
-/// composite (both eventually call the same `csrc/activation.cu`
-/// Neg kernel). Only the Rust shell types (KtTensor vs candle Tensor)
-/// and the kt-bridge dtod-copy at the output boundary differ. This is
-/// bit-exact by construction — same argument as the rmsnorm flip
-/// (`078f3f71`) and rotary_qk flip (`8f383a9e`). Escape hatch:
-/// `KILN_DISABLE_KT_API_NEG=1`.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_neg() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Single-kernel dispatch
-    // (`cuda_activation_unary` kind 12); bit-exact by construction.
-    // Escape hatch: `KILN_DISABLE_KT_API_NEG=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_NEG").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): elementwise `Tensor::sqrt()` through
-/// the kt-API + adapters. Default ON because the kt path bottoms out
-/// in `kiln_tensor::cuda_activation_unary` with kind tag 14 (Sqrt) —
-/// a single-kernel dispatch identical to the candle backend's
-/// `.sqrt()` op. Only the Rust shell types and the kt-bridge dtod-
-/// copy at the output boundary differ. This is bit-exact by
-/// construction — same argument as the rmsnorm flip (`078f3f71`).
-/// Escape hatch: `KILN_DISABLE_KT_API_SQRT=1`.
-///
-/// Distinct from the fused RMSNorm sites (`(variance + eps).sqrt()
-/// .recip()`) which are still candle composites; this gate only
-/// migrates the standalone `.sqrt()` shape that has no fused
-/// kernel alternative.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_sqrt() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Single-kernel dispatch
-    // (`cuda_activation_unary` kind 14); bit-exact by construction.
-    // Escape hatch: `KILN_DISABLE_KT_API_SQRT=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SQRT").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 opt-in: elementwise reciprocal-sqrt
-/// (`1 / sqrt(x)`) through the kt-API + adapters. Set
-/// `KILN_USE_KT_API_RSQRT=1` (or `KILN_USE_KT_API_ALL=1`) to enable;
-/// default off. Routes candle composites that compute
-/// `x.sqrt()?.recip()?` (or any standalone `Tensor::rsqrt()` future
-/// API) through `kiln_tensor::cuda_activation_unary` with kind
-/// tag 28 (Rsqrt) via the kt-bridge borrow adapter. Single kernel
-/// beats sqrt+recip composition by avoiding the second pass through
-/// device memory and the intermediate allocation. Pays one dtod
-/// memcpy on the output direction (the kt allocation is freshly-
-/// owned). Falls through to the candle composite when any
-/// precondition fails so behavior is identical with the gate off.
-///
-/// Targets the RMSNorm tail `(variance + eps).sqrt().recip()` shape
-/// that appears 5+ times in `forward.rs` (RMSNorm, MTP debug taps,
-/// parity test paths). Mirrors the [`cuda_use_kt_api_sqrt`] /
-/// [`cuda_use_kt_api_recip`] cadence.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_rsqrt() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_RSQRT").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): elementwise binary
-/// `Tensor::maximum(other)` through the kt-API + adapters. Default ON
-/// because the kt path is a single-kernel `fmaxf(a, b)` dispatch via
-/// `kiln_tensor::cuda_binary_minmax` kind 1 (Max) — bit-exact to the
-/// candle `.maximum(other)` op which uses the same `fmaxf` CUDA
-/// intrinsic. NaN propagation matches `f32::max` semantics (non-NaN
-/// operand wins). Only the Rust shell types and the kt-bridge
-/// dtod-copy at the output boundary differ. Same argument as the
-/// neg/sqrt/recip/abs single-kernel flips. Escape hatch:
-/// `KILN_DISABLE_KT_API_MAX_BINARY=1`.
-///
-/// Production call site: the `x.maximum(&zeros)` candle calls (the
-/// `relu(x) = max(x, 0)` halves of `softplus`'s `|x| = relu(x) +
-/// relu(-x)` identity). softplus runs once per decode step as the
-/// last step of the GDN `b` (forget gate) path.
-///
-/// Distinct from [`cuda_use_kt_api_max_last_dim`] (the
-/// `max_keepdim(-1)` axis reduction): this gate targets the
-/// *pointwise* binary `max(a, b)` shape.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_max_binary() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Single-kernel `fmaxf` dispatch
-    // (`cuda_binary_minmax` kind 1); bit-exact by construction.
-    // Escape hatch: `KILN_DISABLE_KT_API_MAX_BINARY=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_BINARY").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): elementwise `Tensor::abs()` through
-/// the kt-API + adapters. Default ON because the kt path is a
-/// single-kernel `fabsf(x)` dispatch via
-/// `kiln_tensor::cuda_activation_unary` kind 13 (Abs) — IEEE-equivalent
-/// to the candle `relu(x) + relu(-x)` composite it replaces (both
-/// produce the same byte-stable `|x|` result on finite inputs and
-/// match IEEE sign-extraction semantics on +/-0.0, NaN, and ±inf).
-/// In fact the direct `fabsf` formulation produces fewer roundings
-/// and avoids the intermediate `relu(-x)` allocation, so the kt path
-/// is at least as faithful as the candle composite. Escape hatch:
-/// `KILN_DISABLE_KT_API_ABS=1`.
-///
-/// Production call site: the `softplus` helper's
-/// `abs_x = relu(x) + relu(-x)` step (softplus runs as the last
-/// step of the GDN `b` (forget gate) path — once per decode step).
-/// `try_kt_abs(x)` takes the single-kernel fast path; the candle
-/// composite (neg + relu(-x) + add = 3 kernels) becomes one
-/// `cuda_activation_unary` dispatch.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_abs() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Single-kernel `fabsf` dispatch
-    // (`cuda_activation_unary` kind 13); IEEE-equivalent to the
-    // candle `relu(x)+relu(-x)` composite on all finite inputs.
-    // Escape hatch: `KILN_DISABLE_KT_API_ABS=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ABS").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): elementwise `Tensor::sin()` through
-/// the kt-API + adapters. Default ON because the kt path is a
-/// single-kernel `sinf(x)` dispatch via
-/// `kiln_tensor::cuda_activation_unary` kind 7 (Sin) — bit-exact to
-/// the candle `.sin()` op which uses the same CUDA `sinf`/`__hsin`
-/// intrinsic. Only the Rust shell types and the kt-bridge dtod-copy
-/// at the output boundary differ. Same argument as the exp/log flip
-/// (`53f9b282`). Escape hatch: `KILN_DISABLE_KT_API_SIN=1`.
-///
-/// Production call site: the RoPE `freqs.sin()` cache builder.
-/// Distinct from the fused `cuda_rope` kernel (which fuses
-/// rotate+apply with prebuilt cos/sin caches) — this gate migrates
-/// the *cache-construction* `.sin()` step that runs once per RoPE
-/// precompute (rare hot-path traffic).
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_sin() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Single-kernel `sinf` dispatch
-    // (`cuda_activation_unary` kind 7); bit-exact by construction.
-    // Escape hatch: `KILN_DISABLE_KT_API_SIN=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SIN").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): elementwise `Tensor::cos()` through
-/// the kt-API + adapters. Default ON because the kt path is a
-/// single-kernel `cosf(x)` dispatch via
-/// `kiln_tensor::cuda_activation_unary` kind 8 (Cos) — bit-exact to
-/// the candle `.cos()` op which uses the same CUDA `cosf`/`__hcos`
-/// intrinsic. Only the Rust shell types and the kt-bridge dtod-copy
-/// at the output boundary differ. Same argument as the SIN flip
-/// directly above. Escape hatch: `KILN_DISABLE_KT_API_COS=1`.
-///
-/// Production call site: the RoPE `freqs.cos()` cache builder.
-/// Distinct from the fused `cuda_rope` kernel (which fuses
-/// rotate+apply with prebuilt cos/sin caches) — this gate migrates
-/// the *cache-construction* `.cos()` step that runs once per RoPE
-/// precompute (rare hot-path traffic).
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_cos() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Single-kernel `cosf` dispatch
-    // (`cuda_activation_unary` kind 8); bit-exact by construction.
-    // Escape hatch: `KILN_DISABLE_KT_API_COS=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_COS").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): elementwise `Tensor::exp()` through
-/// the kt-API + adapters. Default ON because both paths bottom out
-/// in the same single-kernel CUDA `expf`/`__hexp` elementwise
-/// dispatch — only the Rust shell types and the kt-bridge dtod-copy
-/// at the output boundary differ. This is bit-exact by construction:
-/// the single-kernel dispatch with no intermediate quantization
-/// produces the same per-element result as the candle `.exp()`
-/// kernel which uses the same CUDA intrinsic.
-///
-/// Distinct from the fused softmax site (which routes through
-/// `try_kt_softmax_last_dim` at the kt-API level) — this gate
-/// migrates the *standalone* `.exp()` calls in `forward.rs` /
-/// `cuda_train.rs` that are not part of a pre-fused composite
-/// (sigmoid forward, sigmoid backward, softmax backward shifted
-/// exponentials, softplus log-term builders). Set
-/// `KILN_DISABLE_KT_API_EXP=1` to opt out (escape hatch).
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_exp() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Both candle and kt paths bottom out
-    // in the same single-kernel CUDA elementwise dispatch; only the
-    // Rust shell types differ. Escape hatch:
-    // `KILN_DISABLE_KT_API_EXP=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_EXP").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): elementwise `Tensor::recip()` through
-/// the kt-API + adapters. Default ON because the kt path bottoms out
-/// in `kiln_tensor::cuda_activation_unary` with kind tag 22 (Recip) —
-/// a single-kernel `1.0 / x` dispatch identical to the candle backend's
-/// `.recip()` op. Only the Rust shell types and the kt-bridge dtod-
-/// copy at the output boundary differ. This is bit-exact by
-/// construction — same argument as the exp / log flip (`53f9b282`).
-/// IEEE semantics match (1.0/0 = ±inf; 1.0/NaN = NaN). Escape hatch:
-/// `KILN_DISABLE_KT_API_RECIP=1`.
-///
-/// Production call sites in `forward.rs` are the
-/// `(variance + eps).sqrt().recip()` RMSNorm tail (multiple
-/// sites — RMSNorm production path, MTP debug taps, and the
-/// universal RMSNorm helper) and the `cuda_sigmoid` composite's
-/// `(1 + e^-x).recip()` final step. Mirrors `cuda_use_kt_api_sqrt` /
-/// `cuda_use_kt_api_neg` cadence.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_recip() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Single-kernel dispatch
-    // (`cuda_activation_unary` kind 22); bit-exact by construction.
-    // Escape hatch: `KILN_DISABLE_KT_API_RECIP=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_RECIP").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 default-on (#1082): elementwise natural-log
-/// `Tensor::log()` through the kt-API + adapters. Default ON because
-/// both paths bottom out in the same single-kernel CUDA `logf` /
-/// `__hlog` elementwise dispatch — only the Rust shell types and
-/// the kt-bridge dtod-copy at the output boundary differ. This is
-/// bit-exact by construction: the single-kernel dispatch with no
-/// intermediate quantization produces the same per-element result
-/// as the candle `.log()` kernel which uses the same CUDA
-/// intrinsic. Mirrors the EXP flip (same commit).
-///
-/// Production call site in `forward.rs` is the `softplus` helper:
-/// `softplus(x) = relu(x) + log(1 + exp(-|x|))`. softplus is the
-/// last step of the GDN `b` (forget gate) path — runs once per
-/// decode step. Also used in `cuda_train.rs` for the
-/// shifted-linear-cross-entropy `log(sumexp)` term. Set
-/// `KILN_DISABLE_KT_API_LOG=1` to opt out (escape hatch).
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_log() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    // #1082: flipped default ON. Both candle and kt paths bottom out
-    // in the same single-kernel CUDA elementwise dispatch; only the
-    // Rust shell types differ. Escape hatch:
-    // `KILN_DISABLE_KT_API_LOG=1`.
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LOG").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 opt-in: route the elementwise dtype cast
-/// (`Tensor::to_dtype`) for the {F32, BF16, F16} triangle through
-/// the kt-API + adapters. Set `KILN_USE_KT_API_TO_DTYPE=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
-/// `.to_dtype(target)` candle calls through
-/// `kiln_tensor::cuda_cast` (a contiguous fused cast kernel) via
-/// the kt-bridge borrow adapter. Pays one dtod memcpy on the
-/// output direction (the kt allocation is freshly-owned). Falls
-/// through to the candle composite when any precondition fails so
-/// behavior is identical with the gate off.
-///
-/// Distinct from the per-kernel epilogue fusions (e.g.
-/// `KILN_USE_KT_API_LM_HEAD` which folds the cast into the matmul
-/// epilogue) — this gate migrates *standalone* `.to_dtype()`
-/// calls in `forward.rs` that are not part of a pre-fused kernel,
-/// e.g. the LoRA delta dtype hops and the BF16↔F32 ping-pong in
-/// the rare-path backward composites. Inputs must be contiguous
-/// to match `cuda_cast`'s preconditions.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_to_dtype() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_TO_DTYPE").is_err());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
-/// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
-/// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
-/// exercise the migration path for parity testing.
-///
-/// Distinct from the per-fused-kernel migrations (sigmoid_mul,
-/// rmsnorm, rotary_qk, mlp_silu_mul, l2_qk_norm) — this one routes
-/// the *plain matmul* in `matmul_no_broadcast_copy`'s 2D fast path
-/// through cublasLt. Lights up the universal 2D matmul site (LM
-/// head, QKV projections, MLP down) when the env var is set.
-///
-/// Pays one dtod memcpy on the output direction (the kt allocation
-/// is freshly-owned; there's no "borrowed candle Tensor" type to
-/// wrap a kt allocation yet). Inputs go zero-copy through the
-/// kt-bridge borrow adapter.
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-pub(crate) fn cuda_use_kt_api_matmul() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MATMUL").is_ok());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
-/// ROCm spelling for the shared CUDA/ROCm kt matmul gate.
-#[cfg(feature = "rocm")]
-pub(crate) fn rocm_use_kt_api_matmul() -> bool {
-    cuda_use_kt_api_matmul()
-}
-
-/// Phase 7 opt-in: route the `PagedKvCache` allocation in
-/// `forward.rs` through the `PagedKvCacheKt` (kt-API) twin defined
-/// in [`crate::paged_kv_cache_kt`]. Default off; set
-/// `KILN_USE_KT_PAGED_KV_CACHE=1` (or `KILN_USE_KT_API_ALL=1`) to
-/// flip the gate.
-///
-/// Wiring the gate without yet migrating any call site is an
-/// intentional incremental step (#1082, Phase 7). The
-/// [`crate::paged_kv_cache_kt::PagedKvCacheKt`] twin is feature
-/// complete for the non-FP8 decode path, but each `forward.rs`
-/// call site is tightly coupled to candle-typed writers/readers
-/// and to `&Device` constructors (vs. the kt twin's
-/// `Arc<CudaDevice>` + `device_index` signature). Landing this
-/// gate first lets follow-up PRs migrate one call site at a time
-/// — same playbook as the kt-API per-kernel migrations
-/// (`KILN_USE_KT_API_SIGMOID_MUL`, `KILN_USE_KT_API_RMSNORM`,
-/// `KILN_USE_KT_API_ROTARY_QK`, `KILN_USE_KT_API_MLP_SILU_MUL`,
-/// `KILN_USE_KT_API_L2_QK_NORM`, `KILN_USE_KT_API_FLASH_ATTN_FWD`,
-/// `KILN_USE_KT_API_GDN_FULL_CHUNK`, `KILN_USE_KT_API_MATMUL`).
-///
-/// Today this gate is unused. The first call-site migration will
-/// branch on it. Returning a bool through `OnceLock` matches the
-/// other Phase 7 gates so the cost is one atomic read per call
-/// (negligible vs. the cache allocation it gates).
-#[cfg(feature = "cuda")]
-pub fn cuda_use_kt_paged_kv_cache() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok());
-    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
-}
-
 /// Constructor stub for the Phase 7 `PagedKvCacheKt` migration (#1082).
 ///
-/// Returns `Ok(Some(cache))` when the `KILN_USE_KT_PAGED_KV_CACHE` gate
-/// (see [`cuda_use_kt_paged_kv_cache`]) is set AND `device` is a CUDA
-/// device. Returns `Ok(None)` in every other case so callers can fall
-/// through to the candle [`PagedKvCache::new`] path unchanged.
+/// Returns `Ok(Some(cache))` when the startup policy enables experimental
+/// routes and `device` is CUDA. Returns `Ok(None)` otherwise.
 ///
 /// # Why this exists
 ///
@@ -1221,7 +424,7 @@ pub fn try_kt_paged_kv_cache_new(
     dtype: DType,
     device: &Device,
 ) -> Result<Option<crate::paged_kv_cache_kt::PagedKvCacheKt>> {
-    if !cuda_use_kt_paged_kv_cache() {
+    if !crate::kt_api_policy::experimental_routes_enabled() {
         return Ok(None);
     }
 
@@ -1318,8 +521,7 @@ pub fn try_kt_paged_kv_cache_new(
 /// allocate an `Option<PagedKvCacheKt>` via `try_kt_paged_kv_cache_new`
 /// and pass `Some(&kt_cache)` down through that newly-threaded
 /// parameter, at which point this helper starts mirroring real
-/// production writes whenever the `KILN_USE_KT_PAGED_KV_CACHE` gate
-/// is on.
+/// production writes whenever `accelerator.kt_api_mode = "all"`.
 ///
 /// No longer `#[allow(dead_code)]` — `gqa_attention_paged_with_rope_tables`
 /// is the live caller.
@@ -1349,9 +551,8 @@ pub(crate) fn try_kt_paged_kv_write_token_major_native_graph_slot(
 /// Phase 7 opt-in: route a `PagedKvCache::block_size()` accessor read
 /// through the kt twin `PagedKvCacheKt::block_size()` (#1082).
 ///
-/// When `kt_cache` is `Some` and the per-site gate
-/// `KILN_USE_KT_PAGED_KV_BLOCK_SIZE` (or `KILN_USE_KT_PAGED_KV_CACHE`,
-/// or `KILN_USE_KT_API_ALL`) is on, this returns the kt cache's
+/// When `kt_cache` is `Some` and `accelerator.kt_api_mode = "all"`, this
+/// returns the kt cache's
 /// `block_size()` and panics if it disagrees with the candle value
 /// passed in. When the gate is off OR `kt_cache` is `None`, the
 /// candle value is returned unchanged — zero overhead, zero
@@ -1380,13 +581,7 @@ pub(crate) fn try_kt_paged_kv_block_size(
         Some(c) => c,
         None => return candle_block_size,
     };
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let gate_on = *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_KT_PAGED_KV_BLOCK_SIZE").is_ok()
-            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
-    });
-    if !gate_on {
+    if !crate::kt_api_policy::experimental_routes_enabled() {
         return candle_block_size;
     }
     kiln_nvtx::range!(c"kiln/paged_kv_kt/block_size");
@@ -1404,9 +599,7 @@ pub(crate) fn try_kt_paged_kv_block_size(
 ///
 /// Sibling to [`try_kt_paged_kv_block_size`]. Returns the kt cache
 /// value (with parity assertion against the candle value) when
-/// `kt_cache` is `Some` AND the per-site gate
-/// `KILN_USE_KT_PAGED_KV_IS_FP8` (or the meta-gates
-/// `KILN_USE_KT_PAGED_KV_CACHE` / `KILN_USE_KT_API_ALL`) is on.
+/// `kt_cache` is `Some` and `accelerator.kt_api_mode = "all"`.
 /// Otherwise returns the candle value unchanged.
 ///
 /// `is_fp8()` is a pure-read accessor backed by a private `bool`
@@ -1424,13 +617,7 @@ pub(crate) fn try_kt_paged_kv_is_fp8(
         Some(c) => c,
         None => return candle_is_fp8,
     };
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let gate_on = *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_KT_PAGED_KV_IS_FP8").is_ok()
-            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
-    });
-    if !gate_on {
+    if !crate::kt_api_policy::experimental_routes_enabled() {
         return candle_is_fp8;
     }
     kiln_nvtx::range!(c"kiln/paged_kv_kt/is_fp8");
@@ -1453,14 +640,12 @@ pub(crate) fn try_kt_paged_kv_is_fp8(
 /// migration. Instead, this just asserts that the kt cache has a layer
 /// for `layer_idx` iff the candle cache does, so that any kt allocator
 /// drift (e.g. a future change to how kt counts layers from
-/// `num_full_attn_layers`) surfaces immediately under the env gate.
+/// `num_full_attn_layers`) surfaces immediately under the startup policy.
 ///
 /// The return is `()`. Callers continue to use the candle `pool_tensors`
 /// return for the actual K/V pool tensors.
 ///
-/// Gate: `KILN_USE_KT_PAGED_KV_POOL_TENSORS` (or meta-gates
-/// `KILN_USE_KT_PAGED_KV_CACHE` / `KILN_USE_KT_API_ALL`). NOP on the
-/// default path.
+/// Active only when `accelerator.kt_api_mode = "all"`; otherwise a no-op.
 #[cfg(feature = "cuda")]
 #[inline]
 pub(crate) fn try_kt_paged_kv_pool_tensors_present(
@@ -1472,13 +657,7 @@ pub(crate) fn try_kt_paged_kv_pool_tensors_present(
         Some(c) => c,
         None => return,
     };
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let gate_on = *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_KT_PAGED_KV_POOL_TENSORS").is_ok()
-            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
-    });
-    if !gate_on {
+    if !crate::kt_api_policy::experimental_routes_enabled() {
         return;
     }
     kiln_nvtx::range!(c"kiln/paged_kv_kt/pool_tensors_present");
@@ -1495,7 +674,7 @@ pub(crate) fn try_kt_paged_kv_pool_tensors_present(
 /// through the kt twin (#1082).
 ///
 /// Sibling to [`try_kt_paged_kv_block_size`] / [`try_kt_paged_kv_is_fp8`].
-/// Gate: `KILN_USE_KT_PAGED_KV_NUM_LAYERS` (or meta-gates).
+/// Active only when `accelerator.kt_api_mode = "all"`.
 ///
 /// `num_layers()` is `Vec<(KtTensor,KtTensor)>::len()` on the kt side
 /// and the equivalent on candle — both are populated from
@@ -1513,13 +692,7 @@ pub(crate) fn try_kt_paged_kv_num_layers(
         Some(c) => c,
         None => return candle_num_layers,
     };
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let gate_on = *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_KT_PAGED_KV_NUM_LAYERS").is_ok()
-            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
-    });
-    if !gate_on {
+    if !crate::kt_api_policy::experimental_routes_enabled() {
         return candle_num_layers;
     }
     kiln_nvtx::range!(c"kiln/paged_kv_kt/num_layers");
@@ -1583,42 +756,6 @@ fn try_kt_paged_kv_read(
     // No kt twin cache on this (non-CUDA) call site — read directly from the
     // kt `PagedKvCacheKt` (`PagedKvCache` is its alias post candle-drop).
     candle_cache.read(layer_idx, block_table, seq_len)
-}
-
-/// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul
-/// path through a kt-API equivalent of `kiln_tensor::cuda_matmul`.
-/// Default off; set `KILN_USE_KT_API_MATMUL=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to flip the gate.
-///
-/// Mirrors the CUDA gate [`cuda_use_kt_api_matmul`] so the same
-/// env var lights up *both* backends' production matmul sites
-/// when the kt-API path lands on each. Today this gate is unused
-/// on the Vulkan side: there is no `kiln_tensor::vulkan_matmul`
-/// sibling to `cuda_matmul` yet, because Vulkan's storage layer is
-/// candle-free (`kiln-vulkan-kernel` operates on its own
-/// `VkTensor` type) and the existing
-/// `VulkanBackend::linear_prefill_apply` already dispatches through
-/// `crate::backend::vulkan_linear_op::VulkanLinearOp` against
-/// VkBuffer-backed weight caches.
-///
-/// Landing this env gate ahead of any call-site migration follows
-/// the same playbook as [`cuda_use_kt_paged_kv_cache`] —
-/// wire the bool through a process-cached `OnceLock` so the first
-/// follow-up PR that does add a `vulkan_matmul` sibling has a
-/// stable branch point. Honors both `KILN_USE_KT_API_MATMUL` and
-/// `KILN_USE_KT_API_ALL` directly (not via [`cuda_use_kt_api_all`]
-/// which is `cfg(feature = "cuda")`); this keeps the gate
-/// compilable under `--features vulkan` alone and preserves the
-/// semantic that the meta-flag activates all backends' matmul
-/// routes at once.
-#[cfg(feature = "vulkan")]
-#[allow(dead_code)]
-pub(crate) fn vulkan_use_kt_api_matmul() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_KT_API_MATMUL").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
-    })
 }
 
 thread_local! {
@@ -2604,7 +1741,7 @@ fn full_attn_qkv_proj_decode_if(
 /// default-on kt route is disabled or any precondition fails.
 fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
-    if cuda_use_kt_api_softmax()
+    if crate::kt_api_policy::stable_routes_enabled()
         && matches!(x.device(), Device::Cuda(_))
         && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
         && x.is_contiguous()
@@ -2648,8 +1785,7 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
             return Ok(out);
         }
     }
-    // Phase 7 (#1082): when `KILN_USE_KT_API_MAX_LAST_DIM=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `x` is a contiguous CUDA
+    // Phase 7 (#1082): when stable KT routes are enabled and `x` is a contiguous CUDA
     // tensor of {F32, BF16, F16}, route the
     // `max_keepdim(D::Minus1)` reduction (the softmax-stabilization
     // max step) through `kiln_tensor::cuda_max_axis` plus a
@@ -2670,8 +1806,7 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         }
     };
     let shifted = x.broadcast_sub(&max_val)?;
-    // Phase 7 (#1082): when `KILN_USE_KT_API_EXP=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `shifted` is a
+    // Phase 7 (#1082): when stable KT routes are enabled and `shifted` is a
     // contiguous CUDA tensor of {F32, BF16, F16}, route the
     // `.exp()` step of the softmax composite through
     // `kiln_tensor::cuda_activation_unary` with kind 6 (Exp).
@@ -2691,8 +1826,7 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
             shifted.exp()?
         }
     };
-    // Phase 7 (#1082): when `KILN_USE_KT_API_SUM_LAST_DIM=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `exp_shifted` is a
+    // Phase 7 (#1082): when stable KT routes are enabled and `exp_shifted` is a
     // contiguous CUDA tensor of {F32, BF16, F16}, route the
     // `sum_keepdim(-1)` reduction through
     // `kiln_tensor::cuda_sum_last_axis` plus a zero-cost
@@ -2728,7 +1862,7 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
 /// traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_sum_last_dim() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -2772,7 +1906,7 @@ pub(crate) fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> 
 /// `Tensor::sum(axis)` call sites.
 #[cfg(feature = "cuda")]
 fn try_kt_sum_axis(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_sum_axis() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -2806,7 +1940,7 @@ fn try_kt_sum_axis(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
 /// traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_max_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_max_last_dim() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -4024,8 +3158,7 @@ impl LinearAttentionState {
             // `batch_state_assemble` stage. The runtime path is identical
             // because cat is the only source feeding these tensors.
             //
-            // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM0=1` (or
-            // `KILN_USE_KT_API_ALL=1`) is set AND every input is a
+            // Phase 7 (#1082): when stable KT routes are enabled and every input is a
             // contiguous CUDA tensor of a supported dtype, route the
             // axis-0 concat through `kiln_tensor::cuda_concat(_, 0)`.
             // Falls through to the candle composite when any
@@ -5181,7 +4314,7 @@ fn matmul_no_broadcast_copy(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             // owns native dispatch. Falls through to the ordinary kt
             // Tensor::matmul path when the gate is off.
             #[cfg(feature = "cuda")]
-            if cuda_use_kt_api_matmul()
+            if crate::kt_api_policy::experimental_routes_enabled()
                 && matches!(lhs2d.dtype(), DType::BF16 | DType::F16 | DType::F32)
                 && lhs2d.dtype() == rhs.dtype()
                 && lhs2d.is_contiguous()
@@ -7429,8 +6562,7 @@ impl GpuWeights {
 ///
 /// Returns: [seq_len, hidden_size] tensor.
 ///
-/// Phase 7 (#1082): when `KILN_USE_KT_API_EMBEDDING=1` (or
-/// `KILN_USE_KT_API_ALL=1`) is set AND inputs are contiguous CUDA
+/// Phase 7 (#1082): when stable KT routes are enabled and inputs are contiguous CUDA
 /// tensors of a supported dtype, route the dim-0 `index_select`
 /// through `kiln_tensor::cuda_index_select_dim0`. Falls through to
 /// candle's `index_select` when any precondition fails.
@@ -7535,7 +6667,7 @@ fn kt_embedding_lookup_native(
 /// caller falls through to candle's `index_select`.
 #[cfg(feature = "cuda")]
 fn try_kt_embedding_lookup(embed_weights: &Tensor, index: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_embedding() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(embed_weights.device(), Device::Cuda(_))
@@ -7586,7 +6718,7 @@ fn try_kt_embedding_lookup_from_weights(
     index: &Tensor,
     weights: &GpuWeights,
 ) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_embedding() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     // Defer to the recording entry whenever a tape scope is active. Outside a
@@ -8016,8 +7148,7 @@ fn vulkan_device_handle() -> Option<std::sync::Arc<kiln_vulkan_kernel::VulkanDev
 /// oracle for the fused CUDA kernel. Matches HF semantics exactly:
 /// `out = (1 + w) * x * rsqrt(mean(x^2) + eps)` with F32 reduction and epilogue.
 pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
-    // Phase 7 (#1082): when `KILN_USE_KT_API_TO_DTYPE=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `x` is a contiguous CUDA
+    // Phase 7 (#1082): when stable KT routes are enabled and `x` is a contiguous CUDA
     // tensor in the {F32, BF16, F16} triangle, route the BF16→F32
     // promotion at the RMSNorm fallback entry through
     // `kiln_tensor::cuda_cast`. Falls through to candle's
@@ -8036,8 +7167,7 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
             x.to_dtype(DType::F32)?
         }
     };
-    // Phase 7 (#1082): when `KILN_USE_KT_API_MEAN_LAST_DIM=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND the squared F32 input is
+    // Phase 7 (#1082): when stable KT routes are enabled and the squared F32 input is
     // a contiguous CUDA tensor, route the `mean_keepdim(-1)` step
     // through `kiln_tensor::cuda_mean_last_axis` plus a zero-cost
     // `unsqueeze(-1)` to restore the trailing-dim shape. Falls
@@ -8058,8 +7188,7 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
             sq.mean_keepdim(LAST_DIM)?
         }
     };
-    // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `variance` is a
+    // Phase 7 (#1082): when stable KT routes are enabled and `variance` is a
     // contiguous CUDA tensor, route the `+ eps` step through
     // `kiln_tensor::cuda_scalar_op` with kind 0 (AddScalar) — a
     // single-kernel dispatch instead of the candle composite.
@@ -8081,8 +7210,7 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
             (variance + eps)?
         }
     };
-    // Phase 7 (#1082): when `KILN_USE_KT_API_RSQRT=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `variance + eps` is a
+    // Phase 7 (#1082): when stable KT routes are enabled and `variance + eps` is a
     // contiguous CUDA F32 tensor, route the
     // `.sqrt()?.recip()?` composite (the RMSNorm tail) through
     // `kiln_tensor::cuda_activation_unary` kind 28 (Rsqrt) — a
@@ -8143,7 +7271,7 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
 /// traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_mean_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_mean_last_dim() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -8860,8 +7988,7 @@ fn apply_rope(
 
     // Concatenate rotated dims + passthrough dims.
     //
-    // Phase 7 (#1082): when `KILN_USE_KT_API_CONCAT_LAST_DIM=1`
-    // (or `KILN_USE_KT_API_ALL=1`) is set AND the inputs satisfy
+    // Phase 7 (#1082): when stable KT routes are enabled and the inputs satisfy
     // the kt-bridge borrow preconditions, route through
     // `kiln_tensor::cuda_concat`. Falls through to the candle
     // `Tensor::cat` composite when any precondition fails.
@@ -8911,7 +8038,7 @@ fn apply_rope(
 /// so nsys traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_concat_last_dim(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_concat_last_dim() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if pieces.is_empty() {
@@ -8962,7 +8089,7 @@ pub(crate) fn try_kt_concat_last_dim(pieces: &[&Tensor]) -> Result<Option<Tensor
 /// separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
 fn try_kt_cat_dim0(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_cat_dim0() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if pieces.is_empty() {
@@ -9011,7 +8138,7 @@ fn try_kt_cat_dim0(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
 /// nsys traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
 fn try_kt_cat_dim1(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_cat_dim1() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if pieces.is_empty() {
@@ -9060,7 +8187,7 @@ fn try_kt_cat_dim1(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
 /// nsys traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
 fn try_kt_cat_dim2(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_cat_dim2() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if pieces.is_empty() {
@@ -9110,7 +8237,7 @@ fn try_kt_cat_dim2(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
 /// separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_add_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_add_scalar() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -9148,7 +8275,7 @@ pub(crate) fn try_kt_add_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 /// baseline composite.
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_neg(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_neg() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -9182,7 +8309,7 @@ pub(crate) fn try_kt_neg(x: &Tensor) -> Result<Option<Tensor>> {
 /// baseline composite.
 #[cfg(feature = "cuda")]
 fn try_kt_sqrt(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_sqrt() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -9226,7 +8353,7 @@ fn try_kt_sqrt(x: &Tensor) -> Result<Option<Tensor>> {
 /// allocation with a single fused kernel.
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_rsqrt(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_rsqrt() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -9264,7 +8391,7 @@ pub(crate) fn try_kt_rsqrt(x: &Tensor) -> Result<Option<Tensor>> {
 /// baseline composite.
 #[cfg(feature = "cuda")]
 fn try_kt_max_binary(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_max_binary() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(a.device(), Device::Cuda(_))
@@ -9311,13 +8438,12 @@ fn try_kt_max_binary(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
 /// First production call site (wired in the same #1082 series):
 /// the `softplus` helper's `abs_x = relu(x) + relu(-x)`
 /// computation now takes a fused single-kernel `try_kt_abs(x)`
-/// fast path when `KILN_USE_KT_API_ABS=1` (or
-/// `KILN_USE_KT_API_ALL=1`) is set. softplus runs as the last
+/// fast path when stable KT routes are enabled. softplus runs as the last
 /// step of the GDN `b` (forget gate) computation, once per
 /// decode step.
 #[cfg(feature = "cuda")]
 fn try_kt_abs(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_abs() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -9351,7 +8477,7 @@ fn try_kt_abs(x: &Tensor) -> Result<Option<Tensor>> {
 /// baseline composite.
 #[cfg(feature = "cuda")]
 fn try_kt_sin(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_sin() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -9384,7 +8510,7 @@ fn try_kt_sin(x: &Tensor) -> Result<Option<Tensor>> {
 /// baseline composite. Mirrors `try_kt_sin` (commit 728b3917).
 #[cfg(feature = "cuda")]
 fn try_kt_cos(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_cos() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -9418,7 +8544,7 @@ fn try_kt_cos(x: &Tensor) -> Result<Option<Tensor>> {
 /// (commits 728b3917 / 6c22330f).
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_exp(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_exp() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -9462,7 +8588,7 @@ pub(crate) fn try_kt_exp(x: &Tensor) -> Result<Option<Tensor>> {
 /// commits of the same #1082 series.
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_recip(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_recip() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -9504,7 +8630,7 @@ pub(crate) fn try_kt_recip(x: &Tensor) -> Result<Option<Tensor>> {
 /// of the GDN `b` (forget gate) computation, once per decode step.
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_log(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_log() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -9542,7 +8668,7 @@ pub(crate) fn try_kt_log(x: &Tensor) -> Result<Option<Tensor>> {
 /// as an early `Ok(None)` and let the caller decide.
 #[cfg(feature = "cuda")]
 fn try_kt_to_dtype(x: &Tensor, target: DType) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_to_dtype() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_)) || !x.is_contiguous() || x.rank() == 0 {
@@ -10091,8 +9217,7 @@ fn kt_swiglu_ffn_native(
 ///
 /// Returns `Ok(None)` — falling through to the existing
 /// projection-by-projection candle path — on any of:
-/// - the gate is off (`KILN_DISABLE_KT_API_SWIGLU_FFN=1` /
-///   `KILN_DISABLE_KT_API_ALL=1`);
+/// - `accelerator.kt_api_mode = "disabled"`;
 /// - non-CUDA device, or a non-{BF16,F16,F32} / mixed dtype;
 /// - non-contiguous `x` or weights, or weight rank ≠ 2, or a K-dim
 ///   mismatch between `x` and the projections;
@@ -10107,7 +9232,7 @@ fn kt_swiglu_ffn_native(
 /// projections + delta application.
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 fn try_kt_swiglu_ffn(x: &Tensor, mlp: &GpuFfnWeights) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_swiglu_ffn() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     // The tape-wired path (training) must run through the recorded silu+mul so
@@ -10545,7 +9670,7 @@ fn swiglu_ffn_impl_no_chunk(
     // round-trips the legacy `swiglu_ffn_split_gate_up` path pays. Returns
     // `None` on any incompatibility (tape scope, tracked input, dtype, …)
     // so the legacy path below runs unchanged. Gated default-on with
-    // escape hatch `KILN_DISABLE_KT_API_SWIGLU_FFN=1`.
+    // escape hatch `accelerator.kt_api_mode = "disabled"`.
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
         if !has_mlp_lora && !has_marlin {
@@ -11148,7 +10273,7 @@ fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
 /// from the candle baseline.
 #[cfg(feature = "cuda")]
 fn try_kt_lora_add(base: &Tensor, delta: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_lora_add() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(base.device(), Device::Cuda(_))
@@ -11200,7 +10325,7 @@ fn try_kt_lora_delta(
     proj: &LoraProjectionWeights,
     scale: f32,
 ) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_lora_delta() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     let x_dims = x.dims();
@@ -11353,7 +10478,7 @@ fn box102_lmhead_no_fastpath() -> bool {
 
 #[cfg(feature = "cuda")]
 fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_lm_head() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     let l_dims = x.dims();
@@ -11500,8 +10625,7 @@ fn lm_head_argmax_with_backend(
                 .context("metal lm_head argmax kernel failed");
         }
     }
-    // Fused matmul + argmax path: when both kt LM head and argmax
-    // gates are on (or KILN_USE_KT_API_ALL=1), chain
+    // Fused matmul + argmax path: when stable KT routes are enabled, chain
     // `MatmulOp` -> `cuda_argmax_last_axis` directly in kt-storage,
     // skipping the intermediate candle copy-back the
     // unfused composition would pay between the two stages.
@@ -11516,7 +10640,7 @@ fn lm_head_argmax_with_backend(
     };
     let logits_1d = logits.flatten_all()?;
     #[cfg(feature = "cuda")]
-    if cuda_use_kt_api_argmax()
+    if crate::kt_api_policy::stable_routes_enabled()
         && matches!(logits_1d.device(), Device::Cuda(_))
         && matches!(logits_1d.dtype(), DType::F32 | DType::BF16 | DType::F16)
         && logits_1d.is_contiguous()
@@ -11549,13 +10673,11 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
 /// `argmax(0)` after `flatten_all`, which is correct but not
 /// applicable to argmax-over-flattened-1D semantics on those shapes.
 ///
-/// Requires both `KILN_USE_KT_API_LM_HEAD` and `KILN_USE_KT_API_ARGMAX`
-/// (or `KILN_USE_KT_API_ALL=1`) to be set; falls through cleanly when
-/// either is off. NVTX range `kiln/lm_head_argmax_kt` brackets the
-/// migrated call.
+/// Requires stable KT routes and falls through cleanly when they are disabled.
+/// NVTX range `kiln/lm_head_argmax_kt` brackets the migrated call.
 #[cfg(feature = "cuda")]
 fn try_kt_lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<u32>> {
-    if !cuda_use_kt_api_lm_head() || !cuda_use_kt_api_argmax() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     let l_dims = x.dims();
@@ -11932,7 +11054,7 @@ fn l2_normalize(x: &Tensor) -> Result<Tensor> {
             .context("Vulkan GDN L2 normalization");
     }
     #[cfg(feature = "cuda")]
-    if cuda_use_kt_api_l2_normalize()
+    if crate::kt_api_policy::stable_routes_enabled()
         && matches!(x_f32.device(), Device::Cuda(_))
         && x_f32.is_contiguous()
     {
@@ -11940,8 +11062,7 @@ fn l2_normalize(x: &Tensor) -> Result<Tensor> {
             return Ok(out);
         }
     }
-    // Phase 7 (#1082): when `KILN_USE_KT_API_SUM_SQ_LAST_DIM=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND the F32 input is a
+    // Phase 7 (#1082): when stable KT routes are enabled and the F32 input is a
     // contiguous CUDA tensor, route the `sqr().sum_keepdim(-1)`
     // two-op composite through `kiln_tensor::cuda_sum_squared_last_axis`
     // (single fused kernel) plus a zero-cost `unsqueeze(-1)` to
@@ -11962,16 +11083,14 @@ fn l2_normalize(x: &Tensor) -> Result<Tensor> {
             x_f32.sqr()?.sum_keepdim(LAST_DIM)?
         }
     };
-    // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `sq_sum` is a contiguous
+    // Phase 7 (#1082): when stable KT routes are enabled and `sq_sum` is a contiguous
     // CUDA tensor of {F32, BF16, F16}, route the `+ 1e-6` epsilon
     // step through `kiln_tensor::cuda_scalar_op` with kind 0
     // (AddScalar). Falls through to the candle composite when any
     // precondition fails so behavior is identical with the gate
     // off. Mirrors the softplus + sigmoid wirings of try_kt_add_scalar.
     //
-    // Phase 7 (#1082): when `KILN_USE_KT_API_SQRT=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND the addend is a
+    // Phase 7 (#1082): when stable KT routes are enabled and the addend is a
     // contiguous CUDA tensor of a supported dtype, route the
     // `.sqrt()` step through `kiln_tensor::cuda_activation_unary`
     // with kind 14 (Sqrt). Falls through to the candle composite
@@ -12021,7 +11140,7 @@ fn l2_normalize(x: &Tensor) -> Result<Tensor> {
 /// traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
 fn try_kt_sum_squared_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
-    if !cuda_use_kt_api_sum_sq_last_dim() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     if !matches!(x.device(), Device::Cuda(_))
@@ -12160,8 +11279,7 @@ fn gdn_qk_norm_forward(
 /// This matches PyTorch's F.softplus output (which clamps to linear for x > 20).
 fn softplus(x: &Tensor) -> Result<Tensor> {
     let zeros = Tensor::zeros_like(x)?;
-    // Phase 7 (#1082): when `KILN_USE_KT_API_MAX_BINARY=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `x` + `zeros` are
+    // Phase 7 (#1082): when stable KT routes are enabled and `x` + `zeros` are
     // contiguous CUDA tensors of {F32, BF16, F16}, route the
     // pointwise `max(x, 0)` (relu) through
     // `kiln_tensor::cuda_binary_minmax` with kind 1 (Max). Falls
@@ -12183,8 +11301,7 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
     };
     // |x| = relu(x) + relu(-x)
     //
-    // Phase 7 (#1082): when `KILN_USE_KT_API_ABS=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `x` is a contiguous
+    // Phase 7 (#1082): when stable KT routes are enabled and `x` is a contiguous
     // CUDA tensor of {F32, BF16, F16}, route the `|x|` computation
     // through a single `kiln_tensor::cuda_activation_unary` call
     // with kind 13 (Abs) — one fused kernel replacing the
@@ -12194,8 +11311,7 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
     // behavior is identical with the gate off. First production
     // call site for `try_kt_abs`.
     //
-    // Phase 7 (#1082): when `KILN_USE_KT_API_NEG=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND the input is a contiguous
+    // Phase 7 (#1082): when stable KT routes are enabled and the input is a contiguous
     // CUDA tensor of a supported dtype, route the `.neg()` through
     // `kiln_tensor::cuda_activation_unary` with kind 12 (Neg).
     // Falls through to the candle composite when any precondition
@@ -12245,16 +11361,14 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
     };
     // log(1 + exp(-|x|)) — always stable since exp(-|x|) ∈ (0, 1]
     //
-    // Phase 7 (#1082): when `KILN_USE_KT_API_EXP=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `neg_abs` is a
+    // Phase 7 (#1082): when stable KT routes are enabled and `neg_abs` is a
     // contiguous CUDA tensor of {F32, BF16, F16}, route the
     // `.exp()` step of the softplus composite through
     // `kiln_tensor::cuda_activation_unary` with kind 6 (Exp).
     // Falls through to the candle composite when any precondition
     // fails.
     //
-    // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND the exp() output is a
+    // Phase 7 (#1082): when stable KT routes are enabled and the exp() output is a
     // contiguous CUDA tensor of a supported dtype, route the
     // `+ 1.0` step of the softplus composite through
     // `kiln_tensor::cuda_scalar_op` with kind 0 (AddScalar).
@@ -12287,8 +11401,7 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
             (exp_neg_abs + 1.0)?
         }
     };
-    // Phase 7 (#1082): when `KILN_USE_KT_API_LOG=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND the input is a contiguous
+    // Phase 7 (#1082): when stable KT routes are enabled and the input is a contiguous
     // CUDA tensor of a supported dtype, route the `.log()` through
     // `kiln_tensor::cuda_activation_unary` with kind 5 (Log = ln(x)).
     // Falls through to the candle composite when any precondition
@@ -12366,8 +11479,7 @@ fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) ->
 
     // RMS norm on last dimension
     //
-    // Phase 7 (#1082): when `KILN_USE_KT_API_MEAN_LAST_DIM=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND the squared F32 input
+    // Phase 7 (#1082): when stable KT routes are enabled and the squared F32 input
     // is a contiguous CUDA tensor, route the `mean_keepdim(-1)`
     // step through `kiln_tensor::cuda_mean_last_axis` plus a
     // zero-cost `unsqueeze(-1)`. Mirrors the rms_norm_fallback
@@ -12389,8 +11501,7 @@ fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) ->
             sq.mean_keepdim(LAST_DIM)?
         }
     };
-    // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `variance` is a
+    // Phase 7 (#1082): when stable KT routes are enabled and `variance` is a
     // contiguous CUDA tensor, route the `+ eps` step through
     // `kiln_tensor::cuda_scalar_op` with kind 0 (AddScalar).
     // Mirrors the rms_norm_fallback wiring. Falls through to the
@@ -12409,8 +11520,7 @@ fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) ->
             (variance + eps)?
         }
     };
-    // Phase 7 (#1082): when `KILN_USE_KT_API_RSQRT=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set, route the RMSNorm-tail
+    // Phase 7 (#1082): when stable KT routes are enabled, route the RMSNorm-tail
     // `(variance + eps).sqrt().recip()` composite through
     // `kiln_tensor::cuda_activation_unary` kind 28 (Rsqrt) — a
     // single fused kernel that replaces the two candle calls + the
@@ -12498,8 +11608,7 @@ fn causal_conv1d_prefill_with_dtype(
 
     // Left-pad with conv_state (previous K-1 inputs, or zeros for fresh state)
     //
-    // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM2=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND both pieces are
+    // Phase 7 (#1082): when stable KT routes are enabled and both pieces are
     // contiguous CUDA tensors of a supported dtype, route the
     // time-axis (axis=2) concat through
     // `kiln_tensor::cuda_concat(_, 2)`. Falls through to the candle
@@ -12581,8 +11690,7 @@ fn causal_conv1d_decode(
 
     // Full window = [conv_state | x] -> [batch, channels, kernel_size]
     //
-    // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM2=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND both pieces are
+    // Phase 7 (#1082): when stable KT routes are enabled and both pieces are
     // contiguous CUDA tensors of a supported dtype, route the
     // decode-path time-axis (axis=2) concat through
     // `kiln_tensor::cuda_concat(_, 2)`. Falls through to the candle
@@ -12607,8 +11715,7 @@ fn causal_conv1d_decode(
 
     // Dot product per channel: sum over kernel dimension.
     //
-    // Phase 7 (#1082): when `KILN_USE_KT_API_SUM_AXIS=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set, the `sum(2)` reduction along
+    // Phase 7 (#1082): when stable KT routes are enabled, the `sum(2)` reduction along
     // the kernel dim is routed through `kiln_tensor::cuda_sum_axis`
     // via the kt-bridge borrow adapter (NVTX range
     // `kiln/sum_axis_kt`). Falls through to candle's `sum(2)` when
@@ -12864,12 +11971,8 @@ fn gdn_single_token_recurrence(
     // Phase 7 (#1082): cluster migration. The
     // `g.to_dtype(F32).exp().to_dtype(dtype)` gate-decay
     // composite runs every GDN decode token on every layer of
-    // the 24 GDN layers. Each gated leg (TO_DTYPE in, EXP,
-    // TO_DTYPE out) can run on the kt-API independently when
-    // its respective gate is set, so the whole 3-op cluster
-    // migrates as a unit under `KILN_USE_KT_API_ALL=1` and
-    // individual op-level gates under `KILN_USE_KT_API_EXP` /
-    // `KILN_USE_KT_API_TO_DTYPE`. Falls through cleanly when
+    // the 24 GDN layers. Stable KT policy controls the three-op cluster as
+    // one route set. Each helper still falls through cleanly when
     // any single op's preconditions fail (the candle `?`
     // operator preserves identical numerics).
     let p = {
@@ -13384,9 +12487,8 @@ fn gdn_chunkwise_recurrence(
                         .broadcast_as((batch, heads, c, c))?;
                     // Phase 7 (#1082): three clusters of
                     // `.exp()?.to_dtype(dtype)?` in the chunkwise GDN
-                    // decay-matrix prep all migrate through the
-                    // `KILN_USE_KT_API_EXP` + `KILN_USE_KT_API_TO_DTYPE`
-                    // gate pair (or the meta `_ALL` flag). Each leg
+                    // decay-matrix prep all migrate under the stable KT route
+                    // policy. Each leg
                     // (EXP, then TO_DTYPE) falls through to the candle
                     // op when its precondition fails, so behavior is
                     // identical with the gates off. These ops run
@@ -13448,8 +12550,8 @@ fn gdn_chunkwise_recurrence(
                     // prep — `decay_last_col_u` and `p_last_u`. Mirrors the
                     // strict_decay / causal_decay / p `exp_to_dtype` closure
                     // above so all five chunk-prep exp calls now take the
-                    // single-kernel kt-API fast path when
-                    // KILN_USE_KT_API_EXP=1 (or KILN_USE_KT_API_ALL=1) is set.
+                    // single-kernel kt-API fast path when stable KT routes are
+                    // enabled.
                     let decay_last_col_u = {
                         let g_diff = g_last.broadcast_sub(&big_g)?;
                         exp_to_dtype(&g_diff)?.unsqueeze(3)?
@@ -13555,8 +12657,7 @@ fn gdn_chunkwise_recurrence(
     }
 
     let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
-    // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM2=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND every chunk-output is
+    // Phase 7 (#1082): when stable KT routes are enabled and every chunk-output is
     // a contiguous CUDA tensor of a supported dtype, route the
     // time-axis (axis=2) per-chunk concat through
     // `kiln_tensor::cuda_concat(_, 2)`. Mirrors the conv1d
@@ -13739,8 +12840,7 @@ fn gated_deltanet_gates_fallback(
             .broadcast_add(&dt_bias_f32)
             .context("gdn gates fallback broadcast_add dt_bias")?;
         let sp = softplus(&a_biased).context("gdn gates fallback softplus")?;
-        // Phase 7 (#1082): when `KILN_USE_KT_API_EXP=1` (or
-        // `KILN_USE_KT_API_ALL=1`) is set AND `a_log_f32` is a
+        // Phase 7 (#1082): when stable KT routes are enabled and `a_log_f32` is a
         // contiguous CUDA tensor of a supported dtype, route the
         // `a_log_f32.exp()` step through
         // `kiln_tensor::cuda_activation_unary` with kind 6 (Exp) via
@@ -13751,9 +12851,8 @@ fn gated_deltanet_gates_fallback(
         // below — the GDN gates fallback that runs when
         // KILN_DISABLE_FUSED_GDN_GATES=1 forces the parity-baseline
         // composite. Wiring the exp step in addition to the neg step
-        // means the full `-exp(A_log)` decay computation goes through
-        // the kt-API when both KILN_USE_KT_API_EXP and
-        // KILN_USE_KT_API_NEG are set.
+        // means the full `-exp(A_log)` decay computation uses the stable KT
+        // route set.
         let a_log_exp = {
             #[cfg(feature = "cuda")]
             {
@@ -13770,8 +12869,7 @@ fn gated_deltanet_gates_fallback(
                 a_log_f32.exp().context("gdn gates fallback a_log exp")?
             }
         };
-        // Phase 7 (#1082): when `KILN_USE_KT_API_NEG=1` (or
-        // `KILN_USE_KT_API_ALL=1`) is set AND `a_log_exp` is a
+        // Phase 7 (#1082): when stable KT routes are enabled and `a_log_exp` is a
         // contiguous CUDA tensor of a supported dtype, route
         // `a_log_exp.neg()` through `kiln_tensor::cuda_activation_unary`
         // with kind 12 (Neg) via the kt-bridge borrow adapter. Falls
@@ -14655,8 +13753,7 @@ fn gdn_chunk_prep_f32(
         .reshape((1, 1, chunk, chunk))?
         .broadcast_as((batch, heads, chunk, chunk))?;
     // Phase 7 (#1082): route the two `where_cond(...).exp()` steps
-    // through `try_kt_exp` when `KILN_USE_KT_API_EXP=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set. The where_cond itself stays
+    // through `try_kt_exp` when stable KT routes are enabled. The where_cond itself stays
     // candle-side (candle's masked-select plumbing handles the
     // selection), but the resulting tensor's exp goes through the
     // kt-API dispatch instead of the candle `.exp()` composite.
@@ -14693,8 +13790,7 @@ fn gdn_chunk_prep_f32(
         }
     };
     // Phase 7 (#1082): route `big_g.exp()` through
-    // `try_kt_exp` when `KILN_USE_KT_API_EXP=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set. Falls through to the
+    // `try_kt_exp` when stable KT routes are enabled. Falls through to the
     // candle composite when any precondition fails so behavior is
     // identical with the gate off.
     let p = {
@@ -14740,8 +13836,7 @@ fn gdn_chunk_prep_f32(
     let q_s_scaled = q_s_f32.broadcast_mul(&p_col)?;
     let g_last = big_g.narrow(2, chunk - 1, 1)?;
     // Phase 7 (#1082): route the `g_last.broadcast_sub(&big_g).exp()`
-    // step through `try_kt_exp` when `KILN_USE_KT_API_EXP=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set. Mirrors the same gate that
+    // step through `try_kt_exp` when stable KT routes are enabled. Mirrors the same gate that
     // already wraps `big_g.exp()` and `g_last.exp()` in this same
     // function. The `broadcast_sub` itself stays candle-side
     // (candle's broadcast plumbing handles the shape), but the
@@ -14818,7 +13913,7 @@ fn solve_tri_transpose_f32(
             let weights = a_col.broadcast_mul(&beta_future)?;
             // Phase 7 (#1082): route the chunkwise-backward sum-over-time
             // reduction through kiln_tensor::cuda_sum_axis when
-            // KILN_USE_KT_API_SUM_AXIS=1 (or KILN_USE_KT_API_ALL=1).
+            // stable KT routes.
             // Falls through to candle on any precondition failure.
             let acc_pre = dr_future.broadcast_mul(&weights)?;
             let acc_sum = {
@@ -15204,8 +14299,7 @@ pub fn gdn_recurrent_backward_no_grad(
         // executes now that the tape chain reaches the recurrence.
         let strict_mask = &chunk_masks.strict_mask_f32;
         // Phase 7 (#1082): route the `beta_c.neg()` step through
-        // `try_kt_neg` when `KILN_USE_KT_API_NEG=1` (or
-        // `KILN_USE_KT_API_ALL=1`) is set. Mirrors the wirings
+        // `try_kt_neg` when stable KT routes are enabled. Mirrors the wirings
         // already in this same backward function and in `softplus`
         // / `cuda_sigmoid`. Falls through to the candle composite
         // when any precondition fails so behavior is identical with
@@ -15248,8 +14342,7 @@ pub fn gdn_recurrent_backward_no_grad(
         );
         let big_g = g_c.cumsum(LAST_DIM)?;
         // Phase 7 (#1082): route the `big_g.exp()` step through
-        // `try_kt_exp` when `KILN_USE_KT_API_EXP=1` (or
-        // `KILN_USE_KT_API_ALL=1`) is set. Mirrors the prefill
+        // `try_kt_exp` when stable KT routes are enabled. Mirrors the prefill
         // chunkwise `p = big_g.exp()` wirings (ca8de9eb, 288531c7,
         // 38e4ea3d). Falls through to the candle `.exp()` composite
         // when any precondition fails so behavior is identical with
@@ -15270,9 +14363,8 @@ pub fn gdn_recurrent_backward_no_grad(
         let p_col = p.unsqueeze(3)?;
         let d_v = d_v_prime.clone();
         // Phase 7 (#1082): route the `.neg()` step of the
-        // `d_ks_entry` computation through `try_kt_neg` when
-        // `KILN_USE_KT_API_NEG=1` (or `KILN_USE_KT_API_ALL=1`) is
-        // set. The intermediate `d_v_prime.broadcast_mul(&p_col)`
+        // `d_ks_entry` computation through `try_kt_neg` when stable KT routes
+        // are enabled. The intermediate `d_v_prime.broadcast_mul(&p_col)`
         // stays candle-side; only the elementwise `.neg()` migrates
         // to a single `cuda_activation_unary` kind 12 (Neg)
         // dispatch. Falls through to candle on any precondition
@@ -15354,7 +14446,7 @@ pub fn gdn_recurrent_backward_no_grad(
         let strict_mask_f32 = &chunk_masks.strict_mask_f32;
         let causal_mask_f32 = &chunk_masks.causal_mask_f32;
         // Phase 7 (#1082): route both `where_cond(...).exp()` steps
-        // through `try_kt_exp` under the same KILN_USE_KT_API_EXP
+        // through `try_kt_exp` under the same stable KT routes
         // gate. The where_cond stays candle-side; only the
         // elementwise `.exp()` migrates. Mirrors the chunkwise
         // forward `gdn_chunk_prep_f32` strict/causal_decay wirings
@@ -15420,11 +14512,10 @@ pub fn gdn_recurrent_backward_no_grad(
         let row_sum = term.sum(LAST_DIM)?;
         // Phase 7 (#1082): route the col-sum reduction (axis 2,
         // the strict-mask row dim) through
-        // kiln_tensor::cuda_sum_axis when KILN_USE_KT_API_SUM_AXIS=1
-        // (or KILN_USE_KT_API_ALL=1). Falls through to candle on
-        // any precondition failure. The complementary `row_sum`
-        // (last-dim non-keepdim) stays on candle since
-        // KILN_USE_KT_API_SUM_AXIS targets `sum(axis)` shapes and
+        // kiln_tensor::cuda_sum_axis when stable KT routes are enabled. Falls
+        // through to candle on any precondition failure. The complementary
+        // `row_sum` (last-dim non-keepdim) stays on candle since this helper
+        // targets `sum(axis)` shapes and
         // candle's `.sum(D::Minus1)` here already feeds the
         // existing fused-decode fast paths upstream.
         let col_sum = {
@@ -15523,8 +14614,7 @@ pub fn gdn_recurrent_backward_no_grad(
         );
     }
 
-    // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM2=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND every chunk is a
+    // Phase 7 (#1082): when stable KT routes are enabled and every chunk is a
     // contiguous CUDA tensor of a supported dtype, route the
     // time-axis (axis=2) per-gradient concat through
     // `kiln_tensor::cuda_concat(_, 2)`. Mirrors the
@@ -15757,8 +14847,7 @@ pub fn gated_deltanet_forward_streaming(
     }
 
     let tile_refs: Vec<&Tensor> = tile_outs.iter().collect();
-    // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM1=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND all tile outputs are
+    // Phase 7 (#1082): when stable KT routes are enabled and all tile outputs are
     // contiguous CUDA tensors of a supported dtype, route the
     // `Tensor::cat(&tile_refs, 1)` step through
     // `kiln_tensor::cuda_concat(_, 1)` via the kt-bridge borrow
@@ -18822,8 +17911,7 @@ pub fn gqa_attention_prepare_prefill(
 /// adapter) so the caller's tape/decline/reshape logic is byte-for-byte
 /// unchanged. Returns `Ok(None)` — falling through to the caller's existing
 /// candle `broadcast_matmul` pair — on any of:
-/// - the gate is off (`KILN_DISABLE_KT_API_GQA_SDPA=1` /
-///   `KILN_DISABLE_KT_API_ALL=1`);
+/// - `accelerator.kt_api_mode = "disabled"`;
 /// - non-CUDA device, non-{BF16,F16,F32} / mixed dtype, or a non-contiguous
 ///   operand;
 /// - autograd-tracked `q` (the candle `loss.backward()` parity oracle keeps
@@ -18845,7 +17933,7 @@ fn try_kt_gqa_sdpa_matmuls(
     seq_len: usize,
     scale: f64,
 ) -> Result<Option<(Tensor, Option<kiln_memory::governor::Reservation<'static>>)>> {
-    if !cuda_use_kt_api_gqa_sdpa() {
+    if !crate::kt_api_policy::stable_routes_enabled() {
         return Ok(None);
     }
     // The autograd / tape paths must run the candle composite: an
@@ -22349,8 +21437,8 @@ fn gqa_attention_paged_with_rope_tables(
         &PagedDecodeGraphInputs<'_>,
     >,
     // Phase 7 #1082: kt twin of `paged_cache` used to mirror the
-    // CUDA-graph paged-KV write to the kt cache when the env gate
-    // `KILN_USE_KT_PAGED_KV_CACHE` is on. `None` means "gate off,
+    // CUDA-graph paged-KV write to the kt cache when
+    // `accelerator.kt_api_mode = "all"`. `None` means "policy disabled,
     // non-CUDA device, or caller hasn't been migrated yet" — the
     // candle writer below runs unchanged in that case. CUDA-gated
     // since `PagedKvCacheKt` itself is CUDA-only.
@@ -22891,7 +21979,7 @@ fn gqa_attention_paged_with_rope_tables(
                     #[cfg(feature = "cuda")]
                     // Phase 7 #1082: when the legacy PagedKvCache writer
                     // succeeded and a kt twin cache is plumbed through (i.e. the
-                    // `KILN_USE_KT_PAGED_KV_CACHE` gate is on and the
+                    // `accelerator.kt_api_mode = "all"` gate is on and the
                     // owning struct allocated a kt cache via
                     // `try_kt_paged_kv_cache_new`), mirror the same write
                     // into the kt cache through
@@ -27361,7 +26449,7 @@ pub fn model_forward_paged(
 /// When `kt_paged_cache` is `None` (or built features are non-CUDA), behavior
 /// is bit-identical to [`model_forward_paged`] — the candle writer is the only
 /// thing that runs. When `Some(&kt)` is passed AND
-/// `KILN_USE_KT_PAGED_KV_CACHE` is on, every paged-KV write inside
+/// `accelerator.kt_api_mode = "all"` is on, every paged-KV write inside
 /// [`gqa_attention_paged_with_rope_tables`] mirrors into the kt cache via
 /// `try_kt_paged_kv_write_token_major_native_graph_slot`.
 ///
@@ -34128,7 +33216,7 @@ mod tests {
         )?;
         // Phase 7 #1082: parallel-allocate a kt twin via the constructor
         // stub `try_kt_paged_kv_cache_new` (commit 638bc441). When the
-        // env gate `KILN_USE_KT_PAGED_KV_CACHE` is off (the default),
+        // startup mode `accelerator.kt_api_mode = "all"` is off (the default),
         // this returns `None` and is zero overhead — the test still
         // runs against `batch_cache` only and asserts the same parity
         // bound. When the gate is on, the kt cache is allocated

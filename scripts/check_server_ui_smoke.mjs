@@ -1634,10 +1634,15 @@ async function startServer({
           },
         },
         accelerator_runtime: {
-          schema_id: 'kiln.accelerator-runtime-policy.v3',
-          version: 3,
+          schema_id: 'kiln.accelerator-runtime-policy.v4',
+          version: 4,
           serving_profile: 'stable',
           serving_profile_source: 'default',
+          kt_api_mode: {
+            configured: 'auto',
+            effective: 'auto',
+            source: 'default',
+          },
           rocm_synchronization_mode: {
             configured: 'legacy_host_barriers',
             effective: 'legacy_host_barriers',
@@ -2765,9 +2770,10 @@ async function expectDirectDecodeRendezvousRuntimeConfig(page, scenarioLabel) {
 async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   const prefix = `${scenarioLabel} ROCm matmul runtime config`;
   const selector = '#runtime-config-body';
-  await waitForPanelText(page, selector, /ROCm execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v3[\s\S]*v3/, `${prefix} should render policy schema v3`);
-  await waitForPanelText(page, selector, /ROCm execution[\s\S]*Strided batched matmul[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable strided-batched route and source`);
-  await waitForPanelText(page, selector, /ROCm execution[\s\S]*BF16 matmul output[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable BF16-output route and source`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v4[\s\S]*v4/, `${prefix} should render policy schema v4`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Kiln-tensor API routes[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable adapter route set and source`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Strided batched matmul[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable strided-batched route and source`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*BF16 matmul output[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable BF16-output route and source`);
 }
 
 async function expectStreamingPrefillRuntimeConfig(page, scenarioLabel) {

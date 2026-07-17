@@ -245,10 +245,15 @@ def require_nonnegative_int(value: Any, label: str) -> int:
 
 def expected_policy(mode: str) -> dict[str, Any]:
     return {
-        "schema_id": "kiln.accelerator-runtime-policy.v3",
-        "version": 3,
+        "schema_id": "kiln.accelerator-runtime-policy.v4",
+        "version": 4,
         "serving_profile": "experimental",
         "serving_profile_source": "config_file",
+        "kt_api_mode": {
+            "configured": "auto",
+            "effective": "auto",
+            "source": "default",
+        },
         "rocm_synchronization_mode": {
             "configured": mode,
             "effective": mode,

@@ -220,12 +220,12 @@ impl RocmBackend {
         let gdn_gated_rms_norm_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
         let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
-        // #1082: the dedicated KILN_DISABLE_KT_API_CONV1D gate was
+        // #1082: the dedicated per-operation KT disable gate was
         // removed once the kt-typed conv1d surface became the only
         // path in `causal_conv1d_{update,prefill}`. The whole-kernel
         // kill switch `KILN_DISABLE_FUSED_CONV1D=1` still falls back
         // to forward.rs's candle to_f32/cat/sum/narrow chain.
-        // #1082: the dedicated KILN_DISABLE_KT_API_GDN gate was
+        // #1082: the dedicated per-operation KT disable gate was
         // removed once the kt-typed GDN surface became the only path
         // across all 10 dispatch wires. The whole-kernel kill switch
         // `KILN_DISABLE_GDN_KERNEL=1` (plus the per-wire decode-fused
@@ -237,7 +237,7 @@ impl RocmBackend {
         // the Rust shell types changing. The `with_graph_outputs`
         // site retains its `graph_outputs.is_none()` guard so the
         // caller-owned-output path keeps using the candle wrapper.
-        // KILN_DISABLE_KT_API_FLASH_ATTN gate removed alongside the
+        // The per-operation KT disable gate was removed alongside the
         // 3 sites where the kt-typed path is the only path. The
         // 4th site checks `graph_outputs.is_none()` directly.
         let gdn_decode_fused_enabled = gdn_gates_enabled
@@ -2074,10 +2074,10 @@ impl LinearBackend for RocmBackend {
             let x2d = x.reshape((lead, k))?;
 
             // Phase 7 opt-in: route through the kt hipBLASLt handle
-            // when KILN_USE_KT_API_MATMUL=1 and the dtype is supported.
+            // when accelerator.kt_api_mode = "all" and the dtype is supported.
             // NVTX range from try_kt_matmul brackets the call as
             // kiln/matmul_kt in nsys.
-            if crate::forward::rocm_use_kt_api_matmul()
+            if crate::kt_api_policy::experimental_routes_enabled()
                 && matches!(
                     x2d.dtype(),
                     kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32
@@ -2108,7 +2108,7 @@ impl LinearBackend for RocmBackend {
             // by (B × T × K), whereas broadcast_matmul's implicit copy scales
             // as (B × K × N), typically larger by an order of magnitude on
             // Qwen3.5-4B GDN in-proj shapes. (#1082)
-            if crate::forward::rocm_use_kt_api_matmul()
+            if crate::kt_api_policy::experimental_routes_enabled()
                 && matches!(
                     x.dtype(),
                     kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32

@@ -373,18 +373,19 @@ training request
 
       <article class="card p-6">
         <div class="label mb-3">Accelerator execution</div>
-        <h2 id="rocm-execution-policy" class="text-2xl font-semibold mb-4">ROCm execution policy, stream ordering, and graph lifecycle</h2>
+        <h2 id="rocm-execution-policy" class="text-2xl font-semibold mb-4">Immutable accelerator routes, ROCm stream ordering, and graph lifecycle</h2>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
           runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
-          to produce <code>kiln.accelerator-runtime-policy.v3</code>. The same resolved object is installed in
+          to produce <code>kiln.accelerator-runtime-policy.v4</code>. The same resolved object is installed in
           the tensor context, projected into the model graph runner, stored in server state, and returned by
           product diagnostics. Tensor, model, and kernel code do not re-read the public graph,
           synchronization, or matmul-route environment names during inference.
         </p>
         <pre class="mt-5"><code>typed [server] + [accelerator] configuration
   -> strict parse, source attribution, and serving-profile gate
-  -> immutable accelerator runtime policy v3
+  -> immutable accelerator runtime policy v4
+  -> kiln-tensor adapter route set installed before model execution
   -> primary ROCm context synchronization and matmul-route discipline
   -> ModelRunner graph lifecycle and bounded graph cache
   -> /v1/config + /health + trusted debug + dashboard + Prometheus</code></pre>
@@ -403,6 +404,16 @@ training request
             <p>The primary context stores the policy. A later owner requesting another policy for the same device receives an error naming the installed and requested values; multiple model/runtime owners cannot silently mix ordering disciplines.</p>
           </div>
         </div>
+
+        <h3 class="font-semibold mt-6 mb-3">Adapter routes are one typed policy</h3>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          <code>accelerator.kt_api_mode</code> replaces the former per-operation environment switches.
+          <code>auto</code> enables the qualified kiln-tensor routes while leaving generic matmul and paged-KV
+          experiments inactive; <code>all</code> enables the complete route set and <code>disabled</code> forces
+          legacy fallbacks. The explicit comparison modes require the experimental profile. The model stores
+          the selected value once, accepts an idempotent reinstall, and rejects a conflicting process-lifetime
+          value rather than allowing different requests or model owners to execute different route mixtures.
+        </p>
 
         <h3 class="font-semibold mt-6 mb-3">Matmul route choice is fixed before inference</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">

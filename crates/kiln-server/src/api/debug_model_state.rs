@@ -977,7 +977,11 @@ mod tests {
         assert_eq!(json["decode_runtime"]["max_decode_batch"]["effective"], 8);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v3"
+            "kiln.accelerator-runtime-policy.v4"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["kt_api_mode"]["effective"],
+            "auto"
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_graph_cache_max_bytes"]["effective"],

@@ -125,8 +125,8 @@ pub const DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MIN: u64 = 64 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024 * 1024;
 /// Versioned schema identity shared by config, health, and debug diagnostics.
-pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v3";
-pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 3;
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v4";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 4;
 
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
@@ -1266,6 +1266,100 @@ impl<'de> Deserialize<'de> for ServingProfileSetting {
     }
 }
 
+/// Startup-authoritative kiln-tensor adapter route selection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KtApiMode {
+    /// Use qualified defaults: stable routes are active while experimental
+    /// matmul and paged-KV routes remain inactive.
+    #[default]
+    Auto,
+    /// Activate every adapter route. Requires the experimental profile.
+    All,
+    /// Disable every adapter route. Requires the experimental profile.
+    Disabled,
+}
+
+impl KtApiMode {
+    fn parse(raw: &str, label: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "all" => Ok(Self::All),
+            "disabled" => Ok(Self::Disabled),
+            _ => anyhow::bail!("{label} must be one of auto, all, or disabled; got {raw:?}"),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::All => "all",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+impl fmt::Display for KtApiMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Source-tracked kiln-tensor adapter route setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KtApiModeSetting {
+    mode: KtApiMode,
+    source: ConfigValueSource,
+}
+
+impl KtApiModeSetting {
+    pub const fn new(mode: KtApiMode, source: ConfigValueSource) -> Self {
+        Self { mode, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        Ok(Self::new(
+            KtApiMode::parse(raw, name)?,
+            ConfigValueSource::Environment,
+        ))
+    }
+
+    pub const fn mode(self) -> KtApiMode {
+        self.mode
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for KtApiModeSetting {
+    fn default() -> Self {
+        Self::new(KtApiMode::Auto, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for KtApiModeSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.mode.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for KtApiModeSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let mode =
+            KtApiMode::parse(&raw, "accelerator.kt_api_mode").map_err(serde::de::Error::custom)?;
+        Ok(Self::new(mode, ConfigValueSource::ConfigFile))
+    }
+}
+
 /// ROCm host/stream synchronization policy selected at process startup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1828,6 +1922,7 @@ pub struct ResolvedAcceleratorRuntimePolicy {
     pub version: u32,
     pub serving_profile: ServingProfile,
     pub serving_profile_source: ConfigValueSource,
+    pub kt_api_mode: ResolvedAcceleratorValue<KtApiMode>,
     pub rocm_synchronization_mode: ResolvedAcceleratorValue<RocmSynchronizationMode>,
     pub rocm_strided_batched_matmul_mode: ResolvedAcceleratorValue<RocmStridedBatchedMatmulMode>,
     pub rocm_bf16_matmul_output_mode: ResolvedAcceleratorValue<RocmBf16MatmulOutputMode>,
@@ -1841,6 +1936,7 @@ pub struct ResolvedAcceleratorRuntimePolicy {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AcceleratorRuntimeConfig {
+    pub kt_api_mode: KtApiModeSetting,
     pub rocm_synchronization_mode: RocmSynchronizationModeSetting,
     pub rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting,
     pub rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting,
@@ -1868,6 +1964,11 @@ impl AcceleratorRuntimeConfig {
             version: ACCELERATOR_RUNTIME_POLICY_VERSION,
             serving_profile: serving_profile.profile(),
             serving_profile_source: serving_profile.source(),
+            kt_api_mode: ResolvedAcceleratorValue {
+                configured: self.kt_api_mode.mode(),
+                effective: self.kt_api_mode.mode(),
+                source: self.kt_api_mode.source(),
+            },
             rocm_synchronization_mode: ResolvedAcceleratorValue {
                 configured: self.rocm_synchronization_mode.mode(),
                 effective: self.rocm_synchronization_mode.mode(),
@@ -1904,6 +2005,12 @@ impl AcceleratorRuntimeConfig {
     /// Fail closed when an experimental ROCm behavior is requested under a
     /// profile that does not permit live accelerator experiments.
     pub fn validate_for_serving_profile(&self, profile: ServingProfile) -> Result<()> {
+        if self.kt_api_mode.mode() != KtApiMode::Auto && profile != ServingProfile::Experimental {
+            anyhow::bail!(
+                "accelerator.kt_api_mode={} requires server.serving_profile=experimental; got {profile}",
+                self.kt_api_mode.mode()
+            );
+        }
         if self.rocm_synchronization_mode.mode() == RocmSynchronizationMode::StreamOrdered
             && profile != ServingProfile::Experimental
         {
@@ -1945,6 +2052,7 @@ impl AcceleratorRuntimeConfig {
 impl Default for AcceleratorRuntimeConfig {
     fn default() -> Self {
         Self {
+            kt_api_mode: KtApiModeSetting::default(),
             rocm_synchronization_mode: RocmSynchronizationModeSetting::default(),
             rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting::default(),
             rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting::default(),
@@ -4609,6 +4717,12 @@ impl NormalizedEnvValue for ServingProfileSetting {
     }
 }
 
+impl NormalizedEnvValue for KtApiModeSetting {
+    fn normalized_env_value(&self) -> String {
+        self.mode().as_str().to_owned()
+    }
+}
+
 impl NormalizedEnvValue for RocmSynchronizationModeSetting {
     fn normalized_env_value(&self) -> String {
         self.mode().as_str().to_owned()
@@ -4927,6 +5041,9 @@ macro_rules! public_env_parser {
     (serving_profile) => {
         ServingProfileSetting::from_named_environment_value
     };
+    (kt_api_mode) => {
+        KtApiModeSetting::from_named_environment_value
+    };
     (rocm_synchronization_mode) => {
         RocmSynchronizationModeSetting::from_named_environment_value
     };
@@ -5142,6 +5259,7 @@ macro_rules! optional_section_public_env_field {
 /// and conformance tests all derive from it.
 static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     public_env_field!(serving_profile, server.serving_profile, SERVING_PROFILE_ENV),
+    public_env_field!(kt_api_mode, accelerator.kt_api_mode),
     public_env_field!(
         rocm_synchronization_mode,
         accelerator.rocm_synchronization_mode
@@ -6529,6 +6647,7 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     const EXPECTED_PUBLIC_ENV_NAMES: &[&str] = &[
+        "KILN_ACCELERATOR_KT_API_MODE",
         "KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE",
         "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES",
         "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES",
@@ -6805,6 +6924,7 @@ mod tests {
         assert!(!config.server.chat_config_hash_metadata);
         assert_eq!(config.server.slow_request_warn_secs, 30);
         assert_eq!(config.server.shutdown_timeout_secs, 5);
+        assert_eq!(config.accelerator.kt_api_mode.mode(), KtApiMode::Auto);
         assert_eq!(
             config.accelerator.rocm_synchronization_mode.mode(),
             RocmSynchronizationMode::LegacyHostBarriers
@@ -6830,6 +6950,7 @@ mod tests {
             DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES
         );
         for source in [
+            config.accelerator.kt_api_mode.source(),
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_strided_batched_matmul_mode.source(),
             config.accelerator.rocm_bf16_matmul_output_mode.source(),
@@ -7047,6 +7168,14 @@ mod tests {
             assert_eq!(resolved.serving_profile, profile);
             assert_eq!(resolved.serving_profile_source, source);
             assert_eq!(
+                resolved.kt_api_mode,
+                ResolvedAcceleratorValue {
+                    configured: KtApiMode::Auto,
+                    effective: KtApiMode::Auto,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
                 resolved.rocm_synchronization_mode,
                 ResolvedAcceleratorValue {
                     configured: RocmSynchronizationMode::LegacyHostBarriers,
@@ -7101,10 +7230,13 @@ mod tests {
             ConfigValueSource::Environment,
         )))
         .unwrap();
-        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v3");
-        assert_eq!(json["version"], 3);
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v4");
+        assert_eq!(json["version"], 4);
         assert_eq!(json["serving_profile"], "experimental");
         assert_eq!(json["serving_profile_source"], "environment");
+        assert_eq!(json["kt_api_mode"]["configured"], "auto");
+        assert_eq!(json["kt_api_mode"]["effective"], "auto");
+        assert_eq!(json["kt_api_mode"]["source"], "default");
         assert_eq!(json["rocm_graph_mode"]["configured"], "profile");
         assert_eq!(json["rocm_graph_mode"]["effective"], "lazy_capture_replay");
         assert_eq!(json["rocm_graph_mode"]["source"], "default");
@@ -7118,6 +7250,7 @@ mod tests {
 serving_profile = "experimental"
 
 [accelerator]
+kt_api_mode = "all"
 rocm_synchronization_mode = "stream_ordered"
 rocm_strided_batched_matmul_mode = "disabled"
 rocm_bf16_matmul_output_mode = "f32_then_cast"
@@ -7128,6 +7261,7 @@ rocm_graph_cache_max_bytes = 17179869184
         )
         .unwrap();
         config.validate().unwrap();
+        assert_eq!(config.accelerator.kt_api_mode.mode(), KtApiMode::All);
         assert_eq!(
             config.accelerator.rocm_synchronization_mode.mode(),
             RocmSynchronizationMode::StreamOrdered
@@ -7150,6 +7284,7 @@ rocm_graph_cache_max_bytes = 17179869184
             ROCM_GRAPH_CACHE_MAX_BYTES_MAX
         );
         for source in [
+            config.accelerator.kt_api_mode.source(),
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_strided_batched_matmul_mode.source(),
             config.accelerator.rocm_bf16_matmul_output_mode.source(),
@@ -7183,6 +7318,8 @@ rocm_graph_cache_max_bytes = 17179869184
         }
 
         for document in [
+            "[accelerator]\nkt_api_mode = \"sometimes\"\n".to_owned(),
+            "[accelerator]\nkt_api_mode = true\n".to_owned(),
             "[accelerator]\nrocm_synchronization_mode = \"eventually\"\n".to_owned(),
             "[accelerator]\nrocm_synchronization_mode = true\n".to_owned(),
             "[accelerator]\nrocm_strided_batched_matmul_mode = \"sometimes\"\n".to_owned(),
@@ -7219,6 +7356,17 @@ rocm_graph_cache_max_bytes = 17179869184
         }
 
         for profile in [ServingProfile::Stable, ServingProfile::Maintenance] {
+            for mode in [KtApiMode::All, KtApiMode::Disabled] {
+                let mut gated = KilnConfig::default();
+                gated.server.serving_profile =
+                    ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
+                gated.accelerator.kt_api_mode =
+                    KtApiModeSetting::new(mode, ConfigValueSource::ConfigFile);
+                let detail = gated.validate().unwrap_err().to_string();
+                assert!(detail.contains("accelerator.kt_api_mode"), "{detail}");
+                assert!(detail.contains("experimental"), "{detail}");
+            }
+
             for mode in [
                 RocmGraphMode::WarmupThenEager,
                 RocmGraphMode::LazyCaptureReplay,
@@ -7538,7 +7686,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 98);
+        assert_eq!(original_len, 99);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -7609,7 +7757,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 103);
+        assert_eq!(serialized_leaves.len(), 104);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -7652,11 +7800,12 @@ rocm_graph_cache_max_bytes = 17179869184
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_ninety_six_public_fields() {
+    fn public_env_canonical_only_loads_all_ninety_nine_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
             ("KILN_SERVER_SERVING_PROFILE", "experimental"),
+            ("KILN_ACCELERATOR_KT_API_MODE", "all"),
             (
                 "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE",
                 "stream_ordered",
@@ -7772,6 +7921,7 @@ rocm_graph_cache_max_bytes = 17179869184
             config.server.serving_profile.profile(),
             ServingProfile::Experimental
         );
+        assert_eq!(config.accelerator.kt_api_mode.mode(), KtApiMode::All);
         assert_eq!(
             config.accelerator.rocm_synchronization_mode.mode(),
             RocmSynchronizationMode::StreamOrdered
@@ -7978,6 +8128,7 @@ rocm_graph_cache_max_bytes = 17179869184
 
         for source in [
             config.server.serving_profile.source(),
+            config.accelerator.kt_api_mode.source(),
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_graph_mode.source(),
             config.accelerator.rocm_graph_cache_entries.source(),

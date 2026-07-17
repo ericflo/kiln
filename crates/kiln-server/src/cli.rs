@@ -1669,6 +1669,12 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             );
             println!(
                 "  {} {} (source: {})",
+                style("Kiln-tensor API routes:").dim(),
+                accelerator_runtime.kt_api_mode.effective,
+                accelerator_runtime.kt_api_mode.source,
+            );
+            println!(
+                "  {} {} (source: {})",
                 style("ROCm synchronization:").dim(),
                 accelerator_runtime.rocm_synchronization_mode.effective,
                 accelerator_runtime.rocm_synchronization_mode.source,

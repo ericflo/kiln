@@ -453,15 +453,20 @@ changes.
 
 ### Tier 3 — `kiln-model` (the forward pass)
 
-27 .rs files. The candle surface here is the most diffuse and the most
-performance-sensitive. Migration proceeds op-family by op-family, with
-each migration env-gated by a `KILN_USE_KT_API_*` flag so the gate can be
-flipped to default-on after a clean parity-test cycle.
+27 .rs files. The candle surface here was the most diffuse and the most
+performance-sensitive. The original migration proceeded op-family by
+op-family behind per-operation environment switches. That switch family has
+now been deleted in favor of the startup-authoritative
+`accelerator.kt_api_mode` typed policy.
 
 State today (post-#f569b7be):
 
-- 40+ env-gated kt-API parallel paths landed; each defaults off.
-- The `KILN_USE_KT_API_ALL=1` master switch flips all gates on at once.
+- Qualified stable kt-API routes are active under the default `auto` policy.
+- Generic matmul and paged-KV experiments require `kt_api_mode = "all"`;
+  `kt_api_mode = "disabled"` selects legacy fallbacks. Both explicit modes
+  require the experimental serving profile.
+- Per-operation `KILN_USE_KT_API_*`, `KILN_DISABLE_KT_API_*`, and
+  `KILN_USE_KT_PAGED_KV_*` names are removed rather than retained as aliases.
 - `PagedKvCache` ↔ `PagedKvCacheKt` migration is partial — constructor +
   writer wired, first end-to-end production site flipped via bench
   (`d5bba062`), ~10 decode call sites remain on the candle path.

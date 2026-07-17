@@ -40,8 +40,8 @@ use kiln_model::forward::{
     model_forward_paged_streaming_with_policy,
     // Phase 7 #1082: kt twin entry point + allocator stub for the first
     // end-to-end PagedKvCacheKt production wiring (latency bench decode
-    // loop). Both are CUDA-only and only kick in when the env gate
-    // `KILN_USE_KT_PAGED_KV_CACHE` is on; behavior is identical otherwise.
+    // loop). Both are CUDA-only and active only when
+    // `accelerator.kt_api_mode = "all"`; behavior is identical otherwise.
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::sampling::{greedy_sample, sample_step};
@@ -986,7 +986,7 @@ fn bench_latency_paged(
     )?;
 
     // Phase 7 #1082: first end-to-end PagedKvCacheKt production wiring.
-    // When `KILN_USE_KT_PAGED_KV_CACHE` (or `KILN_USE_KT_API_ALL`) is on
+    // When `accelerator.kt_api_mode = "all"` is on
     // AND we're on a CUDA device, allocate a kt twin alongside the
     // candle `paged_cache` and pass it to `model_forward_paged_with_kt`
     // below so every paged-KV write inside the GQA attention writer
@@ -2941,6 +2941,9 @@ fn main() -> Result<()> {
 
     let startup_config = KilnConfig::load(args.config_path.as_deref())
         .context("load benchmark startup configuration")?;
+    let accelerator_runtime_policy = startup_config
+        .accelerator
+        .resolved_policy(startup_config.server.serving_profile);
     let gradient_checkpoint_policy = kiln_train::GradientCheckpointPolicy::from_parts(
         startup_config.training.grad_checkpoint_segments,
         startup_config.training.no_grad_checkpoint,
@@ -2976,6 +2979,8 @@ fn main() -> Result<()> {
     // Resolve the benchmark device before any memory probe so mixed-accelerator
     // hosts never report or budget against whichever GPU an auto probe finds first.
     let device_kt = kiln_server::device::select_device_kt()?;
+    kiln_server::accelerator_runtime::install_startup_policy(device_kt, accelerator_runtime_policy)
+        .context("install benchmark accelerator startup policy")?;
     let vram_probe_selector = vram_probe_selector_for_device(&device_kt);
     let backend = runtime_backend::for_device_kt(&device_kt);
     let backend_name = BackendIdentity::runtime_name(backend.as_ref());

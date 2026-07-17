@@ -160,6 +160,12 @@ def build_definitions() -> None:
         "The authority that selected the effective concurrent decode width.",
     )
     add_enum(
+        "KtApiMode",
+        "KtApiMode",
+        ["auto", "all", "disabled"],
+        "The process-lifetime kiln-tensor adapter route selection.",
+    )
+    add_enum(
         "RocmSynchronizationMode",
         "RocmSynchronizationMode",
         ["legacy_host_barriers", "stream_ordered"],
@@ -404,6 +410,7 @@ def build_definitions() -> None:
         "Operator-facing resolution report for process-lifetime serving policy.",
     )
     for name, rust_value, value_schema in (
+        ("ResolvedKtApiMode", "KtApiMode", ref("KtApiMode")),
         ("ResolvedRocmSynchronizationMode", "RocmSynchronizationMode", ref("RocmSynchronizationMode")),
         (
             "ResolvedRocmStridedBatchedMatmulMode",
@@ -436,6 +443,7 @@ def build_definitions() -> None:
             "version": ref("NonNegativeInteger"),
             "serving_profile": ref("ServingProfile"),
             "serving_profile_source": ref("ConfigValueSource"),
+            "kt_api_mode": ref("ResolvedKtApiMode"),
             "rocm_synchronization_mode": ref("ResolvedRocmSynchronizationMode"),
             "rocm_strided_batched_matmul_mode": ref(
                 "ResolvedRocmStridedBatchedMatmulMode"

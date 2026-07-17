@@ -52,6 +52,11 @@
           "version": 0,
           "serving_profile": "stable",
           "serving_profile_source": "default",
+          "kt_api_mode": {
+            "configured": "auto",
+            "effective": "auto",
+            "source": "default"
+          },
           "rocm_synchronization_mode": {
             "configured": "legacy_host_barriers",
             "effective": "legacy_host_barriers",
@@ -779,6 +784,11 @@
             "version": 0,
             "serving_profile": "stable",
             "serving_profile_source": "default",
+            "kt_api_mode": {
+              "configured": "auto",
+              "effective": "auto",
+              "source": "default"
+            },
             "rocm_synchronization_mode": {
               "configured": "legacy_host_barriers",
               "effective": "legacy_host_barriers",
@@ -1360,6 +1370,11 @@
           "version": 0,
           "serving_profile": "stable",
           "serving_profile_source": "default",
+          "kt_api_mode": {
+            "configured": "auto",
+            "effective": "auto",
+            "source": "default"
+          },
           "rocm_synchronization_mode": {
             "configured": "legacy_host_barriers",
             "effective": "legacy_host_barriers",
@@ -4476,6 +4491,17 @@
       "x-kiln-rust-type": "HttpRuntimeInfo | HttpDebugState",
       "x-kiln-field-schema-status": "complete"
     },
+    "KtApiMode": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "all",
+        "disabled"
+      ],
+      "description": "The process-lifetime kiln-tensor adapter route selection.",
+      "x-kiln-rust-type": "KtApiMode",
+      "x-kiln-field-schema-status": "complete"
+    },
     "KvAutoscalerState": {
       "type": "object",
       "additionalProperties": false,
@@ -6619,6 +6645,7 @@
         "version",
         "serving_profile",
         "serving_profile_source",
+        "kt_api_mode",
         "rocm_synchronization_mode",
         "rocm_strided_batched_matmul_mode",
         "rocm_bf16_matmul_output_mode",
@@ -6638,6 +6665,9 @@
         },
         "serving_profile_source": {
           "$ref": "#/$defs/ConfigValueSource"
+        },
+        "kt_api_mode": {
+          "$ref": "#/$defs/ResolvedKtApiMode"
         },
         "rocm_synchronization_mode": {
           "$ref": "#/$defs/ResolvedRocmSynchronizationMode"
@@ -6660,6 +6690,29 @@
       },
       "description": "Versioned process-lifetime accelerator policy.",
       "x-kiln-rust-type": "ResolvedAcceleratorRuntimePolicy",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ResolvedKtApiMode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "effective",
+        "source"
+      ],
+      "properties": {
+        "configured": {
+          "$ref": "#/$defs/KtApiMode"
+        },
+        "effective": {
+          "$ref": "#/$defs/KtApiMode"
+        },
+        "source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        }
+      },
+      "description": "One configured/effective accelerator policy leaf and its startup source.",
+      "x-kiln-rust-type": "ResolvedAcceleratorValue<KtApiMode>",
       "x-kiln-field-schema-status": "complete"
     },
     "ResolvedRocmBf16MatmulOutputMode": {

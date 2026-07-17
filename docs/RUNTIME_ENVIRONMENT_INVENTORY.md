@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **877 direct read call sites** and
+The scanner records **829 direct read call sites** and
 **361 process-mutation call sites**. It can
-statically name **342 distinct literal `KILN_*`
-read names** across **503 call sites**.
+statically name **304 distinct literal `KILN_*`
+read names** across **455 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 405 | 301 | 0 |
+| Experimental/debug migration | 357 | 263 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 135 | 41 | 353 |
 
@@ -56,7 +56,7 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/forward.rs` | 112 | 90 |
+| `crates/kiln-model/src/forward.rs` | 64 | 52 |
 | `crates/kiln-vulkan-kernel/src/kernels.rs` | 47 | 46 |
 | `crates/kiln-model/src/backend/vulkan_config.rs` | 27 | 27 |
 | `crates/kiln-model/src/mtp_debug.rs` | 24 | 24 |
@@ -195,37 +195,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK` | Experimental/debug migration | 2 | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs` |
 | `KILN_DISABLE_GDN_KERNEL` | Experimental/debug migration | 3 | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_DISABLE_GRPO_SHARED_PREFIX_REF` | Experimental/debug migration | 1 | `crates/kiln-train/src/trainer.rs` |
-| `KILN_DISABLE_KT_API_ABS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_ADD_SCALAR` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_ALL` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_ARGMAX` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_CAT_DIM0` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_CAT_DIM1` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_CAT_DIM2` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_CONCAT_LAST_DIM` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_COS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_EMBEDDING` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_EXP` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_GQA_SDPA` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_L2_NORMALIZE` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_LM_HEAD` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_LOG` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_LORA_ADD` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_LORA_DELTA` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_MAX_BINARY` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_MAX_LAST_DIM` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_MEAN_LAST_DIM` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_NEG` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_RECIP` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_RSQRT` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_SIN` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_SOFTMAX` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_SQRT` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_SUM_AXIS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_SUM_LAST_DIM` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_SUM_SQ_LAST_DIM` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_SWIGLU_FFN` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_KT_API_TO_DTYPE` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_MARLIN_BF16_DROP` | Experimental/debug migration, Test only | 3 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
@@ -427,13 +396,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_TRACE_SFT_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-train/src/trainer.rs` |
 | `KILN_TRACE_TAPE_BACKWARD_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-autograd/src/tape.rs` |
 | `KILN_TRACE_TAPE_GDN_CONV_DECISIONS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_USE_KT_API_ALL` | Experimental/debug migration | 6 | `crates/kiln-model/src/forward.rs` |
-| `KILN_USE_KT_API_MATMUL` | Experimental/debug migration | 2 | `crates/kiln-model/src/forward.rs` |
-| `KILN_USE_KT_PAGED_KV_BLOCK_SIZE` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_USE_KT_PAGED_KV_CACHE` | Experimental/debug migration | 5 | `crates/kiln-model/src/forward.rs` |
-| `KILN_USE_KT_PAGED_KV_IS_FP8` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_USE_KT_PAGED_KV_NUM_LAYERS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_USE_KT_PAGED_KV_POOL_TENSORS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_VK_BF16W_ROW_TILE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/matmul_bf16w.rs` |
 | `KILN_VK_ELEMENTWISE_TILE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/mod.rs` |
 | `KILN_VK_EXP_TILE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/mod.rs` |

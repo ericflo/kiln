@@ -11,6 +11,7 @@ pub mod engine;
 pub mod forward;
 pub mod fp8;
 pub mod generate;
+mod kt_api_policy;
 pub mod kv_cache;
 pub mod loader;
 pub mod lora;
@@ -92,6 +93,7 @@ pub use generate::{
     PagedPrefixRegistration, PagedPrefixReuse, PrefixCachedGenerationOutput, StreamDone,
     StreamEvent, StreamToken, ThreadedStreamingOutput,
 };
+pub use kt_api_policy::{KtApiMode, install_kt_api_mode};
 pub use kv_cache::KvCache;
 pub use loader::{
     LoadModelOptions, load_model, load_model_with_options, load_model_with_options_and_snapshot_dir,

@@ -2596,10 +2596,15 @@ def accelerator_policy_attestation_failures(
         "profile" if graphs_requested else "disabled"
     )
     expected = {
-        "schema_id": "kiln.accelerator-runtime-policy.v3",
-        "version": 3,
+        "schema_id": "kiln.accelerator-runtime-policy.v4",
+        "version": 4,
         "serving_profile": serving_profile,
         "serving_profile_source": "config_file",
+        "kt_api_mode": {
+            "configured": "auto",
+            "effective": "auto",
+            "source": "default",
+        },
         "rocm_synchronization_mode": {
             "configured": synchronization_mode,
             "effective": synchronization_mode,

@@ -114,6 +114,11 @@ max_decode_batch = "auto"                # Concurrent decode-row ceiling. "auto"
                                       # this with fold_reasoning_into_content.
 
 [accelerator]
+kt_api_mode = "auto"                    # auto | all | disabled. Auto enables the qualified
+                                      # kiln-tensor adapter routes while leaving experimental
+                                      # matmul and paged-KV routes off. `all` and `disabled`
+                                      # require server.serving_profile="experimental". Override
+                                      # with KILN_ACCELERATOR_KT_API_MODE.
 rocm_synchronization_mode = "legacy_host_barriers" # Qualified default. `stream_ordered` removes
                                       # only proven same-stream host barriers and uses a primary-
                                       # stream external-yield wait; it requires
