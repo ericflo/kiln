@@ -52,7 +52,8 @@ REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS = 10.0
 MAX_STEADY_STATE_WARMUP_WAVES = 16
 ROCM_GRAPH_ADMISSION_POLICY = "idle_owner_lru_then_active_fair_lru"
 ROCM_GRAPH_ACTIVE_OWNER_FLOOR = 1
-ROCM_GRAPH_TRANSITION_HEADROOM_ENTRIES = mixed.MAX_ACTIVE_REQUESTS
+# Fair active relief creates transition room only when a candidate needs it.
+ROCM_GRAPH_TRANSITION_HEADROOM_ENTRIES = 0
 ROCM_GRAPH_CACHE_MAX = (
     mixed.MAX_ACTIVE_REQUESTS * ROCM_GRAPH_ACTIVE_OWNER_FLOOR
     + ROCM_GRAPH_TRANSITION_HEADROOM_ENTRIES
@@ -621,7 +622,7 @@ def effective_config(
         if runtime.graph_cache_max != expected_graph_cache_max:
             raise SoakError(
                 "ROCm graph cache must reserve one protected geometry for each "
-                "declared active request plus the declared transition headroom: "
+                "declared active request plus any explicit transition headroom: "
                 f"{runtime.graph_cache_max} != {expected_graph_cache_max}"
             )
     effective = {

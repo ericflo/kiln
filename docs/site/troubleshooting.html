@@ -683,11 +683,14 @@ kiln serve --config rocm-graph-eager.toml
           evidence that the graph cache byte limit is too low.
         </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          The committed Strix Halo ROCm development soak provisions 24 entries as one protected geometry for each
-          of 12 declared active owners plus 12 transition entries; this is qualification headroom, not the product
-          default. Unused global headroom remains shared. At saturation, idle owners precede minimum fair-LRU
-          active relief, which preserves one projected graph per active owner and every live recurrent-state slot.
-          It also runs the
+          The committed Strix Halo ROCm development soak provisions 12 entries, matching the product default: one
+          protected geometry for each of 12 declared active owners and zero pre-reserved transition entries.
+          Unused global headroom remains shared. At saturation, idle owners precede minimum fair-LRU active relief,
+          which creates only the transition room then required while preserving one projected graph per active
+          owner and every live recurrent-state slot. A same-binary A/B completed the identical first seven-wave
+          sequence 25.3 percent faster at 12 than 24 entries despite lower active p50 SCLK; the smaller arm safely
+          settled seven measured capacity transactions with zero fallback. Treat 12 as the qualified Strix Halo
+          point, not a universal optimum, and require local evidence before raising it. The soak also runs the
           same independent host controller as the Vulkan soak: sample every 250 ms, terminate below 8 GiB
           <code>MemAvailable</code>, fail the result above 512 MiB swap growth, and pace the complete server group at
           88,000/80,000 millicelsius and fail closed at 97,000 millicelsius. Pacing time remains inside request

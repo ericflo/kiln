@@ -1219,6 +1219,9 @@ function validateSftLossRouteDocumentationSourceContract() {
     'selected owner may differ from the candidate owner',
     'no unused global headroom',
     'reusable exact geometries without forced recapture',
+    'product-default 12 entries for 12 declared active owners',
+    'pre-reserves zero transition entries',
+    'identical first seven-wave sequence 25.3 percent faster',
   ]);
   if (missingRocmGraphTerms.length > 0) {
     fail(`docs/site/architecture.html: ROCm owner-geometry contract missing terms: ${missingRocmGraphTerms.join(', ')}`);
@@ -1238,8 +1241,10 @@ function validateSftLossRouteDocumentationSourceContract() {
   const troubleshootingHtml = readFileSync(resolve(repoRoot, 'docs/site/troubleshooting.html'), 'utf8');
   const troubleshootingText = normalizedHtmlText(troubleshootingHtml);
   const missingRocmSafetyTerms = missingNormalizedTerms(troubleshootingText, [
-    '24 entries as one protected geometry',
-    '12 declared active owners plus 12 transition entries',
+    '12 entries, matching the product default',
+    '12 declared active owners and zero pre-reserved transition entries',
+    'identical first seven-wave sequence 25.3 percent faster',
+    'safely settled seven measured capacity transactions with zero fallback',
     'minimum fair-LRU active relief',
     'unused global headroom remains shared',
     '8 GiB MemAvailable',

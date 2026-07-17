@@ -287,14 +287,14 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.ROCM_RUNTIME,
         )
         self.assertEqual(rocm["server"]["max_active_requests"], 12)
-        self.assertEqual(rocm["soak"]["rocm_graph_cache_entries"], 24)
+        self.assertEqual(rocm["soak"]["rocm_graph_cache_entries"], 12)
         self.assertEqual(
             rocm["soak"]["rocm_graph_admission_policy"],
             "idle_owner_lru_then_active_fair_lru",
         )
         self.assertEqual(rocm["soak"]["rocm_graph_active_owner_floor"], 1)
         self.assertEqual(
-            rocm["soak"]["rocm_graph_transition_headroom_entries"], 12
+            rocm["soak"]["rocm_graph_transition_headroom_entries"], 0
         )
         self.assertEqual(
             rocm["soak"]["host_mem_available_floor_bytes"], 8 * 1024**3
@@ -347,7 +347,7 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.effective_config(
                 soak.QUALIFICATION_DURATION_SECONDS,
                 soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
-                soak.dataclasses.replace(soak.ROCM_RUNTIME, graph_cache_max=12),
+                soak.dataclasses.replace(soak.ROCM_RUNTIME, graph_cache_max=11),
             )
 
         vulkan = soak.effective_config(

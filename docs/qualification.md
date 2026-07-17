@@ -1136,18 +1136,28 @@ python3 scripts/qualification/run.py \
 
 The driver builds once and starts one server process with 12 active-request
 slots. Its graph-required operating point reserves one protected geometry for
-each declared active owner plus 12 transition entries, so the checked effective
-configuration derives a 24-entry ceiling as `12 * 1 + 12` rather than carrying
-a magic number. Runtime admission consumes unused global headroom freely. Only
-at entry or byte saturation does it reclaim idle owners, followed by the
-minimum deterministic fair-LRU active entries; the incoming candidate counts
-toward its owner's share and one graph remains protected for every active owner.
-Every narrow retirement preserves recurrent-state slots and continuity. The
-driver warms ROCm graphs and fills the bounded prefix cache to its declared
-entry/state capacity before recording the post-warmup memory baseline or
-starting the 30-minute measurement clock. The 24-entry ceiling is qualification
-headroom for this declared workload, not a new product default or evidence that
-arbitrary deployments require the same value.
+each declared active owner and pre-reserves zero transition entries, so the
+checked 12-entry ceiling is `12 * 1 + 0` and matches the product default. Runtime
+admission consumes unused global headroom freely. Only at entry or byte
+saturation does it reclaim idle owners, followed by the minimum deterministic
+fair-LRU active entries; the incoming candidate counts toward its owner's share
+and one graph remains protected for every active owner. This settled relief
+creates transition room only when needed instead of retaining twelve additional
+native graph objects continuously. Every narrow retirement preserves recurrent-
+state slots and continuity. The driver warms ROCm graphs and fills the bounded
+prefix cache to its declared entry/state capacity before recording the post-
+warmup memory baseline or starting the 30-minute measurement clock.
+
+The smaller operating point is evidence-based. With the same Strix Halo binary,
+model, seed, workload, and 120-second minimum measurement, 12 entries completed
+the identical first seven-wave sequence in 115.461 seconds versus 144.617
+seconds at 24 entries, a 25.3 percent improvement. The 12-entry arm performed
+seven settled measured capacity transactions and twelve captures with zero
+fallback, graph failure, or live-slot loss. Its active SCLK was lower, not
+higher, so the result isolates excessive retained native graph population on
+this host rather than a graphics-clock advantage. This does not establish 12 as
+an optimal cache size for every device; it binds the qualified Strix Halo
+operating point and keeps larger deployments subject to their own receipts.
 It then exercises complete fixed-prompt concurrency cycles, including periodic
 cancellation, until GPU-used and server-RSS deltas remain within 64 MiB and 16
 MiB respectively for two consecutive cycles. This convergence requires at
@@ -1163,7 +1173,7 @@ Slot prompts repeat across waves so prefix hits and cached-block reuse are
 measured. After each wave, the driver requires the engine to drain, every used
 KV block to be owned by the prefix cache, zero active cache leases or pending
 releases, stable cache residency, zero active graph slots or row timelines,
-at most 24 retained graphs and slots, the process to remain alive, and
+at most 12 retained graphs and slots, the process to remain alive, and
 runtime/debug policy attestations to remain consistent. Idle slots and their
 native graphs remain resident for reuse. The final drain requires every
 retained slot to be idle, and the measured phase must exercise slot reuse.
