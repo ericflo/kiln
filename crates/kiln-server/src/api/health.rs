@@ -31,6 +31,7 @@ struct HealthResponse {
     http: HttpRuntimeInfo,
     model_defaults_profile: ModelDefaultsProfile,
     eval_mode: bool,
+    debug_model_state: bool,
     default_thinking_enabled: Option<bool>,
     default_thinking_budget_tokens: Option<usize>,
     default_thinking_budget_ms: Option<u64>,
@@ -1079,6 +1080,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         },
         model_defaults_profile: state.model_defaults_profile,
         eval_mode: state.eval_mode,
+        debug_model_state: state.debug_model_state,
         default_thinking_enabled: state.default_thinking_enabled,
         default_thinking_budget_tokens: state.default_thinking_budget_tokens,
         default_thinking_budget_ms: state.default_thinking_budget_ms,
@@ -1953,6 +1955,7 @@ mod tests {
             true
         );
         assert_eq!(json["eval_mode"], false);
+        assert_eq!(json["debug_model_state"], false);
         assert!(json["default_thinking_enabled"].is_null());
         assert_eq!(json["fold_reasoning_into_content"], false);
         assert!(

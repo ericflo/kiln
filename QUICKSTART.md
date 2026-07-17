@@ -1035,7 +1035,7 @@ complete field, nullability, unknown-field, constraint, and example reference.
 | POST | `/v1/judgments/{name}/compile` | Compile judgments into an SFT dataset for a judge LoRA |
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
 | GET | `/v1/config` | Current server configuration, source attribution, typed batching and streaming-prefill policy, immutable SFT checkpoint-boundary policy, actor activity, and effective serving/decode fields |
-| GET | `/v1/debug/model-state` | Trusted model/config snapshot, including the SFT checkpoint-boundary policy; requires `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
+| GET | `/v1/debug/model-state` | Trusted model/config snapshot, including the SFT checkpoint-boundary policy; requires typed `server.debug_model_state=true` or `server.eval_mode=true` |
 
 ## Configuration
 

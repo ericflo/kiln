@@ -1890,6 +1890,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                         parsed["server"]["http_send_buffer_bytes"],
                         serve.HTTP_SEND_BUFFER_BYTES,
                     )
+                    self.assertTrue(parsed["server"]["debug_model_state"])
                     self.assertTrue(parsed["server"]["chat_performance_metadata"])
                     self.assertFalse(parsed["server"]["default_thinking_enabled"])
                     self.assertEqual(parsed["model"]["path"], str(model))
@@ -1918,10 +1919,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     )
 
                     env = serve.server_environment(variant)
-                    self.assertEqual(env["KILN_DEBUG_ENDPOINTS"], "1")
                     self.assertEqual(
                         sorted(key for key in env if key.startswith("KILN_")),
-                        ["KILN_DEBUG_ENDPOINTS"],
+                        [],
                     )
 
     def test_server_config_overrides_are_typed_and_source_bound(self) -> None:

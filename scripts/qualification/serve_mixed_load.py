@@ -267,7 +267,7 @@ def _variant_config(
         },
         "server": {
             "chat_performance_metadata_enabled": True,
-            "debug_endpoints_enabled": True,
+            "debug_model_state": True,
             "default_thinking_enabled": False,
             "http_send_buffer_bytes": HTTP_SEND_BUFFER_BYTES,
             "log_format": "json",
@@ -2239,16 +2239,8 @@ def server_environment(
     build_environment = dict(spec.environment)
     if rocm_path := build_environment.get("rocm_path"):
         environment["ROCM_PATH"] = rocm_path
-    environment.update(
-        {
-            # Debug endpoint access is an internal qualification capability,
-            # not a public server setting. All public controls are written to
-            # the source-bound TOML file by write_server_config().
-            "KILN_DEBUG_ENDPOINTS": (
-                "1" if config["server"]["debug_endpoints_enabled"] else "0"
-            ),
-            "RUST_LOG": "kiln=info,kiln_server=info,kiln_model=info,kiln_memory=info,tower_http=warn",
-        }
+    environment["RUST_LOG"] = (
+        "kiln=info,kiln_server=info,kiln_model=info,kiln_memory=info,tower_http=warn"
     )
     return environment
 
@@ -2305,6 +2297,7 @@ def write_server_config(
         f"max_prefill_tokens_per_cycle = {server['max_prefill_tokens_per_cycle']}",
         f"max_prefill_layers_per_cycle = {server['max_prefill_layers_per_cycle']}",
         f"max_decode_batch = {server['max_decode_batch']}",
+        f"debug_model_state = {'true' if server['debug_model_state'] else 'false'}",
         "default_thinking_enabled = false",
         "chat_performance_metadata = true",
         "",

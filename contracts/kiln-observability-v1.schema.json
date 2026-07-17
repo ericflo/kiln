@@ -550,7 +550,7 @@
     "DebugDisabledResponse": [
       {
         "error": "debug endpoint disabled",
-        "enable_with": "set KILN_DEBUG_ENDPOINTS=1 or run with eval_mode=true"
+        "enable_with": "set server.debug_model_state=true or server.eval_mode=true"
       }
     ],
     "DebugProvenanceErrorResponse": [
@@ -642,6 +642,7 @@
           "supports_tool_chat_template": false
         },
         "eval_mode": false,
+        "debug_model_state": false,
         "default_thinking_enabled": false,
         "default_thinking_budget_tokens": 0,
         "default_thinking_budget_ms": 0,
@@ -3245,7 +3246,7 @@
           "const": "debug endpoint disabled"
         },
         "enable_with": {
-          "const": "set KILN_DEBUG_ENDPOINTS=1 or run with eval_mode=true"
+          "const": "set server.debug_model_state=true or server.eval_mode=true"
         }
       },
       "description": "HTTP 403 body returned when model-state diagnostics are not enabled.",
@@ -4276,6 +4277,7 @@
         "http",
         "model_defaults_profile",
         "eval_mode",
+        "debug_model_state",
         "default_thinking_enabled",
         "default_thinking_budget_tokens",
         "default_thinking_budget_ms",
@@ -4338,6 +4340,9 @@
           "$ref": "#/$defs/ModelDefaultsProfile"
         },
         "eval_mode": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "debug_model_state": {
           "$ref": "#/$defs/Boolean"
         },
         "default_thinking_enabled": {

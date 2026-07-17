@@ -5190,19 +5190,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_DEBUG_ENDPOINTS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/api/debug_model_state.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "CARGO_PKG_VERSION",
       "argument_kind": "literal",
@@ -7049,11 +7036,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 281,
-    "literal_kiln_read_names": 153,
+    "literal_kiln_read_call_sites": 280,
+    "literal_kiln_read_names": 152,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 112,
+      "experimental_debug": 111,
       "public_stable": 1,
       "test_only": 41
     },
@@ -7063,13 +7050,13 @@
       "test_only": 247
     },
     "process_mutation_entries": 160,
-    "read_call_sites": 647,
+    "read_call_sites": 646,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 175,
+      "experimental_debug": 174,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 381
+    "read_entries": 380
   }
 }

@@ -1111,8 +1111,8 @@ adapter, training queue state, and the immutable SFT checkpoint-boundary policy.
 ### Debug Model State (`GET /v1/debug/model-state`)
 
 Trusted eval/debug endpoint for answering "what model state am I actually
-hitting?" It is available only when `server.eval_mode=true` or
-`KILN_DEBUG_ENDPOINTS=1`, and returns no prompt or user message data. The
+hitting?" It is available only when typed `server.debug_model_state=true` or
+`server.eval_mode=true`, and returns no prompt or user message data. The
 response includes model path, served model id, active defaults profile,
 active/loaded adapters with adapter weight hashes, config hashes, selected
 `KILN_*` flags, batching-engine status, thinking defaults, the resolved SFT

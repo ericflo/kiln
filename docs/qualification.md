@@ -593,10 +593,10 @@ The process environment is scrubbed of ambient `KILN_*` controls before build
 and launch. `memory.kv_autoscale` now carries both enabled and disabled requests.
 Ordinary serving arms write `memory.kv_force_blocks = 0`; the dedicated
 maintenance arm writes its declared positive target. Health and debug must
-report `config_file` provenance for both fields. `KILN_DEBUG_ENDPOINTS=1` is the
-only `KILN_*` launch exception: it is the internal qualification capability that
-grants the trusted debug readback, not public server policy. `RUST_LOG` remains
-the ordinary tracing filter. Qualification rejects every other ambient runtime
+report `config_file` provenance for both fields. The same TOML sets
+`server.debug_model_state = true` to grant trusted readback without enabling
+eval-mode request semantics. No `KILN_*` launch exception remains; `RUST_LOG`
+is the ordinary tracing filter. Qualification rejects every ambient runtime
 control, including the deprecated `KILN_KV_AUTOSCALE` and
 `KILN_KV_FORCE_BLOCKS` aliases.
 

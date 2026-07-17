@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **647 direct read call sites** and
+The scanner records **646 direct read call sites** and
 **255 process-mutation call sites**. It can
-statically name **153 distinct literal `KILN_*`
-read names** across **281 call sites**.
+statically name **152 distinct literal `KILN_*`
+read names** across **280 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 175 | 112 | 0 |
+| Experimental/debug migration | 174 | 111 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 135 | 41 | 247 |
 
@@ -79,7 +79,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-flash-attn/csrc/rocm_flash_api.cpp` | 2 | 0 |
 | `crates/kiln-model/src/backend/metal_config.rs` | 2 | 0 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | 2 | 0 |
-| `crates/kiln-server/src/api/debug_model_state.rs` | 2 | 1 |
 | `crates/kiln-server/src/cli.rs` | 2 | 0 |
 | `crates/kiln-tensor/src/metal_kernels.rs` | 2 | 2 |
 | `crates/kiln-tensor/src/rocm_ops/concat.rs` | 2 | 2 |
@@ -97,6 +96,7 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-opd-loss-kernel/src/lib.rs` | 1 | 1 |
 | `crates/kiln-rmsnorm-kernel/src/kt_api.rs` | 1 | 1 |
 | `crates/kiln-rocblas/src/algo_cache.rs` | 1 | 0 |
+| `crates/kiln-server/src/api/debug_model_state.rs` | 1 | 0 |
 | `crates/kiln-tensor/src/capture_alloc.rs` | 1 | 1 |
 | `crates/kiln-tensor/src/determinism.rs` | 1 | 1 |
 | `crates/kiln-tensor/src/metal_rt/commands.rs` | 1 | 0 |
@@ -130,7 +130,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_CUDA_GRAPH_CACHE_MAX` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
 | `KILN_CUDA_GRAPH_STABLE_PAGED_METADATA` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
 | `KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DEBUG_ENDPOINTS` | Experimental/debug migration | 1 | `crates/kiln-server/src/api/debug_model_state.rs` |
 | `KILN_DEBUG_FLCE_STATS` | Experimental/debug migration | 1 | `crates/kiln-flce-kernel/src/kt_api.rs` |
 | `KILN_DEBUG_FLCE_STATS_LABEL` | Experimental/debug migration | 1 | `crates/kiln-flce-kernel/src/kt_api.rs` |
 | `KILN_DEBUG_FULL_ATTN_FINITE` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |

@@ -91,6 +91,10 @@ max_decode_batch = "auto"                # Concurrent decode-row ceiling. "auto"
                                         # strictly and also accepts "auto". Startup, /health,
                                         # /v1/config, and debug report all sources and constraints.
 # eval_mode = false
+debug_model_state = false               # Trusted /v1/debug/model-state access without eval-mode
+                                        # request semantics. The endpoint contains no prompt or
+                                        # user-message contents. Override strictly with the
+                                        # mechanically derived KILN_SERVER_DEBUG_MODEL_STATE.
 # default_thinking_enabled = false     # Optional. Qwen3.5-4B profile preserves the
                                       # official template thinking default unless this
                                       # is set; eval mode still defaults omitted

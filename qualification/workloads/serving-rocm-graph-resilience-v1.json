@@ -68,7 +68,7 @@
         },
         "server": {
           "chat_performance_metadata_enabled": true,
-          "debug_endpoints_enabled": true,
+          "debug_model_state": true,
           "default_thinking_enabled": false,
           "http_send_buffer_bytes": 4096,
           "log_format": "json",

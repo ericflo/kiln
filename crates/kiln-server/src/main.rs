@@ -1133,6 +1133,7 @@ async fn main() -> Result<()> {
     state.tracked_job_ttl = std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
     state.teacher_credentials = Arc::new(config.teachers.clone());
     state.eval_mode = config.server.eval_mode;
+    state.debug_model_state = config.server.debug_model_state;
     state.default_thinking_enabled = config.server.default_thinking_enabled;
     state.default_thinking_budget_tokens = config.server.default_thinking_budget_tokens;
     state.default_thinking_budget_ms = config.server.default_thinking_budget_ms;

@@ -3138,6 +3138,10 @@ pub struct ServerConfig {
     pub max_decode_batch: MaxDecodeBatch,
     /// Enable deterministic eval-serving behavior for `kiln serve`.
     pub eval_mode: bool,
+    /// Expose the trusted `/v1/debug/model-state` diagnostics endpoint without
+    /// enabling eval-mode request semantics. The endpoint never includes prompt
+    /// or user-message contents.
+    pub debug_model_state: bool,
     /// Server-level default for chat-template `enable_thinking`. `None`
     /// preserves the model template default; requests can still override via
     /// `chat_template_kwargs.enable_thinking`.
@@ -5614,6 +5618,7 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         MAX_DECODE_BATCH_ENV
     ),
     public_env_field!(bool, server.eval_mode, "KILN_EVAL_MODE"),
+    public_env_field!(bool, server.debug_model_state),
     public_env_field!(
         some_bool_with_presence_false,
         server.default_thinking_enabled,
@@ -5928,6 +5933,7 @@ impl Default for ServerConfig {
             max_prefill_layers_per_cycle: PrefillLayerBudget::default(),
             max_decode_batch: MaxDecodeBatch::default(),
             eval_mode: false,
+            debug_model_state: false,
             default_thinking_enabled: None,
             default_thinking_budget_tokens: None,
             default_thinking_budget_ms: None,
@@ -6984,6 +6990,7 @@ mod tests {
         "KILN_SERVER_DEFAULT_THINKING_BUDGET_MS",
         "KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS",
         "KILN_SERVER_DEFAULT_THINKING_ENABLED",
+        "KILN_SERVER_DEBUG_MODEL_STATE",
         "KILN_SERVER_DETERMINISTIC",
         "KILN_SERVER_EVAL_MODE",
         "KILN_SERVER_FOLD_REASONING_INTO_CONTENT",
@@ -7192,6 +7199,7 @@ mod tests {
             ConfigValueSource::Default
         );
         assert!(!config.server.eval_mode);
+        assert!(!config.server.debug_model_state);
         assert_eq!(config.server.default_thinking_enabled, None);
         assert_eq!(config.server.default_thinking_budget_tokens, None);
         assert_eq!(config.server.default_thinking_budget_ms, None);
@@ -8104,7 +8112,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 102);
+        assert_eq!(original_len, 103);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -8175,7 +8183,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 107);
+        assert_eq!(serialized_leaves.len(), 108);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -8244,6 +8252,7 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE", "8"),
             ("KILN_SERVER_MAX_DECODE_BATCH", "backend_policy"),
             ("KILN_SERVER_EVAL_MODE", "true"),
+            ("KILN_SERVER_DEBUG_MODEL_STATE", "true"),
             ("KILN_SERVER_DEFAULT_THINKING_ENABLED", "false"),
             ("KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS", "7"),
             ("KILN_SERVER_DEFAULT_THINKING_BUDGET_MS", "20"),
@@ -8377,6 +8386,7 @@ rocm_graph_cache_max_bytes = 17179869184
         assert_eq!(config.server.max_prefill_layers_per_cycle.layers(), 8);
         assert_eq!(config.server.max_decode_batch.limit(), None);
         assert!(config.server.eval_mode);
+        assert!(config.server.debug_model_state);
         assert_eq!(config.server.default_thinking_enabled, Some(false));
         assert_eq!(config.server.default_thinking_budget_tokens, Some(7));
         assert_eq!(config.server.default_thinking_budget_ms, Some(20));

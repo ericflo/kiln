@@ -2575,6 +2575,8 @@ pub struct AppState {
     /// Eval-serving mode: deterministic defaults, no-think defaults, headers,
     /// adapter-switch warnings, and per-request transient cache cleanup.
     pub eval_mode: bool,
+    /// Typed access policy for the trusted model-state diagnostics endpoint.
+    pub debug_model_state: bool,
     /// Server-level default for chat-template thinking mode. `None` preserves
     /// the template's own default.
     pub default_thinking_enabled: Option<bool>,
@@ -3376,6 +3378,7 @@ impl AppState {
             http_send_buffer_preflight_actual_bytes: None,
             http_send_buffer_preflight_effective_bytes: None,
             eval_mode: false,
+            debug_model_state: false,
             default_thinking_enabled: None,
             default_thinking_budget_tokens: None,
             default_thinking_budget_ms: None,
@@ -4515,6 +4518,7 @@ impl AppState {
             http_send_buffer_preflight_actual_bytes: None,
             http_send_buffer_preflight_effective_bytes: None,
             eval_mode: false,
+            debug_model_state: false,
             default_thinking_enabled: None,
             default_thinking_budget_tokens: None,
             default_thinking_budget_ms: None,

@@ -220,6 +220,16 @@
           "x-kiln-environment": "KILN_EVAL_MODE (deprecated compatibility)",
           "x-kiln-validation": "Enables deterministic eval-serving defaults, headers, adapter warnings, and transient-cache cleanup behavior. serve --eval-mode applies a typed override after environment resolution and wins without mutating process environment."
         },
+        "debug_model_state": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enables trusted GET /v1/debug/model-state diagnostics without changing inference, cache, or eval semantics. server.eval_mode=true also enables the endpoint. The response contains model/configuration/runtime state but no prompt or user-message contents.",
+          "x-kiln-path": "server.debug_model_state",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_SERVER_DEBUG_MODEL_STATE (implemented)",
+          "x-kiln-environment": "None",
+          "x-kiln-validation": "Enables trusted GET /v1/debug/model-state diagnostics without changing inference, cache, or eval semantics. server.eval_mode=true also enables the endpoint. The response contains model/configuration/runtime state but no prompt or user-message contents."
+        },
         "default_thinking_enabled": {
           "type": "boolean",
           "description": "None preserves the model template default. Requests may override with chat_template_kwargs.enable_thinking. Without the canonical spelling, any presence of KILN_DEFAULT_NO_THINK, even a value such as 0, first selects false; the explicit KILN_DEFAULT_THINKING_ENABLED value is applied afterward and wins. When the canonical spelling is present, every present compatibility alias must resolve to the same boolean. There is no environment spelling that restores None.",
@@ -1815,9 +1825,9 @@
       }
     }
   ],
-  "x-kiln-field-count": 107,
+  "x-kiln-field-count": 108,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 102,
+  "x-kiln-canonical-environment-count": 103,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 71,
   "x-kiln-compatibility-alias-count": 76,

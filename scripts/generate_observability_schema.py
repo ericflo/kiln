@@ -1104,6 +1104,7 @@ def build_definitions() -> None:
         "backend": {"type": "string", "enum": ["mock", "model"]}, "backend_runtime": ref("BackendRuntimeInfo"),
         "serving_profile": ref("ServingProfileDiagnostics"), "http": ref("HttpRuntimeInfo"),
         "model_defaults_profile": ref("ModelDefaultsProfile"), "eval_mode": ref("Boolean"),
+        "debug_model_state": ref("Boolean"),
         "default_thinking_enabled": nullable(ref("Boolean")),
         "default_thinking_budget_tokens": nullable(ref("NonNegativeInteger")),
         "default_thinking_budget_ms": nullable(ref("NonNegativeInteger")),
@@ -1377,7 +1378,7 @@ def build_definitions() -> None:
     }, "Complete opt-in model, adapter, provenance, runtime, environment, and cache debug state.")
     add_object("DebugDisabledResponse", "DebugDisabledResponse", {
         "error": {"const": "debug endpoint disabled"},
-        "enable_with": {"const": "set KILN_DEBUG_ENDPOINTS=1 or run with eval_mode=true"},
+        "enable_with": {"const": "set server.debug_model_state=true or server.eval_mode=true"},
     }, "HTTP 403 body returned when model-state diagnostics are not enabled.")
     add_object("DebugProvenanceErrorResponse", "serde_json::Value", {
         "error": {"const": "invalid execution provenance"}, "detail": ref("NonEmptyString"),
@@ -1634,7 +1635,7 @@ def build_schema() -> dict[str, Any]:
     ]
     examples["DebugDisabledResponse"] = [{
         "error": "debug endpoint disabled",
-        "enable_with": "set KILN_DEBUG_ENDPOINTS=1 or run with eval_mode=true",
+        "enable_with": "set server.debug_model_state=true or server.eval_mode=true",
     }]
     examples["DebugProvenanceErrorResponse"] = [{
         "error": "invalid execution provenance",

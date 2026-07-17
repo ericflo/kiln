@@ -119,18 +119,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 107 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 108 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 107 fixed fields:
+credential. Of the 108 fixed fields:
 
-- 102 implement the canonical mechanical environment name;
+- 103 implement the canonical mechanical environment name;
 - 71 also retain one or more deprecated compatibility spellings (76 aliases
   total);
 - 5 are config-file-only and have no environment override;
 - the 76 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 107 fixed fields and both dynamic credential fields.
+The tables below cover all 108 fixed fields and both dynamic credential fields.
 The schema additionally records the accepted deprecated TOML-only
 `streaming_prefill.enabled` compatibility field so validators match the loader.
 
@@ -151,6 +151,7 @@ The schema additionally records the accepted deprecated TOML-only
 | `server.max_prefill_layers_per_cycle` | unsigned integer; `4` | `KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE` (implemented) | `KILN_MAX_PREFILL_LAYERS_PER_CYCLE` (deprecated compatibility) | `1..=1024`. Number of transformer layers an in-flight prefill chunk may execute before yielding to decode. |
 | `server.max_decode_batch` | `"auto"` or unsigned integer; `"auto"` | `KILN_SERVER_MAX_DECODE_BATCH` (implemented) | `KILN_MAX_DECODE_BATCH` (deprecated compatibility) | `auto`, `backend`, and `backend_policy` all delegate to backend policy; an integer must be `1..=65536`. Deterministic mode and `max_batch_tokens` may lower the final width. The Strix Halo Vulkan development-soak candidate sets `2`; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together. |
 | `server.eval_mode` | boolean; `false` | `KILN_SERVER_EVAL_MODE` (implemented) | `KILN_EVAL_MODE` (deprecated compatibility) | Enables deterministic eval-serving defaults, headers, adapter warnings, and transient-cache cleanup behavior. `serve --eval-mode` applies a typed override after environment resolution and wins without mutating process environment. |
+| `server.debug_model_state` | boolean; `false` | `KILN_SERVER_DEBUG_MODEL_STATE` (implemented) | None | Enables trusted `GET /v1/debug/model-state` diagnostics without changing inference, cache, or eval semantics. `server.eval_mode=true` also enables the endpoint. The response contains model/configuration/runtime state but no prompt or user-message contents. |
 | `server.default_thinking_enabled` | optional boolean; omitted (`None`) | `KILN_SERVER_DEFAULT_THINKING_ENABLED` (implemented) | `KILN_DEFAULT_THINKING_ENABLED` (deprecated compatibility); `KILN_DEFAULT_NO_THINK` is a deprecated presence-only alias | `None` preserves the model template default. Requests may override with `chat_template_kwargs.enable_thinking`. Without the canonical spelling, any presence of `KILN_DEFAULT_NO_THINK`, even a value such as `0`, first selects `false`; the explicit `KILN_DEFAULT_THINKING_ENABLED` value is applied afterward and wins. When the canonical spelling is present, every present compatibility alias must resolve to the same boolean. There is no environment spelling that restores `None`. |
 | `server.default_thinking_budget_tokens` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` (implemented) | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` (deprecated compatibility) | Integer values include `0`, which closes thinking immediately. Case-insensitive `unlimited` clears a TOML limit back to `None`. Requests may inherit, replace, or explicitly disable the limit. |
 | `server.default_thinking_budget_ms` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` (implemented) | `KILN_DEFAULT_THINKING_BUDGET_MS` (deprecated compatibility) | Integer values include `0`. `unlimited` clears a TOML limit. The clock starts at the first decode candidate, after queueing and prefill. The first token or time limit reached forces the model's closing `</think>` sequence. |

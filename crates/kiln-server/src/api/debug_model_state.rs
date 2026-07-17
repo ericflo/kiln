@@ -21,8 +21,6 @@ use crate::config::{
 };
 use crate::state::{AppState, DirectDecodeRendezvousRuntimeState, ModelBackend};
 
-const DEBUG_ENDPOINT_ENV: &str = "KILN_DEBUG_ENDPOINTS";
-
 #[derive(Serialize)]
 struct DebugDisabledResponse {
     error: &'static str,
@@ -270,7 +268,7 @@ async fn model_state(State(state): State<AppState>) -> Response {
             StatusCode::FORBIDDEN,
             Json(DebugDisabledResponse {
                 error: "debug endpoint disabled",
-                enable_with: "set KILN_DEBUG_ENDPOINTS=1 or run with eval_mode=true",
+                enable_with: "set server.debug_model_state=true or server.eval_mode=true",
             }),
         )
             .into_response();
@@ -293,18 +291,7 @@ async fn model_state(State(state): State<AppState>) -> Response {
 }
 
 fn debug_model_state_enabled(state: &AppState) -> bool {
-    state.eval_mode
-        || std::env::var(DEBUG_ENDPOINT_ENV)
-            .ok()
-            .as_deref()
-            .is_some_and(is_truthy)
-}
-
-fn is_truthy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    state.eval_mode || state.debug_model_state
 }
 
 async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
@@ -470,7 +457,6 @@ fn count_adapter_dirs(adapter_dir: &Path) -> usize {
 
 fn selected_env_flags() -> BTreeMap<&'static str, EnvFlagState> {
     [
-        DEBUG_ENDPOINT_ENV,
         "KILN_MODEL_PATH",
         "KILN_MODEL_ID",
         "KILN_TOKENIZER_PATH",
@@ -767,7 +753,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debug_model_state_requires_eval_or_debug_env() {
+    async fn debug_model_state_requires_typed_access_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let state = make_test_state(tmp.path().to_path_buf());
         let app = routes().with_state(state);
@@ -783,6 +769,26 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn debug_model_state_accepts_typed_debug_policy_without_eval_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = make_test_state(tmp.path().to_path_buf());
+        state.debug_model_state = true;
+        let app = routes().with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/debug/model-state")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

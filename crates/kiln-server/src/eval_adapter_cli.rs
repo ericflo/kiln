@@ -602,7 +602,7 @@ async fn fetch_model_state(
                 config_hashes: health,
                 adapter_hashes: Vec::new(),
                 warning: Some(format!(
-                    "could not record adapter hash for `{adapter}` because /v1/debug/model-state returned {status}; run the server with --eval-mode or KILN_DEBUG_ENDPOINTS=1"
+                    "could not record adapter hash for `{adapter}` because /v1/debug/model-state returned {status}; set server.debug_model_state=true or run the server with --eval-mode"
                 )),
             }
         }

@@ -71,7 +71,7 @@
           },
           "server": {
             "chat_performance_metadata_enabled": true,
-            "debug_endpoints_enabled": true,
+            "debug_model_state": true,
             "default_thinking_enabled": false,
             "deterministic": true,
             "http_send_buffer_bytes": 4096,
@@ -98,7 +98,7 @@
           },
           "server": {
             "chat_performance_metadata_enabled": true,
-            "debug_endpoints_enabled": true,
+            "debug_model_state": true,
             "default_thinking_enabled": false,
             "deterministic": true,
             "http_send_buffer_bytes": 4096,

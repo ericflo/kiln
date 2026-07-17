@@ -127,8 +127,8 @@ const generatedDocsPages = [
     terms: [
       'KILN_<SECTION>_<FIELD>',
       'Strict failure behavior',
-      '15 top-level sections and 107 fixed leaf fields',
-      '102 implement the canonical mechanical environment name',
+      '15 top-level sections and 108 fixed leaf fields',
+      '103 implement the canonical mechanical environment name',
       '71 also retain one or more deprecated compatibility spellings',
       '76 aliases total',
       '5 are config-file-only',
@@ -775,7 +775,7 @@ const generatedDocsPages = [
     h1: 'Local Hardware Qualification',
     terms: [
       'private TOML file',
-      'KILN_DEBUG_ENDPOINTS=1',
+      'server.debug_model_state',
       'memory.kv_autoscale',
       'memory.kv_force_blocks',
       'config_file',

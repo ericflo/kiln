@@ -315,7 +315,6 @@ KILN_CUDA_GRAPH_STABLE_PAGED_METADATA,1,crates/kiln-model/src/cuda_graph.rs:180,
 KILN_CUDA_NATIVE_TRAINING,1,crates/kiln-model/src/backend/capability.rs:2001,no,no,kiln-model
 KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS,1,crates/kiln-model/src/forward.rs:8897,no,yes,kiln-model
 KILN_DEBUG_BATCHED_HIDDEN,1,crates/kiln-model/src/cuda_graph.rs:2729,no,yes,kiln-model
-KILN_DEBUG_ENDPOINTS,1,crates/kiln-server/src/api/debug_model_state.rs:24,no,no,kiln-server
 KILN_DEBUG_FLCE_STATS,1,crates/kiln-flce-kernel/src/kt_api.rs:924,no,yes,kiln-flce-kernel
 KILN_DEBUG_FLCE_STATS_LABEL,1,crates/kiln-flce-kernel/src/kt_api.rs:934,no,yes,kiln-flce-kernel
 KILN_DEBUG_FULL_ATTN_FINITE,1,crates/kiln-model/src/forward.rs:5266,yes,no,kiln-model
