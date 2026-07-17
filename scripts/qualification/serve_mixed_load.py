@@ -98,6 +98,10 @@ PROMPT_MARKER_FORMAT = "QUAL-{seed}-{role}"
 RESPONSE_ORACLE = "ascending_zero_padded_integers_prefix_v1"
 RESPONSE_ORACLE_INTEGER_WIDTH = 6
 RESPONSE_DIAGNOSTIC_MAX_CHARACTERS = 256
+ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v8"
+ACCELERATOR_RUNTIME_POLICY_VERSION = int(
+    ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID.rsplit(".v", 1)[1]
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2599,8 +2603,8 @@ def accelerator_policy_attestation_failures(
         "profile" if graphs_requested else "disabled"
     )
     expected = {
-        "schema_id": "kiln.accelerator-runtime-policy.v8",
-        "version": 7,
+        "schema_id": ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID,
+        "version": ACCELERATOR_RUNTIME_POLICY_VERSION,
         "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
         "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
         "serving_profile": serving_profile,

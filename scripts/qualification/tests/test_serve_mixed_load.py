@@ -191,7 +191,7 @@ def health_fixture(
     }
     accelerator_runtime = {
         "schema_id": "kiln.accelerator-runtime-policy.v8",
-        "version": 7,
+        "version": 8,
         "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
         "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
         "serving_profile": serving_profile,
@@ -391,7 +391,7 @@ def debug_fixture(
     return {
         "accelerator_runtime": {
             "schema_id": "kiln.accelerator-runtime-policy.v8",
-            "version": 7,
+            "version": 8,
             "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
             "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
             "serving_profile": serving_profile,
@@ -512,6 +512,17 @@ def debug_fixture(
 
 
 class ServeMixedLoadTests(unittest.TestCase):
+    def test_accelerator_policy_version_is_derived_from_schema_identity(self) -> None:
+        self.assertEqual(
+            serve.ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID,
+            "kiln.accelerator-runtime-policy.v8",
+        )
+        self.assertEqual(serve.ACCELERATOR_RUNTIME_POLICY_VERSION, 8)
+        self.assertEqual(
+            serve.ACCELERATOR_RUNTIME_POLICY_VERSION,
+            int(serve.ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID.rsplit(".v", 1)[1]),
+        )
+
     def test_profile_policy_contract_is_independent_from_health_fixture(self) -> None:
         self.assertEqual(
             serve.PROFILE_POLICIES,

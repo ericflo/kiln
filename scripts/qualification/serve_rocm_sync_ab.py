@@ -245,8 +245,8 @@ def require_nonnegative_int(value: Any, label: str) -> int:
 
 def expected_policy(mode: str) -> dict[str, Any]:
     return {
-        "schema_id": "kiln.accelerator-runtime-policy.v8",
-        "version": 7,
+        "schema_id": mixed.ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID,
+        "version": mixed.ACCELERATOR_RUNTIME_POLICY_VERSION,
         "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
         "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
         "serving_profile": "experimental",
