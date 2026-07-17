@@ -49,6 +49,14 @@
 > finite-value guards, synchronization boundaries, and NVTX ranges without that
 > hidden coupling. Historical reports using these names remain evidence only.
 
+> **Chunked full-attention tile traces were retired on 2026-07-17.**
+> `KILN_TRACE_FULL_ATTN_TILES`, `KILN_TRACE_ROCM_FLASH_FWD`, and
+> `KILN_TRACE_FULL_ATTN_STAGE_TIMINGS` added unconditional host clocks and
+> optional per-tile stderr branches to chunked prefill. Current source retains
+> the structured tile-plan event, exact flash eligibility and fallback logic,
+> finite-value checks, and handoff synchronization, but no longer recognizes
+> these investigation controls. Historical trace output remains evidence only.
+
 > **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
 > priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are

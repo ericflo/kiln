@@ -5132,15 +5132,6 @@ pub fn tape_streaming_tile_tokens_for(device: &Device) -> usize {
     StreamingPrefillExecutionPolicy::for_device(*device).tape_tile_tokens()
 }
 
-fn trace_full_attn_tile_dispatch() -> bool {
-    kiln_core::env_flag::env_flag("KILN_TRACE_FULL_ATTN_TILES", false)
-        || kiln_core::env_flag::env_flag("KILN_TRACE_ROCM_FLASH_FWD", false)
-}
-
-fn trace_full_attn_stage_timings() -> bool {
-    kiln_core::env_flag::env_flag("KILN_TRACE_FULL_ATTN_STAGE_TIMINGS", false)
-}
-
 fn debug_full_attn_finite_checks() -> bool {
     kiln_core::env_flag::env_flag("KILN_DEBUG_FULL_ATTN_FINITE", false)
         || kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_FINITE", false)
@@ -21737,16 +21728,6 @@ fn transformer_block_detached_prefill_chunked(
         return Ok(None);
     };
     let debug_finite = debug_full_attn_finite_checks();
-    let trace_tile_dispatch = trace_full_attn_tile_dispatch();
-    let trace_stage_timings = trace_full_attn_stage_timings();
-    let layer_timing_start = std::time::Instant::now();
-    let pre_kv_timing_start = std::time::Instant::now();
-    let mut timing_pre_kv = std::time::Duration::ZERO;
-    let mut timing_tile_prep = std::time::Duration::ZERO;
-    let mut timing_attn_core = std::time::Duration::ZERO;
-    let mut timing_tile_rest = std::time::Duration::ZERO;
-    let mut timing_tile_total = std::time::Duration::ZERO;
-    let mut timing_concat = std::time::Duration::ZERO;
     let materialized_score_budget_mb = full_attn_materialized_score_budget_mib();
     let materialized_scratch_buffers =
         mode.materialized_scratch_buffers_for_tile_plan(backend, &x.device(), x.dtype(), head_dim);
@@ -21904,10 +21885,6 @@ fn transformer_block_detached_prefill_chunked(
         &format!("layer {full_attn_layer_idx} chunked full-attention k_rotary"),
         &k,
     )?;
-    if trace_stage_timings {
-        timing_pre_kv += pre_kv_timing_start.elapsed();
-    }
-
     let mut output_tiles = Vec::with_capacity(seq_len.div_ceil(base_tile_size));
     let mut tile_start = 0usize;
     while tile_start < seq_len {
@@ -21924,9 +21901,6 @@ fn transformer_block_detached_prefill_chunked(
             materialized_score_budget_mb,
         );
         let tile_end = tile_start + tile_len;
-        let tile_timing_start = std::time::Instant::now();
-        let tile_prep_timing_start = std::time::Instant::now();
-
         let normed_tile = tape_narrow_contig_full_attn(
             &normed,
             1,
@@ -22132,13 +22106,9 @@ fn transformer_block_detached_prefill_chunked(
             v: v_prefix,
             gate: None,
         };
-        if trace_stage_timings {
-            timing_tile_prep += tile_prep_timing_start.elapsed();
-        }
-
         let flash_tile_guaranteed =
             mode.flash_tile_guaranteed(backend, &x.device(), x.dtype(), head_dim);
-        let flash_shape_allowed = flash_tile_guaranteed
+        let flash_tile_allowed = flash_tile_guaranteed
             && flash_prefill_allowed_for_shape(
                 backend,
                 &x.device(),
@@ -22147,8 +22117,6 @@ fn transformer_block_detached_prefill_chunked(
                 tile_len,
                 tile_end,
             );
-        let flash_tile_allowed = flash_tile_guaranteed && flash_shape_allowed;
-        let attn_core_timing_start = std::time::Instant::now();
         let attn_core = if flash_tile_allowed {
             match mode {
                 FullAttnChunkMode::DetachedBoundary => {
@@ -22197,28 +22165,6 @@ fn transformer_block_detached_prefill_chunked(
                     .with_context(|| {
                         format!("chunked full-attention flash core tile [{tile_start}, {tile_end})")
                     })?;
-                    if trace_tile_dispatch {
-                        eprintln!(
-                            "kiln_full_attn_tile path=flash_detached result={} layer={} mode={} tile_start={} tile_end={} tile_len={} kv_len={} seq_len={} heads={} kv_heads={} head_dim={} dtype={:?} device={:?}",
-                            if flash_result.is_some() {
-                                "hit"
-                            } else {
-                                "declined"
-                            },
-                            full_attn_layer_idx,
-                            mode.label(),
-                            tile_start,
-                            tile_end,
-                            tile_len,
-                            tile_end,
-                            seq_len,
-                            num_heads,
-                            num_kv_heads,
-                            head_dim,
-                            x.dtype(),
-                            x.device()
-                        );
-                    }
                     match flash_result {
                         Some(out) => out,
                         None => gqa_attention_core_prefill(
@@ -22281,28 +22227,6 @@ fn transformer_block_detached_prefill_chunked(
                             "chunked full-attention tape flash core tile [{tile_start}, {tile_end})"
                         )
                     })?;
-                        if trace_tile_dispatch {
-                            eprintln!(
-                                "kiln_full_attn_tile path=flash_tape result={} layer={} mode={} tile_start={} tile_end={} tile_len={} kv_len={} seq_len={} heads={} kv_heads={} head_dim={} dtype={:?} device={:?}",
-                                if flash_result.is_some() {
-                                    "hit"
-                                } else {
-                                    "declined"
-                                },
-                                full_attn_layer_idx,
-                                mode.label(),
-                                tile_start,
-                                tile_end,
-                                tile_len,
-                                tile_end,
-                                seq_len,
-                                num_heads,
-                                num_kv_heads,
-                                head_dim,
-                                x.dtype(),
-                                x.device()
-                            );
-                        }
                         if let Some(attn_output) = flash_result {
                             let (rb, rs, rh, rd) = attn_output.dims4()?;
                             tape_reshape_full_attn(
@@ -22326,23 +22250,6 @@ fn transformer_block_detached_prefill_chunked(
                     }
                     #[cfg(not(any(feature = "cuda", feature = "rocm")))]
                     {
-                        if trace_tile_dispatch {
-                            eprintln!(
-                                "kiln_full_attn_tile path=gqa_prefill result=flash_unavailable_for_tape layer={} mode={} tile_start={} tile_end={} tile_len={} kv_len={} seq_len={} heads={} kv_heads={} head_dim={} dtype={:?} device={:?}",
-                                full_attn_layer_idx,
-                                mode.label(),
-                                tile_start,
-                                tile_end,
-                                tile_len,
-                                tile_end,
-                                seq_len,
-                                num_heads,
-                                num_kv_heads,
-                                head_dim,
-                                x.dtype(),
-                                x.device()
-                            );
-                        }
                         gqa_attention_core_prefill(
                             backend,
                             &tile_prepared,
@@ -22357,34 +22264,11 @@ fn transformer_block_detached_prefill_chunked(
                 }
             }
         } else {
-            if trace_tile_dispatch {
-                eprintln!(
-                    "kiln_full_attn_tile path=gqa_prefill result=flash_not_allowed layer={} mode={} tile_start={} tile_end={} tile_len={} kv_len={} seq_len={} heads={} kv_heads={} head_dim={} dtype={:?} device={:?} flash_guaranteed={} shape_allowed={}",
-                    full_attn_layer_idx,
-                    mode.label(),
-                    tile_start,
-                    tile_end,
-                    tile_len,
-                    tile_end,
-                    seq_len,
-                    num_heads,
-                    num_kv_heads,
-                    head_dim,
-                    x.dtype(),
-                    x.device(),
-                    flash_tile_guaranteed,
-                    flash_shape_allowed
-                );
-            }
             gqa_attention_core_prefill(backend, &tile_prepared, num_heads, num_kv_heads, head_dim)
                 .with_context(|| {
                 format!("chunked full-attention core tile [{tile_start}, {tile_end})")
             })?
         };
-        if trace_stage_timings {
-            timing_attn_core += attn_core_timing_start.elapsed();
-        }
-        let tile_rest_timing_start = std::time::Instant::now();
         ensure_full_attn_debug_finite(
             debug_finite,
             format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) attn_core"),
@@ -22511,15 +22395,9 @@ fn transformer_block_detached_prefill_chunked(
             out_tile
         };
         output_tiles.push(out_tile);
-        if trace_stage_timings {
-            timing_tile_rest += tile_rest_timing_start.elapsed();
-            timing_tile_total += tile_timing_start.elapsed();
-        }
-
         tile_start = tile_end;
     }
 
-    let concat_timing_start = std::time::Instant::now();
     let output_refs: Vec<&Tensor> = output_tiles.iter().collect();
     let output = Tensor::cat(&output_refs, 1).context("chunked full-attention output cat")?;
     ensure_full_attn_debug_finite(
@@ -22567,23 +22445,6 @@ fn transformer_block_detached_prefill_chunked(
             }
         }
     };
-    if trace_stage_timings {
-        timing_concat += concat_timing_start.elapsed();
-        eprintln!(
-            "kiln_full_attn_layer_timing layer={} mode={} seq_len={} tile_count={} total_ms={:.3} pre_kv_ms={:.3} tile_total_ms={:.3} tile_prep_ms={:.3} attn_core_ms={:.3} tile_rest_ms={:.3} concat_ms={:.3}",
-            full_attn_layer_idx,
-            mode.label(),
-            seq_len,
-            output_tiles.len(),
-            layer_timing_start.elapsed().as_secs_f64() * 1000.0,
-            timing_pre_kv.as_secs_f64() * 1000.0,
-            timing_tile_total.as_secs_f64() * 1000.0,
-            timing_tile_prep.as_secs_f64() * 1000.0,
-            timing_attn_core.as_secs_f64() * 1000.0,
-            timing_tile_rest.as_secs_f64() * 1000.0,
-            timing_concat.as_secs_f64() * 1000.0
-        );
-    }
     Ok(Some(output))
 }
 

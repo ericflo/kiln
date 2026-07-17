@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **660 direct read call sites** and
+The scanner records **657 direct read call sites** and
 **255 process-mutation call sites**. It can
-statically name **163 distinct literal `KILN_*`
-read names** across **291 call sites**.
+statically name **160 distinct literal `KILN_*`
+read names** across **288 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 188 | 122 | 0 |
+| Experimental/debug migration | 185 | 119 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 135 | 41 | 247 |
 
@@ -56,7 +56,7 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/forward.rs` | 38 | 33 |
+| `crates/kiln-model/src/forward.rs` | 35 | 30 |
 | `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
 | `crates/kiln-model/src/backend/rocm.rs` | 11 | 9 |
 | `crates/kiln-model/src/backend/capability.rs` | 9 | 1 |
@@ -267,9 +267,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_TEST_FLAG_GIBBERISH` | Test only | 2 | `crates/kiln-core/src/env_flag.rs` |
 | `KILN_TEST_FLAG_TRUTHY` | Test only | 1 | `crates/kiln-core/src/env_flag.rs` |
 | `KILN_TRACE_FLASH_ATTN_BWD_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-model/src/tape_forward.rs` |
-| `KILN_TRACE_FULL_ATTN_STAGE_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_TRACE_FULL_ATTN_TILES` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_TRACE_ROCM_FLASH_FWD` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_TRACE_SFT_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-train/src/trainer.rs` |
 | `KILN_TRACE_TAPE_BACKWARD_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-autograd/src/tape.rs` |
 | `KILN_VK_MICROBENCH_BATCHES` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |

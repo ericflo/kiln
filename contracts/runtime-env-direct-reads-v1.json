@@ -3708,45 +3708,6 @@
       "surface": "source"
     },
     {
-      "api": "env_flag",
-      "argument": "KILN_TRACE_FULL_ATTN_STAGE_TIMINGS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_TRACE_FULL_ATTN_TILES",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_TRACE_ROCM_FLASH_FWD",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "name",
       "argument_kind": "expression",
@@ -7205,11 +7166,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 291,
-    "literal_kiln_read_names": 163,
+    "literal_kiln_read_call_sites": 288,
+    "literal_kiln_read_names": 160,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 122,
+      "experimental_debug": 119,
       "public_stable": 1,
       "test_only": 41
     },
@@ -7219,13 +7180,13 @@
       "test_only": 247
     },
     "process_mutation_entries": 160,
-    "read_call_sites": 660,
+    "read_call_sites": 657,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 188,
+      "experimental_debug": 185,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 393
+    "read_entries": 390
   }
 }
