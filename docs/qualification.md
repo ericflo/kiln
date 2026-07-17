@@ -1189,11 +1189,35 @@ return zero without force after the decode worker is joined, and snapshot
 cleanup must leave no residue.
 
 ROCm results always declare the base serving metrics plus the shared host
-memory, swap, temperature, and thermal-pacing metrics. Vulkan alone declares
-the resident-prefill, process-DRM, allocator, and mapping extensions. The same
-backend-specific schema is used for both complete and partial results, so a
-later failure cannot replace retained ROCm warmup evidence with a metric-set
-mismatch caused by Vulkan-only fields.
+memory, swap, temperature, thermal-pacing, and accelerator clock/power metrics.
+Vulkan declares the same accelerator telemetry schema plus its resident-prefill,
+process-DRM, allocator, and mapping extensions. The same backend-specific
+schema is used for both complete and partial results, so a later failure cannot
+replace retained ROCm warmup evidence with a metric-set mismatch caused by
+Vulkan-only fields.
+
+The accelerator sampler resolves exactly one Linux DRM device whose `vendor`
+is AMD `0x1002`, then exactly one `amdgpu` hwmon directory below that device.
+It selects SCLK by `freq*_label=sclk`, average package power by
+`power*_label=PPT`, and edge temperature by `temp*_label=edge`; it never embeds
+boot-dependent `cardN` or `hwmonN` numbers. Every 250 ms it reads those labeled
+values with `gpu_busy_percent`, while `pp_dpm_sclk` supplies the advertised
+maximum SCLK. Missing, ambiguous, malformed, or implausible inputs are explicit
+telemetry outcomes rather than zero readings.
+
+Receipt metrics include telemetry availability and errors, total and active
+sample counts, p50/peak busy percentage, advertised SCLK, active-sample
+minimum/p50/maximum SCLK, active SCLK samples below half the advertised maximum,
+active p50/peak PPT power, and active p50 plus overall peak edge temperature.
+An active sample is one with at least 50 percent GPU busy, preventing idle
+clocks and power from distorting the workload summaries. Aggregates are scoped
+to the measured phase; partial results retain samples collected after
+measurement began. ROCm requires available, error-free telemetry with at least
+one measured and one active sample. Vulkan uses the same sampler when AMD sysfs
+is available, but permits an unavailable device so the workload remains
+portable to non-AMD Vulkan implementations; once an AMD telemetry source is
+selected, any read error still fails the case. The below-half-max count is
+diagnostic evidence, not by itself a performance acceptance threshold.
 
 This `kind: soak` workload is intentionally a non-comparative pass/fail gate,
 so its `comparison_policy` is null. Do not use it to claim relative throughput

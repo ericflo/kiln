@@ -1223,6 +1223,17 @@ function validateSftLossRouteDocumentationSourceContract() {
   if (missingRocmGraphTerms.length > 0) {
     fail(`docs/site/architecture.html: ROCm owner-geometry contract missing terms: ${missingRocmGraphTerms.join(', ')}`);
   }
+  const missingAcceleratorTelemetryTerms = missingNormalizedTerms(staticArchitectureText, [
+    'qualification-only device sampler',
+    'exactly one AMD 0x1002 DRM device',
+    'samples at or above 50 percent busy',
+    'minimum/p50/maximum SCLK',
+    'below half the advertised pp_dpm_sclk maximum',
+    'Vulkan records the same closed metric schema',
+  ]);
+  if (missingAcceleratorTelemetryTerms.length > 0) {
+    fail(`docs/site/architecture.html: accelerator telemetry contract missing terms: ${missingAcceleratorTelemetryTerms.join(', ')}`);
+  }
 
   const troubleshootingHtml = readFileSync(resolve(repoRoot, 'docs/site/troubleshooting.html'), 'utf8');
   const troubleshootingText = normalizedHtmlText(troubleshootingHtml);
@@ -1236,6 +1247,11 @@ function validateSftLossRouteDocumentationSourceContract() {
     '88,000/80,000 millicelsius',
     '97,000 millicelsius',
     'host_thermal_pacing',
+    'accelerator_sclk_active_min_hz',
+    'accelerator_sclk_active_p50_hz',
+    'accelerator_sclk_active_below_half_max_count',
+    'requires available, error-free telemetry with measured active samples',
+    'Low SCLK correlation supports a device-wide clock-state hypothesis',
     'runtime setup clock starts only after the exact source-bound build succeeds',
     'outer containment timeout is derived from all phase limits',
   ]);

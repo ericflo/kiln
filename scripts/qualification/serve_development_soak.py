@@ -72,6 +72,8 @@ HOST_MEMORY_AVAILABLE_FLOOR_BYTES = 8 * 1024 * 1024 * 1024
 HOST_SWAP_GROWTH_LIMIT_BYTES = 512 * 1024 * 1024
 HOST_THERMAL_PACING_START_MILLICELSIUS = 88_000
 HOST_THERMAL_PACING_RESUME_MILLICELSIUS = 80_000
+ACCELERATOR_TELEMETRY_ACTIVE_BUSY_FLOOR_PERCENT = 50
+AMD_GPU_VENDOR_ID = "0x1002"
 PROCESS_MEMORY_MAPPING_CATEGORIES = (
     "anonymous",
     "device",
@@ -179,6 +181,7 @@ class SoakRuntime:
     host_thermal_sensor_label: str | None = None
     thermal_pacing_start_millicelsius: int | None = None
     thermal_pacing_resume_millicelsius: int | None = None
+    accelerator_telemetry_required: bool = False
 
 
 ROCM_RUNTIME = SoakRuntime(
@@ -218,6 +221,7 @@ ROCM_RUNTIME = SoakRuntime(
     thermal_pacing_resume_millicelsius=(
         HOST_THERMAL_PACING_RESUME_MILLICELSIUS
     ),
+    accelerator_telemetry_required=True,
 )
 VULKAN_RUNTIME = SoakRuntime(
     variant_id=VULKAN_RUNTIME_VARIANT,
@@ -432,13 +436,42 @@ HOST_SAFETY_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     ),
     "host_thermal_pacing_seconds": ("s", "sum", True),
 }
+ACCELERATOR_TELEMETRY_METRIC_DEFINITIONS: dict[
+    str, tuple[str, str, bool]
+] = {
+    "accelerator_edge_temperature_active_p50_millicelsius": (
+        "millicelsius",
+        "p50",
+        True,
+    ),
+    "accelerator_edge_temperature_peak_millicelsius": (
+        "millicelsius",
+        "max",
+        True,
+    ),
+    "accelerator_gpu_busy_percent_p50": ("percent", "p50", False),
+    "accelerator_gpu_busy_percent_peak": ("percent", "max", False),
+    "accelerator_power_active_p50_microwatts": ("microwatts", "p50", True),
+    "accelerator_power_active_peak_microwatts": ("microwatts", "max", True),
+    "accelerator_sclk_active_below_half_max_count": ("count", "sum", True),
+    "accelerator_sclk_active_max_hz": ("hz", "max", False),
+    "accelerator_sclk_active_min_hz": ("hz", "min", False),
+    "accelerator_sclk_active_p50_hz": ("hz", "p50", False),
+    "accelerator_sclk_advertised_max_hz": ("hz", "exact", False),
+    "accelerator_telemetry_active_sample_count": ("count", "sum", False),
+    "accelerator_telemetry_available": ("bool", "exact", False),
+    "accelerator_telemetry_error_count": ("count", "sum", True),
+    "accelerator_telemetry_sample_count": ("count", "sum", False),
+}
 ROCM_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     **METRIC_DEFINITIONS,
     **HOST_SAFETY_METRIC_DEFINITIONS,
+    **ACCELERATOR_TELEMETRY_METRIC_DEFINITIONS,
 }
 VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     **METRIC_DEFINITIONS,
     **HOST_SAFETY_METRIC_DEFINITIONS,
+    **ACCELERATOR_TELEMETRY_METRIC_DEFINITIONS,
     "prefix_cache_enabled": ("bool", "exact", True),
     "resident_prefill_enabled": ("bool", "exact", False),
     "batched_state_cache_active_leases_end": ("leases", "exact", True),
@@ -561,6 +594,10 @@ class SoakError(RuntimeError):
     pass
 
 
+class AcceleratorTelemetryUnavailable(SoakError):
+    pass
+
+
 @dataclasses.dataclass
 class RequestWorkerEvidence:
     peak_residue_count: int = 0
@@ -598,6 +635,28 @@ def effective_config(
             "cancel_every_waves": runtime.cancel_every_waves,
             "gpu_memory_scope": runtime.gpu_memory_scope,
             "gpu_memory_source": runtime.gpu_memory_source,
+            "accelerator_telemetry": {
+                "active_busy_floor_percent": (
+                    ACCELERATOR_TELEMETRY_ACTIVE_BUSY_FLOOR_PERCENT
+                ),
+                "amd_gpu_vendor_id": AMD_GPU_VENDOR_ID,
+                "device_selector": "exactly_one_amd_drm_device",
+                "mode": (
+                    "required"
+                    if runtime.accelerator_telemetry_required
+                    else "if_available"
+                ),
+                "poll_interval_ms": int(
+                    HOST_GUARD_POLL_INTERVAL_SECONDS * 1000
+                ),
+                "sources": {
+                    "busy": "drm_device/gpu_busy_percent",
+                    "edge_temperature": "amdgpu_hwmon/temp_edge_input",
+                    "power": "amdgpu_hwmon/power_PPT_average",
+                    "sclk": "amdgpu_hwmon/freq_sclk_input",
+                    "sclk_advertised_max": "drm_device/pp_dpm_sclk",
+                },
+            },
             "active_gpu_peak_growth_limit_bytes": (
                 runtime.active_gpu_peak_growth_limit_bytes
                 if runtime.active_gpu_peak_growth_limit_bytes is not None
@@ -1169,6 +1228,319 @@ def read_hwmon_temperature_millicelsius(path: Path) -> int:
     if value < -100_000 or value > 250_000:
         raise SoakError(f"{path} temperature {value} millicelsius is implausible")
     return value
+
+
+@dataclasses.dataclass(frozen=True)
+class AcceleratorTelemetryPaths:
+    drm_device: Path
+    busy_percent: Path
+    sclk_hz: Path
+    power_microwatts: Path
+    edge_temperature_millicelsius: Path
+    advertised_max_sclk_hz: int
+
+
+@dataclasses.dataclass(frozen=True)
+class AcceleratorTelemetrySample:
+    observed: float
+    busy_percent: int
+    sclk_hz: int
+    power_microwatts: int
+    edge_temperature_millicelsius: int
+
+
+def _read_bounded_decimal(
+    path: Path,
+    *,
+    minimum: int,
+    maximum: int,
+    label: str,
+) -> int:
+    raw = path.read_text(encoding="utf-8").strip()
+    if re.fullmatch(r"[+-]?\d+", raw) is None:
+        raise SoakError(f"{path} contains a non-integer {label} value {raw!r}")
+    value = int(raw)
+    if value < minimum or value > maximum:
+        raise SoakError(
+            f"{path} {label} value {value} is outside {minimum}..={maximum}"
+        )
+    return value
+
+
+def _resolve_labeled_hwmon_input(
+    hwmon: Path,
+    *,
+    prefix: str,
+    label: str,
+    value_suffix: str = "input",
+) -> Path:
+    matches: list[Path] = []
+    for label_path in sorted(hwmon.glob(f"{prefix}*_label")):
+        if label_path.read_text(encoding="utf-8").strip() != label:
+            continue
+        input_path = label_path.with_name(
+            label_path.name.removesuffix("_label") + f"_{value_suffix}"
+        )
+        if not input_path.is_file():
+            raise SoakError(f"{label_path} has no matching input")
+        matches.append(input_path)
+    if len(matches) != 1:
+        raise SoakError(
+            f"amdgpu hwmon {prefix}/{label} resolved to {len(matches)} inputs, "
+            "expected exactly one"
+        )
+    return matches[0]
+
+
+def _advertised_max_sclk_hz(path: Path) -> int:
+    frequencies: list[int] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = re.fullmatch(r"\s*\d+:\s*(\d+)Mhz(?:\s+\*)?\s*", line)
+        if match is not None:
+            frequencies.append(int(match.group(1)) * 1_000_000)
+    if not frequencies:
+        raise SoakError(f"{path} contains no parseable SCLK performance levels")
+    return max(frequencies)
+
+
+def resolve_amd_accelerator_telemetry_paths(
+    drm_root: Path = Path("/sys/class/drm"),
+) -> AcceleratorTelemetryPaths:
+    devices: list[Path] = []
+    for card in sorted(drm_root.glob("card[0-9]*")):
+        if re.fullmatch(r"card\d+", card.name) is None:
+            continue
+        device = card / "device"
+        vendor_path = device / "vendor"
+        if not vendor_path.is_file():
+            continue
+        if (
+            vendor_path.read_text(encoding="utf-8").strip().lower()
+            == AMD_GPU_VENDOR_ID
+        ):
+            devices.append(device)
+    if not devices:
+        raise AcceleratorTelemetryUnavailable(
+            "AMD accelerator telemetry resolved 0 DRM devices"
+        )
+    if len(devices) != 1:
+        raise SoakError(
+            f"AMD accelerator telemetry resolved {len(devices)} DRM devices, "
+            "expected exactly one"
+        )
+    device = devices[0]
+    hwmons = [
+        path
+        for path in sorted((device / "hwmon").glob("hwmon*"))
+        if (path / "name").is_file()
+        and (path / "name").read_text(encoding="utf-8").strip() == "amdgpu"
+    ]
+    if len(hwmons) != 1:
+        raise SoakError(
+            f"AMD accelerator telemetry resolved {len(hwmons)} amdgpu hwmon devices, "
+            "expected exactly one"
+        )
+    hwmon = hwmons[0]
+    busy_percent = device / "gpu_busy_percent"
+    advertised_sclk = device / "pp_dpm_sclk"
+    for path in (busy_percent, advertised_sclk):
+        if not path.is_file():
+            raise SoakError(f"AMD accelerator telemetry source is missing: {path}")
+    return AcceleratorTelemetryPaths(
+        drm_device=device,
+        busy_percent=busy_percent,
+        sclk_hz=_resolve_labeled_hwmon_input(hwmon, prefix="freq", label="sclk"),
+        power_microwatts=_resolve_labeled_hwmon_input(
+            hwmon, prefix="power", label="PPT", value_suffix="average"
+        ),
+        edge_temperature_millicelsius=_resolve_labeled_hwmon_input(
+            hwmon, prefix="temp", label="edge"
+        ),
+        advertised_max_sclk_hz=_advertised_max_sclk_hz(advertised_sclk),
+    )
+
+
+class AcceleratorTelemetrySampler:
+    def __init__(
+        self,
+        *,
+        required: bool,
+        drm_root: Path = Path("/sys/class/drm"),
+    ) -> None:
+        self.required = required
+        self.drm_root = drm_root
+        self.paths: AcceleratorTelemetryPaths | None = None
+        self.samples: list[AcceleratorTelemetrySample] = []
+        self.errors: list[str] = []
+        self.unavailable_reason: str | None = None
+        self.stop = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run,
+            name="qualification-accelerator-telemetry",
+            daemon=True,
+        )
+        self._started = False
+        self._closed = False
+
+    def start(self) -> None:
+        try:
+            self.paths = resolve_amd_accelerator_telemetry_paths(self.drm_root)
+            self._sample()
+            if self.errors:
+                self.unavailable_reason = self.errors[-1]
+                mixed.trace(
+                    "accelerator_telemetry_unavailable",
+                    required=self.required,
+                    reason=self.unavailable_reason,
+                )
+                return
+        except AcceleratorTelemetryUnavailable as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            self.unavailable_reason = message
+            if self.required:
+                self.errors.append(message)
+            mixed.trace(
+                "accelerator_telemetry_unavailable",
+                required=self.required,
+                reason=message,
+            )
+            return
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            self.unavailable_reason = message
+            self.errors.append(message)
+            mixed.trace(
+                "accelerator_telemetry_unavailable",
+                required=self.required,
+                reason=message,
+            )
+            return
+        assert self.paths is not None
+        mixed.trace(
+            "accelerator_telemetry_armed",
+            active_busy_floor_percent=(
+                ACCELERATOR_TELEMETRY_ACTIVE_BUSY_FLOOR_PERCENT
+            ),
+            advertised_max_sclk_hz=self.paths.advertised_max_sclk_hz,
+            device=str(self.paths.drm_device),
+            poll_interval_ms=int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
+        )
+        self.thread.start()
+        self._started = True
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.stop.set()
+        if self._started:
+            self.thread.join(timeout=10.0)
+            if self.thread.is_alive() and len(self.errors) < 8:
+                self.errors.append(
+                    "accelerator-telemetry thread did not stop within 10 seconds"
+                )
+            elif not self.errors:
+                self._sample()
+
+    def _sample(self) -> None:
+        assert self.paths is not None
+        try:
+            sample = AcceleratorTelemetrySample(
+                observed=time.monotonic(),
+                busy_percent=_read_bounded_decimal(
+                    self.paths.busy_percent,
+                    minimum=0,
+                    maximum=100,
+                    label="GPU busy percent",
+                ),
+                sclk_hz=_read_bounded_decimal(
+                    self.paths.sclk_hz,
+                    minimum=0,
+                    maximum=10_000_000_000,
+                    label="SCLK frequency",
+                ),
+                power_microwatts=_read_bounded_decimal(
+                    self.paths.power_microwatts,
+                    minimum=0,
+                    maximum=1_000_000_000,
+                    label="accelerator power",
+                ),
+                edge_temperature_millicelsius=_read_bounded_decimal(
+                    self.paths.edge_temperature_millicelsius,
+                    minimum=-100_000,
+                    maximum=250_000,
+                    label="accelerator edge temperature",
+                ),
+            )
+            self.samples.append(sample)
+        except Exception as exc:
+            if len(self.errors) < 8:
+                self.errors.append(f"{type(exc).__name__}: {exc}")
+            self.stop.set()
+
+    def _run(self) -> None:
+        while not self.stop.wait(HOST_GUARD_POLL_INTERVAL_SECONDS):
+            self._sample()
+            if self.errors:
+                return
+
+    def metric_values_since(self, started: float | None) -> dict[str, float | int]:
+        values: dict[str, float | int] = {
+            name: 0 for name in ACCELERATOR_TELEMETRY_METRIC_DEFINITIONS
+        }
+        values["accelerator_telemetry_error_count"] = len(self.errors)
+        if self.paths is None or not self.samples:
+            return values
+        selected = [
+            sample
+            for sample in self.samples
+            if started is None or sample.observed >= started
+        ]
+        values["accelerator_telemetry_available"] = 1
+        values["accelerator_sclk_advertised_max_hz"] = (
+            self.paths.advertised_max_sclk_hz
+        )
+        values["accelerator_telemetry_sample_count"] = len(selected)
+        if not selected:
+            return values
+        busy = [sample.busy_percent for sample in selected]
+        values["accelerator_gpu_busy_percent_p50"] = mixed.percentile_r7(busy, 0.5)
+        values["accelerator_gpu_busy_percent_peak"] = max(busy)
+        active = [
+            sample
+            for sample in selected
+            if sample.busy_percent >= ACCELERATOR_TELEMETRY_ACTIVE_BUSY_FLOOR_PERCENT
+        ]
+        values["accelerator_telemetry_active_sample_count"] = len(active)
+        values["accelerator_edge_temperature_peak_millicelsius"] = max(
+            sample.edge_temperature_millicelsius for sample in selected
+        )
+        if not active:
+            return values
+        sclk = [sample.sclk_hz for sample in active]
+        power = [sample.power_microwatts for sample in active]
+        edge_temperature = [
+            sample.edge_temperature_millicelsius for sample in active
+        ]
+        values.update(
+            {
+                "accelerator_edge_temperature_active_p50_millicelsius": (
+                    mixed.percentile_r7(edge_temperature, 0.5)
+                ),
+                "accelerator_power_active_p50_microwatts": mixed.percentile_r7(
+                    power, 0.5
+                ),
+                "accelerator_power_active_peak_microwatts": max(power),
+                "accelerator_sclk_active_below_half_max_count": sum(
+                    frequency * 2 < self.paths.advertised_max_sclk_hz
+                    for frequency in sclk
+                ),
+                "accelerator_sclk_active_max_hz": max(sclk),
+                "accelerator_sclk_active_min_hz": min(sclk),
+                "accelerator_sclk_active_p50_hz": mixed.percentile_r7(sclk, 0.5),
+            }
+        )
+        return values
 
 
 @dataclasses.dataclass
@@ -2702,6 +3074,9 @@ def execute(
         binary, config_path, runtime.variant_id, runtime.build_spec
     )
     sampler = GpuMemorySampler(port, process.pid, runtime)
+    accelerator_sampler = AcceleratorTelemetrySampler(
+        required=runtime.accelerator_telemetry_required
+    )
     host_guard = (
         HostMemoryGuard(process, runtime.host_mem_available_floor_bytes)
         if runtime.host_mem_available_floor_bytes is not None
@@ -2723,6 +3098,7 @@ def execute(
         thermal_guard.start()
     if host_guard is not None:
         host_guard.start()
+    accelerator_sampler.start()
     shutdown: mixed.ShutdownOutcome | None = None
     snapshot_residue: list[str] = []
     values: dict[str, float | int] | None = None
@@ -3610,6 +3986,7 @@ def execute(
                 break
 
         sampler.close()
+        accelerator_sampler.close()
         health_end = wait_drained(
             port, measurement_deadline, "soak final health"
         )
@@ -3670,6 +4047,7 @@ def execute(
         zero_tokens = int(result_evidence.values["zero_token_response_count"])
         values = {
             **result_evidence.values,
+            **accelerator_sampler.metric_values_since(measurement_started),
             "batching_error_count": mixed.counter_delta(
                 batching_start, batching_end, "total_errors"
             ),
@@ -4002,6 +4380,7 @@ def execute(
         failures.append(f"{type(exc).__name__}: {exc}")
     finally:
         sampler.close()
+        accelerator_sampler.close()
         if thermal_guard is not None:
             thermal_guard.close()
         if host_guard is not None:
@@ -4290,6 +4669,26 @@ def execute(
                 values.update(
                     resident_recurrent_state_metric_values(resident_state_end)
                 )
+    accelerator_values = accelerator_sampler.metric_values_since(
+        measurement_started if measurement_started is not None else math.inf
+    )
+    values.update(accelerator_values)
+    if accelerator_sampler.errors:
+        failures.append(
+            "accelerator telemetry errors: "
+            + ", ".join(accelerator_sampler.errors)
+        )
+    if runtime.accelerator_telemetry_required:
+        if accelerator_values["accelerator_telemetry_available"] != 1:
+            failures.append("required accelerator telemetry was unavailable")
+        if accelerator_values["accelerator_telemetry_sample_count"] < 1:
+            failures.append(
+                "required accelerator telemetry recorded no measurement samples"
+            )
+        if accelerator_values["accelerator_telemetry_active_sample_count"] < 1:
+            failures.append(
+                "required accelerator telemetry recorded no active GPU samples"
+            )
     assert shutdown is not None
     values["shutdown_forced_count"] = int(shutdown.forced)
     values["shutdown_nonzero_count"] = int(shutdown.returncode != 0)

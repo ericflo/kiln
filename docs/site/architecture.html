@@ -638,6 +638,18 @@ training request
           A VRAM-rebalance claim additionally needs allocator reclaim, physical KV resize, memory-tier, or
           host-pressure evidence. A new graph bucket can instead produce a one-time warmup/capture pause.
         </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Source-bound ROCm and Vulkan development soaks add an independent qualification-only device sampler;
+          it is not a second product configuration surface. Every 250 ms the harness resolves exactly one AMD
+          <code>0x1002</code> DRM device and one labeled <code>amdgpu</code> hwmon, then records GPU busy,
+          <code>sclk</code>, <code>PPT</code> average power, and edge temperature. Active aggregates include only
+          samples at or above 50 percent busy and publish minimum/p50/maximum SCLK, p50/peak power, p50/peak
+          temperature, and a count below half the advertised <code>pp_dpm_sclk</code> maximum. ROCm receipts fail
+          closed on unavailable, malformed, empty, or idle-only telemetry. Vulkan records the same closed metric
+          schema when AMD sysfs exists but may report it unavailable on a non-AMD Vulkan device. This evidence can
+          distinguish a device-wide clock or thermal state from graph, allocator, and synchronization events;
+          correlation still does not make any one sample a kernel-level causal profile.
+        </p>
 
         <h3 class="font-semibold mt-6 mb-3">The product surfaces share one authority</h3>
         <div class="overflow-x-auto">

@@ -74,6 +74,39 @@ def batched_state_debug(
     }
 
 
+def write_amd_telemetry_fixture(root: Path) -> dict[str, Path]:
+    device = root / "card1/device"
+    hwmon = device / "hwmon/hwmon6"
+    hwmon.mkdir(parents=True)
+    paths = {
+        "vendor": device / "vendor",
+        "busy": device / "gpu_busy_percent",
+        "dpm": device / "pp_dpm_sclk",
+        "name": hwmon / "name",
+        "sclk_label": hwmon / "freq1_label",
+        "sclk": hwmon / "freq1_input",
+        "power_label": hwmon / "power1_label",
+        "power": hwmon / "power1_average",
+        "temperature_label": hwmon / "temp1_label",
+        "temperature": hwmon / "temp1_input",
+    }
+    values = {
+        "vendor": "0x1002\n",
+        "busy": "80\n",
+        "dpm": "0: 600Mhz\n1: 947Mhz *\n2: 2900Mhz\n",
+        "name": "amdgpu\n",
+        "sclk_label": "sclk\n",
+        "sclk": "2400000000\n",
+        "power_label": "PPT\n",
+        "power": "45000000\n",
+        "temperature_label": "edge\n",
+        "temperature": "70000\n",
+    }
+    for name, value in values.items():
+        paths[name].write_text(value, encoding="utf-8")
+    return paths
+
+
 class ServeRocmSoakTests(unittest.TestCase):
     def test_drained_warmup_evidence_survives_later_policy_failure(self) -> None:
         requests, waves = soak.record_drained_warmup_wave(
@@ -291,6 +324,23 @@ class ServeRocmSoakTests(unittest.TestCase):
                 "itl_attribution": "host_thermal_pacing",
             },
         )
+        self.assertEqual(
+            rocm["soak"]["accelerator_telemetry"],
+            {
+                "active_busy_floor_percent": 50,
+                "amd_gpu_vendor_id": "0x1002",
+                "device_selector": "exactly_one_amd_drm_device",
+                "mode": "required",
+                "poll_interval_ms": 250,
+                "sources": {
+                    "busy": "drm_device/gpu_busy_percent",
+                    "edge_temperature": "amdgpu_hwmon/temp_edge_input",
+                    "power": "amdgpu_hwmon/power_PPT_average",
+                    "sclk": "amdgpu_hwmon/freq_sclk_input",
+                    "sclk_advertised_max": "drm_device/pp_dpm_sclk",
+                },
+            },
+        )
         with self.assertRaisesRegex(
             soak.SoakError, "one protected geometry.*transition headroom"
         ):
@@ -364,6 +414,9 @@ class ServeRocmSoakTests(unittest.TestCase):
                 "resume_signal": "SIGCONT",
                 "itl_attribution": "host_thermal_pacing",
             },
+        )
+        self.assertEqual(
+            vulkan["soak"]["accelerator_telemetry"]["mode"], "if_available"
         )
         self.assertEqual(
             soak.effective_config(60.0, 123)["soak"][
@@ -1686,6 +1739,97 @@ class ServeRocmSoakTests(unittest.TestCase):
             self.assertEqual(resolved, sensor / "temp1_input")
             self.assertEqual(soak.read_hwmon_temperature_millicelsius(resolved), 81250)
 
+    def test_accelerator_telemetry_resolves_and_aggregates_amd_sysfs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            paths = write_amd_telemetry_fixture(root)
+            resolved = soak.resolve_amd_accelerator_telemetry_paths(root)
+            self.assertEqual(resolved.drm_device, root / "card1/device")
+            self.assertEqual(resolved.advertised_max_sclk_hz, 2_900_000_000)
+
+            sampler = soak.AcceleratorTelemetrySampler(required=True, drm_root=root)
+            sampler.paths = resolved
+            with mock.patch.object(soak.time, "monotonic", return_value=10.0):
+                sampler._sample()
+            paths["busy"].write_text("90\n", encoding="utf-8")
+            paths["sclk"].write_text("1200000000\n", encoding="utf-8")
+            paths["power"].write_text("55000000\n", encoding="utf-8")
+            paths["temperature"].write_text("80000\n", encoding="utf-8")
+            with mock.patch.object(soak.time, "monotonic", return_value=20.0):
+                sampler._sample()
+
+        self.assertEqual(
+            sampler.metric_values_since(5.0),
+            {
+                "accelerator_edge_temperature_active_p50_millicelsius": 75_000.0,
+                "accelerator_edge_temperature_peak_millicelsius": 80_000,
+                "accelerator_gpu_busy_percent_p50": 85.0,
+                "accelerator_gpu_busy_percent_peak": 90,
+                "accelerator_power_active_p50_microwatts": 50_000_000.0,
+                "accelerator_power_active_peak_microwatts": 55_000_000,
+                "accelerator_sclk_active_below_half_max_count": 1,
+                "accelerator_sclk_active_max_hz": 2_400_000_000,
+                "accelerator_sclk_active_min_hz": 1_200_000_000,
+                "accelerator_sclk_active_p50_hz": 1_800_000_000.0,
+                "accelerator_sclk_advertised_max_hz": 2_900_000_000,
+                "accelerator_telemetry_active_sample_count": 2,
+                "accelerator_telemetry_available": 1,
+                "accelerator_telemetry_error_count": 0,
+                "accelerator_telemetry_sample_count": 2,
+            },
+        )
+        premeasurement = sampler.metric_values_since(math.inf)
+        self.assertEqual(premeasurement["accelerator_telemetry_available"], 1)
+        self.assertEqual(premeasurement["accelerator_telemetry_sample_count"], 0)
+        self.assertEqual(
+            premeasurement["accelerator_telemetry_active_sample_count"], 0
+        )
+        self.assertEqual(
+            premeasurement["accelerator_sclk_advertised_max_hz"],
+            2_900_000_000,
+        )
+
+    def test_accelerator_telemetry_required_and_optional_unavailable_modes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            required = soak.AcceleratorTelemetrySampler(
+                required=True, drm_root=root
+            )
+            optional = soak.AcceleratorTelemetrySampler(
+                required=False, drm_root=root
+            )
+            with mock.patch.object(soak.mixed, "trace"):
+                required.start()
+                optional.start()
+            required.close()
+            optional.close()
+
+        self.assertEqual(len(required.errors), 1)
+        self.assertIn("resolved 0 DRM devices", required.errors[0])
+        self.assertEqual(optional.errors, [])
+        self.assertIsNotNone(optional.unavailable_reason)
+        self.assertEqual(
+            optional.metric_values_since(None)["accelerator_telemetry_available"],
+            0,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            write_amd_telemetry_fixture(root)
+            second = root / "card2/device"
+            second.mkdir(parents=True)
+            (second / "vendor").write_text("0x1002\n", encoding="utf-8")
+            ambiguous = soak.AcceleratorTelemetrySampler(
+                required=False, drm_root=root
+            )
+            with mock.patch.object(soak.mixed, "trace"):
+                ambiguous.start()
+            ambiguous.close()
+
+        self.assertEqual(len(ambiguous.errors), 1)
+        self.assertIn("resolved 2 DRM devices", ambiguous.errors[0])
+
     def test_host_thermal_guard_terminates_at_limit_and_records_peak(self) -> None:
         process = mock.Mock(pid=4321)
         process.poll.return_value = None
@@ -1905,7 +2049,8 @@ class ServeRocmSoakTests(unittest.TestCase):
             [metric["name"] for metric in metrics], sorted(values)
         )
         self.assertEqual(
-            set(soak.HOST_SAFETY_METRIC_DEFINITIONS),
+            set(soak.HOST_SAFETY_METRIC_DEFINITIONS)
+            | set(soak.ACCELERATOR_TELEMETRY_METRIC_DEFINITIONS),
             set(soak.ROCM_METRIC_DEFINITIONS) - set(soak.METRIC_DEFINITIONS),
         )
 
