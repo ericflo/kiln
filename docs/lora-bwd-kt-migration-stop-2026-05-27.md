@@ -1,5 +1,10 @@
 # LoRA `CustomOp::bwd` kt-bridge migration — STOP (re-audit 2026-05-27)
 
+> Historical audit. The three Candle LoRA `CustomOp::bwd` bodies and the
+> uncalled `try_kt_mul_scalar` scaffold described below were subsequently
+> deleted; the kt tape is now the sole LoRA autograd producer. See
+> `docs/CANDLE_REMOVAL_PLAN.md` for current guidance.
+
 ## TL;DR
 
 Re-audit on resume task (2026-05-27, branch `main` at `095f1c74`)

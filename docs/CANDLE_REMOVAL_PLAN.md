@@ -1312,65 +1312,23 @@ in `bwd`); tolerances are 1e-4 (F32) / 5e-2 (BF16, matching the
 existing `cuda_bwd_kernel_matches_candle_bf16_k32` precedent for the
 same kernel-vs-candle parity baseline).
 
-**STOP on `CudaSigmoidMulTrainingBf16::bwd`**: it has no matching
-single-FFI kt-backward entry-point. The candle path is implemented
-as an out-of-line element-wise composite
-(neg / exp / + 1 / recip / mul / 1 - s / × × ×), and that composite
-is *already* heavily kt-migrated in-place via the fine-grained
-`try_kt_neg` / `try_kt_exp` / `try_kt_add_scalar` / `try_kt_recip` /
-`try_kt_scalar_minus_tensor` helpers driven by the
-`KILN_USE_KT_API_*` Phase-7 gates. A bridge-style rewrite would
-need either (a) a brand-new fused `kiln_fused_sigmoid_mul_bwd`
-kernel in `kiln-rmsnorm-kernel/csrc/` (out of scope — different
-crate / different agent), or (b) hand-composing every step in
-kt-typed primitives, which the existing per-step `try_kt_*`
-wirings already do. No closer-than-status-quo migration is
-available without new kernel work; revisit when the fused
-backward lands.
+**RESOLVED: `CudaSigmoidMulTrainingBf16::bwd` was deleted.** The kt
+tape is the sole sigmoid-multiply autograd producer, so there is no
+Candle backward body left to bridge. The uncalled
+`try_kt_scalar_minus_tensor` scaffold, its self-contained CUDA test,
+and its environment gate were removed after the whole-tree audit
+found no production call expression.
 
-**STOP on the three LoRA `CustomOp::bwd` bodies
-(`CudaLoraAddF32`, `CudaLoraLinearBf16`, `CudaLoraAddBf16` — all in
-`crates/kiln-model/src/forward.rs`, 2026-05-27 audit on branch
-`ce/lora-bwd-kt-bridge-1082`)**: same shape as the
-`CudaSigmoidMulTrainingBf16::bwd` STOP above. Forward kt entry
-points exist in `crates/kiln-rmsnorm-kernel/src/kt_api.rs`
-(`lora_decode_hidden_kt`, `lora_decode_add_kt`,
-`lora_decode_add_full_kt`, `lora_add_inplace_f32_kt`) wrapping the
-forward FFI symbols (`kiln_lora_decode_hidden_bf16`,
-`kiln_lora_decode_add_bf16`, `kiln_lora_add_inplace_f32`). **No
-backward FFI symbol exists for any LoRA op** — `grep -rn
-"kiln_lora.*bwd\|lora.*_bwd_kt\|lora.*_backward_kt" crates/`
-returns zero matches. Each LoRA `bwd` is implemented as an
-out-of-line element-wise composite of generic ops:
-`CudaLoraAddF32::bwd` is two `matmul`s + `scale` + dtype conversions
-(no tile loop); `CudaLoraLinearBf16::bwd` and `CudaLoraAddBf16::bwd`
-are tile-looped composites of `narrow` + `matmul` + `scale` + (for
-the Bf16 add) axis-0 `cat`, and the matmul/scale/cat steps are
-*already* fine-grained-kt-migrated in-place via
-`try_kt_mul_scalar` / `try_kt_cat_dim0` driven by the
-`KILN_USE_KT_API_*` Phase-7 gates. A bridge-style rewrite would
-need either (a) brand-new fused `kiln_lora_add_bwd_f32`,
-`kiln_lora_linear_bwd_bf16`, and `kiln_lora_add_bwd_bf16` kernels
-in `kiln-rmsnorm-kernel/csrc/` (out of scope under the current
-task constraint — only `crates/kiln-model/src/forward.rs` is
-touchable for these migrations), or (b) hand-composing every step
-in kt-typed primitives, which the existing per-step `try_kt_*`
-wirings already do. The bridge template proven by `341da876`
-(`fused_rmsnorm_backward_kt`) and `d99a15a3`
-(`fused_rotary_one_bwd_kt`) relies on a *single* FFI symbol giving
-bit-exact parity by construction. Re-wrapping a multi-step Rust
-composite under a "bridge" helper would not change the kernel calls
-(they'd still be generic `cuda_matmul` / `cuda_scalar_op` /
-`cuda_concat` via `try_kt_*`), would not increase kt coverage
-beyond what the Phase-7 gates already provide, and would not be
-bit-exact by construction the way the rmsnorm/rotary-one bridges
-are. **Revisit when fused `kiln_lora_*_bwd` FFI kernels land in
-`kiln-rmsnorm-kernel`** (different crate / different agent) — at
-that point the migration template is purely mechanical: borrow
-three operands per CustomOp, call the fused `*_bwd_kt`, copy two
-or three gradients back, add `KILN_DISABLE_LORA_*_BWD_KT_BRIDGE`
-env opt-outs and a parity test per op (template proven by the
-rmsnorm + rotary-one migrations).
+**RESOLVED: the three LoRA Candle `CustomOp::bwd` bodies were
+deleted.** `CudaLoraAddF32`, `CudaLoraLinearBf16`, and
+`CudaLoraAddBf16` are no longer present in
+`crates/kiln-model/src/forward.rs`; the kt tape
+(`try_tape_lora_linear_cuda` / `try_tape_lora_add_cuda`) is the
+sole LoRA autograd producer. The May 2026 STOP analysis remains in
+`docs/lora-bwd-kt-migration-stop-2026-05-27.md` as a historical
+record, not current implementation guidance. The unused
+`try_kt_mul_scalar` scaffold and its environment gate were removed
+after whole-tree reachability checks found no call site.
 
 ## kt-autograd autograd-interop blocker (2026-05-27)
 

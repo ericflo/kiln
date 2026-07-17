@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Phase 0.7 — Preserve-list audit.
 #
-# Records three contract surfaces that must NOT change names during the
-# candle-removal migration, per the issue:
+# Records three compatibility surfaces during the candle-removal migration,
+# per the issue:
 #
 #   (a) Every NVTX range name in `forward.rs` (kiln_nvtx::range!(c"kiln/…"))
 #       — these are how PROFILING.md hot-region percentages stay comparable
@@ -309,13 +309,15 @@ with open(out_md, "w", encoding="utf-8") as f:
     f.write("## Contract\n\n")
     f.write(
         "Every migration PR that touches one of these three surfaces must "
-        "include an explicit 'preserved' checkbox in the PR description. "
-        "Specifically:\n\n"
+        "either preserve the reachable contract or record why removing it is "
+        "safe. Specifically:\n\n"
         "- **NVTX range names** keep their exact string spelling so "
         "`PROFILING.md`'s hot-region percentages stay comparable across the "
         "migration.\n"
-        "- **`KILN_*` env vars** keep their exact name so user deployments "
-        "do not break.\n"
+        "- **Reachable `KILN_*` env vars** keep their exact name so user "
+        "deployments do not break. Definition-only migration gates may be "
+        "removed after a whole-tree reachability check; regenerate this audit "
+        "and the runtime-environment contract in the same change.\n"
         "- **`BackendRuntime` trait methods** keep their method names; only "
         "the argument types swap from candle to kiln-tensor.\n\n"
     )

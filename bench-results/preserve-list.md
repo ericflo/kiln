@@ -2,8 +2,8 @@
 
 Sources of truth:
 
-- `bench-results/preserve-list-nvtx.csv` (267 call sites, 177 distinct range names)
-- `bench-results/preserve-list-env.csv` (1746 call sites, 690 distinct `KILN_*` vars; 39 go through `env_flag` / `env_tristate`)
+- `bench-results/preserve-list-nvtx.csv` (245 call sites, 155 distinct range names)
+- `bench-results/preserve-list-env.csv` (1721 call sites, 668 distinct `KILN_*` vars; 39 go through `env_flag` / `env_tristate`)
 - `bench-results/preserve-list-backend-runtime.csv` (0 trait methods whose signature still mentions a candle type)
 
 Regenerate: `scripts/audit-preserve-list.sh`.
@@ -12,10 +12,10 @@ Regenerate: `scripts/audit-preserve-list.sh`.
 
 ## Contract
 
-Every migration PR that touches one of these three surfaces must include an explicit 'preserved' checkbox in the PR description. Specifically:
+Every migration PR that touches one of these three surfaces must either preserve the reachable contract or record why removing it is safe. Specifically:
 
 - **NVTX range names** keep their exact string spelling so `PROFILING.md`'s hot-region percentages stay comparable across the migration.
-- **`KILN_*` env vars** keep their exact name so user deployments do not break.
+- **Reachable `KILN_*` env vars** keep their exact name so user deployments do not break. Definition-only migration gates may be removed after a whole-tree reachability check; regenerate this audit and the runtime-environment contract in the same change.
 - **`BackendRuntime` trait methods** keep their method names; only the argument types swap from candle to kiln-tensor.
 
 ## NVTX range clusters
@@ -32,7 +32,7 @@ Grouped by `kiln/<prefix>/...`; counts are total call sites.
 | `residual` | 10 |
 | `lm_head` | 6 |
 | `mtp` | 6 |
-| `paged_kv_kt` | 6 |
+| `paged_kv_kt` | 5 |
 | `flash_attn_paged_decode_dyn_seqlen_kt` | 4 |
 | `residual_batch_decode` | 4 |
 | `batched_decode` | 4 |
@@ -60,24 +60,16 @@ Grouped by `kiln/<prefix>/...`; counts are total call sites.
 | `abs_kt` | 1 |
 | `add_scalar_kt` | 1 |
 | `argmax_kt` | 1 |
-| `broadcast_add_kt` | 1 |
-| `broadcast_div_kt` | 1 |
-| `broadcast_mul_kt` | 1 |
-| `broadcast_sub_kt` | 1 |
 | `cat_dim0_kt` | 1 |
 | `cat_dim1_kt` | 1 |
 | `cat_dim2_kt` | 1 |
-| `clamp_kt` | 1 |
 | `concat_last_dim_kt` | 1 |
 | `cos_kt` | 1 |
-| `div_scalar_kt` | 1 |
 | `exp_kt` | 1 |
 | `flash_attn_head_major_kt` | 1 |
 | `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs` | 1 |
-| `gelu_kt` | 1 |
 | `gqa_sdpa_kt` | 1 |
 | `l2_normalize_kt` | 1 |
-| `lerp_kt` | 1 |
 | `lm_head_argmax` | 1 |
 | `lm_head_argmax_eager` | 1 |
 | `lm_head_argmax_kt` | 1 |
@@ -88,9 +80,6 @@ Grouped by `kiln/<prefix>/...`; counts are total call sites.
 | `lm_head_eager_batched` | 1 |
 | `lm_head_kt` | 1 |
 | `lm_head_normalized_chunk` | 1 |
-| `log10_kt` | 1 |
-| `log1p_kt` | 1 |
-| `log2_kt` | 1 |
 | `log_kt` | 1 |
 | `lora_add_kt` | 1 |
 | `lora_delta_kt` | 1 |
@@ -98,23 +87,14 @@ Grouped by `kiln/<prefix>/...`; counts are total call sites.
 | `matmul_kt` | 1 |
 | `max_binary_kt` | 1 |
 | `max_last_dim_kt` | 1 |
-| `max_with_scalar_kt` | 1 |
 | `mean_last_dim_kt` | 1 |
-| `min_binary_kt` | 1 |
-| `min_last_dim_kt` | 1 |
-| `min_with_scalar_kt` | 1 |
-| `mul_scalar_kt` | 1 |
 | `neg_kt` | 1 |
-| `pow_kt` | 1 |
 | `recip_kt` | 1 |
-| `relu_kt` | 1 |
 | `rsqrt_kt` | 1 |
 | `sampling_argmax_rows_kt` | 1 |
 | `sampling_penalties_kt` | 1 |
 | `sampling_softmax_kt` | 1 |
 | `sampling_topk_kt` | 1 |
-| `scalar_div_tensor_kt` | 1 |
-| `scalar_minus_tensor_kt` | 1 |
 | `sigmoid_composite_kt` | 1 |
 | `silu_composite_kt` | 1 |
 | `sin_kt` | 1 |
@@ -124,7 +104,6 @@ Grouped by `kiln/<prefix>/...`; counts are total call sites.
 | `sum_last_dim_kt` | 1 |
 | `sum_sq_last_dim_kt` | 1 |
 | `swiglu_ffn_kt` | 1 |
-| `tanh_kt` | 1 |
 | `to_dtype_kt` | 1 |
 
 ## Top 20 `KILN_*` env vars by call-site count
