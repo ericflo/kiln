@@ -940,19 +940,9 @@ fn streaming_gdn_forward_only_fastpaths_allowed(device: &Device) -> bool {
     true
 }
 
-fn profile_paged_layers_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_PAGED_LAYERS"))
-}
-
 fn profile_gdn_stages_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_GDN_STAGES"))
-}
-
-fn profile_gdn_recurrent_inner_stages_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_GDN_RECURRENT_INNER_STAGES"))
 }
 
 fn profile_gdn_segment_layer_enabled(layer_idx: usize) -> bool {
@@ -1082,19 +1072,6 @@ where
     objc2::rc::autoreleasepool(|_| f())
 }
 
-fn log_paged_layer_profile(
-    layer: usize,
-    kind: &str,
-    seq_len: usize,
-    start_pos: usize,
-    elapsed: std::time::Duration,
-) {
-    eprintln!(
-        "kiln_profile_paged_layer layer={layer} kind={kind} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
-        elapsed.as_secs_f64() * 1000.0
-    );
-}
-
 fn start_gdn_stage_profile(
     device: &Device,
     context: Option<(usize, usize)>,
@@ -1123,64 +1100,6 @@ fn finish_gdn_stage_profile(
     synchronize_for_profile(device)?;
     eprintln!(
         "kiln_profile_gdn_stage layer={layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
-        start.elapsed().as_secs_f64() * 1000.0
-    );
-    Ok(())
-}
-
-fn trace_tape_gdn_conv_decisions_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| kiln_core::env_flag::env_flag("KILN_TRACE_TAPE_GDN_CONV_DECISIONS", false))
-}
-
-fn log_tape_gdn_conv_decision(
-    enabled: bool,
-    context: Option<(usize, usize)>,
-    seq_len: usize,
-    decision: &str,
-) {
-    if !enabled {
-        return;
-    }
-    match context {
-        Some((layer, start_pos)) => {
-            eprintln!(
-                "kiln_tape_gdn_conv_decision layer={layer} start_pos={start_pos} seq_len={seq_len} decision={decision}"
-            );
-        }
-        None => {}
-    }
-}
-
-fn start_gdn_recurrent_inner_profile(
-    device: &Device,
-    enabled: bool,
-) -> Result<Option<std::time::Instant>> {
-    if enabled {
-        synchronize_for_profile(device)?;
-        Ok(Some(std::time::Instant::now()))
-    } else {
-        Ok(None)
-    }
-}
-
-fn finish_gdn_recurrent_inner_profile(
-    device: &Device,
-    stage: &str,
-    batch: usize,
-    heads: usize,
-    seq_len: usize,
-    chunk_index: usize,
-    chunk_len: usize,
-    start: Option<std::time::Instant>,
-) -> Result<()> {
-    let Some(start) = start else {
-        return Ok(());
-    };
-    synchronize_for_profile(device)?;
-    eprintln!(
-        "kiln_profile_gdn_recurrent_inner_stage stage={stage} batch={batch} heads={heads} seq_len={seq_len} chunk_index={chunk_index} chunk_len={chunk_len} elapsed_ms={:.3}",
         start.elapsed().as_secs_f64() * 1000.0
     );
     Ok(())
@@ -11539,11 +11458,9 @@ fn gdn_chunkwise_recurrence(
     }
     let (batch, heads, seq_len, _) = q.dims4()?;
     let dtype = q.dtype();
-    // #1082: kt `.device()` returns a value; keep a reference for the
-    // `&Device`-typed profile helpers below.
+    // #1082: kt `.device()` returns a value; keep a reference for mask creation.
     let device_val = q.device();
     let device = &device_val;
-    let profile_inner = profile_gdn_recurrent_inner_stages_enabled();
 
     // Single-token decode fast path. The chunkwise machinery (preshape,
     // decay matrix, KKT, forward sub, B_mask) costs more than the per-token
@@ -11560,7 +11477,6 @@ fn gdn_chunkwise_recurrence(
             // The five squeeze+contiguous calls below can copy the single-row
             // inputs before the recurrent forward runs. The dedicated NVTX
             // range lets nsys attribute this separately from the kernel itself.
-            let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
             let (q1, k1, v1, beta1, g1) = {
                 kiln_nvtx::range!(c"kiln/attn/gdn/precopy");
                 (
@@ -11571,17 +11487,6 @@ fn gdn_chunkwise_recurrence(
                     g.squeeze(2)?.contiguous()?,
                 )
             };
-            finish_gdn_recurrent_inner_profile(
-                device,
-                "single_token_precopy",
-                batch,
-                heads,
-                seq_len,
-                0,
-                1,
-                stage_profile,
-            )?;
-            let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
             let out_opt = {
                 kiln_nvtx::range!(c"kiln/attn/gdn/recurrent");
                 // #1082 DoD-101/102: `gdn_recurrent_step` is now kt-typed and
@@ -11589,33 +11494,12 @@ fn gdn_chunkwise_recurrence(
                 // tensors directly, no candle bridge / write-back.
                 GdnBackend::runtime_gdn_recurrent_step(backend, &q1, &k1, &v1, &beta1, &g1, state)?
             };
-            finish_gdn_recurrent_inner_profile(
-                device,
-                "single_token_backend_step",
-                batch,
-                heads,
-                seq_len,
-                0,
-                1,
-                stage_profile,
-            )?;
             if let Some(out) = out_opt {
                 return Ok(out.unsqueeze(2)?);
             }
         }
 
-        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let out = gdn_single_token_recurrence(q, k, v, beta, g, state)?;
-        finish_gdn_recurrent_inner_profile(
-            device,
-            "single_token_fallback",
-            batch,
-            heads,
-            seq_len,
-            0,
-            1,
-            stage_profile,
-        )?;
         return Ok(out);
     }
 
@@ -11745,7 +11629,6 @@ fn gdn_chunkwise_recurrence(
         let is_tail = ci >= full_chunks;
         let c = if is_tail { tail } else { chunk_size };
 
-        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let (q_c, k_c, v_c, beta_c, g_c, k_t_mat_pre) = if is_tail {
             let t_start = full_chunks * chunk_size;
             (
@@ -11782,38 +11665,15 @@ fn gdn_chunkwise_recurrence(
                 None,
             )
         };
-        finish_gdn_recurrent_inner_profile(
-            device,
-            "slice_inputs",
-            batch,
-            heads,
-            seq_len,
-            ci,
-            c,
-            stage_profile,
-        )?;
-
         // Matmuls first — these are well-tuned GEMMs and stay on kt tensors.
         // KKT/QKT and the state update use transposed-GEMM helpers so accelerator
         // backends can avoid materialising K^T. The optional precomputed K^T is
         // retained only for the fused full-chunk backend path, whose API still
         // consumes it directly.
-        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let ks_entry = k_c.matmul(&*state)?; // [B, nv, C, dv]
         let kkt = kiln_tensor::ops::matmul_rhs_transposed(&k_c, &k_c)?; // [B, nv, C, C]
         let qkt = kiln_tensor::ops::matmul_rhs_transposed(&q_c, &k_c)?; // [B, nv, C, C]
         let q_s = q_c.matmul(&*state)?; // [B, nv, C, dv]
-        finish_gdn_recurrent_inner_profile(
-            device,
-            "matmul_prep",
-            batch,
-            heads,
-            seq_len,
-            ci,
-            c,
-            stage_profile,
-        )?;
-
         let full_chunk_out = if !is_tail
             && c == 64
             && GdnBackend::runtime_supports_gdn_full_chunk_forward(backend)
@@ -11825,22 +11685,11 @@ fn gdn_chunkwise_recurrence(
                     Some(t) => t.clone(),
                     None => k_c.transpose(2, 3)?.contiguous()?,
                 };
-                let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
                 // #1082 DoD-101/102: `gdn_full_chunk_forward` is now kt-typed and
                 // mutates `state` in place through the kt `&mut` — pass kt tensors
                 // directly, no candle bridge / state write-back.
                 let out_chunk = GdnBackend::runtime_gdn_full_chunk_forward(
                     backend, &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
-                )?;
-                finish_gdn_recurrent_inner_profile(
-                    device,
-                    "full_chunk_forward",
-                    batch,
-                    heads,
-                    seq_len,
-                    ci,
-                    c,
-                    stage_profile,
                 )?;
                 out_chunk
             } else {
@@ -11866,7 +11715,6 @@ fn gdn_chunkwise_recurrence(
         //   q_s_scaled:       [B, nv, C, dv] bf16 — q_s * p
         //   decay_last_col_u: [B, nv, C, 1]  bf16 — exp(big_g[C-1] - big_g[i])
         //   p_last_u:         [B, nv, 1, 1]  bf16 — exp(big_g[C-1])
-        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col_u, p_last_u) = {
             kiln_nvtx::range!(c"kiln/attn/gdn/chunk_prep");
             // #1082 DoD-101/102: `gdn_chunk_prep` is now kt-typed — pass kt
@@ -12002,19 +11850,7 @@ fn gdn_chunkwise_recurrence(
                 }
             }
         };
-        finish_gdn_recurrent_inner_profile(
-            device,
-            "chunk_prep",
-            batch,
-            heads,
-            seq_len,
-            ci,
-            c,
-            stage_profile,
-        )?;
-
         let decay_last_col = decay_last_col_u.squeeze(3)?;
-        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let (out_chunk, w_weighted) = {
             kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
             if !any_kt_tensor_tracks_op(&[
@@ -12057,39 +11893,16 @@ fn gdn_chunkwise_recurrence(
                 (out_chunk, w_weighted)
             }
         };
-        finish_gdn_recurrent_inner_profile(
-            device,
-            "chunk_scan",
-            batch,
-            heads,
-            seq_len,
-            ci,
-            c,
-            stage_profile,
-        )?;
-
         out_chunks.push(out_chunk); // [B, nv, C, dv]
 
         // State update:
         //   S_new = exp(G[C-1]) * S_entry
         //         + Σ_i exp(G[C-1] - G[i]) * k[i] ⊗ W[i]
-        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let state_scaled = state.broadcast_mul(&p_last_u)?; // [B, nv, dk, dv]
         let delta_state = kiln_tensor::ops::matmul_lhs_transposed(&k_c, &w_weighted)?; // [B, nv, dk, dv]
         *state = (state_scaled + delta_state)?;
-        finish_gdn_recurrent_inner_profile(
-            device,
-            "state_update",
-            batch,
-            heads,
-            seq_len,
-            ci,
-            c,
-            stage_profile,
-        )?;
     }
 
-    let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
     // Phase 7 (#1082): when stable KT routes are enabled and every chunk-output is
     // a contiguous CUDA tensor of a supported dtype, route the
     // time-axis (axis=2) per-chunk concat through
@@ -12115,16 +11928,6 @@ fn gdn_chunkwise_recurrence(
             Tensor::cat(&chunk_refs, 2)?
         }
     };
-    finish_gdn_recurrent_inner_profile(
-        device,
-        "cat_out",
-        batch,
-        heads,
-        seq_len,
-        full_chunks + if tail > 0 { 1 } else { 0 },
-        seq_len,
-        stage_profile,
-    )?;
     Ok(out)
 }
 
@@ -14789,7 +14592,6 @@ fn gated_deltanet_forward_decode_if_inner(
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let mixed_qkv = {
             kiln_nvtx::range!(c"kiln/gdn/conv");
-            let trace_tape_gdn_conv_decisions = trace_tape_gdn_conv_decisions_enabled();
             // Transpose to [B, channels, T] for conv. At seq_len == 1 the
             // [B, 1, C] -> [B, C, 1] axis swap is a no-data-move shape
             // reinterpretation: in row-major, element[b, 0, c] sits at the
@@ -14964,20 +14766,8 @@ fn gated_deltanet_forward_decode_if_inner(
                                                 kernel_size,
                                             )?;
                                     if let Some(recorded) = recorded {
-                                        log_tape_gdn_conv_decision(
-                                            trace_tape_gdn_conv_decisions,
-                                            profile_context,
-                                            seq_len,
-                                            "fused_prefill_recorded",
-                                        );
                                         recorded
                                     } else {
-                                        log_tape_gdn_conv_decision(
-                                            trace_tape_gdn_conv_decisions,
-                                            profile_context,
-                                            seq_len,
-                                            "fused_prefill_recorder_declined_fallback",
-                                        );
                                         *conv_state = conv_entry_state;
                                         let y = causal_conv1d_prefill(
                                             &mixed_qkv_ct,
@@ -14989,12 +14779,6 @@ fn gated_deltanet_forward_decode_if_inner(
                                         cuda_silu(&y)?
                                     }
                                 } else {
-                                    log_tape_gdn_conv_decision(
-                                        trace_tape_gdn_conv_decisions,
-                                        profile_context,
-                                        seq_len,
-                                        "fused_prefill_forward_only",
-                                    );
                                     out
                                 }
                             }
@@ -15009,12 +14793,6 @@ fn gated_deltanet_forward_decode_if_inner(
                             }
                         }
                         None => {
-                            log_tape_gdn_conv_decision(
-                                trace_tape_gdn_conv_decisions,
-                                profile_context,
-                                seq_len,
-                                "backend_prefill_declined_fallback",
-                            );
                             kiln_nvtx::range!(c"kiln/gdn/conv/fallback_prefill");
                             let y = causal_conv1d_prefill(
                                 &mixed_qkv_ct,
@@ -15040,12 +14818,6 @@ fn gated_deltanet_forward_decode_if_inner(
                         }
                     }
                 } else {
-                    log_tape_gdn_conv_decision(
-                        trace_tape_gdn_conv_decisions,
-                        profile_context,
-                        seq_len,
-                        "prefill_fused_disabled_fallback",
-                    );
                     kiln_nvtx::range!(c"kiln/gdn/conv/fallback_prefill");
                     let y = causal_conv1d_prefill(
                         &mixed_qkv_ct,
@@ -27431,13 +27203,6 @@ fn model_forward_paged_inner_bounded(
     anyhow::ensure!(max_layers > 0, "paged layer quantum must be positive");
     let seq_len = token_ids.len();
     let device = weights.embed_tokens.device();
-    let resumed = resume.is_some();
-    let _profile_sections = std::env::var("KILN_PROFILE_PAGED_SECTIONS")
-        .is_ok()
-        .then(|| {
-            let _ = synchronize_for_profile(&device);
-            (std::time::Instant::now(), seq_len, start_pos)
-        });
 
     let (
         mut hidden,
@@ -27533,25 +27298,10 @@ fn model_forward_paged_inner_bounded(
             .map(|(cos, sin)| (cos as &Tensor, sin as &Tensor))
     });
 
-    if _profile_sections.is_some() && !resumed {
-        let _ = synchronize_for_profile(&device);
-        if let Some((t0, sl, sp)) = _profile_sections.as_ref() {
-            eprintln!(
-                "kiln_profile_section section=embed_and_positions seq_len={sl} start_pos={sp} elapsed_ms={:.3}",
-                t0.elapsed().as_secs_f64() * 1000.0
-            );
-        }
-    }
-    let _profile_layers_t0 = _profile_sections.is_some().then(|| {
-        let _ = synchronize_for_profile(&device);
-        std::time::Instant::now()
-    });
-
     // 2. Loop through all transformer layers
     let layer_end = layer_start
         .saturating_add(max_layers)
         .min(weights.layers.len());
-    let profile_paged_layers = profile_paged_layers_enabled();
     let profile_gdn_stages = profile_gdn_stages_enabled();
     let profile_mlp_stages = profile_mlp_stages_enabled();
     for (i, layer) in weights
@@ -27567,12 +27317,6 @@ fn model_forward_paged_inner_bounded(
 
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
-                let layer_profile_start = if profile_paged_layers {
-                    synchronize_for_profile(&device)?;
-                    Some(std::time::Instant::now())
-                } else {
-                    None
-                };
                 hidden = transformer_block_paged_with_rope_tables(
                     backend,
                     &hidden,
@@ -27605,18 +27349,8 @@ fn model_forward_paged_inner_bounded(
                 )
                 .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
                 full_attn_idx += 1;
-                if let Some(start) = layer_profile_start {
-                    synchronize_for_profile(&device)?;
-                    log_paged_layer_profile(i, "full", seq_len, start_pos, start.elapsed());
-                }
             }
             GpuAttentionWeights::Linear(lin_weights) => {
-                let layer_profile_start = if profile_paged_layers {
-                    synchronize_for_profile(&device)?;
-                    Some(std::time::Instant::now())
-                } else {
-                    None
-                };
                 let state = linear_state.as_mut().ok_or_else(|| {
                     anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
                 })?;
@@ -27650,12 +27384,6 @@ fn model_forward_paged_inner_bounded(
                             {
                                 hidden = out;
                                 linear_attn_idx += 1;
-                                if let Some(start) = layer_profile_start {
-                                    synchronize_for_profile(&device)?;
-                                    log_paged_layer_profile(
-                                        i, "linear", seq_len, start_pos, start.elapsed(),
-                                    );
-                                }
                                 continue;
                             }
                         }
@@ -27714,23 +27442,10 @@ fn model_forward_paged_inner_bounded(
                     residual_add(hidden, ffn_out)?
                 };
                 linear_attn_idx += 1;
-                if let Some(start) = layer_profile_start {
-                    synchronize_for_profile(&device)?;
-                    log_paged_layer_profile(i, "linear", seq_len, start_pos, start.elapsed());
-                }
             }
         }
     }
 
-    if let Some(t) = _profile_layers_t0.as_ref() {
-        let _ = synchronize_for_profile(&device);
-        if let Some((_, sl, sp)) = _profile_sections.as_ref() {
-            eprintln!(
-                "kiln_profile_section section=layer_loop seq_len={sl} start_pos={sp} elapsed_ms={:.3}",
-                t.elapsed().as_secs_f64() * 1000.0
-            );
-        }
-    }
     let layers_processed = layer_end.saturating_sub(layer_start);
     if layer_end < weights.layers.len() {
         anyhow::ensure!(
@@ -27770,11 +27485,6 @@ fn model_forward_paged_inner_bounded(
             layers_processed,
         });
     }
-    let _profile_lm_head_t0 = _profile_sections.is_some().then(|| {
-        let _ = synchronize_for_profile(&device);
-        std::time::Instant::now()
-    });
-
     // 3. Final RMSNorm + 4. LM head projection (weight-tied)
     //
     // `Full` matches the legacy code path exactly. `LastRowOnly` slices the
@@ -27890,22 +27600,7 @@ fn model_forward_paged_inner_bounded(
         }
         LmHeadMode::Skip => Ok((None, None, None)),
         LmHeadMode::HiddenOnly => Ok((None, Some(hidden), None)),
-    }
-    .inspect(|_| {
-        if let (Some(t), Some((t_outer, sl, sp))) =
-            (_profile_lm_head_t0.as_ref(), _profile_sections.as_ref())
-        {
-            let _ = synchronize_for_profile(&device);
-            eprintln!(
-                "kiln_profile_section section=lm_head_tail seq_len={sl} start_pos={sp} elapsed_ms={:.3}",
-                t.elapsed().as_secs_f64() * 1000.0
-            );
-            eprintln!(
-                "kiln_profile_section section=total seq_len={sl} start_pos={sp} elapsed_ms={:.3}",
-                t_outer.elapsed().as_secs_f64() * 1000.0
-            );
-        }
-    })?;
+    }?;
     Ok(PagedForwardProgress {
         logits,
         hidden: output_hidden,

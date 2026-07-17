@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **668 direct read call sites** and
+The scanner records **666 direct read call sites** and
 **255 process-mutation call sites**. It can
-statically name **171 distinct literal `KILN_*`
-read names** across **299 call sites**.
+statically name **169 distinct literal `KILN_*`
+read names** across **297 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 196 | 130 | 0 |
+| Experimental/debug migration | 194 | 128 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 135 | 41 | 247 |
 
@@ -56,7 +56,7 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/forward.rs` | 46 | 41 |
+| `crates/kiln-model/src/forward.rs` | 44 | 39 |
 | `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
 | `crates/kiln-model/src/backend/rocm.rs` | 11 | 9 |
 | `crates/kiln-model/src/backend/capability.rs` | 9 | 1 |
@@ -212,7 +212,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_OPD_USE_CHAT_TEMPLATE_RENDER` | Experimental/debug migration | 1 | `crates/kiln-train/src/opd.rs` |
 | `KILN_PROFILE_GDN_STAGE_LAYER` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_PROFILE_METAL_GRAPH_STAGES` | Experimental/debug migration | 1 | `crates/kiln-model/src/metal_graph.rs` |
-| `KILN_PROFILE_PAGED_SECTIONS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_QUALIFICATION` | Experimental/debug migration, Test only | 28 | `crates/kiln-model/src/rocm_graph.rs`, `crates/kiln-model/tests/adamw_pytorch_oracle.rs`, `crates/kiln-model/tests/rocm_kv_physical_resize.rs`, `crates/kiln-model/tests/vk_resident_decode_parity.rs`, `crates/kiln-server/src/bench.rs`, `crates/kiln-server/tests/real_model_integration.rs`, `crates/kiln-tensor/src/ops/log_softmax.rs`, `crates/kiln-tensor/tests/log_softmax_backend_stability.rs`, `crates/kiln-tensor/tests/metal_ops_parity.rs`, `crates/kiln-tensor/tests/rocm_matmul_parity.rs`, `crates/kiln-tensor/tests/rocm_storage_smoke.rs`, `crates/kiln-train/src/grpo_tape_shim.rs`, `crates/kiln-train/src/opd.rs`, `crates/kiln-train/src/trainer.rs`, `crates/kiln-vulkan-kernel/tests/support/mod.rs`, `crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` |
 | `KILN_QUALIFICATION_CASE_RESULT` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
 | `KILN_QUALIFICATION_HF_LOGITS_PATH` | Test only | 1 | `crates/kiln-model/tests/vk_resident_decode_parity.rs` |
@@ -279,7 +278,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_TRACE_ROCM_FLASH_FWD` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_TRACE_SFT_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-train/src/trainer.rs` |
 | `KILN_TRACE_TAPE_BACKWARD_TIMINGS` | Experimental/debug migration | 1 | `crates/kiln-autograd/src/tape.rs` |
-| `KILN_TRACE_TAPE_GDN_CONV_DECISIONS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_VK_MICROBENCH_BATCHES` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
 | `KILN_VK_MICROBENCH_ONLY` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
 | `KILN_W4A16` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |

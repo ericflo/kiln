@@ -3799,19 +3799,6 @@
       "surface": "source"
     },
     {
-      "api": "env_flag",
-      "argument": "KILN_TRACE_TAPE_GDN_CONV_DECISIONS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "name",
       "argument_kind": "expression",
@@ -4100,19 +4087,6 @@
     {
       "api": "var",
       "argument": "KILN_PROFILE_GDN_STAGE_LAYER",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_PROFILE_PAGED_SECTIONS",
       "argument_kind": "literal",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
@@ -7309,11 +7283,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 299,
-    "literal_kiln_read_names": 171,
+    "literal_kiln_read_call_sites": 297,
+    "literal_kiln_read_names": 169,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 130,
+      "experimental_debug": 128,
       "public_stable": 1,
       "test_only": 41
     },
@@ -7323,13 +7297,13 @@
       "test_only": 247
     },
     "process_mutation_entries": 160,
-    "read_call_sites": 668,
+    "read_call_sites": 666,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 196,
+      "experimental_debug": 194,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 401
+    "read_entries": 399
   }
 }

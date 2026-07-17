@@ -20,6 +20,18 @@
 > commands and output below describe the evidence that established those fixes;
 > they are not runnable operator instructions.
 
+> **Legacy synchronized forward profiling controls were retired on
+> 2026-07-17.** `KILN_PROFILE_PAGED_LAYERS`,
+> `KILN_PROFILE_PAGED_SECTIONS`,
+> `KILN_PROFILE_GDN_RECURRENT_INNER_STAGES`, and
+> `KILN_TRACE_TAPE_GDN_CONV_DECISIONS` inserted host clocks, accelerator queue
+> drains, and stderr logging directly into inference or training. They were
+> investigation tools, not stable configuration, and have no typed
+> replacements. Use the existing NVTX ranges for accelerator attribution and
+> the versioned health/debug/metrics surfaces for product observability. Audit
+> records below retain the historical commands and measurements but do not
+> describe current executable controls.
+
 > **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
 > priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are
