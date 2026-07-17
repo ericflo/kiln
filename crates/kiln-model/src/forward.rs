@@ -4569,9 +4569,6 @@ pub const DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE: usize =
 pub const DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE: usize = 65_536;
 pub const DETACHED_FULL_ATTN_ROCM_ONLINE_DEFAULT_TILE: usize =
     DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE;
-pub const MATERIALIZED_FULL_ATTN_SCORE_BUDGET_MB: usize = 2048;
-pub const MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_MAX_MB: usize = 32 * 1024;
-pub const MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_FREE_DIVISOR: usize = 3;
 const MATERIALIZED_FULL_ATTN_TILE_GRANULARITY: usize = 128;
 const MATERIALIZED_FULL_ATTN_FORWARD_SCRATCH_BUFFERS: usize = 3;
 const DEFAULT_FULL_ATTN_SCORE_TILE_MAX_ELEMENTS: usize = 1 << 29;
@@ -4846,74 +4843,14 @@ fn flash_prefill_allowed_for_shape(
     long_prefill_leaf_flash_allowed_for_device(device, q_len, kv_len)
 }
 
-fn full_attn_materialized_score_budget_mb_env_override() -> Option<usize> {
-    std::env::var("KILN_FULL_ATTN_SCORE_BUDGET_MB")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&mb| mb > 0)
-}
-
-fn full_attn_score_tile_max_elements(device: &Device) -> usize {
-    if let Some(cap) = std::env::var("KILN_FULL_ATTN_SCORE_TILE_MAX_ELEMENTS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&cap| cap > 0)
-    {
-        return cap;
-    }
-    #[cfg(feature = "rocm")]
-    if matches!(
-        streaming_prefill_device_kind(device),
-        StreamingPrefillDeviceKind::Rocm
-    ) {
-        if let Some(cap) = std::env::var("KILN_ROCM_FULL_ATTN_SCORE_ELEMENT_CAP")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&cap| cap > 0)
-        {
-            return cap;
-        }
-    }
+fn full_attn_score_tile_max_elements() -> usize {
     // Keep materialized score tiles comfortably below common 32-bit indexing
     // boundaries. This is still exact SDPA, just split into more prefix tiles.
     DEFAULT_FULL_ATTN_SCORE_TILE_MAX_ELEMENTS
 }
 
-fn vram_probe_selector_for_device(device: &Device) -> kiln_memory::vram::VramProbeSelector {
-    device.memory_probe_selector()
-}
-
-fn published_accelerator_available_bytes(device: &Device) -> Option<u64> {
-    let selector = vram_probe_selector_for_device(device);
-    if kiln_memory::MemoryGovernor::global_configuration().selector != selector {
-        return None;
-    }
-    kiln_memory::MemoryGovernor::try_global_cached_available_bytes()
-}
-
-fn dynamic_full_attn_materialized_score_budget_mb(
-    override_mb: Option<usize>,
-    available_bytes: Option<u64>,
-) -> usize {
-    let Some(available_bytes) = available_bytes else {
-        return 0;
-    };
-    let safe_mb = (available_bytes.min(usize::MAX as u64) as usize)
-        / MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_FREE_DIVISOR
-        / (1024 * 1024);
-    let safe_mb = safe_mb.min(MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_MAX_MB);
-    override_mb.map_or(safe_mb, |requested| requested.min(safe_mb))
-}
-
-fn full_attn_materialized_score_budget_mb(device: &Device) -> usize {
-    let override_mb = full_attn_materialized_score_budget_mb_env_override();
-    if !full_attn_materialized_scores_for_device(device) {
-        return override_mb.unwrap_or(MATERIALIZED_FULL_ATTN_SCORE_BUDGET_MB);
-    }
-    dynamic_full_attn_materialized_score_budget_mb(
-        override_mb,
-        published_accelerator_available_bytes(device),
-    )
+fn full_attn_materialized_score_budget_mib() -> usize {
+    crate::full_attention_policy::full_attention_score_budget_mib()
 }
 
 fn full_attn_materialized_scores_for_device(device: &Device) -> bool {
@@ -4946,7 +4883,7 @@ fn full_attn_adaptive_max_tile_tokens(
     base_tile_tokens: usize,
     scratch_buffers: usize,
 ) -> usize {
-    let budget_mb = full_attn_materialized_score_budget_mb(device);
+    let budget_mb = full_attn_materialized_score_budget_mib();
     full_attn_adaptive_max_tile_tokens_with_budget(
         device,
         dtype,
@@ -4996,8 +4933,7 @@ fn full_attn_adaptive_max_tile_tokens_with_budget(
     let budgeted = if score_element_denom == 0 {
         budgeted
     } else {
-        let max_by_elements =
-            (full_attn_score_tile_max_elements(device) / score_element_denom).max(1);
+        let max_by_elements = (full_attn_score_tile_max_elements() / score_element_denom).max(1);
         budgeted.min(max_by_elements)
     };
     let granularity = MATERIALIZED_FULL_ATTN_TILE_GRANULARITY;
@@ -5019,7 +4955,7 @@ fn full_attn_adaptive_tile_len(
     base_tile_tokens: usize,
     scratch_buffers: usize,
 ) -> usize {
-    let budget_mb = full_attn_materialized_score_budget_mb(device);
+    let budget_mb = full_attn_materialized_score_budget_mib();
     full_attn_adaptive_tile_len_with_budget(
         device,
         dtype,
@@ -23158,7 +23094,7 @@ fn transformer_block_detached_prefill_chunked(
     let mut timing_tile_rest = std::time::Duration::ZERO;
     let mut timing_tile_total = std::time::Duration::ZERO;
     let mut timing_concat = std::time::Duration::ZERO;
-    let materialized_score_budget_mb = full_attn_materialized_score_budget_mb(&x.device());
+    let materialized_score_budget_mb = full_attn_materialized_score_budget_mib();
     let materialized_scratch_buffers =
         mode.materialized_scratch_buffers_for_tile_plan(backend, &x.device(), x.dtype(), head_dim);
     if materialized_scratch_buffers > 0 {
@@ -38668,56 +38604,10 @@ mod tests {
     }
 
     #[test]
-    fn vram_probe_selector_tracks_active_tensor_device() {
-        use kiln_memory::vram::{LinuxDrmVendor, VramProbeSelector};
-
+    fn full_attention_budget_is_process_lifetime_geometry() {
         assert_eq!(
-            vram_probe_selector_for_device(&Device::Cuda(2)),
-            VramProbeSelector::Nvidia(2)
-        );
-        assert_eq!(
-            vram_probe_selector_for_device(&Device::Rocm(1)),
-            VramProbeSelector::LinuxDrm {
-                index: 1,
-                vendor: Some(LinuxDrmVendor::Amd),
-            }
-        );
-        assert_eq!(
-            vram_probe_selector_for_device(&Device::Vulkan(3)),
-            VramProbeSelector::LinuxDrm {
-                index: 3,
-                vendor: None,
-            }
-        );
-        assert_eq!(
-            vram_probe_selector_for_device(&Device::Metal(4)),
-            VramProbeSelector::AppleUnified
-        );
-        assert_eq!(
-            vram_probe_selector_for_device(&Device::Cpu),
-            VramProbeSelector::None
-        );
-    }
-
-    #[test]
-    fn tighter_published_budget_reduces_full_attention_sizing() {
-        let roomy = Some(24 * 1024 * 1024 * 1024);
-        let tight = Some(2 * 1024 * 1024 * 1024);
-        assert!(
-            dynamic_full_attn_materialized_score_budget_mb(None, tight)
-                < dynamic_full_attn_materialized_score_budget_mb(None, roomy)
-        );
-        assert_eq!(
-            dynamic_full_attn_materialized_score_budget_mb(None, Some(0)),
-            0
-        );
-        assert_eq!(
-            dynamic_full_attn_materialized_score_budget_mb(Some(2048), None),
-            0
-        );
-        assert_eq!(
-            dynamic_full_attn_materialized_score_budget_mb(Some(512), Some(3 * 1024 * 1024)),
-            1
+            full_attn_materialized_score_budget_mib(),
+            crate::DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB
         );
     }
 
@@ -38906,7 +38796,7 @@ mod tests {
             16,
             DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE,
             2,
-            MATERIALIZED_FULL_ATTN_SCORE_BUDGET_MB,
+            512,
         );
         assert!(
             rocm_low_budget_long_prefix_tile < DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE,
@@ -38925,7 +38815,7 @@ mod tests {
             16,
             DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE,
             2,
-            MATERIALIZED_FULL_ATTN_DYNAMIC_SCORE_BUDGET_MAX_MB,
+            crate::MAX_FULL_ATTENTION_SCORE_BUDGET_MIB,
         );
         assert!(
             rocm_high_budget_long_prefix_tile > rocm_low_budget_long_prefix_tile,

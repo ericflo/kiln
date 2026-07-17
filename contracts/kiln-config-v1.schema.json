@@ -324,6 +324,18 @@
           "x-kiln-environment": "none",
           "x-kiln-validation": "auto, all, or disabled, case-insensitive. auto enables the qualified kiln-tensor adapter routes while leaving the experimental generic matmul and paged-KV routes inactive. all enables every adapter route; disabled forces legacy fallbacks. The two explicit modes require server.serving_profile = \"experimental\". The mode is resolved before accelerator execution, remains immutable for the process lifetime, and is reported with source attribution. Restart required."
         },
+        "full_attention_score_budget_mib": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 2048,
+          "default": 2048,
+          "description": "64..=2048. Immutable ceiling for exact full-attention materialized score and scratch geometry across CPU, CUDA, ROCm, Metal, and Vulkan model routes. ROCm online attention derives min(value, 1024) MiB while retaining fixed qualified 2048-query/4096-key tiles. Runtime memory observations remain fail-closed admission and reservation checks; they never resize the geometry or switch to smaller tiles during a request. Restart required.",
+          "x-kiln-path": "accelerator.full_attention_score_budget_mib",
+          "x-kiln-type-and-default": "unsigned integer MiB; 2048",
+          "x-kiln-canonical-env": "KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "64..=2048. Immutable ceiling for exact full-attention materialized score and scratch geometry across CPU, CUDA, ROCm, Metal, and Vulkan model routes. ROCm online attention derives min(value, 1024) MiB while retaining fixed qualified 2048-query/4096-key tiles. Runtime memory observations remain fail-closed admission and reservation checks; they never resize the geometry or switch to smaller tiles during a request. Restart required."
+        },
         "rocm_synchronization_mode": {
           "type": "string",
           "enum": [
@@ -1700,9 +1712,9 @@
       }
     }
   ],
-  "x-kiln-field-count": 104,
+  "x-kiln-field-count": 105,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 99,
+  "x-kiln-canonical-environment-count": 100,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 69,
   "x-kiln-compatibility-alias-count": 74,

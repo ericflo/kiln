@@ -119,18 +119,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 104 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 105 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 104 fixed fields:
+credential. Of the 105 fixed fields:
 
-- 99 implement the canonical mechanical environment name;
+- 100 implement the canonical mechanical environment name;
 - 69 also retain one or more deprecated compatibility spellings (74 aliases
   total);
 - 5 are config-file-only and have no environment override;
 - the 74 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 104 fixed fields and both dynamic credential fields.
+The tables below cover all 105 fixed fields and both dynamic credential fields.
 The schema additionally records the accepted deprecated TOML-only
 `streaming_prefill.enabled` compatibility field so validators match the loader.
 
@@ -179,7 +179,7 @@ disabled.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v4`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v5`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
 dashboard all report the same configured/effective/source values; lower model,
 tensor, and kernel paths do not re-read these public environment names.
@@ -187,6 +187,7 @@ tensor, and kernel paths do not re-read these public environment names.
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
 |---|---|---|---|---|
 | `accelerator.kt_api_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_KT_API_MODE` (implemented) | none | `auto`, `all`, or `disabled`, case-insensitive. `auto` enables the qualified kiln-tensor adapter routes while leaving the experimental generic matmul and paged-KV routes inactive. `all` enables every adapter route; `disabled` forces legacy fallbacks. The two explicit modes require `server.serving_profile = "experimental"`. The mode is resolved before accelerator execution, remains immutable for the process lifetime, and is reported with source attribution. Restart required. |
+| `accelerator.full_attention_score_budget_mib` | unsigned integer MiB; `2048` | `KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB` (implemented) | none | `64..=2048`. Immutable ceiling for exact full-attention materialized score and scratch geometry across CPU, CUDA, ROCm, Metal, and Vulkan model routes. ROCm online attention derives `min(value, 1024)` MiB while retaining fixed qualified 2048-query/4096-key tiles. Runtime memory observations remain fail-closed admission and reservation checks; they never resize the geometry or switch to smaller tiles during a request. Restart required. |
 | `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
 | `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | `KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL` and `KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
 | `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | `KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT` and `KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT` (deprecated compatibility) | `auto`, `native_bf16`, or `f32_then_cast`, case-insensitive. `auto` applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
@@ -200,6 +201,21 @@ Those per-operation names are not compatibility aliases: they created
 order-dependent route combinations that could not be represented, validated,
 or reported as one startup policy. Use the typed field or its mechanically
 derived canonical environment name instead.
+
+`accelerator.full_attention_score_budget_mib` replaces the undocumented
+`KILN_FULL_ATTN_SCORE_BUDGET_MB`, `KILN_ROCM_FLASH_SCORE_BUDGET_MB`,
+`KILN_FULL_ATTN_SCORE_TILE_MAX_ELEMENTS`,
+`KILN_ROCM_FULL_ATTN_SCORE_ELEMENT_CAP`,
+`KILN_ROCM_FLASH_SCORE_TILE_MAX_ELEMENTS`,
+`KILN_ROCM_FLASH_ONLINE_SCORE_BUDGET_MB`,
+`KILN_ROCM_FLASH_ONLINE_QUERY_TILE`, and
+`KILN_ROCM_FLASH_ONLINE_KEY_TILE` controls. Those names are intentionally not
+aliases. Previously, model and ROCm flash paths parsed different permissive
+values during execution and recomputed score budgets from changing free-memory
+snapshots, permitting route geometry to change between layers or requests.
+The v5 policy fixes one bounded ceiling before execution; the ROCm allocator
+governor may still reject a planned operation when its exact working set is no
+longer admissible, but it cannot silently shrink or expand that plan.
 
 ### ROCm synchronization semantics
 

@@ -10,6 +10,7 @@ pub mod decode_buffers;
 pub mod engine;
 pub mod forward;
 pub mod fp8;
+mod full_attention_policy;
 pub mod generate;
 mod kt_api_policy;
 pub mod kv_cache;
@@ -84,6 +85,11 @@ pub use backend::{DecodeWeightPrewarmCancelled, DecodeWeightPrewarmPolicy};
 pub use cancel::CancelHandle;
 pub use engine::Engine;
 pub use forward::{LinearAttentionState, StreamingPrefillExecutionPolicy, StreamingPrefillMode};
+pub use full_attention_policy::{
+    DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB, MAX_FULL_ATTENTION_SCORE_BUDGET_MIB,
+    MIN_FULL_ATTENTION_SCORE_BUDGET_MIB, install_full_attention_score_budget_mib,
+    validate_full_attention_score_budget_mib,
+};
 pub use generate::{
     BackendHealthHandle, BackendHealthSnapshot, BatchedStateCacheStats, DecodeBatcher,
     DecodeBatcherConfig, DecodeBatcherStats, ExternalYieldSyncStats, FinishReason,

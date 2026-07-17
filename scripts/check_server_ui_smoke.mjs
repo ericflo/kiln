@@ -1634,13 +1634,18 @@ async function startServer({
           },
         },
         accelerator_runtime: {
-          schema_id: 'kiln.accelerator-runtime-policy.v4',
-          version: 4,
+          schema_id: 'kiln.accelerator-runtime-policy.v5',
+          version: 5,
           serving_profile: 'stable',
           serving_profile_source: 'default',
           kt_api_mode: {
             configured: 'auto',
             effective: 'auto',
+            source: 'default',
+          },
+          full_attention_score_budget_mib: {
+            configured: 2048,
+            effective: 2048,
             source: 'default',
           },
           rocm_synchronization_mode: {
@@ -2770,8 +2775,9 @@ async function expectDirectDecodeRendezvousRuntimeConfig(page, scenarioLabel) {
 async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   const prefix = `${scenarioLabel} ROCm matmul runtime config`;
   const selector = '#runtime-config-body';
-  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v4[\s\S]*v4/, `${prefix} should render policy schema v4`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v5[\s\S]*v5/, `${prefix} should render policy schema v5`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Kiln-tensor API routes[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable adapter route set and source`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Full-attention score ceiling[\s\S]*2,048 MiB[\s\S]*default/, `${prefix} should render immutable full-attention geometry and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Strided batched matmul[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable strided-batched route and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*BF16 matmul output[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable BF16-output route and source`);
 }

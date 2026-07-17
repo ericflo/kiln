@@ -1971,6 +1971,7 @@ function renderRuntimeConfigBody(cfg) {
   const governor = vram.governor || {};
   const acceleratorRuntime = cfg.accelerator_runtime || {};
   const ktApiMode = acceleratorRuntime.kt_api_mode || {};
+  const fullAttentionScoreBudget = acceleratorRuntime.full_attention_score_budget_mib || {};
   const rocmSynchronization = acceleratorRuntime.rocm_synchronization_mode || {};
   const rocmStridedBatchedMatmul = acceleratorRuntime.rocm_strided_batched_matmul_mode || {};
   const rocmBf16MatmulOutput = acceleratorRuntime.rocm_bf16_matmul_output_mode || {};
@@ -2248,6 +2249,7 @@ function renderRuntimeConfigBody(cfg) {
         <div class="rc-group-title">Accelerator execution</div>
         ${runtimeConfigRow('Policy schema', `<strong>${escapeHtml(acceleratorRuntime.schema_id || '—')}</strong>${acceleratorRuntime.version == null ? '' : flagChip(`v${acceleratorRuntime.version}`, 'Accelerator runtime policy schema version.')}`, 'Versioned process-lifetime accelerator policy installed before device initialization.')}
         ${runtimeConfigRow('Kiln-tensor API routes', `<strong>${escapeHtml(ktApiMode.effective || '—')}</strong>${srcChip(ktApiMode.source)}`, 'Immutable adapter route set. Auto uses qualified defaults, all includes experimental matmul and paged-KV routes, and disabled uses legacy fallbacks.')}
+        ${runtimeConfigRow('Full-attention score ceiling', `<strong>${Number.isFinite(fullAttentionScoreBudget.effective) ? num(fullAttentionScoreBudget.effective) + ' MiB' : '—'}</strong>${srcChip(fullAttentionScoreBudget.source)}`, 'Immutable exact-attention scratch ceiling. ROCm online attention uses at most 1024 MiB and live pressure rejects admission instead of changing tile geometry.')}
         ${runtimeConfigRow('Synchronization', `<strong>${escapeHtml(rocmSynchronization.effective || '—')}</strong>${srcChip(rocmSynchronization.source)}`, 'Effective ROCm synchronization discipline. Stream-ordered mode is restricted to the experimental serving profile until locally qualified.')}
         ${runtimeConfigRow('Strided batched matmul', `<strong>${escapeHtml(rocmStridedBatchedMatmul.effective || '—')}</strong>${srcChip(rocmStridedBatchedMatmul.source)}`, 'Immutable ROCm hipBLASLt batched route. Auto retains the qualified gfx115x large-attention correctness guard; explicit routes require the experimental serving profile.')}
         ${runtimeConfigRow('BF16 matmul output', `<strong>${escapeHtml(rocmBf16MatmulOutput.effective || '—')}</strong>${srcChip(rocmBf16MatmulOutput.source)}`, 'Immutable ROCm BF16-output route. Auto retains the qualified ROCm 7.2 F32-output-then-BF16-cast guard; explicit routes require the experimental serving profile.')}

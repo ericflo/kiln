@@ -235,19 +235,6 @@
       "surface": "unit-test"
     },
     {
-      "api": "remove_var",
-      "argument": "KILN_ROCM_FLASH_SCORE_TILE_MAX_ELEMENTS",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-flash-attn/src/rocm_sdpa.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
       "api": "set_var",
       "argument": "KILN_ROCM_ATTENTION_COOPERATIVE_YIELD",
       "argument_kind": "literal",
@@ -263,19 +250,6 @@
     {
       "api": "set_var",
       "argument": "KILN_ROCM_FLASH_NATIVE_FFI_SYNC",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-flash-attn/src/rocm_sdpa.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_ROCM_FLASH_SCORE_TILE_MAX_ELEMENTS",
       "argument_kind": "literal",
       "classification": "test_only",
       "classification_basis": "unit-test source surface",
@@ -5269,32 +5243,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_FULL_ATTN_SCORE_BUDGET_MB",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_FULL_ATTN_SCORE_TILE_MAX_ELEMENTS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_GPU_TRAINING_MLP_CHUNK_TOKENS",
       "argument_kind": "literal",
       "classification": "experimental_debug",
@@ -5322,19 +5270,6 @@
     {
       "api": "var",
       "argument": "KILN_PROFILE_PAGED_SECTIONS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ROCM_FULL_ATTN_SCORE_ELEMENT_CAP",
       "argument_kind": "literal",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
@@ -9870,27 +9805,27 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 455,
-    "literal_kiln_read_names": 304,
+    "literal_kiln_read_call_sites": 452,
+    "literal_kiln_read_names": 301,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 263,
+      "experimental_debug": 260,
       "public_stable": 1,
       "test_only": 41
     },
-    "process_mutation_call_sites": 361,
+    "process_mutation_call_sites": 359,
     "process_mutation_call_sites_by_classification": {
       "build_time": 8,
-      "test_only": 353
+      "test_only": 351
     },
-    "process_mutation_entries": 205,
-    "read_call_sites": 829,
+    "process_mutation_entries": 203,
+    "read_call_sites": 826,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 357,
+      "experimental_debug": 354,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 553
+    "read_entries": 550
   }
 }

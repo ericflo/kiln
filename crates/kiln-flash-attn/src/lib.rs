@@ -21,6 +21,12 @@
 /// kiln-tensor-typed kt-API surface. All callers route through this
 /// module; the crate no longer exposes a candle-typed parallel API.
 mod kt_api;
+mod score_policy;
+pub use score_policy::{
+    DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB, MAX_FULL_ATTENTION_SCORE_BUDGET_MIB,
+    MIN_FULL_ATTENTION_SCORE_BUDGET_MIB, install_full_attention_score_budget_mib,
+    validate_full_attention_score_budget_mib, with_test_score_geometry,
+};
 
 /// ROCm SDPA. The common bf16/head_dim=128 training shape uses a native exact
 /// HIP forward/backward kernel; less common shapes fall back to the fully

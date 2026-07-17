@@ -16,19 +16,19 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **829 direct read call sites** and
-**361 process-mutation call sites**. It can
-statically name **304 distinct literal `KILN_*`
-read names** across **455 call sites**.
+The scanner records **826 direct read call sites** and
+**359 process-mutation call sites**. It can
+statically name **301 distinct literal `KILN_*`
+read names** across **452 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 357 | 263 | 0 |
+| Experimental/debug migration | 354 | 260 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
-| Test only | 135 | 41 | 353 |
+| Test only | 135 | 41 | 351 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -56,7 +56,7 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/forward.rs` | 64 | 52 |
+| `crates/kiln-model/src/forward.rs` | 61 | 49 |
 | `crates/kiln-vulkan-kernel/src/kernels.rs` | 47 | 46 |
 | `crates/kiln-model/src/backend/vulkan_config.rs` | 27 | 27 |
 | `crates/kiln-model/src/mtp_debug.rs` | 24 | 24 |
@@ -288,8 +288,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_FLASH_ATTN_BWD_DETERMINISTIC` | Experimental/debug migration | 1 | `crates/kiln-flash-attn/src/kt_api.rs` |
 | `KILN_FORCE_EAGER_DECODE` | Experimental/debug migration, Test only | 6 | `crates/kiln-model/src/cuda_graph.rs`, `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/metal_graph.rs` |
 | `KILN_FORCE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_FULL_ATTN_SCORE_BUDGET_MB` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_FULL_ATTN_SCORE_TILE_MAX_ELEMENTS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_GPU_TRAINING_MLP_CHUNK_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_KEEP_PROJECTION_ORIGINALS` | Test only | 3 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_GRAPHS` | Experimental/debug migration, Test only | 3 | `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/metal_graph.rs` |
@@ -347,7 +345,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_ROCM_FLASH_BENCH_KV_HEADS` | Test only | 1 | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` |
 | `KILN_ROCM_FLASH_BENCH_SEQ` | Test only | 1 | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` |
 | `KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_ROCM_FULL_ATTN_SCORE_ELEMENT_CAP` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/rocm.rs` |
 | `KILN_ROCM_HEAD_MAJOR_PREFILL` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/rocm.rs` |
 | `KILN_ROCM_IS_FINITE_HOST_SCAN_ELEMENTS` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs` |

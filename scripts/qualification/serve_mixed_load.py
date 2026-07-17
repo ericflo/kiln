@@ -2305,6 +2305,7 @@ def write_server_config(
         "chat_performance_metadata = true",
         "",
         "[accelerator]",
+        "full_attention_score_budget_mib = 2048",
         f"rocm_synchronization_mode = {_toml_string(rocm_synchronization_mode)}",
         "rocm_strided_batched_matmul_mode = "
         + _toml_string(rocm_strided_batched_matmul_mode),
@@ -2596,14 +2597,19 @@ def accelerator_policy_attestation_failures(
         "profile" if graphs_requested else "disabled"
     )
     expected = {
-        "schema_id": "kiln.accelerator-runtime-policy.v4",
-        "version": 4,
+        "schema_id": "kiln.accelerator-runtime-policy.v5",
+        "version": 5,
         "serving_profile": serving_profile,
         "serving_profile_source": "config_file",
         "kt_api_mode": {
             "configured": "auto",
             "effective": "auto",
             "source": "default",
+        },
+        "full_attention_score_budget_mib": {
+            "configured": 2048,
+            "effective": 2048,
+            "source": "config_file",
         },
         "rocm_synchronization_mode": {
             "configured": synchronization_mode,

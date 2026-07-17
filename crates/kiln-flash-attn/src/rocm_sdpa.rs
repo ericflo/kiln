@@ -31,6 +31,7 @@ use half::bf16;
 use kiln_tensor::{DType as KtDType, Device as KtDevice, RocmStreamSubmission, Tensor as KtTensor};
 
 use crate::kt_api::FlashAttnError;
+use crate::score_policy::effective_score_geometry;
 
 /// `ScalarKind::MulScalar` tag (see `kiln_tensor::ops::scalar`).
 const SCALAR_MUL: i32 = 2;
@@ -39,13 +40,10 @@ const SCALAR_MUL: i32 = 2;
 /// finite negative number rather than `f32::NEG_INFINITY` so that BF16 / F16
 /// downcasts in the softmax stay well-defined (`exp` underflows to 0).
 const NEG_FILL: f32 = -1.0e30;
-const DYNAMIC_MATERIALIZED_SCORE_BUDGET_MAX_MB: usize = 32 * 1024;
-const DYNAMIC_MATERIALIZED_SCORE_BUDGET_FREE_DIVISOR: usize = 3;
 const MATERIALIZED_SCORE_SCRATCH_BUFFERS: usize = 3;
 const MATERIALIZED_BWD_SCORE_SCRATCH_BUFFERS: usize = 8;
 const MATERIALIZED_SCORE_TILE_GRANULARITY: usize = 128;
 const MAX_MATERIALIZED_QUERY_TILES: usize = 1024;
-const DEFAULT_MATERIALIZED_SCORE_TILE_MAX_ELEMENTS: usize = 1 << 29;
 const DEFAULT_NATIVE_FWD_MAX_SEQ: usize = 4096;
 const DEFAULT_NATIVE_SINGLE_FWD_MAX_SEQ: usize = 32768;
 const DEFAULT_NATIVE_FWD_QUERY_TILE: usize = 4096;
@@ -54,11 +52,7 @@ const DEFAULT_NATIVE_STREAMING_FWD_KEY_TILE: usize = 4096;
 const DEFAULT_NATIVE_BWD_HD128_MAX_SEQ: usize = 1024;
 const DEFAULT_NATIVE_BWD_HD256_MAX_SEQ: usize = 512;
 const DEFAULT_NATIVE_BWD_LONG_MIN_SEQ: usize = 4096;
-const DEFAULT_ONLINE_QUERY_TILE: usize = 2048;
-const DEFAULT_ONLINE_KEY_TILE: usize = 4096;
 const DEFAULT_ONLINE_MATMUL_BATCH_GROUP: usize = 4;
-const DYNAMIC_ONLINE_SCORE_TILE_BUDGET_MAX_MB: usize = 1024;
-const DYNAMIC_ONLINE_SCORE_TILE_BUDGET_FREE_DIVISOR: usize = 32;
 const ONLINE_TILE_GRANULARITY: usize = 128;
 const MAX_ONLINE_TILE_PAIRS: usize = 16 * 1024;
 const DEFAULT_F32_MATMUL_INNER_TILE: usize = 4096;
@@ -543,36 +537,16 @@ fn reserve_published_rocm_bytes(
     })
 }
 
-fn materialized_score_budget_mb_for_available_bytes(
-    override_mb: Option<usize>,
-    available_bytes: Option<usize>,
-) -> usize {
-    let Some(available_bytes) = available_bytes else {
-        return 0;
-    };
-    let safe_mb =
-        (available_bytes / DYNAMIC_MATERIALIZED_SCORE_BUDGET_FREE_DIVISOR / (1024 * 1024))
-            .min(DYNAMIC_MATERIALIZED_SCORE_BUDGET_MAX_MB);
-    override_mb.map_or(safe_mb, |requested| requested.min(safe_mb))
+fn materialized_score_budget_mib() -> usize {
+    effective_score_geometry().materialized_budget_mib
 }
 
-fn materialized_score_budget_mb(device: KtDevice) -> usize {
-    let override_mb = env_usize("KILN_ROCM_FLASH_SCORE_BUDGET_MB")
-        .or_else(|| env_usize("KILN_FULL_ATTN_SCORE_BUDGET_MB"));
-    materialized_score_budget_mb_for_available_bytes(
-        override_mb,
-        published_rocm_available_bytes(device),
-    )
-}
-
-fn materialized_score_budget_bytes(device: KtDevice) -> usize {
-    materialized_score_budget_mb(device).saturating_mul(1024 * 1024)
+fn materialized_score_budget_bytes() -> usize {
+    materialized_score_budget_mib().saturating_mul(1024 * 1024)
 }
 
 fn materialized_score_tile_max_elements() -> usize {
-    env_usize("KILN_ROCM_FLASH_SCORE_TILE_MAX_ELEMENTS")
-        .or_else(|| env_usize("KILN_FULL_ATTN_SCORE_TILE_MAX_ELEMENTS"))
-        .unwrap_or(DEFAULT_MATERIALIZED_SCORE_TILE_MAX_ELEMENTS)
+    effective_score_geometry().materialized_tile_max_elements
 }
 
 fn materialized_score_working_set_bytes(b: usize, h: usize, sq: usize, sk: usize) -> Option<usize> {
@@ -777,7 +751,7 @@ fn rocm_materialized_bwd_enabled(
     d: usize,
 ) -> bool {
     let heuristic_score_fit = materialized_bwd_score_scratch_bytes(b, h, sq, sk)
-        .map(|bytes| bytes <= materialized_score_budget_bytes(device))
+        .map(|bytes| bytes <= materialized_score_budget_bytes())
         .unwrap_or(false);
     let full_operation_admitted = published_rocm_available_bytes(device)
         .and_then(|available_bytes| {
@@ -1085,22 +1059,6 @@ fn plan_materialized_bwd_query_tiles(
     )
 }
 
-fn online_score_tile_budget_bytes_for_available_bytes(
-    override_mb: Option<usize>,
-    available_bytes: Option<usize>,
-) -> usize {
-    let budget_mb = match available_bytes {
-        None => 0,
-        Some(available_bytes) => {
-            let safe_mb =
-                (available_bytes / DYNAMIC_ONLINE_SCORE_TILE_BUDGET_FREE_DIVISOR / (1024 * 1024))
-                    .min(DYNAMIC_ONLINE_SCORE_TILE_BUDGET_MAX_MB);
-            override_mb.map_or(safe_mb, |requested| requested.min(safe_mb))
-        }
-    };
-    budget_mb.saturating_mul(1024 * 1024)
-}
-
 #[derive(Debug, Clone, Copy)]
 struct OnlineTileSizing {
     query_tile: usize,
@@ -1183,15 +1141,11 @@ impl OnlineTileSizing {
                 ))
             },
         )?;
+        let geometry = effective_score_geometry();
         let sizing = Self {
-            query_tile: env_usize("KILN_ROCM_FLASH_ONLINE_QUERY_TILE")
-                .unwrap_or(DEFAULT_ONLINE_QUERY_TILE),
-            key_tile: env_usize("KILN_ROCM_FLASH_ONLINE_KEY_TILE")
-                .unwrap_or(DEFAULT_ONLINE_KEY_TILE),
-            score_budget_bytes: online_score_tile_budget_bytes_for_available_bytes(
-                env_usize("KILN_ROCM_FLASH_ONLINE_SCORE_BUDGET_MB"),
-                Some(score_available_bytes),
-            ),
+            query_tile: geometry.rocm_online_query_tile,
+            key_tile: geometry.rocm_online_key_tile,
+            score_budget_bytes: geometry.rocm_online_budget_mib.saturating_mul(1024 * 1024),
         };
         validate_online_operation_plan(sizing, bh, sq, sk, d, score_available_bytes, pass)?;
         Ok(sizing)
@@ -2174,7 +2128,7 @@ pub fn flash_attn_fwd_rocm(
         }
     }
 
-    let budget_bytes = materialized_score_budget_bytes(dev);
+    let budget_bytes = materialized_score_budget_bytes();
     let rectangular_causal_prefix = causal && sq != sk;
     if materialized_score_working_set_bytes(b, h, sq, sk)
         .map(|bytes| bytes > budget_bytes)
@@ -2256,7 +2210,7 @@ pub fn flash_attn_fwd_head_major_rocm(
 
     let (b, h, sq, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[2], k.shape()[1]);
-    let budget_bytes = materialized_score_budget_bytes(dev);
+    let budget_bytes = materialized_score_budget_bytes();
     let rectangular_causal_prefix = causal && sq != sk;
     let exceeds_materialized_budget = materialized_score_working_set_bytes(b, h, sq, sk)
         .map(|bytes| bytes > budget_bytes)
@@ -5841,39 +5795,15 @@ mod tests {
     }
 
     #[test]
-    fn tighter_published_budget_reduces_later_attention_sizing() {
-        let roomy = Some(24 * 1024 * 1024 * 1024usize);
-        let tight = Some(2 * 1024 * 1024 * 1024usize);
-        assert!(
-            materialized_score_budget_mb_for_available_bytes(None, tight)
-                < materialized_score_budget_mb_for_available_bytes(None, roomy)
-        );
-        assert!(
-            online_score_tile_budget_bytes_for_available_bytes(None, tight)
-                < online_score_tile_budget_bytes_for_available_bytes(None, roomy)
-        );
-        assert_eq!(
-            materialized_score_budget_mb_for_available_bytes(None, Some(0)),
-            0
-        );
-        assert_eq!(
-            online_score_tile_budget_bytes_for_available_bytes(None, Some(0)),
-            0
-        );
-        assert_eq!(
-            materialized_score_budget_mb_for_available_bytes(Some(4096), None),
-            0
-        );
-        assert_eq!(
-            online_score_tile_budget_bytes_for_available_bytes(Some(1024), None),
-            0
-        );
-
+    fn installed_geometry_is_independent_of_live_memory() {
+        let geometry = effective_score_geometry();
+        assert_eq!(geometry.materialized_budget_mib, 2048);
+        assert_eq!(geometry.rocm_online_budget_mib, 1024);
         let (q_tile, key_tile) = online_tile_lens(
             OnlineTileSizing {
-                query_tile: 4096,
-                key_tile: 8192,
-                score_budget_bytes: online_score_tile_budget_bytes_for_available_bytes(None, tight),
+                query_tile: geometry.rocm_online_query_tile,
+                key_tile: geometry.rocm_online_key_tile,
+                score_budget_bytes: geometry.rocm_online_budget_mib * 1024 * 1024,
             },
             16,
             4096,
@@ -5884,9 +5814,10 @@ mod tests {
 
     #[test]
     fn online_attention_rejects_unbounded_low_budget_plan() {
+        let geometry = effective_score_geometry();
         let low_budget = OnlineTileSizing {
-            query_tile: DEFAULT_ONLINE_QUERY_TILE,
-            key_tile: DEFAULT_ONLINE_KEY_TILE,
+            query_tile: geometry.rocm_online_query_tile,
+            key_tile: geometry.rocm_online_key_tile,
             score_budget_bytes: 1024 * 1024,
         };
         let error = validate_online_tile_plan(low_budget, 16, 128 * 1024, 128 * 1024)
@@ -5935,18 +5866,12 @@ mod tests {
 
     #[test]
     fn materialized_query_tile_respects_score_element_cap() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
-        unsafe {
-            std::env::set_var("KILN_ROCM_FLASH_SCORE_TILE_MAX_ELEMENTS", "536870912");
-        }
         let tile_len = query_tile_len_for_budget(1, 16, 32_768, 8_192, usize::MAX);
-        unsafe {
-            std::env::remove_var("KILN_ROCM_FLASH_SCORE_TILE_MAX_ELEMENTS");
-        }
         assert!(tile_len > 0);
         assert!(tile_len <= 1_024, "tile_len={tile_len}");
         assert!(
-            16usize.saturating_mul(tile_len).saturating_mul(32_768) <= 536_870_912,
+            16usize.saturating_mul(tile_len).saturating_mul(32_768)
+                <= effective_score_geometry().materialized_tile_max_elements,
             "tile_len={tile_len} still exceeds score element cap"
         );
     }

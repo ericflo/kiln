@@ -16,7 +16,7 @@ use half::bf16;
 use kiln_flash_attn::{
     flash_attn_bwd_collapsed_gqa_kt, flash_attn_bwd_kt, flash_attn_fwd_kt,
     flash_attn_fwd_no_lse_kt, flash_attn_paged_decode_dyn_seqlen_kt, flash_attn_paged_decode_kt,
-    paged_kv_write_token_major_bf16_kt,
+    paged_kv_write_token_major_bf16_kt, with_test_score_geometry,
 };
 use kiln_tensor::{DType, Device, Tensor};
 use std::sync::Mutex;
@@ -764,43 +764,36 @@ fn flash_attn_fwd_online_tiled_parity() {
     let sk = 1024usize;
     let scale = 1.0 / (d as f32).sqrt();
 
-    with_env_vars(
-        &[
-            ("KILN_ROCM_FLASH_SCORE_BUDGET_MB", "1"),
-            ("KILN_ROCM_FLASH_ONLINE_QUERY_TILE", "512"),
-            ("KILN_ROCM_FLASH_ONLINE_KEY_TILE", "512"),
-        ],
-        || {
-            for &causal in &[false, true] {
-                let qd = fill_bf16(b * sq * h * d, 401 + causal as usize);
-                let kd = fill_bf16(b * sk * hk * d, 503 + causal as usize);
-                let vd = fill_bf16(b * sk * hk * d, 607 + causal as usize);
+    with_test_score_geometry(1, 512, 512, 1, || {
+        for &causal in &[false, true] {
+            let qd = fill_bf16(b * sq * h * d, 401 + causal as usize);
+            let kd = fill_bf16(b * sk * hk * d, 503 + causal as usize);
+            let vd = fill_bf16(b * sk * hk * d, 607 + causal as usize);
 
-                let q = rocm_bf16(&qd, vec![b, sq, h, d]);
-                let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
-                let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+            let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+            let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+            let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
 
-                let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
-                    .unwrap_or_else(|e| panic!("online tiled causal={causal}: {e}"));
-                assert_eq!(out_t.shape(), &[b, sq, h, d]);
-                assert_eq!(lse_t.shape(), &[b, h, sq]);
-                assert_eq!(lse_t.dtype(), DType::F32);
+            let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+                .unwrap_or_else(|e| panic!("online tiled causal={causal}: {e}"));
+            assert_eq!(out_t.shape(), &[b, sq, h, d]);
+            assert_eq!(lse_t.shape(), &[b, h, sq]);
+            assert_eq!(lse_t.dtype(), DType::F32);
 
-                let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
-                let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
-                let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
-                let want = cpu_sdpa(&qf, &kf, &vf, b, sq, sk, h, hk, d, scale, causal);
-                let got = bf16_to_f32(&out_t);
-                check_close(
-                    &got,
-                    &want,
-                    2e-2,
-                    2e-2,
-                    &format!("online tiled causal={causal}"),
-                );
-            }
-        },
-    );
+            let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
+            let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
+            let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
+            let want = cpu_sdpa(&qf, &kf, &vf, b, sq, sk, h, hk, d, scale, causal);
+            let got = bf16_to_f32(&out_t);
+            check_close(
+                &got,
+                &want,
+                2e-2,
+                2e-2,
+                &format!("online tiled causal={causal}"),
+            );
+        }
+    });
 }
 
 #[test]
@@ -997,63 +990,62 @@ fn flash_attn_bwd_online_tiled_parity() {
         &[
             ("KILN_ROCM_FLASH_MATMUL_BWD", "0"),
             ("KILN_ROCM_FLASH_ONLINE_BWD", "1"),
-            ("KILN_ROCM_FLASH_ONLINE_QUERY_TILE", "4"),
-            ("KILN_ROCM_FLASH_ONLINE_KEY_TILE", "8"),
-            ("KILN_ROCM_FLASH_ONLINE_SCORE_BUDGET_MB", "1"),
         ],
         || {
-            for &causal in &[false, true] {
-                let qd = fill_bf16(b * sq * h * d, 701 + causal as usize);
-                let kd = fill_bf16(b * sk * hk * d, 809 + causal as usize);
-                let vd = fill_bf16(b * sk * hk * d, 907 + causal as usize);
-                let dod = fill_bf16(b * sq * h * d, 1009 + causal as usize);
+            with_test_score_geometry(1, 4, 8, 1, || {
+                for &causal in &[false, true] {
+                    let qd = fill_bf16(b * sq * h * d, 701 + causal as usize);
+                    let kd = fill_bf16(b * sk * hk * d, 809 + causal as usize);
+                    let vd = fill_bf16(b * sk * hk * d, 907 + causal as usize);
+                    let dod = fill_bf16(b * sq * h * d, 1009 + causal as usize);
 
-                let q = rocm_bf16(&qd, vec![b, sq, h, d]);
-                let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
-                let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
-                let dout = rocm_bf16(&dod, vec![b, sq, h, d]);
+                    let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+                    let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+                    let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+                    let dout = rocm_bf16(&dod, vec![b, sq, h, d]);
 
-                let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
-                    .unwrap_or_else(|e| panic!("bwd fwd causal={causal}: {e}"));
-                let (dq_t, dk_t, dv_t) =
-                    flash_attn_bwd_kt(&dout, &q, &k, &v, &out_t, &lse_t, scale, causal)
-                        .unwrap_or_else(|e| panic!("online bwd causal={causal}: {e}"));
+                    let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+                        .unwrap_or_else(|e| panic!("bwd fwd causal={causal}: {e}"));
+                    let (dq_t, dk_t, dv_t) =
+                        flash_attn_bwd_kt(&dout, &q, &k, &v, &out_t, &lse_t, scale, causal)
+                            .unwrap_or_else(|e| panic!("online bwd causal={causal}: {e}"));
 
-                assert_eq!(dq_t.shape(), &[b, sq, h, d]);
-                assert_eq!(dk_t.shape(), &[b, sk, h, d]);
-                assert_eq!(dv_t.shape(), &[b, sk, h, d]);
+                    assert_eq!(dq_t.shape(), &[b, sq, h, d]);
+                    assert_eq!(dk_t.shape(), &[b, sk, h, d]);
+                    assert_eq!(dv_t.shape(), &[b, sk, h, d]);
 
-                let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
-                let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
-                let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
-                let dof: Vec<f32> = dod.iter().map(|x| x.to_f32()).collect();
-                let outf = bf16_to_f32(&out_t);
-                let (want_dq, want_dk, want_dv) = cpu_sdpa_bwd_expanded_gqa(
-                    &dof, &qf, &kf, &vf, &outf, b, sq, sk, h, hk, d, scale, causal,
-                );
+                    let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
+                    let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
+                    let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
+                    let dof: Vec<f32> = dod.iter().map(|x| x.to_f32()).collect();
+                    let outf = bf16_to_f32(&out_t);
+                    let (want_dq, want_dk, want_dv) = cpu_sdpa_bwd_expanded_gqa(
+                        &dof, &qf, &kf, &vf, &outf, b, sq, sk, h, hk, d, scale, causal,
+                    );
 
-                check_close(
-                    &bf16_to_f32(&dq_t),
-                    &want_dq,
-                    4e-2,
-                    4e-2,
-                    &format!("online bwd dq causal={causal}"),
-                );
-                check_close(
-                    &bf16_to_f32(&dk_t),
-                    &want_dk,
-                    4e-2,
-                    4e-2,
-                    &format!("online bwd dk causal={causal}"),
-                );
-                check_close(
-                    &bf16_to_f32(&dv_t),
-                    &want_dv,
-                    4e-2,
-                    4e-2,
-                    &format!("online bwd dv causal={causal}"),
-                );
-            }
+                    check_close(
+                        &bf16_to_f32(&dq_t),
+                        &want_dq,
+                        4e-2,
+                        4e-2,
+                        &format!("online bwd dq causal={causal}"),
+                    );
+                    check_close(
+                        &bf16_to_f32(&dk_t),
+                        &want_dk,
+                        4e-2,
+                        4e-2,
+                        &format!("online bwd dk causal={causal}"),
+                    );
+                    check_close(
+                        &bf16_to_f32(&dv_t),
+                        &want_dv,
+                        4e-2,
+                        4e-2,
+                        &format!("online bwd dv causal={causal}"),
+                    );
+                }
+            });
         },
     );
 }

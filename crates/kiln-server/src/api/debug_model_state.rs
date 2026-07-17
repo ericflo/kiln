@@ -977,11 +977,15 @@ mod tests {
         assert_eq!(json["decode_runtime"]["max_decode_batch"]["effective"], 8);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v4"
+            "kiln.accelerator-runtime-policy.v5"
         );
         assert_eq!(
             json["accelerator_runtime"]["kt_api_mode"]["effective"],
             "auto"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["full_attention_score_budget_mib"]["effective"],
+            kiln_model::DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_graph_cache_max_bytes"]["effective"],

@@ -125,8 +125,8 @@ pub const DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MIN: u64 = 64 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024 * 1024;
 /// Versioned schema identity shared by config, health, and debug diagnostics.
-pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v4";
-pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 4;
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v5";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 5;
 
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
@@ -1907,6 +1907,63 @@ impl<'de> Deserialize<'de> for RocmGraphCacheMaxBytes {
     }
 }
 
+/// Validated process-lifetime ceiling for exact full-attention score scratch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FullAttentionScoreBudgetMib {
+    mib: usize,
+    source: ConfigValueSource,
+}
+
+impl FullAttentionScoreBudgetMib {
+    pub fn new(mib: usize, source: ConfigValueSource) -> Result<Self> {
+        kiln_model::validate_full_attention_score_budget_mib(mib)
+            .with_context(|| format!("invalid full-attention score budget {mib} MiB"))?;
+        Ok(Self { mib, source })
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let mib = parse_decimal_env::<usize>(name, raw, "a decimal integer MiB count")?;
+        Self::new(mib, ConfigValueSource::Environment)
+            .with_context(|| format!("invalid {name} value {raw:?}"))
+    }
+
+    pub const fn mib(self) -> usize {
+        self.mib
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for FullAttentionScoreBudgetMib {
+    fn default() -> Self {
+        Self {
+            mib: kiln_model::DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for FullAttentionScoreBudgetMib {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(self.mib as u64)
+    }
+}
+
+impl<'de> Deserialize<'de> for FullAttentionScoreBudgetMib {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mib = usize::deserialize(deserializer)?;
+        Self::new(mib, ConfigValueSource::ConfigFile).map_err(serde::de::Error::custom)
+    }
+}
+
 /// One configured/effective accelerator policy leaf and its startup source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ResolvedAcceleratorValue<T> {
@@ -1923,6 +1980,7 @@ pub struct ResolvedAcceleratorRuntimePolicy {
     pub serving_profile: ServingProfile,
     pub serving_profile_source: ConfigValueSource,
     pub kt_api_mode: ResolvedAcceleratorValue<KtApiMode>,
+    pub full_attention_score_budget_mib: ResolvedAcceleratorValue<usize>,
     pub rocm_synchronization_mode: ResolvedAcceleratorValue<RocmSynchronizationMode>,
     pub rocm_strided_batched_matmul_mode: ResolvedAcceleratorValue<RocmStridedBatchedMatmulMode>,
     pub rocm_bf16_matmul_output_mode: ResolvedAcceleratorValue<RocmBf16MatmulOutputMode>,
@@ -1937,6 +1995,7 @@ pub struct ResolvedAcceleratorRuntimePolicy {
 #[serde(default, deny_unknown_fields)]
 pub struct AcceleratorRuntimeConfig {
     pub kt_api_mode: KtApiModeSetting,
+    pub full_attention_score_budget_mib: FullAttentionScoreBudgetMib,
     pub rocm_synchronization_mode: RocmSynchronizationModeSetting,
     pub rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting,
     pub rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting,
@@ -1968,6 +2027,11 @@ impl AcceleratorRuntimeConfig {
                 configured: self.kt_api_mode.mode(),
                 effective: self.kt_api_mode.mode(),
                 source: self.kt_api_mode.source(),
+            },
+            full_attention_score_budget_mib: ResolvedAcceleratorValue {
+                configured: self.full_attention_score_budget_mib.mib(),
+                effective: self.full_attention_score_budget_mib.mib(),
+                source: self.full_attention_score_budget_mib.source(),
             },
             rocm_synchronization_mode: ResolvedAcceleratorValue {
                 configured: self.rocm_synchronization_mode.mode(),
@@ -2045,7 +2109,10 @@ impl AcceleratorRuntimeConfig {
             );
         }
         validate_rocm_graph_cache_entries(self.rocm_graph_cache_entries.entries())?;
-        validate_rocm_graph_cache_max_bytes(self.rocm_graph_cache_max_bytes.bytes())
+        validate_rocm_graph_cache_max_bytes(self.rocm_graph_cache_max_bytes.bytes())?;
+        kiln_model::validate_full_attention_score_budget_mib(
+            self.full_attention_score_budget_mib.mib(),
+        )
     }
 }
 
@@ -2053,6 +2120,7 @@ impl Default for AcceleratorRuntimeConfig {
     fn default() -> Self {
         Self {
             kt_api_mode: KtApiModeSetting::default(),
+            full_attention_score_budget_mib: FullAttentionScoreBudgetMib::default(),
             rocm_synchronization_mode: RocmSynchronizationModeSetting::default(),
             rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting::default(),
             rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting::default(),
@@ -4723,6 +4791,12 @@ impl NormalizedEnvValue for KtApiModeSetting {
     }
 }
 
+impl NormalizedEnvValue for FullAttentionScoreBudgetMib {
+    fn normalized_env_value(&self) -> String {
+        self.mib().normalized_env_value()
+    }
+}
+
 impl NormalizedEnvValue for RocmSynchronizationModeSetting {
     fn normalized_env_value(&self) -> String {
         self.mode().as_str().to_owned()
@@ -5044,6 +5118,9 @@ macro_rules! public_env_parser {
     (kt_api_mode) => {
         KtApiModeSetting::from_named_environment_value
     };
+    (full_attention_score_budget_mib) => {
+        FullAttentionScoreBudgetMib::from_named_environment_value
+    };
     (rocm_synchronization_mode) => {
         RocmSynchronizationModeSetting::from_named_environment_value
     };
@@ -5260,6 +5337,10 @@ macro_rules! optional_section_public_env_field {
 static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     public_env_field!(serving_profile, server.serving_profile, SERVING_PROFILE_ENV),
     public_env_field!(kt_api_mode, accelerator.kt_api_mode),
+    public_env_field!(
+        full_attention_score_budget_mib,
+        accelerator.full_attention_score_budget_mib
+    ),
     public_env_field!(
         rocm_synchronization_mode,
         accelerator.rocm_synchronization_mode
@@ -6647,6 +6728,7 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     const EXPECTED_PUBLIC_ENV_NAMES: &[&str] = &[
+        "KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB",
         "KILN_ACCELERATOR_KT_API_MODE",
         "KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE",
         "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES",
@@ -6926,6 +7008,14 @@ mod tests {
         assert_eq!(config.server.shutdown_timeout_secs, 5);
         assert_eq!(config.accelerator.kt_api_mode.mode(), KtApiMode::Auto);
         assert_eq!(
+            config.accelerator.full_attention_score_budget_mib.mib(),
+            kiln_model::DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB
+        );
+        assert_eq!(
+            config.accelerator.full_attention_score_budget_mib.source(),
+            ConfigValueSource::Default
+        );
+        assert_eq!(
             config.accelerator.rocm_synchronization_mode.mode(),
             RocmSynchronizationMode::LegacyHostBarriers
         );
@@ -6951,6 +7041,7 @@ mod tests {
         );
         for source in [
             config.accelerator.kt_api_mode.source(),
+            config.accelerator.full_attention_score_budget_mib.source(),
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_strided_batched_matmul_mode.source(),
             config.accelerator.rocm_bf16_matmul_output_mode.source(),
@@ -7176,6 +7267,14 @@ mod tests {
                 }
             );
             assert_eq!(
+                resolved.full_attention_score_budget_mib,
+                ResolvedAcceleratorValue {
+                    configured: kiln_model::DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB,
+                    effective: kiln_model::DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
                 resolved.rocm_synchronization_mode,
                 ResolvedAcceleratorValue {
                     configured: RocmSynchronizationMode::LegacyHostBarriers,
@@ -7230,13 +7329,14 @@ mod tests {
             ConfigValueSource::Environment,
         )))
         .unwrap();
-        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v4");
-        assert_eq!(json["version"], 4);
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v5");
+        assert_eq!(json["version"], 5);
         assert_eq!(json["serving_profile"], "experimental");
         assert_eq!(json["serving_profile_source"], "environment");
         assert_eq!(json["kt_api_mode"]["configured"], "auto");
         assert_eq!(json["kt_api_mode"]["effective"], "auto");
         assert_eq!(json["kt_api_mode"]["source"], "default");
+        assert_eq!(json["full_attention_score_budget_mib"]["effective"], 2048);
         assert_eq!(json["rocm_graph_mode"]["configured"], "profile");
         assert_eq!(json["rocm_graph_mode"]["effective"], "lazy_capture_replay");
         assert_eq!(json["rocm_graph_mode"]["source"], "default");
@@ -7251,6 +7351,7 @@ serving_profile = "experimental"
 
 [accelerator]
 kt_api_mode = "all"
+full_attention_score_budget_mib = 64
 rocm_synchronization_mode = "stream_ordered"
 rocm_strided_batched_matmul_mode = "disabled"
 rocm_bf16_matmul_output_mode = "f32_then_cast"
@@ -7262,6 +7363,11 @@ rocm_graph_cache_max_bytes = 17179869184
         .unwrap();
         config.validate().unwrap();
         assert_eq!(config.accelerator.kt_api_mode.mode(), KtApiMode::All);
+        assert_eq!(config.accelerator.full_attention_score_budget_mib.mib(), 64);
+        assert_eq!(
+            config.accelerator.full_attention_score_budget_mib.source(),
+            ConfigValueSource::ConfigFile
+        );
         assert_eq!(
             config.accelerator.rocm_synchronization_mode.mode(),
             RocmSynchronizationMode::StreamOrdered
@@ -7295,6 +7401,20 @@ rocm_graph_cache_max_bytes = 17179869184
             assert_eq!(source, ConfigValueSource::ConfigFile);
         }
 
+        for mib in [
+            kiln_model::MIN_FULL_ATTENTION_SCORE_BUDGET_MIB,
+            kiln_model::MAX_FULL_ATTENTION_SCORE_BUDGET_MIB,
+        ] {
+            let parsed: KilnConfig = toml::from_str(&format!(
+                "[accelerator]\nfull_attention_score_budget_mib = {mib}\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                parsed.accelerator.full_attention_score_budget_mib.mib(),
+                mib
+            );
+        }
+
         for entries in [ROCM_GRAPH_CACHE_ENTRIES_MIN, ROCM_GRAPH_CACHE_ENTRIES_MAX] {
             let parsed: KilnConfig = toml::from_str(&format!(
                 "[accelerator]\nrocm_graph_cache_entries = {entries}\n"
@@ -7320,6 +7440,9 @@ rocm_graph_cache_max_bytes = 17179869184
         for document in [
             "[accelerator]\nkt_api_mode = \"sometimes\"\n".to_owned(),
             "[accelerator]\nkt_api_mode = true\n".to_owned(),
+            "[accelerator]\nfull_attention_score_budget_mib = 63\n".to_owned(),
+            "[accelerator]\nfull_attention_score_budget_mib = 2049\n".to_owned(),
+            "[accelerator]\nfull_attention_score_budget_mib = \"2048\"\n".to_owned(),
             "[accelerator]\nrocm_synchronization_mode = \"eventually\"\n".to_owned(),
             "[accelerator]\nrocm_synchronization_mode = true\n".to_owned(),
             "[accelerator]\nrocm_strided_batched_matmul_mode = \"sometimes\"\n".to_owned(),
@@ -7349,6 +7472,7 @@ rocm_graph_cache_max_bytes = 17179869184
             let detail = error.to_string();
             assert!(
                 detail.contains("accelerator")
+                    || detail.contains("full-attention score budget")
                     || detail.contains("invalid type")
                     || detail.contains("unknown field"),
                 "unexpected error for {document:?}: {error:#}"
@@ -7686,7 +7810,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 99);
+        assert_eq!(original_len, 100);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -7757,7 +7881,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 104);
+        assert_eq!(serialized_leaves.len(), 105);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -7800,12 +7924,13 @@ rocm_graph_cache_max_bytes = 17179869184
     }
 
     #[test]
-    fn public_env_canonical_only_loads_all_ninety_nine_public_fields() {
+    fn public_env_canonical_only_loads_all_one_hundred_public_fields() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
             ("KILN_SERVER_SERVING_PROFILE", "experimental"),
             ("KILN_ACCELERATOR_KT_API_MODE", "all"),
+            ("KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB", "512"),
             (
                 "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE",
                 "stream_ordered",
@@ -7922,6 +8047,14 @@ rocm_graph_cache_max_bytes = 17179869184
             ServingProfile::Experimental
         );
         assert_eq!(config.accelerator.kt_api_mode.mode(), KtApiMode::All);
+        assert_eq!(
+            config.accelerator.full_attention_score_budget_mib.mib(),
+            512
+        );
+        assert_eq!(
+            config.accelerator.full_attention_score_budget_mib.source(),
+            ConfigValueSource::Environment
+        );
         assert_eq!(
             config.accelerator.rocm_synchronization_mode.mode(),
             RocmSynchronizationMode::StreamOrdered

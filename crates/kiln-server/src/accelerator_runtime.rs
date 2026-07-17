@@ -134,6 +134,11 @@ pub fn install_startup_policy(
     device: kiln_tensor::Device,
     policy: ResolvedAcceleratorRuntimePolicy,
 ) -> Result<()> {
+    kiln_model::install_full_attention_score_budget_mib(
+        policy.full_attention_score_budget_mib.effective,
+    )
+    .context("failed to install full-attention score-budget policy")?;
+
     if matches!(
         device,
         kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Rocm(_)

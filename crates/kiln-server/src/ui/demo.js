@@ -151,11 +151,12 @@
     '/v1/config': () => ({
       serving_profile: { profile: 'stable', source: 'default' },
       accelerator_runtime: {
-        schema_id: 'kiln.accelerator-runtime-policy.v4',
-        version: 4,
+        schema_id: 'kiln.accelerator-runtime-policy.v5',
+        version: 5,
         serving_profile: 'stable',
         serving_profile_source: 'default',
         kt_api_mode: { configured: 'auto', effective: 'auto', source: 'default' },
+        full_attention_score_budget_mib: { configured: 2048, effective: 2048, source: 'default' },
         rocm_synchronization_mode: { configured: 'legacy_host_barriers', effective: 'legacy_host_barriers', source: 'default' },
         rocm_strided_batched_matmul_mode: { configured: 'auto', effective: 'auto', source: 'default' },
         rocm_bf16_matmul_output_mode: { configured: 'auto', effective: 'auto', source: 'default' },

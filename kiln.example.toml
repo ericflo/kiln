@@ -119,6 +119,11 @@ kt_api_mode = "auto"                    # auto | all | disabled. Auto enables th
                                       # matmul and paged-KV routes off. `all` and `disabled`
                                       # require server.serving_profile="experimental". Override
                                       # with KILN_ACCELERATOR_KT_API_MODE.
+full_attention_score_budget_mib = 2048 # Exact-attention score/scratch ceiling (64..=2048 MiB).
+                                      # ROCm online attention uses at most 1024 MiB. Live pressure
+                                      # rejects admission instead of changing tile geometry during
+                                      # a request. Restart required. Override with
+                                      # KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB.
 rocm_synchronization_mode = "legacy_host_barriers" # Qualified default. `stream_ordered` removes
                                       # only proven same-stream host barriers and uses a primary-
                                       # stream external-yield wait; it requires

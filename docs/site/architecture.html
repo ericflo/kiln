@@ -373,19 +373,20 @@ training request
 
       <article class="card p-6">
         <div class="label mb-3">Accelerator execution</div>
-        <h2 id="rocm-execution-policy" class="text-2xl font-semibold mb-4">Immutable accelerator routes, ROCm stream ordering, and graph lifecycle</h2>
+        <h2 id="rocm-execution-policy" class="text-2xl font-semibold mb-4">Immutable accelerator routes, attention geometry, ROCm stream ordering, and graph lifecycle</h2>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
           runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
-          to produce <code>kiln.accelerator-runtime-policy.v4</code>. The same resolved object is installed in
+          to produce <code>kiln.accelerator-runtime-policy.v5</code>. The same resolved object is installed in
           the tensor context, projected into the model graph runner, stored in server state, and returned by
           product diagnostics. Tensor, model, and kernel code do not re-read the public graph,
           synchronization, or matmul-route environment names during inference.
         </p>
         <pre class="mt-5"><code>typed [server] + [accelerator] configuration
   -> strict parse, source attribution, and serving-profile gate
-  -> immutable accelerator runtime policy v4
+  -> immutable accelerator runtime policy v5
   -> kiln-tensor adapter route set installed before model execution
+  -> exact full-attention score geometry installed in model and ROCm flash planners
   -> primary ROCm context synchronization and matmul-route discipline
   -> ModelRunner graph lifecycle and bounded graph cache
   -> /v1/config + /health + trusted debug + dashboard + Prometheus</code></pre>
@@ -413,6 +414,24 @@ training request
           legacy fallbacks. The explicit comparison modes require the experimental profile. The model stores
           the selected value once, accepts an idempotent reinstall, and rejects a conflicting process-lifetime
           value rather than allowing different requests or model owners to execute different route mixtures.
+        </p>
+
+        <h3 class="font-semibold mt-6 mb-3">Attention geometry cannot follow free-memory noise</h3>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          <code>accelerator.full_attention_score_budget_mib</code> is a 64&ndash;2048 MiB process-lifetime
+          ceiling, defaulting to 2048 MiB. The model planner uses it for materialized exact-attention score
+          and scratch tiling on every backend. ROCm flash attention derives a fixed
+          <code>min(value, 1024)</code> MiB online-score ceiling and retains its qualified 2048-query and
+          4096-key tile maxima. Memory-governor observations still protect allocations: an operation whose
+          exact working set is unavailable is rejected before publication. They no longer choose a different
+          tile size or route between layers or requests.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Policy v5 deletes eight permissive materialized-score, online-score, and tile environment controls
+          rather than retaining aliases. The former planners could independently parse different values during
+          execution and derive a materialized ceiling as high as 32 GiB from changing free memory. Real-device
+          parity tests now force small multi-tile geometry with a scoped programmatic hook, so test coverage no
+          longer mutates process-global configuration.
         </p>
 
         <h3 class="font-semibold mt-6 mb-3">Matmul route choice is fixed before inference</h3>

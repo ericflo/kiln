@@ -1674,6 +1674,14 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 accelerator_runtime.kt_api_mode.source,
             );
             println!(
+                "  {} {} MiB (source: {})",
+                style("Full-attention score ceiling:").dim(),
+                accelerator_runtime
+                    .full_attention_score_budget_mib
+                    .effective,
+                accelerator_runtime.full_attention_score_budget_mib.source,
+            );
+            println!(
                 "  {} {} (source: {})",
                 style("ROCm synchronization:").dim(),
                 accelerator_runtime.rocm_synchronization_mode.effective,

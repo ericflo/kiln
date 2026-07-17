@@ -190,14 +190,19 @@ def health_fixture(
         },
     }
     accelerator_runtime = {
-        "schema_id": "kiln.accelerator-runtime-policy.v4",
-        "version": 4,
+        "schema_id": "kiln.accelerator-runtime-policy.v5",
+        "version": 5,
         "serving_profile": serving_profile,
         "serving_profile_source": "config_file",
         "kt_api_mode": {
             "configured": "auto",
             "effective": "auto",
             "source": "default",
+        },
+        "full_attention_score_budget_mib": {
+            "configured": 2048,
+            "effective": 2048,
+            "source": "config_file",
         },
         "rocm_synchronization_mode": {
             "configured": "legacy_host_barriers",
@@ -373,14 +378,19 @@ def debug_fixture(
 
     return {
         "accelerator_runtime": {
-            "schema_id": "kiln.accelerator-runtime-policy.v4",
-            "version": 4,
+            "schema_id": "kiln.accelerator-runtime-policy.v5",
+            "version": 5,
             "serving_profile": serving_profile,
             "serving_profile_source": "config_file",
             "kt_api_mode": {
                 "configured": "auto",
                 "effective": "auto",
                 "source": "default",
+            },
+            "full_attention_score_budget_mib": {
+                "configured": 2048,
+                "effective": 2048,
+                "source": "config_file",
             },
             "rocm_synchronization_mode": {
                 "configured": "legacy_host_barriers",
