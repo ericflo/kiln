@@ -965,14 +965,6 @@ pub fn linear_with_lora(
 /// (`ucopy_bf16`) that would otherwise be materialized on every step.
 ///
 /// The LoRA delta path is unchanged.
-///
-/// Phase C12: when the MTP fp32-head TLS flag is armed (see
-/// [`crate::mtp_debug::is_mtp_fp32_head_armed`]), the base matmul is
-/// promoted to f32. Inputs and weights are upcast to f32, matmul runs in
-/// f32, and the result is cast back to the input dtype before the LoRA
-/// delta is added. The flag is only set inside `mtp_forward_step` while
-/// the MTP inner transformer block is running, so every non-MTP call site
-/// takes the legacy bf16 broadcast_matmul path unchanged.
 pub fn linear_with_lora_t(
     x: &KtTensor,
     base_weight_t: &KtTensor,
@@ -992,16 +984,10 @@ pub fn linear_with_lora_t(
         base_weight_t
     };
     let f32_matmul_fallback = needs_f32_matmul_fallback(x, base_weight_t);
-    let base_output = if crate::mtp_debug::is_mtp_fp32_head_armed() || f32_matmul_fallback {
-        let in_dtype = x.dtype();
+    let base_output = if f32_matmul_fallback {
         let x_f32 = x.to_dtype(kiln_tensor::DType::F32)?;
         let w_f32 = base_weight_t.to_dtype(kiln_tensor::DType::F32)?;
-        let out = x_f32.broadcast_matmul(&w_f32)?;
-        if f32_matmul_fallback {
-            out
-        } else {
-            out.to_dtype(in_dtype)?
-        }
+        x_f32.broadcast_matmul(&w_f32)?
     } else {
         x.broadcast_matmul(base_weight_t)?
     };

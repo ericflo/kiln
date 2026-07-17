@@ -119,18 +119,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 105 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 107 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 105 fixed fields:
+credential. Of the 107 fixed fields:
 
-- 100 implement the canonical mechanical environment name;
-- 69 also retain one or more deprecated compatibility spellings (74 aliases
+- 102 implement the canonical mechanical environment name;
+- 71 also retain one or more deprecated compatibility spellings (76 aliases
   total);
 - 5 are config-file-only and have no environment override;
-- the 74 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
+- the 76 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 105 fixed fields and both dynamic credential fields.
+The tables below cover all 107 fixed fields and both dynamic credential fields.
 The schema additionally records the accepted deprecated TOML-only
 `streaming_prefill.enabled` compatibility field so validators match the loader.
 
@@ -1299,6 +1299,13 @@ deferred (`load_mtp=false`), request dispatch contains no speculative branch,
 and Desktop always launches with speculative serving off. Benchmark-only
 speculative paths require both `KILN_QUALIFICATION=1` and the qualification
 harness result-path contract before model loading.
+
+The former Phase B/C `KILN_MTP_DEBUG`, `KILN_MTP_DUMP_*`,
+`KILN_MTP_SWAP_*`, and `KILN_MTP_*FP32*` experiment controls are retired and
+are not configuration inputs. They have no typed replacements because they
+selected completed diagnostic branches rather than supported runtime policy.
+Current source retains one canonical MTP execution path; historical commands
+and conclusions remain labeled as such in `PROFILING.md`.
 
 ## `[streaming_prefill]`
 

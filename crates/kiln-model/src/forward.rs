@@ -1274,7 +1274,6 @@ fn try_metal_mlp_gate_up_hidden(
     lora_layer: Option<&LoraLayerWeights>,
 ) -> Result<Option<Tensor>> {
     if lora_layer.is_some_and(LoraLayerWeights::has_mlp_gate_up)
-        || crate::mtp_debug::is_mtp_fp32_head_armed()
         || crate::backend::metal::metal_mlp_gate_up_fusion_disabled()
     {
         return Ok(None);
@@ -1305,8 +1304,7 @@ fn linear_with_lora_t_decode(
 ) -> Result<Tensor> {
     #[cfg(feature = "metal")]
     {
-        if !crate::mtp_debug::is_mtp_fp32_head_armed()
-            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+        if !crate::mtp_runtime::single_token_self_attention_active()
             && (crate::backend::metal::metal_transposed_coop_gemv_supports(x, weight_t)
                 || crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(
                     x, weight_t,
@@ -1541,11 +1539,7 @@ fn linear_with_lora_t_backend_decode_if(
 
 #[cfg(feature = "metal")]
 fn metal_attn_gate_debug_active() -> bool {
-    crate::mtp_debug::is_subop_capture_armed()
-        || crate::mtp_debug::current_b12_layer_is_31()
-        || crate::mtp_debug::is_c7_sdpa_capture_armed()
-        || crate::mtp_debug::is_mtp_fp32_head_armed()
-        || crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+    crate::mtp_runtime::single_token_self_attention_active()
 }
 
 fn attention_output_gate_decode_if(
@@ -1648,9 +1642,7 @@ fn full_attn_qkv_proj_decode_if(
             && use_metal_decode_gemv
             && lora_layer.is_none()
             && attn_weights.q_proj_marlin.is_none()
-            && !crate::mtp_debug::is_mtp_fp32_head_armed()
-            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
-            && !crate::mtp_debug::current_b12_layer_is_31()
+            && !crate::mtp_runtime::single_token_self_attention_active()
             && crate::backend::metal::metal_fused_qkv_transposed_coop_gemv_supports(
                 x,
                 &attn_weights.q_proj_t,
@@ -1672,8 +1664,7 @@ fn full_attn_qkv_proj_decode_if(
     if !tape_scope_active
         && lora_layer.is_none()
         && attn_weights.q_proj_marlin.is_none()
-        && !crate::mtp_debug::is_mtp_fp32_head_armed()
-        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+        && !crate::mtp_runtime::single_token_self_attention_active()
     {
         let q_dim = attn_weights.q_proj_t.dim(1)?;
         let k_dim = attn_weights.k_proj_t.dim(1)?;
@@ -7227,287 +7218,6 @@ pub(crate) fn try_kt_mean_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>>
     Ok(Some(out))
 }
 
-/// Phase C42: capture the minimal layer-1 input-layernorm intermediates needed
-/// to distinguish "bad residual input arrives at block 1" from "the residual
-/// input is clean but the RMSNorm math diverges". This intentionally mirrors
-/// the fallback RMSNorm formula instead of widening the general tracing API.
-fn capture_c42_layer1_input_norm_taps(x: &Tensor, weight: &Tensor, eps: f64) -> Result<()> {
-    crate::mtp_debug::capture_c42_layer1_norm_tap("layer_1_residual_input", x)?;
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let variance = x_f32.sqr()?.mean_keepdim(LAST_DIM)?;
-    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
-    crate::mtp_debug::capture_c42_layer1_norm_tap("layer_1_input_norm_rms_inv", &rms_inv)?;
-    let pre_weight = x_f32.broadcast_mul(&rms_inv)?;
-    crate::mtp_debug::capture_c42_layer1_norm_tap("layer_1_input_norm_pre_weight", &pre_weight)?;
-    let w_f32 = weight.to_dtype(DType::F32)?;
-    let w_plus_one = (w_f32.ones_like()? + w_f32)?;
-    let post = pre_weight.broadcast_mul(&w_plus_one)?.to_dtype(x.dtype())?;
-    crate::mtp_debug::capture_c42_layer1_norm_tap("layer_1_post_input_norm", &post)?;
-    Ok(())
-}
-
-/// Phase C43: keep the C42 layer-1 norm boundary context, but split the
-/// pre-weight multiply into the existing broadcast path and an independently
-/// computed scalar-affine equivalent so the replay dump can distinguish
-/// "broadcast/layout/row-selection bug" from "the normalized values
-/// themselves are already wrong".
-fn capture_c43_layer1_preweight_taps(x: &Tensor, weight: &Tensor, eps: f64) -> Result<()> {
-    crate::mtp_debug::capture_c43_layer1_preweight_tap("layer_1_residual_input", x)?;
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let variance = x_f32.sqr()?.mean_keepdim(LAST_DIM)?;
-    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
-    crate::mtp_debug::capture_c43_layer1_preweight_tap("layer_1_input_norm_rms_inv", &rms_inv)?;
-
-    let pre_weight_broadcast = x_f32.broadcast_mul(&rms_inv)?;
-    crate::mtp_debug::capture_c43_layer1_preweight_tap(
-        "layer_1_input_norm_pre_weight_broadcast_mul",
-        &pre_weight_broadcast,
-    )?;
-
-    let (batch, seq_len, hidden) = x_f32
-        .dims3()
-        .context("C43 pre-weight audit expects layer-1 hidden to be [batch, seq, hidden]")?;
-    let (r_batch, r_seq, r_hidden) = rms_inv
-        .dims3()
-        .context("C43 pre-weight audit expects rms_inv to be [batch, seq, 1]")?;
-    anyhow::ensure!(
-        (batch, seq_len, r_hidden) == (r_batch, r_seq, 1),
-        "C43 pre-weight audit shape mismatch: x={batch}x{seq_len}x{hidden}, rms_inv={r_batch}x{r_seq}x{r_hidden}"
-    );
-    let mut batch_slices = Vec::with_capacity(batch);
-    for batch_idx in 0..batch {
-        let x_batch = x_f32.narrow(0, batch_idx, 1)?;
-        let rms_batch = rms_inv.narrow(0, batch_idx, 1)?;
-        let mut seq_slices = Vec::with_capacity(seq_len);
-        for seq_idx in 0..seq_len {
-            let x_row = x_batch.narrow(1, seq_idx, 1)?;
-            let scale = rms_batch.narrow(1, seq_idx, 1)?;
-            let scale_vals = scale.flatten_all()?.to_vec1::<f32>()?;
-            anyhow::ensure!(
-                scale_vals.len() == 1,
-                "C43 pre-weight audit expected one rms_inv scalar per row, got {}",
-                scale_vals.len()
-            );
-            seq_slices.push(x_row.affine(scale_vals[0] as f64, 0.0)?);
-        }
-        let seq_refs: Vec<&Tensor> = seq_slices.iter().collect();
-        batch_slices.push(Tensor::cat(&seq_refs, 1)?);
-    }
-    let batch_refs: Vec<&Tensor> = batch_slices.iter().collect();
-    let pre_weight_scalar_affine = Tensor::cat(&batch_refs, 0)?;
-    crate::mtp_debug::capture_c43_layer1_preweight_tap(
-        "layer_1_input_norm_pre_weight_scalar_affine",
-        &pre_weight_scalar_affine,
-    )?;
-
-    let w_f32 = weight.to_dtype(DType::F32)?;
-    let w_plus_one = (w_f32.ones_like()? + w_f32)?;
-    let post = pre_weight_broadcast
-        .broadcast_mul(&w_plus_one)?
-        .to_dtype(x.dtype())?;
-    crate::mtp_debug::capture_c43_layer1_preweight_tap("layer_1_post_input_norm", &post)?;
-    Ok(())
-}
-
-/// Phase C44: capture only the last replay row after `x.to_dtype(F32)`, the
-/// matching `rms_inv` scalar for that row, and the normalized row after
-/// applying the shared-good scalar. This distinguishes "bad row before
-/// scaling" from "good row, bad normalization application" without re-dumping
-/// the full C43 tensors.
-fn capture_c44_layer1_f32_row_taps(x: &Tensor, eps: f64) -> Result<()> {
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let (batch, seq_len, _hidden) = x_f32
-        .dims3()
-        .context("C44 row audit expects layer-1 hidden to be [batch, seq, hidden]")?;
-    anyhow::ensure!(seq_len > 0, "C44 row audit requires non-empty sequence");
-
-    let last_row = x_f32.narrow(1, seq_len - 1, 1)?.contiguous()?;
-    crate::mtp_debug::capture_c44_layer1_f32_row_tap("layer_1_residual_input_f32_row", &last_row)?;
-
-    let variance = x_f32.sqr()?.mean_keepdim(LAST_DIM)?;
-    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
-    let rms_inv_row = rms_inv.narrow(1, seq_len - 1, 1)?.contiguous()?;
-    crate::mtp_debug::capture_c44_layer1_f32_row_tap(
-        "layer_1_input_norm_rms_inv_scalar",
-        &rms_inv_row,
-    )?;
-
-    let mut batch_rows = Vec::with_capacity(batch);
-    for batch_idx in 0..batch {
-        let x_row = last_row.narrow(0, batch_idx, 1)?;
-        let scale = rms_inv_row.narrow(0, batch_idx, 1)?;
-        let scale_vals = scale.flatten_all()?.to_vec1::<f32>()?;
-        anyhow::ensure!(
-            scale_vals.len() == 1,
-            "C44 row audit expected one rms_inv scalar per batch row, got {}",
-            scale_vals.len()
-        );
-        batch_rows.push(x_row.affine(scale_vals[0] as f64, 0.0)?);
-    }
-    let batch_refs: Vec<&Tensor> = batch_rows.iter().collect();
-    let normalized_row = Tensor::cat(&batch_refs, 0)?;
-    crate::mtp_debug::capture_c44_layer1_f32_row_tap(
-        "layer_1_input_norm_pre_weight_row_scalar_affine",
-        &normalized_row,
-    )?;
-    Ok(())
-}
-
-fn c45_layer1_row_replay_tensors(
-    x: &Tensor,
-    eps: f64,
-) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)> {
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let (batch, seq_len, hidden) = x_f32
-        .dims3()
-        .context("C45 row audit expects layer-1 hidden to be [batch, seq, hidden]")?;
-    anyhow::ensure!(seq_len > 0, "C45 row audit requires non-empty sequence");
-
-    let last_row = x_f32.narrow(1, seq_len - 1, 1)?.contiguous()?;
-    let variance = x_f32.sqr()?.mean_keepdim(LAST_DIM)?;
-    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
-    let rms_inv_row = rms_inv.narrow(1, seq_len - 1, 1)?.contiguous()?;
-
-    let mut extracted_scalars = Vec::with_capacity(batch);
-    for batch_idx in 0..batch {
-        let scale = rms_inv_row.narrow(0, batch_idx, 1)?;
-        let scale_vals = scale.flatten_all()?.to_vec1::<f32>()?;
-        anyhow::ensure!(
-            scale_vals.len() == 1,
-            "C45 row audit expected one rms_inv scalar per batch row, got {}",
-            scale_vals.len()
-        );
-        extracted_scalars.push(scale_vals[0]);
-    }
-
-    let extracted_scalar_values = extracted_scalars;
-    let extracted_scalars =
-        Tensor::from_vec_on(Device::Cpu, extracted_scalar_values, vec![batch])?.contiguous()?;
-    let last_row_values = last_row.reshape((batch, hidden))?.contiguous()?;
-    let broadcast_output = last_row.broadcast_mul(&rms_inv_row)?.contiguous()?;
-
-    let scalar_values = broadcast_output.reshape((batch, hidden))?.contiguous()?;
-    let reconstructed = scalar_values.reshape((batch, 1, hidden))?.contiguous()?;
-    Ok((
-        rms_inv_row,
-        extracted_scalars,
-        last_row_values,
-        broadcast_output,
-        scalar_values,
-        reconstructed,
-    ))
-}
-
-/// Phase C45: keep the audit strictly inside the previously-bad row-local
-/// scalar multiply so the replay dump can distinguish "the row-local scalar
-/// tensor is fine", "the scalar extraction path already drifts", "the actual
-/// multiply introduces the drift", or "the flattened production multiply
-/// output stays shared-good and divergence only appears when reconstructing the
-/// row-shaped output".
-fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
-    let (
-        rms_inv_row,
-        extracted_scalars,
-        last_row_values,
-        broadcast_output,
-        scalar_values,
-        reconstructed,
-    ) = c45_layer1_row_replay_tensors(x, eps)?;
-    crate::mtp_debug::capture_c45_layer1_row_tap(
-        "layer_1_input_norm_rms_inv_scalar",
-        &rms_inv_row,
-    )?;
-    crate::mtp_debug::capture_c45_layer1_row_tap(
-        "layer_1_input_norm_rms_inv_scalar_extracted_values",
-        &extracted_scalars,
-    )?;
-    crate::mtp_debug::capture_c45_layer1_row_tap(
-        "layer_1_input_norm_last_row_flat_values",
-        &last_row_values,
-    )?;
-    crate::mtp_debug::capture_c45_layer1_row_tap(
-        "layer_1_input_norm_pre_weight_row_broadcast_output",
-        &broadcast_output,
-    )?;
-    crate::mtp_debug::capture_c45_layer1_row_tap(
-        "layer_1_input_norm_pre_weight_row_scalar_values",
-        &scalar_values,
-    )?;
-    crate::mtp_debug::capture_c45_layer1_row_tap(
-        "layer_1_input_norm_pre_weight_row_reconstructed",
-        &reconstructed,
-    )?;
-    Ok(())
-}
-
-fn c46_layer1_row_provenance_tensors(
-    x: &Tensor,
-) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor)> {
-    let (_batch, seq_len, hidden) = x
-        .dims3()
-        .context("C46 row provenance expects layer-1 hidden to be [batch, seq, hidden]")?;
-    anyhow::ensure!(
-        seq_len > 0,
-        "C46 row provenance requires non-empty sequence"
-    );
-
-    let selected_row = x.narrow(1, seq_len - 1, 1)?;
-    let selected_row_f32 = selected_row.to_dtype(DType::F32)?;
-    let selected_row_contiguous = selected_row_f32.contiguous()?;
-    let selected_row_flat = selected_row_contiguous
-        .reshape((selected_row_contiguous.element_count() / hidden, hidden))?
-        .contiguous()?;
-
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let (_batch, seq_len, hidden) = x_f32
-        .dims3()
-        .context("C46 row provenance expects f32 layer-1 hidden to be [batch, seq, hidden]")?;
-    let c45_last_row = {
-        let c45_tmp = x_f32.narrow(1, seq_len - 1, 1)?.contiguous()?;
-        c45_tmp
-            .reshape((c45_tmp.element_count() / hidden, hidden))?
-            .contiguous()?
-    };
-
-    Ok((
-        selected_row,
-        selected_row_f32,
-        selected_row_contiguous,
-        selected_row_flat,
-        c45_last_row,
-    ))
-}
-
-/// Phase C46: bisect the row-side operand provenance feeding C45's
-/// `layer_1_input_norm_last_row_flat_values` by splitting row selection,
-/// dtype promotion, contiguous materialization, flattening, and the exact C45
-/// operand reconstruction into separate taps.
-fn capture_c46_layer1_row_provenance_taps(x: &Tensor) -> Result<()> {
-    let (selected_row, selected_row_f32, selected_row_contiguous, selected_row_flat, c45_last_row) =
-        c46_layer1_row_provenance_tensors(x)?;
-    crate::mtp_debug::capture_c46_layer1_row_provenance_tap(
-        "layer_1_input_norm_selected_row_before_rmsnorm",
-        &selected_row,
-    )?;
-    crate::mtp_debug::capture_c46_layer1_row_provenance_tap(
-        "layer_1_input_norm_selected_row_after_f32_cast",
-        &selected_row_f32,
-    )?;
-    crate::mtp_debug::capture_c46_layer1_row_provenance_tap(
-        "layer_1_input_norm_selected_row_after_contiguous",
-        &selected_row_contiguous,
-    )?;
-    crate::mtp_debug::capture_c46_layer1_row_provenance_tap(
-        "layer_1_input_norm_selected_row_after_flatten",
-        &selected_row_flat,
-    )?;
-    crate::mtp_debug::capture_c46_layer1_row_provenance_tap(
-        "layer_1_input_norm_last_row_flat_values",
-        &c45_last_row,
-    )?;
-    Ok(())
-}
-
 /// Apply Rotary Position Embeddings (RoPE) to query and key tensors.
 ///
 /// `q`: [batch, seq_len, num_heads, head_dim]
@@ -9852,79 +9562,6 @@ fn swiglu_ffn_impl_no_chunk(
         &out,
     )?;
     Ok(out)
-}
-
-/// Phase B12: sub-op-tapping variant of [`swiglu_ffn`]. Structurally
-/// identical — same projections, same SiLU, same `gate * up` elementwise,
-/// same down projection — but with three [`capture_b12_gqa_tap`] calls so
-/// the HF comparator can localize drift to one of mlp_gate / mlp_up /
-/// mlp_down on layer 31.
-///
-/// Called from [`transformer_block_paged`] only when
-/// [`crate::mtp_debug::current_b12_layer_is_31`] is true, so the hot
-/// production path continues to go through `swiglu_ffn` untouched.
-fn swiglu_ffn_b12_tapped(
-    x: &Tensor,
-    mlp: &GpuFfnWeights,
-    lora: Option<(&LoraLayerWeights, f32)>,
-) -> Result<Tensor> {
-    let (lora_layer, lora_scale) = match lora {
-        Some((l, s)) => (Some(l), s),
-        None => (None, 0.0),
-    };
-    // mlp_gate: output of the gate projection BEFORE SiLU. This matches the
-    // HF reference which taps `self.gate_proj(x)` pre-activation.
-    let gate = {
-        kiln_nvtx::range!(c"kiln/mlp/gate");
-        mlp_proj_forward(
-            x,
-            &mlp.gate_proj_t,
-            mlp.gate_proj_marlin.as_ref(),
-            lora_layer.and_then(|l| l.gate_proj.as_ref()),
-            lora_scale,
-        )?
-    };
-    crate::mtp_debug::capture_b12_gqa_tap("mlp_gate", &gate)?;
-    let gate = cuda_silu(&gate)?;
-    // mlp_up: output of the up projection.
-    let up = {
-        kiln_nvtx::range!(c"kiln/mlp/up");
-        mlp_proj_forward(
-            x,
-            &mlp.up_proj_t,
-            mlp.up_proj_marlin.as_ref(),
-            lora_layer.and_then(|l| l.up_proj.as_ref()),
-            lora_scale,
-        )?
-    };
-    crate::mtp_debug::capture_b12_gqa_tap("mlp_up", &up)?;
-    let hidden = (gate * up)?;
-    // mlp_down: final hidden-size output after the down projection.
-    let out = {
-        kiln_nvtx::range!(c"kiln/mlp/down");
-        mlp_proj_forward(
-            &hidden,
-            &mlp.down_proj_t,
-            mlp.down_proj_marlin.as_ref(),
-            lora_layer.and_then(|l| l.down_proj.as_ref()),
-            lora_scale,
-        )?
-    };
-    crate::mtp_debug::capture_b12_gqa_tap("mlp_down", &out)?;
-    Ok(out)
-}
-
-/// Route a single MLP projection through Marlin W4A16 when packed weights are
-/// present, else fall back to the BF16 `linear_with_lora_t` path. LoRA deltas
-/// are added on top of either base matmul. Mirrors `q_proj_forward`'s routing.
-fn mlp_proj_forward(
-    x: &Tensor,
-    weight_t: &Tensor,
-    marlin: Option<&crate::marlin_proj::MarlinPackedProj>,
-    lora: Option<&LoraProjectionWeights>,
-    lora_scale: f32,
-) -> Result<Tensor> {
-    mlp_proj_forward_decode_if(None, false, x, weight_t, marlin, lora, lora_scale)
 }
 
 fn mlp_proj_forward_decode_if(
@@ -12865,8 +12502,6 @@ pub fn gated_deltanet_forward(
     config: &kiln_core::config::ModelConfig,
     recurrent_state: &mut Tensor,
     conv_state: &mut Tensor,
-    capture_b11_taps: bool,
-    capture_c41_taps: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     gated_deltanet_forward_decode_if(
@@ -12876,8 +12511,6 @@ pub fn gated_deltanet_forward(
         config,
         recurrent_state,
         conv_state,
-        capture_b11_taps,
-        capture_c41_taps,
         true,
         false,
         None,
@@ -12913,8 +12546,6 @@ pub fn gdn_attention_residual_block(
         config,
         recurrent_state,
         conv_state,
-        false,
-        false,
         lora,
     )?;
     (hidden + &attn_out).map_err(Into::into)
@@ -14673,8 +14304,6 @@ pub fn gated_deltanet_forward_streaming(
             config,
             recurrent_state,
             conv_state,
-            false,
-            false,
             true,
             false,
             profile_context,
@@ -14705,8 +14334,6 @@ pub fn gated_deltanet_forward_streaming(
                 config,
                 recurrent_state,
                 conv_state,
-                false,
-                false,
                 true,
                 false,
                 tile_profile_context,
@@ -14881,8 +14508,6 @@ fn gated_deltanet_forward_decode_if(
     config: &kiln_core::config::ModelConfig,
     recurrent_state: &mut Tensor,
     conv_state: &mut Tensor,
-    capture_b11_taps: bool,
-    capture_c41_taps: bool,
     use_fused_gdn_gates: bool,
     use_metal_decode_gemv: bool,
     profile_context: Option<(usize, usize)>,
@@ -14899,8 +14524,6 @@ fn gated_deltanet_forward_decode_if(
         config,
         recurrent_state,
         conv_state,
-        capture_b11_taps,
-        capture_c41_taps,
         use_fused_gdn_gates,
         use_metal_decode_gemv,
         profile_context,
@@ -14987,8 +14610,6 @@ fn gated_deltanet_forward_decode_if_inner(
     config: &kiln_core::config::ModelConfig,
     recurrent_state: &mut Tensor,
     conv_state: &mut Tensor,
-    capture_b11_taps: bool,
-    capture_c41_taps: bool,
     use_fused_gdn_gates: bool,
     use_metal_decode_gemv: bool,
     profile_context: Option<(usize, usize)>,
@@ -15054,8 +14675,6 @@ fn gated_deltanet_forward_decode_if_inner(
         if batch == 1
             && seq_len == 1
             && lora.is_none()
-            && !capture_b11_taps
-            && !capture_c41_taps
             && gdn_forward_only_fastpaths
             && qualified_vulkan_resident_decode_enabled()
         {
@@ -15160,19 +14779,6 @@ fn gated_deltanet_forward_decode_if_inner(
     #[cfg(not(feature = "metal"))]
     let _ = &prefill_ab_for_gates;
 
-    // Phase B11b tap: `gdn_in_proj`. Matches the HF reference layout
-    // `concat([in_proj_qkvz(x), in_proj_ba(x)], dim=-1)` = [q, k, v, z, b, a]
-    // along the last axis. Capture once here so subsequent post-split
-    // transforms don't alter what we're attributing divergence to.
-    if capture_b11_taps {
-        let gdn_in_proj = Tensor::cat(&[&mixed_qkv, &z, &b, &a], LAST_DIM)?;
-        crate::mtp_debug::capture_b11_layer0_tap("gdn_in_proj", &gdn_in_proj)?;
-    }
-    if capture_c41_taps {
-        let gdn_in_proj = Tensor::cat(&[&mixed_qkv, &z, &b, &a], LAST_DIM)?;
-        crate::mtp_debug::capture_c41_layer1_tap("gdn_in_proj", &gdn_in_proj)?;
-    }
-
     let scale = 1.0 / (dk as f64).sqrt();
     let recurrent_unexpanded_qk = input_dtype == DType::BF16
         && gdn_forward_only_fastpaths
@@ -15180,16 +14786,12 @@ fn gated_deltanet_forward_decode_if_inner(
         && seq_len <= GDN_RECURRENT_PREFILL_MAX_TOKENS
         && dk == 128
         && gqa_ratio > 1
-        && !capture_b11_taps
-        && !capture_c41_taps
         && GdnBackend::runtime_supports_gdn_recurrent_prefill_native_head_last(backend);
     let fused_decode_unexpanded_qk = input_dtype == DType::BF16
         && gdn_forward_only_fastpaths
         && seq_len == 1
         && dk == 128
         && gqa_ratio > 1
-        && !capture_b11_taps
-        && !capture_c41_taps
         && GdnBackend::runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk(backend);
     #[cfg(feature = "metal")]
     let use_unexpanded_qk = recurrent_unexpanded_qk || fused_decode_unexpanded_qk;
@@ -15198,8 +14800,6 @@ fn gated_deltanet_forward_decode_if_inner(
         {
             if use_unexpanded_qk
                 && gdn_forward_only_fastpaths
-                && !capture_b11_taps
-                && !capture_c41_taps
                 && crate::backend::metal::metal_gdn_decode_qkv_conv_norm_supports(
                     &mixed_qkv,
                     &weights.conv1d,
@@ -15252,8 +14852,6 @@ fn gated_deltanet_forward_decode_if_inner(
                 && recurrent_unexpanded_qk
                 && gdn_forward_only_fastpaths
                 && seq_len > 1
-                && !capture_b11_taps
-                && !capture_c41_taps
                 && crate::backend::metal::metal_gdn_prefill_qkv_conv_split_supports(
                     &mixed_qkv,
                     &weights.conv1d,
@@ -15670,12 +15268,6 @@ fn gated_deltanet_forward_decode_if_inner(
         // Phase B11b tap: `gdn_conv`. Output of the causal depthwise conv1d +
         // SiLU, matching HF's `mixed_qkv` after `self.conv1d(...)[:T]` +
         // `F.silu(...)` (shape [B, T, qkv_dim]).
-        if capture_b11_taps {
-            crate::mtp_debug::capture_b11_layer0_tap("gdn_conv", &mixed_qkv)?;
-        }
-        if capture_c41_taps {
-            crate::mtp_debug::capture_c41_layer1_tap("gdn_conv", &mixed_qkv)?;
-        }
 
         // --- Step 3: Split into Q, K, V and reshape to heads ---
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
@@ -15797,8 +15389,6 @@ fn gated_deltanet_forward_decode_if_inner(
             {
                 seq_len == 1
                     && gdn_forward_only_fastpaths
-                    && !capture_b11_taps
-                    && !capture_c41_taps
                     && fused_decode_unexpanded_qk
                     && input_dtype == DType::BF16
                     && GdnBackend::runtime_supports_gdn_decode_qk_norm_gates_recurrent(backend)
@@ -15810,8 +15400,6 @@ fn gated_deltanet_forward_decode_if_inner(
         };
         let defer_native_qk_norm_to_recurrent = seq_len == 1
             && gdn_forward_only_fastpaths
-            && !capture_b11_taps
-            && !capture_c41_taps
             && recurrent_unexpanded_qk
             && input_dtype == DType::BF16
             && GdnBackend::runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last(backend);
@@ -16060,14 +15648,6 @@ fn gated_deltanet_forward_decode_if_inner(
     // normalization (+ Q scaled by 1/sqrt(dk)). Shapes [B, T, nv, dk] (the
     // GQA head-expand above brought nk→nv). HF mirror: `query` / `key` after
     // `query.normalize(dim=-1)` / `key.normalize(dim=-1)` and the Q-scale.
-    if capture_b11_taps && qk_expanded {
-        crate::mtp_debug::capture_b11_layer0_tap("gdn_qk_norm_q", &q)?;
-        crate::mtp_debug::capture_b11_layer0_tap("gdn_qk_norm_k", &k)?;
-    }
-    if capture_c41_taps && qk_expanded {
-        crate::mtp_debug::capture_c41_layer1_tap("gdn_qk_norm_q", &q)?;
-        crate::mtp_debug::capture_c41_layer1_tap("gdn_qk_norm_k", &k)?;
-    }
 
     // --- Step 7: Chunkwise analytical recurrence (Phase 6, approach (b)) ---
     // The recurrent state dtype is the accumulator policy. Inference backends
@@ -16109,8 +15689,6 @@ fn gated_deltanet_forward_decode_if_inner(
             {
                 if recurrent_unexpanded_qk
                     && seq_len == 1
-                    && !capture_b11_taps
-                    && !capture_c41_taps
                     && crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_supports(
                         &q,
                         &k,
@@ -16191,8 +15769,6 @@ fn gated_deltanet_forward_decode_if_inner(
         if fused_decode_gates_recurrent_rmsnorm.is_none()
             && gdn_forward_only_fastpaths
             && seq_len == 1
-            && !capture_b11_taps
-            && !capture_c41_taps
         {
             if qk_norm_deferred_to_recurrent {
                 kiln_nvtx::range!(c"kiln/gdn/qk_norm_gates_recur");
@@ -16518,14 +16094,6 @@ fn gated_deltanet_forward_decode_if_inner(
         // -exp(A_log) * softplus(a + dt_bias) (the log-decay scalar fed into the
         // recurrence). Shapes [B, T, nv]. HF mirror: `beta = b.sigmoid()` and
         // `g = -A_log.exp() * F.softplus(a + dt_bias)`.
-        if capture_b11_taps {
-            crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_beta", &beta)?;
-            crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_g", &g)?;
-        }
-        if capture_c41_taps {
-            crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_beta", &beta)?;
-            crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_g", &g)?;
-        }
 
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let native_recurrent_result = if tape_recording_active {
@@ -16877,12 +16445,6 @@ fn gated_deltanet_forward_decode_if_inner(
     // "head-last" layout. Capturing here (rather than pre-transpose) lets
     // the HF reference mirror this tensor via a single
     // `norm.register_forward_pre_hook`, which sees exactly the same shape.
-    if capture_b11_taps {
-        crate::mtp_debug::capture_b11_layer0_tap("gdn_recur_out", &attn_out)?;
-    }
-    if capture_c41_taps {
-        crate::mtp_debug::capture_c41_layer1_tap("gdn_recur_out", &attn_out)?;
-    }
 
     // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
     let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
@@ -16994,12 +16556,6 @@ fn gated_deltanet_forward_decode_if_inner(
     // `norm(attn_out) * silu(z)` block, reshaped and cast back to input
     // dtype. Shape [B, T, v_dim]. HF mirror: `core_attn_out` after
     // `self.norm(core_attn_out, z)`.
-    if capture_b11_taps {
-        crate::mtp_debug::capture_b11_layer0_tap("gdn_gated_norm", &attn_out)?;
-    }
-    if capture_c41_taps {
-        crate::mtp_debug::capture_c41_layer1_tap("gdn_gated_norm", &attn_out)?;
-    }
 
     // --- Step 9: Output projection ---
     // NOTE: conv1d bias is not loaded by the weight loader. If the model has one,
@@ -17030,12 +16586,6 @@ fn gated_deltanet_forward_decode_if_inner(
     // Phase B11b tap: `gdn_out_proj`. Output of the final `out_proj` linear
     // (shape [B, T, hidden]) — this is what the caller adds to the residual
     // stream. HF mirror: `self.out_proj(core_attn_out)`.
-    if capture_b11_taps {
-        crate::mtp_debug::capture_b11_layer0_tap("gdn_out_proj", &out)?;
-    }
-    if capture_c41_taps {
-        crate::mtp_debug::capture_c41_layer1_tap("gdn_out_proj", &out)?;
-    }
 
     Ok(out)
 }
@@ -18839,7 +18389,7 @@ pub fn gqa_attention_pre_o(
     ));
     let use_metal_decode_gemv = seq_len == 1
         && kv_cache.is_some()
-        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+        && !crate::mtp_runtime::single_token_self_attention_active();
 
     // Project to Q, K, V (with optional LoRA delta)
     // When attn_output_gate is true, q_proj outputs [Q, gate] fused:
@@ -19524,7 +19074,7 @@ pub fn gqa_attention(
     let debug_finite = debug_full_attn_finite_checks();
     let use_metal_decode_gemv = seq_len == 1
         && kv_cache.is_some()
-        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+        && !crate::mtp_runtime::single_token_self_attention_active();
     let attn_output = gqa_attention_pre_o(
         backend,
         x,
@@ -19883,7 +19433,6 @@ fn try_flash_attn_paged_decode(
             if let Some(attn_output) = attn_output {
                 // The flash-attention helpers already reshape to
                 // [batch, seq_len, num_heads * head_dim].
-                let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
                 let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                 let attn_output =
@@ -19895,7 +19444,6 @@ fn try_flash_attn_paged_decode(
                     q_len,
                     stage_profile,
                 )?;
-                let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
                 let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                 let out = gqa_attention_output_projection(
@@ -19912,7 +19460,6 @@ fn try_flash_attn_paged_decode(
                     q_len,
                     stage_profile,
                 )?;
-                let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
                 return Ok(Some(out));
             }
         }
@@ -20148,7 +19695,6 @@ fn try_flash_attn_paged_decode(
     // [batch, 1, num_heads * head_dim] for the gate / o_proj path.
     let _ = num_kv_heads; // unused — kept in signature for symmetry / future use
     let attn_output = attn_out.reshape((batch, 1usize, num_heads * head_dim))?;
-    let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
     let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
     let attn_output = attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
@@ -20159,7 +19705,6 @@ fn try_flash_attn_paged_decode(
         q_len,
         stage_profile,
     )?;
-    let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
     let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
     let out = {
@@ -20174,7 +19719,6 @@ fn try_flash_attn_paged_decode(
         )?
     };
     finish_full_attn_stage_profile(&q.device(), profile_context, "o_proj", q_len, stage_profile)?;
-    let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
     Ok(Some(out))
 }
 
@@ -20753,7 +20297,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     let _ = max_blocks_per_seq; // shape already baked into the cached tensor
 
     let use_metal_decode_gemv = start_positions.iter().all(|&p| p > 0)
-        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+        && !crate::mtp_runtime::single_token_self_attention_active();
 
     let (lora_layer, lora_scale) = match lora {
         Some((l, s)) => (Some(l), s),
@@ -21383,10 +20927,8 @@ fn gqa_attention_paged_with_rope_tables(
     let profile_device = &profile_device_val;
     let profile_context =
         profile_full_attn_stages_enabled().then_some((full_attn_layer_idx, start_pos));
-    let subop_armed = crate::mtp_debug::is_subop_capture_armed();
-    let b12_layer_31 = crate::mtp_debug::current_b12_layer_is_31();
     let use_metal_decode_gemv =
-        seq_len == 1 && start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+        seq_len == 1 && start_pos > 0 && !crate::mtp_runtime::single_token_self_attention_active();
 
     // Project to Q, K, V (with optional LoRA delta and output gate split)
     let (lora_layer, lora_scale) = match lora {
@@ -21413,35 +20955,11 @@ fn gqa_attention_paged_with_rope_tables(
         )?;
         out
     };
-    // Phase B7b sub-op taps: post-projection (pre-split). `q_raw` may include
-    // the gate half when `attn_output_gate` is on, so its trailing dim is 2H.
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_q_proj_raw", &q_raw);
-        let _ = crate::mtp_debug::capture_subop("post_k_proj", &k_raw);
-        let _ = crate::mtp_debug::capture_subop("post_v_proj", &v);
-    }
-    // Phase B9 H3 alias: pre_gated_attn_split is the q_raw tensor before the
-    // (q, gate) narrow split. Captured as alias of post_q_proj_raw so the
-    // comparator can locate H3 zone divergence by name.
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("pre_gated_attn_split", &q_raw);
-    }
-    // Phase B12 layer-31 GQA taps: q_proj / k_proj / v_proj. These are
-    // the post-projection tensors before the gate split. No-op unless
-    // layer 31 is executing with B12 capture armed.
-    if b12_layer_31 {
-        crate::mtp_debug::capture_b12_gqa_tap("q_proj", &q_raw)?;
-        crate::mtp_debug::capture_b12_gqa_tap("k_proj", &k_raw)?;
-        crate::mtp_debug::capture_b12_gqa_tap("v_proj", &v)?;
-    }
-
     let fused_qkv_prep: Option<(Tensor, Tensor, Option<Tensor>)> = {
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
             if seq_len == 1
                 && !cuda_fused_attn_decode_qkv_prep_disabled()
-                && !subop_armed
-                && !b12_layer_31
                 && !any_kt_tensor_tracks_op(&[
                     &q_raw,
                     &k_raw,
@@ -21572,30 +21090,8 @@ fn gqa_attention_paged_with_rope_tables(
             )?;
             out
         };
-        // After the gate split, q is the rotation target.
-        if subop_armed {
-            let _ = crate::mtp_debug::capture_subop("post_q_split", &q);
-        }
-        // Phase B9 H3 alias: post_gated_attn_split_value mirrors post_q_split.
-        if subop_armed {
-            let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_value", &q);
-            if let Some(ref g) = gate {
-                let _ = crate::mtp_debug::capture_subop("post_gate_split", g);
-                // Phase B9 H3 alias: post_gated_attn_split_gate mirrors post_gate_split.
-                let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_gate", g);
-            }
-        }
-
         let k = reshape_hole0_4(&k_raw, seq_len, num_kv_heads, head_dim)
             .context("gqa paged k reshape")?;
-
-        // Phase B9 H2 taps: pre_qk_norm_{q,k} are the per-head reshaped tensors
-        // immediately before per-head RMSNorm. pre_qk_norm_q is alias of
-        // post_q_split; pre_qk_norm_k is genuinely new (post_k_proj is pre-reshape).
-        if subop_armed {
-            let _ = crate::mtp_debug::capture_subop("pre_qk_norm_q", &q);
-            let _ = crate::mtp_debug::capture_subop("pre_qk_norm_k", &k);
-        }
 
         // QK-norm
         let (q, k) = {
@@ -21613,22 +21109,10 @@ fn gqa_attention_paged_with_rope_tables(
             )?;
             out
         };
-        if subop_armed {
-            let _ = crate::mtp_debug::capture_subop("post_q_norm", &q);
-            let _ = crate::mtp_debug::capture_subop("post_k_norm", &k);
-        }
         // Phase B9 H2 aliases: post_qk_norm_{q,k} mirror post_{q,k}_norm.
-        if subop_armed {
-            let _ = crate::mtp_debug::capture_subop("post_qk_norm_q", &q);
-            let _ = crate::mtp_debug::capture_subop("post_qk_norm_k", &k);
-        }
         // Phase B12 layer-31 GQA taps: qk_norm_q / qk_norm_k. Post per-head
         // RMSNorm, pre-RoPE. Shape [B, T, num_heads, head_dim] /
         // [B, T, num_kv_heads, head_dim].
-        if b12_layer_31 {
-            crate::mtp_debug::capture_b12_gqa_tap("qk_norm_q", &q)?;
-            crate::mtp_debug::capture_b12_gqa_tap("qk_norm_k", &k)?;
-        }
 
         // RoPE — only rotate first rotary_dim dimensions
         // Use the GPU tensor variant so positions remain at a stable GPU address
@@ -21652,20 +21136,6 @@ fn gqa_attention_paged_with_rope_tables(
             )?;
             out
         };
-        if subop_armed {
-            let _ = crate::mtp_debug::capture_subop("post_q_rope", &q);
-            let _ = crate::mtp_debug::capture_subop("post_k_rope", &k);
-        }
-        // Phase B12 layer-31 GQA taps: rope_q / rope_k. Post-RoPE, pre-transpose.
-        // These are intermediates that HF can only expose via a forward hook on
-        // the attention module's q_proj/k_proj output + manual re-run of the
-        // rotary function in the comparator — the Python dump script emits a
-        // NOTE rather than failing when these HF taps are absent.
-        if b12_layer_31 {
-            crate::mtp_debug::capture_b12_gqa_tap("rope_q", &q)?;
-            crate::mtp_debug::capture_b12_gqa_tap("rope_k", &k)?;
-        }
-
         (q, k, gate)
     };
 
@@ -21850,9 +21320,6 @@ fn gqa_attention_paged_with_rope_tables(
                 seq_len,
                 stage_profile,
             )?;
-            if b12_layer_31 {
-                crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
-            }
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
@@ -21873,21 +21340,15 @@ fn gqa_attention_paged_with_rope_tables(
                 stage_profile,
             )?;
             // Phase B12 layer-31 GQA tap: o_proj output (post-o_proj).
-            if b12_layer_31 {
-                crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
-            }
             return Ok(out);
         }
     }
 
-    // Phase C8: when the MTP forward step has armed single-token
-    // self-attention, the MTP layer attends only to the just-computed K/V
-    // (kv_len = 1, no history). Skip the paged-cache write/read and the
-    // fused paged-decode kernel entirely so the per-step (k, v) above
-    // becomes the SDPA input. Cleared back to `false` by the matching
-    // `disarm_mtp_single_token_self_attn` in `mtp_forward_step`, so non-MTP
-    // attention calls on this thread are unaffected.
-    let single_token_self_attn = crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+    // The scoped MTP draft block attends only to the just-computed K/V
+    // (kv_len = 1, no history). Skip the paged-cache write/read and the fused
+    // paged-decode kernel so the per-step (k, v) above becomes the SDPA input.
+    // `MtpAttentionScope` restores ordinary attention on every exit path.
+    let single_token_self_attn = crate::mtp_runtime::single_token_self_attention_active();
 
     // Write new K/V into paged cache.
     if !single_token_self_attn {
@@ -22040,7 +21501,6 @@ fn gqa_attention_paged_with_rope_tables(
         && (num_heads / num_kv_heads) > 1
         && !fused_paged_decode_disabled()
         && AttentionBackend::runtime_supports_flash_attn_paged_decode(backend)
-        && !crate::mtp_debug::is_c7_sdpa_capture_armed()
     {
         // Open the fused-decode range around the call so the kernel work is
         // attributed to it. When the eligibility checks inside reject (return
@@ -22131,8 +21591,7 @@ fn gqa_attention_paged_with_rope_tables(
                     !paged_cache.is_fp8()
                 }
             }
-            && AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend)
-            && !crate::mtp_debug::is_c7_sdpa_capture_armed();
+            && AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend);
         let append_head_major_read_supported =
             PagedKvBackend::runtime_supports_paged_kv_head_major_read_append_token_major(backend);
         let prefix_append_fast = if prefix_only_prefill
@@ -22311,18 +21770,12 @@ fn gqa_attention_paged_with_rope_tables(
     // Multi-token append / speculative verify with prefix history. `read`
     // already returns head-major K/V; on Metal, keep Q/K/V in that layout and
     // avoid token-major transposes plus GQA K/V expansion.
-    if seq_len > 1
-        && AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend)
-        && !crate::mtp_debug::is_c7_sdpa_capture_armed()
-    {
+    if seq_len > 1 && AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend) {
         kiln_nvtx::range!(c"kiln/attn/full/prefill_head_major");
         if let Some(attn_output) =
             flash_attention_forward_head_major(backend, &q, &k, &v, num_heads, head_dim)?
         {
             let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
-            if b12_layer_31 {
-                crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
-            }
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t_backend_decode_if(
@@ -22334,9 +21787,6 @@ fn gqa_attention_paged_with_rope_tables(
                     lora_scale,
                 )?
             };
-            if b12_layer_31 {
-                crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
-            }
             return Ok(out);
         }
     }
@@ -22356,9 +21806,6 @@ fn gqa_attention_paged_with_rope_tables(
         {
             let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
             // Phase B12 layer-31 GQA tap (secondary prefill path).
-            if b12_layer_31 {
-                crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
-            }
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t_backend_decode_if(
@@ -22370,9 +21817,6 @@ fn gqa_attention_paged_with_rope_tables(
                     lora_scale,
                 )?
             };
-            if b12_layer_31 {
-                crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
-            }
             return Ok(out);
         }
     }
@@ -22397,23 +21841,6 @@ fn gqa_attention_paged_with_rope_tables(
     // Instead, group Q heads to match KV heads and compute per-group attention.
     if seq_len == 1 && gqa_ratio > 1 {
         let scale = (head_dim as f64).sqrt();
-
-        // Phase C7 SDPA bisect: capture pre-SDPA Q/K/V and causal-mask taps
-        // BEFORE the grouping reshape, in the canonical HF shapes:
-        //   Q: [batch, num_heads, q_len=1, head_dim]
-        //   K: [batch, num_kv_heads, kv_len, head_dim] (unexpanded — HF
-        //      reference dumps the same pre-repeat_kv form)
-        //   V: same shape as K
-        //   causal_mask: scalar 0 placeholder (decode has q_len=1 and attends
-        //      to all kv_len positions, so no mask is applied)
-        let c7_armed = crate::mtp_debug::is_c7_sdpa_capture_armed();
-        if c7_armed {
-            crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_q", &q)?;
-            crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_k", &k)?;
-            crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_v", &v)?;
-            let empty_mask = Tensor::zeros((), DType::F32, q.device())?;
-            crate::mtp_debug::capture_c7_sdpa_tap("causal_mask", &empty_mask)?;
-        }
 
         // Reshape Q: [batch, num_heads, 1, head_dim]
         //          -> [batch, num_kv_heads, gqa_ratio, 1, head_dim]
@@ -22469,15 +21896,6 @@ fn gqa_attention_paged_with_rope_tables(
             attn_scores
         };
 
-        // Phase C7: reshape grouped scores back to canonical
-        // [batch, num_heads, 1, kv_len] for diff against HF.
-        if c7_armed {
-            let scores_canonical = attn_scores
-                .reshape((batch, num_kv_heads, gqa_ratio, 1, kv_len))?
-                .reshape((batch, num_heads, 1, kv_len))?;
-            crate::mtp_debug::capture_c7_sdpa_tap("attn_scores_pre_softmax", &scores_canonical)?;
-        }
-
         // No causal mask needed for decode (q_len=1 attends to everything)
         let attn_weights_softmax = {
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
@@ -22491,15 +21909,6 @@ fn gqa_attention_paged_with_rope_tables(
             )?;
             out
         };
-
-        // Phase C7: reshape grouped probs back to canonical
-        // [batch, num_heads, 1, kv_len] for diff against HF.
-        if c7_armed {
-            let probs_canonical = attn_weights_softmax
-                .reshape((batch, num_kv_heads, gqa_ratio, 1, kv_len))?
-                .reshape((batch, num_heads, 1, kv_len))?;
-            crate::mtp_debug::capture_c7_sdpa_tap("attn_probs", &probs_canonical)?;
-        }
 
         // Weighted sum: [batch*num_kv_heads, gqa_ratio, 1, head_dim]
         let attn_output = {
@@ -22522,15 +21931,9 @@ fn gqa_attention_paged_with_rope_tables(
             )?;
             attn_output
         };
-        if subop_armed {
-            let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
-        }
 
         // Phase C7: final SDPA output tap at the same point as post_attn_raw,
         // shape [batch, q_len=1, num_heads*head_dim] = [1, 1, 4096].
-        if c7_armed {
-            crate::mtp_debug::capture_c7_sdpa_tap("attn_out", &attn_output)?;
-        }
 
         let attn_output = {
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
@@ -22545,13 +21948,7 @@ fn gqa_attention_paged_with_rope_tables(
             )?;
             out
         };
-        if subop_armed {
-            let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
-        }
         // Phase B12 layer-31 GQA tap (grouped decode path).
-        if b12_layer_31 {
-            crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
-        }
         let out = {
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/proj/o");
@@ -22572,12 +21969,6 @@ fn gqa_attention_paged_with_rope_tables(
             )?;
             out
         };
-        if subop_armed {
-            let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
-        }
-        if b12_layer_31 {
-            crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
-        }
         return Ok(out);
     }
 
@@ -22688,9 +22079,6 @@ fn gqa_attention_paged_with_rope_tables(
         )?;
         out
     };
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
-    }
 
     let attn_output = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
@@ -22705,13 +22093,7 @@ fn gqa_attention_paged_with_rope_tables(
         )?;
         out
     };
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
-    }
     // Phase B12 layer-31 GQA tap (standard fallback path).
-    if b12_layer_31 {
-        crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
-    }
 
     let out = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
@@ -22733,12 +22115,6 @@ fn gqa_attention_paged_with_rope_tables(
         )?;
         out
     };
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
-    }
-    if b12_layer_31 {
-        crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
-    }
     Ok(out)
 }
 
@@ -22867,7 +22243,7 @@ pub fn transformer_block_with_policy(
     let (_batch, seq_len, _hidden) = x.dims3()?;
     let use_metal_decode_ffn = seq_len == 1
         && kv_cache.is_some()
-        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+        && !crate::mtp_runtime::single_token_self_attention_active();
 
     if let Some(out) = transformer_block_detached_prefill_chunked(
         backend,
@@ -24023,17 +23399,13 @@ fn transformer_block_paged_with_rope_tables(
 
     // Vulkan-resident decode fast-path. Gates: seq_len = 1 (decode hot
     // path), start_pos > 0 (need at least one prefill K/V), no LoRA,
-    // no MTP, no debug taps armed, no CUDA graph inputs, and the
-    // backend exposes its resident-decode primitives. On any decline
-    // we fall through to the legacy code below.
+    // no MTP, no CUDA graph inputs, and a resident backend implementation.
     #[cfg(feature = "vulkan")]
     {
         if seq_len == 1
             && start_pos > 0
             && lora.is_none()
-            && !crate::mtp_debug::is_subop_capture_armed()
-            && !crate::mtp_debug::current_b12_layer_is_31()
-            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
             && qualified_vulkan_resident_decode_enabled()
         {
@@ -24058,28 +23430,14 @@ fn transformer_block_paged_with_rope_tables(
             }
         }
     }
-    let subop_armed = crate::mtp_debug::is_subop_capture_armed();
-    let b12_layer_31 = crate::mtp_debug::current_b12_layer_is_31();
-    let use_metal_decode_ffn = seq_len == 1
-        && start_pos > 0
-        && !b12_layer_31
-        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+    let use_metal_decode_ffn =
+        seq_len == 1 && start_pos > 0 && !crate::mtp_runtime::single_token_self_attention_active();
 
     // Pre-attention norm
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_attn");
         rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
     };
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_pre_attn_norm", &normed);
-    }
-    // Phase B12: layer-31 GQA sub-op tap #1. Named `post_input_norm` to
-    // match the HF reference-dump naming. No-op unless we are on base-model
-    // layer 31 with the B12 capture window armed.
-    if b12_layer_31 {
-        crate::mtp_debug::capture_b12_gqa_tap("post_input_norm", &normed)?;
-    }
-
     // Self-attention with paged cache
     let attn_out = gqa_attention_paged_with_rope_tables(
         backend,
@@ -24108,39 +23466,19 @@ fn transformer_block_paged_with_rope_tables(
         #[cfg(feature = "cuda")]
         kt_paged_cache,
     )?;
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_attn_block", &attn_out);
-    }
 
     // Residual connection
     let x = {
         kiln_nvtx::range!(c"kiln/residual");
         (x + attn_out)?
     };
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_attn_residual", &x);
-    }
 
     // Post-attention norm
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_mlp");
         rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?
     };
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_pre_mlp_norm", &normed);
-    }
-    // Phase B12: layer-31 GQA sub-op tap — post_attn_norm. Named to match
-    // the HF reference. No-op unless layer 31 + armed.
-    if b12_layer_31 {
-        crate::mtp_debug::capture_b12_gqa_tap("post_attn_norm", &normed)?;
-    }
-
-    // Feed-forward network. For layer 31 with B12 armed, route through a
-    // sub-op-tapping path that exposes mlp_gate / mlp_up / mlp_down; the
-    // standard `swiglu_ffn` fuses those and is fine for everyone else.
-    let ffn_out = if b12_layer_31 {
-        swiglu_ffn_b12_tapped(&normed, &layer.mlp, lora)?
-    } else if use_metal_decode_ffn {
+    let ffn_out = if use_metal_decode_ffn {
         swiglu_ffn_backend_profiled(
             backend,
             &normed,
@@ -24159,9 +23497,6 @@ fn transformer_block_paged_with_rope_tables(
             profile_mlp_context,
         )?
     };
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_mlp", &ffn_out);
-    }
 
     // Residual connection
     let out = {
@@ -24233,7 +23568,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     // Phase 12-B-prime: per-row start positions are allowed; the SwiGLU MLP
     // decode-gemv hint must hold for every row, so require all > 0.
     let use_metal_decode_ffn = start_positions.iter().all(|&p| p > 0)
-        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+        && !crate::mtp_runtime::single_token_self_attention_active();
 
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_attn_batch_decode");
@@ -24707,7 +24042,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
             .expect("positions_owned built above when stable was None")
     });
     let use_metal_decode_ffn = start_positions.iter().all(|&p| p > 0)
-        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+        && !crate::mtp_runtime::single_token_self_attention_active();
     let profile_full_attn_stages = profile_full_attn_stages_enabled();
     let profile_gdn_stages = profile_gdn_stages_enabled();
     let profile_mlp_stages = profile_mlp_stages_enabled();
@@ -24879,8 +24214,6 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     config,
                     &mut state.recurrent_states[linear_attn_idx],
                     &mut state.conv_states[linear_attn_idx],
-                    false,
-                    false,
                     use_metal_decode_ffn,
                     use_metal_decode_ffn,
                     profile_gdn_stages.then_some((i, max_start_pos)),
@@ -24986,9 +24319,7 @@ fn try_vulkan_resident_batched_decode_argmax(
         || !qualified_vulkan_resident_decode_enabled()
         || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
-        || crate::mtp_debug::is_subop_capture_armed()
-        || crate::mtp_debug::current_b12_layer_is_31()
-        || crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+        || crate::mtp_runtime::single_token_self_attention_active()
     {
         return Ok(None);
     }
@@ -25119,9 +24450,7 @@ fn try_vulkan_resident_batched_decode_hidden(
         || !qualified_vulkan_resident_decode_enabled()
         || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
-        || crate::mtp_debug::is_subop_capture_armed()
-        || crate::mtp_debug::current_b12_layer_is_31()
-        || crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+        || crate::mtp_runtime::single_token_self_attention_active()
     {
         return Ok(None);
     }
@@ -25270,9 +24599,7 @@ fn try_vulkan_resident_batched_decode_sample(
         || !qualified_vulkan_resident_decode_enabled()
         || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
-        || crate::mtp_debug::is_subop_capture_armed()
-        || crate::mtp_debug::current_b12_layer_is_31()
-        || crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+        || crate::mtp_runtime::single_token_self_attention_active()
     {
         return Ok(None);
     }
@@ -25404,9 +24731,7 @@ fn native_resident_decode_required(
         && config.attn_output_gate
         && qualified_vulkan_resident_decode_enabled()
         && ReplayBackend::runtime_supports_resident_decode(backend)
-        && !crate::mtp_debug::is_subop_capture_armed()
-        && !crate::mtp_debug::current_b12_layer_is_31()
-        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+        && !crate::mtp_runtime::single_token_self_attention_active()
 }
 
 /// Strict batched single-token paged decode that returns greedy next-token IDs
@@ -25568,7 +24893,7 @@ pub fn model_forward_kt_with_policy(
     let offset = kv_cache.as_ref().map_or(0, |c| c.seq_len());
     let positions: Vec<u32> = (offset..offset + seq_len).map(|p| p as u32).collect();
     let use_metal_decode_ffn =
-        seq_len == 1 && offset > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+        seq_len == 1 && offset > 0 && !crate::mtp_runtime::single_token_self_attention_active();
 
     // 2. Loop through all transformer layers
     // Track full-attention layer index (0-based counter of only full-attn layers)
@@ -25620,8 +24945,6 @@ pub fn model_forward_kt_with_policy(
                     config,
                     &mut state.recurrent_states[linear_attn_idx],
                     &mut state.conv_states[linear_attn_idx],
-                    /* capture_b11_taps = */ false,
-                    /* capture_c41_taps = */ false,
                     /* use_fused_gdn_gates = */ true,
                     use_metal_decode_ffn,
                     None,
@@ -25936,8 +25259,6 @@ pub fn model_forward_segment_with_policy(
                         config,
                         &mut state.recurrent_states[linear_attn_idx],
                         &mut state.conv_states[linear_attn_idx],
-                        /* capture_b11_taps = */ false,
-                        /* capture_c41_taps = */ false,
                         /* use_fused_gdn_gates = */ true,
                         /* use_metal_decode_gemv = */ false,
                         gdn_profile_context,
@@ -26312,9 +25633,7 @@ pub fn model_forward_paged(
         if token_ids.len() == 1
             && start_pos > 0
             && lora.is_none()
-            && !crate::mtp_debug::is_subop_capture_armed()
-            && !crate::mtp_debug::current_b12_layer_is_31()
-            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
             && qualified_vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
@@ -26561,9 +25880,7 @@ pub fn model_forward_paged_last_token(
         if token_ids.len() == 1
             && start_pos > 0
             && lora.is_none()
-            && !crate::mtp_debug::is_subop_capture_armed()
-            && !crate::mtp_debug::current_b12_layer_is_31()
-            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
             && qualified_vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
@@ -26669,9 +25986,7 @@ pub fn model_forward_paged_last_token_resident(
             && token_ids.len() == 1
             && start_pos > 0
             && lora.is_none()
-            && !crate::mtp_debug::is_subop_capture_armed()
-            && !crate::mtp_debug::current_b12_layer_is_31()
-            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
             && qualified_vulkan_resident_decode_enabled()
         {
@@ -27142,9 +26457,7 @@ pub fn model_forward_paged_last_token_greedy(
         if token_ids.len() == 1
             && start_pos > 0
             && lora.is_none()
-            && !crate::mtp_debug::is_subop_capture_armed()
-            && !crate::mtp_debug::current_b12_layer_is_31()
-            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
             && qualified_vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
@@ -27634,7 +26947,7 @@ pub fn model_forward_paged_batched_decode_hidden(
     let mut hidden = embedding_lookup_from_weights(input_tokens, weights)?;
     hidden = hidden.unsqueeze(1)?;
     let use_metal_decode_ffn = sequence_lengths.iter().all(|&p| p > 0)
-        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+        && !crate::mtp_runtime::single_token_self_attention_active();
 
     let mut full_attn_idx = 0usize;
     let mut linear_attn_idx = 0usize;
@@ -27715,8 +27028,6 @@ pub fn model_forward_paged_batched_decode_hidden(
                     config,
                     &mut recurrent_state,
                     &mut conv_state,
-                    false,
-                    false,
                     true,
                     false,
                     None,
@@ -27884,42 +27195,6 @@ pub fn model_forward_paged_with_last_hidden(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
 ) -> Result<(Tensor, Tensor)> {
-    // Phase B10: arm the base-model per-layer hidden-state capture window
-    // when `KILN_MTP_DUMP_HIDDEN_STATES=1`. The arm is a no-op when the env
-    // var is unset, so production cost is a single TLS borrow + env lookup.
-    // The inner forward pass fills the window with boundary-layer last-row
-    // slices plus `h_post_final_norm` (C18 — formerly `h_pre_final_norm`
-    // before kiln started returning post-final-norm `h_prev`). Phase C40
-    // can opt into a denser early sweep (layers 1..8) via
-    // `KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1`; default B10/B12 behavior is
-    // unchanged when that flag is unset. The window is drained in
-    // `mtp_forward_step`'s dump block so the taps appear alongside the
-    // standard 8 MTP taps in the same safetensors file. The next call to
-    // this function re-arms the window, overwriting any stale buffer from
-    // a prior call whose dump did not fire (e.g. non-targeted `mtp_pos`).
-    crate::mtp_debug::arm_h_main_capture();
-    // Phase B11: stash the exact input tokens that fed this forward pass so
-    // the MTP dump can serialize them, letting the HF reference replay the
-    // same prompt instead of its canonical fallback greeting. No-op when
-    // h_main capture is disarmed.
-    crate::mtp_debug::stash_h_main_replay_context(token_ids);
-    // Phase B11b: arm the layer-0 GDN sub-op capture window in the same
-    // place as h_main so both capture modes drain together inside the MTP
-    // dump block. No-op unless `KILN_MTP_DUMP_B11_TAPS=1`, so production
-    // decode pays only a single TLS borrow + env-var lookup.
-    crate::mtp_debug::arm_b11_layer0_capture();
-    // Phase B12: arm the layer-31 GQA sub-op capture window. Same pattern
-    // as B11 — no-op unless `KILN_MTP_DUMP_B12_GQA_TAPS=1`. The h_main
-    // capture is gated to also include layers 24..30 when this flag is on,
-    // giving the comparator both per-layer h_layer_<idx> taps for the GQA
-    // tail and per-sub-op taps inside layer 31.
-    crate::mtp_debug::arm_b12_gqa_capture();
-    crate::mtp_debug::arm_c41_layer1_capture();
-    crate::mtp_debug::arm_c42_layer1_norm_capture();
-    crate::mtp_debug::arm_c43_layer1_preweight_capture();
-    crate::mtp_debug::arm_c44_layer1_f32_row_capture();
-    crate::mtp_debug::arm_c45_layer1_row_capture();
-    crate::mtp_debug::arm_c46_layer1_row_provenance_capture();
     let (logits, hidden, _token) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -27963,15 +27238,6 @@ pub fn model_forward_paged_last_token_with_last_hidden(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
 ) -> Result<(Tensor, Tensor)> {
-    crate::mtp_debug::arm_h_main_capture();
-    crate::mtp_debug::stash_h_main_replay_context(token_ids);
-    crate::mtp_debug::arm_b11_layer0_capture();
-    crate::mtp_debug::arm_c41_layer1_capture();
-    crate::mtp_debug::arm_c42_layer1_norm_capture();
-    crate::mtp_debug::arm_c43_layer1_preweight_capture();
-    crate::mtp_debug::arm_c44_layer1_f32_row_capture();
-    crate::mtp_debug::arm_c45_layer1_row_capture();
-    crate::mtp_debug::arm_c46_layer1_row_provenance_capture();
     let (logits, hidden, _token) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -28052,105 +27318,23 @@ pub fn mtp_forward_step(
     let mtp = weights.mtp_weights()?;
     let device = weights.embed_tokens.device();
 
-    // Phase C6 dump pre-flight: consume the dump slot up-front so we can arm
-    // the pre-RoPE capture window BEFORE any of the 5 pre-RoPE tensors
-    // (token_emb, norm_emb, norm_h, concat, fused) are materialized. The slot
-    // is one-shot per (process, mtp_pos), so `should_dump` threads through to
-    // the dump block below without being re-consumed. When
-    // `KILN_MTP_DUMP_PRE_ROPE` is unset the arm is a no-op and the per-tap
-    // `capture_pre_rope_tap` calls short-circuit on a closed TLS window.
-    // Phase C13: `KILN_MTP_DUMP_SPLICE=1` is a meta-flag that fires up to N=8
-    // (configurable) dumps per targeted position (default `{0, 2}`) instead of
-    // the one-shot latch used by earlier phases. When the splice lane takes a
-    // slot, `splice_step` is `Some(step)` and the dump path can substitute
-    // `{step}` alongside `{pos}`. When splice is disabled we fall through to
-    // the existing one-shot latch so prior flows (B6/B7/C6/C7) behave
-    // unchanged.
-    let splice_step = crate::mtp_debug::try_consume_splice_slot(mtp_pos);
-    let should_dump = if splice_step.is_some() {
-        true
-    } else if crate::mtp_debug::is_dump_splice_enabled() {
-        // Splice is on but this position/step is not eligible — suppress the
-        // legacy one-shot latch so only the splice lane controls dumping.
-        false
-    } else {
-        crate::mtp_debug::try_consume_dump_slot_for_pos(mtp_pos)
-    };
-    let dump_pre_rope = should_dump && crate::mtp_debug::is_dump_pre_rope_effectively_enabled();
-    if dump_pre_rope {
-        crate::mtp_debug::arm_pre_rope_capture();
-    }
-    // Phase C7 dump pre-flight: arm the SDPA-internal capture BEFORE the
-    // inner transformer block runs, so the 7 taps inside `gqa_attention_paged`
-    // can record Q/K/V, scores, probs, and the raw attention output. Armed
-    // independently of C6 because the two capture windows bracket different
-    // regions of the forward: C6 captures MTP fc inputs pre-RoPE, C7
-    // captures SDPA inside the inner block post-RoPE. Arming C7 also acts as
-    // a signal to the GQA path to bypass the fused flash-attention paged
-    // decode kernel (which doesn't materialize the intermediates we need)
-    // and take the unfused grouped-decode Candle path instead.
-    let dump_c7_sdpa = should_dump && crate::mtp_debug::is_dump_c7_sdpa_enabled();
-    if dump_c7_sdpa {
-        crate::mtp_debug::arm_c7_sdpa_capture();
-    }
-
-    // Phase C14 post-block splice-dump pre-flight. Mirrors the C7 arm above.
-    // Gated on `should_dump` AND either the explicit
-    // `KILN_MTP_DUMP_C14_POST_BLOCK=1` opt-in or (via OR-composition inside
-    // `is_dump_c14_post_block_effectively_enabled`) the C13 splice meta-flag
-    // `KILN_MTP_DUMP_SPLICE=1`. When armed, we capture three taps after the
-    // MTP transformer block returns: `post_block` (pre-norm hidden),
-    // `post_norm` (post-final-norm hidden, pre-lm_head), and `logits`
-    // (post-lm_head, pre-softmax). This is the extension of the splice
-    // window past the `c6__fused` exit that C13 certified clean.
-    let dump_c14_post_block =
-        should_dump && crate::mtp_debug::is_dump_c14_post_block_effectively_enabled();
-    if dump_c14_post_block {
-        crate::mtp_debug::arm_c14_post_block_capture();
-    }
-
     // 1. Token embedding for the draft token. `embedding_lookup` returns
     //    shape [1, H]; unsqueeze to [1, 1, H] to match transformer-block I/O.
     let token_ids = [draft_token_id];
     let token_emb = embedding_lookup_from_weights(&token_ids, weights)?; // [1, H]
     let token_emb = token_emb.unsqueeze(0)?; // [1, 1, H]
-    if dump_pre_rope {
-        let _ = crate::mtp_debug::capture_pre_rope_tap("token_emb", &token_emb);
-    }
 
     // 2-3. Dual RMSNorms. `h_prev` is [1, 1, H] pre-final-norm.
-    //
-    // `KILN_MTP_SWAP_FC_NORMS=1` swaps which RMSNorm weight is applied to
-    // which half. This is the Phase B2 secondary-hypothesis A/B: if the
-    // loader paired the two `pre_fc_norm_*` tensors to the wrong halves of
-    // the `fc` input (plausible since both are [H]-vectors and
-    // distinguishable only by name), swap-on should materially change α.
-    // If α is unchanged the hypothesis is disproven.
-    let swap_fc_norms = crate::mtp_debug::is_swap_fc_norms_enabled();
-    let (norm_emb_weight, norm_h_weight) = if swap_fc_norms {
-        (&mtp.pre_fc_norm_hidden, &mtp.pre_fc_norm_embedding)
-    } else {
-        (&mtp.pre_fc_norm_embedding, &mtp.pre_fc_norm_hidden)
-    };
     let norm_emb = {
         kiln_nvtx::range!(c"kiln/mtp/pre_fc_norm_emb");
-        rms_norm(&token_emb, norm_emb_weight, config.rms_norm_eps)?
+        rms_norm(&token_emb, &mtp.pre_fc_norm_embedding, config.rms_norm_eps)?
     };
-    if dump_pre_rope {
-        let _ = crate::mtp_debug::capture_pre_rope_tap("norm_emb", &norm_emb);
-    }
     let norm_h = {
         kiln_nvtx::range!(c"kiln/mtp/pre_fc_norm_hidden");
-        rms_norm(h_prev, norm_h_weight, config.rms_norm_eps)?
+        rms_norm(h_prev, &mtp.pre_fc_norm_hidden, config.rms_norm_eps)?
     };
-    if dump_pre_rope {
-        let _ = crate::mtp_debug::capture_pre_rope_tap("norm_h", &norm_h);
-    }
 
     // 4. Concat along the hidden dim and fuse: [1, 1, 2H] @ fc_t[2H, H] -> [1, 1, H]
-    //
-    // We keep the concat alive (named `concat`) so the Phase B6 dump can
-    // capture the exact bytes fed into `fc.weight` as `fc_input`.
     //
     // Phase 7 (#1082): for rank-3 tensors axis-2 is the last dim, so
     // route the cat through `try_kt_concat_last_dim`. Both pieces are
@@ -28174,45 +27358,10 @@ pub fn mtp_forward_step(
         }
     }
     .contiguous()?;
-    if dump_pre_rope {
-        let _ = crate::mtp_debug::capture_pre_rope_tap("concat", &concat);
-    }
-    // Phase C12: `KILN_MTP_FP32_HEAD=1` subsumes `KILN_MTP_FC_FP32_ACCUM=1` —
-    // the full-head kill switch always includes fc_input/fc_output in f32,
-    // so either flag alone is sufficient to trigger the fp32 fc path.
-    let fp32_head = crate::mtp_debug::is_mtp_fp32_head_enabled();
     let fused = {
         kiln_nvtx::range!(c"kiln/mtp/fc");
-        if crate::mtp_debug::is_mtp_fc_fp32_accum_enabled() || fp32_head {
-            // Phase C9 falsification: promote inputs to f32, matmul in f32,
-            // cast the result back to the input dtype. Eliminates the bf16
-            // accumulation noise visible at the `fused` / `fc_output` tap
-            // (max|Δ| ~1.6e-2 against the HF bf16 reference). The
-            // [1, 1, 2H] @ [2H, H] shape is tiny (~13M FLOPs for 4B), so
-            // the per-step cost is negligible and there is no hot-path
-            // regression to worry about.
-            let in_dtype = concat.dtype();
-            let concat_f32 = concat.to_dtype(DType::F32)?;
-            let fc_t_f32 = mtp.fc_t.to_dtype(DType::F32)?;
-            runtime_matmul_or_broadcast(backend, &concat_f32, &fc_t_f32)?.to_dtype(in_dtype)?
-        } else {
-            runtime_matmul_or_broadcast(backend, &concat, &mtp.fc_t)?
-        }
+        runtime_matmul_or_broadcast(backend, &concat, &mtp.fc_t)?
     };
-    if dump_pre_rope {
-        let _ = crate::mtp_debug::capture_pre_rope_tap("fused", &fused);
-    }
-
-    // Phase B7 sub-op capture pre-flight. `should_dump` was already consumed
-    // above (moved up to bracket Phase C6 pre-RoPE arming). `dump_subops` is
-    // a strict subset: only true when KILN_MTP_DUMP_SUBOPS=1 AND we are about
-    // to dump anyway. This keeps the production path entirely free of sub-op
-    // capture overhead — the TLS check inside `capture_subop` is a no-op when
-    // the window is closed.
-    let dump_subops = should_dump && crate::mtp_debug::is_dump_subops_enabled();
-    if dump_subops {
-        crate::mtp_debug::arm_subop_capture();
-    }
 
     // 5. Single full-attention transformer block with its own paged cache.
     //
@@ -28236,316 +27385,41 @@ pub fn mtp_forward_step(
     //    per step is fine.
     let abs_pos = base_pos + mtp_pos;
     let positions = Tensor::new(&[abs_pos as f32][..], device)?;
-    // Phase C8: arm single-token self-attention for the MTP inner GQA call.
-    // The Qwen3-Next reference contract (see `scripts/mtp_reference_dump.py`
-    // and HF/vLLM `Qwen3NextMultiTokenPredictor`) runs the MTP inner
-    // attention as kv_len = 1 — Q·K^T is a 1×1 scalar, softmax = 1.0,
-    // attn_out = V. Phase C7 (PR #319) localized the mtp_pos > 0
-    // attn_out divergence to kiln attending over the growing MTP paged
-    // cache (kv_len = mtp_pos + 1) instead of single-token self-attn.
-    // Arming this flag flips `gqa_attention_paged` onto the per-step
-    // K/V scratch path for the MTP layer only; the disarm below clears
-    // it before any non-MTP attention path on this thread can observe it.
-    crate::mtp_debug::arm_mtp_single_token_self_attn();
-    // Phase C12: arm fp32-head BEFORE the inner block so that every
-    // projection matmul inside `gqa_attention_paged` (q/k/v/o) and the
-    // MLP (`swiglu_ffn`'s gate/up/down) sees the TLS flag armed. This is
-    // the cleanest minimal invasive cast point: `linear_with_lora_t` is
-    // the single chokepoint for all of those matmuls, and the non-MTP
-    // paths never observe the armed flag because it is disarmed below
-    // before we return. The MTP head is not Marlin-packed today, so in
-    // practice the flag gates the straight BF16 `broadcast_matmul`; if a
-    // future PR adds Marlin to MTP, the marlin path in `q_proj_forward`
-    // will need an analogous upcast branch.
-    if fp32_head {
-        crate::mtp_debug::arm_mtp_fp32_head();
-    }
-    let mtp_hidden_result = transformer_block_paged(
-        backend,
-        &fused,
-        &mtp.layer,
-        config,
-        &positions,
-        mtp_pos,
-        config.num_attention_heads,
-        config.num_kv_heads,
-        config.head_dim,
-        config.rotary_dim(),
-        &weights.rotary_inv_freq,
-        config.rms_norm_eps,
-        mtp_cache,
-        mtp_block_table,
-        /* full_attn_layer_idx = */ 0,
-        // The adapter's MTP draft-block LoRA, when the adapter was
-        // trained with MTP alignment. Absent → base draft weights
-        // (verify stays exact; acceptance is what degrades).
-        lora.and_then(|l| l.mtp.as_ref().map(|m| (m, l.scale))),
-    );
-    // Always disarm in both success and error paths (`mtp_hidden_result`
-    // is `?`-propagated below, so we cannot rely on the function tail).
-    crate::mtp_debug::disarm_mtp_single_token_self_attn();
-    if fp32_head {
-        crate::mtp_debug::disarm_mtp_fp32_head();
-    }
-
-    // Drain the sub-op capture window in BOTH success and error paths so the
-    // TLS slot is not left armed for the next draft step (which would corrupt
-    // the next dump or leak captures into other transformer block calls).
-    //
-    // Phase B10 appends per-layer base-model hidden-state taps captured during
-    // the prior `model_forward_paged_with_last_hidden` call on this thread.
-    // These live in a distinct TLS slot (`H_MAIN_CAPTURE`) gated on
-    // `KILN_MTP_DUMP_HIDDEN_STATES=1`; `drain_h_main_capture` returns empty
-    // when the slot was never armed, so disarmed runs pay zero cost.
-    let mut extra_subops = if dump_subops {
-        crate::mtp_debug::drain_subop_capture()
-    } else {
-        Vec::new()
+    let mtp_hidden = {
+        let _attention_scope = crate::mtp_runtime::MtpAttentionScope::enter();
+        transformer_block_paged(
+            backend,
+            &fused,
+            &mtp.layer,
+            config,
+            &positions,
+            mtp_pos,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.rotary_dim(),
+            &weights.rotary_inv_freq,
+            config.rms_norm_eps,
+            mtp_cache,
+            mtp_block_table,
+            /* full_attn_layer_idx = */ 0,
+            // The adapter's MTP draft-block LoRA, when the adapter was
+            // trained with MTP alignment. Absent means base draft weights;
+            // verification remains exact while acceptance may degrade.
+            lora.and_then(|l| l.mtp.as_ref().map(|m| (m, l.scale))),
+        )
+        .context("mtp transformer block")?
     };
-    extra_subops.extend(crate::mtp_debug::drain_h_main_capture());
-    let mtp_hidden = mtp_hidden_result.context("mtp transformer block")?;
-    // Phase C14 tap 1/3: pre-final-norm output of the MTP transformer block.
-    if dump_c14_post_block {
-        let _ = crate::mtp_debug::capture_c14_post_block_tap("post_block", &mtp_hidden);
-    }
 
-    // 6. Final RMSNorm + weight-tied LM head (reuses base embed_tokens_t).
-    //
-    // We split `normed` out as a distinct bind (rather than inlining into the
-    // `logits` block) so the Phase B6 dump can capture `post_final_ln` ahead
-    // of the `lm_head` matmul. No semantic change vs the previous inlined
-    // form: `rms_norm` has no side effects, and `normed` is only used once.
+    // 6. Final RMSNorm + weight-tied LM head.
     let normed = {
         kiln_nvtx::range!(c"kiln/mtp/final_layernorm");
         rms_norm(&mtp_hidden, &mtp.final_layernorm, config.rms_norm_eps)?
     };
-    // Phase C14 tap 2/3: post-final-norm hidden state, pre-lm_head.
-    if dump_c14_post_block {
-        let _ = crate::mtp_debug::capture_c14_post_block_tap("post_norm", &normed);
-    }
     let logits = {
         kiln_nvtx::range!(c"kiln/mtp/lm_head");
         lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
     };
-    // Phase C14 tap 3/3: post-lm_head logits, pre-softmax / pre-sampler.
-    if dump_c14_post_block {
-        let _ = crate::mtp_debug::capture_c14_post_block_tap("logits", &logits);
-    }
-
-    // Phase B6/B7 numerical-bisect dump. Fires once per (process, mtp_pos)
-    // pair when `KILN_MTP_DUMP_PATH` is set and the current `mtp_pos` is
-    // listed in `KILN_MTP_DUMP_POS` (defaults to "0" for B6 compatibility).
-    // Writes one safetensors file per targeted position with the 8 outer
-    // taps enumerated in `write_mtp_dump` plus integer metadata (draft
-    // token id, `mtp_pos`, `swap_fc_norms`). When `KILN_MTP_DUMP_SUBOPS=1`
-    // is also set, per-sub-op activations from inside the MTP transformer
-    // block are appended (Phase B7b).
-    //
-    // Use `KILN_MTP_DUMP_PATH=/path/dump_pos{pos}.st` plus
-    // `KILN_MTP_DUMP_POS=0,1,2` to capture three positions in one process.
-    // The companion Python reference (`scripts/mtp_reference_dump.py`)
-    // produces same-shaped files for the same prompt + seed;
-    // `scripts/mtp_compare.py` prints a per-tap first-divergence table.
-    // Failure to dump is logged but non-fatal — we never want an
-    // instrumentation bug to break decode.
-    if should_dump {
-        // Phase C13: when the splice meta-flag is driving this step, the path
-        // can substitute `{step}` alongside `{pos}` so each of the up-to-8
-        // per-position dumps lands in its own file. Falls back to the legacy
-        // `{pos}`-only substitution when splice is off.
-        let dump_path_opt = crate::mtp_debug::dump_path_for_pos_and_step(mtp_pos, splice_step);
-        // Always drain the C7 TLS slot before returning. If we entered the
-        // armed C7 path above but `dump_path_for_pos` returned None (pos not
-        // listed in `KILN_MTP_DUMP_POS`), the slot would otherwise leak
-        // captured tensors into the next draft step's dump. Dropping the
-        // drained vec here is cheap and keeps the invariant "armed ⇒ drained
-        // within the same mtp_forward_step".
-        if dump_c7_sdpa && dump_path_opt.is_none() {
-            let _ = crate::mtp_debug::drain_c7_sdpa_capture();
-        }
-        // Phase C14: mirror the C7 defensive drain so the post-block TLS slot
-        // is not left armed for the next draft step when the path is filtered
-        // out for this pos.
-        if dump_c14_post_block && dump_path_opt.is_none() {
-            let _ = crate::mtp_debug::drain_c14_post_block_capture();
-        }
-        if let Some(path) = dump_path_opt {
-            let taps: [(&str, &Tensor); 8] = [
-                ("h_main", h_prev),
-                ("tok_embed", &token_emb),
-                ("fc_input", &concat),
-                ("fc_output", &fused),
-                ("pre_layer", &fused),
-                ("post_layer", &mtp_hidden),
-                ("post_final_ln", &normed),
-                ("mtp_logits", &logits),
-            ];
-            // Phase B11: drain any prompt tokens stashed by the preceding
-            // `model_forward_paged_with_last_hidden` call. Empty on legacy
-            // paths / when h_main capture was never armed, which matches
-            // the pre-B11 dump format (no `prompt_tokens` tensor emitted).
-            let prompt_tokens = crate::mtp_debug::drain_h_main_prompt_tokens();
-            let replay_tokens = crate::mtp_debug::drain_h_main_replay_tokens();
-            // Phase B11b: drain any layer-0 GDN sub-op taps stashed during
-            // the base-model forward. Empty when `KILN_MTP_DUMP_B11_TAPS`
-            // is unset, which keeps the dump format bit-identical to B11.
-            let b11_taps = crate::mtp_debug::drain_b11_layer0_capture();
-            // Phase B12: drain any layer-31 GQA sub-op taps stashed during
-            // the base-model forward. Empty when
-            // `KILN_MTP_DUMP_B12_GQA_TAPS` is unset, which keeps the dump
-            // format bit-identical to the pre-B12 layout.
-            let b12_taps = crate::mtp_debug::drain_b12_gqa_capture();
-            // Phase C41: drain any transformer-block-1 taps stashed during
-            // the base-model forward. Empty when
-            // `KILN_MTP_DUMP_C41_LAYER1_TAPS` is unset.
-            let c41_taps = crate::mtp_debug::drain_c41_layer1_capture();
-            // Phase C42: drain any layer-1 pre-norm / input-layernorm taps
-            // stashed during the base-model forward. Empty when
-            // `KILN_MTP_DUMP_C42_LAYER1_NORM_TAPS` is unset.
-            let c42_taps = crate::mtp_debug::drain_c42_layer1_norm_capture();
-            // Phase C43: drain the layer-1 pre-weight multiply taps stashed
-            // during the base-model forward. Empty when
-            // `KILN_MTP_DUMP_C43_LAYER1_PREWEIGHT_TAPS` is unset.
-            let c43_taps = crate::mtp_debug::drain_c43_layer1_preweight_capture();
-            // Phase C44: drain the row-level layer-1 taps stashed during the
-            // base-model forward. Empty when
-            // `KILN_MTP_DUMP_C44_LAYER1_F32_ROW_TAPS` is unset.
-            let c44_taps = crate::mtp_debug::drain_c44_layer1_f32_row_capture();
-            // Phase C45: drain the follow-up row-level normalization taps
-            // stashed during the base-model forward. Empty when
-            // `KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS` is unset.
-            let c45_taps = crate::mtp_debug::drain_c45_layer1_row_capture();
-            // Phase C46: drain the C45 row-side operand provenance taps
-            // stashed during the base-model forward. Empty when
-            // `KILN_MTP_DUMP_C46_ROW_PROVENANCE` is unset.
-            let c46_taps = crate::mtp_debug::drain_c46_layer1_row_provenance_capture();
-            // Phase C6: drain the 5 pre-RoPE MTP input taps (token_emb,
-            // norm_emb, norm_h, concat, fused) captured above. Empty when
-            // `KILN_MTP_DUMP_PRE_ROPE` is unset, which keeps the dump format
-            // bit-identical to the pre-C6 layout.
-            let c6_taps = crate::mtp_debug::drain_pre_rope_capture();
-            // Phase C7: drain the 7 SDPA-internal taps (pre_sdpa_q/k/v,
-            // causal_mask, attn_scores_pre_softmax, attn_probs, attn_out)
-            // captured inside `gqa_attention_paged`. Empty when
-            // `KILN_MTP_DUMP_C7_SDPA` is unset, which keeps the dump format
-            // bit-identical to the pre-C7 layout.
-            let c7_taps = crate::mtp_debug::drain_c7_sdpa_capture();
-            // Phase C14: drain the 3 post-MTP-transformer-block taps
-            // (post_block, post_norm, logits) captured above. Empty when
-            // neither `KILN_MTP_DUMP_C14_POST_BLOCK` nor the C13 splice
-            // meta-flag is set, which keeps the dump format bit-identical
-            // to the pre-C14 layout.
-            let c14_taps = crate::mtp_debug::drain_c14_post_block_capture();
-            match crate::mtp_debug::write_mtp_dump(
-                &path,
-                draft_token_id,
-                mtp_pos,
-                base_pos,
-                swap_fc_norms,
-                &crate::mtp_debug::current_h_main_boundary_layers(),
-                &taps,
-                &extra_subops,
-                &prompt_tokens,
-                &replay_tokens,
-                &b11_taps,
-                &b12_taps,
-                &c41_taps,
-                &c42_taps,
-                &c43_taps,
-                &c44_taps,
-                &c45_taps,
-                &c46_taps,
-                &c6_taps,
-                &c7_taps,
-                &c14_taps,
-            ) {
-                Ok(()) => tracing::info!(
-                    target: "kiln::mtp_debug",
-                    path = %path,
-                    draft_token_id,
-                    mtp_pos,
-                    splice_step = ?splice_step,
-                    subops = extra_subops.len(),
-                    prompt_tokens_len = prompt_tokens.len(),
-                    replay_tokens_len = replay_tokens.len(),
-                    b11_taps = b11_taps.len(),
-                    b12_taps = b12_taps.len(),
-                    c41_taps = c41_taps.len(),
-                    c42_taps = c42_taps.len(),
-                    c43_taps = c43_taps.len(),
-                    c44_taps = c44_taps.len(),
-                    c45_taps = c45_taps.len(),
-                    c46_taps = c46_taps.len(),
-                    c6_taps = c6_taps.len(),
-                    c7_taps = c7_taps.len(),
-                    c14_taps = c14_taps.len(),
-                    "mtp_b7_dump_written"
-                ),
-                Err(e) => tracing::warn!(
-                    target: "kiln::mtp_debug",
-                    error = %e,
-                    "mtp_b7_dump_failed"
-                ),
-            }
-        }
-    } else if dump_c7_sdpa || dump_c14_post_block {
-        // Defensive: drain C7 / C14 captures even when `should_dump` is false
-        // to avoid leaving the TLS slots armed for the next draft step. This
-        // branch should be unreachable (both flags AND with `should_dump`),
-        // but is cheap insurance against future refactors that could break
-        // the invariant.
-        if dump_c7_sdpa {
-            let _ = crate::mtp_debug::drain_c7_sdpa_capture();
-        }
-        if dump_c14_post_block {
-            let _ = crate::mtp_debug::drain_c14_post_block_capture();
-        }
-    }
-
-    // Optional Phase B instrumentation. Off by default; enabled with
-    // `KILN_MTP_DEBUG=1`. See `crate::mtp_debug` for the rate-limited path.
-    //
-    // Phase B2 additions: halves-L2 on the `fc` input (to quantify the
-    // embed-dominance hypothesis) and L2 on the fused output (to rule out
-    // explode/collapse failure modes inside the fc matmul). `halves_ratio`
-    // is `norm_emb_l2 / norm_h_l2`; values far from 1.0 are evidence the
-    // two halves have mismatched magnitudes feeding `fc`.
-    if crate::mtp_debug::should_log() {
-        // #1082: `mtp_debug::tensor_l2_norm`/`top_k_logits` stay candle-typed
-        // (also called from the candle-aliased sampler in speculative.rs).
-        // Bridge the kt activations to candle here — cold debug path only
-        // (`should_log()` gate), so the copies don't touch production decode.
-        // #1082: mtp_debug::tensor_l2_norm is kt-native now — no candle bridge.
-        let l2_kt = |t: &Tensor| -> f32 { crate::mtp_debug::tensor_l2_norm(t).unwrap_or(f32::NAN) };
-        let h_norm = l2_kt(h_prev);
-        let norm_emb_l2 = l2_kt(&norm_emb);
-        let norm_h_l2 = l2_kt(&norm_h);
-        let fused_l2 = l2_kt(&fused);
-        let halves_ratio = if norm_h_l2 > 0.0 {
-            norm_emb_l2 / norm_h_l2
-        } else {
-            f32::NAN
-        };
-        let logits_norm = l2_kt(&logits);
-        // #1082: mtp_debug::top_k_logits is kt-native now — pass kt directly.
-        let top = crate::mtp_debug::top_k_logits(&logits, 5)
-            .map(|t| crate::mtp_debug::format_top_k(&t))
-            .unwrap_or_else(|e| format!("<top_k err: {e}>"));
-        tracing::info!(
-            target: "kiln::mtp_debug",
-            mtp_pos = mtp_pos,
-            last_token = draft_token_id,
-            swap_fc_norms = swap_fc_norms,
-            h_prev_l2 = h_norm,
-            norm_emb_l2 = norm_emb_l2,
-            norm_h_l2 = norm_h_l2,
-            halves_ratio = halves_ratio,
-            fused_l2 = fused_l2,
-            mtp_logits_l2 = logits_norm,
-            mtp_top5 = %top,
-            "mtp_draft"
-        );
-    }
 
     Ok((logits, mtp_hidden))
 }
@@ -28749,7 +27623,6 @@ fn model_forward_paged_inner_bounded(
 
         // Phase B11b tap: `tok_embed`. Output of `embed_tokens(input_ids)`
         // with a leading batch dim. A resumed layer group must not repeat it.
-        crate::mtp_debug::capture_b11_layer0_tap("tok_embed", &hidden)?;
 
         let positions_owned = if positions_gpu.is_none() {
             let pos_f32: Vec<f32> = (start_pos..start_pos + seq_len)
@@ -28844,13 +27717,7 @@ fn model_forward_paged_inner_bounded(
                 } else {
                     None
                 };
-                // Phase B12: tell the capture layer that we are entering the
-                // base-model layer `i`. `capture_b12_gqa_tap` call sites inside
-                // `gqa_attention_paged` / `transformer_block_paged` gate on
-                // this TLS slot + the armed capture window so that only
-                // layer 31 emits sub-op taps. No-op on the production path.
-                crate::mtp_debug::enter_b12_layer_scope(i);
-                let block_result = transformer_block_paged_with_rope_tables(
+                hidden = transformer_block_paged_with_rope_tables(
                     backend,
                     &hidden,
                     layer,
@@ -28879,10 +27746,8 @@ fn model_forward_paged_inner_bounded(
                     // authoritative either way.
                     #[cfg(feature = "cuda")]
                     kt_paged_cache,
-                );
-                crate::mtp_debug::exit_b12_layer_scope();
-                hidden = block_result
-                    .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
+                )
+                .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
                 full_attn_idx += 1;
                 if let Some(start) = layer_profile_start {
                     synchronize_for_profile(&device)?;
@@ -28899,10 +27764,9 @@ fn model_forward_paged_inner_bounded(
                 let state = linear_state.as_mut().ok_or_else(|| {
                     anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
                 })?;
-                let capture_b11_taps = crate::mtp_debug::should_capture_b11_tap_for_layer(i);
                 // Vulkan-resident full-block GDN fast-path. Gates: seq_len=1
-                // decode hot path, start_pos > 0, no MTP/debug taps armed,
-                // no LoRA, and qualified resident decode enabled.
+                // decode hot path, start_pos > 0, no MTP, no LoRA, and
+                // qualified resident decode enabled.
                 // Bypasses the legacy pre-norm/residual/post-norm/MLP/final-residual
                 // candle path entirely when active.
                 #[cfg(feature = "vulkan")]
@@ -28910,18 +27774,7 @@ fn model_forward_paged_inner_bounded(
                     if seq_len == 1
                         && start_pos > 0
                         && lora.is_none()
-                        && !crate::mtp_debug::is_subop_capture_armed()
-                        && !crate::mtp_debug::current_b12_layer_is_31()
-                        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
-                        && !capture_b11_taps
-                        && !crate::mtp_debug::should_capture_c41_layer1_tap_for_layer(i)
-                        && !crate::mtp_debug::should_capture_c42_layer1_norm_tap_for_layer(i)
-                        && !crate::mtp_debug::should_capture_c43_layer1_preweight_tap_for_layer(i)
-                        && !crate::mtp_debug::should_capture_c44_layer1_f32_row_tap_for_layer(i)
-                        && !crate::mtp_debug::should_capture_c45_layer1_row_tap_for_layer(i)
-                        && !crate::mtp_debug::should_capture_c46_layer1_row_provenance_tap_for_layer(
-                            i,
-                        )
+                        && !crate::mtp_runtime::single_token_self_attention_active()
                         && qualified_vulkan_resident_decode_enabled()
                     {
                         if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
@@ -28952,64 +27805,13 @@ fn model_forward_paged_inner_bounded(
                         }
                     }
                 }
-                let capture_c41_taps = crate::mtp_debug::should_capture_c41_layer1_tap_for_layer(i);
-                let capture_c42_taps =
-                    crate::mtp_debug::should_capture_c42_layer1_norm_tap_for_layer(i);
-                let capture_c43_taps =
-                    crate::mtp_debug::should_capture_c43_layer1_preweight_tap_for_layer(i);
-                let capture_c44_taps =
-                    crate::mtp_debug::should_capture_c44_layer1_f32_row_tap_for_layer(i);
-                let capture_c45_taps =
-                    crate::mtp_debug::should_capture_c45_layer1_row_tap_for_layer(i);
-                let capture_c46_taps =
-                    crate::mtp_debug::should_capture_c46_layer1_row_provenance_tap_for_layer(i);
                 let use_metal_decode_ffn = seq_len == 1
                     && start_pos > 0
-                    && !capture_b11_taps
-                    && !capture_c41_taps
-                    && !capture_c42_taps
-                    && !capture_c43_taps
-                    && !capture_c44_taps
-                    && !capture_c45_taps
-                    && !capture_c46_taps
-                    && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
-                if capture_c42_taps {
-                    capture_c42_layer1_input_norm_taps(
-                        &hidden,
-                        &layer.input_layernorm,
-                        config.rms_norm_eps,
-                    )?;
-                }
-                if capture_c43_taps {
-                    capture_c43_layer1_preweight_taps(
-                        &hidden,
-                        &layer.input_layernorm,
-                        config.rms_norm_eps,
-                    )?;
-                }
-                if capture_c44_taps {
-                    capture_c44_layer1_f32_row_taps(&hidden, config.rms_norm_eps)?;
-                }
-                if capture_c45_taps {
-                    capture_c45_layer1_row_taps(&hidden, config.rms_norm_eps)?;
-                }
-                if capture_c46_taps {
-                    capture_c46_layer1_row_provenance_taps(&hidden)?;
-                }
+                    && !crate::mtp_runtime::single_token_self_attention_active();
                 let normed = {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
                 };
-                // Phase B11b tap: `layer_0_post_input_norm`. Captured only on
-                // layer 0 (the B10 scan localized divergence there) — pre-GDN
-                // input LayerNorm output. Shape [1, T, hidden]. HF mirror:
-                // `hidden_states` after `self.input_layernorm(...)` at layer 0.
-                if capture_b11_taps {
-                    crate::mtp_debug::capture_b11_layer0_tap("layer_0_post_input_norm", &normed)?;
-                }
-                if capture_c41_taps {
-                    crate::mtp_debug::capture_c41_layer1_tap("layer_1_post_input_norm", &normed)?;
-                }
                 let attn_out = {
                     let _prefill_resident_layer_scope =
                         GdnPrefillResidentStateLayerScope::new(backend, linear_attn_idx);
@@ -29020,8 +27822,6 @@ fn model_forward_paged_inner_bounded(
                         config,
                         &mut state.recurrent_states[linear_attn_idx],
                         &mut state.conv_states[linear_attn_idx],
-                        capture_b11_taps,
-                        capture_c41_taps,
                         true,
                         use_metal_decode_ffn,
                         profile_gdn_stages.then_some((i, start_pos)),
@@ -29037,12 +27837,6 @@ fn model_forward_paged_inner_bounded(
                     kiln_nvtx::range!(c"kiln/residual");
                     residual_add(hidden, attn_out)?
                 };
-                if capture_c41_taps {
-                    crate::mtp_debug::capture_c41_layer1_tap(
-                        "layer_1_post_attn_residual",
-                        &hidden,
-                    )?;
-                }
                 let normed_post = {
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
                     rms_norm(
@@ -29063,9 +27857,6 @@ fn model_forward_paged_inner_bounded(
                     kiln_nvtx::range!(c"kiln/residual");
                     residual_add(hidden, ffn_out)?
                 };
-                if capture_c41_taps {
-                    crate::mtp_debug::capture_c41_layer1_tap("layer_1_output", &hidden)?;
-                }
                 linear_attn_idx += 1;
                 if let Some(start) = layer_profile_start {
                     synchronize_for_profile(&device)?;
@@ -29079,18 +27870,6 @@ fn model_forward_paged_inner_bounded(
         // `read_layer_norm_debug`). Gated by KILN_DEBUG_LAYER_NORMS.
         #[cfg(feature = "cuda")]
         record_layer_norm_debug(&hidden, i);
-
-        // Phase B10: capture last-row hidden state at boundary layers when
-        // `KILN_MTP_DUMP_HIDDEN_STATES=1` and a capture window has been armed
-        // (done by `model_forward_paged_with_last_hidden`). Gate is a cheap
-        // TLS-borrow + array-contains check when disarmed; zero cost in
-        // production. The narrow+contiguous copies ~H floats per captured
-        // layer (5 layers × 2560 f32 ≈ 50 KiB total) which is negligible
-        // next to the full hidden tensor.
-        if crate::mtp_debug::should_capture_hidden_state_for_layer(i) {
-            let last_row = hidden.narrow(1, seq_len - 1, 1)?.contiguous()?;
-            let _ = crate::mtp_debug::capture_h_main_tap(&format!("h_layer_{i}"), &last_row);
-        }
     }
 
     if let Some(t) = _profile_layers_t0.as_ref() {
@@ -29241,9 +28020,6 @@ fn model_forward_paged_inner_bounded(
                 rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?
             };
             let last_hidden = normed.narrow(1, seq_len - 1, 1)?.contiguous()?;
-            if crate::mtp_debug::is_h_main_capture_armed() {
-                let _ = crate::mtp_debug::capture_h_main_tap("h_post_final_norm", &last_hidden);
-            }
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
                 lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
@@ -29260,9 +28036,6 @@ fn model_forward_paged_inner_bounded(
                 kiln_nvtx::range!(c"kiln/final_norm");
                 rms_norm(&last_pre_norm, &weights.final_norm, config.rms_norm_eps)?
             };
-            if crate::mtp_debug::is_h_main_capture_armed() {
-                let _ = crate::mtp_debug::capture_h_main_tap("h_post_final_norm", &last_hidden);
-            }
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
                 lm_head_forward_backend_decode_if(
@@ -29775,9 +28548,6 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
         let end = (cursor + tile_size).min(total);
         let is_last_tile = end == total;
         let mode = if is_last_tile {
-            crate::mtp_debug::arm_h_main_capture();
-            crate::mtp_debug::stash_h_main_replay_context(token_ids);
-            crate::mtp_debug::arm_b11_layer0_capture();
             LmHeadMode::LastRowWithLastHidden
         } else {
             LmHeadMode::Skip
@@ -31258,83 +30028,6 @@ mod tests {
         assert!((vals[0][0] - 1.5).abs() < 1e-4);
         assert!((vals[0][1] - 2.0).abs() < 1e-4);
         assert!((vals[0][2] - 3.0).abs() < 1e-4);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_c45_row_replay_matches_production_broadcast_mul_last_row() -> Result<()> {
-        let device = Device::Cpu;
-        let batch = 2usize;
-        let seq_len = 3usize;
-        let hidden = 4usize;
-        let eps = 1e-6;
-        let x = Tensor::from_slice(
-            &[
-                1.0_f32, 2.0, 3.0, 4.0, 0.5, 1.5, 2.5, 3.5, 4.0, 3.0, 2.0, 1.0, -1.0, -2.0, -3.0,
-                -4.0, 1.0, -1.5, 2.0, -2.5, 0.25, -0.5, 0.75, -1.0,
-            ],
-            (batch, seq_len, hidden),
-        )?
-        .to_device(device)?;
-
-        let (
-            rms_inv_row,
-            extracted_scalars,
-            last_row_values,
-            broadcast_output,
-            scalar_values,
-            reconstructed,
-        ) = c45_layer1_row_replay_tensors(&x, eps)?;
-
-        let x_f32 = x.to_dtype(DType::F32)?;
-        let variance = x_f32.sqr()?.mean_keepdim(LAST_DIM)?;
-        let rms_inv = (variance + eps)?.sqrt()?.recip()?;
-        let production = x_f32.broadcast_mul(&rms_inv)?;
-        let production_last_row = production.narrow(1, seq_len - 1, 1)?.contiguous()?;
-        let production_last_row_values = x_f32
-            .narrow(1, seq_len - 1, 1)?
-            .contiguous()?
-            .reshape((batch, hidden))?
-            .contiguous()?;
-        let production_scalar_values =
-            production_last_row.reshape((batch, hidden))?.contiguous()?;
-        let production_rms_inv_row = rms_inv.narrow(1, seq_len - 1, 1)?.contiguous()?;
-
-        assert_eq!(
-            rms_inv_row.to_vec3::<f32>()?,
-            production_rms_inv_row.to_vec3::<f32>()?
-        );
-        assert_eq!(
-            extracted_scalars.to_vec1::<f32>()?,
-            production_rms_inv_row.reshape((batch,))?.to_vec1::<f32>()?
-        );
-        assert_eq!(
-            last_row_values.to_vec2::<f32>()?,
-            production_last_row_values.to_vec2::<f32>()?
-        );
-        assert_eq!(
-            broadcast_output.to_vec3::<f32>()?,
-            production_last_row.to_vec3::<f32>()?
-        );
-        assert_eq!(
-            reconstructed.to_vec3::<f32>()?,
-            production_last_row.to_vec3::<f32>()?
-        );
-        assert_eq!(
-            scalar_values.to_vec2::<f32>()?,
-            production_scalar_values.to_vec2::<f32>()?
-        );
-        assert_eq!(
-            reconstructed.reshape((batch, hidden))?.to_vec2::<f32>()?,
-            scalar_values.to_vec2::<f32>()?
-        );
-        assert_eq!(
-            broadcast_output
-                .reshape((batch, hidden))?
-                .to_vec2::<f32>()?,
-            scalar_values.to_vec2::<f32>()?
-        );
 
         Ok(())
     }
@@ -38242,8 +36935,6 @@ mod tests {
             &config,
             &mut mono_state.recurrent_states[0],
             &mut mono_state.conv_states[0],
-            false,
-            false,
             None,
         )?;
 

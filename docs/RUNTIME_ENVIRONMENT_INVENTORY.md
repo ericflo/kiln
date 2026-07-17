@@ -16,19 +16,19 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **697 direct read call sites** and
-**351 process-mutation call sites**. It can
-statically name **200 distinct literal `KILN_*`
-read names** across **328 call sites**.
+The scanner records **673 direct read call sites** and
+**255 process-mutation call sites**. It can
+statically name **176 distinct literal `KILN_*`
+read names** across **304 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 225 | 159 | 0 |
+| Experimental/debug migration | 201 | 135 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
-| Test only | 135 | 41 | 343 |
+| Test only | 135 | 41 | 247 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -57,7 +57,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
 | `crates/kiln-model/src/forward.rs` | 48 | 43 |
-| `crates/kiln-model/src/mtp_debug.rs` | 24 | 24 |
 | `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
 | `crates/kiln-model/src/backend/rocm.rs` | 11 | 9 |
 | `crates/kiln-model/src/backend/capability.rs` | 9 | 1 |
@@ -214,30 +213,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_METAL_LORA_QKV_LINEAR_BENCH_ITERS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_QKV_LINEAR_BENCH_WARMUP` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_MTP_BYTE_EQ_MODEL` | Test only | 1 | `crates/kiln-model/tests/mtp_byte_eq.rs` |
-| `KILN_MTP_DEBUG` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DEBUG_MAX_CALLS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_B11_TAPS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_B12_GQA_TAPS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_C14_POST_BLOCK` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_C41_LAYER1_TAPS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_C42_LAYER1_NORM_TAPS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_C43_LAYER1_PREWEIGHT_TAPS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_C44_LAYER1_F32_ROW_TAPS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_C46_ROW_PROVENANCE` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_C7_SDPA` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_EARLY_HMAIN_SWEEP` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_HIDDEN_STATES` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_PATH` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_POS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_PRE_ROPE` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_SPLICE` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_SPLICE_MAX_STEPS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_SPLICE_POS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_DUMP_SUBOPS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_FC_FP32_ACCUM` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_FP32_HEAD` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
-| `KILN_MTP_SWAP_FC_NORMS` | Experimental/debug migration | 1 | `crates/kiln-model/src/mtp_debug.rs` |
 | `KILN_OPD_SAMPLER_SEGMENTS` | Experimental/debug migration | 1 | `crates/kiln-train/src/opd.rs` |
 | `KILN_OPD_USE_CHAT_TEMPLATE_RENDER` | Experimental/debug migration | 1 | `crates/kiln-train/src/opd.rs` |
 | `KILN_PROFILE_GDN_STAGE_LAYER` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |

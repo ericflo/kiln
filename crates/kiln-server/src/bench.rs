@@ -2411,10 +2411,6 @@ fn bench_latency_paged_mtp(
         }
 
         generated_tokens.push(last_token);
-        let mut replay_prefix = Vec::with_capacity(prompt_token_ids.len() + generated_tokens.len());
-        replay_prefix.extend_from_slice(&prompt_token_ids);
-        replay_prefix.extend_from_slice(&generated_tokens);
-        kiln_model::mtp_debug::set_h_main_replay_prefix_tokens(&replay_prefix);
         let step_start = Instant::now();
         let step = speculative_mtp_decode_step(
             &*backend,
@@ -2435,7 +2431,6 @@ fn bench_latency_paged_mtp(
             // The bench measures base-model MTP throughput — no adapter.
             None,
         );
-        kiln_model::mtp_debug::clear_h_main_replay_prefix_tokens();
         let step = step.context("speculative_mtp_decode_step failed")?;
         let step_time = step_start.elapsed();
 

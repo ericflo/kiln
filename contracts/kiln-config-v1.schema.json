@@ -306,7 +306,7 @@
     },
     "accelerator": {
       "type": "object",
-      "description": "Process-lifetime accelerator execution, ROCm synchronization, and graph-cache policy.",
+      "description": "Process-lifetime accelerator execution, Vulkan device selection, ROCm synchronization, and graph-cache policy.",
       "additionalProperties": false,
       "properties": {
         "kt_api_mode": {
@@ -335,6 +335,34 @@
           "x-kiln-canonical-env": "KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB (implemented)",
           "x-kiln-environment": "none",
           "x-kiln-validation": "64..=2048. Immutable ceiling for exact full-attention materialized score and scratch geometry across CPU, CUDA, ROCm, Metal, and Vulkan model routes. ROCm online attention derives min(value, 1024) MiB while retaining fixed qualified 2048-query/4096-key tiles. Runtime memory observations remain fail-closed admission and reservation checks; they never resize the geometry or switch to smaller tiles during a request. Restart required."
+        },
+        "vulkan_device_index": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 0
+            }
+          ],
+          "default": "auto",
+          "description": "auto preserves automatic discrete-GPU preference and otherwise chooses the first enumerated Vulkan physical device. An integer strictly selects that zero-based Vulkan enumeration index. An unavailable index fails logical-device startup; it is never ignored or replaced with another device. The immutable selection is installed before Vulkan device creation and reported with source attribution. Restart required.",
+          "x-kiln-path": "accelerator.vulkan_device_index",
+          "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
+          "x-kiln-canonical-env": "KILN_ACCELERATOR_VULKAN_DEVICE_INDEX (implemented)",
+          "x-kiln-environment": "KILN_VULKAN_DEVICE (deprecated compatibility)",
+          "x-kiln-validation": "auto preserves automatic discrete-GPU preference and otherwise chooses the first enumerated Vulkan physical device. An integer strictly selects that zero-based Vulkan enumeration index. An unavailable index fails logical-device startup; it is never ignored or replaced with another device. The immutable selection is installed before Vulkan device creation and reported with source attribution. Restart required."
+        },
+        "vulkan_validation": {
+          "type": "boolean",
+          "default": false,
+          "description": "true requires server.serving_profile = \"experimental\" and enables VK_LAYER_KHRONOS_validation when the Vulkan instance is created. Startup fails if the layer is not installed. This is not mutable per request or dispatch. Restart required.",
+          "x-kiln-path": "accelerator.vulkan_validation",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_ACCELERATOR_VULKAN_VALIDATION (implemented)",
+          "x-kiln-environment": "KILN_VULKAN_VALIDATION (deprecated compatibility)",
+          "x-kiln-validation": "true requires server.serving_profile = \"experimental\" and enables VK_LAYER_KHRONOS_validation when the Vulkan instance is created. Startup fails if the layer is not installed. This is not mutable per request or dispatch. Restart required."
         },
         "rocm_synchronization_mode": {
           "type": "string",
@@ -1516,6 +1544,81 @@
         "properties": {
           "accelerator": {
             "properties": {
+              "kt_api_mode": {
+                "enum": [
+                  "all",
+                  "disabled"
+                ]
+              }
+            },
+            "required": [
+              "kt_api_mode"
+            ]
+          }
+        },
+        "required": [
+          "accelerator"
+        ]
+      },
+      "then": {
+        "properties": {
+          "server": {
+            "properties": {
+              "serving_profile": {
+                "const": "experimental"
+              }
+            },
+            "required": [
+              "serving_profile"
+            ]
+          }
+        },
+        "required": [
+          "server"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "accelerator": {
+            "properties": {
+              "vulkan_validation": {
+                "const": true
+              }
+            },
+            "required": [
+              "vulkan_validation"
+            ]
+          }
+        },
+        "required": [
+          "accelerator"
+        ]
+      },
+      "then": {
+        "properties": {
+          "server": {
+            "properties": {
+              "serving_profile": {
+                "const": "experimental"
+              }
+            },
+            "required": [
+              "serving_profile"
+            ]
+          }
+        },
+        "required": [
+          "server"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "accelerator": {
+            "properties": {
               "rocm_synchronization_mode": {
                 "const": "stream_ordered"
               }
@@ -1712,11 +1815,11 @@
       }
     }
   ],
-  "x-kiln-field-count": 105,
+  "x-kiln-field-count": 107,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 100,
+  "x-kiln-canonical-environment-count": 102,
   "x-kiln-config-file-only-count": 5,
-  "x-kiln-compatibility-field-count": 69,
-  "x-kiln-compatibility-alias-count": 74,
+  "x-kiln-compatibility-field-count": 71,
+  "x-kiln-compatibility-alias-count": 76,
   "x-kiln-toml-compatibility-field-count": 1
 }

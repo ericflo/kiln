@@ -19,7 +19,7 @@ pub mod lora;
 pub mod lora_loader;
 pub mod marlin_proj;
 pub mod metal_graph;
-pub mod mtp_debug;
+mod mtp_runtime;
 pub mod packed_weight_registry;
 pub mod rocm_graph;
 pub mod stream_text;

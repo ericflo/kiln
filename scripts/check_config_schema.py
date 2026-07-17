@@ -239,6 +239,32 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
         ),
         (
             {
+                "server": {"serving_profile": "experimental"},
+                "accelerator": {"kt_api_mode": "disabled"},
+            },
+            True,
+            "explicit tensor API mode experimental profile",
+        ),
+        (
+            {"accelerator": {"kt_api_mode": "all"}},
+            False,
+            "explicit tensor API mode default profile rejection",
+        ),
+        (
+            {
+                "server": {"serving_profile": "experimental"},
+                "accelerator": {"vulkan_validation": True},
+            },
+            True,
+            "Vulkan validation experimental profile",
+        ),
+        (
+            {"accelerator": {"vulkan_validation": True}},
+            False,
+            "Vulkan validation default profile rejection",
+        ),
+        (
+            {
                 "server": {"serving_profile": "maintenance"},
                 "memory": {"kv_force_blocks": 8, "kv_autoscale": True},
             },

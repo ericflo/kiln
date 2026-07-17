@@ -847,7 +847,10 @@ num_speculative_tokens = 4      # default and hard ceiling
 draft_layers = 8                # qualification geometry only
 ```
 
-See `crates/kiln-model/src/speculative.rs` for the verify loop and `crates/kiln-model/src/mtp_debug.rs` for the per-step instrumentation used during the α investigation.
+See `crates/kiln-model/src/speculative.rs` for the verify loop. The temporary
+per-step Phase B/C instrumentation used during the acceptance investigation was
+retired after its conclusions were archived in `PROFILING.md`; the remaining
+MTP-only single-token attention invariant is a private scoped runtime guard.
 
 ## Configuration
 

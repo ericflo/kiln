@@ -15,8 +15,8 @@
 //! `kiln_tensor` (kt). The speculative / MTP call graph threads kt logits and
 //! kt hidden states directly: `model_forward_head` / `model_forward_paged` /
 //! `model_forward_paged_with_last_hidden` / `mtp_forward_step` all return kt
-//! tensors, and the host samplers (`greedy_sample`, `greedy_sample_rows`,
-//! `sample_with_params`) and `mtp_debug` helpers all consume kt tensors.
+//! tensors, and the host samplers (`greedy_sample`, `greedy_sample_rows`, and
+//! `sample_with_params`) consume kt tensors.
 //!
 //! `logits_to_probs` (used by the rejection-sampling resample path) first tries
 //! the kt device-dispatched scalar + softmax ops, then copies the resulting
@@ -212,6 +212,16 @@ fn logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Vec<f32>> {
     }
 
     Ok(probs)
+}
+
+fn top1_logit(logits: &Tensor) -> Result<f32> {
+    logits
+        .flatten_all()?
+        .to_dtype(DType::F32)?
+        .to_vec1::<f32>()?
+        .into_iter()
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .context("cannot select top-1 logit from an empty tensor")
 }
 
 /// #1082: Device-dispatched fast path for `logits_to_probs`. Extracts the
@@ -921,30 +931,20 @@ pub fn speculative_mtp_decode_step(
     // but accept flips false). Off by default; enabled with
     // `KILN_C1_ATTR_PATH=<path>`.
     let c1_attr_enabled = c1_attr::is_enabled();
-    let mtp_debug_enabled = crate::mtp_debug::is_enabled();
-    let verify_pos0 = if c1_attr_enabled || mtp_debug_enabled {
+    let verify_pos0 = if c1_attr_enabled {
         Some(verify_logits.narrow(1, 0, 1)?.squeeze(1)?)
     } else {
         None
     };
 
     if c1_attr_enabled {
-        // top_k=1 extraction is ~O(V) on host but only runs when the env
-        // var is set, so production decode pays nothing.
-        let draft_top1 = crate::mtp_debug::top_k_logits(&mtp_logits, 1);
-        let main_top1 = crate::mtp_debug::top_k_logits(
+        let mtp_top1_logit = top1_logit(&mtp_logits).unwrap_or(f32::NAN);
+        let main_top1_logit = top1_logit(
             verify_pos0
                 .as_ref()
                 .expect("verify pos-0 tensor materialized for C1 attribution"),
-            1,
-        );
-        let (mtp_top1_logit, main_top1_logit) = match (draft_top1, main_top1) {
-            (Ok(d), Ok(m)) => (
-                d.first().map(|p| p.1).unwrap_or(f32::NAN),
-                m.first().map(|p| p.1).unwrap_or(f32::NAN),
-            ),
-            _ => (f32::NAN, f32::NAN),
-        };
+        )
+        .unwrap_or(f32::NAN);
         c1_attr::push_row(c1_attr::C1Row {
             step_idx: c1_attr::next_step_idx(),
             pos_in_k: 0, // Qwen3.5-4B k=1 MTP: one draft per step.
@@ -958,33 +958,6 @@ pub fn speculative_mtp_decode_step(
             accepted: draft_accepted,
             topk_match: draft_token == target_at_0,
         });
-    }
-
-    // Optional Phase B instrumentation. Off by default; enabled with
-    // `KILN_MTP_DEBUG=1`. Logs the verify pos-0 top-5 alongside the draft so
-    // a 16-step trace can be diffed against an HF reference run on the same
-    // prompt. The `mtp_draft` line emitted from `mtp_forward_step` and this
-    // `mtp_verify` line share `mtp_pos` so they can be paired by grep.
-    if mtp_debug_enabled {
-        let verify_pos0 = verify_pos0
-            .as_ref()
-            .expect("verify pos-0 tensor materialized for MTP debug");
-        let v_top = crate::mtp_debug::top_k_logits(verify_pos0, 5)
-            .map(|t| crate::mtp_debug::format_top_k(&t))
-            .unwrap_or_else(|e| format!("<top_k err: {e}>"));
-        let v_norm = crate::mtp_debug::tensor_l2_norm(verify_pos0).unwrap_or(f32::NAN);
-        tracing::info!(
-            target: "kiln::mtp_debug",
-            mtp_pos = mtp_pos,
-            base_pos = base_pos,
-            last_token = last_token,
-            draft_token = draft_token,
-            target_at_0 = target_at_0,
-            accepted = draft_accepted,
-            verify_pos0_l2 = v_norm,
-            verify_pos0_top5 = %v_top,
-            "mtp_verify"
-        );
     }
 
     let mut new_h_prev = hidden_after_draft.clone();
@@ -1146,6 +1119,12 @@ mod tests {
         for &p in &probs {
             assert!(p >= 0.0, "probability should be non-negative, got {p}");
         }
+    }
+
+    #[test]
+    fn top1_logit_reports_maximum_independently_of_token_selection() {
+        let logits = Tensor::new(&[-4.0_f32, 3.5, 1.25, 3.0], &kiln_tensor::Device::Cpu).unwrap();
+        assert_eq!(top1_logit(&logits).unwrap(), 3.5);
     }
 
     #[test]

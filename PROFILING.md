@@ -1,5 +1,14 @@
 # Kiln Profiling Report
 
+> **MTP phase-debug controls were retired on 2026-07-17.** The Phase B/C
+> sections below are an immutable investigation record, not current operator
+> documentation. Commands using `KILN_MTP_DEBUG`, `KILN_MTP_DUMP_*`,
+> `KILN_MTP_SWAP_*`, or `KILN_MTP_*FP32*` no longer run against current source;
+> the dump launchers were removed with the completed instrumentation. Retained
+> Python comparators can still inspect preserved historical tensors. Current MTP
+> execution uses the canonical normalization and BF16 projection path, with its
+> single-token attention invariant enforced by a private scoped runtime guard.
+
 > **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
 > priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are
