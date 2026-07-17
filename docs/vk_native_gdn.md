@@ -125,12 +125,10 @@ Within the explicitly test-enabled route:
    freeing an in-flight buffer.
 
 A one-token final prompt chunk would use the same scoped recurrent kernel.
-Ordinary decode does not: its separate resident-state scope still requires the
-existing backend decode-residency opt-in. The typed prompt policy is hard false
-in production, including when the decode opt-in is present. The internal
-migration rollback `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` still
-disables decode residency for a fully materialized diagnostic arm. Both policy
-values are cached at backend construction and are not read in a hot path.
+Ordinary decode does not: immutable `kiln.vulkan-kernel-policy.v2` disables
+both the separate decode-residency route and the typed prompt policy. Their
+former environment controls have no aliases. A fully materialized diagnostic
+arm now requires a reviewed source-policy change and a separate binary.
 
 Logical host tensors are stale while this direct registry is authoritative.
 Consequently, an in-place persistent-slot restore must preserve the secondary

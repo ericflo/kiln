@@ -4,7 +4,7 @@
 //! `backend/vulkan.rs` remains the `BackendRuntime` facade.
 
 use anyhow::{Context, Result};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use super::vulkan::VulkanBackend;
 use super::vulkan_residency::{
@@ -18,16 +18,14 @@ use super::vulkan_tensor_bridge::{
 };
 
 fn fused_gdn_resident_state_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE").is_err()
-    })
+    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY
+        .gdn_decode_fused_resident_state_enabled
 }
 
 pub(super) fn supports_gdn_forward_substitution(backend: &VulkanBackend) -> bool {
     // solve_tri is experimental: shared-memory layout not yet validated
     // against CPU parity, and may exceed maxComputeSharedMemorySize on many
-    // GPUs. Opt-in only via KILN_ENABLE_VULKAN_GDN_FORWARD_SUB.
+    // GPUs. Disabled by the qualified Vulkan policy.
     backend.has_vulkan() && backend.gdn_forward_sub_enabled
 }
 
@@ -261,7 +259,8 @@ pub(super) fn gdn_chunkwise_forward(
     if q.dtype() != kiln_tensor::DType::F32 || state_kt.dtype() != kiln_tensor::DType::F32 {
         return Ok(None);
     }
-    if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_FORWARD").is_ok() {
+    let policy = kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY;
+    if !policy.gdn_chunkwise_forward_enabled {
         return Ok(None);
     }
     let Some(vk_device) = backend.vulkan_device() else {
@@ -319,8 +318,8 @@ pub(super) fn gdn_chunkwise_forward(
         )
     };
 
-    let out_vk = if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_ok() {
-        if kiln_core::env_flag::env_flag("KILN_VULKAN_GDN_CHUNKWISE_FALLBACK", false) {
+    let out_vk = if !policy.gdn_chunkwise_single_submit_enabled {
+        if policy.gdn_chunkwise_fallback_enabled {
             tracing::warn!("single-submit Vulkan GDN chunkwise prefill disabled; falling back");
             kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
                 &q_vk,
@@ -347,7 +346,7 @@ pub(super) fn gdn_chunkwise_forward(
         ) {
             Ok(out) => out,
             Err(err) => {
-                if kiln_core::env_flag::env_flag("KILN_VULKAN_GDN_CHUNKWISE_FALLBACK", false) {
+                if policy.gdn_chunkwise_fallback_enabled {
                     tracing::warn!(
                         error = %err,
                         "single-submit Vulkan GDN chunkwise prefill failed; falling back"

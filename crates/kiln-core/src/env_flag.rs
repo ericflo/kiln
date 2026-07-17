@@ -16,10 +16,10 @@
 /// Examples:
 /// ```ignore
 /// // Default-off flag, opt-in via env:
-/// let on = env_flag("KILN_VULKAN_LINEAR", false);
+/// let on = env_flag("KILN_W4A16", false);
 ///
 /// // Default-on flag, opt-out via env:
-/// let on = env_flag("KILN_VULKAN_RMSNORM", true);
+/// let on = env_flag("KILN_ROCM_W8A16", true);
 /// ```
 pub fn env_flag(name: &str, default: bool) -> bool {
     env_tristate(name).unwrap_or(default)
@@ -29,13 +29,13 @@ pub fn env_flag(name: &str, default: bool) -> bool {
 /// values, `Some(false)` for falsy, `None` for anything else
 /// (including unset / unrecognised). Use this for env vars whose
 /// "unset" arm runs an auto-heuristic rather than falling back to a
-/// fixed boolean — e.g. `KILN_VULKAN_FLCE` (auto-engage based on
-/// `active_count`) and `KILN_VULKAN_RMSNORM_TRAINING` (auto-engage
-/// based on `row_count`).
+/// fixed boolean. Prefer the typed startup configuration loader for product
+/// settings; this helper remains only for legacy or internal controls that
+/// have not crossed that boundary yet.
 ///
 /// Idiom:
 /// ```ignore
-/// match env_tristate("KILN_VULKAN_FLCE") {
+/// match env_tristate("KILN_EXPERIMENTAL_FEATURE") {
 ///     Some(true) => engage_provider(),
 ///     Some(false) => return None,
 ///     None => engage_if_heuristic_passes(),

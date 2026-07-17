@@ -245,9 +245,9 @@ def require_nonnegative_int(value: Any, label: str) -> int:
 
 def expected_policy(mode: str) -> dict[str, Any]:
     return {
-        "schema_id": "kiln.accelerator-runtime-policy.v6",
-        "version": 6,
-        "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v1",
+        "schema_id": "kiln.accelerator-runtime-policy.v7",
+        "version": 7,
+        "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v2",
         "serving_profile": "experimental",
         "serving_profile_source": "config_file",
         "kt_api_mode": {

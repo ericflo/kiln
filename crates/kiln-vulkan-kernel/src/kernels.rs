@@ -14,6 +14,41 @@ use std::time::Instant;
 /// requires source review and new correctness/performance receipts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VulkanKernelPolicy {
+    pub gdn_enabled: bool,
+    pub gdn_prefill_in_proj_enabled: bool,
+    pub gdn_gates_enabled: bool,
+    pub gdn_gated_rms_norm_enabled: bool,
+    pub gdn_full_chunk_forward_enabled: bool,
+    pub fused_conv1d_update_enabled: bool,
+    pub fused_conv1d_prefill_enabled: bool,
+    pub conv1d_prefill_single_submit_enabled: bool,
+    pub gdn_forward_sub_enabled: bool,
+    pub gdn_decode_fused_enabled: bool,
+    pub gdn_recurrent_unexpanded_qk_enabled: bool,
+    pub gdn_recurrent_qk_norm_unexpanded_enabled: bool,
+    pub linear_decode_enabled: bool,
+    pub linear_argmax_batch_enabled: bool,
+    pub full_attn_qkv_enabled: bool,
+    pub paged_attn_decode_batch_enabled: bool,
+    pub mlp_decode_enabled: bool,
+    pub mlp_gate_up_enabled: bool,
+    pub mlp_bf16_gate_up_f32_down_enabled: bool,
+    pub bf16_packed_linear_weights_enabled: bool,
+    pub bf16_packed_gdn_in_proj_weights_enabled: bool,
+    pub bf16_packed_full_attn_qkv_weights_enabled: bool,
+    pub bf16_packed_mlp_decode_weights_enabled: bool,
+    pub recurrent_state_residency_enabled: bool,
+    pub prefill_recurrent_state_residency_enabled: bool,
+    pub resident_decode_enabled: bool,
+    pub bridged_rmsnorm_forward_enabled: bool,
+    pub skip_final_gdn_state_readback_enabled: bool,
+    pub flash_attn_prefill_enabled: bool,
+    pub paged_decode_gpu_gather_enabled: bool,
+    pub gdn_chunkwise_forward_enabled: bool,
+    pub gdn_chunkwise_single_submit_enabled: bool,
+    pub gdn_chunkwise_fallback_enabled: bool,
+    pub gdn_decode_fused_resident_state_enabled: bool,
+    pub linear_max_flop_per_dispatch: u64,
     pub mlp_bf16_gate_up_rows4: bool,
     pub mlp_f32_down_rows4: bool,
     pub mlp_bf16_down_rows4: bool,
@@ -67,9 +102,44 @@ pub struct VulkanKernelPolicy {
     pub profile_resident_decode_timing: bool,
 }
 
-pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v1";
+pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v2";
 
 pub const QUALIFIED_VULKAN_KERNEL_POLICY: VulkanKernelPolicy = VulkanKernelPolicy {
+    gdn_enabled: true,
+    gdn_prefill_in_proj_enabled: true,
+    gdn_gates_enabled: true,
+    gdn_gated_rms_norm_enabled: true,
+    gdn_full_chunk_forward_enabled: false,
+    fused_conv1d_update_enabled: false,
+    fused_conv1d_prefill_enabled: true,
+    conv1d_prefill_single_submit_enabled: true,
+    gdn_forward_sub_enabled: false,
+    gdn_decode_fused_enabled: false,
+    gdn_recurrent_unexpanded_qk_enabled: true,
+    gdn_recurrent_qk_norm_unexpanded_enabled: true,
+    linear_decode_enabled: true,
+    linear_argmax_batch_enabled: true,
+    full_attn_qkv_enabled: true,
+    paged_attn_decode_batch_enabled: true,
+    mlp_decode_enabled: true,
+    mlp_gate_up_enabled: false,
+    mlp_bf16_gate_up_f32_down_enabled: true,
+    bf16_packed_linear_weights_enabled: true,
+    bf16_packed_gdn_in_proj_weights_enabled: true,
+    bf16_packed_full_attn_qkv_weights_enabled: true,
+    bf16_packed_mlp_decode_weights_enabled: true,
+    recurrent_state_residency_enabled: false,
+    prefill_recurrent_state_residency_enabled: false,
+    resident_decode_enabled: true,
+    bridged_rmsnorm_forward_enabled: false,
+    skip_final_gdn_state_readback_enabled: true,
+    flash_attn_prefill_enabled: true,
+    paged_decode_gpu_gather_enabled: true,
+    gdn_chunkwise_forward_enabled: true,
+    gdn_chunkwise_single_submit_enabled: true,
+    gdn_chunkwise_fallback_enabled: false,
+    gdn_decode_fused_resident_state_enabled: true,
+    linear_max_flop_per_dispatch: 20_000_000_000,
     mlp_bf16_gate_up_rows4: true,
     mlp_f32_down_rows4: true,
     mlp_bf16_down_rows4: true,
@@ -416,7 +486,45 @@ mod qualified_policy_tests {
     fn qualified_policy_matches_product_kernel_selection() {
         assert_eq!(
             VULKAN_KERNEL_POLICY_SCHEMA_ID,
-            "kiln.vulkan-kernel-policy.v1"
+            "kiln.vulkan-kernel-policy.v2"
+        );
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_prefill_in_proj_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gates_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gated_rms_norm_enabled);
+        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.gdn_full_chunk_forward_enabled);
+        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.fused_conv1d_update_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.fused_conv1d_prefill_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.conv1d_prefill_single_submit_enabled);
+        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.gdn_forward_sub_enabled);
+        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.gdn_decode_fused_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_unexpanded_qk_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_qk_norm_unexpanded_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.linear_argmax_batch_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.paged_attn_decode_batch_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.mlp_decode_enabled);
+        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.mlp_gate_up_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_gate_up_f32_down_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.bf16_packed_linear_weights_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.bf16_packed_gdn_in_proj_weights_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.bf16_packed_full_attn_qkv_weights_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.bf16_packed_mlp_decode_weights_enabled);
+        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.recurrent_state_residency_enabled);
+        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.prefill_recurrent_state_residency_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.resident_decode_enabled);
+        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.bridged_rmsnorm_forward_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.skip_final_gdn_state_readback_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.flash_attn_prefill_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.paged_decode_gpu_gather_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_chunkwise_forward_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_chunkwise_single_submit_enabled);
+        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.gdn_chunkwise_fallback_enabled);
+        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_decode_fused_resident_state_enabled);
+        assert_eq!(
+            QUALIFIED_VULKAN_KERNEL_POLICY.linear_max_flop_per_dispatch,
+            20_000_000_000
         );
         assert!(linear_decode_bf16w_rows4_enabled());
         assert!(linear_decode_bf16w_rows8_enabled());

@@ -1176,14 +1176,7 @@ pub fn vk_gdn_chunkwise_forward_no_grad(
 }
 
 fn gdn_chunkwise_fallback_enabled() -> bool {
-    std::env::var("KILN_VULKAN_GDN_CHUNKWISE_FALLBACK")
-        .map(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "" | "0" | "false" | "off" | "no"
-            )
-        })
-        .unwrap_or(false)
+    crate::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.gdn_chunkwise_fallback_enabled
 }
 
 // ---------------------------------------------------------------------------
@@ -1719,7 +1712,7 @@ pub fn vk_gdn_chunkwise(
         || g.requires_grad();
 
     if !needs_grad {
-        if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_ok() {
+        if !crate::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.gdn_chunkwise_single_submit_enabled {
             if gdn_chunkwise_fallback_enabled() {
                 tracing::warn!(
                     "single-submit vk_gdn_chunkwise no-grad path disabled; falling back"

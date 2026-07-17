@@ -275,12 +275,7 @@ impl DeviceOp2 for RmsNormOp {
 
 #[cfg(feature = "vulkan")]
 fn native_vulkan_rmsnorm_enabled() -> bool {
-    std::env::var("KILN_ENABLE_NATIVE_VULKAN_RMSNORM")
-        .map(|v| {
-            let v = v.trim().to_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false)
+    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.bridged_rmsnorm_forward_enabled
 }
 
 /// Convenience: dispatch `RmsNormOp` on `x` and `weight` with the op's eps.

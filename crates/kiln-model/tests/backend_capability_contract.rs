@@ -423,7 +423,6 @@ fn generated_capability_report_lists_request_descriptors() {
         "BackendTrainingCapabilities",
         "ServerTrainingDispatchPolicy",
         "TrainingAccelerationProfilePolicy",
-        "TrainingAccelerationEnvFlagPolicy",
         "ReplayCapabilities",
         "ReplayAuthority",
         "BackendFallbackCapabilities",
@@ -884,19 +883,6 @@ fn generated_capability_report_lists_request_descriptors() {
             "TrainingAccelerationProfilePolicy should include {field}"
         );
     }
-    let training_acceleration_env_fields =
-        capability_descriptors["TrainingAccelerationEnvFlagPolicy"]["fields"]
-            .as_array()
-            .expect("TrainingAccelerationEnvFlagPolicy fields should be an array")
-            .iter()
-            .filter_map(|field| field["name"].as_str())
-            .collect::<Vec<_>>();
-    for field in ["env", "default_on"] {
-        assert!(
-            training_acceleration_env_fields.contains(&field),
-            "TrainingAccelerationEnvFlagPolicy should include {field}"
-        );
-    }
     let replay_authority_fields = capability_descriptors["ReplayAuthority"]["fields"]
         .as_array()
         .expect("ReplayAuthority fields should be an array")
@@ -1271,21 +1257,9 @@ fn training_acceleration_profile_policy_routes_vulkan_startup_log() {
         vulkan.log_message,
         TrainingAccelerationProfileLogMessage::Vulkan
     );
-    assert_eq!(
-        vulkan.linear.expect("linear env policy").env,
-        "KILN_VULKAN_LINEAR"
-    );
-    assert_eq!(
-        vulkan.sdpa.expect("sdpa env policy").env,
-        "KILN_VULKAN_SDPA"
-    );
-    assert_eq!(
-        vulkan
-            .rmsnorm_inference
-            .expect("rmsnorm inference env policy")
-            .env,
-        "KILN_VULKAN_RMSNORM"
-    );
+    assert_eq!(vulkan.linear, "on (qualified policy)");
+    assert_eq!(vulkan.sdpa, "on (qualified policy)");
+    assert_eq!(vulkan.rmsnorm_inference, "on (qualified policy)");
 
     for (name, device) in [
         ("cpu", Device::Cpu),

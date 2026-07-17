@@ -1531,9 +1531,9 @@ pub struct ServerTrainingDispatchPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrainingAccelerationProfilePolicy {
     pub log_message: TrainingAccelerationProfileLogMessage,
-    pub linear: Option<TrainingAccelerationEnvFlagPolicy>,
-    pub sdpa: Option<TrainingAccelerationEnvFlagPolicy>,
-    pub rmsnorm_inference: Option<TrainingAccelerationEnvFlagPolicy>,
+    pub linear: &'static str,
+    pub sdpa: &'static str,
+    pub rmsnorm_inference: &'static str,
     pub rmsnorm_training: &'static str,
     pub flce_provider: &'static str,
     pub resident_activation: &'static str,
@@ -1545,13 +1545,6 @@ pub struct TrainingAccelerationProfilePolicy {
 pub enum TrainingAccelerationProfileLogMessage {
     None,
     Vulkan,
-}
-
-/// Env flag whose startup status should be surfaced in a backend profile log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TrainingAccelerationEnvFlagPolicy {
-    pub env: &'static str,
-    pub default_on: bool,
 }
 
 /// One structured runtime capability descriptor for backend diagnostics.
@@ -2023,9 +2016,9 @@ impl ServerTrainingDispatchPolicy {
 impl TrainingAccelerationProfilePolicy {
     pub const NONE: Self = Self {
         log_message: TrainingAccelerationProfileLogMessage::None,
-        linear: None,
-        sdpa: None,
-        rmsnorm_inference: None,
+        linear: "n/a",
+        sdpa: "n/a",
+        rmsnorm_inference: "n/a",
         rmsnorm_training: "",
         flce_provider: "",
         resident_activation: "",
@@ -2034,18 +2027,9 @@ impl TrainingAccelerationProfilePolicy {
 
     pub const VULKAN: Self = Self {
         log_message: TrainingAccelerationProfileLogMessage::Vulkan,
-        linear: Some(TrainingAccelerationEnvFlagPolicy {
-            env: "KILN_VULKAN_LINEAR",
-            default_on: true,
-        }),
-        sdpa: Some(TrainingAccelerationEnvFlagPolicy {
-            env: "KILN_VULKAN_SDPA",
-            default_on: true,
-        }),
-        rmsnorm_inference: Some(TrainingAccelerationEnvFlagPolicy {
-            env: "KILN_VULKAN_RMSNORM",
-            default_on: true,
-        }),
+        linear: "on (qualified policy)",
+        sdpa: "on (qualified policy)",
+        rmsnorm_inference: "on (qualified policy)",
         rmsnorm_training: "auto (row_count >= 1024)",
         flce_provider: "auto (active_count >= 16)",
         resident_activation: "always (Phase 3.1 hooks)",
@@ -2550,9 +2534,6 @@ fn support_unless_env_set(env_var: &'static str) -> Support {
 
 fn gdn_recurrent_step_f32_support(name: &str, recurrent_step_supported: bool) -> Support {
     match name {
-        "vulkan" if std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_STEP_F32").is_ok() => {
-            Support::DisabledByEnv
-        }
         "vulkan" if recurrent_step_supported => Support::NativeWithConstraints,
         _ => Support::Declined,
     }

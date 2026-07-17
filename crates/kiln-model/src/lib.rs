@@ -64,9 +64,9 @@ pub use backend::capability::{
     ReplayRequestKind, ServerTrainingDispatchPolicy, ServerTrainingNativeRoute,
     SpeculativeDecodePolicy, StartupCapabilities, StorageCapabilities,
     StreamingPrefillAutoDispatch, StreamingPrefillBackendPolicy, Support,
-    TrainingAccelerationEnvFlagPolicy, TrainingAccelerationProfileLogMessage,
-    TrainingAccelerationProfilePolicy, TrainingOptimizerKind, TrainingOptimizerRequest,
-    TrainingOptimizerRounding, TrainingOptimizerSupport, TrainingOptimizerSupportError,
+    TrainingAccelerationProfileLogMessage, TrainingAccelerationProfilePolicy,
+    TrainingOptimizerKind, TrainingOptimizerRequest, TrainingOptimizerRounding,
+    TrainingOptimizerSupport, TrainingOptimizerSupportError,
 };
 pub use backend::residency::{
     ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource, ResidentResourceFamily,
@@ -117,7 +117,7 @@ pub use weights::{ModelSnapshotCleanup, ModelWeights};
 #[cfg(feature = "vulkan")]
 pub use kiln_vulkan_kernel::kernels::VULKAN_KERNEL_POLICY_SCHEMA_ID;
 #[cfg(not(feature = "vulkan"))]
-pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v1";
+pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v2";
 
 #[cfg(feature = "vulkan")]
 pub use kiln_vulkan_kernel::buffer::VulkanBufferAllocationStats;

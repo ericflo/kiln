@@ -19,9 +19,8 @@ use super::{BackendMatmulLayout, requested_matmul_layout};
 /// offset path in `linear_prefill_apply_offset` still needs the ceiling to
 /// sub-chunk oversized dispatches: the host hard-hung twice on Strix Halo
 /// when a single oversized submit (~4.36M workgroups) was queued, so the
-/// ceiling caps per-submit FLOP. Tunable via `KILN_VULKAN_LINEAR_MAX_GFLOP`
-/// (parsed once; `0` disables the guard).
-const DEFAULT_MAX_FLOP_PER_DISPATCH: u64 = 20_000_000_000;
+/// ceiling caps per-submit FLOP. The immutable qualified Vulkan policy owns
+/// the exact limit so malformed or late process state cannot disable it.
 
 /// FLOP estimate for `[batch, hidden] @ [hidden, out_dim]` (one mul + one
 /// add per inner term).
@@ -33,22 +32,7 @@ fn matmul_flop(batch: usize, hidden: usize, out_dim: usize) -> u64 {
 }
 
 fn max_flop_per_dispatch() -> u64 {
-    static CEILING: OnceLock<u64> = OnceLock::new();
-    *CEILING.get_or_init(|| {
-        std::env::var("KILN_VULKAN_LINEAR_MAX_GFLOP")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|gflop| {
-                if gflop <= 0.0 {
-                    u64::MAX
-                } else {
-                    (gflop * 1.0e9_f64).round() as u64
-                }
-            })
-            .unwrap_or(DEFAULT_MAX_FLOP_PER_DISPATCH)
-    })
+    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.linear_max_flop_per_dispatch
 }
 
 /// True when the requested matmul shape would exceed the per-dispatch FLOP

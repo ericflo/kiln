@@ -32,7 +32,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `cuda` | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 16 | 7 | 0 |
 | `rocm` | `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 17 | 9 | 7 |
 | `metal` | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_attention.rs`, `crates/kiln-model/src/backend/metal_config.rs`, `crates/kiln-model/src/backend/metal_conv1d.rs`, `crates/kiln-model/src/backend/metal_core.rs`, `crates/kiln-model/src/backend/metal_dense.rs`, `crates/kiln-model/src/backend/metal_gdn.rs`, `crates/kiln-model/src/backend/metal_icb.rs`, `crates/kiln-model/src/backend/metal_lm_head.rs`, `crates/kiln-model/src/backend/metal_msl.rs`, `crates/kiln-model/src/backend/metal_norm.rs`, `crates/kiln-model/src/backend/metal_paged.rs`, `crates/kiln-model/src/backend/metal_pipeline.rs`, `crates/kiln-model/src/backend/metal_precompile.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_runtime.rs`, `crates/kiln-model/src/backend/metal_training.rs` | 0 | 20 | 47 | 0 |
-| `vulkan` | `crates/kiln-model/src/backend/vulkan.rs`, `crates/kiln-model/src/backend/vulkan_attention.rs`, `crates/kiln-model/src/backend/vulkan_config.rs`, `crates/kiln-model/src/backend/vulkan_conv1d.rs`, `crates/kiln-model/src/backend/vulkan_decode_state.rs`, `crates/kiln-model/src/backend/vulkan_dense.rs`, `crates/kiln-model/src/backend/vulkan_device.rs`, `crates/kiln-model/src/backend/vulkan_gdn.rs`, `crates/kiln-model/src/backend/vulkan_linear.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/src/backend/vulkan_resources.rs`, `crates/kiln-model/src/backend/vulkan_tensor_bridge.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/src/backend/vulkan_weights.rs` | 0 | 21 | 31 | 0 |
+| `vulkan` | `crates/kiln-model/src/backend/vulkan.rs`, `crates/kiln-model/src/backend/vulkan_attention.rs`, `crates/kiln-model/src/backend/vulkan_config.rs`, `crates/kiln-model/src/backend/vulkan_conv1d.rs`, `crates/kiln-model/src/backend/vulkan_decode_state.rs`, `crates/kiln-model/src/backend/vulkan_dense.rs`, `crates/kiln-model/src/backend/vulkan_device.rs`, `crates/kiln-model/src/backend/vulkan_gdn.rs`, `crates/kiln-model/src/backend/vulkan_linear.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/src/backend/vulkan_resources.rs`, `crates/kiln-model/src/backend/vulkan_tensor_bridge.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/src/backend/vulkan_weights.rs` | 0 | 21 | 0 | 0 |
 
 ## Focused Backend Facets
 
@@ -121,7 +121,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `vulkan` | `runtime_supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_prefill` | no | none |
 | `vulkan` | `runtime_supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_update` | no | none |
 | `vulkan` | `runtime_supports_flash_attn_paged_decode` | `dynamic` | `NativeWithConstraints` | `runtime_flash_attn_paged_decode` | no | none |
-| `vulkan` | `runtime_supports_flash_attn_prefill` | `env_gated` | `NativeWithConstraints` | `runtime_flash_attn_prefill` | no | env |
+| `vulkan` | `runtime_supports_flash_attn_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_flash_attn_prefill` | no | none |
 | `vulkan` | `runtime_supports_flash_attn_prefill_head_major` | `literal_false` | `Declined` | `` | no | none |
 | `vulkan` | `runtime_supports_gdn_chunk_prep` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_chunk_prep` | no | none |
 | `vulkan` | `runtime_supports_gdn_chunk_scan` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_chunk_scan` | no | none |
@@ -186,7 +186,6 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `BackendTrainingCapabilities` | 5 | `hooks`, `precision`, `optimizer`, `server_dispatch`, `acceleration_profile` |
 | `ServerTrainingDispatchPolicy` | 3 | `native_route`, `native_training_env`, `native_training_default_enabled` |
 | `TrainingAccelerationProfilePolicy` | 8 | `log_message`, `linear`, `sdpa`, `rmsnorm_inference`, `rmsnorm_training`, `flce_provider`, `resident_activation`, `sgd_step_on_device` |
-| `TrainingAccelerationEnvFlagPolicy` | 2 | `env`, `default_on` |
 | `ReplayCapabilities` | 3 | `resident_decode`, `paged_decode_graph_outputs`, `authority` |
 | `ReplayAuthority` | 4 | `backend`, `production_authority`, `native_primitive`, `graph_crate_role` |
 | `BackendFallbackCapabilities` | 4 | `generic_device_op`, `decode_hot_path`, `decode_hot_path_debug_env`, `training_optimizer` |
@@ -372,35 +371,5 @@ Legacy aliases honored for compatibility:
 - `KILN_ENABLE_METAL_LM_HEAD_ARGMAX`
 
 ### VULKAN
-- `KILN_DISABLE_VULKAN_BF16_PACKED_FULL_ATTN_QKV_WEIGHTS`
-- `KILN_DISABLE_VULKAN_BF16_PACKED_GDN_IN_PROJ_WEIGHTS`
-- `KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS`
-- `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS`
-- `KILN_DISABLE_VULKAN_CONV1D_PREFILL_SINGLE_SUBMIT`
-- `KILN_DISABLE_VULKAN_FULL_ATTN_QKV`
-- `KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL`
-- `KILN_DISABLE_VULKAN_GDN_CHUNKWISE_FORWARD`
-- `KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT`
-- `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE`
-- `KILN_DISABLE_VULKAN_GDN_PREFILL_IN_PROJ`
-- `KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM`
-- `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE`
-- `KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK`
-- `KILN_DISABLE_VULKAN_LINEAR_ARGMAX_BATCH`
-- `KILN_DISABLE_VULKAN_LINEAR_DECODE`
-- `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_F32_DOWN`
-- `KILN_DISABLE_VULKAN_MLP_DECODE`
-- `KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_BATCH`
-- `KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER`
-- `KILN_ENABLE_VULKAN_FUSED_CONV1D`
-- `KILN_ENABLE_VULKAN_FUSED_CONV1D_UPDATE`
-- `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED`
-- `KILN_ENABLE_VULKAN_GDN_FORWARD_SUB`
-- `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD`
-- `KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE`
-- `KILN_ENABLE_VULKAN_MLP_GATE_UP`
-- `KILN_VULKAN_GDN_CHUNKWISE_FALLBACK`
-- `KILN_VULKAN_LINEAR_MAX_GFLOP`
-- `KILN_VULKAN_RESIDENT_DECODE`
-- `KILN_VULKAN_SDPA`
+- none detected
 

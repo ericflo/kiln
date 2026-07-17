@@ -179,7 +179,7 @@ disabled.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v6`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v7`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
 dashboard all report the same configured/effective/source values, plus the
 compiled Vulkan kernel-policy schema ID; lower model, tensor, and kernel paths
@@ -214,7 +214,7 @@ derived canonical environment name instead.
 aliases. Previously, model and ROCm flash paths parsed different permissive
 values during execution and recomputed score budgets from changing free-memory
 snapshots, permitting route geometry to change between layers or requests.
-The v6 policy fixes one bounded ceiling before execution; the ROCm allocator
+The v7 policy fixes one bounded ceiling before execution; the ROCm allocator
 governor may still reject a planned operation when its exact working set is no
 longer admissible, but it cannot silently shrink or expand that plan.
 
@@ -222,7 +222,7 @@ longer admissible, but it cannot silently shrink or expand that plan.
 
 Vulkan kernel selection is an immutable implementation contract, not a public
 configuration surface. Product execution uses
-`kiln.vulkan-kernel-policy.v1`, defined by the typed
+`kiln.vulkan-kernel-policy.v2`, defined by the typed
 `QUALIFIED_VULKAN_KERNEL_POLICY` object before any dispatch. There is no TOML,
 CLI, request, or environment override for its leaves. Changing one requires a
 reviewed source change, a new policy version, backend/oracle parity, and new
@@ -232,6 +232,10 @@ The qualified policy fixes these exact route decisions:
 
 | Family | Qualified selection |
 |---|---|
+| Model route availability | GDN, GDN prefill input projection, fused GDN gates/norm, single-submit GDN chunkwise prefill, fused conv1d prefill and its single-submit path, recurrent unexpanded Q/K plus Q/K norm, fused batch GDN state, linear decode and batched argmax, full-attention QKV, SDPA prefill, paged decode with GPU block-table gather, fused MLP decode, resident decode, and final GDN state-readback elision are enabled. Every resident-decode entry point uses the same policy leaf. |
+| Packed model weights | BF16-packed linear, GDN input-projection, full-attention QKV, and MLP decode weights are enabled. The MLP BF16 gate/up with F32 down route is enabled. |
+| Quarantined or slower model routes | Full-chunk GDN, single-token fused conv1d update, GDN forward substitution, batch-one fused GDN decode, the standalone MLP gate/up route, decode recurrent-state residency, resumable-prefill recurrent-state residency, fallback after a failed/disabled single-submit GDN chunkwise route, and the CPU-bridged/generic-tensor native Vulkan RMSNorm experiment are disabled. The device-resident model RMSNorm route remains enabled. |
+| Dispatch safety | Vulkan linear submissions are capped at exactly 20,000,000,000 estimated FLOP and oversized work is sub-chunked. The former floating-point environment parser and its zero-means-unbounded escape are removed. |
 | BF16 MLP | Four-row gate/up at batch 8, four-row down at batch 16, four-row F32 down at batch 8, and eight-row kernels at batch 256; all are enabled. |
 | BF16 linear | Four-row kernels at batch 16 and eight-row kernels at batch 64; both are enabled. |
 | BF16 full-attention QKV | Four-row kernels at batch 2 and eight-row kernels at batch 64; both are enabled. |
@@ -241,15 +245,23 @@ The qualified policy fixes these exact route decisions:
 | Paged-attention split-K | Batch one uses 32 chunks. Batch 16 or wider uses 4. Smaller batches use 2 at 64 or more blocks per sequence and 4 otherwise, with an absolute 256-chunk bound. |
 | Prefill and profiling | Pair-row prefill matmul is enabled from batch 8. Kernel-stage and resident-decode profiling are disabled in product execution. |
 
-The former `KILN_DISABLE_VULKAN_*`, `KILN_ENABLE_VULKAN_*`, Vulkan kernel
-threshold, split-K, and kernel-stage profiling variables read by
-`kiln-vulkan-kernel::kernels` and the resident model path were deleted without
-aliases or replacement fields. They permitted route mixtures and permissive
-integer fallback below the typed startup boundary, and the model duplicated a
-different copy of several thresholds. Historical optimization documents may
-name those variables as experiment evidence; they do not describe current
-runtime controls. The research microbenchmark remains a separate executable
-surface and must not be treated as product configuration.
+The former variables represented by this table, including the applicable
+`KILN_DISABLE_VULKAN_*`, `KILN_ENABLE_VULKAN_*`, kernel-threshold, split-K,
+kernel-stage profiling, model-route, packed-weight, recurrence-residency, and
+resident-decode controls, were deleted without aliases or replacement fields.
+They permitted route mixtures and permissive fallback below the typed startup
+boundary, and the model duplicated a different copy of several thresholds.
+Historical optimization documents may name those variables as experiment
+evidence; they do not describe current runtime controls. The research
+microbenchmark remains a separate executable surface and must not be treated as
+product configuration.
+
+This policy is not yet the repository-wide environment boundary. Vulkan device
+selection/validation and the remaining `KILN_VK_*` operator research controls
+are still listed in the generated [Runtime Environment Inventory](RUNTIME_ENVIRONMENT_INVENTORY.md).
+They are not qualified public configuration, and a launch containing one is not
+comparable to a qualified receipt. Phase 8.1 remains open until those reads are
+deleted or moved behind an explicit typed qualification interface.
 
 ### ROCm synchronization semantics
 
@@ -1352,14 +1364,11 @@ residency enabled and decode residency disabled, the cancellation/drain probe,
 and the checked soak. A micro-kernel or small-state parity result alone is not a
 release gate.
 
-The historical decode residency experiment remains a separate opt-in behind
-`KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1`; the internal migration
-guard `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` disables that decode
-scope. Startup resolves both once into typed backend runtime configuration, and
-no forward path re-reads them. They are inventoried in
-[Runtime Environment Inventory](RUNTIME_ENVIRONMENT_INVENTORY.md) as migration
-inputs rather than supported public configuration. Neither variable can bypass
-the prompt-residency quarantine.
+The historical decode residency experiment is also disabled by immutable
+`kiln.vulkan-kernel-policy.v2`. Its former enable and disable variables were
+deleted without aliases; neither decode nor prompt residency can be activated
+by process environment. Re-enabling either route requires a reviewed source
+policy version and the full evidence sequence above.
 
 Trusted `GET /v1/debug/model-state` exposes current ownership as
 `caches.resident_recurrent_state.entry_count`, `buffer_bytes`, and

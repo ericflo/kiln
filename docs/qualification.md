@@ -1736,14 +1736,14 @@ observe nonzero values only while a prefill quantum is live. Its cleanup must be
 scoped to the stable request owner; clearing the whole registry would be an
 invalid implementation because it could corrupt concurrent rows.
 
-No environment variable can enable the quarantined prompt scope. The internal
-migration rollback `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1`
-disables the separate decode recurrent-state experiment for a fully materialized
-control. A control that merely reports `resident_prefill_used=false` is
+No environment variable can enable the quarantined prompt or decode scope;
+`kiln.vulkan-kernel-policy.v2` fixes both off. A fully materialized control
+requires a reviewed source-policy change and separately attested binary. A
+control that merely reports `resident_prefill_used=false` is
 insufficient: that field describes the native multi-row prefill route, not this
 direct GDN registry. A valid control additionally observes zero direct-registry
-ownership and records no direct resident GDN use. The decode guard is
-startup-cached, so each A/B arm requires a fresh server process.
+ownership and records no direct resident GDN use. Each source-policy A/B arm
+requires a fresh server process and its own source/binary identity.
 
 Any future device-resident repair must preserve the ordinary external-dtype boundary. For a
 BF16 recurrent tensor, every completed nonfinal token chunk performs a

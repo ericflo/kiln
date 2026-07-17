@@ -2597,9 +2597,9 @@ def accelerator_policy_attestation_failures(
         "profile" if graphs_requested else "disabled"
     )
     expected = {
-        "schema_id": "kiln.accelerator-runtime-policy.v6",
-        "version": 6,
-        "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v1",
+        "schema_id": "kiln.accelerator-runtime-policy.v7",
+        "version": 7,
+        "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v2",
         "serving_profile": serving_profile,
         "serving_profile_source": "config_file",
         "kt_api_mode": {

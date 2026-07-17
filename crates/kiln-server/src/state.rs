@@ -19,8 +19,7 @@ use kiln_model::{
     GpuMemoryBudgetPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
     InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy, LinearAttentionState, ModelRunner,
     PagedKvCacheKt, PagedPrefixNextToken, PagedPrefixRegistration, Support,
-    TrainingAccelerationEnvFlagPolicy, TrainingAccelerationProfileLogMessage,
-    TrainingAccelerationProfilePolicy,
+    TrainingAccelerationProfileLogMessage, TrainingAccelerationProfilePolicy,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_tensor::DType;
@@ -4581,35 +4580,14 @@ impl AppState {
     }
 }
 
-fn training_acceleration_env_flag_status(
-    policy: Option<TrainingAccelerationEnvFlagPolicy>,
-) -> &'static str {
-    let Some(policy) = policy else {
-        return "n/a";
-    };
-    let raw = std::env::var(policy.env).ok();
-    let lower = raw.as_deref().map(str::trim).map(str::to_ascii_lowercase);
-    let truthy = matches!(lower.as_deref(), Some("1") | Some("true") | Some("yes"));
-    let falsy = matches!(lower.as_deref(), Some("0") | Some("false") | Some("no"));
-    match (truthy, falsy, policy.default_on) {
-        (true, _, _) => "on (env)",
-        (_, true, _) => "off (env)",
-        (_, _, true) => "on (default)",
-        (_, _, false) => "off (default)",
-    }
-}
-
 fn log_backend_training_acceleration_profile(policy: TrainingAccelerationProfilePolicy) {
-    let linear = training_acceleration_env_flag_status(policy.linear);
-    let sdpa = training_acceleration_env_flag_status(policy.sdpa);
-    let rmsnorm_inference = training_acceleration_env_flag_status(policy.rmsnorm_inference);
     match policy.log_message {
         TrainingAccelerationProfileLogMessage::None => {}
         TrainingAccelerationProfileLogMessage::Vulkan => {
             tracing::info!(
-                linear,
-                sdpa,
-                rmsnorm_inference,
+                linear = policy.linear,
+                sdpa = policy.sdpa,
+                rmsnorm_inference = policy.rmsnorm_inference,
                 rmsnorm_training = policy.rmsnorm_training,
                 flce_provider = policy.flce_provider,
                 resident_activation = policy.resident_activation,

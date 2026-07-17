@@ -134,9 +134,15 @@ fn fast_batched_linear_state_scatter_enabled() -> bool {
 }
 
 fn skip_final_gdn_state_readback_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_SKIP_FINAL_GDN_STATE_READBACK").is_err())
+    #[cfg(feature = "vulkan")]
+    {
+        kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY
+            .skip_final_gdn_state_readback_enabled
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        true
+    }
 }
 
 struct GdnRecurrentResidentStateScope<'a> {

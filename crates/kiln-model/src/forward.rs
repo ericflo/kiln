@@ -4449,7 +4449,7 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
 /// `broadcast_matmul_cpu_compatible` directly, bypassing the existing
 /// Vulkan routing in `linear_with_lora_t_backend_decode_if`. This
 /// helper threads them through `LinearBackend::runtime_linear_prefill_apply`
-/// (the autograd-safe `CustomOp1`) when `KILN_VULKAN_LINEAR=1` is set.
+/// (the autograd-safe `CustomOp1`) under the qualified Vulkan route policy.
 /// On Qwen3.5-4B that's 24 GDN layers × 4 in-proj matmuls per layer
 /// — the dominant CPU compute in training before this commit.
 fn gdn_in_proj_matmul(
@@ -6893,12 +6893,12 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
         }
         // Training returned through the authoritative tape recorder above.
     }
-    // Resident Vulkan RMSNorm: opt-in only. The raw `qwen_rmsnorm_forward`
+    // Resident Vulkan RMSNorm. The raw `qwen_rmsnorm_forward`
     // shader passes its narrow kernel parity test, but the kt wrapper path has
     // produced non-finite rows on real model tensors under lavapipe/RADV soak
     // setups. Keep correctness as the default by falling through to
-    // `rms_norm_fallback`; set `KILN_ENABLE_NATIVE_VULKAN_RMSNORM=1` to
-    // exercise the native leaf while debugging that backend path.
+    // `rms_norm_fallback`; the qualified policy keeps the separate bridged
+    // and generic-tensor leaf disabled while this resident route remains on.
     #[cfg(feature = "vulkan")]
     if crate::backend::vulkan_active()
         && matches!(x.device(), Device::Vulkan(_))
@@ -6963,19 +6963,15 @@ fn rocm_fused_rmsnorm_allowed_for_tensor(x: &Tensor) -> bool {
     true
 }
 
-/// `KILN_ENABLE_NATIVE_VULKAN_RMSNORM=1` opts into the native Vulkan RMSNorm
-/// leaf. Default: disabled, so Vulkan uses the composite fallback.
+/// The unsafe CPU-bridged Vulkan RMSNorm leaf is disabled by qualified policy.
 #[cfg(feature = "vulkan")]
 fn vulkan_rmsnorm_forward_inference_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_ENABLE_NATIVE_VULKAN_RMSNORM")
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                v == "1" || v == "true" || v == "yes" || v == "on"
-            })
-            .unwrap_or(false)
-    })
+    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.bridged_rmsnorm_forward_enabled
+}
+
+#[cfg(feature = "vulkan")]
+fn qualified_vulkan_resident_decode_enabled() -> bool {
+    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.resident_decode_enabled
 }
 
 /// File-private kt⇔bytes helpers — migrated inline from
@@ -15061,7 +15057,7 @@ fn gated_deltanet_forward_decode_if_inner(
             && !capture_b11_taps
             && !capture_c41_taps
             && gdn_forward_only_fastpaths
-            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_GDN", true)
+            && qualified_vulkan_resident_decode_enabled()
         {
             if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
@@ -24039,7 +24035,7 @@ fn transformer_block_paged_with_rope_tables(
             && !crate::mtp_debug::current_b12_layer_is_31()
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
             && config.attn_output_gate
-            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_BLOCK", true)
+            && qualified_vulkan_resident_decode_enabled()
         {
             if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
@@ -24987,7 +24983,7 @@ fn try_vulkan_resident_batched_decode_argmax(
         || start_positions.iter().any(|&p| p == 0)
         || lora.is_some()
         || !config.attn_output_gate
-        || !kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+        || !qualified_vulkan_resident_decode_enabled()
         || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
         || crate::mtp_debug::is_subop_capture_armed()
@@ -25120,7 +25116,7 @@ fn try_vulkan_resident_batched_decode_hidden(
         || start_positions.iter().any(|&p| p == 0)
         || lora.is_some()
         || !config.attn_output_gate
-        || !kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+        || !qualified_vulkan_resident_decode_enabled()
         || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
         || crate::mtp_debug::is_subop_capture_armed()
@@ -25271,7 +25267,7 @@ fn try_vulkan_resident_batched_decode_sample(
         || start_positions.iter().any(|&p| p == 0)
         || lora.is_some()
         || !config.attn_output_gate
-        || !kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+        || !qualified_vulkan_resident_decode_enabled()
         || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
         || crate::mtp_debug::is_subop_capture_armed()
@@ -25406,7 +25402,7 @@ fn native_resident_decode_required(
         && start_positions.iter().all(|&pos| pos > 0)
         && lora.is_none()
         && config.attn_output_gate
-        && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+        && qualified_vulkan_resident_decode_enabled()
         && ReplayBackend::runtime_supports_resident_decode(backend)
         && !crate::mtp_debug::is_subop_capture_armed()
         && !crate::mtp_debug::current_b12_layer_is_31()
@@ -26320,7 +26316,7 @@ pub fn model_forward_paged(
             && !crate::mtp_debug::current_b12_layer_is_31()
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
             && config.attn_output_gate
-            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+            && qualified_vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
@@ -26569,7 +26565,7 @@ pub fn model_forward_paged_last_token(
             && !crate::mtp_debug::current_b12_layer_is_31()
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
             && config.attn_output_gate
-            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+            && qualified_vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
@@ -26664,8 +26660,8 @@ pub fn model_forward_paged_last_token_resident(
 
     // Native single-submit orchestrator: chains all 32 layers' dispatches
     // into one `CommandBatch`, eliminating per-layer Tensor bridging and
-    // submit overhead. Gated on KILN_VK_RESIDENT_DECODE_NATIVE (default
-    // on); falls back transparently to the per-layer fast-path embedded
+    // submit overhead. Enabled by the qualified Vulkan policy; falls back
+    // transparently to the per-layer fast-path embedded
     // in `model_forward_paged_inner` on any decline.
     #[cfg(feature = "vulkan")]
     {
@@ -26677,7 +26673,7 @@ pub fn model_forward_paged_last_token_resident(
             && !crate::mtp_debug::current_b12_layer_is_31()
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
             && config.attn_output_gate
-            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+            && qualified_vulkan_resident_decode_enabled()
         {
             if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
@@ -26736,12 +26732,8 @@ fn model_forward_paged_last_token_resident_native_vk(
 ) -> Result<Option<Tensor>> {
     use kiln_vulkan_kernel::CommandBatch;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-    static NATIVE_PHASE_TIMING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let timing_enabled = *NATIVE_PHASE_TIMING.get_or_init(|| {
-        std::env::var("KILN_VK_NATIVE_PHASE_TIMING")
-            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off" | "no"))
-            .unwrap_or(false)
-    });
+    let timing_enabled =
+        kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.profile_resident_decode_timing;
     static EMBED_NS: AtomicU64 = AtomicU64::new(0);
     static ROPE_NS: AtomicU64 = AtomicU64::new(0);
     static UPLOAD_NS: AtomicU64 = AtomicU64::new(0);
@@ -27154,7 +27146,7 @@ pub fn model_forward_paged_last_token_greedy(
             && !crate::mtp_debug::current_b12_layer_is_31()
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
             && config.attn_output_gate
-            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+            && qualified_vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
@@ -28910,7 +28902,7 @@ fn model_forward_paged_inner_bounded(
                 let capture_b11_taps = crate::mtp_debug::should_capture_b11_tap_for_layer(i);
                 // Vulkan-resident full-block GDN fast-path. Gates: seq_len=1
                 // decode hot path, start_pos > 0, no MTP/debug taps armed,
-                // no LoRA, and KILN_VK_RESIDENT_DECODE_GDN_FULL_BLOCK default on.
+                // no LoRA, and qualified resident decode enabled.
                 // Bypasses the legacy pre-norm/residual/post-norm/MLP/final-residual
                 // candle path entirely when active.
                 #[cfg(feature = "vulkan")]
@@ -28930,10 +28922,7 @@ fn model_forward_paged_inner_bounded(
                         && !crate::mtp_debug::should_capture_c46_layer1_row_provenance_tap_for_layer(
                             i,
                         )
-                        && kiln_core::env_flag::env_flag(
-                            "KILN_VK_RESIDENT_DECODE_GDN_FULL_BLOCK",
-                            true,
-                        )
+                        && qualified_vulkan_resident_decode_enabled()
                     {
                         if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                             .downcast_ref::<crate::backend::vulkan::VulkanBackend>(

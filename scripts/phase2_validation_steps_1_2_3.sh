@@ -1,31 +1,19 @@
 #!/usr/bin/env bash
 #
-# Phase 2 hardware validation — Steps 1 and 2 from the runbook
-# (`docs/audits/phase2_hardware_validation_runbook_2026-05-11.md`).
+# Bounded Vulkan training smoke retained from the Phase 2 validation work.
 #
-# Step 1: smallest payload exercising FLCE auto-engagement at
-#         active_count >= 16, with all KILN_VULKAN_LINEAR* defaults.
-# Step 2: same payload with KILN_VULKAN_LINEAR=1 — first run that
-#         exercises the in-op chunking against the SFT path.
-# Step 3: same payload with KILN_VULKAN_LINEAR=1 + KILN_VULKAN_SDPA=1
-#         — full-attn matmuls go through the new SDPA F32 kernel.
-#         At T~256 the per-dispatch SDPA work is ~134 MFLOP × 8
-#         layers, well under any safety threshold.
-#
-# All three steps are bounded (1 example × 1 epoch, T~256, ~30s each)
-# and abort if MemAvailable drops below 8 GiB. Step 4 (the original
-# T=918 repro) is still operator-driven per the runbook — running it
-# autonomously is what crashed the host twice.
+# The old three-arm environment comparison was removed with the immutable
+# Vulkan execution policy. This runs the one supported qualified route with a
+# tiny payload and aborts if MemAvailable drops below 8 GiB. The original
+# T=918 repro remains operator-driven because it crashed the host twice.
 #
 # Usage:
-#   ./scripts/phase2_validation_step1_step2.sh <model-path>
+#   ./scripts/phase2_validation_steps_1_2_3.sh <model-path>
 #
 # Exit codes:
-#   0  — all three steps passed
+#   0  — qualified-policy smoke passed
 #   1  — pre-flight check failed (build, memory, or stale processes)
-#   2  — Step 1 failed
-#   3  — Step 2 failed
-#   4  — Step 3 failed
+#   2  — training smoke failed
 
 set -euo pipefail
 
@@ -101,7 +89,10 @@ if [[ "$SKIP_BUILD" -eq 1 ]]; then
     echo ">>> Pre-flight: build (skipped per --skip-build)" >&2
 else
     echo ">>> Pre-flight: build" >&2
-    cargo build --release -p kiln-server --features vulkan --no-default-features 2>&1 \
+    PATH="$HOME/.cargo/bin:$PATH" \
+        KILN_CARGO_MIN_AVAILABLE_GIB=15 \
+        KILN_CARGO_CPU_QUOTA_PERCENT=50 \
+        scripts/cargo-bounded.sh build --release -p kiln-server --features vulkan --no-default-features 2>&1 \
         | tee "$LOG_DIR/build.log" >&2
 fi
 
@@ -236,50 +227,19 @@ run_step() {
 }
 
 # -----------------------------------------------------------------------------
-# Step 1: minimal everything-off — opts out of every Vulkan training
-# acceleration path. This is the "all-CPU forward + candle CPU SGD"
-# configuration; gives a known-good baseline against which steps 2-3
-# can be diff'd.
+# Qualified immutable Vulkan route. Environment A/B arms no longer exist.
 # -----------------------------------------------------------------------------
-if ! run_step "step1-everything-off" 'RUST_LOG=info
-KILN_VULKAN_LINEAR=0
-KILN_VULKAN_SDPA=0
-KILN_VULKAN_FLCE=0'; then
-    echo ">>> Step 1 FAILED. Logs in $LOG_DIR" >&2
+if ! run_step "qualified-policy" 'RUST_LOG=info'; then
+    echo ">>> Qualified-policy smoke FAILED. Logs in $LOG_DIR" >&2
     exit 2
 fi
 
-# -----------------------------------------------------------------------------
-# Step 2: production defaults — KILN_VULKAN_LINEAR=on, SDPA=on, FLCE
-# auto, on-device LoRA delta + BF16 SGD. This is what `kiln serve`
-# now runs out of the box after Phase 4.x landed (commit e501663f).
-# -----------------------------------------------------------------------------
-if ! run_step "step2-production-defaults" 'RUST_LOG=info'; then
-    echo ">>> Step 2 FAILED. Logs in $LOG_DIR" >&2
-    exit 3
-fi
-
-# -----------------------------------------------------------------------------
-# Step 3: explicit KILN_VULKAN_LINEAR=1 + KILN_VULKAN_SDPA=1.
-# Functionally identical to Step 2 (same as defaults) but flushes
-# the OnceLock-cached env state on a fresh process and surfaces a
-# different "linear=on (env)" vs "on (default)" tag in the
-# acceleration-profile log so the operator can confirm both paths
-# produce the same loss.
-# -----------------------------------------------------------------------------
-if ! run_step "step3-vulkan-explicit" 'RUST_LOG=info
-KILN_VULKAN_LINEAR=1
-KILN_VULKAN_SDPA=1'; then
-    echo ">>> Step 3 FAILED. Logs in $LOG_DIR" >&2
-    exit 4
-fi
-
-echo ">>> Steps 1, 2, 3 passed. Logs in $LOG_DIR" >&2
+echo ">>> Qualified-policy smoke passed. Logs in $LOG_DIR" >&2
 
 # Compact summary of the per-step server logs — surfaces the
 # acceleration-profile and chunking traces so the operator can confirm
 # the right paths engaged without grepping the full server logs.
-for step in step1-everything-off step2-production-defaults step3-vulkan-explicit; do
+for step in qualified-policy; do
     echo "" >&2
     echo "--- $step traces ---" >&2
     if [[ -f "$LOG_DIR/$step-server.log" ]]; then
@@ -289,5 +249,5 @@ for step in step1-everything-off step2-production-defaults step3-vulkan-explicit
 done
 
 echo "" >&2
-echo ">>> Next: run Step 4 (original /tmp/sft-data.jsonl repro) per runbook." >&2
+echo ">>> The original T=918 repro remains a separate operator-driven run." >&2
 exit 0

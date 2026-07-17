@@ -105,7 +105,6 @@ CAPABILITY_DESCRIPTOR_STRUCTS = [
     "BackendTrainingCapabilities",
     "ServerTrainingDispatchPolicy",
     "TrainingAccelerationProfilePolicy",
-    "TrainingAccelerationEnvFlagPolicy",
     "ReplayCapabilities",
     "ReplayAuthority",
     "BackendFallbackCapabilities",

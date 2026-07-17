@@ -63,8 +63,7 @@ pub struct VulkanBackend {
     /// Backend-owned recurrent state makes resumable prefill independent of
     /// which serving worker resumes or discards the request.
     pub(super) recurrent_state_resident_registry: RecurrentStateResidentRegistry,
-    /// Cached at construction: reading env vars per decode step × 24 GDN layers
-    /// shows up in decode NVTX captures. Env vars don't change at runtime.
+    /// Cached at construction from the immutable qualified Vulkan policy.
     pub(super) gdn_enabled: bool,
     pub(super) gdn_prefill_in_proj_enabled: bool,
     pub(super) gdn_gates_enabled: bool,
@@ -90,11 +89,9 @@ pub struct VulkanBackend {
     pub(super) bf16_packed_mlp_decode_weights_enabled: bool,
     pub(super) recurrent_state_residency_enabled: bool,
     pub(super) prefill_recurrent_state_residency_enabled: bool,
-    /// Cached `supports_resident_decode()` evaluation. The trait method
-    /// is called per-call on the hot path; reading env vars and checking
-    /// the device handle every time would be wasteful. Set at
-    /// construction from `KILN_VULKAN_RESIDENT_DECODE` (default on when
-    /// the device is up) and never changes.
+    /// Cached `supports_resident_decode()` evaluation. The trait method is
+    /// called per-call on the hot path, so the qualified process-lifetime
+    /// policy is projected once at construction and never changes.
     resident_decode_enabled: bool,
     /// Lazily constructed fixed ring of 3-4 reusable intermediate
     /// `VulkanBuffer`s sized to `max(hidden, intermediate) × max_batch × 4`
@@ -183,7 +180,7 @@ impl VulkanBackend {
     }
 
     pub fn new(device: kiln_tensor::Device) -> Self {
-        let config = VulkanRuntimeConfig::from_env();
+        let config = VulkanRuntimeConfig::qualified();
 
         let vulkan_device = vulkan_device::new_backend_device();
 
@@ -552,12 +549,11 @@ impl AttentionBackend for VulkanBackend {
         // Default-enabled now that the kernel is parity-tested at
         // multiple shapes (including Qwen3.5-4B head_dim=128) and
         // bounded in dispatch size (workgroup_count = T × H × B
-        // is well under any reasonable Vulkan limit for production
-        // shapes). Set `KILN_VULKAN_SDPA=0` to opt out.
+        // is well under any reasonable Vulkan limit for production shapes).
         if !self.has_vulkan() {
             return false;
         }
-        kiln_core::env_flag::env_flag("KILN_VULKAN_SDPA", true)
+        kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.flash_attn_prefill_enabled
     }
 
     fn runtime_supports_flash_attn_prefill_head_major(&self) -> bool {

@@ -2029,11 +2029,11 @@ mod tests {
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v6"
+            "kiln.accelerator-runtime-policy.v7"
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["vulkan_kernel_policy_schema_id"],
-            "kiln.vulkan-kernel-policy.v1"
+            "kiln.vulkan-kernel-policy.v2"
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["kt_api_mode"]["effective"],

@@ -6,21 +6,14 @@
 //! residency registries, and optimizer dispatch.
 
 use anyhow::{Context, Result};
-use std::sync::OnceLock;
 
 use super::vulkan::VulkanBackend;
 use super::vulkan_tensor_bridge::{
     kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape, resident_sdpa_prefill_b1,
 };
 
-/// When set, the multi-batch paged attention decode path walks the
-/// block_table inside the Vulkan shader instead of compacting K/V on the
-/// host. Default: enabled. Disable via
-/// `KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER=1` to force a visible native
-/// helper error for parity comparisons.
 fn paged_decode_gpu_gather_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER").is_err())
+    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.paged_decode_gpu_gather_enabled
 }
 
 fn generic_paged_decode_splitk_chunks(batch: usize, max_blocks_per_seq: usize) -> usize {
@@ -219,9 +212,7 @@ fn flash_attn_prefill_vulkan(
         match resident_sdpa_prefill_b1(q, k, v, seq_len, num_heads, head_dim, softmax_scale) {
             Ok(out) => return Ok(Some(out)),
             Err(e) => {
-                if std::env::var("KILN_VK_TRACE").is_ok() {
-                    eprintln!("[vk] resident sdpa_prefill fell back to bytes: {e}");
-                }
+                tracing::debug!(error = %e, "resident Vulkan SDPA prefill fell back to bytes");
             }
         }
     }

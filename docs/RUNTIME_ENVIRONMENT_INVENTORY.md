@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **767 direct read call sites** and
+The scanner records **712 direct read call sites** and
 **359 process-mutation call sites**. It can
-statically name **253 distinct literal `KILN_*`
-read names** across **396 call sites**.
+statically name **213 distinct literal `KILN_*`
+read names** across **342 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 295 | 212 | 0 |
+| Experimental/debug migration | 240 | 172 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 135 | 41 | 351 |
 
@@ -56,19 +56,17 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/forward.rs` | 61 | 49 |
-| `crates/kiln-model/src/backend/vulkan_config.rs` | 27 | 27 |
+| `crates/kiln-model/src/forward.rs` | 48 | 43 |
 | `crates/kiln-model/src/mtp_debug.rs` | 24 | 24 |
 | `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
 | `crates/kiln-model/src/backend/rocm.rs` | 11 | 9 |
-| `crates/kiln-model/src/backend/capability.rs` | 10 | 2 |
+| `crates/kiln-model/src/backend/capability.rs` | 9 | 1 |
 | `crates/kiln-model/src/tape_forward.rs` | 9 | 8 |
 | `crates/kiln-server/src/bench.rs` | 9 | 8 |
 | `crates/kiln-model/src/cuda_graph.rs` | 8 | 8 |
 | `crates/kiln-train/src/trainer.rs` | 8 | 8 |
-| `crates/kiln-model/src/generate.rs` | 6 | 4 |
 | `crates/kiln-model/src/metal_graph.rs` | 6 | 4 |
-| `crates/kiln-model/src/backend/vulkan_gdn.rs` | 5 | 4 |
+| `crates/kiln-model/src/generate.rs` | 5 | 3 |
 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` | 5 | 2 |
 | `crates/kiln-model/src/rocm_w8_proj.rs` | 4 | 4 |
 | `crates/kiln-tensor/csrc/paged_decode_meta.cu` | 4 | 2 |
@@ -80,12 +78,10 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-model/src/marlin_proj.rs` | 3 | 3 |
 | `crates/kiln-train/src/opd.rs` | 3 | 3 |
 | `crates/kiln-vulkan-kernel/src/device.rs` | 3 | 2 |
-| `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs` | 3 | 3 |
 | `crates/kiln-autograd/src/tape.rs` | 2 | 2 |
 | `crates/kiln-core/src/env_flag.rs` | 2 | 0 |
 | `crates/kiln-flash-attn/csrc/rocm_flash_api.cpp` | 2 | 0 |
 | `crates/kiln-model/src/backend/metal_config.rs` | 2 | 0 |
-| `crates/kiln-model/src/backend/vulkan_attention.rs` | 2 | 2 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | 2 | 0 |
 | `crates/kiln-server/src/api/debug_model_state.rs` | 2 | 1 |
 | `crates/kiln-server/src/cli.rs` | 2 | 0 |
@@ -104,20 +100,17 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-kt-bridge/src/tape_bridge.rs` | 1 | 0 |
 | `crates/kiln-memory/src/vram.rs` | 1 | 0 |
 | `crates/kiln-model/src/backend/metal_attention.rs` | 1 | 0 |
-| `crates/kiln-model/src/backend/vulkan.rs` | 1 | 1 |
-| `crates/kiln-model/src/backend/vulkan_linear.rs` | 1 | 1 |
 | `crates/kiln-model/src/c1_attr.rs` | 1 | 1 |
 | `crates/kiln-opd-loss-kernel/src/lib.rs` | 1 | 1 |
 | `crates/kiln-rmsnorm-kernel/src/kt_api.rs` | 1 | 1 |
 | `crates/kiln-rocblas/src/algo_cache.rs` | 1 | 0 |
-| `crates/kiln-server/src/state.rs` | 1 | 0 |
 | `crates/kiln-tensor/src/capture_alloc.rs` | 1 | 1 |
 | `crates/kiln-tensor/src/determinism.rs` | 1 | 1 |
 | `crates/kiln-tensor/src/metal_rt/commands.rs` | 1 | 0 |
-| `crates/kiln-tensor/src/ops/rmsnorm.rs` | 1 | 1 |
 | `crates/kiln-tensor/src/rocm_capture_alloc.rs` | 1 | 1 |
 | `crates/kiln-train/src/remote_teacher.rs` | 1 | 0 |
 | `crates/kiln-vulkan-blas/src/pipeline_cache.rs` | 1 | 0 |
+| `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs` | 1 | 1 |
 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_gated_rms_norm.rs` | 1 | 1 |
 | `crates/kiln-vulkan-kernel/src/vk_ops/matmul_bf16w.rs` | 1 | 1 |
 | `crates/kiln-vulkan-kernel/src/vk_ops/solve_tri.rs` | 1 | 1 |
@@ -182,8 +175,8 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_FUSED_CUDA_ROTARY_QK` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_FUSED_GDN_DECODE` | Experimental/debug migration | 2 | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs` |
-| `KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM` | Experimental/debug migration | 3 | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_FUSED_GDN_GATES` | Experimental/debug migration | 3 | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/vulkan_config.rs` |
+| `KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM` | Experimental/debug migration | 2 | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs` |
+| `KILN_DISABLE_FUSED_GDN_GATES` | Experimental/debug migration | 2 | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs` |
 | `KILN_DISABLE_FUSED_L2_QK_NORM` | Experimental/debug migration | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_FUSED_PAGED_DECODE` | Experimental/debug migration, Test only | 9 | `crates/kiln-model/src/forward.rs` |
@@ -191,7 +184,7 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK` | Experimental/debug migration | 2 | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs` |
 | `KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK` | Experimental/debug migration | 2 | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs` |
-| `KILN_DISABLE_GDN_KERNEL` | Experimental/debug migration | 3 | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/vulkan_config.rs` |
+| `KILN_DISABLE_GDN_KERNEL` | Experimental/debug migration | 2 | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs` |
 | `KILN_DISABLE_GRPO_SHARED_PREFIX_REF` | Experimental/debug migration | 1 | `crates/kiln-train/src/trainer.rs` |
 | `KILN_DISABLE_MARLIN_BF16_DROP` | Experimental/debug migration, Test only | 3 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
@@ -209,28 +202,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_DISABLE_ROCM_SPLIT_PAGED_ATTN` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` |
 | `KILN_DISABLE_ROCM_W8_SAMPLED_LM_HEAD` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_ROCM_W8_SWIGLU` | Experimental/debug migration | 1 | `crates/kiln-model/src/rocm_w8_proj.rs` |
-| `KILN_DISABLE_VULKAN_BF16_PACKED_FULL_ATTN_QKV_WEIGHTS` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_BF16_PACKED_GDN_IN_PROJ_WEIGHTS` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_CONV1D_PREFILL_SINGLE_SUBMIT` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_FULL_ATTN_QKV` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_GDN_CHUNKWISE_FORWARD` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_gdn.rs` |
-| `KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT` | Experimental/debug migration | 2 | `crates/kiln-model/src/backend/vulkan_gdn.rs`, `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs` |
-| `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_gdn.rs` |
-| `KILN_DISABLE_VULKAN_GDN_PREFILL_IN_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_GDN_RECURRENT_STEP_F32` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/capability.rs` |
-| `KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_LINEAR_ARGMAX_BATCH` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_LINEAR_DECODE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_F32_DOWN` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_MLP_DECODE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_BATCH` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_attention.rs` |
-| `KILN_DISABLE_VULKAN_SKIP_FINAL_GDN_STATE_READBACK` | Experimental/debug migration | 1 | `crates/kiln-model/src/generate.rs` |
 | `KILN_DOCTEST_PYTHON` | Experimental/debug migration | 1 | `crates/kiln-eval/src/scorers/python_doctest.rs` |
 | `KILN_DROP_PROJECTION_ORIGINALS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_ECHO_ENABLED` | Experimental/debug migration, Test only | 2 | `crates/kiln-train/examples/cuda_grpo_ablation.rs`, `crates/kiln-train/src/lib.rs` |
@@ -238,14 +209,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_ECHO_LAMBDA` | Experimental/debug migration, Test only | 2 | `crates/kiln-train/examples/cuda_grpo_ablation.rs`, `crates/kiln-train/src/lib.rs` |
 | `KILN_ECHO_WARNING_FILTER` | Experimental/debug migration, Test only | 2 | `crates/kiln-train/examples/cuda_grpo_ablation.rs`, `crates/kiln-train/src/lib.rs` |
 | `KILN_ENABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP` | Experimental/debug migration | 1 | `crates/kiln-model/src/generate.rs` |
-| `KILN_ENABLE_NATIVE_VULKAN_RMSNORM` | Experimental/debug migration | 2 | `crates/kiln-model/src/forward.rs`, `crates/kiln-tensor/src/ops/rmsnorm.rs` |
-| `KILN_ENABLE_VULKAN_FUSED_CONV1D` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_ENABLE_VULKAN_FUSED_CONV1D_UPDATE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_ENABLE_VULKAN_GDN_FORWARD_SUB` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_ENABLE_VULKAN_MLP_GATE_UP` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
 | `KILN_EVAL_MODE` | Test only | 1 | `crates/kiln-server/src/config.rs` |
 | `KILN_FLASH_ATTN_BWD_DETERMINISTIC` | Experimental/debug migration | 1 | `crates/kiln-flash-attn/src/kt_api.rs` |
 | `KILN_FORCE_EAGER_DECODE` | Experimental/debug migration, Test only | 6 | `crates/kiln-model/src/cuda_graph.rs`, `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/metal_graph.rs` |
@@ -366,19 +329,9 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_VK_GDN_STATE_EXIT_BWD_CPU` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs` |
 | `KILN_VK_MICROBENCH_BATCHES` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
 | `KILN_VK_MICROBENCH_ONLY` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
-| `KILN_VK_NATIVE_PHASE_TIMING` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_VK_RESIDENT_DECODE_BLOCK` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_VK_RESIDENT_DECODE_GDN` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_VK_RESIDENT_DECODE_GDN_FULL_BLOCK` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_VK_RESIDENT_DECODE_NATIVE` | Experimental/debug migration | 8 | `crates/kiln-model/src/forward.rs` |
 | `KILN_VK_SOLVE_TRI_CPU` | Experimental/debug migration | 2 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs`, `crates/kiln-vulkan-kernel/src/vk_ops/solve_tri.rs` |
 | `KILN_VK_SOLVE_TRI_TRANSPOSE_CPU` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs` |
-| `KILN_VK_TRACE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_attention.rs` |
 | `KILN_VULKAN_DEVICE` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/device.rs` |
-| `KILN_VULKAN_GDN_CHUNKWISE_FALLBACK` | Experimental/debug migration | 3 | `crates/kiln-model/src/backend/vulkan_gdn.rs`, `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs` |
-| `KILN_VULKAN_LINEAR_MAX_GFLOP` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_linear.rs` |
-| `KILN_VULKAN_RESIDENT_DECODE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan_config.rs` |
-| `KILN_VULKAN_SDPA` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/vulkan.rs` |
 | `KILN_VULKAN_VALIDATION` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/device.rs` |
 | `KILN_W4A16` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |
 | `KILN_W4A16_GDN_OUT_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |
@@ -502,7 +455,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-server/src/execution_provenance.rs` | `env!` | `CARGO_PKG_VERSION` | Test only | 2 |
 | `crates/kiln-server/src/logging.rs` | `var` | `name` | Public stable | 1 |
 | `crates/kiln-server/src/logging.rs` | `var` | `RUST_LOG` | Public stable | 1 |
-| `crates/kiln-server/src/state.rs` | `var` | `policy . env` | Experimental/debug migration | 1 |
 | `crates/kiln-server/src/teacher_identity.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/teacher_identity.rs` | `env!` | `CARGO_PKG_VERSION` | Test only | 1 |
 | `crates/kiln-tensor/build.rs` | `var` | `var` | Build time/provenance | 2 |

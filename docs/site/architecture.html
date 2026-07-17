@@ -377,14 +377,14 @@ training request
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
           runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
-          to produce <code>kiln.accelerator-runtime-policy.v6</code>. The same resolved object is installed in
+          to produce <code>kiln.accelerator-runtime-policy.v7</code>. The same resolved object is installed in
           the tensor context, projected into the model graph runner, stored in server state, and returned by
           product diagnostics. Tensor, model, and kernel code do not re-read the public graph,
           synchronization, or matmul-route environment names during inference.
         </p>
         <pre class="mt-5"><code>typed [server] + [accelerator] configuration
   -> strict parse, source attribution, and serving-profile gate
-  -> immutable accelerator runtime policy v6
+  -> immutable accelerator runtime policy v7
   -> kiln-tensor adapter route set installed before model execution
   -> exact full-attention score geometry installed in model and ROCm flash planners
   -> primary ROCm context synchronization and matmul-route discipline
@@ -419,17 +419,22 @@ training request
         <h3 class="font-semibold mt-6 mb-3">Vulkan kernels use one qualified source policy</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           Product Vulkan dispatch uses the typed, immutable
-          <code>kiln.vulkan-kernel-policy.v1</code> object. It is not a TOML, CLI, request, or environment
-          surface. The kernel crate and resident model planner share this one object, so route enablement,
-          batch thresholds, and split-K geometry cannot diverge or change between requests. A source change
+          <code>kiln.vulkan-kernel-policy.v2</code> object. It is not a TOML, CLI, request, or environment
+          surface. The Vulkan backend, kernel crate, and resident model planner share this one object, so the
+          covered model-route and packed-weight selections, recurrence residency, batch thresholds, and
+          split-K geometry cannot diverge or change between requests. A source change
           must version the policy and rerun Vulkan oracle, performance, development-soak, and endurance gates.
-          Accelerator policy v6 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
+          Accelerator policy v7 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
           health, trusted debug state, the CLI config check, and the dashboard.
         </p>
         <div class="overflow-x-auto mt-4">
           <table class="w-full text-sm" style="color: var(--fg-dim);">
             <thead><tr><th class="text-left p-2">Family</th><th class="text-left p-2">Qualified selection</th></tr></thead>
             <tbody>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Model routes</td><td class="p-2">GDN and its qualified prefill/gate/norm/chunkwise routes, fused conv1d prefill, recurrent unexpanded Q/K and norm, fused batch GDN state, linear decode/argmax, full-attention QKV, SDPA prefill, paged decode with GPU gather, fused MLP decode, resident decode, and final GDN state-readback elision are enabled. Every resident-decode entry point uses the same policy leaf.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Packed weights</td><td class="p-2">BF16-packed linear, GDN input projection, full-attention QKV, and MLP decode weights are enabled; the MLP BF16 gate/up with F32 down route is enabled.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Quarantined/slower routes</td><td class="p-2">Full-chunk GDN, single-token fused conv1d update, GDN forward substitution, batch-one fused GDN decode, standalone MLP gate/up, both recurrent-state residency routes, GDN chunkwise fallback, and the CPU-bridged/generic-tensor native Vulkan RMSNorm experiment are disabled. Device-resident model RMSNorm remains enabled.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Dispatch safety</td><td class="p-2">Linear submissions have a fixed 20,000,000,000-FLOP ceiling; oversized work is sub-chunked and no environment value can disable the guard.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">MLP</td><td class="p-2">BF16 four-row gate/up at batch 8, four-row down at 16, F32 down at 8, and eight-row at 256; enabled.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Linear</td><td class="p-2">BF16 four-row at batch 16 and eight-row at 64; enabled.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Full-attention QKV</td><td class="p-2">BF16 four-row at batch 2 and eight-row at 64; enabled.</td></tr>
@@ -440,11 +445,19 @@ training request
           </table>
         </div>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The former kernel-level <code>KILN_DISABLE_VULKAN_*</code>,
-          <code>KILN_ENABLE_VULKAN_*</code>, threshold, split-K, and stage-profile variables have no aliases
-          or replacement fields. They silently composed unreportable routes and accepted malformed integers.
+          The former controls represented by this table, including the applicable
+          <code>KILN_DISABLE_VULKAN_*</code>, <code>KILN_ENABLE_VULKAN_*</code>, threshold, split-K,
+          stage-profile, packed-weight, recurrence, and resident-decode variables, have no aliases or
+          replacement fields. They silently composed unreportable routes and accepted malformed values.
           Historical optimization logs retain them only as experiment provenance; the research microbenchmark
           is a separate executable and is not a product configuration path.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          This is not yet the repository-wide environment boundary. Vulkan device selection/validation and the
+          remaining <code>KILN_VK_*</code> operator research controls are still enumerated in the generated
+          runtime environment inventory. They are not qualified public configuration, and any launch containing
+          one is not comparable to a qualified receipt. Phase 8.1 remains open until those reads are deleted or
+          moved behind an explicit typed qualification interface.
         </p>
 
         <h3 class="font-semibold mt-6 mb-3">Attention geometry cannot follow free-memory noise</h3>
@@ -697,7 +710,7 @@ training request
           <table class="w-full text-sm" style="color: var(--fg-dim);">
             <thead style="color: var(--fg);"><tr><th class="text-left p-2">Surface</th><th class="text-left p-2">Contract</th></tr></thead>
             <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /v1/config</code></td><td class="p-2">Top-level <code>accelerator_runtime</code> schema v6 exposes configured/effective/source values for adapter routing, attention geometry, synchronization, both matmul routes, graph mode, entry capacity, and retained-byte budget, plus the compiled Vulkan kernel-policy schema ID. Product snapshot fields are <code>rocm_graphs</code> plus <code>rocm_graphs_unavailable_reason</code> for full cache statistics, and <code>rocm_graph_telemetry</code> plus <code>rocm_graph_telemetry_unavailable_reason</code> for the separate phase/transient channel. The full-stat read is nonblocking; the phase read is independent of both runner locks. The complete config handler still reads unrelated training-capability state.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /v1/config</code></td><td class="p-2">Top-level <code>accelerator_runtime</code> schema v7 exposes configured/effective/source values for adapter routing, attention geometry, synchronization, both matmul routes, graph mode, entry capacity, and retained-byte budget, plus the compiled Vulkan kernel-policy schema ID. Product snapshot fields are <code>rocm_graphs</code> plus <code>rocm_graphs_unavailable_reason</code> for full cache statistics, and <code>rocm_graph_telemetry</code> plus <code>rocm_graph_telemetry_unavailable_reason</code> for the separate phase/transient channel. The full-stat read is nonblocking; the phase read is independent of both runner locks. The complete config handler still reads unrelated training-capability state.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /health</code></td><td class="p-2"><code>decode_runtime.accelerator_runtime</code>, <code>decode_runtime.rocm_synchronization</code>, and <code>decode_runtime.rocm_graphs</code> combine immutable intent with live wait/skip and quarantine state. The graph object flattens full statistics and phase telemetry but preserves separate <code>unavailable_reason</code>, <code>phase_telemetry_available</code>, and <code>phase_telemetry_unavailable_reason</code> authorities; <code>state</code> is busy only for lock contention and unavailable for no-runner or poisoned-lock state.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Trusted debug</td><td class="p-2"><code>/v1/debug/model-state</code> repeats top-level <code>accelerator_runtime</code>, <code>rocm_synchronization</code>, and the same four graph value/reason fields as config; it does not reintroduce raw runtime flags.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /metrics</code></td><td class="p-2">Synchronization policy/availability/quarantine and 23 fixed-reason wait/skip families sit beside two graph availability gauges and two five-reason one-hot missing-data families. Full graph state/capacity/owner/retained/cache/capture/replay/fallback families and phase/current/transient families are independently governed.</td></tr>

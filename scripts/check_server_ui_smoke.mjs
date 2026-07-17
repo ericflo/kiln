@@ -1634,9 +1634,9 @@ async function startServer({
           },
         },
         accelerator_runtime: {
-          schema_id: 'kiln.accelerator-runtime-policy.v6',
-          version: 6,
-          vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v1',
+          schema_id: 'kiln.accelerator-runtime-policy.v7',
+          version: 7,
+          vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v2',
           serving_profile: 'stable',
           serving_profile_source: 'default',
           kt_api_mode: {
@@ -2776,8 +2776,8 @@ async function expectDirectDecodeRendezvousRuntimeConfig(page, scenarioLabel) {
 async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   const prefix = `${scenarioLabel} ROCm matmul runtime config`;
   const selector = '#runtime-config-body';
-  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v6[\s\S]*v6/, `${prefix} should render policy schema v6`);
-  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan kernel policy[\s\S]*kiln\.vulkan-kernel-policy\.v1/, `${prefix} should render the qualified Vulkan kernel policy schema`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v7[\s\S]*v7/, `${prefix} should render policy schema v7`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan kernel policy[\s\S]*kiln\.vulkan-kernel-policy\.v2/, `${prefix} should render the qualified Vulkan kernel policy schema`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Kiln-tensor API routes[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable adapter route set and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Full-attention score ceiling[\s\S]*2,048 MiB[\s\S]*default/, `${prefix} should render immutable full-attention geometry and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Strided batched matmul[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable strided-batched route and source`);
