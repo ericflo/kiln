@@ -57,6 +57,18 @@
 > finite-value checks, and handoff synchronization, but no longer recognizes
 > these investigation controls. Historical trace output remains evidence only.
 
+> **Synchronized GDN, full-attention, and MLP stage profilers were retired on
+> 2026-07-17.** `KILN_PROFILE_GDN_STAGES`,
+> `KILN_PROFILE_GDN_STAGE_LAYER`, `KILN_PROFILE_FULL_ATTN_STAGES`, and
+> `KILN_PROFILE_MLP_STAGES` wrapped individual forward stages in host clocks,
+> accelerator queue drains, and stderr output. They were intrusive
+> target-selection probes rather than product observability and have no typed
+> replacements. Current source retains the same tensor operations, route
+> decisions, MLP/GDN finite-value diagnostics, tensor-handoff boundaries, and
+> NVTX ranges without the synchronized wrappers. Historical audit commands and
+> measurements using these names remain evidence only; current source no longer
+> recognizes the controls.
+
 > **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
 > priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are

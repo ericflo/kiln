@@ -939,35 +939,6 @@ fn streaming_gdn_forward_only_fastpaths_allowed(device: &Device) -> bool {
     true
 }
 
-fn profile_gdn_stages_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_GDN_STAGES"))
-}
-
-fn profile_gdn_segment_layer_enabled(layer_idx: usize) -> bool {
-    if !profile_gdn_stages_enabled() {
-        return false;
-    }
-    match std::env::var("KILN_PROFILE_GDN_STAGE_LAYER") {
-        Ok(value) => value
-            .trim()
-            .parse::<usize>()
-            .map(|target| target == layer_idx)
-            .unwrap_or(true),
-        Err(_) => true,
-    }
-}
-
-fn profile_full_attn_stages_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_FULL_ATTN_STAGES"))
-}
-
-fn profile_mlp_stages_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_MLP_STAGES"))
-}
-
 fn weighted_lm_head_prep_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| env_truthy_for_profile("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP"))
@@ -1069,120 +1040,6 @@ where
     F: FnOnce() -> T,
 {
     objc2::rc::autoreleasepool(|_| f())
-}
-
-fn start_gdn_stage_profile(
-    device: &Device,
-    context: Option<(usize, usize)>,
-) -> Result<Option<std::time::Instant>> {
-    if context.is_some() {
-        synchronize_for_profile(device)?;
-        Ok(Some(std::time::Instant::now()))
-    } else {
-        Ok(None)
-    }
-}
-
-fn finish_gdn_stage_profile(
-    device: &Device,
-    context: Option<(usize, usize)>,
-    stage: &str,
-    seq_len: usize,
-    start: Option<std::time::Instant>,
-) -> Result<()> {
-    let Some(start) = start else {
-        return Ok(());
-    };
-    let Some((layer, start_pos)) = context else {
-        return Ok(());
-    };
-    synchronize_for_profile(device)?;
-    eprintln!(
-        "kiln_profile_gdn_stage layer={layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
-        start.elapsed().as_secs_f64() * 1000.0
-    );
-    Ok(())
-}
-
-fn start_full_attn_stage_profile(
-    device: &Device,
-    context: Option<(usize, usize)>,
-) -> Result<Option<std::time::Instant>> {
-    if context.is_some() {
-        synchronize_for_profile(device)?;
-        Ok(Some(std::time::Instant::now()))
-    } else {
-        Ok(None)
-    }
-}
-
-fn start_named_full_attn_stage_profile(
-    device: &Device,
-    context: Option<(usize, usize)>,
-    stage: &str,
-    seq_len: usize,
-) -> Result<Option<std::time::Instant>> {
-    let start = start_full_attn_stage_profile(device, context)?;
-    if let Some((full_attn_layer, start_pos)) = context {
-        eprintln!(
-            "kiln_profile_full_attn_stage_begin full_attn_layer={full_attn_layer} stage={stage} seq_len={seq_len} start_pos={start_pos}"
-        );
-    }
-    Ok(start)
-}
-
-fn finish_full_attn_stage_profile(
-    device: &Device,
-    context: Option<(usize, usize)>,
-    stage: &str,
-    seq_len: usize,
-    start: Option<std::time::Instant>,
-) -> Result<()> {
-    let Some(start) = start else {
-        return Ok(());
-    };
-    let Some((full_attn_layer, start_pos)) = context else {
-        return Ok(());
-    };
-    synchronize_for_profile(device)?;
-    eprintln!(
-        "kiln_profile_full_attn_stage full_attn_layer={full_attn_layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
-        start.elapsed().as_secs_f64() * 1000.0
-    );
-    Ok(())
-}
-
-fn start_mlp_stage_profile(
-    device: &Device,
-    context: Option<(usize, usize)>,
-) -> Result<Option<std::time::Instant>> {
-    if context.is_some() {
-        synchronize_for_profile(device)?;
-        Ok(Some(std::time::Instant::now()))
-    } else {
-        Ok(None)
-    }
-}
-
-fn finish_mlp_stage_profile(
-    device: &Device,
-    context: Option<(usize, usize)>,
-    stage: &str,
-    seq_len: usize,
-    start: Option<std::time::Instant>,
-) -> Result<()> {
-    let Some(start) = start else {
-        return Ok(());
-    };
-    let Some((layer, start_pos)) = context else {
-        return Ok(());
-    };
-    synchronize_for_profile(device)?;
-    eprintln!(
-        "kiln_profile_mlp_stage layer={layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
-        start.elapsed().as_secs_f64() * 1000.0
-    );
-    Ok(())
 }
 
 #[cfg(feature = "metal")]
@@ -5310,11 +5167,11 @@ fn ensure_full_attn_debug_no_nan(
 
 fn ensure_gdn_debug_finite(
     enabled: bool,
-    profile_context: Option<(usize, usize)>,
+    diagnostic_context: Option<(usize, usize)>,
     stage: &'static str,
     tensor: &Tensor,
 ) -> Result<()> {
-    let label = match profile_context {
+    let label = match diagnostic_context {
         Some((layer, start_pos)) => format!("gdn layer {layer} start {start_pos} {stage}"),
         None => format!("gdn {stage}"),
     };
@@ -5323,11 +5180,11 @@ fn ensure_gdn_debug_finite(
 
 fn ensure_mlp_debug_finite(
     enabled: bool,
-    profile_context: Option<(usize, usize)>,
+    diagnostic_context: Option<(usize, usize)>,
     stage: &'static str,
     tensor: &Tensor,
 ) -> Result<()> {
-    let label = match profile_context {
+    let label = match diagnostic_context {
         Some((layer, start_pos)) => format!("mlp layer {layer} start {start_pos} {stage}"),
         None => format!("mlp {stage}"),
     };
@@ -8290,7 +8147,7 @@ fn swiglu_ffn_backend_profiled(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
     use_metal_decode_gemv: bool,
-    profile_context: Option<(usize, usize)>,
+    diagnostic_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
     swiglu_ffn_impl(
         Some(backend),
@@ -8298,7 +8155,7 @@ fn swiglu_ffn_backend_profiled(
         mlp,
         lora,
         use_metal_decode_gemv,
-        profile_context,
+        diagnostic_context,
     )
 }
 
@@ -8308,7 +8165,7 @@ fn swiglu_ffn_impl(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
     use_metal_decode_gemv: bool,
-    profile_context: Option<(usize, usize)>,
+    diagnostic_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     let (_, seq_len, _) = x.dims3()?;
@@ -8327,7 +8184,7 @@ fn swiglu_ffn_impl(
                 mlp,
                 lora,
                 use_metal_decode_gemv,
-                profile_context,
+                diagnostic_context,
                 chunk_tokens,
             );
         }
@@ -8339,7 +8196,7 @@ fn swiglu_ffn_impl(
         mlp,
         lora,
         use_metal_decode_gemv,
-        profile_context,
+        diagnostic_context,
     )
 }
 
@@ -8415,7 +8272,7 @@ fn swiglu_ffn_impl_chunked(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
     use_metal_decode_gemv: bool,
-    profile_context: Option<(usize, usize)>,
+    diagnostic_context: Option<(usize, usize)>,
     chunk_tokens: usize,
 ) -> Result<Tensor> {
     let (_, seq_len, _) = x.dims3()?;
@@ -8435,7 +8292,7 @@ fn swiglu_ffn_impl_chunked(
             mlp,
             lora,
             use_metal_decode_gemv,
-            profile_context,
+            diagnostic_context,
         )
         .with_context(|| format!("chunked CUDA training MLP tile [{start}, {})", start + len))?;
         synchronize_tensor_ready_for_model_handoff(
@@ -8461,7 +8318,7 @@ fn swiglu_ffn_impl_chunked(
     synchronize_tensor_ready_for_model_handoff("chunked GPU training MLP cat", &out)?;
     ensure_mlp_debug_finite(
         debug_full_attn_finite_checks(),
-        profile_context,
+        diagnostic_context,
         "chunked_cat",
         &out,
     )?;
@@ -8481,12 +8338,9 @@ fn swiglu_ffn_split_gate_up(
     lora_layer: Option<&LoraLayerWeights>,
     lora_scale: f32,
     use_metal_decode_gemv: bool,
-    profile_device: &Device,
-    profile_context: Option<(usize, usize)>,
-    seq_len: usize,
+    diagnostic_context: Option<(usize, usize)>,
 ) -> Result<(Tensor, Tensor)> {
     // x @ gate_proj_t -> [batch, seq_len, intermediate_size]
-    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let gate = {
         kiln_nvtx::range!(c"kiln/mlp/gate");
         mlp_proj_forward_decode_if(
@@ -8499,15 +8353,7 @@ fn swiglu_ffn_split_gate_up(
             lora_scale,
         )?
     };
-    finish_mlp_stage_profile(
-        profile_device,
-        profile_context,
-        "gate_proj",
-        seq_len,
-        stage_profile,
-    )?;
     // x @ up_proj_t -> [batch, seq_len, intermediate_size]
-    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let up = {
         kiln_nvtx::range!(c"kiln/mlp/up");
         mlp_proj_forward_decode_if(
@@ -8520,18 +8366,11 @@ fn swiglu_ffn_split_gate_up(
             lora_scale,
         )?
     };
-    finish_mlp_stage_profile(
-        profile_device,
-        profile_context,
-        "up_proj",
-        seq_len,
-        stage_profile,
-    )?;
     synchronize_tensor_ready_for_model_handoff("mlp gate projection", &gate)?;
     synchronize_tensor_ready_for_model_handoff("mlp up projection", &up)?;
     let debug_finite = debug_full_attn_finite_checks();
-    ensure_mlp_debug_finite(debug_finite, profile_context, "gate_proj", &gate)?;
-    ensure_mlp_debug_finite(debug_finite, profile_context, "up_proj", &up)?;
+    ensure_mlp_debug_finite(debug_finite, diagnostic_context, "gate_proj", &gate)?;
+    ensure_mlp_debug_finite(debug_finite, diagnostic_context, "up_proj", &up)?;
     Ok((gate, up))
 }
 
@@ -8729,13 +8568,9 @@ fn swiglu_ffn_impl_no_chunk(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
     use_metal_decode_gemv: bool,
-    profile_context: Option<(usize, usize)>,
+    diagnostic_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
-    // #1082: kt `.device()` returns a `Device` by value; bind the owned value
-    // and a reference so the `&Device`-typed profile helpers below are unchanged.
-    let profile_device_val = x.device();
-    let profile_device = &profile_device_val;
-    let (_, seq_len, _) = x.dims3()?;
+    let (_, _seq_len, _) = x.dims3()?;
     #[cfg(any(
         feature = "cuda",
         feature = "metal",
@@ -8763,7 +8598,7 @@ fn swiglu_ffn_impl_no_chunk(
     if !tape_scope_active
         && !has_mlp_lora
         && !has_marlin
-        && seq_len == 1
+        && _seq_len == 1
         && x.dtype() == DType::BF16
         && !x.track_op()
         && let (Some(gate_up_w8), Some(down_w8)) =
@@ -8772,7 +8607,6 @@ fn swiglu_ffn_impl_no_chunk(
         if gate_up_w8.n % 2 == 0 {
             let g_dim = gate_up_w8.n / 2;
             if crate::rocm_w8_proj::swiglu_bf16_enabled(gate_up_w8) {
-                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                 if let Some(hidden) = {
                     kiln_nvtx::range!(c"kiln/mlp/gate_up_swiglu_w8");
                     crate::rocm_w8_proj::swiglu_bf16(x, gate_up_w8)?
@@ -8781,45 +8615,21 @@ fn swiglu_ffn_impl_no_chunk(
                         "mlp gate_up_swiglu_w8 hidden",
                         &hidden,
                     )?;
-                    finish_mlp_stage_profile(
-                        profile_device,
-                        profile_context,
-                        "gate_up_swiglu_w8",
-                        seq_len,
-                        stage_profile,
-                    )?;
-                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                     let out = {
                         kiln_nvtx::range!(c"kiln/mlp/down_w8");
                         crate::rocm_w8_proj::matmul_bf16(&hidden, down_w8)?
                     };
-                    finish_mlp_stage_profile(
-                        profile_device,
-                        profile_context,
-                        "down_proj_w8",
-                        seq_len,
-                        stage_profile,
-                    )?;
                     return Ok(out);
                 }
             }
-            let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
             let gate_up = {
                 kiln_nvtx::range!(c"kiln/mlp/gate_up_w8");
                 crate::rocm_w8_proj::matmul_bf16(x, gate_up_w8)?
             };
-            finish_mlp_stage_profile(
-                profile_device,
-                profile_context,
-                "gate_up_w8",
-                seq_len,
-                stage_profile,
-            )?;
             synchronize_tensor_ready_for_model_handoff("mlp gate_up_w8", &gate_up)?;
             if let Some(gate_up_kt) = try_borrow_kt_cuda(&gate_up)
                 .filter(|t| kiln_rmsnorm_kernel::supports_mlp_silu_mul_packed_kt(t, g_dim))
             {
-                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                 let hidden = {
                     kiln_nvtx::range!(c"kiln/mlp/gate_silu_hidden_mul_packed");
                     kiln_rmsnorm_kernel::fused_mlp_silu_mul_packed_kt(&gate_up_kt, g_dim)
@@ -8829,32 +8639,16 @@ fn swiglu_ffn_impl_no_chunk(
                     "mlp gate_silu_hidden_mul_packed",
                     &hidden,
                 )?;
-                finish_mlp_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "gate_silu_hidden_mul_packed",
-                    seq_len,
-                    stage_profile,
-                )?;
-                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                 let out = {
                     kiln_nvtx::range!(c"kiln/mlp/down_w8");
                     crate::rocm_w8_proj::matmul_bf16(&hidden, down_w8)?
                 };
-                finish_mlp_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "down_proj_w8",
-                    seq_len,
-                    stage_profile,
-                )?;
                 return Ok(out);
             }
         }
     }
     if !tape_scope_active && !has_mlp_lora && !has_marlin {
         if let Some(backend) = backend {
-            let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
             if let Some(out) = LinearBackend::runtime_mlp_decode(
                 backend,
                 x,
@@ -8862,20 +8656,12 @@ fn swiglu_ffn_impl_no_chunk(
                 &mlp.up_proj_t,
                 &mlp.down_proj_t,
             )? {
-                finish_mlp_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "fused",
-                    seq_len,
-                    stage_profile,
-                )?;
                 return Ok(out);
             }
         }
     }
     if !tape_scope_active && !has_mlp_gate_up_lora && !has_marlin {
         if let Some(backend) = backend {
-            let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
             if let Some(hidden) = LinearBackend::runtime_mlp_gate_up_decode(
                 backend,
                 x,
@@ -8883,14 +8669,6 @@ fn swiglu_ffn_impl_no_chunk(
                 &mlp.up_proj_t,
             )? {
                 synchronize_tensor_ready_for_model_handoff("mlp gate_up_fused hidden", &hidden)?;
-                finish_mlp_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "gate_up_fused",
-                    seq_len,
-                    stage_profile,
-                )?;
-                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                 let out = {
                     kiln_nvtx::range!(c"kiln/mlp/down");
                     mlp_proj_forward_decode_if(
@@ -8903,30 +8681,14 @@ fn swiglu_ffn_impl_no_chunk(
                         lora_scale,
                     )?
                 };
-                finish_mlp_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "down_proj",
-                    seq_len,
-                    stage_profile,
-                )?;
                 return Ok(out);
             }
         }
     }
     #[cfg(feature = "metal")]
     if !tape_scope_active {
-        let gate_up_profile = start_mlp_stage_profile(profile_device, profile_context)?;
         if let Some(hidden) = try_metal_mlp_gate_up_hidden(x, mlp, lora_layer)? {
             synchronize_tensor_ready_for_model_handoff("mlp metal gate_up_fused hidden", &hidden)?;
-            finish_mlp_stage_profile(
-                profile_device,
-                profile_context,
-                "gate_up_fused",
-                seq_len,
-                gate_up_profile,
-            )?;
-            let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
             let out = {
                 kiln_nvtx::range!(c"kiln/mlp/down");
                 mlp_proj_forward_decode_if(
@@ -8939,13 +8701,6 @@ fn swiglu_ffn_impl_no_chunk(
                     lora_scale,
                 )?
             };
-            finish_mlp_stage_profile(
-                profile_device,
-                profile_context,
-                "down_proj",
-                seq_len,
-                stage_profile,
-            )?;
             return Ok(out);
         }
     }
@@ -8982,8 +8737,6 @@ fn swiglu_ffn_impl_no_chunk(
                     if let (Ok(g_dim), Ok(u_dim)) = (mlp.gate_proj_t.dim(1), mlp.up_proj_t.dim(1)) {
                         let gu_dims = gate_up_proj_t.dims();
                         if gu_dims.len() == 2 && gu_dims[1] == g_dim + u_dim && g_dim == u_dim {
-                            let stage_profile =
-                                start_mlp_stage_profile(profile_device, profile_context)?;
                             let gate_up = {
                                 kiln_nvtx::range!(c"kiln/mlp/gate_up_fused_prefill");
                                 if let Some(backend) = backend {
@@ -9001,13 +8754,6 @@ fn swiglu_ffn_impl_no_chunk(
                                         .context("cuda fused MLP gate+up prefill matmul")?
                                 }
                             };
-                            finish_mlp_stage_profile(
-                                profile_device,
-                                profile_context,
-                                "gate_up_fused_prefill",
-                                seq_len,
-                                stage_profile,
-                            )?;
                             synchronize_tensor_ready_for_model_handoff(
                                 "mlp gate_up_fused_prefill",
                                 &gate_up,
@@ -9015,8 +8761,6 @@ fn swiglu_ffn_impl_no_chunk(
                             if let Some(gate_up_kt) = try_borrow_kt_cuda(&gate_up).filter(|t| {
                                 kiln_rmsnorm_kernel::supports_mlp_silu_mul_packed_kt(t, g_dim)
                             }) {
-                                let stage_profile =
-                                    start_mlp_stage_profile(profile_device, profile_context)?;
                                 let hidden = {
                                     kiln_nvtx::range!(c"kiln/mlp/gate_silu_hidden_mul_packed");
                                     // #1082: keep the silu*mul output as kt — the
@@ -9034,15 +8778,6 @@ fn swiglu_ffn_impl_no_chunk(
                                     "mlp gate_silu_hidden_mul_packed",
                                     &hidden,
                                 )?;
-                                finish_mlp_stage_profile(
-                                    profile_device,
-                                    profile_context,
-                                    "gate_silu_hidden_mul_packed",
-                                    seq_len,
-                                    stage_profile,
-                                )?;
-                                let stage_profile =
-                                    start_mlp_stage_profile(profile_device, profile_context)?;
                                 let out = {
                                     kiln_nvtx::range!(c"kiln/mlp/down");
                                     mlp_proj_forward_decode_if(
@@ -9055,13 +8790,6 @@ fn swiglu_ffn_impl_no_chunk(
                                         lora_scale,
                                     )?
                                 };
-                                finish_mlp_stage_profile(
-                                    profile_device,
-                                    profile_context,
-                                    "down_proj",
-                                    seq_len,
-                                    stage_profile,
-                                )?;
                                 return Ok(out);
                             }
                         }
@@ -9095,58 +8823,24 @@ fn swiglu_ffn_impl_no_chunk(
         lora_layer,
         lora_scale,
         use_metal_decode_gemv,
-        profile_device,
-        profile_context,
-        seq_len,
+        diagnostic_context,
     )?;
     let hidden = {
         #[cfg(feature = "metal")]
         {
             if tape_scope_active {
-                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                 let hidden = crate::tape_forward::try_tape_swiglu_kt(&gate, &up)
                     .context("swiglu_ffn_impl_no_chunk try_tape_swiglu_kt")?
                     .context("active tape scope failed to record SwiGLU")?;
-                finish_mlp_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "gate_silu_hidden_mul",
-                    seq_len,
-                    stage_profile,
-                )?;
                 hidden
             } else if crate::backend::metal::metal_mlp_silu_mul_supports(&gate, &up) {
-                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                 let hidden = crate::backend::metal::metal_mlp_silu_mul_bf16(&gate, &up)
                     .context("metal mlp silu*mul kernel failed")?;
-                finish_mlp_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "gate_silu_hidden_mul",
-                    seq_len,
-                    stage_profile,
-                )?;
                 hidden
             } else {
-                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                 let gate = cuda_silu(&gate)?;
                 synchronize_tensor_ready_for_model_handoff("mlp gate_silu", &gate)?;
-                finish_mlp_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "gate_silu",
-                    seq_len,
-                    stage_profile,
-                )?;
-                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                 let hidden = (gate * up)?;
-                finish_mlp_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "hidden_mul",
-                    seq_len,
-                    stage_profile,
-                )?;
                 hidden
             }
         }
@@ -9169,20 +8863,11 @@ fn swiglu_ffn_impl_no_chunk(
                         (try_borrow_kt_cuda(&gate), try_borrow_kt_cuda(&up))
                     {
                         if kiln_rmsnorm_kernel::supports_mlp_silu_mul_kt(&gate_kt, &up_kt) {
-                            let stage_profile =
-                                start_mlp_stage_profile(profile_device, profile_context)?;
                             // Phase 7 (#1082): kt-only. Same FFI symbol. Keep the
                             // output as kt — no candle copy-out (down-proj is kt).
                             let hidden =
                                 kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
                                     .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul2: {e}"))?;
-                            finish_mlp_stage_profile(
-                                profile_device,
-                                profile_context,
-                                "gate_silu_hidden_mul",
-                                seq_len,
-                                stage_profile,
-                            )?;
                             Some(hidden)
                         } else {
                             None
@@ -9197,7 +8882,6 @@ fn swiglu_ffn_impl_no_chunk(
                     hidden
                 } else {
                     // SiLU activation: x * sigmoid(x)
-                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                     // CP-4 Increment 6 (#1082): wire SiLU(gate) onto the kt Tape so
                     // the gate-proj LoRA Vars chain through it. Outside a tape
                     // scope the normal forward remains authoritative.
@@ -9207,15 +8891,7 @@ fn swiglu_ffn_impl_no_chunk(
                     // tape wiring here is subsumed.
                     let gate = cuda_silu(&gate)?;
                     synchronize_tensor_ready_for_model_handoff("mlp gate_silu", &gate)?;
-                    finish_mlp_stage_profile(
-                        profile_device,
-                        profile_context,
-                        "gate_silu",
-                        seq_len,
-                        stage_profile,
-                    )?;
                     // Element-wise multiply
-                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                     // CP-4 Increment 6 (#1082): the production SwiGLU mul. Wire it
                     // so SiLU(gate) and up chain back to the gate/up projections
                     // (down_proj reaches the loss via the FFN residual, but without
@@ -9231,13 +8907,6 @@ fn swiglu_ffn_impl_no_chunk(
                     } else {
                         (gate * up)?
                     };
-                    finish_mlp_stage_profile(
-                        profile_device,
-                        profile_context,
-                        "hidden_mul",
-                        seq_len,
-                        stage_profile,
-                    )?;
                     hidden
                 }
             }
@@ -9269,26 +8938,10 @@ fn swiglu_ffn_impl_no_chunk(
                     );
                 }
                 // SiLU activation: x * sigmoid(x)
-                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                 let gate = cuda_silu(&gate)?;
                 synchronize_tensor_ready_for_model_handoff("mlp gate_silu", &gate)?;
-                finish_mlp_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "gate_silu",
-                    seq_len,
-                    stage_profile,
-                )?;
                 // Element-wise multiply
-                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                 let hidden = (gate * up)?;
-                finish_mlp_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "hidden_mul",
-                    seq_len,
-                    stage_profile,
-                )?;
                 hidden
             }
         }
@@ -9296,12 +8949,11 @@ fn swiglu_ffn_impl_no_chunk(
     synchronize_tensor_ready_for_model_handoff("mlp hidden", &hidden)?;
     ensure_mlp_debug_finite(
         debug_full_attn_finite_checks(),
-        profile_context,
+        diagnostic_context,
         "hidden",
         &hidden,
     )?;
     // hidden @ down_proj_t -> [batch, seq_len, hidden_size]
-    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/mlp/down");
         mlp_proj_forward_decode_if(
@@ -9314,17 +8966,10 @@ fn swiglu_ffn_impl_no_chunk(
             lora_scale,
         )?
     };
-    finish_mlp_stage_profile(
-        profile_device,
-        profile_context,
-        "down_proj",
-        seq_len,
-        stage_profile,
-    )?;
     synchronize_tensor_ready_for_model_handoff("mlp down_proj", &out)?;
     ensure_mlp_debug_finite(
         debug_full_attn_finite_checks(),
-        profile_context,
+        diagnostic_context,
         "down_proj",
         &out,
     )?;
@@ -13584,7 +13229,7 @@ pub fn gated_deltanet_forward_streaming(
     recurrent_state: &mut Tensor,
     conv_state: &mut Tensor,
     tile_size: usize,
-    profile_context: Option<(usize, usize)>,
+    diagnostic_context: Option<(usize, usize)>,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
@@ -13609,7 +13254,7 @@ pub fn gated_deltanet_forward_streaming(
             conv_state,
             true,
             false,
-            profile_context,
+            diagnostic_context,
             true,
             true,
             lora,
@@ -13626,8 +13271,8 @@ pub fn gated_deltanet_forward_streaming(
         let allow_forward_only_fastpaths =
             streaming_gdn_forward_only_fastpaths_allowed(&tile_device);
         let allow_prefill_recurrent_kernel = allow_forward_only_fastpaths;
-        let tile_profile_context =
-            profile_context.map(|(layer_idx, start_pos)| (layer_idx, start_pos + cursor));
+        let tile_diagnostic_context =
+            diagnostic_context.map(|(layer_idx, start_pos)| (layer_idx, start_pos + cursor));
         let mut run_tile = || -> Result<Tensor> {
             let tile_in = x.narrow(1, cursor, len)?;
             gated_deltanet_forward_decode_if(
@@ -13639,7 +13284,7 @@ pub fn gated_deltanet_forward_streaming(
                 conv_state,
                 true,
                 false,
-                tile_profile_context,
+                tile_diagnostic_context,
                 allow_forward_only_fastpaths,
                 allow_prefill_recurrent_kernel,
                 lora,
@@ -13694,7 +13339,7 @@ pub fn gated_deltanet_forward_streaming(
             )?;
         }
         if debug_full_attn_finite_checks() {
-            let label = match profile_context {
+            let label = match diagnostic_context {
                 Some((layer_idx, start_pos)) => format!(
                     "streaming GDN layer {layer_idx} tile [{}, {}) output before cat",
                     start_pos + cursor,
@@ -13732,7 +13377,7 @@ pub fn gated_deltanet_forward_streaming(
         }
     };
     if debug_full_attn_finite_checks() {
-        let label = match profile_context {
+        let label = match diagnostic_context {
             Some((layer_idx, start_pos)) => {
                 format!("streaming GDN layer {layer_idx} start {start_pos} cat output")
             }
@@ -13813,7 +13458,7 @@ fn gated_deltanet_forward_decode_if(
     conv_state: &mut Tensor,
     use_fused_gdn_gates: bool,
     use_metal_decode_gemv: bool,
-    profile_context: Option<(usize, usize)>,
+    diagnostic_context: Option<(usize, usize)>,
     allow_forward_only_fastpaths: bool,
     allow_prefill_recurrent_kernel: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
@@ -13829,7 +13474,7 @@ fn gated_deltanet_forward_decode_if(
         conv_state,
         use_fused_gdn_gates,
         use_metal_decode_gemv,
-        profile_context,
+        diagnostic_context,
         allow_forward_only_fastpaths,
         allow_prefill_recurrent_kernel,
         lora,
@@ -13915,16 +13560,12 @@ fn gated_deltanet_forward_decode_if_inner(
     conv_state: &mut Tensor,
     use_fused_gdn_gates: bool,
     use_metal_decode_gemv: bool,
-    profile_context: Option<(usize, usize)>,
+    diagnostic_context: Option<(usize, usize)>,
     allow_forward_only_fastpaths: bool,
     allow_prefill_recurrent_kernel: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
-    // #1082: kt `.device()` returns a `Device` by value; bind the owned value
-    // and a reference so the `&Device`-typed profile helpers below are unchanged.
-    let profile_device_val = x.device();
-    let profile_device = &profile_device_val;
     let input_dtype = x.dtype();
     let debug_gdn_finite = debug_full_attn_finite_checks();
     let nk = config.linear_num_key_heads;
@@ -14002,7 +13643,6 @@ fn gated_deltanet_forward_decode_if_inner(
     // --- Step 1: Input projections ---
     // Use the pre-transposed weight cache (Phase 6) so we don't pay a `.t().contiguous()`
     // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).
-    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let (mixed_qkv, z, a, b, prefill_ab_for_gates) = {
         kiln_nvtx::range!(c"kiln/gdn/in_proj");
         if !has_gdn_in_lora
@@ -14072,13 +13712,6 @@ fn gated_deltanet_forward_decode_if_inner(
             }
         }
     };
-    finish_gdn_stage_profile(
-        profile_device,
-        profile_context,
-        "in_proj",
-        seq_len,
-        stage_profile,
-    )?;
     #[cfg(not(feature = "metal"))]
     let _ = &prefill_ab_for_gates;
 
@@ -14115,7 +13748,6 @@ fn gated_deltanet_forward_decode_if_inner(
                 )
             {
                 kiln_nvtx::range!(c"kiln/gdn/qkv_conv_norm");
-                let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
                 let (q, k, v) = crate::backend::metal::metal_gdn_decode_qkv_conv_norm_bf16(
                     &mixed_qkv,
                     &weights.conv1d,
@@ -14130,13 +13762,6 @@ fn gated_deltanet_forward_decode_if_inner(
                 )
                 .context("metal gdn decode qkv conv/norm kernel failed")?;
                 let z = z.reshape((batch, seq_len, nv, dv))?;
-                finish_gdn_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "qkv_conv_norm",
-                    seq_len,
-                    stage_profile,
-                )?;
                 Some((q, k, v, z, false, false, false))
             } else {
                 None
@@ -14167,7 +13792,6 @@ fn gated_deltanet_forward_decode_if_inner(
                 )
             {
                 kiln_nvtx::range!(c"kiln/gdn/qkv_conv_split");
-                let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
                 let (q, k, v) =
                     crate::backend::metal::metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
                         &mixed_qkv,
@@ -14185,13 +13809,6 @@ fn gated_deltanet_forward_decode_if_inner(
                     gdn_qk_norm(&q, &k, input_dtype, scale)?
                 };
                 let z = z.reshape((batch, seq_len, nv, dv))?;
-                finish_gdn_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "qkv_conv_split_norm",
-                    seq_len,
-                    stage_profile,
-                )?;
                 Some((q, k, v, z, false, false, false))
             } else {
                 None
@@ -14225,7 +13842,6 @@ fn gated_deltanet_forward_decode_if_inner(
         // backends, non-bf16, kernel_size != 4, and the `KILN_DISABLE_FUSED_CONV1D`
         // kill switch all route through the portable candle path below — which is the
         // parity oracle.
-        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let mixed_qkv = {
             kiln_nvtx::range!(c"kiln/gdn/conv");
             // Transpose to [B, channels, T] for conv. At seq_len == 1 the
@@ -14529,20 +14145,12 @@ fn gated_deltanet_forward_decode_if_inner(
                 post_silu.transpose(1, 2)?
             }
         };
-        finish_gdn_stage_profile(
-            profile_device,
-            profile_context,
-            "conv",
-            seq_len,
-            stage_profile,
-        )?;
 
         // Phase B11b tap: `gdn_conv`. Output of the causal depthwise conv1d +
         // SiLU, matching HF's `mixed_qkv` after `self.conv1d(...)[:T]` +
         // `F.silu(...)` (shape [B, T, qkv_dim]).
 
         // --- Step 3: Split into Q, K, V and reshape to heads ---
-        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let (q, k, v, z) = {
             kiln_nvtx::range!(c"kiln/gdn/qkv_split");
             // CP-4 Increment 3 (#1082): the narrow (QKV split) + reshape ops mint
@@ -14631,16 +14239,9 @@ fn gated_deltanet_forward_decode_if_inner(
             };
             (q, k, v, z_reshaped)
         };
-        finish_gdn_stage_profile(
-            profile_device,
-            profile_context,
-            "qkv_split",
-            seq_len,
-            stage_profile,
-        )?;
-        ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "qkv_split_q", &q)?;
-        ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "qkv_split_k", &k)?;
-        ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "qkv_split_v", &v)?;
+        ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "qkv_split_q", &q)?;
+        ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "qkv_split_k", &k)?;
+        ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "qkv_split_v", &v)?;
 
         // --- Step 4/5: GQA head repeat (nk → nv), L2 normalize Q/K, scale Q ---
         //
@@ -14655,7 +14256,6 @@ fn gated_deltanet_forward_decode_if_inner(
         // path skips the F32 round-trip through HBM. The candle path is the
         // parity oracle exercised by `kiln-rmsnorm-kernel`'s
         // `parity_l2_qk_norm_*` tests.
-        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let defer_backend_qk_norm_to_recurrent = {
             #[cfg(any(feature = "cuda", feature = "rocm"))]
             {
@@ -14896,15 +14496,8 @@ fn gated_deltanet_forward_decode_if_inner(
                 }
             }
         };
-        finish_gdn_stage_profile(
-            profile_device,
-            profile_context,
-            "qk_norm",
-            seq_len,
-            stage_profile,
-        )?;
-        ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "qk_norm_q", &q)?;
-        ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "qk_norm_k", &k)?;
+        ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "qk_norm_q", &q)?;
+        ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "qk_norm_k", &k)?;
         (
             q,
             k,
@@ -14975,7 +14568,6 @@ fn gated_deltanet_forward_decode_if_inner(
                     )
                 {
                     kiln_nvtx::range!(c"kiln/gdn/gates_recur_gated_norm");
-                    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
                     let out = crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
                         &q,
                         &k,
@@ -14990,13 +14582,6 @@ fn gated_deltanet_forward_decode_if_inner(
                         config.rms_norm_eps as f32,
                     )
                     .context("metal gdn decode gates+recurrent+gated-rmsnorm kernel failed")?;
-                    finish_gdn_stage_profile(
-                        profile_device,
-                        profile_context,
-                        "gates_recur_gated_norm",
-                        seq_len,
-                        stage_profile,
-                    )?;
                     Some(out)
                 } else {
                     None
@@ -15009,7 +14594,6 @@ fn gated_deltanet_forward_decode_if_inner(
         };
         if fused.is_none() && qk_norm_deferred_to_recurrent {
             kiln_nvtx::range!(c"kiln/gdn/qk_norm_gates_recur_gated_norm");
-            let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
             fused = GdnBackend::runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm(
                 backend,
                 &q,
@@ -15026,13 +14610,6 @@ fn gated_deltanet_forward_decode_if_inner(
                 1e-6,
                 config.rms_norm_eps,
             )?;
-            finish_gdn_stage_profile(
-                profile_device,
-                profile_context,
-                "qk_norm_gates_recur_gated_norm",
-                seq_len,
-                stage_profile,
-            )?;
         }
         fused
     };
@@ -15044,7 +14621,6 @@ fn gated_deltanet_forward_decode_if_inner(
         {
             if qk_norm_deferred_to_recurrent {
                 kiln_nvtx::range!(c"kiln/gdn/qk_norm_gates_recur");
-                let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
                 let out = if let Some(out) = GdnBackend::runtime_gdn_decode_qk_norm_gates_recurrent(
                     backend,
                     &q,
@@ -15077,13 +14653,6 @@ fn gated_deltanet_forward_decode_if_inner(
                     )?
                     .context("CUDA deferred qk_norm fallback recurrent path declined")?
                 };
-                finish_gdn_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "qk_norm_gates_recur",
-                    seq_len,
-                    stage_profile,
-                )?;
                 Some(out)
             } else if let Some(out) = GdnBackend::runtime_gdn_decode_gates_recurrent(
                 backend,
@@ -15117,8 +14686,6 @@ fn gated_deltanet_forward_decode_if_inner(
                         )
                     {
                         kiln_nvtx::range!(c"kiln/gdn/gates_recur");
-                        let stage_profile =
-                            start_gdn_stage_profile(profile_device, profile_context)?;
                         let out = crate::backend::metal::metal_gdn_decode_gates_recurrent_bf16(
                             &q,
                             &k,
@@ -15130,13 +14697,6 @@ fn gated_deltanet_forward_decode_if_inner(
                             recurrent_state,
                         )
                         .context("metal gdn decode gates+recurrent kernel failed")?;
-                        finish_gdn_stage_profile(
-                            profile_device,
-                            profile_context,
-                            "gates_recur",
-                            seq_len,
-                            stage_profile,
-                        )?;
                         Some(out)
                     } else {
                         None
@@ -15177,7 +14737,6 @@ fn gated_deltanet_forward_decode_if_inner(
                     &b,
                     recurrent_state,
                 ) {
-                    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
                     let (beta, decay) = {
                         kiln_nvtx::range!(c"kiln/gdn/gates");
                         if let Some(ab) = prefill_ab_for_gates.as_ref() {
@@ -15213,16 +14772,8 @@ fn gated_deltanet_forward_decode_if_inner(
                             .context("metal gdn prefill gates decay kernel failed")?
                         }
                     };
-                    finish_gdn_stage_profile(
-                        profile_device,
-                        profile_context,
-                        "gates",
-                        seq_len,
-                        stage_profile,
-                    )?;
 
                     kiln_nvtx::range!(c"kiln/gdn/recurrent");
-                    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
                     let attn_out =
                         crate::backend::metal::metal_gdn_recurrent_prefill_native_head_last_decay_bf16(
                             &q,
@@ -15233,13 +14784,6 @@ fn gated_deltanet_forward_decode_if_inner(
                             recurrent_state,
                         )
                         .context("metal gdn prefill recurrent decay kernel failed")?;
-                    finish_gdn_stage_profile(
-                        profile_device,
-                        profile_context,
-                        "recurrent",
-                        seq_len,
-                        stage_profile,
-                    )?;
                     Some(attn_out)
                 } else {
                     None
@@ -15328,7 +14872,6 @@ fn gated_deltanet_forward_decode_if_inner(
         // `KILN_DISABLE_METAL_GDN_GATES=1`). The two are algorithmically
         // identical — the reference path is the original Phase-6 implementation
         // and remains the parity oracle.
-        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let (beta, g) = {
             kiln_nvtx::range!(c"kiln/gdn/gates");
             if gdn_forward_only_fastpaths
@@ -15354,20 +14897,11 @@ fn gated_deltanet_forward_decode_if_inner(
                     .context("gdn decode gates fallback")?
             }
         };
-        finish_gdn_stage_profile(
-            profile_device,
-            profile_context,
-            "gates",
-            seq_len,
-            stage_profile,
-        )?;
 
         // Phase B11b taps: `gdn_gate_beta` = sigmoid(b), `gdn_gate_g` =
         // -exp(A_log) * softplus(a + dt_bias) (the log-decay scalar fed into the
         // recurrence). Shapes [B, T, nv]. HF mirror: `beta = b.sigmoid()` and
         // `g = -A_log.exp() * F.softplus(a + dt_bias)`.
-
-        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let native_recurrent_result = if tape_recording_active {
             None
         } else if qk_norm_deferred_to_native_recurrent {
@@ -15526,16 +15060,21 @@ fn gated_deltanet_forward_decode_if_inner(
             {
                 ensure_gdn_debug_finite(
                     debug_gdn_finite,
-                    profile_context,
+                    diagnostic_context,
                     "recurrent_entry_state",
                     &gdn_entry_state,
                 )?;
             }
-            ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "recurrent_q", &q)?;
-            ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "recurrent_k", &k)?;
-            ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "recurrent_v", &v)?;
-            ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "recurrent_beta", &beta)?;
-            ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "recurrent_g", &g)?;
+            ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "recurrent_q", &q)?;
+            ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "recurrent_k", &k)?;
+            ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "recurrent_v", &v)?;
+            ensure_gdn_debug_finite(
+                debug_gdn_finite,
+                diagnostic_context,
+                "recurrent_beta",
+                &beta,
+            )?;
+            ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "recurrent_g", &g)?;
 
             let recurrent_result = if allow_prefill_recurrent_kernel
                 && let Some(attn_out) = gdn_recurrent_prefill_head_last(
@@ -15578,7 +15117,7 @@ fn gated_deltanet_forward_decode_if_inner(
             };
             ensure_gdn_debug_finite(
                 debug_gdn_finite,
-                profile_context,
+                diagnostic_context,
                 "recurrent_state_after",
                 recurrent_state,
             )?;
@@ -15625,16 +15164,9 @@ fn gated_deltanet_forward_decode_if_inner(
 
             recurrent_result
         };
-        finish_gdn_stage_profile(
-            profile_device,
-            profile_context,
-            "recurrent",
-            seq_len,
-            stage_profile,
-        )?;
         ensure_gdn_debug_finite(
             debug_gdn_finite,
-            profile_context,
+            diagnostic_context,
             "recurrent",
             &recurrent_result.0,
         )?;
@@ -15655,7 +15187,6 @@ fn gated_deltanet_forward_decode_if_inner(
 
     // Transpose to [B, T, nv, dv] unless the Metal full-chunk path already
     // wrote that contiguous layout directly.
-    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let attn_out = {
         kiln_nvtx::range!(c"kiln/gdn/post_transpose");
         if attn_out_head_last {
@@ -15697,16 +15228,9 @@ fn gated_deltanet_forward_decode_if_inner(
             }
         }
     };
-    finish_gdn_stage_profile(
-        profile_device,
-        profile_context,
-        "post_transpose",
-        seq_len,
-        stage_profile,
-    )?;
     ensure_gdn_debug_finite(
         debug_gdn_finite,
-        profile_context,
+        diagnostic_context,
         "post_transpose",
         &attn_out,
     )?;
@@ -15719,7 +15243,6 @@ fn gated_deltanet_forward_decode_if_inner(
     // `norm.register_forward_pre_hook`, which sees exactly the same shape.
 
     // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
-    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let attn_out = {
         kiln_nvtx::range!(c"kiln/gdn/gated_norm");
         anyhow::ensure!(
@@ -15815,14 +15338,12 @@ fn gated_deltanet_forward_decode_if_inner(
         };
         casted
     };
-    finish_gdn_stage_profile(
-        profile_device,
-        profile_context,
+    ensure_gdn_debug_finite(
+        debug_gdn_finite,
+        diagnostic_context,
         "gated_norm",
-        seq_len,
-        stage_profile,
+        &attn_out,
     )?;
-    ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "gated_norm", &attn_out)?;
 
     // Phase B11b tap: `gdn_gated_norm`. Output of the GatedRMSNorm /
     // `norm(attn_out) * silu(z)` block, reshaped and cast back to input
@@ -15833,7 +15354,6 @@ fn gated_deltanet_forward_decode_if_inner(
     // NOTE: conv1d bias is not loaded by the weight loader. If the model has one,
     // it should be added to GpuLinearAttentionWeights and applied after conv1d.
     // Pre-transposed cache (see Step 1 note).
-    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/gdn/out_proj");
         mlp_proj_forward_decode_if(
@@ -15846,14 +15366,7 @@ fn gated_deltanet_forward_decode_if_inner(
             lora_scale,
         )?
     };
-    finish_gdn_stage_profile(
-        profile_device,
-        profile_context,
-        "out_proj",
-        seq_len,
-        stage_profile,
-    )?;
-    ensure_gdn_debug_finite(debug_gdn_finite, profile_context, "out_proj", &out)?;
+    ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "out_proj", &out)?;
 
     // Phase B11b tap: `gdn_out_proj`. Output of the final `out_proj` linear
     // (shape [B, T, hidden]) — this is what the caller adds to the residual
@@ -17651,14 +17164,6 @@ pub fn gqa_attention_pre_o(
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
     let debug_finite = debug_full_attn_finite_checks();
-    // #1082: kt `.device()` returns a `Device` by value; bind the owned value
-    // and a reference so the `&Device`-typed profile helpers below are unchanged.
-    let profile_device_val = x.device();
-    let profile_device = &profile_device_val;
-    let profile_context = profile_full_attn_stages_enabled().then_some((
-        full_attn_layer_idx,
-        positions.first().copied().unwrap_or(0) as usize,
-    ));
     let use_metal_decode_gemv = seq_len == 1
         && kv_cache.is_some()
         && !crate::mtp_runtime::single_token_self_attention_active();
@@ -17688,12 +17193,6 @@ pub fn gqa_attention_pre_o(
     };
 
     let (q_raw, k, v) = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qkv_proj",
-            seq_len,
-        )?;
         kiln_nvtx::range!(c"kiln/proj/qkv");
         let out = if split_q_gate.is_some() {
             let k = linear_with_lora_t_backend_decode_if(
@@ -17724,13 +17223,6 @@ pub fn gqa_attention_pre_o(
             )?;
             (Some(q_raw), k, v)
         };
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qkv_proj",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
     if let Some(q_raw) = q_raw.as_ref() {
@@ -17814,12 +17306,6 @@ pub fn gqa_attention_pre_o(
 
     // Reshape K, V to [batch, seq_len, num_heads, head_dim]
     let (k, v) = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "kv_reshape",
-            seq_len,
-        )?;
         // CP-4 (#1082) Increment 7: same as the q reshape above — tape-wire the
         // K/V reshapes so the chain from k_proj/v_proj reaches k_norm (K) and
         // the value matmul (V) on the SDPA-fallback path.
@@ -17843,36 +17329,16 @@ pub fn gqa_attention_pre_o(
                 ],
             )?,
         );
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "kv_reshape",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
 
     // Apply per-head RMSNorm to Q and K (Qwen3.5 uses QK-norm)
     // q_norm/k_norm are [head_dim] — broadcast over [batch, seq_len, num_heads, head_dim]
     let (q, k) = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qk_norm",
-            seq_len,
-        )?;
         let out = (
             rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?,
             rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?,
         );
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qk_norm",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
     ensure_full_attn_debug_finite(
@@ -17889,16 +17355,7 @@ pub fn gqa_attention_pre_o(
     // Apply RoPE (positions are absolute, so cached tokens get correct embeddings)
     // Only rotate first rotary_dim dimensions; the rest pass through unchanged.
     let (q, k) = {
-        let stage_profile =
-            start_named_full_attn_stage_profile(profile_device, profile_context, "rope", seq_len)?;
         let out = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "rope",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
     ensure_full_attn_debug_finite(
@@ -18029,24 +17486,11 @@ pub fn gqa_attention_pre_o(
     // candle `transpose().contiguous()` would mint a fresh id and sever the
     // tape between rope/reshape and SDPA. Falls through to candle otherwise.
     let (q, k, v) = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qkv_transpose",
-            seq_len,
-        )?;
         let out = (
             tape_transpose_contig_full_attn(&q, 1, 2)?,
             tape_transpose_contig_full_attn(&k, 1, 2)?,
             tape_transpose_contig_full_attn(&v, 1, 2)?,
         );
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qkv_transpose",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
 
@@ -18072,25 +17516,12 @@ pub fn gqa_attention_pre_o(
 
     // If KV cache is provided, update it and use full cached K/V
     let (k, v, kv_len) = if let Some(cache) = kv_cache {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "kv_cache_update",
-            seq_len,
-        )?;
         // #1082: the contiguous `KvCache` is now kt-native (token-major
         // storage, kt `slice_set`/`narrow`). K/V flow straight through — no
         // candle bridge.
         let (full_k, full_v) = cache
             .update(full_attn_layer_idx, &k, &v)
             .context("KV cache update failed")?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "kv_cache_update",
-            seq_len,
-            stage_profile,
-        )?;
         let kv_len = full_k.dim(2)?;
         (full_k, full_v, kv_len)
     } else {
@@ -18101,12 +17532,6 @@ pub fn gqa_attention_pre_o(
     let gqa_ratio = num_heads / num_kv_heads;
     let batch = k.dim(0)?;
     let (k, v) = if gqa_ratio > 1 {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "gqa_expand",
-            seq_len,
-        )?;
         // Expand [batch, num_kv_heads, kv_len, head_dim] -> [batch, num_heads, kv_len, head_dim]
         let out = (
             k.unsqueeze(2)?
@@ -18118,13 +17543,6 @@ pub fn gqa_attention_pre_o(
                 .contiguous()?
                 .reshape((batch, num_heads, kv_len, head_dim))?,
         );
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "gqa_expand",
-            seq_len,
-            stage_profile,
-        )?;
         out
     } else {
         (k.contiguous()?, v.contiguous()?)
@@ -18136,77 +17554,25 @@ pub fn gqa_attention_pre_o(
     // scores: [batch, num_heads, seq_len, kv_len]
     let scale = (head_dim as f64).sqrt();
     let attn_scores = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "score_matmul",
-            seq_len,
-        )?;
         let out = kiln_tensor::ops::matmul_rhs_transposed(&q, &k)?;
         // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
         let out = out.affine(1.0 / scale, 0.0)?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "score_matmul",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
 
     // Apply causal mask (handles Q_len != KV_len for cached decoding)
     let past_len = kv_len - seq_len;
     let attn_scores = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "causal_mask",
-            seq_len,
-        )?;
         let out = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "causal_mask",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
 
     let attn_weights_softmax = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "softmax",
-            seq_len,
-        )?;
         let out = cuda_softmax_last_dim(&attn_scores)?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "softmax",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
     let attn_output = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "value_matmul",
-            seq_len,
-        )?;
         let out = attn_weights_softmax.broadcast_matmul(&v)?; // [batch, num_heads, seq_len, head_dim]
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "value_matmul",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
 
@@ -18262,23 +17628,10 @@ pub fn gqa_attention_pre_o(
 
     // Transpose back: [batch, seq_len, num_heads, head_dim] -> [batch, seq_len, hidden]
     let attn_output = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "attn_output_layout",
-            seq_len,
-        )?;
         let out = reshape_hole0_3(
             &attn_output.transpose(1, 2)?.contiguous()?,
             seq_len,
             num_heads * head_dim,
-        )?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "attn_output_layout",
-            seq_len,
-            stage_profile,
         )?;
         out
     };
@@ -18514,7 +17867,6 @@ fn try_flash_attn_paged_decode(
     #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<
         &PagedDecodeGraphInputs<'_>,
     >,
-    profile_context: Option<(usize, usize)>,
     // Phase 7 #1082: kt twin of `paged_cache` for parity-checked
     // accessor reads. When `Some` AND the env gate is on,
     // `paged_cache.block_size()` and `paged_cache.is_fp8()` are
@@ -18580,7 +17932,6 @@ fn try_flash_attn_paged_decode(
             contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
         {
             let softmax_scale = 1.0 / (head_dim as f32).sqrt();
-            let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
             let attn_output = {
                 kiln_nvtx::range!(c"kiln/attn/paged_decode_contiguous");
                 AttentionBackend::runtime_flash_attn_paged_decode_contiguous(
@@ -18593,13 +17944,6 @@ fn try_flash_attn_paged_decode(
                     softmax_scale,
                 )?
             };
-            finish_full_attn_stage_profile(
-                &q.device(),
-                profile_context,
-                "decode_attn_contiguous",
-                q_len,
-                stage_profile,
-            )?;
             let attn_output = if attn_output.is_some() {
                 attn_output
             } else {
@@ -18608,21 +17952,12 @@ fn try_flash_attn_paged_decode(
                         && PagedKvBackend::runtime_supports_paged_kv_head_major_read(backend);
                 let fast_head_major = if can_read_head_major {
                     kiln_nvtx::range!(c"kiln/kv/head_major_read_decode");
-                    let stage_profile =
-                        start_full_attn_stage_profile(&q.device(), profile_context)?;
                     let out = PagedKvBackend::runtime_paged_kv_head_major_read(
                         backend,
                         k_pool,
                         v_pool,
                         start_slot,
                         total_seq_len,
-                    )?;
-                    finish_full_attn_stage_profile(
-                        &q.device(),
-                        profile_context,
-                        "kv_head_read",
-                        q_len,
-                        stage_profile,
                     )?;
                     out
                 } else {
@@ -18646,17 +17981,8 @@ fn try_flash_attn_paged_decode(
                             )
                         }
                     };
-                    let stage_profile =
-                        start_full_attn_stage_profile(&q.device(), profile_context)?;
                     let out = flash_attention_forward_head_major(
                         backend, q, &k_head, &v_head, num_heads, head_dim,
-                    )?;
-                    finish_full_attn_stage_profile(
-                        &q.device(),
-                        profile_context,
-                        "decode_attn_head_major",
-                        q_len,
-                        stage_profile,
                     )?;
                     out
                 } else {
@@ -18671,19 +17997,10 @@ fn try_flash_attn_paged_decode(
                 // returns above and should not pay this transpose/copy.
                 let k_live = k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
                 let v_live = v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
-                let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                 let q_fa = {
                     kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
                     q.transpose(1, 2)?.contiguous()?
                 };
-                finish_full_attn_stage_profile(
-                    &q.device(),
-                    profile_context,
-                    "q_fa_transpose",
-                    q_len,
-                    stage_profile,
-                )?;
-                let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                 let out = flash_attention_forward(
                     backend,
                     &q_fa,
@@ -18693,44 +18010,19 @@ fn try_flash_attn_paged_decode(
                     num_kv_heads,
                     head_dim,
                 )?;
-                finish_full_attn_stage_profile(
-                    &q.device(),
-                    profile_context,
-                    "decode_attn_fallback",
-                    q_len,
-                    stage_profile,
-                )?;
                 out
             };
             if let Some(attn_output) = attn_output {
                 // The flash-attention helpers already reshape to
                 // [batch, seq_len, num_heads * head_dim].
-
-                let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                 let attn_output =
                     attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
-                finish_full_attn_stage_profile(
-                    &q.device(),
-                    profile_context,
-                    "attn_gate",
-                    q_len,
-                    stage_profile,
-                )?;
-
-                let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                 let out = gqa_attention_output_projection(
                     backend,
                     &attn_output,
                     attn_weights,
                     use_metal_decode_gemv,
                     lora_layer.map(|l| (l, lora_scale)),
-                )?;
-                finish_full_attn_stage_profile(
-                    &q.device(),
-                    profile_context,
-                    "o_proj",
-                    q_len,
-                    stage_profile,
                 )?;
                 return Ok(Some(out));
             }
@@ -18831,20 +18123,10 @@ fn try_flash_attn_paged_decode(
     // -> [batch, 1, num_heads, head_dim]. Build it lazily so the contiguous-KV
     // Metal path above can avoid a dead transpose/copy per full-attention layer.
     let q_fa = {
-        let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
         let q_fa = q.transpose(1, 2)?.contiguous()?;
-        finish_full_attn_stage_profile(
-            &q.device(),
-            profile_context,
-            "q_fa_transpose",
-            q_len,
-            stage_profile,
-        )?;
         q_fa
     };
-
-    let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
     let attn_out = {
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
@@ -18927,13 +18209,6 @@ fn try_flash_attn_paged_decode(
             }
         }
     };
-    finish_full_attn_stage_profile(
-        &q.device(),
-        profile_context,
-        "decode_attn_paged",
-        q_len,
-        stage_profile,
-    )?;
 
     // ROCm device-pool paged decode: order the per-layer async work before the
     // downstream read. The async KV-write d2d + stream-ordered allocator let a
@@ -18967,18 +18242,7 @@ fn try_flash_attn_paged_decode(
     // [batch, 1, num_heads * head_dim] for the gate / o_proj path.
     let _ = num_kv_heads; // unused — kept in signature for symmetry / future use
     let attn_output = attn_out.reshape((batch, 1usize, num_heads * head_dim))?;
-
-    let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
     let attn_output = attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
-    finish_full_attn_stage_profile(
-        &q.device(),
-        profile_context,
-        "attn_gate",
-        q_len,
-        stage_profile,
-    )?;
-
-    let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
         linear_with_lora_t_backend_decode_if(
@@ -18990,7 +18254,6 @@ fn try_flash_attn_paged_decode(
             lora_scale,
         )?
     };
-    finish_full_attn_stage_profile(&q.device(), profile_context, "o_proj", q_len, stage_profile)?;
     Ok(Some(out))
 }
 
@@ -19353,7 +18616,6 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     full_attn_layer_idx: usize,
     attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
-    profile_context: Option<(usize, usize)>,
     cached_meta: Option<&CachedPagedDecodeMeta>,
     // CUDA-graph-stable paged-decode scratch tensors for the dyn_seqlen
     // backend path. When `Some((attn_out, softmax_lse))`, the captured
@@ -19398,10 +18660,6 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
-    // #1082: kt `.device()` returns a `Device` by value; bind the owned value
-    // and a reference so the `&Device`-typed profile helpers below are unchanged.
-    let profile_device_val = x.device();
-    let profile_device = &profile_device_val;
     anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
     anyhow::ensure!(
         seq_len == 1,
@@ -19576,7 +18834,6 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         None => (None, 0.0),
     };
     let (q_raw, k, v) = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/qkv_batch_decode");
         let out = full_attn_qkv_proj_decode_if(
             backend,
@@ -19587,18 +18844,10 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             lora_scale,
         )
         .context("gqa paged qkv projection")?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qkv_proj_batch",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
 
     let (q, gate) = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let out = if attn_output_gate {
             let q_raw = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim * 2)?;
             let q = q_raw.narrow(3, 0, head_dim)?;
@@ -19608,33 +18857,17 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         } else {
             (reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim)?, None)
         };
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qkv_split_batch",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
     let k = reshape_hole0_4(&k, seq_len, num_kv_heads, head_dim)?;
     let v = reshape_hole0_4(&v, seq_len, num_kv_heads, head_dim)?;
 
     let (q, k) = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
         let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qk_norm_batch",
-            seq_len,
-            stage_profile,
-        )?;
         (q, k)
     };
     let (q, k) = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let out = if let Some((cos, sin)) = rope_tables {
             // CUDA-graph capture path: the runner pre-allocates
             // `[batch, rotary_dim/2]` cos/sin tables and re-fills them via
@@ -19676,13 +18909,6 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 k_rot.transpose(0, 1)?.contiguous()?,
             )
         };
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "rope_batch",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
     // Q stays in [batch, 1, num_heads, head_dim] for the dyn_seqlen path; the
@@ -19757,7 +18983,6 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     #[cfg(not(feature = "metal"))]
     let run_eager_kv_and_attention = true;
     if run_eager_kv_and_attention {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let kv_write_done = {
             #[cfg(any(feature = "cuda", feature = "metal"))]
             {
@@ -19814,13 +19039,6 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 anyhow::bail!("batched contiguous paged attention KV write declined");
             }
         }
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "kv_write_batch",
-            seq_len,
-            stage_profile,
-        )?;
     }
 
     let strict_start_slots: Option<&[u32]> = match (cached_meta, own_strict_start_slots.as_ref()) {
@@ -19829,7 +19047,6 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         (None, None) => None,
     };
     let run_eager_paged_decode_attention = || -> Result<Tensor> {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         // Phase 12-B-prime perf gate: dyn_seqlen handles divergent per-row
         // start_pos correctly but regressed synthetic c=8 throughput by ~61%
         // versus the post-#996 strict-path baseline under uniform load (which
@@ -19882,15 +19099,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             let start_slots = Tensor::from_vec_on(x.device(), strict_slots.to_vec(), vec![batch])?
                 .contiguous()?;
             let q_strict = {
-                let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
                 let q_strict = q.transpose(1, 2)?.contiguous()?;
-                finish_full_attn_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "q_transpose_batch",
-                    seq_len,
-                    stage_profile,
-                )?;
                 q_strict
             };
             *out_acc = AttentionBackend::runtime_flash_attn_paged_decode_contiguous_batch(
@@ -19959,13 +19168,6 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 try_strict(&mut out)?;
             }
         }
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "decode_attn_contiguous_batch",
-            seq_len,
-            stage_profile,
-        )?;
         out.context("backend declined batched contiguous paged attention")
     };
     let attn_output = {
@@ -19994,20 +19196,11 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     };
 
     let attn_output = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let out =
             attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "attn_gate_batch",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
     let out = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/o_batch_decode");
         let out = gqa_attention_output_projection(
             backend,
@@ -20015,13 +19208,6 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             attn_weights,
             use_metal_decode_gemv,
             lora_layer.map(|l| (l, lora_scale)),
-        )?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "o_proj_batch",
-            seq_len,
-            stage_profile,
         )?;
         out
     };
@@ -20193,12 +19379,6 @@ fn gqa_attention_paged_with_rope_tables(
     #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
-    // #1082: kt `.device()` returns a `Device` by value; bind the owned value
-    // and a reference so the `&Device`-typed profile helpers below are unchanged.
-    let profile_device_val = x.device();
-    let profile_device = &profile_device_val;
-    let profile_context =
-        profile_full_attn_stages_enabled().then_some((full_attn_layer_idx, start_pos));
     let use_metal_decode_gemv =
         seq_len == 1 && start_pos > 0 && !crate::mtp_runtime::single_token_self_attention_active();
 
@@ -20208,7 +19388,6 @@ fn gqa_attention_paged_with_rope_tables(
         None => (None, 0.0),
     };
     let (q_raw, k_raw, v) = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/qkv");
         let out = full_attn_qkv_proj_decode_if(
             backend,
@@ -20217,13 +19396,6 @@ fn gqa_attention_paged_with_rope_tables(
             attn_weights,
             lora_layer,
             lora_scale,
-        )?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qkv_proj",
-            seq_len,
-            stage_profile,
         )?;
         out
     };
@@ -20268,8 +19440,6 @@ fn gqa_attention_paged_with_rope_tables(
                             rotary_dim,
                             attn_output_gate,
                         ) {
-                            let stage_profile =
-                                start_full_attn_stage_profile(profile_device, profile_context)?;
                             kiln_nvtx::range!(c"kiln/attn/qkv_prep_gpu_fused");
                             let (q_kt, k_kt, gate_kt) =
                                 kiln_rmsnorm_kernel::attn_decode_qkv_split_qk_norm_rope_kt(
@@ -20293,13 +19463,6 @@ fn gqa_attention_paged_with_rope_tables(
                             let q = q_kt;
                             let k = k_kt;
                             let gate = gate_kt;
-                            finish_full_attn_stage_profile(
-                                profile_device,
-                                profile_context,
-                                "qkv_split_qk_norm_rope",
-                                seq_len,
-                                stage_profile,
-                            )?;
                             Some((q, k, gate))
                         } else {
                             None
@@ -20324,7 +19487,6 @@ fn gqa_attention_paged_with_rope_tables(
         (q, k, gate)
     } else {
         let (q, gate) = {
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/proj/qkv_split");
             let out = if attn_output_gate {
                 let q_raw = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim * 2)
@@ -20353,13 +19515,6 @@ fn gqa_attention_paged_with_rope_tables(
                     .context("gqa paged q reshape")?;
                 (q, None)
             };
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "qkv_split",
-                seq_len,
-                stage_profile,
-            )?;
             out
         };
         let k = reshape_hole0_4(&k_raw, seq_len, num_kv_heads, head_dim)
@@ -20367,18 +19522,10 @@ fn gqa_attention_paged_with_rope_tables(
 
         // QK-norm
         let (q, k) = {
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/attn/qk_norm");
             let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps).context("gqa paged q norm")?;
             let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps).context("gqa paged k norm")?;
             let out = (q, k);
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "qk_norm",
-                seq_len,
-                stage_profile,
-            )?;
             out
         };
         // Phase B9 H2 aliases: post_qk_norm_{q,k} mirror post_{q,k}_norm.
@@ -20390,7 +19537,6 @@ fn gqa_attention_paged_with_rope_tables(
         // Use the GPU tensor variant so positions remain at a stable GPU address
         // (critical for CUDA graph replay correctness)
         let (q, k) = {
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/attn/rope");
             let out = if let Some((cos, sin)) = rope_tables {
                 rotary_embedding_from_tables(&q, &k, cos, sin, head_dim, rotary_dim)
@@ -20399,13 +19545,6 @@ fn gqa_attention_paged_with_rope_tables(
                 rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)
                     .context("gqa paged rope tensor")?
             };
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "rope",
-                seq_len,
-                stage_profile,
-            )?;
             out
         };
         (q, k, gate)
@@ -20425,20 +19564,12 @@ fn gqa_attention_paged_with_rope_tables(
     // prefill tiles and speculative verifier windows read full head-major K/V
     // back from the paged cache instead.
     let q = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/qkv_transpose");
         let q = q
             .transpose(1, 2)
             .context("gqa paged q transpose view")?
             .contiguous()
             .context("gqa paged q transpose contiguous")?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "q_transpose",
-            seq_len,
-            stage_profile,
-        )?;
         q
     };
 
@@ -20456,37 +19587,13 @@ fn gqa_attention_paged_with_rope_tables(
             || AttentionBackend::runtime_supports_flash_attn_prefill(backend))
     {
         kiln_nvtx::range!(c"kiln/attn/full/prefill_initial");
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
         let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "prefill_kv_head_layout",
-            seq_len,
-            stage_profile,
-        )?;
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let attn_output = if let Some(attn_output) =
             flash_attention_forward_head_major(backend, &q, &k_head, &v_head, num_heads, head_dim)?
         {
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "prefill_attn_head_major",
-                seq_len,
-                stage_profile,
-            )?;
             Some(attn_output)
         } else if AttentionBackend::runtime_supports_flash_attn_prefill(backend) {
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "prefill_attn_head_major",
-                seq_len,
-                stage_profile,
-            )?;
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let q_prefill = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
             let k_prefill = k_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
             let v_prefill = v_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
@@ -20499,27 +19606,12 @@ fn gqa_attention_paged_with_rope_tables(
                 num_kv_heads,
                 head_dim,
             )?;
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "prefill_attn_fallback",
-                seq_len,
-                stage_profile,
-            )?;
             out
         } else {
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "prefill_attn_head_major",
-                seq_len,
-                stage_profile,
-            )?;
             None
         };
 
         if let Some(attn_output) = attn_output {
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             {
                 kiln_nvtx::range!(c"kiln/kv/copy");
                 // #1082: `PagedKvCacheKt` write methods take kt tensors; the
@@ -20571,28 +19663,12 @@ fn gqa_attention_paged_with_rope_tables(
                         .context("paged KV cache write (non-CUDA) failed")?;
                 }
             }
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "kv_write",
-                seq_len,
-                stage_profile,
-            )?;
 
             // Phase B12 layer-31 GQA tap: attn_out. Captured AFTER the gate
             // multiply (if `attn_output_gate`) and BEFORE o_proj, so it
             // matches the HF reference's `attn_output = ... * sigmoid_gate`
             // tap point. Shape: [B, T, num_heads * head_dim].
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "attn_gate",
-                seq_len,
-                stage_profile,
-            )?;
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t_backend_decode_if(
@@ -20604,13 +19680,6 @@ fn gqa_attention_paged_with_rope_tables(
                     lora_scale,
                 )?
             };
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "o_proj",
-                seq_len,
-                stage_profile,
-            )?;
             // Phase B12 layer-31 GQA tap: o_proj output (post-o_proj).
             return Ok(out);
         }
@@ -20624,7 +19693,6 @@ fn gqa_attention_paged_with_rope_tables(
 
     // Write new K/V into paged cache.
     if !single_token_self_attn {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/kv/copy");
         let graph_write_done = {
             #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -20727,13 +19795,6 @@ fn gqa_attention_paged_with_rope_tables(
                     .context("paged KV cache write (non-CUDA) failed")?;
             }
         }
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "kv_write",
-            seq_len,
-            stage_profile,
-        )?;
     }
 
     // Fast path: fused paged-decode flash-attention kernel.
@@ -20798,7 +19859,6 @@ fn gqa_attention_paged_with_rope_tables(
                 lora_scale,
                 #[cfg(any(feature = "cuda", feature = "rocm"))]
                 graph_inputs,
-                profile_context,
                 #[cfg(feature = "cuda")]
                 kt_paged_cache,
             )?
@@ -21006,8 +20066,6 @@ fn gqa_attention_paged_with_rope_tables(
             match fast_read {
                 Some((k, v)) => (k, v),
                 None => {
-                    let stage_profile =
-                        start_full_attn_stage_profile(profile_device, profile_context)?;
                     #[cfg(feature = "cuda")]
                     let out = try_kt_paged_kv_read(
                         paged_cache,
@@ -21025,13 +20083,6 @@ fn gqa_attention_paged_with_rope_tables(
                         total_seq_len,
                     )
                     .context("paged KV cache read failed")?;
-                    finish_full_attn_stage_profile(
-                        profile_device,
-                        profile_context,
-                        "kv_read",
-                        seq_len,
-                        stage_profile,
-                    )?;
                     out
                 }
             }
@@ -21121,7 +20172,6 @@ fn gqa_attention_paged_with_rope_tables(
         //          -> [batch * num_kv_heads, kv_len, head_dim]
         // V:         same as K
         let (q_grouped, k_flat, v_flat) = {
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let q_grouped = q
                 .reshape((batch, num_kv_heads, gqa_ratio, 1, head_dim))?
                 .reshape((batch * num_kv_heads, gqa_ratio, 1, head_dim))?
@@ -21139,52 +20189,28 @@ fn gqa_attention_paged_with_rope_tables(
                 .reshape((batch * num_kv_heads, kv_len, head_dim))?
                 .unsqueeze(1)?
                 .contiguous()?;
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "decode_group_layout",
-                seq_len,
-                stage_profile,
-            )?;
             (q_grouped, k_flat, v_flat)
         };
 
         // Attention scores: [batch*num_kv_heads, gqa_ratio, 1, kv_len]
         let attn_scores = {
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let k_grouped = k_flat
                 .broadcast_as((batch * num_kv_heads, gqa_ratio, kv_len, head_dim))?
                 .contiguous()?;
             let attn_scores = kiln_tensor::ops::matmul_rhs_transposed(&q_grouped, &k_grouped)?;
             // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
             let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "decode_scores",
-                seq_len,
-                stage_profile,
-            )?;
             attn_scores
         };
 
         // No causal mask needed for decode (q_len=1 attends to everything)
         let attn_weights_softmax = {
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let out = cuda_softmax_last_dim(&attn_scores)?;
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "decode_softmax",
-                seq_len,
-                stage_profile,
-            )?;
             out
         };
 
         // Weighted sum: [batch*num_kv_heads, gqa_ratio, 1, head_dim]
         let attn_output = {
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let attn_output = attn_weights_softmax.broadcast_matmul(&v_flat)?;
 
             // Reshape back: -> [batch, num_kv_heads * gqa_ratio, 1, head_dim]
@@ -21194,13 +20220,6 @@ fn gqa_attention_paged_with_rope_tables(
                 .transpose(1, 2)?
                 .contiguous()?
                 .reshape((batch, 1, num_heads * head_dim))?;
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "decode_weighted_sum",
-                seq_len,
-                stage_profile,
-            )?;
             attn_output
         };
 
@@ -21208,21 +20227,12 @@ fn gqa_attention_paged_with_rope_tables(
         // shape [batch, q_len=1, num_heads*head_dim] = [1, 1, 4096].
 
         let attn_output = {
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let out =
                 attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "attn_gate",
-                seq_len,
-                stage_profile,
-            )?;
             out
         };
         // Phase B12 layer-31 GQA tap (grouped decode path).
         let out = {
-            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/proj/o");
             let out = linear_with_lora_t_backend_decode_if(
                 Some(backend),
@@ -21232,13 +20242,6 @@ fn gqa_attention_paged_with_rope_tables(
                 lora_layer.and_then(|l| l.o_proj.as_ref()),
                 lora_scale,
             )?;
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "o_proj",
-                seq_len,
-                stage_profile,
-            )?;
             out
         };
         return Ok(out);
@@ -21246,7 +20249,6 @@ fn gqa_attention_paged_with_rope_tables(
 
     // Standard path (prefill without flash-attn, or gqa_ratio == 1)
     let (k, v) = if gqa_ratio > 1 {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let k = k
             .unsqueeze(2)?
             .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
@@ -21257,118 +20259,54 @@ fn gqa_attention_paged_with_rope_tables(
             .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
             .contiguous()?
             .reshape((batch, num_heads, kv_len, head_dim))?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "prefill_gqa_expand",
-            seq_len,
-            stage_profile,
-        )?;
         (k, v)
     } else {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let out = (k.contiguous()?, v.contiguous()?);
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "prefill_kv_contiguous",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
 
     // Scaled dot-product attention
     let scale = (head_dim as f64).sqrt();
     let attn_scores = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let attn_scores = kiln_tensor::ops::matmul_rhs_transposed(&q, &k)?;
         // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
         let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "prefill_scores",
-            seq_len,
-            stage_profile,
-        )?;
         attn_scores
     };
 
     let past_len = kv_len - seq_len;
     let attn_scores = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "prefill_mask",
-            seq_len,
-            stage_profile,
-        )?;
         attn_scores
     };
 
     let attn_weights_softmax = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let out = cuda_softmax_last_dim(&attn_scores)?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "prefill_softmax",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
     let attn_output = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let out = attn_weights_softmax.broadcast_matmul(&v)?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "prefill_weighted_sum",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
 
     // Transpose back and output projection
     let attn_output = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let out = reshape_hole0_3(
             &attn_output.transpose(1, 2)?.contiguous()?,
             seq_len,
             num_heads * head_dim,
         )?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "prefill_output_layout",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
 
     let attn_output = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let out =
             attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "attn_gate",
-            seq_len,
-            stage_profile,
-        )?;
         out
     };
     // Phase B12 layer-31 GQA tap (standard fallback path).
 
     let out = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/o");
         let out = linear_with_lora_t_backend_decode_if(
             Some(backend),
@@ -21377,13 +20315,6 @@ fn gqa_attention_paged_with_rope_tables(
             &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
             lora_scale,
-        )?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "o_proj",
-            seq_len,
-            stage_profile,
         )?;
         out
     };
@@ -22670,8 +21601,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     block_tables: &[&BlockTable],
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
-    full_attn_profile_context: Option<(usize, usize)>,
-    mlp_profile_context: Option<(usize, usize)>,
+    mlp_diagnostic_context: Option<(usize, usize)>,
     cached_meta: Option<&CachedPagedDecodeMeta>,
     // CUDA-graph-stable `(attn_out, softmax_lse)` scratch for the bs>1
     // captured forward path. Forwarded as-is to
@@ -22733,7 +21663,6 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         full_attn_layer_idx,
         config.attn_output_gate,
         lora,
-        full_attn_profile_context,
         cached_meta,
         graph_outputs,
         rope_tables,
@@ -22757,7 +21686,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         &layer.mlp,
         lora,
         use_metal_decode_ffn,
-        mlp_profile_context,
+        mlp_diagnostic_context,
     )?;
     let out = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -23121,11 +22050,6 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
         block_tables.len() == batch && start_positions.len() == batch,
         "batched paged decode metadata length mismatch"
     );
-    let max_start_pos = *start_positions
-        .iter()
-        .max()
-        .context("batched paged decode requires a non-empty start_positions")?;
-
     if weights
         .layers
         .iter()
@@ -23185,9 +22109,6 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
     });
     let use_metal_decode_ffn = start_positions.iter().all(|&p| p > 0)
         && !crate::mtp_runtime::single_token_self_attention_active();
-    let profile_full_attn_stages = profile_full_attn_stages_enabled();
-    let profile_gdn_stages = profile_gdn_stages_enabled();
-    let profile_mlp_stages = profile_mlp_stages_enabled();
 
     // Build the per-step paged-decode metadata once when there are any
     // full-attention layers in the model. Each gqa call within this step
@@ -23325,8 +22246,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     block_tables,
                     full_attn_idx,
                     layer_lora,
-                    profile_full_attn_stages.then_some((full_attn_idx, max_start_pos)),
-                    profile_mlp_stages.then_some((i, max_start_pos)),
+                    None,
                     cached_paged_meta_ref,
                     layer_graph_outputs,
                     layer_rope_tables,
@@ -23358,7 +22278,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     &mut state.conv_states[linear_attn_idx],
                     use_metal_decode_ffn,
                     use_metal_decode_ffn,
-                    profile_gdn_stages.then_some((i, max_start_pos)),
+                    None,
                     true,
                     true,
                     layer_lora,
@@ -23384,7 +22304,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     &layer.mlp,
                     layer_lora,
                     use_metal_decode_ffn,
-                    profile_mlp_stages.then_some((i, max_start_pos)),
+                    None,
                 )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -24325,7 +23245,7 @@ pub fn model_forward_segment_with_policy(
                     &format!("layer {i} gdn pre_attn_norm"),
                     &normed,
                 )?;
-                let gdn_profile_context = profile_gdn_segment_layer_enabled(i).then_some((i, 0));
+                let gdn_diagnostic_context = None;
                 let attn_out = if stream_active {
                     gated_deltanet_forward_streaming(
                         backend,
@@ -24335,7 +23255,7 @@ pub fn model_forward_segment_with_policy(
                         &mut state.recurrent_states[linear_attn_idx],
                         &mut state.conv_states[linear_attn_idx],
                         stream_tile,
-                        gdn_profile_context,
+                        gdn_diagnostic_context,
                         layer_lora,
                     )
                     .with_context(|| format!("segment streaming gated deltanet layer {i}"))?
@@ -24349,7 +23269,7 @@ pub fn model_forward_segment_with_policy(
                         &mut state.conv_states[linear_attn_idx],
                         /* use_fused_gdn_gates = */ true,
                         /* use_metal_decode_gemv = */ false,
-                        gdn_profile_context,
+                        gdn_diagnostic_context,
                         /* allow_forward_only_fastpaths = */ true,
                         /* allow_prefill_recurrent_kernel = */ true,
                         layer_lora,
@@ -26088,7 +25008,6 @@ pub fn model_forward_paged_batched_decode_hidden(
                     None,
                     None,
                     None,
-                    None,
                     #[cfg(feature = "metal")]
                     None,
                     #[cfg(feature = "cuda")]
@@ -26663,8 +25582,6 @@ fn model_forward_paged_inner_bounded(
     let layer_end = layer_start
         .saturating_add(max_layers)
         .min(weights.layers.len());
-    let profile_gdn_stages = profile_gdn_stages_enabled();
-    let profile_mlp_stages = profile_mlp_stages_enabled();
     for (i, layer) in weights
         .layers
         .iter()
@@ -26698,7 +25615,7 @@ fn model_forward_paged_inner_bounded(
                     layer_lora,
                     #[cfg(any(feature = "cuda", feature = "rocm"))]
                     graph_inputs,
-                    profile_mlp_stages.then_some((i, start_pos)),
+                    None,
                     // Phase 7 #1082: forward the inner-fn kt twin
                     // parameter down to the per-layer block call so the
                     // kt cache mirrors the candle CUDA-graph paged-KV
@@ -26769,7 +25686,7 @@ fn model_forward_paged_inner_bounded(
                         &mut state.conv_states[linear_attn_idx],
                         true,
                         use_metal_decode_ffn,
-                        profile_gdn_stages.then_some((i, start_pos)),
+                        None,
                         true,
                         true,
                         layer_lora,
@@ -26796,7 +25713,7 @@ fn model_forward_paged_inner_bounded(
                     &layer.mlp,
                     layer_lora,
                     use_metal_decode_ffn,
-                    profile_mlp_stages.then_some((i, start_pos)),
+                    None,
                 )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
@@ -30223,8 +29140,6 @@ mod tests {
             &block_tables,
             0,
             false,
-            None,
-            None,
             None,
             None,
             None,
