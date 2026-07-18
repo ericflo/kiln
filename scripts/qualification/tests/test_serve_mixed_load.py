@@ -1128,6 +1128,9 @@ class ServeMixedLoadTests(unittest.TestCase):
             "prompt_marker_format": serve.PROMPT_MARKER_FORMAT,
             "response_oracle": serve.RESPONSE_ORACLE,
             "response_oracle_integer_width": serve.RESPONSE_ORACLE_INTEGER_WIDTH,
+            "response_oracle_target_integer_count": (
+                serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT
+            ),
             "request_timeout_seconds": int(serve.REQUEST_TIMEOUT_SECONDS),
             "sampled_profile_max_tokens": serve.SAMPLED_PROFILE_MAX_TOKENS,
             "sampled_profile_min_p": serve.SAMPLED_PROFILE_MIN_P,
@@ -3268,8 +3271,21 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
     def test_measured_prompts_and_results_require_a_fixed_output_denominator(self) -> None:
         prompt = serve.deterministic_prompt("marker", 3)
         self.assertIn("ascending zero-padded integers", prompt)
-        self.assertIn("until the response token limit", prompt)
+        self.assertIn(str(serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT), prompt)
+        self.assertIn("response-token limit will truncate", prompt)
+        self.assertIn("unrelated to the output length", prompt)
+        self.assertIn("do not count", prompt)
         self.assertIn("item00 item01 item02", prompt)
+        self.assertGreater(
+            serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT * 7,
+            serve.SLOW_MAX_TOKENS,
+        )
+        self.assertEqual(
+            serve.VARIANT_CONFIGS["both-off"]["workload"][
+                "response_oracle_target_integer_count"
+            ],
+            serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT,
+        )
 
         def completed(name: str, token_limit: int) -> serve.StreamResult:
             return serve.StreamResult(
@@ -3322,8 +3338,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
     def test_slow_consumer_prompt_demands_generation_until_the_token_limit(self) -> None:
         prompt = serve.slow_consumer_prompt("marker")
         self.assertIn("marker", prompt)
-        self.assertIn("without commentary", prompt)
-        self.assertIn("until the response token limit", prompt)
+        self.assertIn(str(serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT), prompt)
+        self.assertIn("response-token limit will truncate", prompt)
+        self.assertIn("do not stop", prompt)
+        self.assertIn("add commentary", prompt)
 
     def test_background_helpers_can_close_before_start(self) -> None:
         slow = serve.SlowConsumer(1, "marker", 7)
