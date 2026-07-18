@@ -15,6 +15,7 @@ use super::{
     matmul_support_from_native, requested_matmul_layout,
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
+use crate::rocm_policy::{RocmKernelPolicy, current_rocm_kernel_policy};
 
 static ROCM_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static ROCM_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
@@ -24,105 +25,6 @@ static ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static ROCM_FLASH_ATTN_TRACKED_DECLINES: AtomicU64 = AtomicU64::new(0);
 static ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static ROCM_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-static ROCM_KERNEL_POLICY: OnceLock<RocmKernelPolicy> = OnceLock::new();
-
-/// Immutable ROCm kernel-route policy installed before backend construction.
-///
-/// The server exposes a small closed profile vocabulary and maps it to one of
-/// these complete policies. Embedders that do not install a policy receive the
-/// qualified production defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RocmKernelPolicy {
-    full_attn_qkv_in_proj: bool,
-    gdn_ab_in_proj: bool,
-    gdn_prefill_ab_in_proj: bool,
-    gdn_prefill_gates: bool,
-    head_major_prefill: bool,
-    gdn: bool,
-    gdn_gates: bool,
-    gdn_gated_rms_norm: bool,
-    gdn_decode_fused: bool,
-    gdn_decode_unexpanded_qk: bool,
-    gdn_decode_qk_norm_recurrent: bool,
-    gdn_decode_qk_norm_recurrent_rmsnorm: bool,
-    fused_conv1d: bool,
-    lora_decode_add: bool,
-    gdn_full_chunk_forward_multiblock: bool,
-}
-
-impl RocmKernelPolicy {
-    /// Qualified Strix Halo production policy.
-    pub const fn qualified() -> Self {
-        Self {
-            full_attn_qkv_in_proj: true,
-            gdn_ab_in_proj: true,
-            gdn_prefill_ab_in_proj: true,
-            gdn_prefill_gates: true,
-            head_major_prefill: true,
-            gdn: true,
-            gdn_gates: true,
-            gdn_gated_rms_norm: true,
-            gdn_decode_fused: true,
-            gdn_decode_unexpanded_qk: true,
-            gdn_decode_qk_norm_recurrent: true,
-            gdn_decode_qk_norm_recurrent_rmsnorm: true,
-            fused_conv1d: true,
-            lora_decode_add: true,
-            gdn_full_chunk_forward_multiblock: false,
-        }
-    }
-
-    /// Reference-oriented policy that declines every route governed by this
-    /// profile and lets the portable model path handle supported operations.
-    pub const fn portable_fallback() -> Self {
-        Self {
-            full_attn_qkv_in_proj: false,
-            gdn_ab_in_proj: false,
-            gdn_prefill_ab_in_proj: false,
-            gdn_prefill_gates: false,
-            head_major_prefill: false,
-            gdn: false,
-            gdn_gates: false,
-            gdn_gated_rms_norm: false,
-            gdn_decode_fused: false,
-            gdn_decode_unexpanded_qk: false,
-            gdn_decode_qk_norm_recurrent: false,
-            gdn_decode_qk_norm_recurrent_rmsnorm: false,
-            fused_conv1d: false,
-            lora_decode_add: false,
-            gdn_full_chunk_forward_multiblock: false,
-        }
-    }
-
-    /// Qualified policy plus the unqualified multi-block GDN prefill route.
-    pub const fn experimental_multiblock() -> Self {
-        Self {
-            gdn_full_chunk_forward_multiblock: true,
-            ..Self::qualified()
-        }
-    }
-}
-
-impl Default for RocmKernelPolicy {
-    fn default() -> Self {
-        Self::qualified()
-    }
-}
-
-/// Install process-lifetime ROCm kernel policy. Reinstalling the same value is
-/// idempotent; conflicting values fail instead of changing live dispatch.
-pub fn install_rocm_kernel_policy(policy: RocmKernelPolicy) -> Result<()> {
-    match ROCM_KERNEL_POLICY.set(policy) {
-        Ok(()) => Ok(()),
-        Err(policy) if ROCM_KERNEL_POLICY.get() == Some(&policy) => Ok(()),
-        Err(_) => anyhow::bail!("ROCm kernel policy was already installed with a different value"),
-    }
-}
-
-fn rocm_kernel_policy() -> RocmKernelPolicy {
-    *ROCM_KERNEL_POLICY.get_or_init(RocmKernelPolicy::default)
-}
-
 pub fn optimizer_dispatch_success_counts() -> (u64, u64) {
     (
         ROCM_SGD_DISPATCH_SUCCESSES.load(Ordering::Relaxed),
@@ -249,7 +151,7 @@ pub struct RocmBackend {
 
 impl RocmBackend {
     pub fn new(device: kiln_tensor::Device) -> Self {
-        Self::new_with_kernel_policy(device, rocm_kernel_policy())
+        Self::new_with_kernel_policy(device, current_rocm_kernel_policy())
     }
 
     fn new_with_kernel_policy(device: kiln_tensor::Device, policy: RocmKernelPolicy) -> Self {

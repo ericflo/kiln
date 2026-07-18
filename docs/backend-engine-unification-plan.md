@@ -342,7 +342,9 @@ Capability profile:
 - GDN/RMSNorm/conv1d/optimizer paths largely mirror CUDA through HIP-compatible
   kernel crates.
 - ROCm's qualified typed kernel profile includes head-major prefill; the
-  portable fallback profile declines it without a hot-path environment read.
+  complete 35-leaf policy also owns model loading, W8 decode, long attention,
+  tape forward, and bounded training geometry. Portable fallback declines all
+  30 accelerated routes without weakening the two training-safety routes.
 - Some code still carries CUDA names, comments, and telemetry strings.
 - The earlier `supports_linear_decode_argmax` mismatch is resolved: ROCm now
   reports `Declined` for that support predicate until a native argmax path

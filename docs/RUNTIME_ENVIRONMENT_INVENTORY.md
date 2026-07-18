@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **600 direct read call sites** and
+The scanner records **588 direct read call sites** and
 **236 process-mutation call sites**. It can
-statically name **127 distinct literal `KILN_*`
-read names** across **237 call sites**.
+statically name **116 distinct literal `KILN_*`
+read names** across **225 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 133 | 86 | 0 |
+| Experimental/debug migration | 121 | 75 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 130 | 37 | 228 |
 
@@ -56,19 +56,18 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/forward.rs` | 28 | 23 |
+| `crates/kiln-model/src/forward.rs` | 22 | 18 |
 | `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
 | `crates/kiln-model/src/backend/capability.rs` | 9 | 1 |
 | `crates/kiln-server/src/bench.rs` | 8 | 7 |
 | `crates/kiln-model/src/cuda_graph.rs` | 5 | 5 |
 | `crates/kiln-model/src/metal_graph.rs` | 5 | 3 |
-| `crates/kiln-model/src/tape_forward.rs` | 5 | 5 |
 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` | 5 | 2 |
 | `crates/kiln-model/src/generate.rs` | 4 | 3 |
-| `crates/kiln-model/src/rocm_w8_proj.rs` | 4 | 4 |
 | `crates/kiln-tensor/csrc/paged_decode_meta.cu` | 4 | 2 |
 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` | 4 | 4 |
 | `crates/kiln-model/src/marlin_proj.rs` | 3 | 3 |
+| `crates/kiln-model/src/tape_forward.rs` | 3 | 3 |
 | `crates/kiln-core/src/env_flag.rs` | 2 | 0 |
 | `crates/kiln-flash-attn/csrc/rocm_flash_api.cpp` | 2 | 0 |
 | `crates/kiln-flash-attn/src/rocm_sdpa.rs` | 2 | 0 |
@@ -152,16 +151,12 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_DISABLE_OPD_LOSS_KERNEL` | Experimental/debug migration | 1 | `crates/kiln-opd-loss-kernel/src/lib.rs` |
 | `KILN_DISABLE_PARALLEL_PACK` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |
 | `KILN_DISABLE_RMSNORM_BACKWARD` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_RMSNORM_KERNEL` | Experimental/debug migration | 2 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_ROCM_ATTN_DECODE_QKV_PREP` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
+| `KILN_DISABLE_RMSNORM_KERNEL` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_ROCM_CONCAT_SAFE_ROW_ASSEMBLY` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/concat.rs` |
 | `KILN_DISABLE_ROCM_GQA_D128_PARALLEL` | Experimental/debug migration | 2 | `crates/kiln-tensor/csrc/paged_decode_meta.cu` |
 | `KILN_DISABLE_ROCM_GQA_D256_PARALLEL` | Experimental/debug migration | 2 | `crates/kiln-tensor/csrc/paged_decode_meta.cu` |
 | `KILN_DISABLE_ROCM_GQA_PAGED_ATTN` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` |
-| `KILN_DISABLE_ROCM_LONG_FLASH_ATTN` | Experimental/debug migration | 1 | `crates/kiln-model/src/tape_forward.rs` |
 | `KILN_DISABLE_ROCM_SPLIT_PAGED_ATTN` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` |
-| `KILN_DISABLE_ROCM_W8_SAMPLED_LM_HEAD` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_ROCM_W8_SWIGLU` | Experimental/debug migration | 1 | `crates/kiln-model/src/rocm_w8_proj.rs` |
 | `KILN_DOCTEST_PYTHON` | Experimental/debug migration | 1 | `crates/kiln-eval/src/scorers/python_doctest.rs` |
 | `KILN_DROP_PROJECTION_ORIGINALS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_ENABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP` | Experimental/debug migration | 1 | `crates/kiln-model/src/generate.rs` |
@@ -195,18 +190,11 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_ROCM_FLASH_BENCH_HEAD_DIM` | Test only | 1 | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` |
 | `KILN_ROCM_FLASH_BENCH_KV_HEADS` | Test only | 1 | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` |
 | `KILN_ROCM_FLASH_BENCH_SEQ` | Test only | 1 | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` |
-| `KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_ROCM_IS_FINITE_HOST_SCAN_ELEMENTS` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs` |
 | `KILN_ROCM_IS_FINITE_LARGE_HOST_SCAN` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs` |
 | `KILN_ROCM_PAGED_ATTN_MAX_SPLITS` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` |
 | `KILN_ROCM_PAGED_ATTN_SPLIT_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` |
 | `KILN_ROCM_RMSNORM_ROW_TILE_ROWS` | Experimental/debug migration | 1 | `crates/kiln-rmsnorm-kernel/src/kt_api.rs` |
-| `KILN_ROCM_SPLIT_Q_GATE_ROW_TILE_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_ROCM_TAPE_FLASH_MATERIALIZED` | Experimental/debug migration | 1 | `crates/kiln-model/src/tape_forward.rs` |
-| `KILN_ROCM_TRAINING_MLP_CHUNK_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_ROCM_W8A16` | Experimental/debug migration | 1 | `crates/kiln-model/src/rocm_w8_proj.rs` |
-| `KILN_ROCM_W8A8` | Experimental/debug migration | 1 | `crates/kiln-model/src/rocm_w8_proj.rs` |
-| `KILN_ROCM_W8A8_SAMPLED_LM_HEAD` | Experimental/debug migration | 1 | `crates/kiln-model/src/rocm_w8_proj.rs` |
 | `KILN_ROCM_WAVE64` | Build time/provenance | 6 | `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-tensor/build.rs` |
 | `KILN_RUN_LONG_ROCM_RMSNORM` | Test only | 1 | `crates/kiln-rmsnorm-kernel/tests/rocm_rmsnorm_parity.rs` |
 | `KILN_SDPA_PREFILL_MIN` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/metal_kernels.rs` |

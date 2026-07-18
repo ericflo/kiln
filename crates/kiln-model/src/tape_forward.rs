@@ -1807,7 +1807,7 @@ pub fn try_tape_flash_attn_kt(
         #[cfg(feature = "rocm")]
         if matches!(q.device(), kiln_tensor::Device::Rocm(_))
             && (sq.max(sk) > 4096)
-            && kiln_core::env_flag::env_flag("KILN_DISABLE_ROCM_LONG_FLASH_ATTN", false)
+            && !crate::rocm_policy::current_rocm_kernel_policy().long_flash_attn
         {
             return Ok(None);
         }
@@ -1819,13 +1819,7 @@ pub fn try_tape_flash_attn_kt(
                     .map_err(|e| anyhow::anyhow!("kt flash_attn_fwd_kt: {e:?}"))
             };
             #[cfg(feature = "rocm")]
-            let (out_kt, lse_kt) = if matches!(q.device(), kiln_tensor::Device::Rocm(_))
-                && kiln_core::env_flag::env_flag("KILN_ROCM_TAPE_FLASH_MATERIALIZED", false)
-            {
-                kiln_flash_attn::with_rocm_online_fwd_disabled(run_flash)?
-            } else {
-                run_flash()?
-            };
+            let (out_kt, lse_kt) = run_flash()?;
             #[cfg(not(feature = "rocm"))]
             let (out_kt, lse_kt) = run_flash()?;
             tape.record(

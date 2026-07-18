@@ -21,6 +21,7 @@ pub mod metal_graph;
 mod mtp_runtime;
 pub mod packed_weight_registry;
 pub mod rocm_graph;
+mod rocm_policy;
 pub mod stream_text;
 // (#1082 all-hardware) `paged_kv_cache_kt` compiles on every backend now: the
 // struct, metadata accessors, and `new`/`new_with_fp8` constructors are
@@ -80,8 +81,6 @@ pub use backend::{
 };
 // (#1082 candle removal) `backend::for_device` (candle-typed shim) was deleted
 // with the candle-parity opt-in feature; production uses `for_device_kt`.
-#[cfg(feature = "rocm")]
-pub use backend::rocm::{RocmKernelPolicy, install_rocm_kernel_policy};
 pub use backend::{DecodeWeightPrewarmCancelled, DecodeWeightPrewarmPolicy};
 pub use cancel::CancelHandle;
 pub use engine::Engine;
@@ -112,6 +111,8 @@ pub use rocm_graph::{
     RocmGraphLiveTelemetry, RocmGraphPhase, RocmGraphPhaseStats, RocmGraphStats,
     RocmGraphStatsUnavailable, RocmGraphTelemetryHandle,
 };
+#[cfg(feature = "rocm")]
+pub use rocm_policy::{RocmKernelPolicy, install_rocm_kernel_policy};
 pub use speculative::SpeculativeConfig;
 pub use weights::{ModelSnapshotCleanup, ModelWeights};
 

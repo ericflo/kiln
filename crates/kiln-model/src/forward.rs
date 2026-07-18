@@ -239,17 +239,18 @@ fn try_kt_sigmoid_composite(x: &Tensor) -> Result<Option<Tensor>> {
     Ok(Some(out))
 }
 
-fn fused_paged_decode_disabled() -> bool {
+fn fused_paged_decode_disabled(device: Device) -> bool {
+    if matches!(device, Device::Rocm(_)) {
+        return !crate::rocm_policy::current_rocm_kernel_policy().fused_paged_decode;
+    }
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok())
 }
 
 /// ROCm device-resident KV pools + the native sq=1 O(n) paged-decode path
 /// (correct + faster at every context length: ~13 tok/s @32, ~12 @128, ~11 @256
-/// vs the contiguous O(n^2) prefill recompute's 10.5 degrading to ~8). DEFAULT
-/// ON; set `KILN_ROCM_PAGED_DECODE=0` to fall back to the contiguous path.
-/// `PagedKvCacheKt::new` also reads this policy, so KV-pool routing and
-/// attention routing agree.
+/// vs the contiguous O(n^2) prefill recompute's 10.5 degrading to ~8). The
+/// immutable qualified profile enables the route and its KV-pool contract.
 #[cfg(feature = "rocm")]
 pub(crate) fn rocm_paged_decode_enabled() -> bool {
     crate::backend::capability::DecodeBatcherPolicy::for_backend("rocm", Device::Rocm(0))
@@ -331,27 +332,30 @@ fn cuda_fused_rotary_qk_disabled() -> bool {
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_fused_attn_decode_qkv_prep_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP").is_ok()
-            || std::env::var("KILN_DISABLE_ROCM_ATTN_DECODE_QKV_PREP").is_ok()
-    })
+fn gpu_fused_attn_decode_qkv_prep_disabled(device: &Device) -> bool {
+    if matches!(device, Device::Rocm(_)) {
+        return !crate::rocm_policy::current_rocm_kernel_policy().attn_decode_qkv_prep;
+    }
+    static CUDA_DISABLED: OnceLock<bool> = OnceLock::new();
+    *CUDA_DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP").is_ok())
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_fused_mlp_silu_mul_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL").is_ok())
+fn gpu_fused_mlp_silu_mul_disabled(device: Device) -> bool {
+    if matches!(device, Device::Rocm(_)) {
+        return !crate::rocm_policy::current_rocm_kernel_policy().fused_mlp_silu_mul;
+    }
+    static CUDA_DISABLED: OnceLock<bool> = OnceLock::new();
+    *CUDA_DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL").is_ok())
 }
 
-/// Kill switch for the CUDA prefill fused `[x] @ [gate||up]` GEMM. Set
-/// `KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL=1` to fall back to the legacy
-/// two-matmul path (used for A/B parity bench-marking).
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_fused_mlp_gate_up_prefill_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL").is_ok())
+fn gpu_fused_mlp_gate_up_prefill_disabled(device: Device) -> bool {
+    if matches!(device, Device::Rocm(_)) {
+        return !crate::rocm_policy::current_rocm_kernel_policy().fused_mlp_gate_up_prefill;
+    }
+    static CUDA_DISABLED: OnceLock<bool> = OnceLock::new();
+    *CUDA_DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL").is_ok())
 }
 
 #[cfg(feature = "cuda")]
@@ -919,8 +923,7 @@ fn metal_streaming_gdn_forward_only_fastpaths_enabled() -> bool {
 
 #[cfg(feature = "rocm")]
 fn rocm_streaming_gdn_forward_only_fastpaths_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy("KILN_ENABLE_ROCM_GDN_STREAMING_FASTPATHS"))
+    false
 }
 
 fn streaming_gdn_forward_only_fastpaths_allowed(device: &Device) -> bool {
@@ -936,6 +939,7 @@ fn streaming_gdn_forward_only_fastpaths_allowed(device: &Device) -> bool {
             return rocm_streaming_gdn_forward_only_fastpaths_enabled();
         }
     }
+    let _ = device;
     true
 }
 
@@ -2282,7 +2286,7 @@ pub struct GpuFullAttentionWeights {
     /// Optional ROCm-only row-wise W8A16 full-attention decode projections.
     /// `qkv_proj_w8` stores `[q_raw | k | v]` rows; `o_proj_w8` stores
     /// `[hidden, num_heads * head_dim]`. Populated only when
-    /// Enabled by default on ROCm decode; set `KILN_ROCM_W8A16=0` to disable.
+    /// Enabled by the qualified immutable ROCm kernel profile for decode.
     pub qkv_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     pub o_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     /// Optional Marlin W4A16-packed q_proj. Populated at load time when the
@@ -2386,7 +2390,7 @@ pub struct GpuLinearAttentionWeights {
     pub out_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
     /// Optional ROCm-only row-wise W8A16 fused input projection storing
     /// `[qkv | z | a | b]` rows. Enabled by default on ROCm decode; set
-    /// `KILN_ROCM_W8A16=0` to disable.
+    /// The immutable ROCm kernel profile owns packing and dispatch.
     pub in_proj_qkvzab_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
 }
 
@@ -2559,7 +2563,7 @@ pub struct GpuFfnWeights {
     /// Optional ROCm-only row-wise W8A16 decode projections. `gate_up_proj_w8`
     /// stores `[2 * intermediate, hidden]`; `down_proj_w8` stores
     /// `[hidden, intermediate]`. Enabled by default on ROCm decode; set
-    /// `KILN_ROCM_W8A16=0` to disable.
+    /// The immutable ROCm kernel profile owns packing and dispatch.
     pub gate_up_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     pub down_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
 }
@@ -4561,12 +4565,12 @@ pub fn detached_full_attn_tile_tokens_for(device: &Device) -> usize {
 }
 
 fn rocm_long_flash_attn_enabled() -> bool {
-    !env_truthy("KILN_DISABLE_ROCM_LONG_FLASH_ATTN")
+    crate::rocm_policy::current_rocm_kernel_policy().long_flash_attn
 }
 
 #[cfg(feature = "rocm")]
 fn rocm_native_rectangular_causal_flash_enabled() -> bool {
-    kiln_core::env_flag::env_flag("KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL", true)
+    crate::rocm_policy::current_rocm_kernel_policy().native_rectangular_causal_flash
 }
 
 fn long_prefill_leaf_flash_allowed_for_device(
@@ -4581,8 +4585,8 @@ fn long_prefill_leaf_flash_allowed_for_device(
     ) {
         // ROCm's long flash/online SDPA route is exact and is the only
         // practical path for large prefix-causal training rows on gfx115x.
-        // Keep the disable env as a production kill switch, but do not require
-        // a server restart with an opt-in env just to fit and train a long row.
+        // The immutable qualified profile keeps this route enabled so long
+        // rows fit without a per-request or hot-path policy lookup.
         rocm_long_flash_attn_enabled()
     } else {
         true
@@ -5280,7 +5284,9 @@ impl GpuWeights {
         let _durable_vulkan_allocations = matches!(device, Device::Vulkan(_))
             .then(kiln_vulkan_kernel::buffer_pool::durable_allocation_scope);
 
-        let w8a16_enabled = crate::rocm_w8_proj::env_enabled();
+        #[cfg(feature = "rocm")]
+        let w8a16_enabled = matches!(device, Device::Rocm(_))
+            && crate::rocm_policy::current_rocm_kernel_policy().w8_projection;
         // On Metal and on Vulkan-active processes, `embed_tokens` itself
         // is never read past `embedding_lookup_from_weights` (which falls
         // back to `embed_tokens_t` whenever the dims don't match the
@@ -6296,15 +6302,10 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
 #[cfg(feature = "rocm")]
 fn rocm_fused_rmsnorm_allowed_for_tensor(x: &Tensor) -> bool {
     let _ = x;
-    if std::env::var("KILN_DISABLE_RMSNORM_KERNEL").is_ok() {
-        return false;
-    }
     // The ROCm kt RMSNorm path row-tiles long inputs internally
-    // (`fused_rmsnorm_kt_rocm_row_tiled`). Keeping a separate model-level row
-    // cap sent long-context training to the generic fallback unless the server
-    // was restarted with `KILN_ENABLE_ROCM_LONG_RMSNORM_KERNEL=1`, and that
-    // fallback has produced impossible magnitudes on real long SFT rows.
-    true
+    // (`fused_rmsnorm_kt_rocm_row_tiled`), so the immutable profile needs no
+    // shape-dependent override for long rows.
+    crate::rocm_policy::current_rocm_kernel_policy().fused_rmsnorm
 }
 
 /// The unsafe CPU-bridged Vulkan RMSNorm leaf is disabled by qualified policy.
@@ -7772,7 +7773,7 @@ pub fn swiglu_ffn_gated_hidden(
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
         if !crate::tape_forward::tape_scope_active()
-            && !cuda_fused_mlp_silu_mul_disabled()
+            && !gpu_fused_mlp_silu_mul_disabled(gate.device())
             && !gate.track_op()
             && !up.track_op()
         {
@@ -7874,8 +7875,8 @@ fn swiglu_ffn_impl(
     let (_, seq_len, _) = x.dims3()?;
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
-        let chunk_tokens = cuda_training_mlp_chunk_tokens(&x.device());
-        if !cuda_training_mlp_chunking_disabled()
+        let chunk_tokens = gpu_training_mlp_chunk_tokens(&x.device());
+        if !gpu_training_mlp_chunking_disabled(&x.device())
             && chunk_tokens > 0
             && seq_len > chunk_tokens
             && (x.track_op() || lora.is_some())
@@ -7896,17 +7897,19 @@ fn swiglu_ffn_impl(
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_training_mlp_chunking_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| {
+fn gpu_training_mlp_chunking_disabled(device: &Device) -> bool {
+    if matches!(device, Device::Rocm(_)) {
+        return !crate::rocm_policy::current_rocm_kernel_policy().training_mlp_chunking;
+    }
+    static CUDA_DISABLED: OnceLock<bool> = OnceLock::new();
+    *CUDA_DISABLED.get_or_init(|| {
         env_truthy("KILN_DISABLE_CUDA_TRAINING_MLP_CHUNKING")
-            || env_truthy("KILN_DISABLE_ROCM_TRAINING_MLP_CHUNKING")
             || env_truthy("KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING")
     })
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_training_mlp_chunk_tokens(device: &Device) -> usize {
+fn gpu_training_mlp_chunk_tokens(device: &Device) -> usize {
     match device {
         Device::Rocm(_) => rocm_training_mlp_chunk_tokens(),
         _ => generic_cuda_training_mlp_chunk_tokens(),
@@ -7929,14 +7932,7 @@ fn generic_cuda_training_mlp_chunk_tokens() -> usize {
 
 #[cfg(feature = "rocm")]
 fn rocm_training_mlp_chunk_tokens() -> usize {
-    static CHUNK_TOKENS: OnceLock<usize> = OnceLock::new();
-    *CHUNK_TOKENS.get_or_init(|| {
-        std::env::var("KILN_ROCM_TRAINING_MLP_CHUNK_TOKENS")
-            .ok()
-            .and_then(parse_positive_usize)
-            .or_else(training_mlp_chunk_tokens_from_env)
-            .unwrap_or(512)
-    })
+    crate::rocm_policy::current_rocm_kernel_policy().training_mlp_chunk_tokens
 }
 
 #[cfg(all(any(feature = "cuda", feature = "rocm"), not(feature = "rocm")))]
@@ -8401,7 +8397,7 @@ fn swiglu_ffn_impl_no_chunk(
         if !tape_scope_active
             && !has_mlp_gate_up_lora
             && !has_marlin
-            && !cuda_fused_mlp_gate_up_prefill_disabled()
+            && !gpu_fused_mlp_gate_up_prefill_disabled(x.device())
         {
             if let Some(gate_up_proj_t) = mlp.gate_up_proj_t.as_ref() {
                 if x.dtype() == DType::BF16
@@ -8531,7 +8527,7 @@ fn swiglu_ffn_impl_no_chunk(
                 // fire and leave the gate/up projections' grads islands. Disable it
                 // under a tape recording scope so the unfused, tape-wired silu + mul
                 // path runs. Default (no tape scope) unchanged.
-                let fused_hidden = if !cuda_fused_mlp_silu_mul_disabled()
+                let fused_hidden = if !gpu_fused_mlp_silu_mul_disabled(gate.device())
                     && !gate.track_op()
                     && !up.track_op()
                     && !crate::tape_forward::tape_scope_active()
@@ -9408,7 +9404,7 @@ pub fn lm_head_sample_backend_decode_if(
     {
         use kiln_core::sampling::SamplingParams as SP;
 
-        if std::env::var("KILN_DISABLE_ROCM_W8_SAMPLED_LM_HEAD").is_err()
+        if crate::rocm_policy::current_rocm_kernel_policy().w8_sampled_lm_head
             && params.top_k == 0
             && SP::top_p_disables_nucleus_filter(params.top_p)
             && SP::min_p_is_disabled(params.min_p)
@@ -15038,19 +15034,28 @@ fn q_proj_forward_decode_if(
 }
 
 fn split_q_gate_training_disabled(device: &Device) -> bool {
+    if matches!(device, Device::Rocm(_)) {
+        return !crate::rocm_policy::current_rocm_kernel_policy().split_q_gate_training;
+    }
     static DISABLED: OnceLock<bool> = OnceLock::new();
     if *DISABLED.get_or_init(|| env_truthy("KILN_DISABLE_SPLIT_Q_GATE_TRAINING")) {
         return true;
     }
     match device {
         Device::Cuda(_) => env_truthy("KILN_DISABLE_CUDA_SPLIT_Q_GATE_TRAINING"),
-        Device::Rocm(_) => env_truthy("KILN_DISABLE_ROCM_SPLIT_Q_GATE_TRAINING"),
+        Device::Rocm(_) => unreachable!("ROCm policy returned above"),
         Device::Vulkan(_) => env_truthy("KILN_DISABLE_VULKAN_SPLIT_Q_GATE_TRAINING"),
         _ => false,
     }
 }
 
 fn split_q_gate_output_chunk_features_for_device(device: &Device, full_dim: usize) -> usize {
+    if matches!(device, Device::Rocm(_)) {
+        return crate::rocm_policy::current_rocm_kernel_policy()
+            .split_q_gate_output_chunk_features
+            .min(full_dim)
+            .max(1);
+    }
     let env_override = std::env::var("KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
@@ -15063,7 +15068,7 @@ fn split_q_gate_output_chunk_features_for_device(device: &Device, full_dim: usiz
         // [8192 x 2560] @ [2560 x 8192] fused q+gate projection. Column
         // slicing is algebraically identical and keeps each GEMM on stable
         // shapes; the final concat preserves the original q/gate layout.
-        Device::Rocm(_) => full_dim.min(1024).max(1),
+        Device::Rocm(_) => unreachable!("ROCm policy returned above"),
         // Vulkan's linear offset path already has submit-size ceilings. Use
         // the same split contract when BF16 projection slices are available.
         Device::Vulkan(_) => full_dim.min(1024).max(1),
@@ -15110,13 +15115,7 @@ fn q_gate_projection_weight_slice(
 
 #[cfg(feature = "rocm")]
 fn rocm_split_q_gate_row_tile_tokens() -> usize {
-    std::env::var("KILN_ROCM_SPLIT_Q_GATE_ROW_TILE_TOKENS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        // Keep the ROCm fallback kernel's working set bounded for long-row
-        // split q/gate training projections.
-        .unwrap_or(512)
+    crate::rocm_policy::current_rocm_kernel_policy().split_q_gate_row_tile_tokens
 }
 
 #[cfg(feature = "rocm")]
@@ -15126,7 +15125,7 @@ fn rocm_q_gate_projection_slice_bf16_via_f32(
     chunk_start: usize,
     chunk_len: usize,
 ) -> Result<Option<Tensor>> {
-    if env_truthy("KILN_DISABLE_ROCM_SPLIT_Q_GATE_F32_OUTPUT")
+    if !crate::rocm_policy::current_rocm_kernel_policy().split_q_gate_f32_output
         || !matches!(x.device(), Device::Rocm(_))
         || x.dtype() != DType::BF16
         || full_weight_t.dtype() != DType::BF16
@@ -15796,7 +15795,7 @@ fn try_rocm_gqa_sdpa_f32_materialized(
     kv_len: usize,
     scale: f64,
 ) -> Result<Option<Tensor>> {
-    if env_truthy("KILN_DISABLE_ROCM_GQA_SDPA_F32") {
+    if !crate::rocm_policy::current_rocm_kernel_policy().gqa_sdpa_f32_materialized {
         return Ok(None);
     }
     let dtype = q.dtype();
@@ -18417,7 +18416,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         // (the pre-12-B-prime working path) and only fall through to
         // dyn_seqlen when rows actually diverge.
         //
-        // Env switches:
+        // CUDA/Metal migration switches; ROCm uses immutable profile policy:
         //   KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH=1
         //     Force strict path everywhere (debug). Will fail loudly if a
         //     batch arrives with divergent start_pos because the strict
@@ -18427,9 +18426,14 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         //     pre-fix throughput number or to validate dyn_seqlen
         //     correctness under uniform load.
         // KILN_DISABLE_* takes precedence over KILN_FORCE_* if both set.
-        let kill_dyn_seqlen =
-            std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok();
+        let rocm_policy = BackendIdentity::runtime_name(backend) == "rocm";
+        let kill_dyn_seqlen = if rocm_policy {
+            !crate::rocm_policy::current_rocm_kernel_policy().paged_decode_dyn_seqlen_batch
+        } else {
+            std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok()
+        };
         let force_dyn_seqlen = !kill_dyn_seqlen
+            && !rocm_policy
             && std::env::var("KILN_FORCE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok();
         // Short-circuit the strict probe on backends that have no
         // strict_paged_decode_contiguous_batch kernel impl. The probe
@@ -18765,7 +18769,7 @@ fn gqa_attention_paged_with_rope_tables(
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
             if seq_len == 1
-                && !cuda_fused_attn_decode_qkv_prep_disabled()
+                && !gpu_fused_attn_decode_qkv_prep_disabled(&x.device())
                 && !any_kt_tensor_tracks_op(&[
                     &q_raw,
                     &k_raw,
@@ -19194,7 +19198,7 @@ fn gqa_attention_paged_with_rope_tables(
             }
         }
         && (num_heads / num_kv_heads) > 1
-        && !fused_paged_decode_disabled()
+        && !fused_paged_decode_disabled(q.device())
         && AttentionBackend::runtime_supports_flash_attn_paged_decode(backend)
     {
         // Open the fused-decode range around the call so the kernel work is

@@ -500,12 +500,15 @@ training request
 
         <h3 class="font-semibold mt-6 mb-3">ROCm model kernels use one complete route profile</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.rocm_kernel_profile</code> replaces independent model-kernel environment gates.
+          <code>accelerator.rocm_kernel_profile</code> replaces independent model-kernel environment gates with
+          one complete 35-leaf policy.
           <code>qualified</code> is the stable production profile: it enables the qualified full-attention QKV,
           GDN projection/gates/recurrent/normalization/decode, head-major prefill, fused convolution, and LoRA
-          decode routes while keeping the slower gfx1151 multi-block GDN prefill experiment off.
-          <code>portable_fallback</code> declines all fifteen profile-governed ROCm model routes and delegates to supported
-          portable implementations, making reference comparison intentional and reproducible.
+          decode routes, exact long-attention routes, W8 decode projections, and bounded training routes while
+          keeping the slower gfx1151 multi-block GDN prefill experiment off. <code>portable_fallback</code>
+          declines all thirty accelerated ROCm model routes and delegates to supported portable
+          implementations, making reference comparison intentional and reproducible. It deliberately retains
+          the two correctness-oriented training safeguards and their three bounded geometry values.
           <code>experimental_multiblock</code> is the qualified set plus that unqualified multi-block prefill
           kernel and therefore fails startup outside the experimental serving profile.
         </p>
@@ -528,17 +531,59 @@ training request
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_conv1d</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lora_decode_add</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_full_chunk_forward_multiblock</code></td><td class="p-2">off</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>attn_decode_qkv_prep</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_paged_decode</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>paged_decode_dyn_seqlen_batch</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_mlp_silu_mul</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_mlp_gate_up_prefill</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_rmsnorm</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>long_flash_attn</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>native_rectangular_causal_flash</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>w8_projection</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>w8a8_projection</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>w8_swiglu</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>w8_sampled_lm_head</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>w8a8_sampled_lm_head</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gqa_sdpa_f32_materialized</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_q_gate_f32_output</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>training_mlp_chunking</code></td><td class="p-2">on</td><td class="p-2">on</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>training_mlp_chunk_tokens</code></td><td class="p-2">512</td><td class="p-2">512</td><td class="p-2">512</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_q_gate_training</code></td><td class="p-2">on</td><td class="p-2">on</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_q_gate_output_chunk_features</code></td><td class="p-2">1024</td><td class="p-2">1024</td><td class="p-2">1024</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_q_gate_row_tile_tokens</code></td><td class="p-2">512</td><td class="p-2">512</td><td class="p-2">512</td></tr>
             </tbody>
           </table>
         </div>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The server maps the typed profile to a complete model policy before backend construction. Each
-          <code>RocmBackend</code> captures that value; dispatch does not consult process environment in hot
-          paths. A same-value process install is idempotent and a conflicting install fails. The retired
-          per-kernel ROCm spellings and CUDA-spelled fallbacks are deliberately unsupported as aliases for
-          this ROCm profile, so an operator cannot create an unqualified mixture or change a route during
-          inference. Remaining CUDA-only controls are tracked for the later CUDA-host migration.
+          The server maps the typed profile to a complete model policy before backend construction. Backend
+          dispatch, model loading, forward execution, and tape-forward execution all read that immutable
+          value. Dispatch does not consult process environment in hot paths. A same-value process install is
+          idempotent and a conflicting
+          install fails. The retired per-kernel ROCm spellings and CUDA-spelled fallbacks are deliberately
+          unsupported as aliases, so an operator cannot create an unqualified mixture or change a route during
+          inference. The default-off ROCm streaming-GDN and materialized tape-flash investigation switches were
+          removed rather than promoted. Generic GPU MLP and split-projection environment controls remain live
+          for CUDA/Vulkan until those hardware-host migrations, but ROCm no longer consumes them.
         </p>
+        <details class="mt-4" open>
+          <summary class="font-medium">Retired model-layer ROCm variables</summary>
+          <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+            The profile replaces <code>KILN_DISABLE_ROCM_ATTN_DECODE_QKV_PREP</code>,
+            <code>KILN_ENABLE_ROCM_GDN_STREAMING_FASTPATHS</code>,
+            <code>KILN_DISABLE_ROCM_LONG_FLASH_ATTN</code>,
+            <code>KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL</code>,
+            <code>KILN_DISABLE_ROCM_TRAINING_MLP_CHUNKING</code>,
+            <code>KILN_ROCM_TRAINING_MLP_CHUNK_TOKENS</code>,
+            <code>KILN_DISABLE_ROCM_W8_SAMPLED_LM_HEAD</code>,
+            <code>KILN_DISABLE_ROCM_SPLIT_Q_GATE_TRAINING</code>,
+            <code>KILN_ROCM_SPLIT_Q_GATE_ROW_TILE_TOKENS</code>,
+            <code>KILN_DISABLE_ROCM_SPLIT_Q_GATE_F32_OUTPUT</code>,
+            <code>KILN_DISABLE_ROCM_GQA_SDPA_F32</code>,
+            <code>KILN_ROCM_TAPE_FLASH_MATERIALIZED</code>, <code>KILN_ROCM_W8A16</code>,
+            <code>KILN_ROCM_W8A8</code>, <code>KILN_ROCM_W8A8_SAMPLED_LM_HEAD</code>, and
+            <code>KILN_DISABLE_ROCM_W8_SWIGLU</code>. None is accepted as an alias.
+          </p>
+        </details>
 
         <h3 class="font-semibold mt-6 mb-3">Matmul route choice is fixed before inference</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">

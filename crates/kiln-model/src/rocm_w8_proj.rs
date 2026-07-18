@@ -1,11 +1,11 @@
-//! Experimental ROCm W8 decode projections.
+//! ROCm W8 decode projections.
 //!
-//! This is default-on for ROCm decode (`KILN_ROCM_W8A16=0` disables it) and
-//! decode-scoped. It
+//! The immutable ROCm kernel profile owns packing and dispatch. The route is
+//! default-on in the qualified profile and decode-scoped. It
 //! packs BF16 row-major projection weights `[out, in]` into signed int8 plus
 //! one F32 scale per output row, then uses a ROCm GEMV kernel for single-token
-//! decode. Runtime projection math defaults to W8A8 for sampled-decode
-//! throughput; set `KILN_ROCM_W8A8=0` to force the W8A16 projection kernel.
+//! decode. Qualified runtime projection math uses W8A8 for sampled-decode
+//! throughput.
 
 use anyhow::{Context, Result};
 
@@ -17,28 +17,19 @@ pub struct RocmW8Proj {
     pub n: usize,
 }
 
-pub fn env_enabled() -> bool {
-    kiln_core::env_flag::env_flag("KILN_ROCM_W8A16", true)
-}
-
 #[cfg(feature = "rocm")]
 fn a8_enabled() -> bool {
-    kiln_core::env_flag::env_flag("KILN_ROCM_W8A8", true)
+    crate::rocm_policy::current_rocm_kernel_policy().w8a8_projection
 }
 
 #[cfg(feature = "rocm")]
 fn a8_sample_enabled() -> bool {
-    a8_enabled() && kiln_core::env_flag::env_flag("KILN_ROCM_W8A8_SAMPLED_LM_HEAD", true)
-}
-
-#[cfg(feature = "rocm")]
-fn swiglu_disabled() -> bool {
-    kiln_core::env_flag::env_flag("KILN_DISABLE_ROCM_W8_SWIGLU", false)
+    a8_enabled() && crate::rocm_policy::current_rocm_kernel_policy().w8a8_sampled_lm_head
 }
 
 #[cfg(feature = "rocm")]
 pub fn swiglu_bf16_enabled(w: &RocmW8Proj) -> bool {
-    !swiglu_disabled() && w.n % 2 == 0
+    crate::rocm_policy::current_rocm_kernel_policy().w8_swiglu && w.n % 2 == 0
 }
 
 pub fn pack_from_bf16_rows(weight: &kiln_tensor::Tensor) -> Result<Option<RocmW8Proj>> {

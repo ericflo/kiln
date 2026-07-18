@@ -3201,19 +3201,6 @@
       "surface": "source"
     },
     {
-      "api": "env_flag",
-      "argument": "KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "name",
       "argument_kind": "expression",
@@ -3414,32 +3401,6 @@
       "argument_kind": "literal",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_ROCM_ATTN_DECODE_QKV_PREP",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_ROCM_W8_SAMPLED_LM_HEAD",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
       "count": 1,
       "language": "rust",
       "operation": "read",
@@ -3463,32 +3424,6 @@
     {
       "api": "var",
       "argument": "KILN_GPU_TRAINING_MLP_CHUNK_TOKENS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ROCM_SPLIT_Q_GATE_ROW_TILE_TOKENS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ROCM_TRAINING_MLP_CHUNK_TOKENS",
       "argument_kind": "literal",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
@@ -3875,84 +3810,6 @@
       "path": "crates/kiln-model/src/rocm_graph.rs",
       "phase": "runtime",
       "surface": "unit-test"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_DISABLE_ROCM_W8_SWIGLU",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/rocm_w8_proj.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_ROCM_W8A16",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/rocm_w8_proj.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_ROCM_W8A8",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/rocm_w8_proj.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_ROCM_W8A8_SAMPLED_LM_HEAD",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/rocm_w8_proj.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_DISABLE_ROCM_LONG_FLASH_ATTN",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_ROCM_TAPE_FLASH_MATERIALIZED",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
     },
     {
       "api": "var",
@@ -6256,11 +6113,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 237,
-    "literal_kiln_read_names": 127,
+    "literal_kiln_read_call_sites": 225,
+    "literal_kiln_read_names": 116,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 86,
+      "experimental_debug": 75,
       "public_stable": 1,
       "test_only": 37
     },
@@ -6270,13 +6127,13 @@
       "test_only": 228
     },
     "process_mutation_entries": 145,
-    "read_call_sites": 600,
+    "read_call_sites": 588,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 133,
+      "experimental_debug": 121,
       "public_stable": 9,
       "test_only": 130
     },
-    "read_entries": 335
+    "read_entries": 324
   }
 }
