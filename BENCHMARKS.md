@@ -13,7 +13,7 @@ streaming `POST /v1/chat/completions` API. Kiln `/health` snapshots are taken
 before and after a run when available, outside the timed request path; they do
 not alter request bodies or scheduling.
 
-New measurements use driver version 3. The driver:
+New measurements use driver version 4. The driver:
 
 - fingerprints every weight shard plus the model config, tokenizer, and chat
   template before traffic and rechecks the complete identity after traffic;
@@ -36,19 +36,22 @@ New measurements use driver version 3. The driver:
   forward, phase time, and error deltas when its diagnostics are enabled;
 - samples one explicit DRM memory counter, fails any row above the declared
   absolute byte limit, and records both absolute peak and baseline delta;
-- attaches one hashed host-thermal policy to the local server process group,
+- owns a typed argv-only server launch by default, arms one hashed host-thermal
+  policy before the first readiness request, and binds the new process group,
   includes pacing and boundary cooling in a separate sustainable-throughput
   rate for every row, fails closed on sensor/process identity drift or a hard
-  trip, and requires a stable cool handoff while leaving the engine running;
+  trip, requires a clean process-group shutdown, and completes stable cooldown;
 - writes an atomic, self-hashing receipt on success or on any recoverable
   post-preflight failure, preserving the exact ordered prefix of completed rows;
 - records structured warmup, measurement, sampler-stop, comparison, and
   finalization failures, while independently rechecking repository, model,
   runtime artifact, and engine-specific live-runtime identity after traffic;
-- requires a current v3 reference receipt with identical workload and model
+- hashes the exclusive server log and retains typed launch, readiness,
+  shutdown-status, forced-shutdown, and final process-liveness evidence;
+- requires a current v4 reference receipt with identical workload and model
   content for cross-engine runs.
 
-A partial v3 receipt is diagnostic counterevidence, never performance
+A partial v4 receipt is diagnostic counterevidence, never performance
 acceptance. Its top-level verdict is `failed`, `completion.completed_run_count`
 names the retained prefix, `completion.expected_run_count` names the complete
 declared matrix, and `completion.failures` explains why execution stopped. Kiln
@@ -58,9 +61,10 @@ model, and runtime-artifact checks are never optional. A process crash or host
 loss can still prevent any file from being written, so raw logs remain required
 for catastrophic failures.
 
-Driver version 2 remains accepted only so the historical checked-in receipts
-continue to validate. It cannot produce new receipts and does not satisfy the
-current acceptance protocol.
+Driver versions 2 and 3 remain accepted only so historical checked-in receipts
+continue to validate. They cannot produce new receipts and do not satisfy the
+current acceptance protocol. The complete field and lifecycle reference is in
+[Serving Benchmark Protocol](docs/SERVING_BENCHMARK_PROTOCOL.md).
 
 ### Fixed workload profiles
 
@@ -95,13 +99,16 @@ Run Kiln first from a clean checkout. Use an explicit DRM path on machines with
 more than one GPU. Choose the absolute memory limit before either engine starts
 and use the same value for both engines; do not derive it from an observed peak.
 
-The protected server PID must lead its own local process group. Start the engine
-through `setsid` or an equivalent supervisor scope, retain the leader PID, and
-pass the same typed thermal policy to Kiln and vLLM. The driver binds PID, PGID,
-Linux boot ID, process start ticks, executable path, and a hash of the command
-line before it can send traffic. It samples at both row boundaries, waits for
-an active pacing interval to settle, and holds a stopped process until the
-policy's consecutive-sample safe-handoff gate passes.
+Prefer `--server-launch-config`: the driver creates a fresh session-led process
+group and arms containment before readiness, then owns graceful shutdown and
+cooldown. The loopback port must be unbound before launch, and after readiness
+its listening socket inode must belong to the launched process group. The
+closed launch document contains argv, working/log directories,
+readiness cadence and deadline, shutdown deadline, and accepted exit codes; it
+has no shell string or environment map. `--server-pid` remains available for an
+external supervisor. That PID must lead its group, and containment before the
+driver attaches is then the supervisor's responsibility. Both modes bind PID,
+PGID, Linux boot ID, process start ticks, executable path, and command-line hash.
 
 On this Strix Halo, use
 `qualification/host-policies/strix-halo-serving-benchmark-v1.json`. It starts
@@ -188,7 +195,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 30000000000 \
   --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-v1.json \
-  --server-pid "$KILN_SERVER_PID" \
+  --server-launch-config .qualification/serving/rocm-kiln-launch.json \
   --out-dir /tmp/kiln-serving-campaign
 ```
 
@@ -231,7 +238,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 30000000000 \
   --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-v1.json \
-  --server-pid "$VLLM_SERVER_PID" \
+  --server-launch-config .qualification/serving/rocm-vllm-launch.json \
   --reference-dir /tmp/kiln-serving-campaign \
   --out-dir /tmp/vllm-serving-campaign
 ```
@@ -287,14 +294,17 @@ with `scripts/bench-concurrent-batch.py --validate-receipt PATH...`. The latter
 rejects unknown or missing fields, non-finite metrics, inconsistent gates,
 dirty passed sources, workload/run mismatches, and an invalid canonical
 self-hash. It also rejects a run if the repository identity changes while
-measurement is in progress. New v3 receipts additionally reject altered model
+measurement is in progress. Driver v3/v4 receipts additionally reject altered model
 content identities, runtime-artifact mismatches, missing Kiln executable
 provenance, profile/sampling drift, prompt-token summary drift, and an
 inconsistent absolute-memory gate. They also reject a non-prefix partial run,
 unstructured completion failures, invalid engine-specific finalization
 applicability, and any passed verdict without the complete declared matrix and
-all applicable provenance rechecks. Historical v2 validation is compatibility,
-not current performance evidence.
+all applicable provenance rechecks. Driver v4 additionally rejects launch
+config drift, lifecycle/thermal ownership disagreement, missing log identity,
+forced or unacceptable shutdown, surviving process groups, and incomplete
+post-exit cooldown. Historical v2/v3 validation is compatibility, not current
+performance evidence.
 
 ## Historical CUDA setup
 

@@ -102,10 +102,33 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
                 list(campaign.PROFILES),
             )
             self.assertEqual(summary["verdict"], "passed")
-            self.assertEqual(summary["server_pid"], 4321)
+            self.assertEqual(summary["server_owner"]["server_pid"], 4321)
+            self.assertEqual(
+                summary["server_owner"]["mode"], "attached_process_group"
+            )
             self.assertTrue(
                 summary["host_thermal_policy"]["sha256"].startswith("sha256:")
             )
+
+    def test_campaign_can_forward_owned_server_launch_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw_args = required_args(root)
+            pid_index = raw_args.index("--server-pid")
+            del raw_args[pid_index : pid_index + 2]
+            launch_config = root / "server-launch.json"
+            launch_config.write_text('{"fixture":true}\n')
+            raw_args.extend(("--server-launch-config", str(launch_config)))
+            args = campaign.parse_args(raw_args)
+            command = campaign.benchmark_command(
+                args, "greedy-short", root / "greedy-short.kiln.json"
+            )
+
+        self.assertNotIn("--server-pid", command)
+        self.assertEqual(
+            command[command.index("--server-launch-config") + 1],
+            str(launch_config),
+        )
 
 
 if __name__ == "__main__":

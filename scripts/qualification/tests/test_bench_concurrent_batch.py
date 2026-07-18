@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
 import threading
@@ -856,6 +857,80 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertEqual(events[0], "guard_started")
         self.assertIn("server_probe", events[1:])
+
+    def test_owned_server_launch_binds_group_shutdown_and_log_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                reservation.listen()
+                port = reservation.getsockname()[1]
+                with self.assertRaisesRegex(bench.BenchmarkError, "already listening"):
+                    bench.require_owned_base_url_unbound(
+                        f"http://127.0.0.1:{port}"
+                    )
+            executable = root / "fixture-server.py"
+            executable.write_text(
+                "#!/usr/bin/env python3\n"
+                "import signal\n"
+                "import socket\n"
+                "import sys\n"
+                "import time\n"
+                "signal.signal(signal.SIGTERM, lambda *_: exit(0))\n"
+                "listener = socket.create_server(('127.0.0.1', int(sys.argv[1])))\n"
+                "print('ready', flush=True)\n"
+                "while True:\n"
+                "    time.sleep(0.1)\n"
+            )
+            executable.chmod(0o755)
+            launch_value = {
+                "schema": bench.SERVER_LAUNCH_SCHEMA,
+                "id": "fixture-owned-server-v1",
+                "command": ["./fixture-server.py", str(port)],
+                "working_directory": ".",
+                "log_directory": "logs",
+                "readiness_poll_interval_ms": 10,
+                "startup_timeout_seconds": 5.0,
+                "shutdown_timeout_seconds": 5.0,
+                "acceptable_exit_codes": [0],
+            }
+            config = bench.validate_server_launch_config_value(
+                launch_value,
+                config_directory=root,
+                label="fixture",
+            )
+            base_url = f"http://127.0.0.1:{port}"
+            self.assertEqual(bench.require_owned_base_url_unbound(base_url), port)
+            server = bench.launch_owned_server(config, "fixture-run-v1")
+            try:
+                deadline = time.monotonic() + 5.0
+                while "ready" not in server.log_path.read_text():
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                bench.verify_owned_listener(server, base_url)
+                shutdown = bench.shutdown_owned_server(server)
+                log = bench.close_owned_server_log(server)
+            finally:
+                if server.process.poll() is None:
+                    bench.shutdown_owned_server(server)
+                if not server.log_handle.closed:
+                    server.log_handle.close()
+
+            self.assertEqual(server.identity.pid, server.identity.process_group_id)
+            self.assertFalse(shutdown["forced"])
+            self.assertEqual(shutdown["returncode"], 0)
+            self.assertFalse(shutdown["process_group_alive_end"])
+            self.assertGreater(log["bytes"], 0)
+            mode, passed = bench.validate_server_lifecycle(
+                {
+                    "mode": "owned_process_group",
+                    "launch_config": config.record,
+                    "log": log,
+                    "shutdown": shutdown,
+                }
+            )
+            self.assertEqual(mode, "owned_process_group")
+            self.assertTrue(passed)
 
     def test_cli_writes_a_self_hashing_passed_receipt(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:

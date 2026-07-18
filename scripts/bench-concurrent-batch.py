@@ -21,6 +21,7 @@ import math
 import os
 import platform
 import re
+import signal
 import socket
 import stat
 import subprocess
@@ -28,6 +29,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -36,8 +38,9 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 HOST_THERMAL_POLICY_SCHEMA = "kiln.host-thermal-policy.v1"
-DRIVER_VERSION = "3"
-SUPPORTED_DRIVER_VERSIONS = {"2", DRIVER_VERSION}
+SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
+DRIVER_VERSION = "4"
+SUPPORTED_DRIVER_VERSIONS = {"2", "3", DRIVER_VERSION}
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
 ROOT = Path(__file__).resolve().parents[1]
@@ -158,7 +161,7 @@ RECEIPT_KEYS = {
     "verdict",
     "receipt_sha256",
 }
-COMPLETION_CHECK_NAMES = (
+COMPLETION_CHECK_NAMES_V3 = (
     "repository_unchanged",
     "model_identity_unchanged",
     "runtime_artifact_unchanged",
@@ -166,6 +169,7 @@ COMPLETION_CHECK_NAMES = (
     "execution_identity_unchanged",
     "host_thermal_handoff",
 )
+COMPLETION_CHECK_NAMES = (*COMPLETION_CHECK_NAMES_V3, "server_shutdown")
 COMPLETION_CHECK_STATUSES = {"passed", "failed", "not_applicable"}
 COMPLETION_FAILURE_PHASES = {
     "host_thermal_startup",
@@ -406,6 +410,18 @@ HOST_THERMAL_POLICY_KEYS = {
     "phase_settlement_timeout_seconds",
 }
 
+SERVER_LAUNCH_KEYS = {
+    "schema",
+    "id",
+    "command",
+    "working_directory",
+    "log_directory",
+    "readiness_poll_interval_ms",
+    "startup_timeout_seconds",
+    "shutdown_timeout_seconds",
+    "acceptable_exit_codes",
+}
+
 
 def validate_host_thermal_policy_value(
     value: Any,
@@ -495,6 +511,377 @@ def load_host_thermal_policy(
     except Exception as exc:
         raise BenchmarkError(f"cannot load host thermal policy {path}: {exc}") from exc
     return validate_host_thermal_policy_value(raw, "host thermal policy")
+
+
+@dataclasses.dataclass(frozen=True)
+class ServerLaunchConfig:
+    record: dict[str, Any]
+    command: tuple[str, ...]
+    working_directory: Path
+    log_directory: Path
+    readiness_poll_interval_seconds: float
+    startup_timeout_seconds: float
+    shutdown_timeout_seconds: float
+    acceptable_exit_codes: tuple[int, ...]
+
+
+def validate_server_launch_config_value(
+    value: Any,
+    *,
+    config_directory: Path,
+    label: str,
+    require_local_paths: bool = True,
+) -> ServerLaunchConfig:
+    value = _object(value, label)
+    has_content_hash = "content_sha256" in value
+    _exact_keys(
+        value,
+        SERVER_LAUNCH_KEYS | ({"content_sha256"} if has_content_hash else set()),
+        label,
+    )
+    raw = dict(value)
+    recorded_hash = raw.pop("content_sha256", None)
+    if raw["schema"] != SERVER_LAUNCH_SCHEMA:
+        raise BenchmarkError(
+            f"serving benchmark launch config must use schema {SERVER_LAUNCH_SCHEMA}"
+        )
+    if not isinstance(raw["id"], str) or re.fullmatch(
+        r"[a-z0-9][a-z0-9._-]{2,127}", raw["id"]
+    ) is None:
+        raise BenchmarkError("server launch config id must be a portable identifier")
+    command = raw["command"]
+    if (
+        not isinstance(command, list)
+        or not command
+        or len(command) > 256
+        or any(not isinstance(item, str) or not item or "\x00" in item for item in command)
+    ):
+        raise BenchmarkError(
+            "server launch config command must be 1..256 non-empty argv strings"
+        )
+    for name in ("working_directory", "log_directory"):
+        if not isinstance(raw[name], str) or not raw[name] or "\x00" in raw[name]:
+            raise BenchmarkError(f"server launch config {name} must be a non-empty path")
+    working_directory = Path(raw["working_directory"])
+    if not working_directory.is_absolute():
+        working_directory = config_directory / working_directory
+    working_directory = working_directory.resolve()
+    if require_local_paths and not working_directory.is_dir():
+        raise BenchmarkError(
+            f"server launch working directory is not a directory: {working_directory}"
+        )
+    executable = Path(command[0])
+    if not executable.is_absolute():
+        if "/" not in command[0]:
+            raise BenchmarkError(
+                "server launch executable must be an absolute or explicitly relative path"
+            )
+        executable = working_directory / executable
+    executable = executable.resolve()
+    if require_local_paths and (
+        not executable.is_file() or not os.access(executable, os.X_OK)
+    ):
+        raise BenchmarkError(
+            f"server launch executable is not a regular executable file: {executable}"
+        )
+    log_directory = Path(raw["log_directory"])
+    if not log_directory.is_absolute():
+        log_directory = config_directory / log_directory
+    log_directory = log_directory.resolve()
+    if require_local_paths and log_directory.exists() and not log_directory.is_dir():
+        raise BenchmarkError(
+            f"server launch log directory is not a directory: {log_directory}"
+        )
+    poll_ms = _positive_int(
+        raw["readiness_poll_interval_ms"],
+        f"{label}.readiness_poll_interval_ms",
+    )
+    if poll_ms > 60_000:
+        raise BenchmarkError("server readiness poll interval must not exceed 60000 ms")
+    startup_timeout = _nonnegative_number(
+        raw["startup_timeout_seconds"], f"{label}.startup_timeout_seconds"
+    )
+    shutdown_timeout = _nonnegative_number(
+        raw["shutdown_timeout_seconds"], f"{label}.shutdown_timeout_seconds"
+    )
+    if startup_timeout <= 0 or shutdown_timeout <= 0:
+        raise BenchmarkError("server startup and shutdown timeouts must be positive")
+    acceptable = raw["acceptable_exit_codes"]
+    if (
+        not isinstance(acceptable, list)
+        or not acceptable
+        or len(acceptable) > 16
+        or any(isinstance(code, bool) or not isinstance(code, int) for code in acceptable)
+        or acceptable != sorted(set(acceptable))
+    ):
+        raise BenchmarkError(
+            "server acceptable exit codes must be a non-empty sorted unique integer array"
+        )
+    content_hash = canonical_sha256(raw)
+    if recorded_hash is not None and _sha256(
+        recorded_hash, f"{label}.content_sha256"
+    ) != content_hash:
+        raise BenchmarkError(f"{label}.content_sha256 does not match launch content")
+    normalized = dict(raw)
+    normalized["content_sha256"] = content_hash
+    return ServerLaunchConfig(
+        record=normalized,
+        command=(str(executable), *command[1:]),
+        working_directory=working_directory,
+        log_directory=log_directory,
+        readiness_poll_interval_seconds=poll_ms / 1000.0,
+        startup_timeout_seconds=startup_timeout,
+        shutdown_timeout_seconds=shutdown_timeout,
+        acceptable_exit_codes=tuple(acceptable),
+    )
+
+
+def load_server_launch_config(path: Path) -> ServerLaunchConfig:
+    if path.is_symlink() or not path.is_file():
+        raise BenchmarkError(f"server launch config is not a regular file: {path}")
+    data = path.read_bytes()
+    if len(data) > 64 * 1024:
+        raise BenchmarkError("server launch config exceeds 64 KiB")
+    try:
+        raw = strict_json_loads(data)
+    except Exception as exc:
+        raise BenchmarkError(f"cannot load server launch config {path}: {exc}") from exc
+    return validate_server_launch_config_value(
+        raw,
+        config_directory=path.resolve().parent,
+        label="server launch config",
+    )
+
+
+@dataclasses.dataclass
+class OwnedServer:
+    process: subprocess.Popen[bytes]
+    identity: AttachedProcessGroup
+    config: ServerLaunchConfig
+    log_path: Path
+    log_handle: Any
+
+
+def launch_owned_server(config: ServerLaunchConfig, run_id: str) -> OwnedServer:
+    log_path = config.log_directory / f"{run_id}.server.log"
+    config.log_directory.mkdir(parents=True, exist_ok=True)
+    try:
+        log_handle = log_path.open("xb", buffering=0)
+    except OSError as exc:
+        raise BenchmarkError(f"cannot create server log {log_path}: {exc}") from exc
+    try:
+        process = subprocess.Popen(
+            list(config.command),
+            cwd=config.working_directory,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+        try:
+            identity = AttachedProcessGroup.attach(process.pid)
+        except Exception:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                process.wait(timeout=5.0)
+            raise
+        return OwnedServer(
+            process=process,
+            identity=identity,
+            config=config,
+            log_path=log_path,
+            log_handle=log_handle,
+        )
+    except Exception:
+        log_handle.close()
+        raise
+
+
+def process_group_alive(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def loopback_base_url_port(base_url: str) -> int:
+    parsed = urllib.parse.urlsplit(base_url)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise BenchmarkError(
+            "owned server base URL must be an origin-only loopback HTTP URL"
+        )
+    try:
+        return parsed.port or 80
+    except ValueError as exc:
+        raise BenchmarkError(f"owned server base URL has an invalid port: {exc}") from exc
+
+
+def listening_socket_inodes(port: int, proc_root: Path = Path("/proc")) -> set[str]:
+    inodes: set[str] = set()
+    for name in ("tcp", "tcp6"):
+        path = proc_root / "net" / name
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()[1:]
+        except OSError as exc:
+            raise BenchmarkError(f"cannot inspect listening sockets in {path}: {exc}") from exc
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != "0A":
+                continue
+            try:
+                local_port = int(fields[1].rsplit(":", 1)[1], 16)
+            except (IndexError, ValueError) as exc:
+                raise BenchmarkError(f"malformed socket row in {path}: {line}") from exc
+            if local_port == port:
+                inodes.add(fields[9])
+    return inodes
+
+
+def process_group_socket_inodes(
+    process_group_id: int, proc_root: Path = Path("/proc")
+) -> set[str]:
+    inodes: set[str] = set()
+    try:
+        process_paths = list(proc_root.iterdir())
+    except OSError as exc:
+        raise BenchmarkError(f"cannot enumerate {proc_root}: {exc}") from exc
+    for process_path in process_paths:
+        if not process_path.name.isdigit():
+            continue
+        try:
+            _state, observed_group, _start = AttachedProcessGroup._read_stat(
+                int(process_path.name), proc_root
+            )
+        except BenchmarkError:
+            continue
+        if observed_group != process_group_id:
+            continue
+        try:
+            descriptors = list((process_path / "fd").iterdir())
+        except OSError:
+            continue
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(descriptor)
+            except OSError:
+                continue
+            match = re.fullmatch(r"socket:\[(\d+)\]", target)
+            if match is not None:
+                inodes.add(match.group(1))
+    return inodes
+
+
+def require_owned_base_url_unbound(base_url: str) -> int:
+    port = loopback_base_url_port(base_url)
+    if listening_socket_inodes(port):
+        raise BenchmarkError(
+            f"owned server base URL port {port} is already listening before launch"
+        )
+    return port
+
+
+def verify_owned_listener(server: OwnedServer, base_url: str) -> None:
+    port = loopback_base_url_port(base_url)
+    listeners = listening_socket_inodes(port)
+    owned = process_group_socket_inodes(server.identity.process_group_id)
+    if not listeners:
+        raise BenchmarkError(
+            f"owned server base URL port {port} has no listening socket after readiness"
+        )
+    if listeners.isdisjoint(owned):
+        raise BenchmarkError(
+            f"owned server base URL port {port} is not owned by process group "
+            f"{server.identity.process_group_id}"
+        )
+
+
+def shutdown_owned_server(server: OwnedServer) -> dict[str, Any]:
+    started = time.monotonic()
+    signal_sent = server.process.poll() is None
+    forced = False
+    if signal_sent:
+        try:
+            os.killpg(server.process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        returncode = server.process.wait(timeout=server.config.shutdown_timeout_seconds)
+    except subprocess.TimeoutExpired:
+        forced = True
+        try:
+            os.killpg(server.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            returncode = server.process.wait(timeout=10.0)
+        except subprocess.TimeoutExpired as exc:
+            raise BenchmarkError(
+                "owned server process did not exit after SIGTERM and SIGKILL"
+            ) from exc
+    return {
+        "signal": "SIGTERM",
+        "signal_sent": signal_sent,
+        "forced": forced,
+        "returncode": returncode,
+        "acceptable_exit_codes": list(server.config.acceptable_exit_codes),
+        "elapsed_seconds": time.monotonic() - started,
+        "process_group_alive_end": process_group_alive(server.identity.process_group_id),
+    }
+
+
+def close_owned_server_log(server: OwnedServer) -> dict[str, Any]:
+    if not server.log_handle.closed:
+        server.log_handle.flush()
+        os.fsync(server.log_handle.fileno())
+        server.log_handle.close()
+    path = server.log_path.absolute()
+    before = path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(before.st_mode):
+        raise BenchmarkError(f"server log is not a regular file: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    after = path.stat(follow_symlinks=False)
+    if _stat_identity(before) != _stat_identity(after):
+        raise BenchmarkError(f"server log changed while hashing: {path}")
+    return {
+        "path": str(path),
+        "bytes": before.st_size,
+        "sha256": "sha256:" + digest.hexdigest(),
+    }
+
+
+def server_log_tail(path: Path, limit_bytes: int = 16 * 1024) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - limit_bytes))
+            return handle.read(limit_bytes).decode("utf-8", errors="replace")[-limit_bytes:]
+    except OSError as exc:
+        return f"<cannot read server log: {exc}>"
 
 
 def model_content(value: dict[str, Any]) -> dict[str, Any]:
@@ -739,7 +1126,7 @@ def validate_benchmark_run(
     workload_profile: str | None,
 ) -> None:
     row = _object(value, label)
-    _exact_keys(row, RUN_KEYS_V3 if driver_version == "3" else RUN_KEYS, label)
+    _exact_keys(row, RUN_KEYS_V3 if driver_version in {"3", "4"} else RUN_KEYS, label)
     if row["concurrency"] != concurrency or row["repeat"] != repeat:
         raise BenchmarkError(f"{label} does not match its declared concurrency/repeat")
     if row["request_count"] != concurrency:
@@ -763,7 +1150,7 @@ def validate_benchmark_run(
         "dispatch_spread_ms",
     ):
         _nonnegative_number(row[name], f"{label}.{name}")
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         phase = (
             f"warmup-c{concurrency:03d}"
             if repeat == -1
@@ -790,7 +1177,7 @@ def validate_benchmark_run(
             _nonnegative_number(row[name], f"{label}.{name}")
     _sha256(row["prompt_set_sha256"], f"{label}.prompt_set_sha256")
     _sha256(row["output_set_sha256"], f"{label}.output_set_sha256")
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         prompt_token_counts = row["prompt_token_counts"]
         if (
             not isinstance(prompt_token_counts, list)
@@ -829,7 +1216,7 @@ def validate_benchmark_run(
         raise BenchmarkError(f"{label}.error_count does not match errors")
     if row["success_count"] + row["error_count"] != concurrency:
         raise BenchmarkError(f"{label} success and error counts must cover every request")
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         for index, count in enumerate(row["prompt_token_counts"]):
             if (index in error_indices) != (count == 0):
                 raise BenchmarkError(
@@ -874,7 +1261,7 @@ def validate_benchmark_run(
         expected_measured = row["memory"] is not None and row["memory"]["samples"] >= 2
         if memory_measured_gate is None or memory_measured_gate["passed"] != expected_measured:
             raise BenchmarkError(f"{label} has an inconsistent memory-measurement gate")
-    if driver_version == "3" and workload_profile is not None:
+    if driver_version in {"3", "4"} and workload_profile is not None:
         uniform = PROFILE_CONTRACTS[workload_profile]["require_uniform_prompt_tokens"]
         expected_name = (
             "mixed_prompt_tokens"
@@ -970,10 +1357,10 @@ def validate_host_thermal_receipt(value: Any) -> tuple[str, bool]:
                 "unconfigured host thermal evidence requires an explicit unsafe acknowledgment"
             )
         return mode, False
-    if mode != "attached_process_group":
+    if mode not in {"attached_process_group", "owned_process_group"}:
         raise BenchmarkError("receipt.host_thermal.mode is unsupported")
     if host_thermal["unsafe_no_guard_acknowledged"] is not False:
-        raise BenchmarkError("attached host thermal evidence cannot be marked unsafe")
+        raise BenchmarkError("configured host thermal evidence cannot be marked unsafe")
     policy_record, _policy, _settlement_timeout = (
         validate_host_thermal_policy_value(
             host_thermal["policy"], "receipt.host_thermal.policy"
@@ -1096,6 +1483,7 @@ def validate_host_thermal_receipt(value: Any) -> tuple[str, bool]:
         not tripped
         and not errors
         and evidence["process_alive_at_handoff"]
+        == (mode == "attached_process_group")
         and evidence["host_thermal_pacing_active_end"] == 0
         and evidence["host_thermal_pacing_completed_event_count"]
         == evidence["host_thermal_pacing_event_count"]
@@ -1110,12 +1498,89 @@ def validate_host_thermal_receipt(value: Any) -> tuple[str, bool]:
     return mode, operationally_passed
 
 
+def validate_server_lifecycle(value: Any) -> tuple[str, bool]:
+    lifecycle = _object(value, "receipt.server_lifecycle")
+    _exact_keys(
+        lifecycle,
+        {"mode", "launch_config", "log", "shutdown"},
+        "receipt.server_lifecycle",
+    )
+    mode = lifecycle["mode"]
+    if mode in {"not_configured", "attached_process_group"}:
+        if any(lifecycle[name] is not None for name in ("launch_config", "log", "shutdown")):
+            raise BenchmarkError(
+                "non-owned server lifecycle fields must all be null"
+            )
+        return mode, mode == "attached_process_group"
+    if mode != "owned_process_group":
+        raise BenchmarkError("receipt.server_lifecycle.mode is unsupported")
+    launch = validate_server_launch_config_value(
+        lifecycle["launch_config"],
+        config_directory=Path("/"),
+        label="receipt.server_lifecycle.launch_config",
+        require_local_paths=False,
+    )
+    log = _object(lifecycle["log"], "receipt.server_lifecycle.log")
+    _exact_keys(
+        log,
+        RUNTIME_ARTIFACT_KEYS,
+        "receipt.server_lifecycle.log",
+    )
+    if not isinstance(log["path"], str) or not Path(log["path"]).is_absolute():
+        raise BenchmarkError("receipt server log path must be absolute")
+    _nonnegative_int(log["bytes"], "receipt.server_lifecycle.log.bytes")
+    _sha256(log["sha256"], "receipt.server_lifecycle.log.sha256")
+    shutdown = _object(
+        lifecycle["shutdown"], "receipt.server_lifecycle.shutdown"
+    )
+    _exact_keys(
+        shutdown,
+        {
+            "signal",
+            "signal_sent",
+            "forced",
+            "returncode",
+            "acceptable_exit_codes",
+            "elapsed_seconds",
+            "process_group_alive_end",
+        },
+        "receipt.server_lifecycle.shutdown",
+    )
+    if shutdown["signal"] != "SIGTERM":
+        raise BenchmarkError("owned server shutdown signal must be SIGTERM")
+    for name in ("signal_sent", "forced", "process_group_alive_end"):
+        if not isinstance(shutdown[name], bool):
+            raise BenchmarkError(
+                f"receipt.server_lifecycle.shutdown.{name} must be boolean"
+            )
+    if isinstance(shutdown["returncode"], bool) or not isinstance(
+        shutdown["returncode"], int
+    ):
+        raise BenchmarkError("owned server shutdown returncode must be an integer")
+    if shutdown["acceptable_exit_codes"] != list(launch.acceptable_exit_codes):
+        raise BenchmarkError(
+            "owned server shutdown acceptable exit codes disagree with launch config"
+        )
+    _nonnegative_number(
+        shutdown["elapsed_seconds"],
+        "receipt.server_lifecycle.shutdown.elapsed_seconds",
+    )
+    passed = (
+        not shutdown["forced"]
+        and not shutdown["process_group_alive_end"]
+        and shutdown["returncode"] in launch.acceptable_exit_codes
+    )
+    return mode, passed
+
+
 def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     receipt = _object(value, "receipt")
     driver_version = receipt.get("driver_version")
     required_receipt_keys = set(RECEIPT_KEYS)
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         required_receipt_keys.update({"completion", "host_thermal"})
+    if driver_version == "4":
+        required_receipt_keys.add("server_lifecycle")
     _exact_keys(receipt, required_receipt_keys, "receipt", {"comparison"})
     if receipt["schema"] != SCHEMA or driver_version not in SUPPORTED_DRIVER_VERSIONS:
         supported = ", ".join(sorted(SUPPORTED_DRIVER_VERSIONS))
@@ -1143,7 +1608,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         "authentication_configured",
     }
     engine_optional = {"authentication_source"}
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         engine_keys |= {
             "model_identity",
             "runtime_artifact",
@@ -1163,7 +1628,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             raise BenchmarkError("receipt.engine.authentication_source is invalid")
         if engine["authentication_configured"] != (engine["authentication_source"] != "none"):
             raise BenchmarkError("receipt.engine authentication fields disagree")
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         model_identity = validate_model_identity(
             engine["model_identity"], "receipt.engine.model_identity"
         )
@@ -1266,11 +1731,13 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         "max_dispatch_spread_ms",
         "slo",
     }
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         workload_keys |= {"profile", "comparison_mode", "memory_limit_bytes"}
     _exact_keys(workload, workload_keys, "receipt.workload")
     expected_template = (
-        PROMPT_TEMPLATE_VERSION if driver_version == "3" else LEGACY_PROMPT_TEMPLATE_VERSION
+        PROMPT_TEMPLATE_VERSION
+        if driver_version in {"3", "4"}
+        else LEGACY_PROMPT_TEMPLATE_VERSION
     )
     if (
         workload["schema"] != WORKLOAD_SCHEMA
@@ -1335,7 +1802,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         if _nonnegative_number(value, f"receipt.workload.slo.{name}") <= 0:
             raise BenchmarkError(f"receipt.workload.slo.{name} must be positive")
     memory_limit_bytes: int | None = None
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         if workload["profile"] not in PROFILE_CONTRACTS:
             raise BenchmarkError("receipt.workload.profile is unsupported")
         profile = PROFILE_CONTRACTS[workload["profile"]]
@@ -1382,7 +1849,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
 
     memory_sampler = _object(receipt["memory_sampler"], "receipt.memory_sampler")
     _exact_keys(memory_sampler, {"source", "path", "interval_ms"}, "receipt.memory_sampler")
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         if (
             memory_sampler["source"] != "drm_vram_used"
             or not isinstance(memory_sampler["path"], str)
@@ -1394,17 +1861,29 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     _exact_keys(diagnostics, {"url", "timed_request_path_affected"}, "receipt.diagnostics")
     if diagnostics["timed_request_path_affected"] is not False:
         raise BenchmarkError("receipt diagnostics must remain outside the timed request path")
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         host_thermal_mode, host_thermal_passed = validate_host_thermal_receipt(
             receipt["host_thermal"]
         )
+        if driver_version == "3" and host_thermal_mode == "owned_process_group":
+            raise BenchmarkError("driver v3 cannot claim owned server lifecycle evidence")
     else:
         host_thermal_mode, host_thermal_passed = "legacy", True
+    if driver_version == "4":
+        server_lifecycle_mode, server_lifecycle_passed = validate_server_lifecycle(
+            receipt["server_lifecycle"]
+        )
+        if server_lifecycle_mode != host_thermal_mode:
+            raise BenchmarkError(
+                "receipt server lifecycle and host thermal ownership modes disagree"
+            )
+    else:
+        server_lifecycle_mode, server_lifecycle_passed = host_thermal_mode, True
 
     missing_declared_warmup = False
     if warmup_requests:
         if receipt["warmup"] is None:
-            if driver_version == "3":
+            if driver_version in {"3", "4"}:
                 missing_declared_warmup = True
             else:
                 raise BenchmarkError("receipt omits its declared warmup")
@@ -1442,11 +1921,14 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 memory_limit_bytes=memory_limit_bytes,
                 workload_profile=workload.get("profile"),
             )
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         thermal_rows = list(runs)
         if receipt["warmup"] is not None:
             thermal_rows.insert(0, receipt["warmup"])
-        expect_thermal_rows = host_thermal_mode == "attached_process_group"
+        expect_thermal_rows = host_thermal_mode in {
+            "attached_process_group",
+            "owned_process_group",
+        }
         if any(
             (row["host_thermal"] is not None) != expect_thermal_rows
             for row in thermal_rows
@@ -1456,7 +1938,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             )
     completion_failures: list[dict[str, str]] = []
     completion_checks: dict[str, str] | None = None
-    if driver_version == "3":
+    if driver_version in {"3", "4"}:
         completion = _object(receipt["completion"], "receipt.completion")
         _exact_keys(
             completion,
@@ -1493,6 +1975,10 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             if (
                 not isinstance(failure["phase"], str)
                 or failure["phase"] not in COMPLETION_FAILURE_PHASES
+                or (
+                    driver_version != "4"
+                    and failure["phase"] == "server_shutdown"
+                )
                 or not isinstance(failure["detail"], str)
                 or not failure["detail"]
                 or len(failure["detail"]) > 4096
@@ -1505,9 +1991,14 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             completion["finalization_checks"],
             "receipt.completion.finalization_checks",
         )
+        expected_completion_checks = (
+            COMPLETION_CHECK_NAMES
+            if driver_version == "4"
+            else COMPLETION_CHECK_NAMES_V3
+        )
         _exact_keys(
             completion_checks,
-            set(COMPLETION_CHECK_NAMES),
+            set(expected_completion_checks),
             "receipt.completion.finalization_checks",
         )
         for name, status in completion_checks.items():
@@ -1533,7 +2024,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 f"receipt.completion.finalization_checks.{inapplicable_check} "
                 "must be not_applicable"
             )
-        if host_thermal_mode == "attached_process_group":
+        if host_thermal_mode in {"attached_process_group", "owned_process_group"}:
             if completion_checks["host_thermal_handoff"] == "not_applicable":
                 raise BenchmarkError(
                     "receipt.completion.finalization_checks.host_thermal_handoff "
@@ -1550,8 +2041,23 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 "receipt.completion.finalization_checks.host_thermal_handoff "
                 "must be not_applicable without a guard"
             )
+        if driver_version == "4":
+            shutdown_check = completion_checks["server_shutdown"]
+            if server_lifecycle_mode == "owned_process_group":
+                if shutdown_check == "not_applicable":
+                    raise BenchmarkError(
+                        "receipt owned server shutdown check is required"
+                    )
+                if (shutdown_check == "passed") != server_lifecycle_passed:
+                    raise BenchmarkError(
+                        "receipt server shutdown check disagrees with lifecycle evidence"
+                    )
+            elif shutdown_check != "not_applicable":
+                raise BenchmarkError(
+                    "receipt server shutdown must be not_applicable without ownership"
+                )
         failure_phases = {failure["phase"] for failure in completion_failures}
-        for name in COMPLETION_CHECK_NAMES:
+        for name in expected_completion_checks:
             if (completion_checks[name] == "failed") != (name in failure_phases):
                 raise BenchmarkError(
                     f"receipt.completion.finalization_checks.{name} disagrees with failures"
@@ -1580,7 +2086,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             "matched",
             "mismatches",
         }
-        if driver_version == "3":
+        if driver_version in {"3", "4"}:
             comparison_keys.add("comparison_mode")
         _exact_keys(
             comparison,
@@ -1596,7 +2102,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         ):
             raise BenchmarkError("receipt.comparison has invalid field types")
         if (
-            driver_version == "3"
+            driver_version in {"3", "4"}
             and comparison["comparison_mode"] != workload["comparison_mode"]
         ):
             raise BenchmarkError("receipt.comparison mode disagrees with its workload")
@@ -1604,8 +2110,10 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     passed = (
         not repository["dirty"]
         and not completion_failures
-        and host_thermal_mode in {"legacy", "attached_process_group"}
+        and host_thermal_mode
+        in {"legacy", "attached_process_group", "owned_process_group"}
         and host_thermal_passed
+        and server_lifecycle_passed
         and (
             completion_checks is None
             or all(
@@ -2506,6 +3014,40 @@ def probe_models(
     return models
 
 
+def wait_for_owned_server_models(
+    server: OwnedServer,
+    guard: thermal.HostThermalGuard,
+    base_url: str,
+    headers: dict[str, str],
+) -> list[str]:
+    deadline = time.monotonic() + server.config.startup_timeout_seconds
+    last_error = "server has not accepted a readiness probe"
+    while True:
+        if guard.trip_reason is not None:
+            raise BenchmarkError(
+                f"owned server thermal containment tripped during startup: "
+                f"{guard.trip_reason}\n{server_log_tail(server.log_path)}"
+            )
+        returncode = server.process.poll()
+        if returncode is not None:
+            raise BenchmarkError(
+                f"owned server exited during startup with status {returncode}:\n"
+                f"{server_log_tail(server.log_path)}"
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BenchmarkError(
+                f"owned server did not become ready within "
+                f"{server.config.startup_timeout_seconds:.3f} seconds; last probe: "
+                f"{last_error}\n{server_log_tail(server.log_path)}"
+            )
+        try:
+            return probe_models(base_url, headers, min(2.0, remaining))
+        except BenchmarkError as exc:
+            last_error = str(exc)
+        time.sleep(min(server.config.readiness_poll_interval_seconds, remaining))
+
+
 def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
     if path.exists():
         raise BenchmarkError(f"refusing to overwrite existing receipt: {path}")
@@ -2652,10 +3194,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="run without host thermal containment and force a diagnostic-only verdict",
     )
-    parser.add_argument(
+    server_ownership = parser.add_mutually_exclusive_group()
+    server_ownership.add_argument(
         "--server-pid",
         type=int,
         help="local process-group leader protected by --host-thermal-policy",
+    )
+    server_ownership.add_argument(
+        "--server-launch-config",
+        type=Path,
+        help="typed argv-only server lifecycle owned by this benchmark",
     )
     authentication = parser.add_mutually_exclusive_group()
     authentication.add_argument(
@@ -2735,6 +3283,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     thermal_guard: thermal.HostThermalGuard | None = None
+    owned_server: OwnedServer | None = None
+    owned_shutdown: dict[str, Any] | None = None
+    owned_log: dict[str, Any] | None = None
     try:
         if args.validate_receipt is not None:
             if (
@@ -2742,6 +3293,7 @@ def main(argv: list[str] | None = None) -> int:
                 or args.reference_receipt is not None
                 or args.host_thermal_policy is not None
                 or args.server_pid is not None
+                or args.server_launch_config is not None
                 or args.unsafe_no_host_thermal_guard
             ):
                 raise BenchmarkError(
@@ -2754,12 +3306,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.host_thermal_policy is None and not args.unsafe_no_host_thermal_guard:
             raise BenchmarkError(
-                "measured runs require --host-thermal-policy and --server-pid; "
+                "measured runs require --host-thermal-policy plus --server-pid or "
+                "--server-launch-config; "
                 "use --unsafe-no-host-thermal-guard only for diagnostic counterevidence"
             )
-        if (args.host_thermal_policy is None) != (args.server_pid is None):
+        has_server_owner = (
+            args.server_pid is not None or args.server_launch_config is not None
+        )
+        if (args.host_thermal_policy is None) != (not has_server_owner):
             raise BenchmarkError(
-                "--host-thermal-policy and --server-pid must be provided together"
+                "--host-thermal-policy and exactly one server owner must be provided together"
             )
         if args.model_path is None:
             raise BenchmarkError("--model-path is required for a measured run")
@@ -2809,12 +3365,29 @@ def main(argv: list[str] | None = None) -> int:
         thermal_policy: thermal.HostThermalPolicy | None = None
         thermal_settlement_timeout = 0.0
         attached_process: AttachedProcessGroup | None = None
+        launch_config: ServerLaunchConfig | None = None
         if args.host_thermal_policy is not None:
             thermal_policy_record, thermal_policy, thermal_settlement_timeout = (
                 load_host_thermal_policy(args.host_thermal_policy)
             )
-            assert args.server_pid is not None
-            attached_process = AttachedProcessGroup.attach(args.server_pid)
+            if args.server_launch_config is not None:
+                launch_config = load_server_launch_config(args.server_launch_config)
+                require_owned_base_url_unbound(args.base_url)
+                if (
+                    args.engine == "kiln"
+                    and Path(runtime_artifact["path"]).resolve()
+                    != Path(launch_config.command[0])
+                ):
+                    raise BenchmarkError(
+                        "owned Kiln launch executable must equal --runtime-artifact"
+                    )
+                owned_server = launch_owned_server(launch_config, args.run_id)
+                attached_process = owned_server.identity
+                guarded_process: Any = owned_server.process
+            else:
+                assert args.server_pid is not None
+                attached_process = AttachedProcessGroup.attach(args.server_pid)
+                guarded_process = attached_process
 
             def trace_host_thermal(event: str, **fields: Any) -> None:
                 print(
@@ -2827,9 +3400,14 @@ def main(argv: list[str] | None = None) -> int:
                     flush=True,
                 )
 
+            guard_kwargs = thermal_policy.guard_kwargs()
+            if owned_server is not None:
+                guard_kwargs["cooldown_mode"] = (
+                    "post_process_exit_consecutive_samples"
+                )
             thermal_guard = thermal.HostThermalGuard(
-                attached_process,
-                **thermal_policy.guard_kwargs(),
+                guarded_process,
+                **guard_kwargs,
                 trace_callback=trace_host_thermal,
                 error_type=BenchmarkError,
             )
@@ -2852,7 +3430,15 @@ def main(argv: list[str] | None = None) -> int:
         }
         if args.api_key:
             headers["Authorization"] = f"Bearer {args.api_key}"
-        models = probe_models(args.base_url, headers, args.timeout_secs)
+        models = (
+            wait_for_owned_server_models(
+                owned_server, thermal_guard, args.base_url, headers
+            )
+            if owned_server is not None and thermal_guard is not None
+            else probe_models(args.base_url, headers, args.timeout_secs)
+        )
+        if owned_server is not None:
+            verify_owned_listener(owned_server, args.base_url)
         if args.model not in models:
             raise BenchmarkError(
                 f"requested model {args.model!r} is absent from /v1/models: {models}"
@@ -3046,12 +3632,41 @@ def main(argv: list[str] | None = None) -> int:
         else:
             finalization_checks["execution_identity_unchanged"] = "not_applicable"
 
+        if owned_server is not None:
+
+            def verify_owned_server_shutdown() -> None:
+                nonlocal owned_shutdown, owned_log
+                if thermal_guard is not None:
+                    thermal_guard.prepare_for_process_exit()
+                owned_shutdown = shutdown_owned_server(owned_server)
+                owned_log = close_owned_server_log(owned_server)
+                if owned_shutdown["forced"]:
+                    raise BenchmarkError("owned server required SIGKILL during shutdown")
+                if owned_shutdown["process_group_alive_end"]:
+                    raise BenchmarkError("owned server process group survived shutdown")
+                if (
+                    owned_shutdown["returncode"]
+                    not in owned_shutdown["acceptable_exit_codes"]
+                ):
+                    raise BenchmarkError(
+                        "owned server returned an unacceptable exit status "
+                        f"{owned_shutdown['returncode']}"
+                    )
+
+            run_finalization_check("server_shutdown", verify_owned_server_shutdown)
+        else:
+            finalization_checks["server_shutdown"] = "not_applicable"
+
         if thermal_guard is not None:
             assert attached_process is not None
             assert thermal_policy_record is not None
 
             def verify_host_thermal_handoff() -> None:
-                thermal_guard.set_phase("safe-handoff")
+                thermal_guard.set_phase(
+                    "post-shutdown-cooldown"
+                    if owned_server is not None
+                    else "safe-handoff"
+                )
                 thermal_guard.close()
                 metrics = thermal_guard.metric_values()
                 pacing = thermal_guard.pacing_metric_values()
@@ -3061,9 +3676,14 @@ def main(argv: list[str] | None = None) -> int:
                     raise BenchmarkError(
                         "host thermal guard errors: " + "; ".join(thermal_guard.errors)
                     )
-                if attached_process.poll() is not None:
+                process_alive = attached_process.poll() is None
+                if owned_server is None and not process_alive:
                     raise BenchmarkError(
                         "protected server process group exited before safe handoff"
+                    )
+                if owned_server is not None and process_alive:
+                    raise BenchmarkError(
+                        "owned server process group remained alive after shutdown"
                     )
                 if metrics["host_thermal_cooldown_completed_count"] != 1:
                     raise BenchmarkError("host thermal safe handoff did not complete")
@@ -3083,7 +3703,11 @@ def main(argv: list[str] | None = None) -> int:
                 "host_thermal_handoff", verify_host_thermal_handoff
             )
             host_thermal_record = {
-                "mode": "attached_process_group",
+                "mode": (
+                    "owned_process_group"
+                    if owned_server is not None
+                    else "attached_process_group"
+                ),
                 "unsafe_no_guard_acknowledged": False,
                 "policy": thermal_policy_record,
                 "process_group": attached_process.receipt_identity(),
@@ -3109,6 +3733,28 @@ def main(argv: list[str] | None = None) -> int:
                 "policy": None,
                 "process_group": None,
                 "evidence": None,
+            }
+
+        if owned_server is not None:
+            server_lifecycle = {
+                "mode": "owned_process_group",
+                "launch_config": owned_server.config.record,
+                "log": owned_log,
+                "shutdown": owned_shutdown,
+            }
+        elif attached_process is not None:
+            server_lifecycle = {
+                "mode": "attached_process_group",
+                "launch_config": None,
+                "log": None,
+                "shutdown": None,
+            }
+        else:
+            server_lifecycle = {
+                "mode": "not_configured",
+                "launch_config": None,
+                "log": None,
+                "shutdown": None,
             }
 
         receipt: dict[str, Any] = {
@@ -3147,6 +3793,7 @@ def main(argv: list[str] | None = None) -> int:
                 "url": diagnostics_url,
                 "timed_request_path_affected": False,
             },
+            "server_lifecycle": server_lifecycle,
             "host_thermal": host_thermal_record,
             "warmup": warmup,
             "runs": runs,
@@ -3160,7 +3807,8 @@ def main(argv: list[str] | None = None) -> int:
         if (
             args.reference_receipt is not None
             and not completion_failures
-            and host_thermal_record["mode"] == "attached_process_group"
+            and host_thermal_record["mode"]
+            in {"attached_process_group", "owned_process_group"}
             and len(runs) == len(sizes) * args.repeats
         ):
             try:
@@ -3172,7 +3820,8 @@ def main(argv: list[str] | None = None) -> int:
         passed = (
             not repo["dirty"]
             and not completion_failures
-            and host_thermal_record["mode"] == "attached_process_group"
+            and host_thermal_record["mode"]
+            in {"attached_process_group", "owned_process_group"}
             and all(
                 status in {"passed", "not_applicable"}
                 for status in finalization_checks.values()
@@ -3184,6 +3833,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         receipt["verdict"] = "passed" if passed else "failed"
         receipt["receipt_sha256"] = canonical_sha256(receipt)
+        validate_benchmark_receipt(receipt)
         if args.out is not None:
             atomic_write_json(args.out, receipt)
             print(f"wrote {args.out}")
@@ -3194,8 +3844,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"benchmark error: {exc}", file=sys.stderr)
         return 2
     finally:
+        if owned_server is not None and owned_server.process.poll() is None:
+            if thermal_guard is not None:
+                thermal_guard.prepare_for_process_exit()
+            try:
+                owned_shutdown = shutdown_owned_server(owned_server)
+            except Exception as exc:
+                print(f"owned server cleanup error: {exc}", file=sys.stderr)
         if thermal_guard is not None:
             thermal_guard.close()
+        if owned_server is not None and not owned_server.log_handle.closed:
+            try:
+                close_owned_server_log(owned_server)
+            except Exception as exc:
+                print(f"owned server log cleanup error: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

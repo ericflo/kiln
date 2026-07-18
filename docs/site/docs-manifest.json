@@ -131,6 +131,21 @@
       "description": "Typed host sensor, pacing, hard-limit, per-phase settlement, and safe live-process handoff contract for local serving benchmarks."
     },
     {
+      "source": "qualification/schema/serving-benchmark-server-launch-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "serving-benchmark-launch-schema",
+      "title": "Serving Benchmark Launch Schema",
+      "section": "serving",
+      "description": "Argv-only owned server launch, readiness, exclusive logging, graceful shutdown, and accepted-exit contract for local serving benchmarks."
+    },
+    {
+      "source": "docs/SERVING_BENCHMARK_PROTOCOL.md",
+      "slug": "serving-benchmark-protocol",
+      "title": "Serving Benchmark Protocol",
+      "section": "serving",
+      "description": "Complete Kiln/vLLM workload, process ownership, thermal containment, lifecycle evidence, comparison, campaign, and receipt-validation protocol."
+    },
+    {
       "source": "docs/SERVING_PROFILES.md",
       "slug": "serving-profiles",
       "title": "Serving Profiles",

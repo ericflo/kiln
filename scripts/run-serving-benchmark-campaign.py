@@ -17,7 +17,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "scripts" / "bench-concurrent-batch.py"
-SCHEMA = "kiln.serving-benchmark-campaign.v1"
+SCHEMA = "kiln.serving-benchmark-campaign.v2"
 PROFILES = (
     "greedy-short",
     "api-default-sampled",
@@ -89,7 +89,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--memory-limit-bytes", type=int, required=True)
     parser.add_argument("--memory-sample-ms", type=int, default=50)
     parser.add_argument("--host-thermal-policy", type=Path, required=True)
-    parser.add_argument("--server-pid", type=int, required=True)
+    server_owner = parser.add_mutually_exclusive_group(required=True)
+    server_owner.add_argument("--server-pid", type=int)
+    server_owner.add_argument("--server-launch-config", type=Path)
     parser.add_argument("--slo-ttft-ms", type=float, default=5_000.0)
     parser.add_argument("--slo-itl-ms", type=float, default=250.0)
     parser.add_argument("--slo-e2e-ms", type=float, default=60_000.0)
@@ -102,10 +104,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--reference-dir is required for a vLLM campaign")
     if args.engine == "kiln" and args.reference_dir is not None:
         parser.error("--reference-dir is only valid for a vLLM campaign")
-    if args.server_pid <= 1:
+    if args.server_pid is not None and args.server_pid <= 1:
         parser.error("--server-pid must be greater than one")
     if args.host_thermal_policy.is_symlink() or not args.host_thermal_policy.is_file():
         parser.error("--host-thermal-policy must name a regular file")
+    if args.server_launch_config is not None and (
+        args.server_launch_config.is_symlink()
+        or not args.server_launch_config.is_file()
+    ):
+        parser.error("--server-launch-config must name a regular file")
     return args
 
 
@@ -151,8 +158,6 @@ def benchmark_command(
         str(args.memory_sample_ms),
         "--host-thermal-policy",
         str(args.host_thermal_policy),
-        "--server-pid",
-        str(args.server_pid),
         "--slo-ttft-ms",
         str(args.slo_ttft_ms),
         "--slo-itl-ms",
@@ -164,6 +169,10 @@ def benchmark_command(
         "--out",
         str(output),
     ]
+    if args.server_launch_config is not None:
+        command.extend(("--server-launch-config", str(args.server_launch_config)))
+    else:
+        command.extend(("--server-pid", str(args.server_pid)))
     if args.api_key_env is not None:
         command.extend(("--api-key-env", args.api_key_env))
     if args.reference_dir is not None:
@@ -211,7 +220,22 @@ def main(argv: list[str] | None = None) -> int:
                 "path": str(args.host_thermal_policy.resolve()),
                 "sha256": file_sha256(args.host_thermal_policy),
             },
-            "server_pid": args.server_pid,
+            "server_owner": (
+                {
+                    "mode": "owned_process_group",
+                    "launch_config": {
+                        "path": str(args.server_launch_config.resolve()),
+                        "sha256": file_sha256(args.server_launch_config),
+                    },
+                    "server_pid": None,
+                }
+                if args.server_launch_config is not None
+                else {
+                    "mode": "attached_process_group",
+                    "launch_config": None,
+                    "server_pid": args.server_pid,
+                }
+            ),
             "profiles": rows,
             "verdict": (
                 "passed"
