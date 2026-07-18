@@ -625,6 +625,33 @@ class ServeMixedLoadTests(unittest.TestCase):
                 self.assertFalse(serve.qualified_stream_success(result))
                 self.assertIn(failure, serve.bounded_response_text(result))
 
+    def test_fixed_output_failure_retains_bounded_token_identity(self) -> None:
+        measured = [
+            stream_result_with_text("wrong", name=f"normal-{index:02d}")
+            for index in range(serve.NORMAL_REQUESTS)
+        ]
+        for index, result in enumerate(measured):
+            result.completion_tokens = serve.NORMAL_MAX_TOKENS
+            result.finish_reason = "length"
+            result.token_ids = [index, 42, 248_319]
+        measured.extend(
+            [
+                stream_result_with_text("wrong", name="long-prefill"),
+                stream_result_with_text("wrong", name="pressure-peer"),
+            ]
+        )
+        measured[-2].completion_tokens = serve.LONG_PREFILL_MAX_TOKENS
+        measured[-1].completion_tokens = serve.PRESSURE_PEER_MAX_TOKENS
+        for result in measured[-2:]:
+            result.finish_reason = "length"
+            result.token_ids = [7, 8, 9]
+
+        failures = serve.fixed_output_contract_failures(measured)
+
+        normal_failure = next(item for item in failures if item.startswith("normal-00 failed"))
+        self.assertIn("token_ids=[0,42,248319]", normal_failure)
+        self.assertRegex(normal_failure, r"token_ids_sha256=sha256:[0-9a-f]{64}")
+
     def test_sampled_response_oracle_accepts_arbitrary_plain_text_only(self) -> None:
         result = stream_result_with_text("not an ascending sequence")
         self.assertIsNone(serve.sampled_response_oracle_failure(result))

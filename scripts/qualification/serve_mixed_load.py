@@ -113,6 +113,7 @@ PROMPT_MARKER_FORMAT = "QUAL-{seed}-{role}"
 RESPONSE_ORACLE = "ascending_zero_padded_integers_prefix_v1"
 RESPONSE_ORACLE_INTEGER_WIDTH = 6
 RESPONSE_DIAGNOSTIC_MAX_CHARACTERS = 256
+TOKEN_ID_DIAGNOSTIC_MAX_COUNT = 256
 ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v11"
 ACCELERATOR_RUNTIME_POLICY_VERSION = int(
     ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID.rsplit(".v", 1)[1]
@@ -1416,6 +1417,25 @@ def bounded_response_text(result: StreamResult) -> str:
     if structural_failure is not None:
         suffix += f" [{structural_failure}]"
     return ascii(excerpt) + suffix
+
+
+def token_id_diagnostic(result: StreamResult) -> str:
+    encoded = json.dumps(result.token_ids, separators=(",", ":")).encode()
+    digest = hashlib.sha256(encoded).hexdigest()
+    if len(result.token_ids) <= TOKEN_ID_DIAGNOSTIC_MAX_COUNT:
+        rendered = encoded.decode()
+    else:
+        head_count = TOKEN_ID_DIAGNOSTIC_MAX_COUNT // 2
+        tail_count = TOKEN_ID_DIAGNOSTIC_MAX_COUNT - head_count
+        rendered = json.dumps(
+            {
+                "count": len(result.token_ids),
+                "first": result.token_ids[:head_count],
+                "last": result.token_ids[-tail_count:],
+            },
+            separators=(",", ":"),
+        )
+    return f"token_ids_sha256=sha256:{digest}; token_ids={rendered}"
 
 
 def request_body(
@@ -4372,7 +4392,8 @@ def fixed_output_contract_failures(measured: list[StreamResult]) -> list[str]:
         if oracle_failure is not None:
             failures.append(
                 f"{name} failed {RESPONSE_ORACLE}: {oracle_failure}; "
-                f"response_text={bounded_response_text(result)}"
+                f"response_text={bounded_response_text(result)}; "
+                f"{token_id_diagnostic(result)}"
             )
         if result.finish_reason != "length" or result.completion_tokens != expected:
             failures.append(
@@ -4868,6 +4889,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 name=sampled_result.name,
                 response_oracle_failure=sampled_response_oracle_failure(sampled_result),
                 response_text=bounded_response_text(sampled_result),
+                token_ids=sampled_result.token_ids,
                 sampling_ms=(
                     sampled_result.latency_phases.get("sampling_ms")
                     if sampled_result.latency_phases is not None
@@ -4892,6 +4914,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 semantic_events=len(result.semantic_times),
                 response_oracle_failure=deterministic_response_oracle_failure(result),
                 response_text=bounded_response_text(result),
+                token_ids=result.token_ids,
                 ttft_ms=result.ttft_ms,
             )
         details = " | ".join(status_failures) if status_failures else None
