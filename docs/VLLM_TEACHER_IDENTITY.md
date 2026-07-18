@@ -531,8 +531,8 @@ Strix Halo comparison:
 
 - `qualification/runtime/vllm/rocm/strix-halo/vllm-rocm723-qwen35-4b-triton-text-v2.json`
   is the launcher-produced runtime manifest;
-- `qualification/server-launch/vllm-rocm-strix-halo-triton-text-v2.json` is the
-  atomic owned-launch document; and
+- `qualification/server-launch/vllm-rocm-strix-halo-triton-text-private-cache-v3.json`
+  is the current atomic owned-launch document; and
 - `qualification/host-policies/strix-halo-serving-benchmark-fast-guard-v1.json`
   is the thermal policy used by the first guarded startup and comparison runs.
 
@@ -549,6 +549,11 @@ and setting every vLLM multimodal input limit to zero. The retained v1 artifacts
 omit that switch and are rejected counterexample inputs: vLLM resolved the
 hybrid architecture, requested an image processor absent from the text-serving
 checkpoint, and exited before weight allocation.
+The retained v2 launch document selected the correct text surface but inherited
+the user-global vLLM cache and is also rejected. The v3 launch keeps the same
+semantic runtime manifest and inference fingerprint while explicitly selecting
+`.qualification/vllm-runtime-caches` as the parent of a new empty cache. A
+non-semantic cache-isolation change must not fabricate a second model identity.
 This is a qualification input, not a portable claim that another ROCm host has
 the same runtime and not evidence that vLLM has passed startup or performance.
 
