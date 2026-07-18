@@ -120,10 +120,11 @@ For owned runs, the driver resolves and reads the selected sensor only after all
 source/model/runtime fingerprinting and launch validation have completed. It
 does not call `Popen` until `safe_handoff.stable_samples` consecutive readings
 are at or below `safe_handoff.target_millicelsius`. A timeout fails before any
-child exists. Driver v5 receipts retain the sensor path, policy values, start,
-peak, and end temperatures, sample count, stable count, elapsed time, scope, and
-completion state for this boundary. The receipt validator requires those values
-to match the content-hashed thermal policy and the runtime guard's sensor.
+child exists. Driver v5 and later receipts retain the sensor path, policy
+values, start, peak, and end temperatures, sample count, stable count, elapsed
+time, scope, and completion state for this boundary. The receipt validator
+requires those values to match the content-hashed thermal policy and the runtime
+guard's sensor.
 
 Cooling remains part of wall-clock service cost. Each row records both request
 window output throughput and thermally sustainable throughput including pacing
@@ -181,6 +182,18 @@ unsettled pacing, guard errors, forced shutdown, process residue, or failed
 cooldown. Failed rows completed before a later measurement or finalization
 failure remain in a self-hashing failed receipt.
 
+Once an owned child has been created, driver v6 also retains failures before the
+first request. Readiness exit or timeout, listener ownership mismatch, absent
+model ID, malformed `/v1/models`, and Kiln health/identity failure become a
+structured `server_startup` completion failure. The failed receipt records an
+empty available-model list when discovery never completed, no warmup or rows,
+the exact launch and prelaunch-cooldown evidence, server-log hash, observed exit
+status, process-group residue check, thermal trip/cooldown evidence, and all
+independent source/model/runtime finalization checks. A Kiln startup that never
+returned health records a null execution identity only together with an
+explicitly failed `execution_identity_unchanged` check. Pre-process validation
+failures still return without a receipt because no measured lifecycle began.
+
 ## Running the Five-Profile Campaign
 
 `scripts/run-serving-benchmark-campaign.py` runs all five profiles. In owned
@@ -220,11 +233,14 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v5 is the current contract. It extends v4 `server_lifecycle` evidence
-with the mandatory post-provenance, pre-process cooldown described above. Owned
-evidence also contains the content-hashed launch document, absolute server-log
-fingerprint, shutdown signal/status/timing, forced-shutdown flag, and
-process-group liveness. Attached and explicitly unsafe runs serialize null
-lifecycle artifacts so ownership cannot be inferred from missing fields.
-Historical driver v2, v3, and v4 receipts remain valid under their original
-contracts, but do not satisfy current performance acceptance.
+Driver v6 is the current contract. It retains the v5 mandatory
+post-provenance, pre-process cooldown and adds the structured startup-failure
+evidence described above. It also validates embedded vLLM identity objects by
+JSON value while continuing to bind the launcher's exact canonical JSON bytes;
+sorting the outer receipt cannot change identity semantics. Owned evidence
+contains the content-hashed launch document, absolute server-log fingerprint,
+shutdown signal/status/timing, forced-shutdown flag, and process-group liveness.
+Attached and explicitly unsafe runs serialize null lifecycle artifacts so
+ownership cannot be inferred from missing fields. Historical driver v2 through
+v5 receipts remain valid under their original contracts, but do not satisfy
+current performance acceptance.

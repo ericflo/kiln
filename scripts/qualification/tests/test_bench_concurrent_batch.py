@@ -121,6 +121,9 @@ class FakeThermalGuard:
     def close(self) -> None:
         return
 
+    def prepare_for_process_exit(self) -> None:
+        return
+
     def wait_for_pacing_settlement(self, _timeout_seconds: float) -> bool:
         return True
 
@@ -334,13 +337,17 @@ class ServingBenchmarkTests(unittest.TestCase):
         fetch_json: object | None = None,
         guarded: bool = True,
         thermal_guard_factory: object = FakeThermalGuard,
+        engine: str = "kiln",
     ) -> tuple[int, Path]:
         output = Path(directory) / "receipt.json"
         runtime_artifact = Path(directory) / "kiln-server"
-        runtime_artifact.write_bytes(b"test runtime")
-        fake.state.execution_identity["executable_sha256"] = (
-            "sha256:" + hashlib.sha256(b"test runtime").hexdigest()
-        )
+        if engine == "vllm":
+            runtime_artifact.write_text(json.dumps(valid_vllm_manifest()))
+        else:
+            runtime_artifact.write_bytes(b"test runtime")
+            fake.state.execution_identity["executable_sha256"] = (
+                "sha256:" + hashlib.sha256(b"test runtime").hexdigest()
+            )
         memory_counter = Path(directory) / "vram-used"
         memory_counter.write_text("1024")
         thermal_policy = Path(directory) / "host-thermal-policy.json"
@@ -406,6 +413,8 @@ class ServingBenchmarkTests(unittest.TestCase):
             )
             return_code = bench.main(
                 [
+                    "--engine",
+                    engine,
                     "--base-url",
                     fake.base_url,
                     "--model",
@@ -1038,6 +1047,118 @@ class ServingBenchmarkTests(unittest.TestCase):
                     host_thermal_policy=thermal_record,
                 )
 
+    def test_owned_server_readiness_exit_retains_complete_failed_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "failing-server.py"
+            executable.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "import time\n"
+                "print('injected startup failure', flush=True)\n"
+                "time.sleep(0.25)\n"
+                "sys.exit(1)\n"
+            )
+            executable.chmod(0o755)
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            launch_path = root / "launch.json"
+            launch_path.write_text(
+                json.dumps(
+                    {
+                        "schema": bench.SERVER_LAUNCH_SCHEMA,
+                        "id": "fixture-failing-server-v1",
+                        "command": ["./failing-server.py"],
+                        "working_directory": ".",
+                        "log_directory": "logs",
+                        "readiness_poll_interval_ms": 10,
+                        "startup_timeout_seconds": 2.0,
+                        "shutdown_timeout_seconds": 1.0,
+                        "acceptable_exit_codes": [0],
+                    }
+                )
+            )
+            runtime_artifact = root / "vllm-manifest.json"
+            runtime_artifact.write_text(json.dumps(valid_vllm_manifest()))
+            memory_counter = root / "vram-used"
+            memory_counter.write_text("1024")
+            thermal_policy = root / "thermal.json"
+            thermal_policy.write_text(json.dumps(valid_host_thermal_policy()))
+            output = root / "receipt.json"
+            model_fingerprint = {
+                "id": "test-model",
+                "path": str(root / "model"),
+                "weight_files": [
+                    {
+                        "path": "model.safetensors",
+                        "bytes": 8,
+                        "sha256": "sha256:" + "c" * 64,
+                    }
+                ],
+                "config_hash": "sha256:" + "d" * 64,
+                "tokenizer_hash": "sha256:" + "e" * 64,
+                "chat_template_hash": "sha256:" + "f" * 64,
+            }
+            clean_repository = {
+                "commit": "a" * 40,
+                "dirty": False,
+                "source_tree_sha256": "sha256:" + "b" * 64,
+            }
+            with (
+                mock.patch.object(
+                    bench, "repository_identity", return_value=clean_repository
+                ),
+                mock.patch.object(
+                    bench, "fingerprint_model", return_value=model_fingerprint
+                ),
+                mock.patch.object(
+                    bench,
+                    "wait_for_prelaunch_cooldown",
+                    return_value=valid_prelaunch_cooldown(),
+                ),
+                mock.patch.object(
+                    bench.thermal,
+                    "HostThermalGuard",
+                    side_effect=FakeThermalGuard,
+                ),
+            ):
+                return_code = bench.main(
+                    [
+                        "--engine=vllm",
+                        f"--base-url=http://127.0.0.1:{port}",
+                        "--model=test-model",
+                        f"--model-path={root / 'model'}",
+                        "--runtime-identity=test-vllm-runtime",
+                        f"--runtime-artifact={runtime_artifact}",
+                        "--run-id=owned-startup-failure-v1",
+                        "--sizes=1",
+                        "--max-tokens=1",
+                        "--warmup-requests=0",
+                        f"--memory-path={memory_counter}",
+                        "--memory-limit-bytes=2048",
+                        f"--host-thermal-policy={thermal_policy}",
+                        f"--server-launch-config={launch_path}",
+                        f"--out={output}",
+                    ]
+                )
+
+            receipt = bench.strict_json_loads(output.read_bytes())
+            bench.validate_benchmark_receipt(receipt)
+            self.assertEqual(return_code, 2)
+            self.assertEqual(receipt["verdict"], "failed")
+            self.assertEqual(
+                [failure["phase"] for failure in receipt["completion"]["failures"]],
+                ["server_startup", "server_shutdown"],
+            )
+            lifecycle = receipt["server_lifecycle"]
+            self.assertEqual(lifecycle["shutdown"]["returncode"], 1)
+            self.assertFalse(lifecycle["shutdown"]["signal_sent"])
+            self.assertFalse(lifecycle["shutdown"]["forced"])
+            self.assertFalse(lifecycle["shutdown"]["process_group_alive_end"])
+            self.assertGreater(lifecycle["log"]["bytes"], 0)
+            self.assertIsNone(receipt["host_thermal"]["evidence"]["trip_reason"])
+
     def test_cli_writes_a_self_hashing_passed_receipt(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
             return_code, output = self._run_cli_fixture(fake, directory)
@@ -1058,6 +1179,13 @@ class ServingBenchmarkTests(unittest.TestCase):
             tampered.pop("receipt_sha256")
             tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
             with self.assertRaisesRegex(bench.BenchmarkError, "model content"):
+                bench.validate_benchmark_receipt(tampered)
+
+            tampered = json.loads(json.dumps(receipt))
+            tampered["engine"]["available_models"] = []
+            tampered.pop("receipt_sha256")
+            tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+            with self.assertRaisesRegex(bench.BenchmarkError, "absent"):
                 bench.validate_benchmark_receipt(tampered)
 
             vllm_receipt = json.loads(json.dumps(receipt))
@@ -1171,6 +1299,13 @@ class ServingBenchmarkTests(unittest.TestCase):
                     "detail": "BenchmarkError: injected startup thermal trip",
                 },
                 {
+                    "phase": "execution_identity_unchanged",
+                    "detail": (
+                        "BenchmarkError: Kiln execution identity is unavailable "
+                        "because startup did not complete"
+                    ),
+                },
+                {
                     "phase": "host_thermal_handoff",
                     "detail": "BenchmarkError: injected startup thermal trip",
                 },
@@ -1180,6 +1315,50 @@ class ServingBenchmarkTests(unittest.TestCase):
             receipt["completion"]["finalization_checks"]["host_thermal_handoff"],
             "failed",
         )
+
+    def test_server_startup_failure_writes_a_valid_failed_receipt(self) -> None:
+        def fail_models(url: str, *_args: object, **_kwargs: object) -> dict:
+            if url.endswith("/v1/models"):
+                raise bench.BenchmarkError("injected readiness failure")
+            raise AssertionError(f"unexpected fetch after startup failure: {url}")
+
+        for engine in ("kiln", "vllm"):
+            with self.subTest(engine=engine):
+                with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
+                    return_code, output = self._run_cli_fixture(
+                        fake,
+                        directory,
+                        fetch_json=fail_models,
+                        engine=engine,
+                    )
+                    receipt = bench.strict_json_loads(output.read_bytes())
+                    bench.validate_benchmark_receipt(receipt)
+
+                self.assertEqual(return_code, 2)
+                self.assertEqual(receipt["verdict"], "failed")
+                self.assertEqual(receipt["engine"]["available_models"], [])
+                self.assertIsNone(receipt["warmup"])
+                self.assertEqual(receipt["runs"], [])
+                failure_phases = [
+                    failure["phase"]
+                    for failure in receipt["completion"]["failures"]
+                ]
+                self.assertEqual(
+                    failure_phases,
+                    (
+                        ["server_startup", "execution_identity_unchanged"]
+                        if engine == "kiln"
+                        else ["server_startup"]
+                    ),
+                )
+                self.assertIn(
+                    "injected readiness failure",
+                    receipt["completion"]["failures"][0]["detail"],
+                )
+                if engine == "kiln":
+                    self.assertIsNone(
+                        receipt["engine"]["runtime_execution_identity"]
+                    )
 
     def test_receipt_writer_refuses_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1210,6 +1389,11 @@ class ServingBenchmarkTests(unittest.TestCase):
         manifest = valid_vllm_manifest()
         self.assertEqual(
             bench.validate_vllm_runtime_manifest(manifest, "fixture"), manifest
+        )
+        reordered = json.loads(json.dumps(manifest))
+        reordered["identity"] = dict(reversed(tuple(reordered["identity"].items())))
+        self.assertEqual(
+            bench.validate_vllm_runtime_manifest(reordered, "fixture"), reordered
         )
         tampered = json.loads(json.dumps(manifest))
         tampered["identity"]["implementation"] = "vllm:changed"

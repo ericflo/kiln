@@ -39,10 +39,11 @@ SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 HOST_THERMAL_POLICY_SCHEMA = "kiln.host-thermal-policy.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "5"
-SUPPORTED_DRIVER_VERSIONS = {"2", "3", "4", DRIVER_VERSION}
-THERMAL_DRIVER_VERSIONS = {"3", "4", DRIVER_VERSION}
-LIFECYCLE_DRIVER_VERSIONS = {"4", DRIVER_VERSION}
+DRIVER_VERSION = "6"
+SUPPORTED_DRIVER_VERSIONS = {"2", "3", "4", "5", DRIVER_VERSION}
+THERMAL_DRIVER_VERSIONS = {"3", "4", "5", DRIVER_VERSION}
+LIFECYCLE_DRIVER_VERSIONS = {"4", "5", DRIVER_VERSION}
+PRELAUNCH_DRIVER_VERSIONS = {"5", DRIVER_VERSION}
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
 ROOT = Path(__file__).resolve().parents[1]
@@ -175,6 +176,7 @@ COMPLETION_CHECK_NAMES = (*COMPLETION_CHECK_NAMES_V3, "server_shutdown")
 COMPLETION_CHECK_STATUSES = {"passed", "failed", "not_applicable"}
 COMPLETION_FAILURE_PHASES = {
     "host_thermal_startup",
+    "server_startup",
     "warmup",
     "measurement",
     "memory_sampler_stop",
@@ -1096,6 +1098,33 @@ def validate_runtime_artifact(value: Any, label: str) -> dict[str, Any]:
     return artifact
 
 
+def validate_kiln_execution_identity(
+    value: Any,
+    artifact: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    identity = _object(value, label)
+    if identity.get("executable_sha256") != artifact["sha256"]:
+        raise BenchmarkError(
+            "receipt Kiln execution identity does not bind the runtime artifact"
+        )
+    if identity.get("provenance_type") != "kiln.execution-provenance.v1":
+        raise BenchmarkError("receipt Kiln execution provenance type is unsupported")
+    for name in ("backend", "device", "inference_dtype", "training_policy"):
+        if not isinstance(identity.get(name), str) or not identity[name]:
+            raise BenchmarkError(f"{label}.{name} must be non-empty")
+    for name in (
+        "provenance_sha256",
+        "executable_sha256",
+        "numerical_runtime_sha256",
+        "kernel_contract_sha256",
+        "effective_server_config_sha256",
+        "effective_environment_sha256",
+    ):
+        _sha256(identity.get(name), f"{label}.{name}")
+    return identity
+
+
 def validate_vllm_runtime_manifest(value: Any, label: str) -> dict[str, Any]:
     manifest = _object(value, label)
     _exact_keys(manifest, VLLM_RUNTIME_MANIFEST_KEYS, label)
@@ -1103,13 +1132,17 @@ def validate_vllm_runtime_manifest(value: Any, label: str) -> dict[str, Any]:
     canonical_json = manifest["canonical_json"]
     if not isinstance(canonical_json, str) or not canonical_json:
         raise BenchmarkError(f"{label}.canonical_json must be non-empty")
+    try:
+        canonical_identity = strict_json_loads(canonical_json.encode("utf-8"))
+    except Exception as exc:
+        raise BenchmarkError(f"{label}.canonical_json is not strict JSON: {exc}") from exc
     expected_json = json.dumps(
-        identity,
+        canonical_identity,
         ensure_ascii=False,
         allow_nan=False,
         separators=(",", ":"),
     )
-    if canonical_json != expected_json:
+    if canonical_json != expected_json or canonical_identity != identity:
         raise BenchmarkError(f"{label}.canonical_json does not match its identity")
     fingerprint = manifest["system_fingerprint"]
     if not isinstance(fingerprint, str):
@@ -1699,7 +1732,7 @@ def validate_server_lifecycle(
 ) -> tuple[str, bool]:
     lifecycle = _object(value, "receipt.server_lifecycle")
     lifecycle_keys = {"mode", "launch_config", "log", "shutdown"}
-    if driver_version == DRIVER_VERSION:
+    if driver_version in PRELAUNCH_DRIVER_VERSIONS:
         lifecycle_keys.add("prelaunch_cooldown")
     _exact_keys(
         lifecycle,
@@ -1708,7 +1741,7 @@ def validate_server_lifecycle(
     )
     mode = lifecycle["mode"]
     owned_fields = ["launch_config", "log", "shutdown"]
-    if driver_version == DRIVER_VERSION:
+    if driver_version in PRELAUNCH_DRIVER_VERSIONS:
         owned_fields.append("prelaunch_cooldown")
     if mode in {"not_configured", "attached_process_group"}:
         if any(lifecycle[name] is not None for name in owned_fields):
@@ -1719,7 +1752,7 @@ def validate_server_lifecycle(
     if mode != "owned_process_group":
         raise BenchmarkError("receipt.server_lifecycle.mode is unsupported")
     prelaunch_passed = True
-    if driver_version == DRIVER_VERSION:
+    if driver_version in PRELAUNCH_DRIVER_VERSIONS:
         if host_thermal_policy is None:
             raise BenchmarkError(
                 "owned server pre-launch cooldown requires a host thermal policy"
@@ -1835,6 +1868,20 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     for name in ("runtime_identity", "base_url", "model"):
         if not isinstance(engine[name], str) or not engine[name]:
             raise BenchmarkError(f"receipt.engine.{name} must be a non-empty string")
+    if engine["reported_version"] is not None and (
+        not isinstance(engine["reported_version"], str)
+        or not engine["reported_version"]
+    ):
+        raise BenchmarkError("receipt.engine.reported_version must be null or non-empty")
+    available_models = engine["available_models"]
+    if (
+        not isinstance(available_models, list)
+        or any(not isinstance(model, str) or not model for model in available_models)
+        or len(set(available_models)) != len(available_models)
+    ):
+        raise BenchmarkError(
+            "receipt.engine.available_models must contain unique non-empty strings"
+        )
     if not isinstance(engine["authentication_configured"], bool):
         raise BenchmarkError("receipt.engine.authentication_configured must be boolean")
     if "authentication_source" in engine:
@@ -1853,37 +1900,25 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         )
         execution_identity = engine["runtime_execution_identity"]
         if engine["name"] == "kiln":
-            execution_identity = _object(
-                execution_identity, "receipt.engine.runtime_execution_identity"
-            )
-            if execution_identity.get("executable_sha256") != artifact["sha256"]:
-                raise BenchmarkError(
-                    "receipt Kiln execution identity does not bind the runtime artifact"
+            if execution_identity is None:
+                completion = receipt.get("completion")
+                checks = (
+                    completion.get("finalization_checks")
+                    if isinstance(completion, dict)
+                    else None
                 )
-            if (
-                execution_identity.get("provenance_type")
-                != "kiln.execution-provenance.v1"
-            ):
-                raise BenchmarkError("receipt Kiln execution provenance type is unsupported")
-            for name in ("backend", "device", "inference_dtype", "training_policy"):
-                if (
-                    not isinstance(execution_identity.get(name), str)
-                    or not execution_identity[name]
-                ):
+                if not isinstance(checks, dict) or checks.get(
+                    "execution_identity_unchanged"
+                ) != "failed":
                     raise BenchmarkError(
-                        f"receipt.engine.runtime_execution_identity.{name} must be non-empty"
+                        "receipt Kiln execution identity may be null only when its "
+                        "finalization check failed"
                     )
-            for name in (
-                "provenance_sha256",
-                "executable_sha256",
-                "numerical_runtime_sha256",
-                "kernel_contract_sha256",
-                "effective_server_config_sha256",
-                "effective_environment_sha256",
-            ):
-                _sha256(
-                    execution_identity.get(name),
-                    f"receipt.engine.runtime_execution_identity.{name}",
+            else:
+                validate_kiln_execution_identity(
+                    execution_identity,
+                    artifact,
+                    "receipt.engine.runtime_execution_identity",
                 )
         elif execution_identity is not None:
             raise BenchmarkError("receipt vLLM runtime execution identity must be null")
@@ -2094,7 +2129,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 "receipt server lifecycle and host thermal ownership modes disagree"
             )
         if (
-            driver_version == DRIVER_VERSION
+            driver_version in PRELAUNCH_DRIVER_VERSIONS
             and server_lifecycle_mode == "owned_process_group"
             and receipt["server_lifecycle"]["prelaunch_cooldown"]["sensor_path"]
             != receipt["host_thermal"]["evidence"]["sensor_path"]
@@ -2163,6 +2198,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             )
     completion_failures: list[dict[str, str]] = []
     completion_checks: dict[str, str] | None = None
+    failure_phases: set[str] = set()
     if driver_version in THERMAL_DRIVER_VERSIONS:
         completion = _object(receipt["completion"], "receipt.completion")
         _exact_keys(
@@ -2301,6 +2337,13 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             )
     elif actual_pairs != expected_pairs:
         raise BenchmarkError("receipt.runs do not exactly match declared concurrency and repeats")
+
+    if engine["model"] not in available_models and not failure_phases.intersection(
+        {"host_thermal_startup", "server_startup"}
+    ):
+        raise BenchmarkError(
+            "receipt requested model is absent without a structured startup failure"
+        )
 
     comparison_passed = True
     if "comparison" in receipt:
@@ -3661,31 +3704,43 @@ def main(argv: list[str] | None = None) -> int:
         }
         if args.api_key:
             headers["Authorization"] = f"Bearer {args.api_key}"
-        models = (
-            wait_for_owned_server_models(
-                owned_server, thermal_guard, args.base_url, headers
-            )
-            if owned_server is not None and thermal_guard is not None
-            else probe_models(args.base_url, headers, args.timeout_secs)
-        )
-        if owned_server is not None:
-            verify_owned_listener(owned_server, args.base_url)
-        if args.model not in models:
-            raise BenchmarkError(
-                f"requested model {args.model!r} is absent from /v1/models: {models}"
-            )
+        models: list[str] = []
         health_version = None
         runtime_execution_identity: dict[str, Any] | None = None
-        if args.engine == "kiln":
-            health = fetch_json(f"{args.base_url}/health", headers, args.timeout_secs)
-            health_version = health.get("version")
-            runtime_execution_identity = _object(
-                health.get("execution_identity"), "Kiln health.execution_identity"
-            )
-            if runtime_execution_identity.get("executable_sha256") != runtime_artifact["sha256"]:
-                raise BenchmarkError(
-                    "Kiln health execution identity does not match --runtime-artifact"
+        server_startup_error: Exception | None = None
+        if thermal_startup_error is None:
+            try:
+                models = (
+                    wait_for_owned_server_models(
+                        owned_server, thermal_guard, args.base_url, headers
+                    )
+                    if owned_server is not None and thermal_guard is not None
+                    else probe_models(args.base_url, headers, args.timeout_secs)
                 )
+                if owned_server is not None:
+                    verify_owned_listener(owned_server, args.base_url)
+                if args.model not in models:
+                    raise BenchmarkError(
+                        f"requested model {args.model!r} is absent from /v1/models: {models}"
+                    )
+                if args.engine == "kiln":
+                    health = fetch_json(
+                        f"{args.base_url}/health", headers, args.timeout_secs
+                    )
+                    health_version = health.get("version")
+                    runtime_execution_identity = _object(
+                        health.get("execution_identity"),
+                        "Kiln health.execution_identity",
+                    )
+                    if (
+                        runtime_execution_identity.get("executable_sha256")
+                        != runtime_artifact["sha256"]
+                    ):
+                        raise BenchmarkError(
+                            "Kiln health execution identity does not match --runtime-artifact"
+                        )
+            except Exception as exc:
+                server_startup_error = exc
 
         diagnostics_url: str | None
         if args.diagnostics_url == "none":
@@ -3771,6 +3826,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if thermal_startup_error is not None:
             record_completion_failure("host_thermal_startup", thermal_startup_error)
+        elif server_startup_error is not None:
+            record_completion_failure("server_startup", server_startup_error)
         else:
             sampler.start()
             try:
@@ -3853,6 +3910,10 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.engine == "kiln":
             def verify_execution_identity() -> None:
+                if runtime_execution_identity is None:
+                    raise BenchmarkError(
+                        "Kiln execution identity is unavailable because startup did not complete"
+                    )
                 health_after = fetch_json(
                     f"{args.base_url}/health", headers, args.timeout_secs
                 )
