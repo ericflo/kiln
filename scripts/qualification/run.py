@@ -91,7 +91,8 @@ CASE_RESULT_LIMIT_BYTES = 16 * 1024 * 1024
 CASE_OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024
 MAX_RUN_CAPTURE_BYTES = 256 * 1024 * 1024
 MAX_RUN_STRUCTURED_BYTES = 64 * 1024 * 1024
-MAX_TERMINATION_GRACE_SECONDS = 60.0
+MAX_TERMINATION_GRACE_SECONDS = 75.0
+DEFAULT_TERMINATION_GRACE_SECONDS = 65.0
 SUCCESS_DESCENDANT_SETTLEMENT_SECONDS = 1.0
 
 
@@ -848,6 +849,30 @@ def load_case_result(
     )
 
 
+def _process_group_members(process_group: int) -> tuple[tuple[int, str, int], ...]:
+    if sys.platform != "linux":
+        return ()
+    try:
+        entries = tuple(Path("/proc").iterdir())
+    except OSError:
+        return ()
+    members: list[tuple[int, str, int]] = []
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat_line = (entry / "stat").read_text()
+            fields = stat_line[stat_line.rfind(")") + 2 :].split()
+            state = fields[0]
+            parent_pid = int(fields[1])
+            member_group = int(fields[2])
+        except (FileNotFoundError, IndexError, OSError, ValueError):
+            continue
+        if member_group == process_group:
+            members.append((int(entry.name), state, parent_pid))
+    return tuple(members)
+
+
 def _group_exists(process_group: int) -> bool:
     try:
         os.killpg(process_group, 0)
@@ -857,27 +882,10 @@ def _group_exists(process_group: int) -> bool:
         return True
     if sys.platform != "linux":
         return True
-    try:
-        entries = tuple(Path("/proc").iterdir())
-    except OSError:
+    members = _process_group_members(process_group)
+    if any(state != "Z" for _pid, state, _parent_pid in members):
         return True
-    saw_member = False
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            stat_line = (entry / "stat").read_text()
-            fields = stat_line[stat_line.rfind(")") + 2 :].split()
-            state = fields[0]
-            member_group = int(fields[2])
-        except (FileNotFoundError, IndexError, OSError, ValueError):
-            continue
-        if member_group != process_group:
-            continue
-        saw_member = True
-        if state != "Z":
-            return True
-    if saw_member:
+    if members:
         return False
     try:
         os.killpg(process_group, 0)
@@ -895,16 +903,53 @@ def _wait_for_process_group_exit(process_group: int, grace_seconds: float) -> bo
     return not _group_exists(process_group)
 
 
+def _signal_process_member(pid: int, process_group: int, signal_number: int) -> None:
+    descriptor: int | None = None
+    try:
+        descriptor = os.pidfd_open(pid)
+        members = {
+            member_pid: state
+            for member_pid, state, _parent_pid in _process_group_members(process_group)
+        }
+        if pid not in members or members[pid] == "Z":
+            return
+        signal.pidfd_send_signal(descriptor, signal_number)
+    except ProcessLookupError:
+        pass
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def _terminate_process_group(process: subprocess.Popen[bytes], grace_seconds: float) -> None:
     process_group = process.pid
-    try:
-        os.killpg(process_group, signal.SIGTERM)
-    except ProcessLookupError:
-        process.wait()
-        return
+    members = _process_group_members(process_group)
+    parent_pids = {parent_pid for _pid, _state, parent_pid in members}
+    # Interrupt leaf commands while sandbox supervisors remain alive so driver
+    # finally blocks can stop separately grouped servers and delete snapshots.
+    descendants = [
+        pid
+        for pid, state, _parent_pid in members
+        if pid != process_group and state != "Z" and pid not in parent_pids
+    ]
+    if descendants:
+        for pid in descendants:
+            _signal_process_member(pid, process_group, signal.SIGINT)
+    else:
+        try:
+            os.killpg(process_group, signal.SIGTERM)
+        except ProcessLookupError:
+            process.wait()
+            return
     deadline = time.monotonic() + grace_seconds
     while time.monotonic() < deadline and _group_exists(process_group):
         time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    if _group_exists(process_group):
+        try:
+            os.killpg(process_group, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        _wait_for_process_group_exit(process_group, min(1.0, grace_seconds))
     if _group_exists(process_group):
         try:
             os.killpg(process_group, signal.SIGKILL)
@@ -1377,7 +1422,7 @@ def _receipt_id(
     return value
 
 
-def run_qualification(
+def _run_qualification_impl(
     workload_path: Path,
     *,
     variant_id: str,
@@ -1390,7 +1435,8 @@ def run_qualification(
     root: Path = ROOT,
     invocation: list[str] | None = None,
     hooks: RunnerHooks = DEFAULT_HOOKS,
-    termination_grace_seconds: float = 5.0,
+    termination_grace_seconds: float = DEFAULT_TERMINATION_GRACE_SECONDS,
+    active_run_directories: list[Path],
 ) -> RunOutcome:
     root = root.resolve(strict=True)
     if not HOST_ID_RE.fullmatch(host_id):
@@ -1528,6 +1574,7 @@ def run_qualification(
         raise QualificationRunError(
             f"refusing to reuse existing run directory: {run_directory}"
         ) from exc
+    active_run_directories.append(run_directory)
 
     infrastructure_failures: list[str] = []
     try:
@@ -1970,11 +2017,61 @@ def run_qualification(
             )
 
     _atomic_write_json_new(receipt_path, receipt)
+    active_run_directories.remove(run_directory)
     return RunOutcome(
         receipt_path=receipt_path,
         receipt=receipt,
         exit_code=0 if receipt["qualification"]["verdict"] == "passed" else 1,
     )
+
+
+def run_qualification(
+    workload_path: Path,
+    *,
+    variant_id: str,
+    host_id: str,
+    variable_assignments: list[str] | None = None,
+    model_path: Path | None = None,
+    model_id: str | None = None,
+    output: Path | None = None,
+    receipt_id: str | None = None,
+    root: Path = ROOT,
+    invocation: list[str] | None = None,
+    hooks: RunnerHooks = DEFAULT_HOOKS,
+    termination_grace_seconds: float = DEFAULT_TERMINATION_GRACE_SECONDS,
+) -> RunOutcome:
+    active_run_directories: list[Path] = []
+    try:
+        return _run_qualification_impl(
+            workload_path,
+            variant_id=variant_id,
+            host_id=host_id,
+            variable_assignments=variable_assignments,
+            model_path=model_path,
+            model_id=model_id,
+            output=output,
+            receipt_id=receipt_id,
+            root=root,
+            invocation=invocation,
+            hooks=hooks,
+            termination_grace_seconds=termination_grace_seconds,
+            active_run_directories=active_run_directories,
+        )
+    except BaseException as exc:
+        cleanup_errors: list[str] = []
+        for run_directory in reversed(active_run_directories):
+            try:
+                shutil.rmtree(run_directory)
+            except FileNotFoundError:
+                pass
+            except OSError as cleanup_exc:
+                cleanup_errors.append(f"{run_directory}: {cleanup_exc}")
+        if cleanup_errors:
+            raise QualificationRunError(
+                "cannot clean interrupted qualification run directories: "
+                + " | ".join(cleanup_errors)
+            ) from exc
+        raise
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -2017,9 +2114,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--term-grace-seconds",
         type=float,
-        default=5.0,
+        default=DEFAULT_TERMINATION_GRACE_SECONDS,
         help=(
-            "time between containment TERM and KILL after a timeout "
+            "time for driver-first cleanup before containment KILL after a timeout "
             f"(maximum {MAX_TERMINATION_GRACE_SECONDS:g})"
         ),
     )
@@ -2046,6 +2143,12 @@ def main(argv: list[str] | None = None) -> int:
     except (QualificationRunError, WorkloadValidationError) as exc:
         print(f"qualification run failed: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print(
+            "qualification run interrupted; owned processes and run data were cleaned",
+            file=sys.stderr,
+        )
+        return 130
     try:
         display = outcome.receipt_path.relative_to(ROOT)
     except ValueError:

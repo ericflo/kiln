@@ -709,10 +709,10 @@ kiln serve --config rocm-graph-eager.toml
           owner and every live recurrent-state slot. A same-binary A/B completed the identical first seven-wave
           sequence 25.3 percent faster at 12 than 24 entries despite lower active p50 SCLK; the smaller arm safely
           settled seven measured capacity transactions with zero fallback. Treat 12 as the qualified Strix Halo
-          point, not a universal optimum, and require local evidence before raising it. The soak also runs the
-          same independent host controller as the Vulkan soak: sample every 250 ms, terminate below 8 GiB
-          <code>MemAvailable</code>, fail the result above 512 MiB swap growth, and pace the complete server group at
-          88,000/80,000 millicelsius and fail closed at 97,000 millicelsius. Pacing time remains inside request
+          point, not a universal optimum, and require local evidence before raising it. The soak terminates below
+          8 GiB <code>MemAvailable</code> and fails above 512 MiB swap growth. The soak, shorter ROCm mixed-load
+          gate, and Vulkan soak share the independent 250 ms thermal controller: pace the complete server group
+          at 88,000/80,000 millicelsius and fail closed at 97,000 millicelsius. Pacing time remains inside request
           and phase deadlines and is emitted as <code>host_thermal_pacing</code>, so a sustainable throughput result
           cannot discard cooling time or mislabel a controlled pause as unexplained inference latency. A memory
           hard-stop follows <code>SIGTERM</code> with <code>SIGCONT</code> so a thermally stopped group can execute

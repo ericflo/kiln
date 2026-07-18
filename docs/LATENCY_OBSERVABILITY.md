@@ -232,6 +232,17 @@ multi-row decode. Aggregate throughput describes the eight-request service
 window; the per-request p50 describes individual request wall time. They answer
 different questions and must not be substituted for one another.
 
+The same mixed-load window retains host thermal pacing as an external causal
+interval. The Strix Halo controller samples `k10temp/Tctl` every 250 ms, stops
+the complete server process group at 88 C, resumes it at 80 C, and independently
+fails closed at 97 C. A token gap overlapping a stop/resume interval is assigned
+the bounded `host_thermal_pacing` category. Start/peak/end temperature, guard
+errors and trips, pacing counts, duration, maximum interval, and active-at-end
+state are receipt metrics. Cooling time remains inside request and workload wall
+clocks, so throughput and latency describe sustainable service on the named
+host rather than an unpaced burst. This external attribution does not change or
+populate any request-local backend phase.
+
 Phase values are blocking candidates, not an additive critical-path
 decomposition. Work can overlap, especially response delivery with the next
 actor forward, and the broad `decode_ms` interval contains any measured backend

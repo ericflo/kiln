@@ -26,6 +26,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Iterable
 
+import host_thermal_guard as thermal
 from result_details import compact_details
 
 
@@ -55,6 +56,12 @@ BUILD_CARGO_HOST_THERMAL_SENSOR_NAME = "k10temp"
 BUILD_CARGO_HOST_THERMAL_SENSOR_LABEL = "Tctl"
 BUILD_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS = 97_000
 BUILD_CARGO_HOST_THERMAL_POLL_MILLISECONDS = 250
+RUNTIME_HOST_THERMAL_SENSOR_NAME = "k10temp"
+RUNTIME_HOST_THERMAL_SENSOR_LABEL = "Tctl"
+RUNTIME_HOST_THERMAL_LIMIT_MILLICELSIUS = 97_000
+RUNTIME_HOST_THERMAL_PACING_START_MILLICELSIUS = 88_000
+RUNTIME_HOST_THERMAL_PACING_RESUME_MILLICELSIUS = 80_000
+RUNTIME_HOST_THERMAL_POLL_MILLISECONDS = 250
 BUILD_TIMEOUT_SECONDS = 900.0
 STARTUP_TIMEOUT_SECONDS = 240.0
 REQUEST_TIMEOUT_SECONDS = 120.0
@@ -356,6 +363,39 @@ def _variant_config(
     }
 
 
+def _mixed_load_host_safety(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "build": config["build"],
+        "runtime": config["runtime"],
+        "host_safety": {
+            "thermal_guard": {
+                "limit_millicelsius": RUNTIME_HOST_THERMAL_LIMIT_MILLICELSIUS,
+                "poll_interval_ms": RUNTIME_HOST_THERMAL_POLL_MILLISECONDS,
+                "sensor": {
+                    "hwmon_name": RUNTIME_HOST_THERMAL_SENSOR_NAME,
+                    "label": RUNTIME_HOST_THERMAL_SENSOR_LABEL,
+                },
+            },
+            "thermal_pacing": {
+                "deadline_accounting": "included",
+                "itl_attribution": "host_thermal_pacing",
+                "mode": "continuous_process_group_stop",
+                "pause_signal": "SIGSTOP",
+                "resume_millicelsius": (
+                    RUNTIME_HOST_THERMAL_PACING_RESUME_MILLICELSIUS
+                ),
+                "resume_signal": "SIGCONT",
+                "scope": "server_process_group",
+                "start_millicelsius": (
+                    RUNTIME_HOST_THERMAL_PACING_START_MILLICELSIUS
+                ),
+            },
+        },
+        "server": config["server"],
+        "workload": config["workload"],
+    }
+
+
 VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
     "default": _variant_config(
         serving_profile="experimental",
@@ -402,6 +442,10 @@ VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
         rocm_graphs_requested=True,
         rocm_graphs_enabled=False,
     ),
+}
+VARIANT_CONFIGS = {
+    variant_id: _mixed_load_host_safety(config)
+    for variant_id, config in VARIANT_CONFIGS.items()
 }
 
 
@@ -538,6 +582,21 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "graph_pre_measurement_capture_success_count": ("count", "exact", False),
     "graph_pre_measurement_failure_count": ("count", "exact", True),
     "graph_pre_measurement_replay_success_count": ("count", "exact", False),
+    "host_temperature_end_millicelsius": ("millicelsius", "exact", True),
+    "host_temperature_peak_millicelsius": ("millicelsius", "max", True),
+    "host_temperature_start_millicelsius": ("millicelsius", "exact", True),
+    "host_thermal_guard_error_count": ("count", "sum", True),
+    "host_thermal_guard_trip_count": ("count", "sum", True),
+    "host_thermal_pacing_active_end": ("bool", "exact", True),
+    "host_thermal_pacing_completed_event_count": ("count", "sum", False),
+    "host_thermal_pacing_event_count": ("count", "sum", True),
+    "host_thermal_pacing_max_seconds": ("s", "max", True),
+    "host_thermal_pacing_max_start_millicelsius": (
+        "millicelsius",
+        "max",
+        True,
+    ),
+    "host_thermal_pacing_seconds": ("s", "sum", True),
     "itl_ms_p50": ("ms", "p50", True),
     "itl_ms_p99": ("ms", "p99", True),
     "itl_ms_p999": ("ms", "p99.9", True),
@@ -735,6 +794,16 @@ EXTERNAL_YIELD_SYNC_MONOTONIC_FIELDS = (
 
 class QualificationError(RuntimeError):
     pass
+
+
+class QualificationInterrupted(QualificationError):
+    pass
+
+
+def raise_termination_interrupt(signum: int, _frame: Any) -> None:
+    raise QualificationInterrupted(
+        f"qualification driver received {signal.Signals(signum).name}"
+    )
 
 
 def remaining_until(deadline: float, label: str, cap: float | None = None) -> float:
@@ -4368,12 +4437,30 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
     )
     policy_events_started = time.monotonic()
     process, server_log = start_server(binary, config_path, variant)
+    thermal_guard = thermal.HostThermalGuard(
+        process,
+        hwmon_name=RUNTIME_HOST_THERMAL_SENSOR_NAME,
+        label=RUNTIME_HOST_THERMAL_SENSOR_LABEL,
+        limit_millicelsius=RUNTIME_HOST_THERMAL_LIMIT_MILLICELSIUS,
+        pacing_start_millicelsius=(
+            RUNTIME_HOST_THERMAL_PACING_START_MILLICELSIUS
+        ),
+        pacing_resume_millicelsius=(
+            RUNTIME_HOST_THERMAL_PACING_RESUME_MILLICELSIUS
+        ),
+        poll_interval_seconds=RUNTIME_HOST_THERMAL_POLL_MILLISECONDS / 1000,
+        trace_callback=trace,
+        error_type=QualificationError,
+    )
     sampler = MemorySampler(port)
     slow: SlowConsumer | None = None
     result: tuple[list[dict[str, Any]], str | None] | None = None
+    execution_failure: str | None = None
     shutdown_outcome: ShutdownOutcome | None = None
     snapshot_residue: list[str] = []
     try:
+        thermal_guard.start()
+        thermal_guard.set_phase("startup")
         wait_ready(port, process, server_log, overall_deadline)
         health_before_warmup = read_stable_health(
             port, overall_deadline, "startup graph snapshot"
@@ -4388,6 +4475,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         health_measurement_start: dict[str, Any] = {}
         expect_graphs = VARIANT_CONFIGS[variant]["runtime"]["rocm_graphs_enabled"]
         for attempt in range(MAX_WARMUP_REQUESTS):
+            thermal_guard.set_phase(f"warmup-{attempt + 1}")
             warmup = run_stream(
                 port,
                 name=f"warmup-{attempt + 1}",
@@ -4437,6 +4525,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             )
         assert warmup is not None
         health_before_sampled_profile = health_measurement_start
+        thermal_guard.set_phase("sampled-profile")
         sampled_profile = run_sampled_profile(port, seed, overall_deadline)
         health_after_sampled_profile = wait_for_batching_drain(
             port, overall_deadline, "sampled profile"
@@ -4453,6 +4542,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             )
         health_measurement_start = health_after_sampled_profile
         measurement_started = time.monotonic()
+        thermal_guard.set_phase("measurement")
         sampler.start()
         first_token = threading.Event()
         normal_word_counts = (16, 32, 64, 128, 256, 384, 512, 768)
@@ -4608,6 +4698,9 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             healthy_peer_overlaps_pressure(pressure_peer, pressure_window)
         )
         measurement_events = server_log.events_since(measurement_started)
+        measurement_events.extend(
+            thermal_guard.pacing_events_since(measurement_started)
+        )
         policy_events = server_log.events_since(policy_events_started)
         values = metric_values(
             measured=measured,
@@ -4626,6 +4719,9 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             health_end=health_end,
             events=measurement_events,
         )
+        values.update(thermal_guard.metric_values())
+        values.update(thermal_guard.pacing_metric_values())
+        values["host_thermal_guard_error_count"] = len(thermal_guard.errors)
         status_failures = [
             *final_attestation,
             *execution_attestation,
@@ -4639,6 +4735,14 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             ),
         ]
         status_failures.extend(sampled_profile_contract_failures(values))
+        if thermal_guard.trip_reason is not None:
+            status_failures.append(thermal_guard.trip_reason)
+        if thermal_guard.errors:
+            status_failures.append(
+                "host thermal guard errors: " + ", ".join(thermal_guard.errors)
+            )
+        if values["host_thermal_guard_trip_count"] != 0:
+            status_failures.append("host thermal guard tripped during mixed load")
         for phase, metric_name in (
             ("admission", "batching_slow_admission_count"),
             ("prefill", "batching_slow_prefill_forward_count"),
@@ -4792,10 +4896,15 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             )
         details = " | ".join(status_failures) if status_failures else None
         result = metrics_from_values(values), details
+    except Exception as exc:
+        execution_failure = f"{type(exc).__name__}: {exc}"
+        trace("qualification_error", details=execution_failure)
     finally:
         if slow is not None:
             slow.close()
         sampler.close()
+        thermal_guard.set_phase("teardown")
+        thermal_guard.close()
         shutdown_outcome = terminate_process(process)
         server_log.join()
         snapshot_residue = snapshot_payload_residue(snapshot_dir)
@@ -4808,10 +4917,44 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         )
         shutil.rmtree(run_dir, ignore_errors=True)
 
-    if result is None or shutdown_outcome is None:
-        raise AssertionError("mixed-load execution completed without a result")
+    if shutdown_outcome is None:
+        raise AssertionError("mixed-load execution completed without shutdown evidence")
+    final_thermal_values: dict[str, float | int] = {
+        **thermal_guard.metric_values(),
+        **thermal_guard.pacing_metric_values(),
+        "host_thermal_guard_error_count": len(thermal_guard.errors),
+    }
+    if result is None:
+        if execution_failure is None:
+            raise AssertionError("mixed-load execution completed without a result")
+        failed_values = {name: 0 for name in METRIC_DEFINITIONS}
+        failed_values["request_failure_count"] = 1
+        failed_values.update(final_thermal_values)
+        result = metrics_from_values(failed_values), execution_failure
     metrics, details = result
+    metrics_by_name = {metric["name"]: metric for metric in metrics}
+    for name, value in final_thermal_values.items():
+        metrics_by_name[name]["value"] = value
     lifecycle_failures: list[str] = []
+    if thermal_guard.trip_reason is not None:
+        lifecycle_failures.append(thermal_guard.trip_reason)
+    if thermal_guard.errors:
+        lifecycle_failures.append(
+            "host thermal guard errors: " + ", ".join(thermal_guard.errors)
+        )
+    if final_thermal_values["host_thermal_guard_trip_count"] != 0:
+        lifecycle_failures.append("host thermal guard tripped during mixed load")
+    if final_thermal_values["host_thermal_pacing_active_end"] != 0:
+        lifecycle_failures.append("host thermal pacing remained active after teardown")
+    if (
+        final_thermal_values["host_thermal_pacing_completed_event_count"]
+        != final_thermal_values["host_thermal_pacing_event_count"]
+    ):
+        lifecycle_failures.append(
+            "host thermal pacing events did not all complete: "
+            f"{final_thermal_values['host_thermal_pacing_completed_event_count']} != "
+            f"{final_thermal_values['host_thermal_pacing_event_count']}"
+        )
     if shutdown_outcome.forced:
         lifecycle_failures.append(
             "server did not exit within the 60-second graceful teardown window"
@@ -4850,6 +4993,7 @@ def main(argv: list[str] | None = None) -> int:
     status = "failed"
     details: str | None = None
     metrics = zero_metrics()
+    previous_sigterm = signal.signal(signal.SIGTERM, raise_termination_interrupt)
     try:
         if variant not in VARIANT_CONFIGS:
             raise QualificationError(
@@ -4863,6 +5007,8 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         details = f"{type(exc).__name__}: {exc}"
         trace("qualification_error", details=details)
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
     result = {
         "schema_version": 1,
         "case_id": CASE_ID,

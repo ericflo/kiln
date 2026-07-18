@@ -39,6 +39,18 @@ python3 scripts/qualification/workload.py \
 The runner rejects a dirty worktree, an uncommitted workload, missing required
 variables, a missing required device, silent skips, and an existing receipt or
 raw-run directory. Do not bypass those checks.
+The runner also owns interruption containment. It starts each case in a new
+process group and, on timeout or `Ctrl-C`, signals case descendants before the
+outer sandbox leader so a Python serving driver can stop its independently
+grouped server, delete private model snapshots, and publish no misleading
+receipt. The default cleanup allowance is 65 seconds and may be set explicitly
+with `--term-grace-seconds` up to the hard 75-second bound. If execution is
+interrupted before receipt publication, the runner removes the exact
+`.qualification/runs/<receipt-id>` directory transactionally and exits 130
+without a traceback. A cleanup failure is itself a runner failure rather than
+ignored residue. `SIGKILL`, kernel failure, or machine power loss cannot run
+userspace cleanup; after such an event, verify process ownership before
+removing the exact ignored directory.
 Each case runs under `closed-qualification-case-v1`: a fixed base containing
 only path, toolchain-home, locale, temporary-directory, user, and user-session
 plumbing, followed by the committed case's exact `environment` object and the
@@ -127,9 +139,14 @@ Every serving driver creates a collision-resistant mode-0700 workspace below
 `.qualification/serving` (the pressure driver uses
 `.qualification/serving-pressure`). Names never depend on the sandbox PID,
 because PID namespaces can assign the same PID on every run. Normal teardown
-removes the workspace and private model snapshot. An externally interrupted
-run can leave ignored payloads behind; confirm that no qualification or Kiln
-process references a stale directory before removing that exact directory.
+removes the workspace and private model snapshot. The runner sends `SIGINT` to
+leaf case commands while keeping sandbox supervisors alive, allowing Python
+`finally` owners to execute before hard containment. The ROCm mixed-load driver
+also converts direct `SIGTERM` into a catchable interruption. A normal timeout
+or `Ctrl-C` in that driver must therefore leave neither workspace nor copied
+model payload. Treat residue after an uncatchable process or machine failure as
+an explicit recovery condition: confirm no qualification or Kiln process still
+references it before removing that exact directory.
 
 Batching qualification must bind the complete typed startup policy, not only a
 legacy actor environment switch. A serving workload that exercises the actor
@@ -652,6 +669,26 @@ window. `sampled_profile_per_request_output_token_throughput_per_second_p50` is
 the median of each request's completion count divided by its own end-to-end
 wall time. Neither is a transformer-only kernel rate, and the narrower sampling
 phase remains contained by the broad actor `decode_ms` interval.
+
+Every ROCm mixed-load arm applies the same independent host thermal policy from
+server launch through readiness, warmup, the isolated sampled wave, ordinary
+measurement, drain, and teardown. The typed `host_safety` object selects
+exactly one Linux hwmon input by `name=k10temp` and `label=Tctl`, polls every
+250 ms, pauses the complete server process group with `SIGSTOP` at or above
+88,000 millicelsius, and resumes it with `SIGCONT` at or below 80,000. A
+97,000-millicelsius reading, missing or ambiguous selector, malformed input,
+controller error, or signal error fails closed and terminates the server group.
+Cooling consumes existing wall-clock and request deadlines, so throughput
+includes the host's sustainable pacing cost rather than excluding it. Pacing
+intervals join ITL attribution as `host_thermal_pacing`.
+
+The receipt retains start/peak/end package temperature, guard error and trip
+counts, pacing start/completion counts, total and maximum pacing seconds,
+hottest pacing start, and whether a pause remained active at teardown. A pass
+requires zero guard error or trip, no active final pause, and identical started
+and completed pacing counts. These checks apply to the short mixed-load gate as
+well as the longer development/endurance soaks; the source-build watchdog is a
+separate guard around the compiler/linker service.
 
 ### Vulkan serving baseline
 

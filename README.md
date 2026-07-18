@@ -1209,6 +1209,15 @@ fixed-seed sampled profile before the greedy measurement window. Its dedicated
 metrics retain aggregate and median per-request throughput, sampled-tail versus
 broad decode cost, nullable readback population, and multi-row batching proof;
 the driver drains and resets its health baseline before the ordinary workload.
+That gate also owns a typed Strix Halo thermal policy from server launch through
+teardown: a 250 ms `k10temp/Tctl` controller pauses the server process group at
+88 C, resumes it at 80 C, and fails closed at 97 C. Receipt metrics retain
+start/peak/end temperature, guard errors/trips, and every pacing interval; a
+pass requires all pauses to complete and includes their wall time in throughput
+and ITL attribution. The local qualification runner gives an interrupted driver
+65 seconds to clean its separate server group and private model snapshot before
+hard containment, removes incomplete run evidence transactionally, and exits
+130 without a traceback.
 The same values appear in health and debug snapshots. A phase crossing 100 ms
 emits one structured `slow_batching_actor_phase` event with the bounded phase
 name and work size, which lets qualification correlate a token gap without

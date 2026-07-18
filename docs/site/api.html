@@ -1770,6 +1770,16 @@ kiln serve --config kiln.toml</code></pre>
           cannot contaminate established mixed-load counters. A pass requires sampled attribution
           for every request, no separately claimed readback timing, and proven multi-row decode.
         </p>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          The same ROCm gate records a typed Strix Halo thermal policy across server startup,
+          warmup, both workload windows, drain, and teardown. A 250 ms
+          <code>k10temp/Tctl</code> controller stops the server process group at 88 C, resumes it at
+          80 C, and fails closed at 97 C. Temperature, guard errors/trips, and complete pacing
+          intervals are receipt metrics; cooling remains inside latency and throughput wall clocks
+          and is attributed as <code>host_thermal_pacing</code>. The local runner gives an interrupted
+          driver a bounded cleanup window before hard containment and removes incomplete run evidence
+          rather than leaving copied model shards behind.
+        </p>
         <h3 id="prompt-logprobs" class="text-xl font-semibold mt-6 mb-3">Score prompt tokens</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           Set <code>max_tokens</code> to <code>0</code> or <code>1</code> and request

@@ -1055,12 +1055,32 @@ class ServeMixedLoadTests(unittest.TestCase):
             "startup_timeout_seconds": int(serve.STARTUP_TIMEOUT_SECONDS),
             "warmup_max_tokens": serve.WARMUP_MAX_TOKENS,
         }
+        expected_host_safety = {
+            "thermal_guard": {
+                "limit_millicelsius": 97_000,
+                "poll_interval_ms": 250,
+                "sensor": {"hwmon_name": "k10temp", "label": "Tctl"},
+            },
+            "thermal_pacing": {
+                "deadline_accounting": "included",
+                "itl_attribution": "host_thermal_pacing",
+                "mode": "continuous_process_group_stop",
+                "pause_signal": "SIGSTOP",
+                "resume_millicelsius": 80_000,
+                "resume_signal": "SIGCONT",
+                "scope": "server_process_group",
+                "start_millicelsius": 88_000,
+            },
+        }
         expected_metrics = sorted(serve.METRIC_DEFINITIONS)
         for variant_id, driver_config in serve.VARIANT_CONFIGS.items():
             with self.subTest(variant=variant_id):
                 declared = variants[variant_id]
                 self.assertEqual(declared["effective_config"], driver_config)
                 self.assertEqual(declared["effective_config"]["build"], expected_build)
+                self.assertEqual(
+                    declared["effective_config"]["host_safety"], expected_host_safety
+                )
                 self.assertEqual(declared["effective_config"]["workload"], expected_schedule)
                 self.assertEqual(len(declared["cases"]), 1)
                 case = declared["cases"][0]
@@ -1129,6 +1149,76 @@ class ServeMixedLoadTests(unittest.TestCase):
                 if variant_id not in {"default", "stable"}
             },
         )
+
+    def test_startup_failure_retains_final_thermal_guard_evidence(self) -> None:
+        process = mock.Mock(pid=4321)
+        server_log = mock.Mock()
+        guard = mock.Mock()
+        guard.trip_reason = "host k10temp/Tctl reached the safety limit"
+        guard.errors = ["sensor read failed"]
+        guard.metric_values.return_value = {
+            "host_temperature_end_millicelsius": 97_000,
+            "host_temperature_peak_millicelsius": 97_000,
+            "host_temperature_start_millicelsius": 86_000,
+            "host_thermal_guard_trip_count": 1,
+        }
+        guard.pacing_metric_values.return_value = {
+            "host_thermal_pacing_active_end": 0,
+            "host_thermal_pacing_completed_event_count": 1,
+            "host_thermal_pacing_event_count": 1,
+            "host_thermal_pacing_max_seconds": 2.5,
+            "host_thermal_pacing_max_start_millicelsius": 89_000,
+            "host_thermal_pacing_seconds": 2.5,
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            run_dir = Path(raw) / "serving"
+            run_dir.mkdir()
+            with (
+                mock.patch.object(
+                    serve,
+                    "build_binary",
+                    return_value=(
+                        ROOT / "target/release/kiln",
+                        "sha256:" + "a" * 64,
+                        0.5,
+                    ),
+                ),
+                mock.patch.object(serve, "free_loopback_port", return_value=8420),
+                mock.patch.object(
+                    serve, "create_serving_run_dir", return_value=run_dir
+                ),
+                mock.patch.object(serve, "write_server_config"),
+                mock.patch.object(
+                    serve, "start_server", return_value=(process, server_log)
+                ),
+                mock.patch.object(
+                    serve.thermal, "HostThermalGuard", return_value=guard
+                ),
+                mock.patch.object(
+                    serve,
+                    "wait_ready",
+                    side_effect=serve.QualificationError("startup failed closed"),
+                ),
+                mock.patch.object(
+                    serve,
+                    "terminate_process",
+                    return_value=serve.ShutdownOutcome(0, False, 10.0),
+                ),
+                mock.patch.object(
+                    serve, "snapshot_payload_residue", return_value=[]
+                ),
+            ):
+                metrics, details = serve.execute(Path(raw), 7, "autoscale-off")
+
+        values = {metric["name"]: metric["value"] for metric in metrics}
+        self.assertEqual(values["request_failure_count"], 1)
+        self.assertEqual(values["host_temperature_start_millicelsius"], 86_000)
+        self.assertEqual(values["host_temperature_peak_millicelsius"], 97_000)
+        self.assertEqual(values["host_thermal_guard_error_count"], 1)
+        self.assertEqual(values["host_thermal_guard_trip_count"], 1)
+        self.assertEqual(values["host_thermal_pacing_event_count"], 1)
+        self.assertIn("startup failed closed", details or "")
+        self.assertIn("sensor read failed", details or "")
 
     def test_cargo_resolution_uses_rustup_home_when_path_omits_cargo(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

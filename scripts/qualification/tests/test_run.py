@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -619,6 +621,83 @@ class RunnerTests(unittest.TestCase):
             time.sleep(0.05)
         self.assertFalse(process_running(child_pid), f"child {child_pid} survived timeout cleanup")
         self.assert_valid(outcome, repository.root)
+
+    def test_process_group_cleanup_lets_driver_finish_before_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            ready = root / "ready"
+            cleaned = root / "cleaned"
+            child_code = (
+                "import pathlib,signal,time; "
+                f"ready=pathlib.Path({str(ready)!r}); "
+                f"cleaned=pathlib.Path({str(cleaned)!r}); "
+                "signal.signal(signal.SIGINT,lambda *_: "
+                "(cleaned.write_text('cleaned'),exit(0))); "
+                "ready.write_text('ready'); "
+                "time.sleep(30)"
+            )
+            wrapper_code = (
+                "import subprocess,sys; "
+                f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}]); "
+                "raise SystemExit(child.wait())"
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-c", wrapper_code],
+                start_new_session=True,
+            )
+            self.addCleanup(lambda: process.poll() is None and process.kill())
+            deadline = time.monotonic() + 2.0
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "driver child did not become ready")
+
+            run_module._terminate_process_group(process, 2.0)
+
+            self.assertEqual(cleaned.read_text(encoding="utf-8"), "cleaned")
+            self.assertEqual(process.returncode, 0)
+
+    def test_keyboard_interrupt_removes_owned_run_directory(self) -> None:
+        repository = Repository(
+            environment_workload([sys.executable, "-c", "pass"])
+        )
+        self.addCleanup(repository.close)
+        hooks = self.hooks()
+        interrupted_hooks = run_module.RunnerHooks(
+            capture_environment=mock.Mock(side_effect=KeyboardInterrupt),
+            fingerprint_model=hooks.fingerprint_model,
+            network_isolation=hooks.network_isolation,
+        )
+
+        with self.assertRaises(KeyboardInterrupt):
+            run_module.run_qualification(
+                repository.workload_path,
+                variant_id="rocm",
+                host_id="test-host",
+                receipt_id="runner-interrupted-receipt-v1",
+                root=repository.root,
+                invocation=["qualification-runner-test"],
+                hooks=interrupted_hooks,
+                termination_grace_seconds=0.1,
+            )
+
+        runs_root = repository.root / ".qualification" / "runs"
+        self.assertEqual(list(runs_root.iterdir()) if runs_root.exists() else [], [])
+
+    def test_main_reports_keyboard_interrupt_without_traceback(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                run_module, "run_qualification", side_effect=KeyboardInterrupt
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            exit_code = run_module.main(
+                ["--variant", "rocm", "--host-id", "test-host", "fixture.json"]
+            )
+
+        self.assertEqual(exit_code, 130)
+        self.assertIn("owned processes and run data were cleaned", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_command_output_is_visible_before_the_process_exits(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1345,7 +1424,10 @@ class RunnerTests(unittest.TestCase):
                     hooks=self.hooks(),
                     termination_grace_seconds=value,
                 )
-        with self.assertRaisesRegex(run_module.QualificationRunError, "at most 60"):
+        with self.assertRaisesRegex(
+            run_module.QualificationRunError,
+            f"at most {run_module.MAX_TERMINATION_GRACE_SECONDS:g}",
+        ):
             run_module.run_qualification(
                 repository.workload_path,
                 variant_id="rocm",
@@ -1354,7 +1436,9 @@ class RunnerTests(unittest.TestCase):
                 root=repository.root,
                 invocation=["qualification-runner-test"],
                 hooks=self.hooks(),
-                termination_grace_seconds=60.01,
+                termination_grace_seconds=(
+                    run_module.MAX_TERMINATION_GRACE_SECONDS + 0.01
+                ),
             )
         self.assertEqual(self.hook_calls, {"environment": 0, "model": 0, "network": 0})
         self.assertFalse((repository.root / ".qualification").exists())
