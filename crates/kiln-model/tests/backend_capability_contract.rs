@@ -1802,7 +1802,7 @@ fn generated_capability_report_lists_replay_authority() {
 }
 
 #[test]
-fn generated_capability_report_separates_rocm_legacy_cuda_env_aliases() {
+fn generated_capability_report_keeps_cuda_route_gates_out_of_rocm_policy() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
@@ -1822,22 +1822,30 @@ fn generated_capability_report_separates_rocm_legacy_cuda_env_aliases() {
         .iter()
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
+    let cuda_native_env_gates = report["backends"]["cuda"]["native_env_gates"]
+        .as_array()
+        .expect("cuda native_env_gates should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
 
     assert!(
-        native_env_gates
-            .iter()
-            .all(|gate| !gate.starts_with("KILN_DISABLE_CUDA_")),
-        "ROCm native env gates should not include legacy CUDA aliases"
+        native_env_gates.is_empty(),
+        "ROCm model routing should be owned by typed policy, not native env gates: {native_env_gates:?}"
     );
-    for alias in [
+    assert!(
+        legacy_env_aliases.is_empty(),
+        "ROCm should not accept per-route compatibility aliases: {legacy_env_aliases:?}"
+    );
+    for cuda_gate in [
         "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT",
         "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
         "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
         "KILN_DISABLE_CUDA_LORA_DECODE_ADD",
     ] {
         assert!(
-            legacy_env_aliases.contains(&alias),
-            "ROCm should list {alias} as a legacy compatibility alias"
+            cuda_native_env_gates.contains(&cuda_gate),
+            "CUDA should retain ownership of its still-live route gate {cuda_gate}"
         );
     }
 }
