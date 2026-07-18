@@ -98,6 +98,7 @@ python3 scripts/vllm_teacher.py \
   --port=8000 \
   --dtype=bfloat16 \
   --attention-backend=TRITON_ATTN \
+  --language-model-only \
   --api-key=replace-with-a-random-secret
 ```
 
@@ -292,6 +293,12 @@ selection. Other built-in names and custom class paths fail before any model
 snapshot or server process is created. Qualifying another backend requires
 adding its exact name to the closed launcher set, testing the rejection
 boundary, and capturing backend-specific correctness and performance evidence.
+
+`--language-model-only` is a reviewed, identity-bound valueless switch for
+hybrid text/multimodal architectures. It tells vLLM to set every multimodal
+input limit to zero. Use it only when the qualified model surface is text-only;
+it does not synthesize missing image/audio processors and it deliberately makes
+multimodal requests unsupported.
 
 `PYTHONPATH`, `PYTHONHOME`, Python safe/user-site overrides, `LD_PRELOAD`, and
 `LD_LIBRARY_PATH` are rejected for real launches so the child cannot resolve
@@ -490,9 +497,9 @@ Then qualify each ROCm, CUDA, and other intended machine locally:
 The repository retains the current machine-specific inputs for the local
 Strix Halo comparison:
 
-- `qualification/runtime/vllm/rocm/strix-halo/vllm-rocm723-qwen35-4b-triton-v1.json`
+- `qualification/runtime/vllm/rocm/strix-halo/vllm-rocm723-qwen35-4b-triton-text-v2.json`
   is the launcher-produced runtime manifest;
-- `qualification/server-launch/vllm-rocm-strix-halo-triton-v1.json` is the
+- `qualification/server-launch/vllm-rocm-strix-halo-triton-text-v2.json` is the
   atomic owned-launch document; and
 - `qualification/host-policies/strix-halo-serving-benchmark-fast-guard-v1.json`
   is the thermal policy used by the first guarded startup and comparison runs.
@@ -505,6 +512,11 @@ the local Qwen3.5-4B model/tokenizer content, and every inference-affecting
 argument. The launch selects BF16 `TRITON_ATTN`, a 32,768-token context and
 batch-token limit, 64 sequence slots, 40 percent device-memory utilization,
 fixed seed zero, FCFS scheduling, prefix caching, and 16-token cache blocks.
+It also selects `--language-model-only`, matching Kiln's qualified text surface
+and setting every vLLM multimodal input limit to zero. The retained v1 artifacts
+omit that switch and are rejected counterexample inputs: vLLM resolved the
+hybrid architecture, requested an image processor absent from the text-serving
+checkpoint, and exited before weight allocation.
 This is a qualification input, not a portable claim that another ROCm host has
 the same runtime and not evidence that vLLM has passed startup or performance.
 
@@ -522,6 +534,14 @@ those ambient inputs removed and bytecode writes disabled:
 env -u ROCM_PATH -u HF_TOKEN PYTHONDONTWRITEBYTECODE=1 \
   python3 scripts/bench-concurrent-batch.py ...
 ```
+
+Before the v2 startup, the root-owned model-info cache left by another runtime
+was quarantined intact and replaced by an empty user-owned mode-0700
+`~/.cache/vllm/modelinfos`. vLLM keys those records by the model implementation
+module hash, but an unreadable or externally seeded cache is not acceptable
+qualification state. Cache initialization and any resulting files must be
+reported with the startup evidence; do not silently repair permissions during
+a measured lifecycle.
 
 Do not copy this manifest to another machine and call it qualified. Recreate
 the isolated runtime there, emit a new manifest through the exact launch argv,

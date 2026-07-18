@@ -197,6 +197,7 @@ VALUELESS_OPTIONS = {
     "--enable-request-id-headers",
     "--enforce-eager",
     "--fail-on-environ-validation",
+    "--language-model-only",
 }
 
 # Every inference-affecting pass-through option is explicitly reviewed. Unknown
@@ -2591,6 +2592,8 @@ def validate_extra_vllm_args(args: Sequence[str]) -> list[str]:
             )
         if not separator and option not in VALUELESS_OPTIONS:
             raise TeacherLaunchError(f"vLLM option must use --key=value form: {option}")
+        if separator and option in VALUELESS_OPTIONS:
+            raise TeacherLaunchError(f"vLLM valueless option must not use =value: {option}")
         if separator and not value:
             raise TeacherLaunchError(f"vLLM option value must not be empty: {option}")
         if option == "--attention-backend" and value not in REVIEWED_ATTENTION_BACKENDS:

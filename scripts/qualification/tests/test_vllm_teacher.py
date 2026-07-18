@@ -1062,6 +1062,7 @@ class ArgumentAndCommandTests(unittest.TestCase):
                 [
                     "--dtype=bfloat16",
                     "--attention-backend=TRITON_ATTN",
+                    "--language-model-only",
                     "--enforce-eager",
                     "--api-key=$(touch /tmp/nope)",
                 ]
@@ -1069,6 +1070,7 @@ class ArgumentAndCommandTests(unittest.TestCase):
             [
                 "--dtype=bfloat16",
                 "--attention-backend=TRITON_ATTN",
+                "--language-model-only",
                 "--enforce-eager",
                 "--api-key=$(touch /tmp/nope)",
             ],
@@ -1077,6 +1079,7 @@ class ArgumentAndCommandTests(unittest.TestCase):
             (["--dtype", "bfloat16"], "key=value"),
             (["-p=8000"], "ambiguous"),
             (["--dtype=f16", "--dtype=bf16"], "duplicate"),
+            (["--language-model-only=true"], "valueless option must not use"),
             (["--model=/tmp/model"], "owns or forbids"),
             (["--enable-lora"], "owns or forbids"),
             (["--enable-prompt-adapter"], "owns or forbids"),
