@@ -77,7 +77,7 @@ LONG_PREFILL_WORDS = 1536
 LONG_PREFILL_MAX_TOKENS = 32
 LONG_PREFILL_MARKER_ROLE = "long-prefill"
 PRESSURE_PEER_PROMPT_WORDS = 64
-PRESSURE_PEER_MAX_TOKENS = 128
+PRESSURE_PEER_MAX_TOKENS = 256
 PRESSURE_PEER_SEED_OFFSET = 103
 PRESSURE_PEER_DISPATCH = "before_slow_start_after_first_token"
 WARMUP_MAX_TOKENS = 32
@@ -117,11 +117,12 @@ MEASURED_EXPECTED_COMPLETION_TOKENS = (
     + LONG_PREFILL_MAX_TOKENS
     + PRESSURE_PEER_MAX_TOKENS
 )
-PROMPT_IDENTITY = "variant_invariant_fixed_output_v4"
+PROMPT_IDENTITY = "variant_invariant_fixed_output_v5"
 PROMPT_MARKER_FORMAT = "QUAL-{seed}-{role}"
 RESPONSE_ORACLE = "ascending_zero_padded_integers_prefix_v1"
 RESPONSE_ORACLE_INTEGER_WIDTH = 6
-RESPONSE_ORACLE_TARGET_INTEGER_COUNT = 1_024
+RESPONSE_ORACLE_TARGET_INTEGER_COUNT = 64
+SLOW_RESPONSE_TARGET_INTEGER_COUNT = 1_024
 RESPONSE_DIAGNOSTIC_MAX_CHARACTERS = 256
 TOKEN_ID_DIAGNOSTIC_MAX_COUNT = 256
 ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v11"
@@ -376,6 +377,9 @@ def _variant_config(
             "sampled_profile_top_p": SAMPLED_PROFILE_TOP_P,
             "slow_socket_buffer_bytes": SLOW_SOCKET_BUFFER_BYTES,
             "slow_max_tokens": SLOW_MAX_TOKENS,
+            "slow_response_target_integer_count": (
+                SLOW_RESPONSE_TARGET_INTEGER_COUNT
+            ),
             "startup_timeout_seconds": int(STARTUP_TIMEOUT_SECONDS),
             "warmup_max_tokens": WARMUP_MAX_TOKENS,
         },
@@ -1591,10 +1595,10 @@ def workload_marker(seed: int, role: str) -> str:
 
 def slow_consumer_prompt(marker: str) -> str:
     return (
-        f"{marker} Emit exactly {RESPONSE_ORACLE_TARGET_INTEGER_COUNT} ascending zero-padded "
+        f"{marker} Emit exactly {SLOW_RESPONSE_TARGET_INTEGER_COUNT} ascending zero-padded "
         "six-digit integers as one continuous plain-text sequence, starting at 000000 and "
         "separated only by single spaces. Begin immediately and keep going. The server may "
-        f"truncate the response before all {RESPONSE_ORACLE_TARGET_INTEGER_COUNT} integers; "
+        f"truncate the response before all {SLOW_RESPONSE_TARGET_INTEGER_COUNT} integers; "
         "that is expected. Do not stop early, "
         "emit an end marker, explain, refuse, summarize, or discuss output limits."
     )

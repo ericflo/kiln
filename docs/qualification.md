@@ -634,19 +634,23 @@ performance metadata is enabled, and an escaped output excerpt capped at 256
 characters. This bound preserves actionable corruption evidence without
 allowing model output to exhaust the result-detail envelope.
 
-The mixed-load prompt identity is
-`variant_invariant_fixed_output_v4`. It requests exactly 1,024 ascending
-six-digit integers but tells the model that server truncation before the target
-is expected. This target is long enough to exceed the 4,096-token slow-consumer
-response envelope without the refusal behavior observed when the contract asked
-for one million integers. The instruction requires immediate sequence output
-and forbids early stopping, end markers, explanation, refusal, summaries, or
-discussion of output limits. Prompt-length padding uses nonnumeric `itemNN`
-tokens and explicitly has no relationship to response length. Every arm records
-the prompt identity, `response_oracle_target_integer_count = 1024`, and
+The measured mixed-load prompt identity is
+`variant_invariant_fixed_output_v5`. It requests exactly 64 ascending six-digit
+integers and tells the model that server truncation before the target is
+expected. At roughly seven model tokens per formatted integer, the target
+remains beyond the 32-, 128-, and 256-token measured response caps without
+inviting the output-limit refusals observed at one million and 1,024 requested
+integers. The instruction requires immediate sequence output and forbids early
+stopping, end markers, explanation, refusal, summaries, or discussion of output
+limits. Prompt-length padding uses nonnumeric `itemNN` tokens and explicitly has
+no relationship to response length. The separate unvalidated stalled-socket
+request retains a 1,024-integer fill target so its 4,096-token response envelope
+does not weaken. Every arm records the prompt identity,
+`response_oracle_target_integer_count = 64`,
+`slow_response_target_integer_count = 1024`, and
 `long_prefill_marker_role = "long-prefill"`. The diagnostic and acceptance
 paths therefore tokenize the same named long request; a wording, denominator,
-or marker-role change invalidates direct A/B configuration identity.
+fill target, or marker-role change invalidates direct A/B configuration identity.
 
 Before the ordinary mixed-load measurement window, every ROCm arm also runs a
 separate fixed-seed sampled profile at concurrency eight: 32 tokens per request,
@@ -1129,7 +1133,8 @@ occupancy, and the waiting queue all to reach zero. This proves that the latency
 path ran without treating the staging capacity as a wider backend decode batch
 or accepting an active prefill as drained.
 The pressure peer also requires terminal request-scoped performance metadata.
-The driver dispatches it before the slow consumer and waits for its first
+The 256-token peer is twice the ordinary response length. The driver dispatches
+it before the slow consumer and waits for its first
 producer-ready token before opening the stalled socket. The acceptance window
 then requires further producer-ready tokens during and after the slow
 consumer's request-attributed backpressure interval. This ordering proves

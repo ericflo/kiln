@@ -1771,20 +1771,24 @@ kiln serve --config kiln.toml</code></pre>
           for every request, no separately claimed readback timing, and proven multi-row decode.
         </p>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
-          Greedy mixed-load requests bind prompt identity
-          <code>variant_invariant_fixed_output_v4</code>. They request exactly 1,024 ascending
-          six-digit integers while stating that server truncation before the target is expected;
-          this exceeds the 4,096-token slow-consumer envelope without the long-context refusal
-          caused by the former one-million-integer wording. The prompt requires immediate sequence
-          output, forbids explanation, refusal, summaries, and output-limit discussion, and uses
-          only nonnumeric <code>itemNN</code> padding that is explicitly unrelated to output length.
-          Receipts record both the prompt identity and
-          <code>response_oracle_target_integer_count = 1024</code>, plus
+          Greedy measured requests bind prompt identity
+          <code>variant_invariant_fixed_output_v5</code>. They request exactly 64 ascending
+          six-digit integers while stating that server truncation before the target is expected.
+          At roughly seven model tokens per integer, the target exceeds every 32-, 128-, and
+          256-token measured cap without the output-limit refusals caused by million- and
+          1,024-item measured requests. The prompt requires immediate sequence output, forbids
+          explanation, refusal, summaries, and output-limit discussion, and uses only nonnumeric
+          <code>itemNN</code> padding that is explicitly unrelated to output length. The separate
+          unvalidated stalled socket retains a 1,024-integer fill target for its 4,096-token cap.
+          Receipts record the prompt identity,
+          <code>response_oracle_target_integer_count = 64</code>,
+          <code>slow_response_target_integer_count = 1024</code>, and
           <code>long_prefill_marker_role = "long-prefill"</code>. The diagnostic and acceptance
           paths therefore tokenize the same named long request for exact A/B configuration identity.
         </p>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
-          Slow-consumer containment dispatches its pressure peer before opening the stalled socket
+          Slow-consumer containment uses a 256-token pressure peer, twice the ordinary response
+          length. It dispatches that peer before opening the stalled socket
           and waits for that peer's first producer-ready token. Acceptance then requires additional
           producer-ready tokens during and after the request-attributed backpressure window. The
           typed schedule records

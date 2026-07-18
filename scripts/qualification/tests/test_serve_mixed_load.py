@@ -1147,6 +1147,9 @@ class ServeMixedLoadTests(unittest.TestCase):
             "sampled_profile_top_p": serve.SAMPLED_PROFILE_TOP_P,
             "slow_socket_buffer_bytes": serve.SLOW_SOCKET_BUFFER_BYTES,
             "slow_max_tokens": serve.SLOW_MAX_TOKENS,
+            "slow_response_target_integer_count": (
+                serve.SLOW_RESPONSE_TARGET_INTEGER_COUNT
+            ),
             "startup_timeout_seconds": int(serve.STARTUP_TIMEOUT_SECONDS),
             "warmup_max_tokens": serve.WARMUP_MAX_TOKENS,
         }
@@ -3304,7 +3307,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             serve.workload_marker(-1, "normal-00")
 
     def test_measured_prompts_and_results_require_a_fixed_output_denominator(self) -> None:
-        self.assertEqual(serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT, 1_024)
+        self.assertEqual(serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT, 64)
         prompt = serve.deterministic_prompt("marker", 3)
         self.assertIn("ascending zero-padded six-digit integers", prompt)
         self.assertIn(str(serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT), prompt)
@@ -3315,6 +3318,14 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertIn("item00 item01 item02", prompt)
         self.assertGreater(
             serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT * 7,
+            max(
+                serve.NORMAL_MAX_TOKENS,
+                serve.LONG_PREFILL_MAX_TOKENS,
+                serve.PRESSURE_PEER_MAX_TOKENS,
+            ),
+        )
+        self.assertGreater(
+            serve.SLOW_RESPONSE_TARGET_INTEGER_COUNT * 7,
             serve.SLOW_MAX_TOKENS,
         )
         self.assertEqual(
@@ -3375,7 +3386,11 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
     def test_slow_consumer_prompt_demands_generation_until_the_token_limit(self) -> None:
         prompt = serve.slow_consumer_prompt("marker")
         self.assertIn("marker", prompt)
-        self.assertIn(str(serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT), prompt)
+        self.assertIn(str(serve.SLOW_RESPONSE_TARGET_INTEGER_COUNT), prompt)
+        self.assertNotIn(
+            f"exactly {serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT} ascending",
+            prompt,
+        )
         self.assertIn("server may truncate the response", prompt)
         self.assertIn("Do not stop early", prompt)
         self.assertIn("explain, refuse", prompt)
