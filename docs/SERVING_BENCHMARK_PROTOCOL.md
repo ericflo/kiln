@@ -13,10 +13,11 @@ Every measured run requires `--host-thermal-policy` and exactly one server
 ownership mode:
 
 - `--server-launch-config PATH` is the default for local qualification. The
-  driver launches a new process group, arms thermal containment before the first
-  readiness request, requires the loopback port to be unbound before launch,
-  waits for `/v1/models`, proves the listening socket belongs to that process
-  group, runs the workload, verifies the
+  driver fingerprints the source, model, and runtime, then requires stable host
+  cooldown before process creation. It launches a new process group, arms
+  thermal containment before the first readiness request, requires the loopback
+  port to be unbound before launch, waits for `/v1/models`, proves the listening
+  socket belongs to that process group, runs the workload, verifies the
   live runtime, sends `SIGTERM`, requires the whole process group to disappear,
   monitors the hard limit through exit, completes host cooldown, and hashes the
   server log.
@@ -27,9 +28,12 @@ ownership mode:
   counterevidence. It can never produce a passing receipt.
 
 Owned launch eliminates the manual gap in which model loading or inference
-prewarm could run before the guard attached. PID attachment remains useful for
+prewarm could run before the guard attached. The pre-launch cooldown also
+eliminates a subtler gap: model-content and runtime hashing can heat a shared
+CPU/GPU package before the child exists. PID attachment remains useful for
 remote orchestration that already owns process creation, but that orchestrator
-is responsible for containment before the benchmark starts.
+is responsible for containment and its starting host state before the benchmark
+starts.
 
 Owned mode accepts only an origin-only loopback HTTP base URL. On Linux it
 matches the listening TCP/TCP6 socket inode with descriptors held by the leader
@@ -89,6 +93,33 @@ stable cooldown target. The controller sends `SIGSTOP` and `SIGCONT` to the
 complete server process group. Crossing the hard limit sends `SIGTERM`, records
 the trip, and fails the run.
 
+The closed policy fields are:
+
+| Field | Contract |
+|---|---|
+| `schema` | Exact `kiln.host-thermal-policy.v1` identifier. |
+| `id` | Stable portable policy identifier, 3 to 128 characters. |
+| `sensor.hwmon_name` | Exact Linux hwmon device name. The selector must resolve once. |
+| `sensor.label` | Exact temperature-channel label beneath that hwmon device. |
+| `limit_millicelsius` | Hard termination boundary, strictly above the pacing start. |
+| `poll_interval_ms` | Positive cadence shared by pre-launch cooling, runtime protection, pacing, and final cooldown. |
+| `pacing.start_millicelsius` | Temperature at which the complete process group is stopped. |
+| `pacing.resume_millicelsius` | Lower temperature at which resume becomes eligible. |
+| `pacing.resume_stable_samples` | Consecutive eligible samples required before `SIGCONT`. |
+| `safe_handoff.target_millicelsius` | Maximum temperature accepted before owned process creation and after shutdown, or before returning an attached live process. It cannot exceed the pacing-resume temperature. |
+| `safe_handoff.stable_samples` | Consecutive samples required at or below the target. |
+| `safe_handoff.timeout_seconds` | Positive deadline for each boundary cooldown. |
+| `phase_settlement_timeout_seconds` | Positive deadline for an active pacing interval to settle before or after each workload row. |
+
+For owned runs, the driver resolves and reads the selected sensor only after all
+source/model/runtime fingerprinting and launch validation have completed. It
+does not call `Popen` until `safe_handoff.stable_samples` consecutive readings
+are at or below `safe_handoff.target_millicelsius`. A timeout fails before any
+child exists. Driver v5 receipts retain the sensor path, policy values, start,
+peak, and end temperatures, sample count, stable count, elapsed time, scope, and
+completion state for this boundary. The receipt validator requires those values
+to match the content-hashed thermal policy and the runtime guard's sensor.
+
 Cooling remains part of wall-clock service cost. Each row records both request
 window output throughput and thermally sustainable throughput including pacing
 settlement. The top-level receipt records start, peak, and final temperature;
@@ -134,7 +165,7 @@ python3 scripts/bench-concurrent-batch.py \
   --max-tokens 64 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
-  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-v1.json \
+  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-c32-v1.json \
   --server-launch-config .qualification/serving/rocm-launch.json \
   --out .qualification/serving/greedy-short.kiln.json
 ```
@@ -163,7 +194,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --out-dir .qualification/serving/rocm-qualified-v1 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
-  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-v1.json \
+  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-c32-v1.json \
   --server-launch-config .qualification/serving/rocm-launch.json
 ```
 
@@ -184,9 +215,11 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v4 receipts add `server_lifecycle`. Owned evidence contains the
-content-hashed launch document, absolute server-log fingerprint, shutdown
-signal/status/timing, forced-shutdown flag, and process-group liveness. Attached
-and explicitly unsafe runs serialize null lifecycle artifacts so ownership
-cannot be inferred from missing fields. Historical driver v2 and v3 receipts
-remain valid under their original contracts.
+Driver v5 is the current contract. It extends v4 `server_lifecycle` evidence
+with the mandatory post-provenance, pre-process cooldown described above. Owned
+evidence also contains the content-hashed launch document, absolute server-log
+fingerprint, shutdown signal/status/timing, forced-shutdown flag, and
+process-group liveness. Attached and explicitly unsafe runs serialize null
+lifecycle artifacts so ownership cannot be inferred from missing fields.
+Historical driver v2, v3, and v4 receipts remain valid under their original
+contracts, but do not satisfy current performance acceptance.

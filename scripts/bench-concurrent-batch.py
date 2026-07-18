@@ -39,8 +39,10 @@ SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 HOST_THERMAL_POLICY_SCHEMA = "kiln.host-thermal-policy.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "4"
-SUPPORTED_DRIVER_VERSIONS = {"2", "3", DRIVER_VERSION}
+DRIVER_VERSION = "5"
+SUPPORTED_DRIVER_VERSIONS = {"2", "3", "4", DRIVER_VERSION}
+THERMAL_DRIVER_VERSIONS = {"3", "4", DRIVER_VERSION}
+LIFECYCLE_DRIVER_VERSIONS = {"4", DRIVER_VERSION}
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
 ROOT = Path(__file__).resolve().parents[1]
@@ -422,6 +424,22 @@ SERVER_LAUNCH_KEYS = {
     "acceptable_exit_codes",
 }
 
+PRELAUNCH_COOLDOWN_KEYS = {
+    "scope",
+    "sensor_path",
+    "poll_interval_ms",
+    "target_millicelsius",
+    "stable_samples_required",
+    "stable_samples_observed",
+    "timeout_seconds",
+    "sample_count",
+    "temperature_start_millicelsius",
+    "temperature_peak_millicelsius",
+    "temperature_end_millicelsius",
+    "elapsed_seconds",
+    "completed",
+}
+
 
 def validate_host_thermal_policy_value(
     value: Any,
@@ -511,6 +529,97 @@ def load_host_thermal_policy(
     except Exception as exc:
         raise BenchmarkError(f"cannot load host thermal policy {path}: {exc}") from exc
     return validate_host_thermal_policy_value(raw, "host thermal policy")
+
+
+def wait_for_prelaunch_cooldown(
+    policy: thermal.HostThermalPolicy,
+    *,
+    hwmon_root: Path = Path("/sys/class/hwmon"),
+    trace_callback: Callable[..., None] | None = None,
+) -> dict[str, Any]:
+    """Wait for stable host cooling after provenance work and before Popen."""
+
+    input_path = thermal.resolve_hwmon_temperature_input(
+        policy.hwmon_name,
+        policy.label,
+        hwmon_root,
+        error_type=BenchmarkError,
+    )
+    poll_interval_seconds = policy.poll_interval_ms / 1000.0
+    started = time.monotonic()
+    deadline = started + policy.cooldown_timeout_seconds
+    sample_count = 0
+    stable_samples = 0
+    start_temperature: int | None = None
+    peak_temperature: int | None = None
+    end_temperature: int | None = None
+
+    def trace(event: str, **fields: Any) -> None:
+        if trace_callback is not None:
+            trace_callback(event, **fields)
+
+    trace(
+        "host_thermal_prelaunch_cooldown_started",
+        scope="host_package_before_process_creation",
+        sensor_path=str(input_path),
+        target_millicelsius=policy.cooldown_target_millicelsius,
+        stable_samples=policy.cooldown_stable_samples,
+        timeout_seconds=policy.cooldown_timeout_seconds,
+        poll_interval_ms=policy.poll_interval_ms,
+    )
+    while True:
+        temperature = thermal.read_hwmon_temperature_millicelsius(
+            input_path,
+            error_type=BenchmarkError,
+        )
+        sample_count += 1
+        if start_temperature is None:
+            start_temperature = temperature
+            peak_temperature = temperature
+        peak_temperature = max(peak_temperature, temperature)
+        end_temperature = temperature
+        if temperature <= policy.cooldown_target_millicelsius:
+            stable_samples += 1
+        else:
+            stable_samples = 0
+        elapsed = time.monotonic() - started
+        if stable_samples >= policy.cooldown_stable_samples:
+            evidence = {
+                "scope": "host_package_before_process_creation",
+                "sensor_path": str(input_path),
+                "poll_interval_ms": policy.poll_interval_ms,
+                "target_millicelsius": policy.cooldown_target_millicelsius,
+                "stable_samples_required": policy.cooldown_stable_samples,
+                "stable_samples_observed": stable_samples,
+                "timeout_seconds": policy.cooldown_timeout_seconds,
+                "sample_count": sample_count,
+                "temperature_start_millicelsius": start_temperature,
+                "temperature_peak_millicelsius": peak_temperature,
+                "temperature_end_millicelsius": end_temperature,
+                "elapsed_seconds": elapsed,
+                "completed": True,
+            }
+            trace("host_thermal_prelaunch_cooldown_completed", **evidence)
+            return evidence
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            trace(
+                "host_thermal_prelaunch_cooldown_timed_out",
+                sensor_path=str(input_path),
+                sample_count=sample_count,
+                stable_samples_observed=stable_samples,
+                temperature_start_millicelsius=start_temperature,
+                temperature_peak_millicelsius=peak_temperature,
+                temperature_end_millicelsius=end_temperature,
+                elapsed_seconds=elapsed,
+            )
+            raise BenchmarkError(
+                "host thermal pre-launch cooldown did not reach "
+                f"{policy.cooldown_target_millicelsius} millicelsius for "
+                f"{policy.cooldown_stable_samples} consecutive samples within "
+                f"{policy.cooldown_timeout_seconds:.3f} seconds"
+            )
+        time.sleep(min(poll_interval_seconds, remaining))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1139,7 +1248,11 @@ def validate_benchmark_run(
     workload_profile: str | None,
 ) -> None:
     row = _object(value, label)
-    _exact_keys(row, RUN_KEYS_V3 if driver_version in {"3", "4"} else RUN_KEYS, label)
+    _exact_keys(
+        row,
+        RUN_KEYS_V3 if driver_version in THERMAL_DRIVER_VERSIONS else RUN_KEYS,
+        label,
+    )
     if row["concurrency"] != concurrency or row["repeat"] != repeat:
         raise BenchmarkError(f"{label} does not match its declared concurrency/repeat")
     if row["request_count"] != concurrency:
@@ -1163,7 +1276,7 @@ def validate_benchmark_run(
         "dispatch_spread_ms",
     ):
         _nonnegative_number(row[name], f"{label}.{name}")
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         phase = (
             f"warmup-c{concurrency:03d}"
             if repeat == -1
@@ -1190,7 +1303,7 @@ def validate_benchmark_run(
             _nonnegative_number(row[name], f"{label}.{name}")
     _sha256(row["prompt_set_sha256"], f"{label}.prompt_set_sha256")
     _sha256(row["output_set_sha256"], f"{label}.output_set_sha256")
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         prompt_token_counts = row["prompt_token_counts"]
         if (
             not isinstance(prompt_token_counts, list)
@@ -1229,7 +1342,7 @@ def validate_benchmark_run(
         raise BenchmarkError(f"{label}.error_count does not match errors")
     if row["success_count"] + row["error_count"] != concurrency:
         raise BenchmarkError(f"{label} success and error counts must cover every request")
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         for index, count in enumerate(row["prompt_token_counts"]):
             if (index in error_indices) != (count == 0):
                 raise BenchmarkError(
@@ -1274,7 +1387,7 @@ def validate_benchmark_run(
         expected_measured = row["memory"] is not None and row["memory"]["samples"] >= 2
         if memory_measured_gate is None or memory_measured_gate["passed"] != expected_measured:
             raise BenchmarkError(f"{label} has an inconsistent memory-measurement gate")
-    if driver_version in {"3", "4"} and workload_profile is not None:
+    if driver_version in THERMAL_DRIVER_VERSIONS and workload_profile is not None:
         uniform = PROFILE_CONTRACTS[workload_profile]["require_uniform_prompt_tokens"]
         expected_name = (
             "mixed_prompt_tokens"
@@ -1511,22 +1624,109 @@ def validate_host_thermal_receipt(value: Any) -> tuple[str, bool]:
     return mode, operationally_passed
 
 
-def validate_server_lifecycle(value: Any) -> tuple[str, bool]:
+def validate_prelaunch_cooldown(
+    value: Any,
+    policy_record: dict[str, Any],
+) -> bool:
+    label = "receipt.server_lifecycle.prelaunch_cooldown"
+    evidence = _object(value, label)
+    _exact_keys(evidence, PRELAUNCH_COOLDOWN_KEYS, label)
+    if evidence["scope"] != "host_package_before_process_creation":
+        raise BenchmarkError(f"{label}.scope is unsupported")
+    if (
+        not isinstance(evidence["sensor_path"], str)
+        or not Path(evidence["sensor_path"]).is_absolute()
+    ):
+        raise BenchmarkError(f"{label}.sensor_path must be absolute")
+    for name in (
+        "poll_interval_ms",
+        "target_millicelsius",
+        "stable_samples_required",
+        "stable_samples_observed",
+        "sample_count",
+    ):
+        _positive_int(evidence[name], f"{label}.{name}")
+    for name in (
+        "temperature_start_millicelsius",
+        "temperature_peak_millicelsius",
+        "temperature_end_millicelsius",
+    ):
+        temperature = evidence[name]
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, int)
+            or not -100_000 <= temperature <= 250_000
+        ):
+            raise BenchmarkError(f"{label}.{name} is an implausible temperature")
+    timeout = _nonnegative_number(
+        evidence["timeout_seconds"], f"{label}.timeout_seconds"
+    )
+    if timeout <= 0:
+        raise BenchmarkError(f"{label}.timeout_seconds must be positive")
+    _nonnegative_number(evidence["elapsed_seconds"], f"{label}.elapsed_seconds")
+    if evidence["completed"] is not True:
+        raise BenchmarkError(f"{label}.completed must be true")
+    safe_handoff = policy_record["safe_handoff"]
+    if (
+        evidence["poll_interval_ms"] != policy_record["poll_interval_ms"]
+        or evidence["target_millicelsius"]
+        != safe_handoff["target_millicelsius"]
+        or evidence["stable_samples_required"] != safe_handoff["stable_samples"]
+        or evidence["timeout_seconds"] != safe_handoff["timeout_seconds"]
+    ):
+        raise BenchmarkError(f"{label} disagrees with the host thermal policy")
+    if (
+        evidence["stable_samples_observed"]
+        < evidence["stable_samples_required"]
+        or evidence["sample_count"] < evidence["stable_samples_observed"]
+        or evidence["temperature_end_millicelsius"]
+        > evidence["target_millicelsius"]
+        or evidence["temperature_peak_millicelsius"]
+        < max(
+            evidence["temperature_start_millicelsius"],
+            evidence["temperature_end_millicelsius"],
+        )
+    ):
+        raise BenchmarkError(f"{label} does not prove stable cooldown")
+    return True
+
+
+def validate_server_lifecycle(
+    value: Any,
+    *,
+    driver_version: str = DRIVER_VERSION,
+    host_thermal_policy: dict[str, Any] | None = None,
+) -> tuple[str, bool]:
     lifecycle = _object(value, "receipt.server_lifecycle")
+    lifecycle_keys = {"mode", "launch_config", "log", "shutdown"}
+    if driver_version == DRIVER_VERSION:
+        lifecycle_keys.add("prelaunch_cooldown")
     _exact_keys(
         lifecycle,
-        {"mode", "launch_config", "log", "shutdown"},
+        lifecycle_keys,
         "receipt.server_lifecycle",
     )
     mode = lifecycle["mode"]
+    owned_fields = ["launch_config", "log", "shutdown"]
+    if driver_version == DRIVER_VERSION:
+        owned_fields.append("prelaunch_cooldown")
     if mode in {"not_configured", "attached_process_group"}:
-        if any(lifecycle[name] is not None for name in ("launch_config", "log", "shutdown")):
+        if any(lifecycle[name] is not None for name in owned_fields):
             raise BenchmarkError(
                 "non-owned server lifecycle fields must all be null"
             )
         return mode, mode == "attached_process_group"
     if mode != "owned_process_group":
         raise BenchmarkError("receipt.server_lifecycle.mode is unsupported")
+    prelaunch_passed = True
+    if driver_version == DRIVER_VERSION:
+        if host_thermal_policy is None:
+            raise BenchmarkError(
+                "owned server pre-launch cooldown requires a host thermal policy"
+            )
+        prelaunch_passed = validate_prelaunch_cooldown(
+            lifecycle["prelaunch_cooldown"], host_thermal_policy
+        )
     launch = validate_server_launch_config_value(
         lifecycle["launch_config"],
         config_directory=Path("/"),
@@ -1579,7 +1779,8 @@ def validate_server_lifecycle(value: Any) -> tuple[str, bool]:
         "receipt.server_lifecycle.shutdown.elapsed_seconds",
     )
     passed = (
-        not shutdown["forced"]
+        prelaunch_passed
+        and not shutdown["forced"]
         and not shutdown["process_group_alive_end"]
         and shutdown["returncode"] in launch.acceptable_exit_codes
     )
@@ -1590,9 +1791,9 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     receipt = _object(value, "receipt")
     driver_version = receipt.get("driver_version")
     required_receipt_keys = set(RECEIPT_KEYS)
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         required_receipt_keys.update({"completion", "host_thermal"})
-    if driver_version == "4":
+    if driver_version in LIFECYCLE_DRIVER_VERSIONS:
         required_receipt_keys.add("server_lifecycle")
     _exact_keys(receipt, required_receipt_keys, "receipt", {"comparison"})
     if receipt["schema"] != SCHEMA or driver_version not in SUPPORTED_DRIVER_VERSIONS:
@@ -1621,7 +1822,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         "authentication_configured",
     }
     engine_optional = {"authentication_source"}
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         engine_keys |= {
             "model_identity",
             "runtime_artifact",
@@ -1641,7 +1842,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             raise BenchmarkError("receipt.engine.authentication_source is invalid")
         if engine["authentication_configured"] != (engine["authentication_source"] != "none"):
             raise BenchmarkError("receipt.engine authentication fields disagree")
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         model_identity = validate_model_identity(
             engine["model_identity"], "receipt.engine.model_identity"
         )
@@ -1744,12 +1945,12 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         "max_dispatch_spread_ms",
         "slo",
     }
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         workload_keys |= {"profile", "comparison_mode", "memory_limit_bytes"}
     _exact_keys(workload, workload_keys, "receipt.workload")
     expected_template = (
         PROMPT_TEMPLATE_VERSION
-        if driver_version in {"3", "4"}
+        if driver_version in THERMAL_DRIVER_VERSIONS
         else LEGACY_PROMPT_TEMPLATE_VERSION
     )
     if (
@@ -1815,7 +2016,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         if _nonnegative_number(value, f"receipt.workload.slo.{name}") <= 0:
             raise BenchmarkError(f"receipt.workload.slo.{name} must be positive")
     memory_limit_bytes: int | None = None
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         if workload["profile"] not in PROFILE_CONTRACTS:
             raise BenchmarkError("receipt.workload.profile is unsupported")
         profile = PROFILE_CONTRACTS[workload["profile"]]
@@ -1862,7 +2063,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
 
     memory_sampler = _object(receipt["memory_sampler"], "receipt.memory_sampler")
     _exact_keys(memory_sampler, {"source", "path", "interval_ms"}, "receipt.memory_sampler")
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         if (
             memory_sampler["source"] != "drm_vram_used"
             or not isinstance(memory_sampler["path"], str)
@@ -1874,7 +2075,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     _exact_keys(diagnostics, {"url", "timed_request_path_affected"}, "receipt.diagnostics")
     if diagnostics["timed_request_path_affected"] is not False:
         raise BenchmarkError("receipt diagnostics must remain outside the timed request path")
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         host_thermal_mode, host_thermal_passed = validate_host_thermal_receipt(
             receipt["host_thermal"]
         )
@@ -1882,13 +2083,24 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             raise BenchmarkError("driver v3 cannot claim owned server lifecycle evidence")
     else:
         host_thermal_mode, host_thermal_passed = "legacy", True
-    if driver_version == "4":
+    if driver_version in LIFECYCLE_DRIVER_VERSIONS:
         server_lifecycle_mode, server_lifecycle_passed = validate_server_lifecycle(
-            receipt["server_lifecycle"]
+            receipt["server_lifecycle"],
+            driver_version=driver_version,
+            host_thermal_policy=receipt["host_thermal"]["policy"],
         )
         if server_lifecycle_mode != host_thermal_mode:
             raise BenchmarkError(
                 "receipt server lifecycle and host thermal ownership modes disagree"
+            )
+        if (
+            driver_version == DRIVER_VERSION
+            and server_lifecycle_mode == "owned_process_group"
+            and receipt["server_lifecycle"]["prelaunch_cooldown"]["sensor_path"]
+            != receipt["host_thermal"]["evidence"]["sensor_path"]
+        ):
+            raise BenchmarkError(
+                "receipt pre-launch cooldown and runtime guard sensors disagree"
             )
     else:
         server_lifecycle_mode, server_lifecycle_passed = host_thermal_mode, True
@@ -1896,7 +2108,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     missing_declared_warmup = False
     if warmup_requests:
         if receipt["warmup"] is None:
-            if driver_version in {"3", "4"}:
+            if driver_version in THERMAL_DRIVER_VERSIONS:
                 missing_declared_warmup = True
             else:
                 raise BenchmarkError("receipt omits its declared warmup")
@@ -1934,7 +2146,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 memory_limit_bytes=memory_limit_bytes,
                 workload_profile=workload.get("profile"),
             )
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         thermal_rows = list(runs)
         if receipt["warmup"] is not None:
             thermal_rows.insert(0, receipt["warmup"])
@@ -1951,7 +2163,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             )
     completion_failures: list[dict[str, str]] = []
     completion_checks: dict[str, str] | None = None
-    if driver_version in {"3", "4"}:
+    if driver_version in THERMAL_DRIVER_VERSIONS:
         completion = _object(receipt["completion"], "receipt.completion")
         _exact_keys(
             completion,
@@ -1989,7 +2201,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 not isinstance(failure["phase"], str)
                 or failure["phase"] not in COMPLETION_FAILURE_PHASES
                 or (
-                    driver_version != "4"
+                    driver_version not in LIFECYCLE_DRIVER_VERSIONS
                     and failure["phase"] == "server_shutdown"
                 )
                 or not isinstance(failure["detail"], str)
@@ -2006,7 +2218,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         )
         expected_completion_checks = (
             COMPLETION_CHECK_NAMES
-            if driver_version == "4"
+            if driver_version in LIFECYCLE_DRIVER_VERSIONS
             else COMPLETION_CHECK_NAMES_V3
         )
         _exact_keys(
@@ -2054,7 +2266,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 "receipt.completion.finalization_checks.host_thermal_handoff "
                 "must be not_applicable without a guard"
             )
-        if driver_version == "4":
+        if driver_version in LIFECYCLE_DRIVER_VERSIONS:
             shutdown_check = completion_checks["server_shutdown"]
             if server_lifecycle_mode == "owned_process_group":
                 if shutdown_check == "not_applicable":
@@ -2099,7 +2311,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             "matched",
             "mismatches",
         }
-        if driver_version in {"3", "4"}:
+        if driver_version in THERMAL_DRIVER_VERSIONS:
             comparison_keys.add("comparison_mode")
         _exact_keys(
             comparison,
@@ -2115,7 +2327,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         ):
             raise BenchmarkError("receipt.comparison has invalid field types")
         if (
-            driver_version in {"3", "4"}
+            driver_version in THERMAL_DRIVER_VERSIONS
             and comparison["comparison_mode"] != workload["comparison_mode"]
         ):
             raise BenchmarkError("receipt.comparison mode disagrees with its workload")
@@ -3299,6 +3511,7 @@ def main(argv: list[str] | None = None) -> int:
     owned_server: OwnedServer | None = None
     owned_shutdown: dict[str, Any] | None = None
     owned_log: dict[str, Any] | None = None
+    prelaunch_cooldown: dict[str, Any] | None = None
     try:
         if args.validate_receipt is not None:
             if (
@@ -3383,24 +3596,6 @@ def main(argv: list[str] | None = None) -> int:
             thermal_policy_record, thermal_policy, thermal_settlement_timeout = (
                 load_host_thermal_policy(args.host_thermal_policy)
             )
-            if args.server_launch_config is not None:
-                launch_config = load_server_launch_config(args.server_launch_config)
-                require_owned_base_url_unbound(args.base_url)
-                if (
-                    args.engine == "kiln"
-                    and Path(runtime_artifact["path"]).resolve()
-                    != Path(launch_config.command[0])
-                ):
-                    raise BenchmarkError(
-                        "owned Kiln launch executable must equal --runtime-artifact"
-                    )
-                owned_server = launch_owned_server(launch_config, args.run_id)
-                attached_process = owned_server.identity
-                guarded_process: Any = owned_server.process
-            else:
-                assert args.server_pid is not None
-                attached_process = AttachedProcessGroup.attach(args.server_pid)
-                guarded_process = attached_process
 
             def trace_host_thermal(event: str, **fields: Any) -> None:
                 print(
@@ -3412,6 +3607,29 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                     flush=True,
                 )
+
+            if args.server_launch_config is not None:
+                launch_config = load_server_launch_config(args.server_launch_config)
+                require_owned_base_url_unbound(args.base_url)
+                if (
+                    args.engine == "kiln"
+                    and Path(runtime_artifact["path"]).resolve()
+                    != Path(launch_config.command[0])
+                ):
+                    raise BenchmarkError(
+                        "owned Kiln launch executable must equal --runtime-artifact"
+                    )
+                prelaunch_cooldown = wait_for_prelaunch_cooldown(
+                    thermal_policy,
+                    trace_callback=trace_host_thermal,
+                )
+                owned_server = launch_owned_server(launch_config, args.run_id)
+                attached_process = owned_server.identity
+                guarded_process: Any = owned_server.process
+            else:
+                assert args.server_pid is not None
+                attached_process = AttachedProcessGroup.attach(args.server_pid)
+                guarded_process = attached_process
 
             guard_kwargs = thermal_policy.guard_kwargs()
             if owned_server is not None:
@@ -3752,6 +3970,7 @@ def main(argv: list[str] | None = None) -> int:
             server_lifecycle = {
                 "mode": "owned_process_group",
                 "launch_config": owned_server.config.record,
+                "prelaunch_cooldown": prelaunch_cooldown,
                 "log": owned_log,
                 "shutdown": owned_shutdown,
             }
@@ -3759,6 +3978,7 @@ def main(argv: list[str] | None = None) -> int:
             server_lifecycle = {
                 "mode": "attached_process_group",
                 "launch_config": None,
+                "prelaunch_cooldown": None,
                 "log": None,
                 "shutdown": None,
             }
@@ -3766,6 +3986,7 @@ def main(argv: list[str] | None = None) -> int:
             server_lifecycle = {
                 "mode": "not_configured",
                 "launch_config": None,
+                "prelaunch_cooldown": None,
                 "log": None,
                 "shutdown": None,
             }

@@ -69,6 +69,24 @@ def valid_host_thermal_policy() -> dict:
     }
 
 
+def valid_prelaunch_cooldown() -> dict:
+    return {
+        "scope": "host_package_before_process_creation",
+        "sensor_path": "/fixture/temp1_input",
+        "poll_interval_ms": 250,
+        "target_millicelsius": 65_000,
+        "stable_samples_required": 2,
+        "stable_samples_observed": 2,
+        "timeout_seconds": 30.0,
+        "sample_count": 3,
+        "temperature_start_millicelsius": 70_000,
+        "temperature_peak_millicelsius": 70_000,
+        "temperature_end_millicelsius": 50_000,
+        "elapsed_seconds": 0.5,
+        "completed": True,
+    }
+
+
 class FakeAttachedProcessGroup:
     pid = 4321
 
@@ -805,6 +823,63 @@ class ServingBenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(bench.BenchmarkError, "resume < start"):
                 bench.load_host_thermal_policy(path)
 
+    def test_prelaunch_cooldown_requires_consecutive_post_provenance_samples(self) -> None:
+        policy_record, policy, _timeout = bench.validate_host_thermal_policy_value(
+            valid_host_thermal_policy(), "fixture"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            hwmon = Path(directory) / "hwmon0"
+            hwmon.mkdir()
+            (hwmon / "name").write_text("fixture\n")
+            (hwmon / "temp1_label").write_text("package\n")
+            (hwmon / "temp1_input").write_text("50000\n")
+            events: list[str] = []
+
+            def trace(event: str, **_fields: object) -> None:
+                events.append(event)
+
+            with mock.patch.object(bench.time, "sleep"):
+                evidence = bench.wait_for_prelaunch_cooldown(
+                    policy,
+                    hwmon_root=Path(directory),
+                    trace_callback=trace,
+                )
+
+        self.assertEqual(evidence["sample_count"], 2)
+        self.assertEqual(evidence["stable_samples_observed"], 2)
+        self.assertEqual(evidence["temperature_end_millicelsius"], 50_000)
+        self.assertEqual(
+            events,
+            [
+                "host_thermal_prelaunch_cooldown_started",
+                "host_thermal_prelaunch_cooldown_completed",
+            ],
+        )
+        self.assertTrue(
+            bench.validate_prelaunch_cooldown(evidence, policy_record)
+        )
+
+    def test_prelaunch_cooldown_times_out_before_process_creation(self) -> None:
+        _record, policy, _timeout = bench.validate_host_thermal_policy_value(
+            valid_host_thermal_policy(), "fixture"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            hwmon = Path(directory) / "hwmon0"
+            hwmon.mkdir()
+            (hwmon / "name").write_text("fixture\n")
+            (hwmon / "temp1_label").write_text("package\n")
+            (hwmon / "temp1_input").write_text("70000\n")
+            with mock.patch.object(
+                bench.time, "monotonic", side_effect=[0.0, 1.0, 31.0]
+            ):
+                with self.assertRaisesRegex(
+                    bench.BenchmarkError, "pre-launch cooldown did not reach"
+                ):
+                    bench.wait_for_prelaunch_cooldown(
+                        policy,
+                        hwmon_root=Path(directory),
+                    )
+
     def test_attached_process_group_binds_proc_identity_and_detects_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -935,16 +1010,33 @@ class ServingBenchmarkTests(unittest.TestCase):
             self.assertEqual(shutdown["returncode"], 0)
             self.assertFalse(shutdown["process_group_alive_end"])
             self.assertGreater(log["bytes"], 0)
+            lifecycle = {
+                "mode": "owned_process_group",
+                "launch_config": config.record,
+                "prelaunch_cooldown": valid_prelaunch_cooldown(),
+                "log": log,
+                "shutdown": shutdown,
+            }
+            thermal_record = bench.validate_host_thermal_policy_value(
+                valid_host_thermal_policy(), "fixture"
+            )[0]
             mode, passed = bench.validate_server_lifecycle(
-                {
-                    "mode": "owned_process_group",
-                    "launch_config": config.record,
-                    "log": log,
-                    "shutdown": shutdown,
-                }
+                lifecycle,
+                host_thermal_policy=thermal_record,
             )
             self.assertEqual(mode, "owned_process_group")
             self.assertTrue(passed)
+            invalid_lifecycle = json.loads(json.dumps(lifecycle))
+            invalid_lifecycle["prelaunch_cooldown"][
+                "temperature_end_millicelsius"
+            ] = 70_000
+            with self.assertRaisesRegex(
+                bench.BenchmarkError, "does not prove stable cooldown"
+            ):
+                bench.validate_server_lifecycle(
+                    invalid_lifecycle,
+                    host_thermal_policy=thermal_record,
+                )
 
     def test_cli_writes_a_self_hashing_passed_receipt(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:

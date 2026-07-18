@@ -13,7 +13,7 @@ streaming `POST /v1/chat/completions` API. Kiln `/health` snapshots are taken
 before and after a run when available, outside the timed request path; they do
 not alter request bodies or scheduling.
 
-New measurements use driver version 4. The driver:
+New measurements use driver version 5. The driver:
 
 - fingerprints every weight shard plus the model config, tokenizer, and chat
   template before traffic and rechecks the complete identity after traffic;
@@ -36,8 +36,10 @@ New measurements use driver version 4. The driver:
   forward, phase time, and error deltas when its diagnostics are enabled;
 - samples one explicit DRM memory counter, fails any row above the declared
   absolute byte limit, and records both absolute peak and baseline delta;
-- owns a typed argv-only server launch by default, arms one hashed host-thermal
-  policy before the first readiness request, and binds the new process group,
+- owns a typed argv-only server launch by default, waits for stable host cooling
+  after provenance hashing and before process creation, arms one hashed
+  host-thermal policy before the first readiness request, and binds the new
+  process group;
   includes pacing and boundary cooling in a separate sustainable-throughput
   rate for every row, fails closed on sensor/process identity drift or a hard
   trip, requires a clean process-group shutdown, and completes stable cooldown;
@@ -48,10 +50,10 @@ New measurements use driver version 4. The driver:
   runtime artifact, and engine-specific live-runtime identity after traffic;
 - hashes the exclusive server log and retains typed launch, readiness,
   shutdown-status, forced-shutdown, and final process-liveness evidence;
-- requires a current v4 reference receipt with identical workload and model
+- requires a current v5 reference receipt with identical workload and model
   content for cross-engine runs.
 
-A partial v4 receipt is diagnostic counterevidence, never performance
+A partial v5 receipt is diagnostic counterevidence, never performance
 acceptance. Its top-level verdict is `failed`, `completion.completed_run_count`
 names the retained prefix, `completion.expected_run_count` names the complete
 declared matrix, and `completion.failures` explains why execution stopped. Kiln
@@ -61,7 +63,7 @@ model, and runtime-artifact checks are never optional. A process crash or host
 loss can still prevent any file from being written, so raw logs remain required
 for catastrophic failures.
 
-Driver versions 2 and 3 remain accepted only so historical checked-in receipts
+Driver versions 2, 3, and 4 remain accepted only so historical checked-in receipts
 continue to validate. They cannot produce new receipts and do not satisfy the
 current acceptance protocol. The complete field and lifecycle reference is in
 [Serving Benchmark Protocol](docs/SERVING_BENCHMARK_PROTOCOL.md).
@@ -294,17 +296,19 @@ with `scripts/bench-concurrent-batch.py --validate-receipt PATH...`. The latter
 rejects unknown or missing fields, non-finite metrics, inconsistent gates,
 dirty passed sources, workload/run mismatches, and an invalid canonical
 self-hash. It also rejects a run if the repository identity changes while
-measurement is in progress. Driver v3/v4 receipts additionally reject altered model
+measurement is in progress. Driver v3/v4/v5 receipts additionally reject altered model
 content identities, runtime-artifact mismatches, missing Kiln executable
 provenance, profile/sampling drift, prompt-token summary drift, and an
 inconsistent absolute-memory gate. They also reject a non-prefix partial run,
 unstructured completion failures, invalid engine-specific finalization
 applicability, and any passed verdict without the complete declared matrix and
-all applicable provenance rechecks. Driver v4 additionally rejects launch
+all applicable provenance rechecks. Driver v4/v5 additionally rejects launch
 config drift, lifecycle/thermal ownership disagreement, missing log identity,
 forced or unacceptable shutdown, surviving process groups, and incomplete
-post-exit cooldown. Historical v2/v3 validation is compatibility, not current
-performance evidence.
+post-exit cooldown. Driver v5 additionally rejects missing, incomplete, or
+policy-inconsistent post-provenance cooldown before process creation, including
+sensor disagreement with the runtime guard. Historical v2/v3/v4 validation is
+compatibility, not current performance evidence.
 
 ## Historical CUDA setup
 
