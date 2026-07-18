@@ -5,7 +5,7 @@
     "hwmon_name": "k10temp",
     "label": "Tctl"
   },
-  "limit_millicelsius": 90000,
+  "limit_millicelsius": 93000,
   "poll_interval_ms": 250,
   "pacing": {
     "start_millicelsius": 78000,
