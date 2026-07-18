@@ -80,6 +80,34 @@ The default snapshot root is
 root gives reflinks the best chance to succeed, but capacity checks always
 assume copy fallback.
 
+## Runtime cache lifecycle
+
+Every real launch also gets a fresh, empty vLLM runtime cache. The typed
+`--cache-root` option names only a private parent; it defaults to
+`~/.cache/kiln/vllm-runtime-caches`. The launcher creates a unique mode-0700
+`cache-<pid>-<nonce>` child, verifies the parent and child through open
+directory descriptors, and derives `VLLM_CACHE_ROOT` for the supervised vLLM
+process. An ambient `VLLM_CACHE_ROOT` is rejected with a pointer to the typed
+option. Model, adapter, snapshot, and cache roots must be separate and
+non-nested.
+
+The generated cache path is a nonce and is excluded from the inference digest.
+That is valid because the child is empty at spawn, is used only as output, is
+never reused, and the private-cache policy itself is part of the hashed launcher
+runtime. Cache contents therefore cannot carry compiled code, model metadata,
+or autotuning state from another user, vLLM build, model, profile, or benchmark
+arm. A serving profile still warms the running server before measurement;
+server startup and compilation are not silently borrowed from a prior profile.
+
+After vLLM and its descendants exit, the launcher recursively removes the cache
+through its anchored parent descriptor without following links or crossing a
+filesystem boundary. Normal child failure follows the same cleanup path. An
+unrecoverable kill can leave an ignored `cache-*` directory, but no later launch
+will consume it; inspect it only after confirming that no owning process remains.
+Cold compilation can use substantial temporary disk and startup time, so place
+`--cache-root` on a filesystem with appropriate headroom. Those costs are
+deliberate qualification isolation, not measured request throughput.
+
 ## Base teacher
 
 Additional vLLM arguments follow `--` and use one `--key=value` token each,
@@ -89,6 +117,7 @@ except for the launcher's small set of vetted valueless switches.
 python3 scripts/vllm_teacher.py \
   --model-path=/models/Qwen3.5-4B \
   --snapshot-root=/var/tmp/kiln-teacher-snapshots \
+  --cache-root=/var/tmp/kiln-vllm-runtime-caches \
   --served-model-id=qwen35-4b-teacher \
   --max-top-k=20 \
   --max-model-len=32768 \
@@ -308,6 +337,9 @@ homes, roots, or cache directories are also rejected across the vLLM, CUDA,
 ROCm, Torch, Triton, and HF namespaces. This includes vLLM shared-library and
 logging-config paths plus `HIPBLASLT_TUNING_OVERRIDE_FILE`. Device-visibility
 variables including `ROCR_VISIBLE_DEVICES` are allowed but identity-bound.
+`VLLM_CACHE_ROOT` is the one derived cache environment value: callers configure
+`--cache-root`, and the launcher supplies a fresh child path rather than
+accepting process-global state.
 
 Runtime hashing is intentionally bounded and fail-closed: at most 250,000
 files, 100,000 directories, 64 GiB of logical file content, 128 directory
@@ -542,6 +574,18 @@ module hash, but an unreadable or externally seeded cache is not acceptable
 qualification state. Cache initialization and any resulting files must be
 reported with the startup evidence; do not silently repair permissions during
 a measured lifecycle.
+
+The v2 startup then loaded both weight shards and 7.99 GiB of model state before
+failing in its first profiling forward: a separate 7.0 GiB root-owned global
+Torch compile cache prevented creation of the requested AOT cache key. The
+driver-v6 failure receipt is retained under
+`benchmarks/receipts/rocm/strix-halo/20260718t213402-rocm-strix-halo-vllm-triton-text-v2-smoke.json`.
+That foreign tree was moved intact to
+`~/.cache/vllm/torch_compile_cache.root-owned-20260718`; it was not deleted or
+permission-mutated. The typed private-cache lifecycle above removes global
+compile and metadata caches from subsequent launch inputs. A later v3 manifest
+and guarded receipt, not the repaired host-global path, are required to accept
+startup.
 
 Do not copy this manifest to another machine and call it qualified. Recreate
 the isolated runtime there, emit a new manifest through the exact launch argv,

@@ -68,6 +68,16 @@ has already made it the leader of an isolated Linux process group. Detached
 vLLM children cannot satisfy listener ownership and are never thermally guarded
 by implication from their parent.
 
+The vLLM wrapper owns its runtime cache through the typed `--cache-root` option.
+Each real launch derives a unique empty `VLLM_CACHE_ROOT`, and removes it after
+the supervised process group exits. Tracked launch documents should name an
+explicit ignored local parent so the filesystem and capacity assumption is
+auditable. The generic launch schema intentionally still has no environment
+map: ambient cache variables are rejected, and randomized cache paths never
+become shell or JSON environment overrides. Every campaign profile therefore
+starts without compiled-code, model-info, or autotuning cache state from a
+different arm; warmup remains inside that profile's live server lifecycle.
+
 Example local Kiln launch document:
 
 ```json

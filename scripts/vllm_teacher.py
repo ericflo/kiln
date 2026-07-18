@@ -63,6 +63,7 @@ MAX_PROMPT_LOGPROB_CANDIDATES = 1_000_000
 DEFAULT_PROMPT_LOGPROB_CANDIDATES = 1_000_000
 SNAPSHOT_SCHEMA = "kiln.vllm-teacher-snapshot.v1"
 SNAPSHOT_MANIFEST = "snapshot-manifest.json"
+CACHE_DIRECTORY_PREFIX = "cache-"
 COPY_CHUNK_BYTES = 8 * 1024 * 1024
 FICLONE = 0x40049409
 MAX_SNAPSHOT_FILES = 100_000
@@ -276,6 +277,10 @@ INFERENCE_ENV_PREFIXES = (
 INFERENCE_ENV_KEYS = {
     "GPU_DEVICE_ORDINAL",
     "PATH",
+}
+DERIVED_RUNTIME_ENV_KEYS = {
+    "VLLM_ALLOW_RUNTIME_LORA_UPDATING",
+    "VLLM_CACHE_ROOT",
 }
 FORBIDDEN_FILE_ENV_KEYS = {
     "CC",
@@ -638,11 +643,76 @@ class ImmutableSnapshot:
         self._cleaned = True
 
 
+@dataclass
+class PrivateRuntimeCache:
+    root: Path
+    path: Path
+    _root_fd: int
+    _root_identity: tuple[int, ...]
+    _cache_identity: tuple[int, ...]
+    _device: int
+    _cleaned: bool = False
+
+    def verify(self) -> None:
+        try:
+            root_descriptor = os.fstat(self._root_fd)
+            root_path = self.root.stat(follow_symlinks=False)
+            cache_entry = os.stat(
+                self.path.name,
+                dir_fd=self._root_fd,
+                follow_symlinks=False,
+            )
+            cache_path = self.path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise TeacherLaunchError(f"cannot verify private runtime cache anchors: {exc}") from exc
+        if (
+            _directory_anchor_identity(root_descriptor) != self._root_identity
+            or _directory_anchor_identity(root_path) != self._root_identity
+        ):
+            raise TeacherLaunchError("private runtime cache root was replaced")
+        if (
+            _directory_anchor_identity(cache_entry) != self._cache_identity
+            or _directory_anchor_identity(cache_path) != self._cache_identity
+        ):
+            raise TeacherLaunchError("private runtime cache directory was replaced")
+        if stat.S_IMODE(cache_entry.st_mode) != 0o700:
+            raise TeacherLaunchError("private runtime cache directory must retain mode 0700")
+
+    def cleanup(self) -> None:
+        if self._cleaned:
+            return
+        _validate_private_child(
+            self.root,
+            self.path,
+            CACHE_DIRECTORY_PREFIX,
+            "runtime cache",
+        )
+        try:
+            _remove_private_child(
+                self._root_fd,
+                self.path.name,
+                expected_anchor_identity=self._cache_identity,
+                expected_device=self._device,
+            )
+        except OSError as exc:
+            raise TeacherLaunchError(
+                f"failed to remove private runtime cache {self.path}: {exc}"
+            ) from exc
+        if self._root_fd >= 0:
+            os.close(self._root_fd)
+            self._root_fd = -1
+        self._cleaned = True
+
+
 def default_snapshot_root() -> Path:
     configured = os.environ.get("KILN_VLLM_SNAPSHOT_ROOT")
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".cache" / "kiln" / "teacher-snapshots"
+
+
+def default_runtime_cache_root() -> Path:
+    return Path.home() / ".cache" / "kiln" / "vllm-runtime-caches"
 
 
 def _assert_no_symlink_components(path: Path, label: str) -> None:
@@ -662,12 +732,10 @@ def _trusted_snapshot_directory_owner(info: os.stat_result) -> bool:
     return not hasattr(os, "getuid") or info.st_uid in {0, os.getuid()}
 
 
-def _secure_snapshot_root(path: Path) -> Path:
+def _secure_private_root(path: Path, label: str) -> Path:
     absolute = Path(os.path.abspath(os.fspath(path.expanduser())))
     if absolute == Path(absolute.anchor):
-        raise TeacherLaunchError(
-            "snapshot root must be a dedicated directory, not a filesystem root"
-        )
+        raise TeacherLaunchError(f"{label} must be a dedicated directory, not a filesystem root")
     current = Path(absolute.anchor)
     final_created = False
     for part in absolute.parts[1:]:
@@ -682,39 +750,47 @@ def _secure_snapshot_root(path: Path) -> Path:
                     final_created = True
             except OSError as exc:
                 raise TeacherLaunchError(
-                    f"cannot create snapshot root component {current}: {exc}"
+                    f"cannot create {label} component {current}: {exc}"
                 ) from exc
         except OSError as exc:
             raise TeacherLaunchError(
-                f"cannot inspect snapshot root component {current}: {exc}"
+                f"cannot inspect {label} component {current}: {exc}"
             ) from exc
         if stat.S_ISLNK(info.st_mode):
-            raise TeacherLaunchError(f"snapshot root must not traverse a symlink: {current}")
+            raise TeacherLaunchError(f"{label} must not traverse a symlink: {current}")
         if not stat.S_ISDIR(info.st_mode):
-            raise TeacherLaunchError(f"snapshot root component is not a directory: {current}")
+            raise TeacherLaunchError(f"{label} component is not a directory: {current}")
         if not _trusted_snapshot_directory_owner(info):
             raise TeacherLaunchError(
-                f"snapshot root ancestry has an untrusted owner: {current}"
+                f"{label} ancestry has an untrusted owner: {current}"
             )
         permissions = stat.S_IMODE(info.st_mode)
         if permissions & 0o022 and not permissions & stat.S_ISVTX:
             raise TeacherLaunchError(
-                "snapshot root ancestry must not permit untrusted rename: "
+                f"{label} ancestry must not permit untrusted rename: "
                 f"{current} has mode {permissions:04o}"
             )
-    root = _normal_directory(absolute, "snapshot root")
+    root = _normal_directory(absolute, label)
     try:
         info = root.stat(follow_symlinks=False)
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
-            raise TeacherLaunchError(f"snapshot root is not owned by the current user: {root}")
+            raise TeacherLaunchError(f"{label} is not owned by the current user: {root}")
         if stat.S_IMODE(info.st_mode) != 0o700:
             origin = "new" if final_created else "existing"
             raise TeacherLaunchError(
-                f"{origin} snapshot root must have mode 0700 without permission mutation: {root}"
+                f"{origin} {label} must have mode 0700 without permission mutation: {root}"
             )
     except OSError as exc:
-        raise TeacherLaunchError(f"cannot verify snapshot root privacy: {exc}") from exc
+        raise TeacherLaunchError(f"cannot verify {label} privacy: {exc}") from exc
     return root
+
+
+def _secure_snapshot_root(path: Path) -> Path:
+    return _secure_private_root(path, "snapshot root")
+
+
+def _secure_runtime_cache_root(path: Path) -> Path:
+    return _secure_private_root(path, "runtime cache root")
 
 
 def _path_is_within(path: Path, parent: Path) -> bool:
@@ -1262,6 +1338,7 @@ def _remove_private_child(
     name: str,
     *,
     expected_identity: tuple[Any, ...] | None = None,
+    expected_anchor_identity: tuple[int, ...] | None = None,
     expected_device: int | None = None,
 ) -> None:
     """Remove one direct child without ever resolving through the root path."""
@@ -1273,6 +1350,11 @@ def _remove_private_child(
     identity = _model_fingerprint._stat_identity(info)
     if expected_identity is not None and identity != expected_identity:
         raise TeacherLaunchError(f"refusing to remove replaced snapshot entry {name!r}")
+    if (
+        expected_anchor_identity is not None
+        and _directory_anchor_identity(info) != expected_anchor_identity
+    ):
+        raise TeacherLaunchError(f"refusing to remove replaced private entry {name!r}")
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         if (
             expected_device is not None
@@ -1309,13 +1391,58 @@ def _remove_private_child(
     os.rmdir(name, dir_fd=parent_fd)
 
 
-def _validate_snapshot_child(root: Path, path: Path, prefix: str) -> None:
+def _validate_private_child(root: Path, path: Path, prefix: str, label: str) -> None:
     absolute_root = Path(os.path.abspath(os.fspath(root)))
     absolute_path = Path(os.path.abspath(os.fspath(path)))
     if absolute_path.parent != absolute_root or not absolute_path.name.startswith(prefix):
         raise TeacherLaunchError(
-            f"refusing snapshot cleanup outside {absolute_root}: {absolute_path}"
+            f"refusing {label} cleanup outside {absolute_root}: {absolute_path}"
         )
+
+
+def _validate_snapshot_child(root: Path, path: Path, prefix: str) -> None:
+    _validate_private_child(root, path, prefix, "snapshot")
+
+
+def create_private_runtime_cache(cache_root: Path) -> PrivateRuntimeCache:
+    root = _secure_runtime_cache_root(cache_root)
+    root_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        root_fd = os.open(root, root_flags)
+    except OSError as exc:
+        raise TeacherLaunchError(
+            f"cannot anchor private runtime cache root {root}: {exc}"
+        ) from exc
+    root_info = os.fstat(root_fd)
+    root_identity = _directory_anchor_identity(root_info)
+    cache_name = f"{CACHE_DIRECTORY_PREFIX}{os.getpid()}-{secrets.token_hex(16)}"
+    cache_path = root / cache_name
+    try:
+        os.mkdir(cache_name, mode=0o700, dir_fd=root_fd)
+        cache_info = os.stat(cache_name, dir_fd=root_fd, follow_symlinks=False)
+        cache = PrivateRuntimeCache(
+            root=root,
+            path=cache_path,
+            _root_fd=root_fd,
+            _root_identity=root_identity,
+            _cache_identity=_directory_anchor_identity(cache_info),
+            _device=root_info.st_dev,
+        )
+        cache.verify()
+        if _directory_entry_names(cache.path, "private runtime cache"):
+            raise TeacherLaunchError("new private runtime cache is not empty")
+        return cache
+    except BaseException:
+        try:
+            _remove_private_child(root_fd, cache_name, expected_device=root_info.st_dev)
+        finally:
+            os.close(root_fd)
+        raise
 
 
 def create_immutable_snapshot(
@@ -2545,6 +2672,8 @@ def _deterministic_policy(
 
 
 def _unbound_environment_key(key: str) -> bool:
+    if key in DERIVED_RUNTIME_ENV_KEYS:
+        return False
     if key in FORBIDDEN_FILE_ENV_KEYS:
         return True
     if key in SAFE_ENV_NAME_EXCEPTIONS:
@@ -2645,7 +2774,7 @@ def inference_config_fingerprint(
         key: value
         for key, value in sorted(environment.items())
         if (key.startswith(INFERENCE_ENV_PREFIXES) or key in INFERENCE_ENV_KEYS)
-        and key not in {"VLLM_ALLOW_RUNTIME_LORA_UPDATING"}
+        and key not in DERIVED_RUNTIME_ENV_KEYS
     }
     runtime_value = _validate_runtime_versions(runtime_versions)
     accelerator_value = _validate_accelerator(accelerator)
@@ -3035,10 +3164,14 @@ def build_vllm_command(
     return command
 
 
-def launch_environment() -> dict[str, str]:
+def launch_environment(runtime_cache: Path | None = None) -> dict[str, str]:
     environment = dict(os.environ)
     environment["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "0"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    if runtime_cache is not None:
+        environment["VLLM_CACHE_ROOT"] = os.fspath(runtime_cache)
+    else:
+        environment.pop("VLLM_CACHE_ROOT", None)
     environment.pop("VLLM_LORA_RESOLVER_CACHE_DIR", None)
     for key in FORBIDDEN_FILE_ENV_KEYS:
         environment.pop(key, None)
@@ -3046,6 +3179,10 @@ def launch_environment() -> dict[str, str]:
 
 
 def validate_launch_environment(environment: Mapping[str, str]) -> None:
+    if environment.get("VLLM_CACHE_ROOT", "").strip():
+        raise TeacherLaunchError(
+            "VLLM_CACHE_ROOT must be unset; configure the typed --cache-root option instead"
+        )
     for key, raw_value in environment.items():
         if raw_value.strip() and _unbound_environment_key(key):
             raise TeacherLaunchError(
@@ -3345,6 +3482,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             "~/.cache/kiln/teacher-snapshots)"
         ),
     )
+    parser.add_argument(
+        "--cache-root",
+        type=Path,
+        default=default_runtime_cache_root(),
+        help=(
+            "parent for a fresh private per-launch vLLM cache "
+            "(default: ~/.cache/kiln/vllm-runtime-caches)"
+        ),
+    )
     parser.add_argument("--max-top-k", required=True, type=int, help="maximum prompt_logprobs K")
     parser.add_argument("--max-model-len", required=True, type=int, help="maximum token context")
     parser.add_argument(
@@ -3459,6 +3605,26 @@ def _identity_inputs(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _validate_runtime_cache_separation(args: argparse.Namespace) -> None:
+    cache_root = Path(os.path.abspath(os.fspath(args.cache_root.expanduser())))
+    paths: list[tuple[Path, str]] = [
+        (Path(os.path.abspath(os.fspath(args.snapshot_root.expanduser()))), "snapshot root")
+    ]
+    if args.model_path is not None:
+        paths.append(
+            (Path(os.path.abspath(os.fspath(args.model_path.expanduser()))), "model path")
+        )
+    if args.adapter_path is not None:
+        paths.append(
+            (Path(os.path.abspath(os.fspath(args.adapter_path.expanduser()))), "adapter path")
+        )
+    for path, label in paths:
+        if _path_is_within(cache_root, path) or _path_is_within(path, cache_root):
+            raise TeacherLaunchError(
+                f"runtime cache root and {label} must be separate, non-nested directories: {path}"
+            )
+
+
 def _execute(args: argparse.Namespace) -> int:
     _validate_requested_limits(args)
     if not args.manifest_only:
@@ -3467,6 +3633,7 @@ def _execute(args: argparse.Namespace) -> int:
     extra_args = validate_extra_vllm_args(args.vllm_args)
     real_launch = not args.manifest_only and not args.dry_run
     snapshot: ImmutableSnapshot | None = None
+    runtime_cache: PrivateRuntimeCache | None = None
     effective_args = args
     try:
         if real_launch:
@@ -3474,6 +3641,9 @@ def _execute(args: argparse.Namespace) -> int:
                 raise TeacherLaunchError("--identity-input is forbidden for a real launch")
             if args.model_path is None:
                 raise TeacherLaunchError("--model-path is required for a real launch")
+            _validate_runtime_cache_separation(args)
+            runtime_cache = create_private_runtime_cache(args.cache_root)
+            runtime_environment = launch_environment(runtime_cache.path)
             snapshot = create_immutable_snapshot(
                 args.model_path,
                 args.adapter_path,
@@ -3558,13 +3728,19 @@ def _execute(args: argparse.Namespace) -> int:
             output["command"] = _redact_command(command)
             output["runtime_lora_updates"] = "disabled"
             output["path_mode"] = "source preview; real launches use a verified private snapshot"
+            output["runtime_cache"] = {
+                "mode": "private_ephemeral",
+                "parent": os.fspath(Path(os.path.abspath(os.fspath(args.cache_root.expanduser())))),
+            }
         if args.manifest_only or args.dry_run:
             print(json.dumps(output, ensure_ascii=False, indent=2))
             return 0
 
         assert command is not None
         assert snapshot is not None
+        assert runtime_cache is not None
         snapshot.verify()
+        runtime_cache.verify()
         verify_child_runtime_contract(
             inputs["runtime_versions"],
             inputs["runtime_content_sha256"],
@@ -3577,6 +3753,8 @@ def _execute(args: argparse.Namespace) -> int:
                     "runtime_content_sha256": inputs["runtime_content_sha256"],
                     "snapshot": os.fspath(snapshot.path),
                     "snapshot_cleanup": "when the supervised vLLM process exits",
+                    "runtime_cache": os.fspath(runtime_cache.path),
+                    "runtime_cache_cleanup": "when the supervised vLLM process exits",
                 }
             ),
             flush=True,
@@ -3587,8 +3765,12 @@ def _execute(args: argparse.Namespace) -> int:
             process_group_mode=args.process_group_mode,
         )
     finally:
-        if snapshot is not None:
-            snapshot.cleanup()
+        try:
+            if snapshot is not None:
+                snapshot.cleanup()
+        finally:
+            if runtime_cache is not None:
+                runtime_cache.cleanup()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

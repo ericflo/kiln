@@ -674,6 +674,61 @@ class ImmutableSnapshotTests(unittest.TestCase):
         self.assertFalse(nested_root.exists())
 
 
+class PrivateRuntimeCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.cache_root = self.base / "runtime-caches"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_private_cache_is_empty_writable_unique_and_recursively_removed(self) -> None:
+        first = vllm_teacher.create_private_runtime_cache(self.cache_root)
+        second = vllm_teacher.create_private_runtime_cache(self.cache_root)
+        try:
+            self.assertNotEqual(first.path, second.path)
+            self.assertEqual(first.path.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(list(first.path.iterdir()), [])
+            (first.path / "compiled").mkdir()
+            (first.path / "compiled" / "artifact.so").write_bytes(b"compiled")
+            (first.path / "artifact-link").symlink_to("compiled/artifact.so")
+            first.verify()
+        finally:
+            first.cleanup()
+            second.cleanup()
+        self.assertEqual(list(self.cache_root.iterdir()), [])
+
+    def test_replaced_cache_entry_is_not_removed(self) -> None:
+        cache = vllm_teacher.create_private_runtime_cache(self.cache_root)
+        original = self.cache_root / "original-cache"
+        cache.path.rename(original)
+        cache.path.mkdir(mode=0o700)
+        sentinel = cache.path / "keep"
+        sentinel.write_text("keep")
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "replaced"):
+            cache.cleanup()
+        self.assertEqual(sentinel.read_text(), "keep")
+        sentinel.unlink()
+        cache.path.rmdir()
+        original.rename(cache.path)
+        cache.cleanup()
+
+    def test_cache_root_symlink_and_nonprivate_existing_root_are_rejected(self) -> None:
+        victim = self.base / "victim"
+        victim.mkdir()
+        link = self.base / "cache-link"
+        link.symlink_to(victim, target_is_directory=True)
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "symlink"):
+            vllm_teacher.create_private_runtime_cache(link)
+
+        existing = self.base / "existing"
+        existing.mkdir(mode=0o755)
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "mode 0700"):
+            vllm_teacher.create_private_runtime_cache(existing)
+        self.assertEqual(existing.stat().st_mode & 0o777, 0o755)
+
+
 class ManifestTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -1121,6 +1176,15 @@ class ArgumentAndCommandTests(unittest.TestCase):
             environment={"CUDA_VISIBLE_DEVICES": "0,1"},
         )
         self.assertEqual(first, reordered)
+        derived_cache = vllm_teacher.inference_config_fingerprint(
+            **kwargs,
+            extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2"],
+            environment={
+                "CUDA_VISIBLE_DEVICES": "0,1",
+                "VLLM_CACHE_ROOT": "/tmp/private-random-cache",
+            },
+        )
+        self.assertEqual(first, derived_cache)
         changed_dtype = vllm_teacher.inference_config_fingerprint(
             **kwargs,
             extra_args=["--dtype=float16", "--tensor-parallel-size=2"],
@@ -1257,6 +1321,7 @@ class ArgumentAndCommandTests(unittest.TestCase):
             os.environ,
             {
                 "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
+                "VLLM_CACHE_ROOT": "/tmp/ambient-cache",
                 "PYTHONPATH": "/tmp/shadow",
                 "LD_PRELOAD": "/tmp/inject.so",
             },
@@ -1266,6 +1331,9 @@ class ArgumentAndCommandTests(unittest.TestCase):
         self.assertEqual(environment["VLLM_ALLOW_RUNTIME_LORA_UPDATING"], "0")
         self.assertNotIn("PYTHONPATH", environment)
         self.assertNotIn("LD_PRELOAD", environment)
+        self.assertNotIn("VLLM_CACHE_ROOT", environment)
+        derived = vllm_teacher.launch_environment(Path("/tmp/private-cache"))
+        self.assertEqual(derived["VLLM_CACHE_ROOT"], "/tmp/private-cache")
         vllm_teacher.validate_launch_environment({})
         with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "VLLM_PLUGINS"):
             vllm_teacher.validate_launch_environment(
@@ -1286,6 +1354,7 @@ class ArgumentAndCommandTests(unittest.TestCase):
             "VLLM_NCCL_SO_PATH",
             "VLLM_LOGGING_CONFIG_PATH",
             "TRITON_CACHE_DIR",
+            "VLLM_CACHE_ROOT",
         ):
             with self.subTest(key=key), self.assertRaisesRegex(
                 vllm_teacher.TeacherLaunchError, key
@@ -1635,6 +1704,10 @@ class MainTests(unittest.TestCase):
             self.assertEqual(
                 process_group_mode, vllm_teacher.PROCESS_GROUP_MODE_DETACHED
             )
+            runtime_cache = Path(environment["VLLM_CACHE_ROOT"])
+            self.assertTrue(runtime_cache.exists())
+            self.assertEqual(runtime_cache.stat().st_mode & 0o777, 0o700)
+            called["runtime_cache"] = runtime_cache
             called.update(command=command, environment=environment)
             return 23
 
@@ -1657,6 +1730,8 @@ class MainTests(unittest.TestCase):
             "4096",
             "--snapshot-root",
             str(Path(self.tmp.name) / "snapshots"),
+            "--cache-root",
+            str(Path(self.tmp.name) / "runtime-caches"),
             "--",
             "--api-key=$(touch /tmp/must-not-run)",
         ]
@@ -1675,6 +1750,27 @@ class MainTests(unittest.TestCase):
             called["environment"]["VLLM_ALLOW_RUNTIME_LORA_UPDATING"], "0"
         )
         self.assertFalse(called["staged_model"].exists())
+        self.assertFalse(called["runtime_cache"].exists())
+
+    def test_runtime_cache_must_be_separate_from_model_and_snapshot_roots(self) -> None:
+        parsed = vllm_teacher.parse_args(
+            [
+                "--model-path",
+                str(self.model),
+                "--served-model-id",
+                "teacher-qwen",
+                "--max-top-k",
+                "5",
+                "--max-model-len",
+                "4096",
+                "--snapshot-root",
+                str(Path(self.tmp.name) / "snapshots"),
+                "--cache-root",
+                str(self.model / "cache"),
+            ]
+        )
+        with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, "non-nested"):
+            vllm_teacher._validate_runtime_cache_separation(parsed)
 
     def test_invalid_limits_fail_before_snapshot_work(self) -> None:
         stderr = io.StringIO()
