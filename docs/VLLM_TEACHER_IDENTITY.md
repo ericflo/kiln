@@ -619,12 +619,19 @@ for high-concurrency ROCm serving. It does not close correctness: all four
 greedy output-set hashes differed, so the vLLM receipt failed exact comparison.
 Both engines also recorded zero SLO-goodput because the conservative host guard
 inserted multi-second process stops. Preserve the pair as counterevidence;
-rerun both arms with driver-v7 `--output-evidence full` so the retained
-comparison identifies every mismatched request and the first divergent UTF-8
-byte in reasoning and visible content. Then diagnose the numerical cause and
-continuous thermal policy before expanding the claim or treating the throughput
-rows as unpaced latency data. Hash-only v7 runs still retain per-request
-reasoning/content fingerprints without publishing generated text.
+the source-paired driver-v7 c1 follow-up is retained at
+`benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.{kiln,vllm}.json`.
+Both outputs contain 64 tokens and no reasoning. They agree through generated
+token index 2 (`To establish a`) and diverge at index 3: Kiln emits token
+`25045` (` baseline`) while vLLM emits `15787` (` foundation`). The first
+visible UTF-8 difference is byte 15. This closes mismatch localization, not
+correctness attribution; use a guarded independent eager
+Transformers/PyTorch next-token oracle before changing either implementation.
+The c1 rows also remain pacing-dominated: both have zero SLO-goodput, and the
+vLLM cold lifecycle accumulated 748.90 seconds of process stops around 162.63
+active compile seconds plus 30 active graph-capture seconds. Diagnose that
+continuous thermal policy before expanding the claim or treating either c1
+throughput value as unpaced latency data.
 
 Do not copy this manifest to another machine and call it qualified. Recreate
 the isolated runtime there, emit a new manifest through the exact launch argv,

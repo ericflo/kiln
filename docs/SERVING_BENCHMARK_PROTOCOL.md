@@ -242,6 +242,28 @@ the hard limit, while vLLM peaked at 86.625 C. Diagnose the output divergence
 and establish a continuous thermally sustainable policy before promotion or a
 broader performance claim.
 
+The source-paired driver-v7 c1 diagnostic receipts are:
+
+- `benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.kiln.json`
+- `benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.vllm.json`
+
+Both arms use exact clean source `1434e0d11`, retain bounded full output
+evidence, complete 64 tokens, and have empty reasoning output. They agree on
+the first three generated tokenizer tokens: `1206` (`To`), `5517`
+(` establish`), and `264` (` a`). The visible content first differs at UTF-8
+byte 15 and generated token index 3: Kiln selects token `25045` (` baseline`),
+while vLLM selects token `15787` (` foundation`). This rules out an aggregate
+hash artifact and localizes the remaining question to the fourth greedy decode
+choice; it does not establish which engine is numerically correct. An
+independent eager Transformers/PyTorch next-token oracle is still required.
+
+The c1 request windows reported 6.21 output tokens/second for Kiln and 3.83 for
+vLLM, but both had zero SLO-goodput and roughly 2.8 to 3.0 second p99 ITL due to
+host pacing. The vLLM lifecycle spent 162.63 active seconds in
+`torch.compile`, 30 active seconds in graph capture, and 748.90 wall seconds
+thermally paused. These diagnostic throughput values must not replace the
+source-paired c1-32 table above.
+
 ## Running One Profile
 
 ```bash
