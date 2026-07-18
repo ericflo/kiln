@@ -34,12 +34,6 @@ pub use score_policy::{
 /// CUDA operands are untouched (this module is cfg-gated).
 #[cfg(feature = "rocm")]
 mod rocm_sdpa;
-#[cfg(feature = "rocm")]
-pub use rocm_sdpa::with_rocm_online_fwd_disabled;
-#[cfg(not(feature = "rocm"))]
-pub fn with_rocm_online_fwd_disabled<T>(f: impl FnOnce() -> T) -> T {
-    f()
-}
 pub use kt_api::{
     FlashAttnError, flash_attn_bwd_collapsed_gqa_kt, flash_attn_bwd_kt,
     flash_attn_fwd_head_major_kt, flash_attn_fwd_kt, flash_attn_fwd_no_lse_kt,
@@ -173,24 +167,22 @@ unsafe extern "C" {
 }
 
 #[cfg(feature = "rocm")]
-unsafe extern "C" {
-    pub(crate) fn kiln_rocm_flash_attn_fwd_ck_bf16(
-        q: *const core::ffi::c_void,
-        k: *const core::ffi::c_void,
-        v: *const core::ffi::c_void,
-        out: *mut core::ffi::c_void,
-        softmax_lse_out: *mut core::ffi::c_void,
-        batch_size: i32,
-        seqlen_q: i32,
-        seqlen_k: i32,
-        num_heads: i32,
-        num_heads_k: i32,
-        head_dim: i32,
-        softmax_scale: f32,
-        is_causal: i32,
-        stream: *mut core::ffi::c_void,
-    ) -> i32;
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(crate) struct RocmFlashAttentionFfiPolicy {
+    pub native_gqa_qblock_forward: i32,
+    pub native_gqa_qblock_forward_min_sequence: i32,
+    pub wmma_gqa_qblock_forward: i32,
+    pub wmma_gqa_r64k32_forward: i32,
+    pub wmma_gqa_r64k32_forward_min_sequence: i32,
+    pub wmma_gqa_r64k32_log2_forward: i32,
+    pub wmma_gqa_r64k32_log2_forward_min_sequence: i32,
+    pub backward_precompute_delta_max_sequence: i32,
+    pub native_direct_collapsed_gqa_query_parallelism: i32,
+}
 
+#[cfg(feature = "rocm")]
+unsafe extern "C" {
     pub(crate) fn kiln_rocm_flash_attn_fwd_bf16(
         q: *const core::ffi::c_void,
         k: *const core::ffi::c_void,
@@ -205,6 +197,7 @@ unsafe extern "C" {
         head_dim: i32,
         softmax_scale: f32,
         is_causal: i32,
+        policy: *const RocmFlashAttentionFfiPolicy,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
@@ -224,6 +217,7 @@ unsafe extern "C" {
         softmax_scale: f32,
         is_causal: i32,
         q_start: i32,
+        policy: *const RocmFlashAttentionFfiPolicy,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
@@ -243,6 +237,7 @@ unsafe extern "C" {
         softmax_scale: f32,
         is_causal: i32,
         q_start: i32,
+        policy: *const RocmFlashAttentionFfiPolicy,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
@@ -299,6 +294,7 @@ unsafe extern "C" {
         head_dim: i32,
         softmax_scale: f32,
         is_causal: i32,
+        policy: *const RocmFlashAttentionFfiPolicy,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
@@ -320,6 +316,7 @@ unsafe extern "C" {
         head_dim: i32,
         softmax_scale: f32,
         is_causal: i32,
+        policy: *const RocmFlashAttentionFfiPolicy,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 

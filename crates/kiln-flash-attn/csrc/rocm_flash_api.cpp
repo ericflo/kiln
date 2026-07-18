@@ -4,29 +4,23 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <type_traits>
 #include <utility>
 
-#if defined(KILN_ENABLE_CK_TILE_FMHA) && __has_include(<ck_tile/ops/fmha_bwd.hpp>)
-#include <ck_tile/ops/fmha_bwd.hpp>
-#include <ck_tile/ops/epilogue.hpp>
-#include <ck_tile/ops/fmha.hpp>
-#include <ck_tile/ops/mask.hpp>
-#define KILN_HAS_CK_TILE_FMHA 1
-#else
-#define KILN_HAS_CK_TILE_FMHA 0
-#endif
-
-#if KILN_HAS_CK_TILE_FMHA && defined(KILN_ENABLE_CK_TILE_FMHA_FWD) && \
-    __has_include(<ck_tile/ops/fmha_fwd_v3_impl.hpp>)
-#include <ck_tile/ops/fmha_fwd_v3_impl.hpp>
-#define KILN_HAS_CK_TILE_FMHA_FWD 1
-#else
-#define KILN_HAS_CK_TILE_FMHA_FWD 0
-#endif
+struct KilnRocmFlashAttentionPolicy
+{
+    int32_t native_gqa_qblock_forward;
+    int32_t native_gqa_qblock_forward_min_sequence;
+    int32_t wmma_gqa_qblock_forward;
+    int32_t wmma_gqa_r64k32_forward;
+    int32_t wmma_gqa_r64k32_forward_min_sequence;
+    int32_t wmma_gqa_r64k32_log2_forward;
+    int32_t wmma_gqa_r64k32_log2_forward_min_sequence;
+    int32_t backward_precompute_delta_max_sequence;
+    int32_t native_direct_collapsed_gqa_query_parallelism;
+};
 
 namespace {
 
@@ -64,63 +58,26 @@ int allocation_failure_status(hipError_t error, const void* pointer)
 #define KILN_ROCM_HAS_GFX11_WMMA 0
 #endif
 
-bool env_truthy(const char* name)
+bool valid_flash_policy(const KilnRocmFlashAttentionPolicy* policy)
 {
-    const char* value = std::getenv(name);
-    if(value == nullptr || value[0] == '\0')
-    {
-        return false;
-    }
-    return !(value[0] == '0' && value[1] == '\0');
+    return policy != nullptr && policy->native_gqa_qblock_forward_min_sequence > 0 &&
+           policy->wmma_gqa_r64k32_forward_min_sequence > 0 &&
+           policy->wmma_gqa_r64k32_log2_forward_min_sequence > 0 &&
+           policy->backward_precompute_delta_max_sequence > 0 &&
+           (policy->native_direct_collapsed_gqa_query_parallelism == 1 ||
+            policy->native_direct_collapsed_gqa_query_parallelism == 2 ||
+            policy->native_direct_collapsed_gqa_query_parallelism == 4);
 }
 
-int env_i32_or(const char* name, int fallback)
-{
-    const char* value = std::getenv(name);
-    if(value == nullptr || value[0] == '\0')
-    {
-        return fallback;
-    }
-    char* end = nullptr;
-    const long parsed = std::strtol(value, &end, 10);
-    if(end == value || parsed <= 0 || parsed > INT32_MAX)
-    {
-        return fallback;
-    }
-    return static_cast<int>(parsed);
-}
-
-bool native_keysplit_enabled(int seqlen_q, int seqlen_k)
-{
-    if(env_truthy("KILN_ROCM_FLASH_NATIVE_KEYSPLIT"))
-    {
-        return true;
-    }
-    const int threshold = env_i32_or("KILN_ROCM_FLASH_NATIVE_KEYSPLIT_MIN_SEQ", INT32_MAX);
-    return std::max(seqlen_q, seqlen_k) >= threshold;
-}
-
-bool native_wmma_qblock_enabled(int head_dim, int seqlen_q, int seqlen_k)
-{
-    if(head_dim != 256)
-    {
-        return false;
-    }
-    if(env_truthy("KILN_ROCM_FLASH_NATIVE_WMMA_QBLOCK"))
-    {
-        return true;
-    }
-    const int threshold = env_i32_or("KILN_ROCM_FLASH_NATIVE_WMMA_QBLOCK_MIN_SEQ", INT32_MAX);
-    return std::max(seqlen_q, seqlen_k) >= threshold;
-}
-
-bool native_gqa_qblock_enabled(int head_dim,
+bool native_gqa_qblock_enabled(const KilnRocmFlashAttentionPolicy& policy,
+                               int head_dim,
                                int seqlen_q,
                                int seqlen_k,
                                int num_heads,
                                int num_heads_k)
 {
-    if(head_dim != 256 || num_heads_k <= 0 || num_heads % num_heads_k != 0)
+    if(policy.native_gqa_qblock_forward == 0 || head_dim != 256 || num_heads_k <= 0 ||
+       num_heads % num_heads_k != 0)
     {
         return false;
     }
@@ -129,43 +86,24 @@ bool native_gqa_qblock_enabled(int head_dim,
     {
         return false;
     }
-    if(env_truthy("KILN_ROCM_FLASH_NATIVE_GQA_QBLOCK"))
-    {
-        return true;
-    }
-    const int threshold = env_i32_or("KILN_ROCM_FLASH_NATIVE_GQA_QBLOCK_MIN_SEQ", 256);
-    return std::max(seqlen_q, seqlen_k) >= threshold;
+    return std::max(seqlen_q, seqlen_k) >= policy.native_gqa_qblock_forward_min_sequence;
 }
 
-bool wmma_gqa_r64k32_enabled(int seqlen_q, int seqlen_k)
+bool wmma_gqa_r64k32_enabled(const KilnRocmFlashAttentionPolicy& policy,
+                            int seqlen_q,
+                            int seqlen_k)
 {
-    if(env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K32") ||
-       env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K16"))
-    {
-        return false;
-    }
-    if(env_truthy("KILN_ROCM_FLASH_USE_WMMA_GQA_R64K32") ||
-       env_truthy("KILN_ROCM_FLASH_USE_WMMA_GQA_R64K16"))
-    {
-        return true;
-    }
-    const int legacy_threshold = env_i32_or("KILN_ROCM_FLASH_WMMA_GQA_R64K16_MIN_SEQ", 256);
-    const int threshold = env_i32_or("KILN_ROCM_FLASH_WMMA_GQA_R64K32_MIN_SEQ", legacy_threshold);
-    return std::max(seqlen_q, seqlen_k) >= threshold;
+    return policy.wmma_gqa_r64k32_forward != 0 &&
+           std::max(seqlen_q, seqlen_k) >= policy.wmma_gqa_r64k32_forward_min_sequence;
 }
 
-bool wmma_gqa_r64k32_log2_enabled(int seqlen_q, int seqlen_k)
+bool wmma_gqa_r64k32_log2_enabled(const KilnRocmFlashAttentionPolicy& policy,
+                                 int seqlen_q,
+                                 int seqlen_k)
 {
-    if(env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K32_LOG2"))
-    {
-        return false;
-    }
-    if(env_truthy("KILN_ROCM_FLASH_USE_WMMA_GQA_R64K32_LOG2"))
-    {
-        return true;
-    }
-    const int threshold = env_i32_or("KILN_ROCM_FLASH_WMMA_GQA_R64K32_LOG2_MIN_SEQ", 256);
-    return std::max(seqlen_q, seqlen_k) >= threshold;
+    return policy.wmma_gqa_r64k32_log2_forward != 0 &&
+           std::max(seqlen_q, seqlen_k) >=
+               policy.wmma_gqa_r64k32_log2_forward_min_sequence;
 }
 
 // Return 0 only after a completed capability query. Positive HIP statuses must
@@ -373,233 +311,6 @@ __global__ void kiln_rocm_flash_wmma_qk16_bf16_kernel(const hip_bfloat16* __rest
 #endif
 }
 
-__global__ void kiln_rocm_flash_fwd_wmma_qblock256_bf16_kernel(
-    const hip_bfloat16* __restrict__ q,
-    const hip_bfloat16* __restrict__ k,
-    const hip_bfloat16* __restrict__ v,
-    hip_bfloat16* __restrict__ out,
-    float* __restrict__ lse,
-    int batch_size,
-    int seqlen_q,
-    int seqlen_k,
-    int num_heads,
-    int num_heads_k,
-    float softmax_scale,
-    int is_causal)
-{
-    constexpr int HeadDim = 256;
-    constexpr int Rows = 16;
-    constexpr int KeyBlock = 32;
-    constexpr int WmmaRows = 16;
-    constexpr int WmmaCols = 16;
-    const int tid = static_cast<int>(threadIdx.x);
-    const int lane = tid & 31;
-    const int row = tid / KilnLogicalWarpSize;
-    const int q_block = static_cast<int>(blockIdx.x) * Rows;
-    const int q_idx = q_block + row;
-    const int head = static_cast<int>(blockIdx.y);
-    const int batch = static_cast<int>(blockIdx.z);
-
-    if(batch >= batch_size || head >= num_heads || row >= Rows)
-    {
-        return;
-    }
-
-    __shared__ hip_bfloat16 q_tile[Rows][HeadDim];
-    __shared__ hip_bfloat16 k_tile[KeyBlock][HeadDim];
-    __shared__ hip_bfloat16 v_tile[KeyBlock][HeadDim];
-    __shared__ float scores[Rows][KeyBlock];
-    __shared__ float row_alpha[Rows];
-    __shared__ float row_inv_l[Rows];
-
-    constexpr int MaxLaneDims = (HeadDim + 31) / 32;
-    float acc_vals[MaxLaneDims];
-    int dim_vals[MaxLaneDims];
-    int lane_dims = 0;
-
-    const int groups_per_kv_head = num_heads / num_heads_k;
-    const int kv_head = head / groups_per_kv_head;
-    const bool valid_q = q_idx < seqlen_q;
-    const size_t q_base =
-        ((static_cast<size_t>(batch) * seqlen_q + (valid_q ? q_idx : 0)) * num_heads + head) *
-        HeadDim;
-
-    for(int dim = lane; dim < HeadDim; dim += KilnLogicalWarpSize)
-    {
-        dim_vals[lane_dims] = dim;
-        acc_vals[lane_dims] = 0.0f;
-        ++lane_dims;
-    }
-
-    for(int idx = tid; idx < Rows * HeadDim; idx += static_cast<int>(blockDim.x))
-    {
-        const int q_row = idx / HeadDim;
-        const int dim = idx - q_row * HeadDim;
-        const int load_q = q_block + q_row;
-        if(load_q < seqlen_q)
-        {
-            const size_t load_q_base =
-                ((static_cast<size_t>(batch) * seqlen_q + load_q) * num_heads + head) * HeadDim;
-            q_tile[q_row][dim] = q[load_q_base + dim];
-        }
-        else
-        {
-            q_tile[q_row][dim] = hip_bfloat16(0.0f);
-        }
-    }
-    __syncthreads();
-
-    float m = -INFINITY;
-    float l = 0.0f;
-    const int key_limit = valid_q ? (is_causal ? causal_key_limit(q_idx, seqlen_q, seqlen_k)
-                                               : seqlen_k)
-                                  : 0;
-    const int last_q = min(seqlen_q - 1, q_block + Rows - 1);
-    const int max_key_limit =
-        last_q >= q_block ? (is_causal ? causal_key_limit(last_q, seqlen_q, seqlen_k) : seqlen_k)
-                          : 0;
-
-    for(int key_base = 0; key_base < max_key_limit; key_base += KeyBlock)
-    {
-        const int tile_count = min(KeyBlock, max_key_limit - key_base);
-        for(int idx = tid; idx < tile_count * HeadDim; idx += static_cast<int>(blockDim.x))
-        {
-            const int key_offset = idx / HeadDim;
-            const int dim = idx - key_offset * HeadDim;
-            const int key_idx = key_base + key_offset;
-            const size_t kv_base =
-                ((static_cast<size_t>(batch) * seqlen_k + key_idx) * num_heads_k + kv_head) *
-                HeadDim;
-            k_tile[key_offset][dim] = k[kv_base + dim];
-            v_tile[key_offset][dim] = v[kv_base + dim];
-        }
-        __syncthreads();
-
-#if KILN_ROCM_HAS_GFX11_WMMA
-        if(tid < KilnLogicalWarpSize)
-        {
-            const int ab_lane = lane & 15;
-            for(int key_sub = 0; key_sub < KeyBlock; key_sub += WmmaCols)
-            {
-                kiln_f32x8 c_vec = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-                for(int dim_base = 0; dim_base < HeadDim; dim_base += WmmaCols)
-                {
-                    kiln_bf16x16 q_vec;
-                    kiln_bf16x16 k_vec;
-                    for(int k_inner = 0; k_inner < WmmaCols; ++k_inner)
-                    {
-                        const int dim = dim_base + k_inner;
-                        q_vec[k_inner] =
-                            ab_lane < Rows ? kiln_to_native_bf16(q_tile[ab_lane][dim])
-                                           : static_cast<__bf16>(0.0f);
-                        k_vec[k_inner] =
-                            key_sub + ab_lane < tile_count
-                                ? kiln_to_native_bf16(k_tile[key_sub + ab_lane][dim])
-                                : static_cast<__bf16>(0.0f);
-                    }
-                    c_vec = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(q_vec, k_vec, c_vec);
-                }
-
-                const int score_col = key_sub + (lane & 15);
-                const int score_row_parity = lane >> 4;
-                for(int i = 0; i < 8; ++i)
-                {
-                    const int score_row = i * 2 + score_row_parity;
-                    if(score_row < Rows && score_col < KeyBlock)
-                    {
-                        scores[score_row][score_col] = c_vec[i] * softmax_scale;
-                    }
-                }
-            }
-        }
-#else
-        if(tid < Rows * KeyBlock)
-        {
-            scores[tid / KeyBlock][tid % KeyBlock] = -INFINITY;
-        }
-#endif
-        __syncthreads();
-
-        if(lane == 0)
-        {
-            float tile_m = -INFINITY;
-            for(int col = 0; col < KeyBlock; ++col)
-            {
-                const int key_idx = key_base + col;
-                if(key_idx < key_limit)
-                {
-                    tile_m = fmaxf(tile_m, scores[row][col]);
-                }
-            }
-
-            const float new_m = fmaxf(m, tile_m);
-            float beta_sum = 0.0f;
-            if(tile_m > -INFINITY)
-            {
-                for(int col = 0; col < KeyBlock; ++col)
-                {
-                    const int key_idx = key_base + col;
-                    if(key_idx < key_limit)
-                    {
-                        const float beta = expf(scores[row][col] - new_m);
-                        scores[row][col] = beta;
-                        beta_sum += beta;
-                    }
-                    else
-                    {
-                        scores[row][col] = 0.0f;
-                    }
-                }
-            }
-            else
-            {
-                for(int col = 0; col < KeyBlock; ++col)
-                {
-                    scores[row][col] = 0.0f;
-                }
-            }
-            const float alpha = l > 0.0f ? expf(m - new_m) : 0.0f;
-            row_alpha[row] = alpha;
-            l = l * alpha + beta_sum;
-            m = new_m;
-        }
-        __syncthreads();
-
-        const float alpha = row_alpha[row];
-        for(int i = 0; i < lane_dims; ++i)
-        {
-            const int dim = dim_vals[i];
-            float weighted = 0.0f;
-            for(int col = 0; col < tile_count; ++col)
-            {
-                const float beta = scores[row][col];
-                weighted += beta * static_cast<float>(v_tile[col][dim]);
-            }
-            acc_vals[i] = acc_vals[i] * alpha + weighted;
-        }
-        __syncthreads();
-    }
-
-    if(lane == 0)
-    {
-        row_inv_l[row] = l > 0.0f ? 1.0f / l : 0.0f;
-        if(valid_q && lse != nullptr)
-        {
-            lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx] =
-                l > 0.0f ? m + logf(l) : -INFINITY;
-        }
-    }
-    __syncthreads();
-
-    if(valid_q)
-    {
-        const float inv_l = row_inv_l[row];
-        for(int i = 0; i < lane_dims; ++i)
-        {
-            out[q_base + dim_vals[i]] = hip_bfloat16(acc_vals[i] * inv_l);
-        }
-    }
-}
 
 __global__ void kiln_rocm_flash_fwd_wmma_gqa_r32h1k32_bf16_kernel(
     const hip_bfloat16* __restrict__ q,
@@ -1329,137 +1040,6 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     }
 }
 
-#if KILN_HAS_CK_TILE_FMHA_FWD
-struct KilnFmhaGfx11Policy : ck_tile::BlockFmhaV3PipelineDefaultPolicy
-{
-    template <typename Problem>
-    CK_TILE_DEVICE static constexpr auto GetAlignmentK()
-    {
-        return 4;
-    }
-
-    template <typename Problem>
-    CK_TILE_DEVICE static constexpr auto GetAlignmentV()
-    {
-        return 4;
-    }
-};
-
-template <int HeadDim, bool Causal>
-int launch_ck_fwd_bf16(const hip_bfloat16* q,
-                       const hip_bfloat16* k,
-                       const hip_bfloat16* v,
-                       hip_bfloat16* out,
-                       float* lse,
-                       int batch_size,
-                       int seqlen_q,
-                       int seqlen_k,
-                       int num_heads,
-                       int num_heads_k,
-                       float softmax_scale,
-                       void* stream)
-{
-    using data_type = ck_tile::fmha_fwd_v3_args::data_type_enum;
-    using dtype = ck_tile::fmha_fwd_v3_problem_traits<data_type::bf16>;
-    // CK Tile v3 asserts that QK head_dim is consumed in a single K0 loop.
-    // gfx115x can satisfy that for d=128 with this policy's 4-element bf16
-    // lane alignment. Larger head sizes are declined by the dispatcher below.
-    using fmha_block_tile = ck_tile::sequence<256, 32, HeadDim, 128, 32, HeadDim>;
-    using fmha_warp_gemm_shape = ck_tile::sequence<32, 32, 16>;
-    using fmha_block_warps = ck_tile::sequence<8, 1, 1>;
-    using fmha_shape = ck_tile::TileFmhaShape<fmha_block_tile,
-                                             fmha_block_warps,
-                                             fmha_warp_gemm_shape,
-                                             fmha_block_warps,
-                                             fmha_warp_gemm_shape,
-                                             true>;
-    using fmha_traits = ck_tile::TileFmhaFwdV3Traits<true, true, false, false, false, -1>;
-    using fmha_mask = ck_tile::GenericAttentionMask<Causal, false>;
-    using fmha_pipeline_problem =
-        ck_tile::BlockFmhaFwdV3PipelineProblem<typename dtype::qkvp_dtype,
-                                               typename dtype::qkvp_dtype,
-                                               typename dtype::qkvp_dtype,
-                                               typename dtype::acc_dtype,
-                                               typename dtype::acc_dtype,
-                                               typename dtype::lse_dtype,
-                                               typename dtype::qkvp_dtype,
-                                               typename dtype::acc_dtype,
-                                               typename dtype::o_dtype,
-                                               fmha_shape,
-                                               false,
-                                               fmha_mask,
-                                               fmha_traits>;
-    using fmha_pipeline =
-        ck_tile::BlockFmhaFwdV3Pipeline<fmha_pipeline_problem, KilnFmhaGfx11Policy>;
-    using fmha_epilogue = ck_tile::Default2DEpilogue<
-        ck_tile::Default2DEpilogueProblem<typename dtype::acc_dtype,
-                                          typename dtype::o_dtype,
-                                          true,
-                                          true,
-                                          true>>;
-    using fmha_kernel = ck_tile::FmhaFwdV3Kernel<fmha_pipeline, fmha_epilogue>;
-
-    const ck_tile::index_t mask_type =
-        Causal ? static_cast<ck_tile::index_t>(mask_enum::mask_bottom_right)
-               : static_cast<ck_tile::index_t>(mask_enum::no_mask);
-    int remap_opt = 2;
-    if(Causal && ((num_heads % 8 != 0) || (16384 < seqlen_q)))
-    {
-        remap_opt = 65536 <= seqlen_q ? 0 : 1;
-    }
-
-    (void)lse;
-    auto kargs = fmha_kernel::MakeKargs(q,
-                                        k,
-                                        v,
-                                        nullptr,
-                                        out,
-                                        seqlen_q,
-                                        seqlen_k,
-                                        HeadDim,
-                                        HeadDim,
-                                        num_heads,
-                                        num_heads / num_heads_k,
-                                        softmax_scale,
-                                        num_heads * HeadDim,
-                                        num_heads_k * HeadDim,
-                                        num_heads_k * HeadDim,
-                                        num_heads * HeadDim,
-                                        HeadDim,
-                                        HeadDim,
-                                        HeadDim,
-                                        seqlen_q,
-                                        HeadDim,
-                                        seqlen_q * num_heads * HeadDim,
-                                        seqlen_k * num_heads_k * HeadDim,
-                                        seqlen_k * num_heads_k * HeadDim,
-                                        num_heads * seqlen_q,
-                                        seqlen_q * num_heads * HeadDim,
-                                        Causal ? -1 : 0,
-                                        0,
-                                        mask_type,
-                                        remap_opt,
-                                        nullptr,
-                                        nullptr);
-    const dim3 grids = fmha_kernel::GridSize(batch_size, num_heads, seqlen_q, HeadDim);
-
-    try
-    {
-        const ck_tile::stream_config stream_config{static_cast<hipStream_t>(stream), false};
-        ck_tile::launch_kernel(stream_config,
-                               ck_tile::make_kernel<fmha_kernel::kBlockPerCu>(
-                                   fmha_kernel{}, grids, fmha_kernel::BlockSize(), 0, kargs));
-    }
-    catch(const std::exception&)
-    {
-        return KilnExternalExecutionFailure;
-    }
-
-    const hipError_t err = hipGetLastError();
-    return err == hipSuccess ? 0 : static_cast<int>(err);
-}
-#endif
-
 template <int HeadDim, int Rows, int XDim>
 __global__ void kiln_rocm_flash_fwd_qrows_bf16_kernel(const hip_bfloat16* __restrict__ q,
                                                 const hip_bfloat16* __restrict__ k,
@@ -1665,133 +1245,6 @@ __global__ void kiln_rocm_flash_fwd_warprows_bf16_kernel(const hip_bfloat16* __r
         {
             lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx] =
                 l > 0.0f ? m + logf(l) : -INFINITY;
-        }
-    }
-}
-
-template <int HeadDim, int NumKeyWarps>
-__global__ void kiln_rocm_flash_fwd_keysplit_bf16_kernel(const hip_bfloat16* __restrict__ q,
-                                                         const hip_bfloat16* __restrict__ k,
-                                                         const hip_bfloat16* __restrict__ v,
-                                                         hip_bfloat16* __restrict__ out,
-                                                         float* __restrict__ lse,
-                                                         int batch_size,
-                                                         int seqlen_q,
-                                                         int seqlen_k,
-                                                         int num_heads,
-                                                         int num_heads_k,
-                                                         float softmax_scale,
-                                                         int is_causal)
-{
-    const int lane = static_cast<int>(threadIdx.x) % KilnLogicalWarpSize;
-    const int key_warp = static_cast<int>(threadIdx.x) / KilnLogicalWarpSize;
-    const int q_idx = static_cast<int>(blockIdx.x);
-    const int head = static_cast<int>(blockIdx.y);
-    const int batch = static_cast<int>(blockIdx.z);
-
-    if(batch >= batch_size || q_idx >= seqlen_q || head >= num_heads ||
-       key_warp >= NumKeyWarps)
-    {
-        return;
-    }
-
-    constexpr int MaxLaneDims = (HeadDim + 31) / 32;
-    float q_vals[MaxLaneDims];
-    float acc_vals[MaxLaneDims];
-    int dim_vals[MaxLaneDims];
-    int lane_dims = 0;
-
-    const int groups_per_kv_head = num_heads / num_heads_k;
-    const int kv_head = head / groups_per_kv_head;
-    const size_t q_base =
-        ((static_cast<size_t>(batch) * seqlen_q + q_idx) * num_heads + head) * HeadDim;
-
-    for(int dim = lane; dim < HeadDim; dim += KilnLogicalWarpSize)
-    {
-        dim_vals[lane_dims] = dim;
-        q_vals[lane_dims] = static_cast<float>(q[q_base + dim]);
-        acc_vals[lane_dims] = 0.0f;
-        ++lane_dims;
-    }
-
-    const int key_limit = is_causal ? causal_key_limit(q_idx, seqlen_q, seqlen_k) : seqlen_k;
-    float m = -INFINITY;
-    float l = 0.0f;
-
-    for(int key = key_warp; key < key_limit; key += NumKeyWarps)
-    {
-        const size_t kv_base =
-            ((static_cast<size_t>(batch) * seqlen_k + key) * num_heads_k + kv_head) * HeadDim;
-
-        float partial = 0.0f;
-        for(int i = 0; i < lane_dims; ++i)
-        {
-            partial += q_vals[i] * static_cast<float>(k[kv_base + dim_vals[i]]);
-        }
-        const float score = kiln_wave_reduce_sum(partial) * softmax_scale;
-        const float new_m = fmaxf(m, score);
-        const float alpha = expf(m - new_m);
-        const float beta = expf(score - new_m);
-        for(int i = 0; i < lane_dims; ++i)
-        {
-            const float vv = static_cast<float>(v[kv_base + dim_vals[i]]);
-            acc_vals[i] = acc_vals[i] * alpha + beta * vv;
-        }
-        l = l * alpha + beta;
-        m = new_m;
-    }
-
-    __shared__ float partial_m[NumKeyWarps];
-    __shared__ float partial_l[NumKeyWarps];
-    __shared__ float partial_acc[NumKeyWarps][HeadDim];
-    if(lane == 0)
-    {
-        partial_m[key_warp] = m;
-        partial_l[key_warp] = l;
-    }
-    for(int i = 0; i < lane_dims; ++i)
-    {
-        partial_acc[key_warp][dim_vals[i]] = acc_vals[i];
-    }
-    __syncthreads();
-
-    if(key_warp == 0)
-    {
-        float global_m = -INFINITY;
-        for(int w = 0; w < NumKeyWarps; ++w)
-        {
-            if(partial_l[w] > 0.0f)
-            {
-                global_m = fmaxf(global_m, partial_m[w]);
-            }
-        }
-
-        float global_l = 0.0f;
-        for(int w = 0; w < NumKeyWarps; ++w)
-        {
-            if(partial_l[w] > 0.0f)
-            {
-                global_l += partial_l[w] * expf(partial_m[w] - global_m);
-            }
-        }
-        const float inv_l = global_l > 0.0f ? 1.0f / global_l : 0.0f;
-
-        for(int dim = lane; dim < HeadDim; dim += KilnLogicalWarpSize)
-        {
-            float acc = 0.0f;
-            for(int w = 0; w < NumKeyWarps; ++w)
-            {
-                if(partial_l[w] > 0.0f)
-                {
-                    acc += partial_acc[w][dim] * expf(partial_m[w] - global_m);
-                }
-            }
-            out[q_base + dim] = hip_bfloat16(acc * inv_l);
-        }
-        if(lane == 0 && lse != nullptr)
-        {
-            lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx] =
-                global_l > 0.0f ? global_m + logf(global_l) : -INFINITY;
         }
     }
 }
@@ -3142,47 +2595,6 @@ int launch_fwd(const void* q,
     return err == hipSuccess ? 0 : static_cast<int>(err);
 }
 
-template <int HeadDim, int NumKeyWarps>
-int launch_fwd_keysplit(const void* q,
-                        const void* k,
-                        const void* v,
-                        void* out,
-                        void* softmax_lse_out,
-                        int batch_size,
-                        int seqlen_q,
-                        int seqlen_k,
-                        int num_heads,
-                        int num_heads_k,
-                        float softmax_scale,
-                        int is_causal,
-                        void* stream)
-{
-    dim3 grid(static_cast<unsigned>(seqlen_q),
-              static_cast<unsigned>(num_heads),
-              static_cast<unsigned>(batch_size));
-    dim3 block(static_cast<unsigned>(NumKeyWarps * KilnLogicalWarpSize));
-    hipLaunchKernelGGL((kiln_rocm_flash_fwd_keysplit_bf16_kernel<HeadDim, NumKeyWarps>),
-                       grid,
-                       block,
-                       0,
-                       static_cast<hipStream_t>(stream),
-                       static_cast<const hip_bfloat16*>(q),
-                       static_cast<const hip_bfloat16*>(k),
-                       static_cast<const hip_bfloat16*>(v),
-                       static_cast<hip_bfloat16*>(out),
-                       static_cast<float*>(softmax_lse_out),
-                       batch_size,
-                       seqlen_q,
-                       seqlen_k,
-                       num_heads,
-                       num_heads_k,
-                       softmax_scale,
-                       is_causal != 0 ? 1 : 0);
-
-    const hipError_t err = hipGetLastError();
-    return err == hipSuccess ? 0 : static_cast<int>(err);
-}
-
 template <int HeadDim, int Rows, int KeyBlock>
 int launch_fwd_qblock_cached(const void* q,
                              const void* k,
@@ -3292,46 +2704,6 @@ int launch_fwd_gqa_qblock_cached(const void* q,
     return err == hipSuccess ? 0 : static_cast<int>(err);
 }
 
-int launch_fwd_wmma_qblock256(const void* q,
-                              const void* k,
-                              const void* v,
-                              void* out,
-                              void* softmax_lse_out,
-                              int batch_size,
-                              int seqlen_q,
-                              int seqlen_k,
-                              int num_heads,
-                              int num_heads_k,
-                              float softmax_scale,
-                              int is_causal,
-                              void* stream)
-{
-    dim3 grid(static_cast<unsigned>((seqlen_q + 15) / 16),
-              static_cast<unsigned>(num_heads),
-              static_cast<unsigned>(batch_size));
-    dim3 block(512);
-    hipLaunchKernelGGL(kiln_rocm_flash_fwd_wmma_qblock256_bf16_kernel,
-                       grid,
-                       block,
-                       0,
-                       static_cast<hipStream_t>(stream),
-                       static_cast<const hip_bfloat16*>(q),
-                       static_cast<const hip_bfloat16*>(k),
-                       static_cast<const hip_bfloat16*>(v),
-                       static_cast<hip_bfloat16*>(out),
-                       static_cast<float*>(softmax_lse_out),
-                       batch_size,
-                       seqlen_q,
-                       seqlen_k,
-                       num_heads,
-                       num_heads_k,
-                       softmax_scale,
-                       is_causal != 0 ? 1 : 0);
-
-    const hipError_t err = hipGetLastError();
-    return err == hipSuccess ? 0 : static_cast<int>(err);
-}
-
 int launch_fwd_wmma_gqa_r32h1k32(const void* q,
                                   const void* k,
                                   const void* v,
@@ -3390,13 +2762,14 @@ int launch_fwd_wmma_gqa_r64h1k32(const void* q,
                                   int out_q_start,
                                   int out_seqlen_q,
                                   int is_causal,
+                                  const KilnRocmFlashAttentionPolicy& policy,
                                   void* stream)
 {
     dim3 grid(static_cast<unsigned>((seqlen_q + 63) / 64),
               static_cast<unsigned>(num_heads),
               static_cast<unsigned>(batch_size));
     dim3 block(512);
-    if(wmma_gqa_r64k32_log2_enabled(seqlen_q, seqlen_k))
+    if(wmma_gqa_r64k32_log2_enabled(policy, seqlen_q, seqlen_k))
     {
         hipLaunchKernelGGL((kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel<true>),
                            grid,
@@ -3554,16 +2927,15 @@ int launch_bwd(const void* dout,
                int num_heads_k,
                float softmax_scale,
                int is_causal,
+               const KilnRocmFlashAttentionPolicy& policy,
                void* stream)
 {
     dim3 block(HeadDim, KPar);
     dim3 dq_grid(static_cast<unsigned>(seqlen_q),
                  static_cast<unsigned>(num_heads),
                  static_cast<unsigned>(batch_size));
-    const bool use_delta_bwd =
-        env_truthy("KILN_ROCM_FLASH_BWD_PRECOMPUTE_DELTA") ||
-        std::max(seqlen_q, seqlen_k) <=
-            env_i32_or("KILN_ROCM_FLASH_BWD_PRECOMPUTE_DELTA_MAX_SEQ", 1024);
+    const bool use_delta_bwd = std::max(seqlen_q, seqlen_k) <=
+                               policy.backward_precompute_delta_max_sequence;
     if(use_delta_bwd)
     {
         float* delta = nullptr;
@@ -4037,448 +3409,8 @@ int launch_bwd_collapsed_gqa_warp(const void* dout,
     return free_err == hipSuccess ? 0 : static_cast<int>(free_err);
 }
 
-#if KILN_HAS_CK_TILE_FMHA
-template <int HeadDim>
-int launch_bwd_collapsed_gqa_ck_trload(const void* dout,
-                                       const void* q,
-                                       const void* k,
-                                       const void* v,
-                                       const void* out,
-                                       const void* softmax_lse,
-                                       void* dq,
-                                       void* dk,
-                                       void* dv,
-                                       int batch_size,
-                                       int seqlen_q,
-                                       int seqlen_k,
-                                       int num_heads,
-                                       int num_heads_k,
-                                       float softmax_scale,
-                                       int is_causal,
-                                       void* stream)
-{
-    if(!is_causal || HeadDim != 256)
-    {
-        return -4;
-    }
-
-    using dtype = FmhaBwdTypeConfig<FmhaBwdBf16>;
-    using block_tile = ck_tile::sequence<32, 32, 16, 32, 16, 32, 16, HeadDim, HeadDim>;
-    using warps = ck_tile::sequence<2, 1, 1>;
-    using warp_tile = ck_tile::sequence<16, 16, 16>;
-    using shape = ck_tile::TileFmhaBwdShape<block_tile,
-                                            warps,
-                                            warp_tile,
-                                            warps,
-                                            warp_tile,
-                                            warps,
-                                            warp_tile,
-                                            warps,
-                                            warp_tile,
-                                            warps,
-                                            warp_tile,
-                                            0>;
-    using traits =
-        ck_tile::TileFmhaBwdTraits<0, 0, ck_tile::BlockAttentionBiasEnum::NO_BIAS, false, -1>;
-    using mask = ck_tile::GenericAttentionMask<true, false>;
-    using problem =
-        ck_tile::BlockFmhaBwdPipelineProblem<typename dtype::QDataType,
-                                             typename dtype::KDataType,
-                                             typename dtype::VDataType,
-                                             typename dtype::GemmDataType,
-                                             typename dtype::LSEDataType,
-                                             typename dtype::AccDataType,
-                                             typename dtype::DDataType,
-                                             typename dtype::BiasDataType,
-                                             typename dtype::RandValOutputDataType,
-                                             typename dtype::ODataType,
-                                             typename dtype::OGradDataType,
-                                             typename dtype::QGradDataType,
-                                             typename dtype::AccDataType,
-                                             typename dtype::AccDataType,
-                                             typename dtype::BiasGradDataType,
-                                             shape,
-                                             false,
-                                             false,
-                                             mask,
-                                             ck_tile::BlockDropoutBwd<false, false, false>,
-                                             true,
-                                             traits>;
-    using pipeline = ck_tile::BlockFmhaBwdDQDKDVPipeline<problem>;
-    using kgrad_epilogue = ck_tile::Default2DEpilogue<
-        ck_tile::Default2DEpilogueProblem<typename dtype::AccDataType,
-                                          typename dtype::AccDataType,
-                                          false,
-                                          false,
-                                          true>>;
-    using vgrad_epilogue = ck_tile::Default2DEpilogue<
-        ck_tile::Default2DEpilogueProblem<typename dtype::AccDataType,
-                                          typename dtype::AccDataType,
-                                          false,
-                                          false,
-                                          true>>;
-    using qgrad_epilogue = ck_tile::Default2DEpilogue<
-        ck_tile::Default2DEpilogueProblem<typename dtype::AccDataType,
-                                          typename dtype::QGradDataType,
-                                          false,
-                                          false,
-                                          true>>;
-    using kernel =
-        ck_tile::FmhaBwdDQDKDVKernel<pipeline, kgrad_epilogue, vgrad_epilogue, qgrad_epilogue>;
-
-    const hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    float* delta = nullptr;
-    float* dq_acc = nullptr;
-    float* dk_full = nullptr;
-    float* dv_full = nullptr;
-    const size_t delta_count = static_cast<size_t>(batch_size) * num_heads * seqlen_q;
-    const size_t dq_count =
-        static_cast<size_t>(batch_size) * seqlen_q * num_heads * HeadDim;
-    const size_t dkdv_full_count =
-        static_cast<size_t>(batch_size) * seqlen_k * num_heads * HeadDim;
-    hipError_t err =
-        hipMallocAsync(reinterpret_cast<void**>(&delta), delta_count * sizeof(float), hip_stream);
-    if(err != hipSuccess)
-    {
-        return allocation_failure_status(err, delta);
-    }
-    if(delta == nullptr)
-    {
-        return KilnExternalExecutionFailure;
-    }
-    err = hipMallocAsync(reinterpret_cast<void**>(&dq_acc), dq_count * sizeof(float), hip_stream);
-    if(err != hipSuccess)
-    {
-        if(!clean_allocation_decline(err, dq_acc))
-        {
-            return allocation_failure_status(err, dq_acc);
-        }
-        const hipError_t free_err = hipFreeAsync(delta, hip_stream);
-        if(free_err != hipSuccess)
-        {
-            return allocation_failure_status(free_err, delta);
-        }
-        return allocation_failure_status(err, dq_acc);
-    }
-    if(dq_acc == nullptr)
-    {
-        return KilnExternalExecutionFailure;
-    }
-    err = hipMallocAsync(reinterpret_cast<void**>(&dk_full),
-                         dkdv_full_count * sizeof(float),
-                         hip_stream);
-    if(err != hipSuccess)
-    {
-        if(!clean_allocation_decline(err, dk_full))
-        {
-            return allocation_failure_status(err, dk_full);
-        }
-        hipError_t free_err = hipFreeAsync(dq_acc, hip_stream);
-        if(free_err == hipSuccess)
-        {
-            free_err = hipFreeAsync(delta, hip_stream);
-        }
-        if(free_err != hipSuccess)
-        {
-            return allocation_failure_status(free_err, dq_acc);
-        }
-        return allocation_failure_status(err, dk_full);
-    }
-    if(dk_full == nullptr)
-    {
-        return KilnExternalExecutionFailure;
-    }
-    err = hipMallocAsync(reinterpret_cast<void**>(&dv_full),
-                         dkdv_full_count * sizeof(float),
-                         hip_stream);
-    if(err != hipSuccess)
-    {
-        if(!clean_allocation_decline(err, dv_full))
-        {
-            return allocation_failure_status(err, dv_full);
-        }
-        hipError_t free_err = hipFreeAsync(dk_full, hip_stream);
-        if(free_err == hipSuccess)
-        {
-            free_err = hipFreeAsync(dq_acc, hip_stream);
-        }
-        if(free_err == hipSuccess)
-        {
-            free_err = hipFreeAsync(delta, hip_stream);
-        }
-        if(free_err != hipSuccess)
-        {
-            return allocation_failure_status(free_err, dk_full);
-        }
-        return allocation_failure_status(err, dv_full);
-    }
-    if(dv_full == nullptr)
-    {
-        return KilnExternalExecutionFailure;
-    }
-
-    dim3 delta_grid(static_cast<unsigned>(seqlen_q),
-                    static_cast<unsigned>(num_heads),
-                    static_cast<unsigned>(batch_size));
-    dim3 delta_block(static_cast<unsigned>(HeadDim), 1);
-    hipLaunchKernelGGL((kiln_rocm_flash_bwd_delta_bf16_kernel<HeadDim>),
-                       delta_grid,
-                       delta_block,
-                       0,
-                       hip_stream,
-                       static_cast<const hip_bfloat16*>(dout),
-                       static_cast<const hip_bfloat16*>(out),
-                       delta,
-                       batch_size,
-                       seqlen_q,
-                       num_heads);
-    err = hipGetLastError();
-    if(err == hipSuccess)
-    {
-        err = hipMemsetAsync(dq_acc, 0, dq_count * sizeof(float), hip_stream);
-    }
-    if(err != hipSuccess)
-    {
-        hipFreeAsync(dv_full, hip_stream);
-        hipFreeAsync(dk_full, hip_stream);
-        hipFreeAsync(dq_acc, hip_stream);
-        hipFreeAsync(delta, hip_stream);
-        return static_cast<int>(err);
-    }
-
-    const int groups_per_kv_head = num_heads / num_heads_k;
-    const ck_tile::index_t stride_q = num_heads * HeadDim;
-    const ck_tile::index_t stride_k = num_heads_k * HeadDim;
-    const ck_tile::index_t stride_v = num_heads_k * HeadDim;
-    const ck_tile::index_t stride_do = num_heads * HeadDim;
-    const ck_tile::index_t stride_dq_acc = num_heads * HeadDim;
-    const ck_tile::index_t stride_dk = num_heads * HeadDim;
-    const ck_tile::index_t stride_dv = num_heads * HeadDim;
-    const ck_tile::index_t nhead_stride_q = HeadDim;
-    const ck_tile::index_t nhead_stride_k = HeadDim;
-    const ck_tile::index_t nhead_stride_v = HeadDim;
-    const ck_tile::index_t nhead_stride_do = HeadDim;
-    const ck_tile::index_t nhead_stride_lsed = seqlen_q;
-    const ck_tile::index_t nhead_stride_dq_acc = HeadDim;
-    const ck_tile::index_t nhead_stride_dk = HeadDim;
-    const ck_tile::index_t nhead_stride_dv = HeadDim;
-    const ck_tile::index_t batch_stride_q = seqlen_q * num_heads * HeadDim;
-    const ck_tile::index_t batch_stride_k = seqlen_k * num_heads_k * HeadDim;
-    const ck_tile::index_t batch_stride_v = seqlen_k * num_heads_k * HeadDim;
-    const ck_tile::index_t batch_stride_do = seqlen_q * num_heads * HeadDim;
-    const ck_tile::index_t batch_stride_lsed = num_heads * seqlen_q;
-    const ck_tile::index_t batch_stride_dq_acc = seqlen_q * num_heads * HeadDim;
-    const ck_tile::index_t batch_stride_dk = seqlen_k * num_heads * HeadDim;
-    const ck_tile::index_t batch_stride_dv = seqlen_k * num_heads * HeadDim;
-
-    auto kargs = kernel::MakeKargsImpl(q,
-                                       k,
-                                       v,
-                                       nullptr,
-                                       softmax_lse,
-                                       dout,
-                                       delta,
-                                       nullptr,
-                                       dk_full,
-                                       dv_full,
-                                       nullptr,
-                                       dq_acc,
-                                       seqlen_q,
-                                       seqlen_k,
-                                       HeadDim,
-                                       HeadDim,
-                                       num_heads,
-                                       groups_per_kv_head,
-                                       softmax_scale,
-                                       stride_q,
-                                       stride_k,
-                                       stride_v,
-                                       0,
-                                       0,
-                                       stride_do,
-                                       stride_dq_acc,
-                                       stride_dk,
-                                       stride_dv,
-                                       0,
-                                       nhead_stride_q,
-                                       nhead_stride_k,
-                                       nhead_stride_v,
-                                       0,
-                                       0,
-                                       nhead_stride_do,
-                                       nhead_stride_lsed,
-                                       nhead_stride_dq_acc,
-                                       nhead_stride_dk,
-                                       nhead_stride_dv,
-                                       0,
-                                       batch_stride_q,
-                                       batch_stride_k,
-                                       batch_stride_v,
-                                       0,
-                                       0,
-                                       batch_stride_do,
-                                       batch_stride_lsed,
-                                       batch_stride_dq_acc,
-                                       batch_stride_dk,
-                                       batch_stride_dv,
-                                       0,
-                                       0,
-                                       -1,
-                                       0,
-                                       static_cast<ck_tile::index_t>(mask_enum::mask_bottom_right),
-                                       0.0f,
-                                       std::pair<uint64_t, uint64_t>{0, 0});
-    const dim3 ck_grid = kernel::GridSize(batch_size, num_heads, seqlen_k);
-    const ck_tile::stream_config stream_config{hip_stream, false};
-    try
-    {
-        ck_tile::launch_kernel(
-            stream_config,
-            ck_tile::make_kernel<kernel::kBlockPerCu>(
-                kernel{}, ck_grid, kernel::BlockSize(), 0, kargs));
-    }
-    catch(const std::exception&)
-    {
-        hipFreeAsync(dv_full, hip_stream);
-        hipFreeAsync(dk_full, hip_stream);
-        hipFreeAsync(dq_acc, hip_stream);
-        hipFreeAsync(delta, hip_stream);
-        return KilnExternalExecutionFailure;
-    }
-    err = hipGetLastError();
-    if(err == hipSuccess)
-    {
-        constexpr int block = 256;
-        const long long dq_n = static_cast<long long>(dq_count);
-        const int dq_grid = static_cast<int>((dq_n + block - 1) / block);
-        kiln_rocm_flash_f32_to_bf16_kernel<<<dq_grid, block, 0, hip_stream>>>(
-            dq_acc, static_cast<hip_bfloat16*>(dq), dq_n);
-        err = hipGetLastError();
-    }
-    if(err == hipSuccess)
-    {
-        constexpr int block = 256;
-        const long long kv_n =
-            static_cast<long long>(batch_size) * seqlen_k * num_heads_k * HeadDim;
-        const int kv_grid = static_cast<int>((kv_n + block - 1) / block);
-        kiln_rocm_flash_reduce_gqa_grads_f32_to_bf16_kernel<HeadDim><<<kv_grid,
-                                                                        block,
-                                                                        0,
-                                                                        hip_stream>>>(
-            dk_full,
-            static_cast<hip_bfloat16*>(dk),
-            batch_size,
-            seqlen_k,
-            num_heads,
-            num_heads_k);
-        err = hipGetLastError();
-    }
-    if(err == hipSuccess)
-    {
-        constexpr int block = 256;
-        const long long kv_n =
-            static_cast<long long>(batch_size) * seqlen_k * num_heads_k * HeadDim;
-        const int kv_grid = static_cast<int>((kv_n + block - 1) / block);
-        kiln_rocm_flash_reduce_gqa_grads_f32_to_bf16_kernel<HeadDim><<<kv_grid,
-                                                                        block,
-                                                                        0,
-                                                                        hip_stream>>>(
-            dv_full,
-            static_cast<hip_bfloat16*>(dv),
-            batch_size,
-            seqlen_k,
-            num_heads,
-            num_heads_k);
-        err = hipGetLastError();
-    }
-
-    const hipError_t free_dv_err = hipFreeAsync(dv_full, hip_stream);
-    const hipError_t free_dk_err = hipFreeAsync(dk_full, hip_stream);
-    const hipError_t free_dq_err = hipFreeAsync(dq_acc, hip_stream);
-    const hipError_t free_delta_err = hipFreeAsync(delta, hip_stream);
-    if(err != hipSuccess)
-    {
-        return static_cast<int>(err);
-    }
-    if(free_dv_err != hipSuccess)
-    {
-        return static_cast<int>(free_dv_err);
-    }
-    if(free_dk_err != hipSuccess)
-    {
-        return static_cast<int>(free_dk_err);
-    }
-    if(free_dq_err != hipSuccess)
-    {
-        return static_cast<int>(free_dq_err);
-    }
-    return free_delta_err == hipSuccess ? 0 : static_cast<int>(free_delta_err);
-}
-#endif
 
 } // namespace
-
-extern "C" int kiln_rocm_flash_attn_fwd_ck_bf16(const void* q,
-                                                const void* k,
-                                                const void* v,
-                                                void* out,
-                                                void* softmax_lse_out,
-                                                int batch_size,
-                                                int seqlen_q,
-                                                int seqlen_k,
-                                                int num_heads,
-                                                int num_heads_k,
-                                                int head_dim,
-                                                float softmax_scale,
-                                                int is_causal,
-                                                void* stream)
-{
-    if(q == nullptr || k == nullptr || v == nullptr || out == nullptr)
-    {
-        return -1;
-    }
-    if(batch_size <= 0 || seqlen_q <= 0 || seqlen_k <= 0 || num_heads <= 0 || num_heads_k <= 0)
-    {
-        return -2;
-    }
-    if(num_heads % num_heads_k != 0)
-    {
-        return -3;
-    }
-    if(is_causal && seqlen_k < seqlen_q)
-    {
-        return -5;
-    }
-
-#if KILN_HAS_CK_TILE_FMHA_FWD
-    if(!is_causal)
-    {
-        return -6;
-    }
-    switch(head_dim)
-    {
-    case 128:
-        return launch_ck_fwd_bf16<128, true>(static_cast<const hip_bfloat16*>(q),
-                                             static_cast<const hip_bfloat16*>(k),
-                                             static_cast<const hip_bfloat16*>(v),
-                                             static_cast<hip_bfloat16*>(out),
-                                             static_cast<float*>(softmax_lse_out),
-                                             batch_size,
-                                             seqlen_q,
-                                             seqlen_k,
-                                             num_heads,
-                                             num_heads_k,
-                                             softmax_scale,
-                                             stream);
-    case 256:
-        return -4;
-    default:
-        return -4;
-    }
-#else
-    return -20;
-#endif
-}
 
 extern "C" int kiln_rocm_flash_wmma_qk16_bf16(const void* a,
                                               const void* b,
@@ -4527,9 +3459,11 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                              int head_dim,
                                              float softmax_scale,
                                              int is_causal,
+                                             const KilnRocmFlashAttentionPolicy* policy,
                                              void* stream)
 {
-    if(q == nullptr || k == nullptr || v == nullptr || out == nullptr)
+    if(q == nullptr || k == nullptr || v == nullptr || out == nullptr ||
+       !valid_flash_policy(policy))
     {
         return -1;
     }
@@ -4545,22 +3479,6 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
     switch(head_dim)
     {
     case 128:
-        if(native_keysplit_enabled(seqlen_q, seqlen_k))
-        {
-            return launch_fwd_keysplit<128, 8>(q,
-                                               k,
-                                               v,
-                                               out,
-                                               softmax_lse_out,
-                                               batch_size,
-                                               seqlen_q,
-                                               seqlen_k,
-                                               num_heads,
-                                               num_heads_k,
-                                               softmax_scale,
-                                               is_causal,
-                                               stream);
-        }
         if(seqlen_k >= 512)
         {
             return launch_fwd_qblock_cached<128, 8, 32>(q,
@@ -4597,9 +3515,10 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                        is_causal,
                                        stream);
     case 256:
-        if(native_gqa_qblock_enabled(head_dim, seqlen_q, seqlen_k, num_heads, num_heads_k))
+        if(native_gqa_qblock_enabled(
+               *policy, head_dim, seqlen_q, seqlen_k, num_heads, num_heads_k))
         {
-            if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK"))
+            if(policy->wmma_gqa_qblock_forward != 0)
             {
                 bool supports_gfx11_wmma = false;
                 const int device_query_status =
@@ -4610,7 +3529,7 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                 }
                 if(supports_gfx11_wmma)
                 {
-                    if(wmma_gqa_r64k32_enabled(seqlen_q, seqlen_k))
+                    if(wmma_gqa_r64k32_enabled(*policy, seqlen_q, seqlen_k))
                     {
                         return launch_fwd_wmma_gqa_r64h1k32(q,
                                                             k,
@@ -4630,6 +3549,7 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                             0,
                                                             seqlen_q,
                                                             is_causal,
+                                                            *policy,
                                                             stream);
                     }
                     return launch_fwd_wmma_gqa_r32h1k32(q,
@@ -4666,48 +3586,6 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                                seqlen_q,
                                                                is_causal,
                                                                stream);
-        }
-        if(native_wmma_qblock_enabled(head_dim, seqlen_q, seqlen_k))
-        {
-            bool supports_gfx11_wmma = false;
-            const int device_query_status =
-                query_current_device_gfx11_wmma(&supports_gfx11_wmma);
-            if(device_query_status != 0)
-            {
-                return device_query_status;
-            }
-            if(supports_gfx11_wmma)
-            {
-                return launch_fwd_wmma_qblock256(q,
-                                                 k,
-                                                 v,
-                                                 out,
-                                                 softmax_lse_out,
-                                                 batch_size,
-                                                 seqlen_q,
-                                                 seqlen_k,
-                                                 num_heads,
-                                                 num_heads_k,
-                                                 softmax_scale,
-                                                 is_causal,
-                                                 stream);
-            }
-        }
-        if(native_keysplit_enabled(seqlen_q, seqlen_k))
-        {
-            return launch_fwd_keysplit<256, 8>(q,
-                                               k,
-                                               v,
-                                               out,
-                                               softmax_lse_out,
-                                               batch_size,
-                                               seqlen_q,
-                                               seqlen_k,
-                                               num_heads,
-                                               num_heads_k,
-                                               softmax_scale,
-                                               is_causal,
-                                               stream);
         }
         if(seqlen_k >= 512)
         {
@@ -4764,9 +3642,11 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_bf16(const void* q,
                                                       float softmax_scale,
                                                       int is_causal,
                                                       int q_start,
+                                                      const KilnRocmFlashAttentionPolicy* policy,
                                                       void* stream)
 {
-    if(q == nullptr || k == nullptr || v == nullptr || out == nullptr)
+    if(q == nullptr || k == nullptr || v == nullptr || out == nullptr ||
+       !valid_flash_policy(policy))
     {
         return -1;
     }
@@ -4808,10 +3688,11 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_bf16(const void* q,
         return -4;
     }
 
-    if(native_gqa_qblock_enabled(head_dim, seqlen_q_tile, seqlen_k, num_heads, num_heads_k))
+    if(native_gqa_qblock_enabled(
+           *policy, head_dim, seqlen_q_tile, seqlen_k, num_heads, num_heads_k))
     {
-        if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK") &&
-           wmma_gqa_r64k32_enabled(seqlen_q_tile, seqlen_k))
+        if(policy->wmma_gqa_qblock_forward != 0 &&
+           wmma_gqa_r64k32_enabled(*policy, seqlen_q_tile, seqlen_k))
         {
             bool supports_gfx11_wmma = false;
             const int device_query_status =
@@ -4840,6 +3721,7 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_bf16(const void* q,
                                                     0,
                                                     seqlen_q_tile,
                                                     is_causal,
+                                                    *policy,
                                                     stream);
             }
         }
@@ -4900,9 +3782,11 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_into_bf16(const void* q,
                                                            float softmax_scale,
                                                            int is_causal,
                                                            int q_start,
+                                                           const KilnRocmFlashAttentionPolicy* policy,
                                                            void* stream)
 {
-    if(q == nullptr || k == nullptr || v == nullptr || out == nullptr)
+    if(q == nullptr || k == nullptr || v == nullptr || out == nullptr ||
+       !valid_flash_policy(policy))
     {
         return -1;
     }
@@ -4944,10 +3828,11 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_into_bf16(const void* q,
         return -4;
     }
 
-    if(native_gqa_qblock_enabled(head_dim, seqlen_q_tile, seqlen_k, num_heads, num_heads_k))
+    if(native_gqa_qblock_enabled(
+           *policy, head_dim, seqlen_q_tile, seqlen_k, num_heads, num_heads_k))
     {
-        if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK") &&
-           wmma_gqa_r64k32_enabled(seqlen_q_tile, seqlen_k))
+        if(policy->wmma_gqa_qblock_forward != 0 &&
+           wmma_gqa_r64k32_enabled(*policy, seqlen_q_tile, seqlen_k))
         {
             bool supports_gfx11_wmma = false;
             const int device_query_status =
@@ -4976,6 +3861,7 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_into_bf16(const void* q,
                                                     q_start,
                                                     seqlen_q_total,
                                                     is_causal,
+                                                    *policy,
                                                     stream);
             }
         }
@@ -5036,9 +3922,11 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_base_into_bf16(const void* q,
                                                                 float softmax_scale,
                                                                 int is_causal,
                                                                 int q_start,
+                                                                const KilnRocmFlashAttentionPolicy* policy,
                                                                 void* stream)
 {
-    if(q == nullptr || k == nullptr || v == nullptr || out == nullptr)
+    if(q == nullptr || k == nullptr || v == nullptr || out == nullptr ||
+       !valid_flash_policy(policy))
     {
         return -1;
     }
@@ -5080,10 +3968,11 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_base_into_bf16(const void* q,
         return -4;
     }
 
-    if(native_gqa_qblock_enabled(head_dim, seqlen_q_tile, seqlen_k, num_heads, num_heads_k))
+    if(native_gqa_qblock_enabled(
+           *policy, head_dim, seqlen_q_tile, seqlen_k, num_heads, num_heads_k))
     {
-        if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK") &&
-           wmma_gqa_r64k32_enabled(seqlen_q_tile, seqlen_k))
+        if(policy->wmma_gqa_qblock_forward != 0 &&
+           wmma_gqa_r64k32_enabled(*policy, seqlen_q_tile, seqlen_k))
         {
             bool supports_gfx11_wmma = false;
             const int device_query_status =
@@ -5112,6 +4001,7 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_base_into_bf16(const void* q,
                                                     q_start,
                                                     seqlen_q_total,
                                                     is_causal,
+                                                    *policy,
                                                     stream);
             }
         }
@@ -5307,10 +4197,12 @@ extern "C" int kiln_rocm_flash_attn_bwd_bf16(const void* dout,
                                              int head_dim,
                                              float softmax_scale,
                                              int is_causal,
+                                             const KilnRocmFlashAttentionPolicy* policy,
                                              void* stream)
 {
     if(dout == nullptr || q == nullptr || k == nullptr || v == nullptr || out == nullptr ||
-       softmax_lse == nullptr || dq == nullptr || dk == nullptr || dv == nullptr)
+       softmax_lse == nullptr || dq == nullptr || dk == nullptr || dv == nullptr ||
+       !valid_flash_policy(policy))
     {
         return -1;
     }
@@ -5342,6 +4234,7 @@ extern "C" int kiln_rocm_flash_attn_bwd_bf16(const void* dout,
                                   num_heads_k,
                                   softmax_scale,
                                   is_causal,
+                                  *policy,
                                   stream);
     case 256:
         return launch_bwd<256, 4>(dout,
@@ -5360,6 +4253,7 @@ extern "C" int kiln_rocm_flash_attn_bwd_bf16(const void* dout,
                                   num_heads_k,
                                   softmax_scale,
                                   is_causal,
+                                  *policy,
                                   stream);
     default:
         return -4;
@@ -5383,10 +4277,12 @@ extern "C" int kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(const void* dout,
                                                            int head_dim,
                                                            float softmax_scale,
                                                            int is_causal,
+                                                           const KilnRocmFlashAttentionPolicy* policy,
                                                            void* stream)
 {
     if(dout == nullptr || q == nullptr || k == nullptr || v == nullptr || out == nullptr ||
-       softmax_lse == nullptr || dq == nullptr || dk == nullptr || dv == nullptr)
+       softmax_lse == nullptr || dq == nullptr || dk == nullptr || dv == nullptr ||
+       !valid_flash_policy(policy))
     {
         return -1;
     }
@@ -5399,46 +4295,11 @@ extern "C" int kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(const void* dout,
         return -3;
     }
 
-#if KILN_HAS_CK_TILE_FMHA
-    if(!env_truthy("KILN_ROCM_FLASH_DISABLE_CK_BWD_COLLAPSED_GQA") && head_dim == 256 &&
-       is_causal)
-    {
-        bool supports_gfx11_wmma = false;
-        const int device_query_status =
-            query_current_device_gfx11_wmma(&supports_gfx11_wmma);
-        if(device_query_status != 0)
-        {
-            return device_query_status;
-        }
-        if(supports_gfx11_wmma)
-        {
-            return launch_bwd_collapsed_gqa_ck_trload<256>(dout,
-                                                           q,
-                                                           k,
-                                                           v,
-                                                           out,
-                                                           softmax_lse,
-                                                           dq,
-                                                           dk,
-                                                           dv,
-                                                           batch_size,
-                                                           seqlen_q,
-                                                           seqlen_k,
-                                                           num_heads,
-                                                           num_heads_k,
-                                                           softmax_scale,
-                                                           is_causal,
-                                                           stream);
-        }
-    }
-#endif
-
     switch(head_dim)
     {
     case 128:
     {
-        const int qpar =
-            env_i32_or("KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_QPAR", 1);
+        const int qpar = policy->native_direct_collapsed_gqa_query_parallelism;
         if(qpar <= 1)
         {
             return launch_bwd_collapsed_gqa_warp<128>(dout,
@@ -5519,8 +4380,7 @@ extern "C" int kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(const void* dout,
     }
     case 256:
     {
-        const int qpar =
-            env_i32_or("KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_QPAR", 1);
+        const int qpar = policy->native_direct_collapsed_gqa_query_parallelism;
         if(qpar <= 1)
         {
             return launch_bwd_collapsed_gqa_warp<256>(dout,

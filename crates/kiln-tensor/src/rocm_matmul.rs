@@ -891,16 +891,28 @@ fn rocm_matmul_dispatch(
         let a_ptr = (a_base + a_off_root) as *const core::ffi::c_void;
         let b_ptr = (b_base + b_off_root) as *const core::ffi::c_void;
         let c_ptr = out_base as *mut core::ffi::c_void;
-        let batched =
-            unsafe { handle.matmul(&stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null()) };
-        if batched.is_ok() {
-            sync_after_rocm_matmul_if_needed(&ctx, &[a_storage, b_storage], op, m, n, k, batch)?;
-            let storage_arc: Storage = Arc::new(out_storage);
-            return Tensor::from_parts(
-                storage_arc,
-                Layout::contiguous(out_shape),
-                TensorId::next(),
-            );
+        match unsafe { handle.matmul(&stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null()) } {
+            Ok(_) => {
+                sync_after_rocm_matmul_if_needed(
+                    &ctx,
+                    &[a_storage, b_storage],
+                    op,
+                    m,
+                    n,
+                    k,
+                    batch,
+                )?;
+                let storage_arc: Storage = Arc::new(out_storage);
+                return Tensor::from_parts(
+                    storage_arc,
+                    Layout::contiguous(out_shape),
+                    TensorId::next(),
+                );
+            }
+            Err(error) if !error.permits_layout_fallback() => {
+                return Err(rocm_matmul_execution_error(op, &request, batch, 0, error));
+            }
+            Err(_) => {}
         }
     }
 

@@ -144,97 +144,6 @@
       "surface": "build-script"
     },
     {
-      "api": "remove_var",
-      "argument": "KILN_ROCM_ATTENTION_COOPERATIVE_YIELD",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-flash-attn/src/rocm_sdpa.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_ROCM_ATTENTION_YIELD_MS",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-flash-attn/src/rocm_sdpa.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_ROCM_FLASH_NATIVE_FFI_SYNC",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-flash-attn/src/rocm_sdpa.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_ROCM_ATTENTION_COOPERATIVE_YIELD",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-flash-attn/src/rocm_sdpa.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_ROCM_FLASH_NATIVE_FFI_SYNC",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-flash-attn/src/rocm_sdpa.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "k",
-      "argument_kind": "expression",
-      "classification": "test_only",
-      "classification_basis": "integration-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "k",
-      "argument_kind": "expression",
-      "classification": "test_only",
-      "classification_basis": "integration-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
       "api": "set_var",
       "argument": "NVCC",
       "argument_kind": "literal",
@@ -2292,45 +2201,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_ROCM_DISABLE_CK_FMHA",
-      "argument_kind": "literal",
-      "classification": "build_time",
-      "classification_basis": "build-time environment access",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-flash-attn/build.rs",
-      "phase": "build-time",
-      "surface": "build-script"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ROCM_ENABLE_CK_FMHA",
-      "argument_kind": "literal",
-      "classification": "build_time",
-      "classification_basis": "build-time environment access",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-flash-attn/build.rs",
-      "phase": "build-time",
-      "surface": "build-script"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ROCM_ENABLE_CK_FMHA_FWD",
-      "argument_kind": "literal",
-      "classification": "build_time",
-      "classification_basis": "build-time environment access",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-flash-attn/build.rs",
-      "phase": "build-time",
-      "surface": "build-script"
-    },
-    {
-      "api": "var",
       "argument": "KILN_ROCM_WAVE64",
       "argument_kind": "literal",
       "classification": "build_time",
@@ -2408,19 +2278,6 @@
       "surface": "build-script"
     },
     {
-      "api": "getenv",
-      "argument": "name",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 2,
-      "language": "native",
-      "operation": "read",
-      "path": "crates/kiln-flash-attn/csrc/rocm_flash_api.cpp",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "KILN_FLASH_ATTN_BWD_DETERMINISTIC",
       "argument_kind": "literal",
@@ -2432,32 +2289,6 @@
       "path": "crates/kiln-flash-attn/src/kt_api.rs",
       "phase": "runtime",
       "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "name",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-flash-attn/src/rocm_sdpa.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "k",
-      "argument_kind": "expression",
-      "classification": "test_only",
-      "classification_basis": "integration-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
     },
     {
       "api": "var",
@@ -5905,27 +5736,27 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 212,
-    "literal_kiln_read_names": 105,
+    "literal_kiln_read_call_sites": 209,
+    "literal_kiln_read_names": 102,
     "literal_kiln_read_names_by_classification": {
-      "build_time": 9,
+      "build_time": 6,
       "experimental_debug": 64,
       "public_stable": 1,
       "test_only": 37
     },
-    "process_mutation_call_sites": 232,
+    "process_mutation_call_sites": 222,
     "process_mutation_call_sites_by_classification": {
       "build_time": 8,
-      "test_only": 224
+      "test_only": 214
     },
-    "process_mutation_entries": 141,
-    "read_call_sites": 574,
+    "process_mutation_entries": 134,
+    "read_call_sites": 566,
     "read_call_sites_by_classification": {
-      "build_time": 328,
-      "experimental_debug": 108,
+      "build_time": 325,
+      "experimental_debug": 104,
       "public_stable": 9,
-      "test_only": 129
+      "test_only": 128
     },
-    "read_entries": 312
+    "read_entries": 306
   }
 }

@@ -580,6 +580,199 @@ impl RocmMatmulPolicy {
     }
 }
 
+/// Selection discipline for a ROCm flash-attention route.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RocmFlashAttentionRouteMode {
+    /// Use the qualified shape and memory-admission heuristic.
+    #[default]
+    Auto,
+    /// Prefer the route whenever its hard correctness and memory guards pass.
+    Enabled,
+    /// Do not prefer the route. Exact fallback paths remain available.
+    Disabled,
+}
+
+/// Immutable ROCm flash-attention route and geometry policy.
+///
+/// The fields normalize the former collection of positive, negative, force,
+/// and threshold environment variables into one closed policy. They are read
+/// from the input tensor's owning [`RocmContext`] before dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RocmFlashAttentionPolicy {
+    pub f32_matmul_inner_tile: usize,
+    pub online_matmul_batch_group: usize,
+    pub native_scalar_forward: bool,
+    pub native_scalar_forward_max_sequence: usize,
+    pub native_single_forward_max_sequence: usize,
+    pub native_tiled_forward: bool,
+    pub native_forward_query_tile: usize,
+    pub native_streaming_forward: bool,
+    pub native_streaming_forward_min_sequence: usize,
+    pub native_streaming_forward_key_tile: usize,
+    pub native_rectangular_causal_forward: bool,
+    pub online_forward: bool,
+    pub online_backward: bool,
+    pub materialized_backward_mode: RocmFlashAttentionRouteMode,
+    pub native_backward_preference: RocmFlashAttentionRouteMode,
+    pub native_backward_d128_max_sequence: usize,
+    pub native_backward_d256_max_sequence: usize,
+    pub native_backward_long_min_sequence: usize,
+    pub collapsed_gqa_backward: bool,
+    pub native_direct_collapsed_gqa_backward: bool,
+    pub native_gqa_qblock_forward: bool,
+    pub native_gqa_qblock_forward_min_sequence: usize,
+    pub wmma_gqa_qblock_forward: bool,
+    pub wmma_gqa_r64k32_forward: bool,
+    pub wmma_gqa_r64k32_forward_min_sequence: usize,
+    pub wmma_gqa_r64k32_log2_forward: bool,
+    pub wmma_gqa_r64k32_log2_forward_min_sequence: usize,
+    pub backward_precompute_delta_max_sequence: usize,
+    pub native_direct_collapsed_gqa_query_parallelism: usize,
+}
+
+impl RocmFlashAttentionPolicy {
+    /// Qualified Strix Halo flash-attention policy.
+    pub const fn qualified() -> Self {
+        Self {
+            f32_matmul_inner_tile: 4096,
+            online_matmul_batch_group: 4,
+            native_scalar_forward: true,
+            native_scalar_forward_max_sequence: 4096,
+            native_single_forward_max_sequence: 32768,
+            native_tiled_forward: true,
+            native_forward_query_tile: 4096,
+            native_streaming_forward: true,
+            native_streaming_forward_min_sequence: 8192,
+            native_streaming_forward_key_tile: 4096,
+            native_rectangular_causal_forward: true,
+            online_forward: true,
+            online_backward: true,
+            materialized_backward_mode: RocmFlashAttentionRouteMode::Auto,
+            native_backward_preference: RocmFlashAttentionRouteMode::Auto,
+            native_backward_d128_max_sequence: 1024,
+            native_backward_d256_max_sequence: 512,
+            native_backward_long_min_sequence: 4096,
+            collapsed_gqa_backward: true,
+            native_direct_collapsed_gqa_backward: true,
+            native_gqa_qblock_forward: true,
+            native_gqa_qblock_forward_min_sequence: 256,
+            wmma_gqa_qblock_forward: true,
+            wmma_gqa_r64k32_forward: true,
+            wmma_gqa_r64k32_forward_min_sequence: 256,
+            wmma_gqa_r64k32_log2_forward: true,
+            wmma_gqa_r64k32_log2_forward_min_sequence: 256,
+            backward_precompute_delta_max_sequence: 1024,
+            native_direct_collapsed_gqa_query_parallelism: 1,
+        }
+    }
+
+    /// Reference-oriented policy retaining exact, bounded composite routes.
+    pub const fn portable_fallback() -> Self {
+        Self {
+            native_scalar_forward: false,
+            native_tiled_forward: false,
+            native_streaming_forward: false,
+            native_rectangular_causal_forward: false,
+            native_backward_preference: RocmFlashAttentionRouteMode::Disabled,
+            collapsed_gqa_backward: false,
+            native_direct_collapsed_gqa_backward: false,
+            native_gqa_qblock_forward: false,
+            wmma_gqa_qblock_forward: false,
+            wmma_gqa_r64k32_forward: false,
+            wmma_gqa_r64k32_log2_forward: false,
+            ..Self::qualified()
+        }
+    }
+
+    /// The multiblock experiment changes no flash-attention route.
+    pub const fn experimental_multiblock() -> Self {
+        Self::qualified()
+    }
+
+    /// Return the first invalid invariant without touching the device.
+    pub const fn validation_error(self) -> Option<&'static str> {
+        if self.f32_matmul_inner_tile == 0 {
+            return Some("flash_attention.f32_matmul_inner_tile must be positive");
+        }
+        if self.online_matmul_batch_group == 0 {
+            return Some("flash_attention.online_matmul_batch_group must be positive");
+        }
+        if self.native_scalar_forward_max_sequence == 0 {
+            return Some("flash_attention.native_scalar_forward_max_sequence must be positive");
+        }
+        if self.native_single_forward_max_sequence == 0 {
+            return Some("flash_attention.native_single_forward_max_sequence must be positive");
+        }
+        if self.native_forward_query_tile == 0 {
+            return Some("flash_attention.native_forward_query_tile must be positive");
+        }
+        if self.native_streaming_forward_min_sequence == 0 {
+            return Some("flash_attention.native_streaming_forward_min_sequence must be positive");
+        }
+        if self.native_streaming_forward_key_tile == 0 {
+            return Some("flash_attention.native_streaming_forward_key_tile must be positive");
+        }
+        if self.native_backward_d128_max_sequence == 0
+            || self.native_backward_d256_max_sequence == 0
+        {
+            return Some("flash_attention native backward maxima must be positive");
+        }
+        if self.native_backward_long_min_sequence == 0 {
+            return Some("flash_attention.native_backward_long_min_sequence must be positive");
+        }
+        if self.native_gqa_qblock_forward_min_sequence == 0 {
+            return Some("flash_attention.native_gqa_qblock_forward_min_sequence must be positive");
+        }
+        if self.native_gqa_qblock_forward_min_sequence > i32::MAX as usize {
+            return Some("flash_attention.native_gqa_qblock_forward_min_sequence must fit i32");
+        }
+        if self.wmma_gqa_qblock_forward && !self.native_gqa_qblock_forward {
+            return Some("flash_attention WMMA GQA qblock requires native GQA qblock");
+        }
+        if self.wmma_gqa_r64k32_forward && !self.wmma_gqa_qblock_forward {
+            return Some("flash_attention WMMA GQA r64k32 requires WMMA GQA qblock");
+        }
+        if self.wmma_gqa_r64k32_forward_min_sequence == 0 {
+            return Some("flash_attention.wmma_gqa_r64k32_forward_min_sequence must be positive");
+        }
+        if self.wmma_gqa_r64k32_forward_min_sequence > i32::MAX as usize {
+            return Some("flash_attention.wmma_gqa_r64k32_forward_min_sequence must fit i32");
+        }
+        if self.wmma_gqa_r64k32_log2_forward && !self.wmma_gqa_r64k32_forward {
+            return Some("flash_attention WMMA GQA log2 requires WMMA GQA r64k32");
+        }
+        if self.wmma_gqa_r64k32_log2_forward_min_sequence == 0 {
+            return Some(
+                "flash_attention.wmma_gqa_r64k32_log2_forward_min_sequence must be positive",
+            );
+        }
+        if self.wmma_gqa_r64k32_log2_forward_min_sequence > i32::MAX as usize {
+            return Some("flash_attention.wmma_gqa_r64k32_log2_forward_min_sequence must fit i32");
+        }
+        if self.backward_precompute_delta_max_sequence == 0 {
+            return Some("flash_attention.backward_precompute_delta_max_sequence must be positive");
+        }
+        if self.backward_precompute_delta_max_sequence > i32::MAX as usize {
+            return Some("flash_attention.backward_precompute_delta_max_sequence must fit i32");
+        }
+        if !matches!(
+            self.native_direct_collapsed_gqa_query_parallelism,
+            1 | 2 | 4
+        ) {
+            return Some(
+                "flash_attention.native_direct_collapsed_gqa_query_parallelism must be 1, 2, or 4",
+            );
+        }
+        None
+    }
+}
+
+impl Default for RocmFlashAttentionPolicy {
+    fn default() -> Self {
+        Self::qualified()
+    }
+}
+
 /// Immutable low-level ROCm tensor-kernel policy.
 ///
 /// These values are fixed before the primary context is created. Tensor and
@@ -598,6 +791,7 @@ pub struct RocmTensorKernelPolicy {
     pub concat_safe_row_assembly_min_elements: usize,
     pub is_finite_host_scan_min_elements: Option<usize>,
     pub rmsnorm_row_tile_rows: usize,
+    pub flash_attention: RocmFlashAttentionPolicy,
 }
 
 impl RocmTensorKernelPolicy {
@@ -615,6 +809,7 @@ impl RocmTensorKernelPolicy {
             concat_safe_row_assembly_min_elements: 1_000_000,
             is_finite_host_scan_min_elements: Some(16 * 1024 * 1024),
             rmsnorm_row_tile_rows: 4096,
+            flash_attention: RocmFlashAttentionPolicy::qualified(),
         }
     }
 
@@ -626,13 +821,17 @@ impl RocmTensorKernelPolicy {
             gqa_paged_attention: false,
             gqa_d128_parallel: false,
             gqa_d256_parallel: false,
+            flash_attention: RocmFlashAttentionPolicy::portable_fallback(),
             ..Self::qualified()
         }
     }
 
     /// The experimental model profile changes no low-level tensor route.
     pub const fn experimental_multiblock() -> Self {
-        Self::qualified()
+        Self {
+            flash_attention: RocmFlashAttentionPolicy::experimental_multiblock(),
+            ..Self::qualified()
+        }
     }
 
     /// Return the first invalid invariant without touching the device.
@@ -659,6 +858,9 @@ impl RocmTensorKernelPolicy {
         }
         if self.rmsnorm_row_tile_rows == 0 {
             return Some("rmsnorm_row_tile_rows must be positive");
+        }
+        if let Some(error) = self.flash_attention.validation_error() {
+            return Some(error);
         }
         None
     }
@@ -2855,6 +3057,90 @@ mod tests {
             }
             .validation_error(),
             Some("rmsnorm_row_tile_rows must be positive")
+        );
+    }
+
+    #[test]
+    fn flash_attention_profiles_preserve_bounded_composites_and_close_native_routes() {
+        let qualified = RocmFlashAttentionPolicy::qualified();
+        let fallback = RocmFlashAttentionPolicy::portable_fallback();
+        let experimental = RocmFlashAttentionPolicy::experimental_multiblock();
+
+        assert_eq!(qualified.validation_error(), None);
+        assert_eq!(fallback.validation_error(), None);
+        assert_eq!(experimental, qualified);
+        assert_eq!(qualified.f32_matmul_inner_tile, 4096);
+        assert_eq!(qualified.native_forward_query_tile, 4096);
+        assert_eq!(qualified.native_streaming_forward_key_tile, 4096);
+        assert_eq!(qualified.backward_precompute_delta_max_sequence, 1024);
+        assert!(qualified.online_forward && qualified.online_backward);
+        assert!(fallback.online_forward && fallback.online_backward);
+        assert_eq!(
+            [
+                qualified.native_scalar_forward,
+                qualified.native_tiled_forward,
+                qualified.native_streaming_forward,
+                qualified.native_rectangular_causal_forward,
+                qualified.collapsed_gqa_backward,
+                qualified.native_direct_collapsed_gqa_backward,
+                qualified.native_gqa_qblock_forward,
+                qualified.wmma_gqa_qblock_forward,
+                qualified.wmma_gqa_r64k32_forward,
+                qualified.wmma_gqa_r64k32_log2_forward,
+            ],
+            [true; 10]
+        );
+        assert_eq!(
+            [
+                fallback.native_scalar_forward,
+                fallback.native_tiled_forward,
+                fallback.native_streaming_forward,
+                fallback.native_rectangular_causal_forward,
+                fallback.collapsed_gqa_backward,
+                fallback.native_direct_collapsed_gqa_backward,
+                fallback.native_gqa_qblock_forward,
+                fallback.wmma_gqa_qblock_forward,
+                fallback.wmma_gqa_r64k32_forward,
+                fallback.wmma_gqa_r64k32_log2_forward,
+            ],
+            [false; 10]
+        );
+        assert_eq!(
+            fallback.native_backward_preference,
+            RocmFlashAttentionRouteMode::Disabled
+        );
+        assert_eq!(
+            RocmFlashAttentionPolicy {
+                wmma_gqa_qblock_forward: true,
+                native_gqa_qblock_forward: false,
+                ..qualified
+            }
+            .validation_error(),
+            Some("flash_attention WMMA GQA qblock requires native GQA qblock")
+        );
+    }
+
+    #[test]
+    fn invalid_flash_attention_policy_fails_before_device_probe() {
+        let flash_attention = RocmFlashAttentionPolicy {
+            native_forward_query_tile: 0,
+            ..RocmFlashAttentionPolicy::qualified()
+        };
+        let invalid = RocmTensorKernelPolicy {
+            flash_attention,
+            ..RocmTensorKernelPolicy::qualified()
+        };
+        let error = RocmContext::new_with_execution_policy(
+            usize::MAX,
+            RocmExecutionPolicy::default().with_tensor_kernel_policy(invalid),
+        )
+        .expect_err("invalid flash policy must fail before the impossible ordinal is probed");
+
+        assert_eq!(error.api, "RocmContext::new");
+        assert_eq!(error.code, -1);
+        assert_eq!(
+            error.message,
+            "invalid ROCm tensor-kernel policy: flash_attention.native_forward_query_tile must be positive"
         );
     }
 

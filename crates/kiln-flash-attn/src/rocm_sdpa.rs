@@ -25,10 +25,11 @@
 
 #![cfg(feature = "rocm")]
 
-use std::cell::Cell;
-
 use half::bf16;
-use kiln_tensor::{DType as KtDType, Device as KtDevice, RocmStreamSubmission, Tensor as KtTensor};
+use kiln_tensor::{
+    DType as KtDType, Device as KtDevice, RocmFlashAttentionPolicy, RocmFlashAttentionRouteMode,
+    RocmStorage, RocmStreamSubmission, Tensor as KtTensor,
+};
 
 use crate::kt_api::FlashAttnError;
 use crate::score_policy::effective_score_geometry;
@@ -44,47 +45,8 @@ const MATERIALIZED_SCORE_SCRATCH_BUFFERS: usize = 3;
 const MATERIALIZED_BWD_SCORE_SCRATCH_BUFFERS: usize = 8;
 const MATERIALIZED_SCORE_TILE_GRANULARITY: usize = 128;
 const MAX_MATERIALIZED_QUERY_TILES: usize = 1024;
-const DEFAULT_NATIVE_FWD_MAX_SEQ: usize = 4096;
-const DEFAULT_NATIVE_SINGLE_FWD_MAX_SEQ: usize = 32768;
-const DEFAULT_NATIVE_FWD_QUERY_TILE: usize = 4096;
-const DEFAULT_NATIVE_STREAMING_FWD_MIN_SEQ: usize = 8192;
-const DEFAULT_NATIVE_STREAMING_FWD_KEY_TILE: usize = 4096;
-const DEFAULT_NATIVE_BWD_HD128_MAX_SEQ: usize = 1024;
-const DEFAULT_NATIVE_BWD_HD256_MAX_SEQ: usize = 512;
-const DEFAULT_NATIVE_BWD_LONG_MIN_SEQ: usize = 4096;
-const DEFAULT_ONLINE_MATMUL_BATCH_GROUP: usize = 4;
 const ONLINE_TILE_GRANULARITY: usize = 128;
 const MAX_ONLINE_TILE_PAIRS: usize = 16 * 1024;
-const DEFAULT_F32_MATMUL_INNER_TILE: usize = 4096;
-
-thread_local! {
-    static ROCM_ONLINE_FWD_OVERRIDE: Cell<Option<bool>> = Cell::new(None);
-}
-
-pub fn with_rocm_online_fwd_disabled<T>(f: impl FnOnce() -> T) -> T {
-    let previous = ROCM_ONLINE_FWD_OVERRIDE.with(|cell| {
-        let previous = cell.get();
-        cell.set(Some(false));
-        previous
-    });
-    struct Guard(Option<bool>);
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            ROCM_ONLINE_FWD_OVERRIDE.with(|cell| cell.set(self.0));
-        }
-    }
-    let _guard = Guard(previous);
-    f()
-}
-
-fn dev_index(device: KtDevice) -> Result<usize, FlashAttnError> {
-    match device {
-        KtDevice::Rocm(i) => Ok(i),
-        other => Err(FlashAttnError::Msg(format!(
-            "rocm-sdpa: expected Device::Rocm, got {other:?}"
-        ))),
-    }
-}
 
 fn map_kt<T>(r: Result<T, kiln_tensor::Error>) -> Result<T, FlashAttnError> {
     r.map_err(|e| FlashAttnError::Msg(format!("rocm-sdpa: {e}")))
@@ -129,65 +91,89 @@ fn rocm_cast_to(t: &KtTensor, target: KtDType) -> Result<KtTensor, FlashAttnErro
     map_kt(kiln_tensor::rocm_cast(&c, target))
 }
 
-fn env_usize(name: &str) -> Option<usize> {
-    std::env::var(name)
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
+fn rocm_storage(tensor: &KtTensor) -> Result<&RocmStorage, FlashAttnError> {
+    tensor
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| FlashAttnError::Msg("rocm-sdpa: input must use ROCm storage".into()))
 }
 
-fn env_bool(name: &str) -> Option<bool> {
-    std::env::var(name)
-        .ok()
-        .map(|s| s.trim().to_ascii_lowercase())
-        .and_then(|s| match s.as_str() {
-            "1" | "true" | "yes" | "on" => Some(true),
-            "0" | "false" | "no" | "off" => Some(false),
-            _ => None,
+fn rocm_zeros_in_tensor_context(
+    source: &KtTensor,
+    dtype: KtDType,
+    shape: Vec<usize>,
+) -> Result<KtTensor, FlashAttnError> {
+    kiln_kt_bridge::alloc_rocm_tensor(rocm_storage(source)?, dtype, shape)
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))
+}
+
+fn rocm_flash_attention_policy(
+    tensor: &KtTensor,
+) -> Result<RocmFlashAttentionPolicy, FlashAttnError> {
+    Ok(rocm_storage(tensor)?
+        .context()
+        .execution_policy()
+        .tensor_kernels
+        .flash_attention)
+}
+
+fn rocm_execution_quarantined(tensor: &KtTensor) -> Result<bool, FlashAttnError> {
+    Ok(rocm_storage(tensor)?.context().cleanup_quarantined())
+}
+
+fn rocm_flash_attention_ffi_policy(
+    policy: RocmFlashAttentionPolicy,
+) -> Result<crate::RocmFlashAttentionFfiPolicy, FlashAttnError> {
+    let to_i32 = |name: &'static str, value: usize| {
+        i32::try_from(value).map_err(|_| {
+            FlashAttnError::Msg(format!(
+                "rocm-sdpa: {name} exceeds the C++ dispatch boundary"
+            ))
         })
+    };
+    Ok(crate::RocmFlashAttentionFfiPolicy {
+        native_gqa_qblock_forward: i32::from(policy.native_gqa_qblock_forward),
+        native_gqa_qblock_forward_min_sequence: to_i32(
+            "native_gqa_qblock_forward_min_sequence",
+            policy.native_gqa_qblock_forward_min_sequence,
+        )?,
+        wmma_gqa_qblock_forward: i32::from(policy.wmma_gqa_qblock_forward),
+        wmma_gqa_r64k32_forward: i32::from(policy.wmma_gqa_r64k32_forward),
+        wmma_gqa_r64k32_forward_min_sequence: to_i32(
+            "wmma_gqa_r64k32_forward_min_sequence",
+            policy.wmma_gqa_r64k32_forward_min_sequence,
+        )?,
+        wmma_gqa_r64k32_log2_forward: i32::from(policy.wmma_gqa_r64k32_log2_forward),
+        wmma_gqa_r64k32_log2_forward_min_sequence: to_i32(
+            "wmma_gqa_r64k32_log2_forward_min_sequence",
+            policy.wmma_gqa_r64k32_log2_forward_min_sequence,
+        )?,
+        backward_precompute_delta_max_sequence: to_i32(
+            "backward_precompute_delta_max_sequence",
+            policy.backward_precompute_delta_max_sequence,
+        )?,
+        native_direct_collapsed_gqa_query_parallelism: to_i32(
+            "native_direct_collapsed_gqa_query_parallelism",
+            policy.native_direct_collapsed_gqa_query_parallelism,
+        )?,
+    })
 }
 
-fn rocm_sync_device(device: KtDevice) -> Result<(), FlashAttnError> {
-    if kiln_tensor::rocm_capture_arena_active() {
-        return Ok(());
-    }
-    let dev_idx = dev_index(device)?;
-    // The tiled online path uses the active ROCm compute stream for tensor
-    // ops, hipBLASLt calls, and the small custom HIP state kernels. A
-    // stream-level fence preserves producer/consumer ordering without draining
-    // unrelated device work after every QK/softmax/PV substep.
-    map_kt(kiln_tensor::rocm_synchronize_compute_stream(dev_idx))
+fn rocm_sync_tensor(tensor: &KtTensor) -> Result<(), FlashAttnError> {
+    map_kt(kiln_tensor::rocm_synchronize_tensor_stream_for(
+        tensor,
+        kiln_tensor::RocmSyncReason::ExplicitStreamDrain,
+    ))
 }
 
-fn rocm_attention_cooperative_yield(device: KtDevice) -> Result<(), FlashAttnError> {
-    if !env_bool("KILN_ROCM_ATTENTION_COOPERATIVE_YIELD").unwrap_or(false) {
-        return Ok(());
-    }
-    rocm_sync_device(device)?;
-    let sleep_ms = env_usize("KILN_ROCM_ATTENTION_YIELD_MS").unwrap_or(0);
-    if sleep_ms > 0 {
-        std::thread::sleep(std::time::Duration::from_millis(sleep_ms as u64));
-    } else {
-        std::thread::yield_now();
-    }
-    Ok(())
-}
-
-fn rocm_native_ffi_sync_if_enabled(device: KtDevice) -> Result<(), FlashAttnError> {
-    if env_bool("KILN_ROCM_FLASH_NATIVE_FFI_SYNC").unwrap_or(false) {
-        rocm_sync_device(device)?;
-    }
-    Ok(())
-}
-
-fn f32_matmul_inner_tile_len() -> usize {
-    env_usize("KILN_ROCM_F32_MATMUL_INNER_TILE").unwrap_or(DEFAULT_F32_MATMUL_INNER_TILE)
+fn f32_matmul_inner_tile_len(tensor: &KtTensor) -> Result<usize, FlashAttnError> {
+    Ok(rocm_flash_attention_policy(tensor)?.f32_matmul_inner_tile)
 }
 
 fn rocm_matmul_split_inner_f32(
     lhs: &KtTensor,
     rhs: &KtTensor,
-    device: KtDevice,
     label: &str,
 ) -> Result<KtTensor, FlashAttnError> {
     let lhs_shape = lhs.shape();
@@ -209,10 +195,10 @@ fn rocm_matmul_split_inner_f32(
     }
 
     let inner = lhs_shape[2];
-    let tile = f32_matmul_inner_tile_len().max(1);
+    let tile = f32_matmul_inner_tile_len(lhs)?;
     if inner <= tile {
-        let out = rocm_matmul_f32_batch_grouped(lhs, rhs, device, label)?;
-        rocm_sync_device(device)?;
+        let out = rocm_matmul_f32_batch_grouped(lhs, rhs, label)?;
+        rocm_sync_tensor(&out)?;
         return Ok(out);
     }
 
@@ -222,13 +208,13 @@ fn rocm_matmul_split_inner_f32(
         let len = (inner - start).min(tile);
         let lhs_block = rocm_contig(&map_kt(lhs.narrow(2, start, len))?)?;
         let rhs_block = rocm_contig(&map_kt(rhs.narrow(1, start, len))?)?;
-        rocm_sync_device(device)?;
-        let partial = rocm_matmul_f32_batch_grouped(&lhs_block, &rhs_block, device, label)?;
-        rocm_sync_device(device)?;
+        rocm_sync_tensor(&rhs_block)?;
+        let partial = rocm_matmul_f32_batch_grouped(&lhs_block, &rhs_block, label)?;
+        rocm_sync_tensor(&partial)?;
         acc = Some(match acc.take() {
             Some(prev) => {
                 let sum = map_kt(prev.add(&partial))?;
-                rocm_sync_device(device)?;
+                rocm_sync_tensor(&sum)?;
                 drop(prev);
                 drop(partial);
                 sum
@@ -242,15 +228,15 @@ fn rocm_matmul_split_inner_f32(
     Ok(out)
 }
 
-fn online_matmul_batch_group() -> usize {
-    env_usize("KILN_ROCM_FLASH_ONLINE_MATMUL_BATCH_GROUP")
-        .unwrap_or(DEFAULT_ONLINE_MATMUL_BATCH_GROUP)
-        .max(1)
+fn online_matmul_batch_group(tensor: &KtTensor) -> Result<usize, FlashAttnError> {
+    Ok(rocm_flash_attention_policy(tensor)?.online_matmul_batch_group)
 }
 
-fn should_group_online_batch_matmul(batch: usize) -> bool {
-    let group = online_matmul_batch_group();
-    group > 0 && batch > group
+fn should_group_online_batch_matmul(
+    tensor: &KtTensor,
+    batch: usize,
+) -> Result<bool, FlashAttnError> {
+    Ok(batch > online_matmul_batch_group(tensor)?)
 }
 
 fn rocm_cat_axis0(chunks: &[KtTensor], label: &str) -> Result<KtTensor, FlashAttnError> {
@@ -267,7 +253,6 @@ fn rocm_cat_axis0(chunks: &[KtTensor], label: &str) -> Result<KtTensor, FlashAtt
 fn rocm_matmul_f32_batch_grouped(
     lhs: &KtTensor,
     rhs: &KtTensor,
-    device: KtDevice,
     label: &str,
 ) -> Result<KtTensor, FlashAttnError> {
     let lhs_shape = lhs.shape();
@@ -276,11 +261,11 @@ fn rocm_matmul_f32_batch_grouped(
         return map_kt(kiln_tensor::rocm_matmul(lhs, rhs));
     }
     let batch = lhs_shape[0];
-    if !should_group_online_batch_matmul(batch) {
+    if !should_group_online_batch_matmul(lhs, batch)? {
         return map_kt(kiln_tensor::rocm_matmul(lhs, rhs));
     }
 
-    let group = online_matmul_batch_group().min(batch);
+    let group = online_matmul_batch_group(lhs)?.min(batch);
     let mut chunks = Vec::with_capacity(batch.div_ceil(group));
     let mut start = 0usize;
     while start < batch {
@@ -292,7 +277,7 @@ fn rocm_matmul_f32_batch_grouped(
         start += len;
     }
     let out = rocm_cat_axis0(&chunks, label)?;
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&out)?;
     Ok(out)
 }
 
@@ -300,7 +285,6 @@ fn rocm_matmul_rhs_transposed_to_dtype_batch_grouped(
     lhs: &KtTensor,
     rhs: &KtTensor,
     out_dtype: KtDType,
-    device: KtDevice,
     label: &str,
 ) -> Result<KtTensor, FlashAttnError> {
     let lhs_shape = lhs.shape();
@@ -311,13 +295,13 @@ fn rocm_matmul_rhs_transposed_to_dtype_batch_grouped(
         ));
     }
     let batch = lhs_shape[0];
-    if !should_group_online_batch_matmul(batch) {
+    if !should_group_online_batch_matmul(lhs, batch)? {
         return map_kt(kiln_tensor::rocm_matmul_rhs_transposed_to_dtype(
             lhs, rhs, out_dtype,
         ));
     }
 
-    let group = online_matmul_batch_group().min(batch);
+    let group = online_matmul_batch_group(lhs)?.min(batch);
     let mut chunks = Vec::with_capacity(batch.div_ceil(group));
     let mut start = 0usize;
     while start < batch {
@@ -331,7 +315,7 @@ fn rocm_matmul_rhs_transposed_to_dtype_batch_grouped(
         start += len;
     }
     let out = rocm_cat_axis0(&chunks, label)?;
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&out)?;
     Ok(out)
 }
 
@@ -506,77 +490,48 @@ fn materialized_bwd_route_enabled(
     }
 }
 
-fn native_scalar_fwd_enabled(sq: usize, sk: usize) -> bool {
-    if matches!(env_bool("KILN_ROCM_FLASH_NATIVE_SCALAR"), Some(false)) {
-        return false;
-    }
-    if env_bool("KILN_ROCM_FLASH_NATIVE_SCALAR_FORCE").unwrap_or(false) {
-        return true;
-    }
-    let max_seq = env_usize("KILN_ROCM_FLASH_NATIVE_MAX_SEQ")
-        .unwrap_or(DEFAULT_NATIVE_FWD_MAX_SEQ)
-        .max(1);
-    sq.max(sk) <= max_seq
+fn native_scalar_fwd_enabled(policy: RocmFlashAttentionPolicy, sq: usize, sk: usize) -> bool {
+    policy.native_scalar_forward && sq.max(sk) <= policy.native_scalar_forward_max_sequence
 }
 
-fn native_fwd_query_tile_len() -> usize {
-    env_usize("KILN_ROCM_FLASH_NATIVE_QUERY_TILE").unwrap_or(DEFAULT_NATIVE_FWD_QUERY_TILE)
+fn native_fwd_query_tile_len(policy: RocmFlashAttentionPolicy) -> usize {
+    policy.native_forward_query_tile
 }
 
-fn native_single_fwd_launch_enabled(sq: usize, sk: usize) -> bool {
-    let max_seq = env_usize("KILN_ROCM_FLASH_NATIVE_SINGLE_MAX_SEQ")
-        .unwrap_or(DEFAULT_NATIVE_SINGLE_FWD_MAX_SEQ)
-        .max(1);
-    sq.max(sk) <= max_seq
+fn native_single_fwd_launch_enabled(
+    policy: RocmFlashAttentionPolicy,
+    sq: usize,
+    sk: usize,
+) -> bool {
+    sq.max(sk) <= policy.native_single_forward_max_sequence
 }
 
-fn native_tiled_fwd_enabled(sq: usize, sk: usize) -> bool {
-    if matches!(env_bool("KILN_ROCM_FLASH_NATIVE_TILED"), Some(false)) {
-        return false;
-    }
-    if env_bool("KILN_ROCM_FLASH_NATIVE_TILED_FORCE").unwrap_or(false) {
-        return true;
-    }
-    sq.max(sk) > native_fwd_query_tile_len()
+fn native_tiled_fwd_enabled(policy: RocmFlashAttentionPolicy, sq: usize, sk: usize) -> bool {
+    policy.native_tiled_forward && sq.max(sk) > native_fwd_query_tile_len(policy)
 }
 
-fn native_streaming_fwd_key_tile_len() -> usize {
-    env_usize("KILN_ROCM_FLASH_NATIVE_KEY_TILE").unwrap_or(DEFAULT_NATIVE_STREAMING_FWD_KEY_TILE)
+fn native_streaming_fwd_key_tile_len(policy: RocmFlashAttentionPolicy) -> usize {
+    policy.native_streaming_forward_key_tile
 }
 
-fn native_streaming_fwd_enabled(sq: usize, sk: usize) -> bool {
-    if matches!(env_bool("KILN_ROCM_FLASH_NATIVE_STREAMING"), Some(false)) {
-        return false;
-    }
-    if env_bool("KILN_ROCM_FLASH_NATIVE_STREAMING_FORCE").unwrap_or(false) {
-        return true;
-    }
-    let min_seq = env_usize("KILN_ROCM_FLASH_NATIVE_STREAMING_MIN_SEQ")
-        .unwrap_or(DEFAULT_NATIVE_STREAMING_FWD_MIN_SEQ)
-        .max(1);
-    sq.max(sk) >= min_seq
+fn native_streaming_fwd_enabled(policy: RocmFlashAttentionPolicy, sq: usize, sk: usize) -> bool {
+    policy.native_streaming_forward && sq.max(sk) >= policy.native_streaming_forward_min_sequence
 }
 
-fn native_rectangular_causal_fwd_enabled() -> bool {
-    env_bool("KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL").unwrap_or(true)
+fn native_rectangular_causal_fwd_enabled(policy: RocmFlashAttentionPolicy) -> bool {
+    policy.native_rectangular_causal_forward
 }
 
-fn rocm_ck_no_lse_fwd_enabled() -> bool {
-    env_bool("KILN_ROCM_FLASH_CK").unwrap_or(false)
+fn rocm_online_fwd_enabled(policy: RocmFlashAttentionPolicy) -> bool {
+    policy.online_forward
 }
 
-fn rocm_online_fwd_enabled() -> bool {
-    if let Some(force) = ROCM_ONLINE_FWD_OVERRIDE.with(|cell| cell.get()) {
-        return force;
-    }
-    env_bool("KILN_ROCM_FLASH_ONLINE").unwrap_or(true)
-}
-
-fn rocm_online_bwd_enabled() -> bool {
-    env_bool("KILN_ROCM_FLASH_ONLINE_BWD").unwrap_or(true)
+fn rocm_online_bwd_enabled(policy: RocmFlashAttentionPolicy) -> bool {
+    policy.online_backward
 }
 
 fn rocm_materialized_bwd_enabled(
+    policy: RocmFlashAttentionPolicy,
     device: KtDevice,
     b: usize,
     h: usize,
@@ -594,47 +549,52 @@ fn rocm_materialized_bwd_enabled(
         })
         .unwrap_or(false);
     materialized_bwd_route_enabled(
-        env_bool("KILN_ROCM_FLASH_MATMUL_BWD"),
+        match policy.materialized_backward_mode {
+            RocmFlashAttentionRouteMode::Auto => None,
+            RocmFlashAttentionRouteMode::Enabled => Some(true),
+            RocmFlashAttentionRouteMode::Disabled => Some(false),
+        },
         heuristic_score_fit,
         full_operation_admitted,
     )
 }
 
-fn rocm_native_bwd_preferred(_b: usize, _h: usize, sq: usize, sk: usize, d: usize) -> bool {
-    if env_bool("KILN_ROCM_FLASH_NATIVE_BWD_FORCE").unwrap_or(false) {
-        return true;
+fn rocm_native_bwd_preferred(
+    policy: RocmFlashAttentionPolicy,
+    _b: usize,
+    _h: usize,
+    sq: usize,
+    sk: usize,
+    d: usize,
+) -> bool {
+    match policy.native_backward_preference {
+        RocmFlashAttentionRouteMode::Enabled => return true,
+        RocmFlashAttentionRouteMode::Disabled => return false,
+        RocmFlashAttentionRouteMode::Auto => {}
     }
-    if matches!(env_bool("KILN_ROCM_FLASH_MATMUL_BWD"), Some(true)) {
+    if policy.materialized_backward_mode == RocmFlashAttentionRouteMode::Enabled {
         return false;
     }
-    if let Some(force) = env_bool("KILN_ROCM_FLASH_NATIVE_BWD") {
-        return force;
-    }
-    let default_max_seq = match d {
-        128 => DEFAULT_NATIVE_BWD_HD128_MAX_SEQ,
-        256 => DEFAULT_NATIVE_BWD_HD256_MAX_SEQ,
+    let max_sequence = match d {
+        128 => policy.native_backward_d128_max_sequence,
+        256 => policy.native_backward_d256_max_sequence,
         _ => return false,
     };
-    if let Some(max_seq) = env_usize("KILN_ROCM_FLASH_NATIVE_BWD_MAX_SEQ") {
-        return sq.max(sk) <= max_seq.max(1);
-    }
-    if sq.max(sk) <= default_max_seq {
+    if sq.max(sk) <= max_sequence {
         return true;
     }
-    let long_min_seq = env_usize("KILN_ROCM_FLASH_NATIVE_BWD_LONG_MIN_SEQ")
-        .unwrap_or(DEFAULT_NATIVE_BWD_LONG_MIN_SEQ)
-        .max(1);
-    sq.max(sk) >= long_min_seq
+    sq.max(sk) >= policy.native_backward_long_min_sequence
 }
 
-fn rocm_collapsed_gqa_bwd_enabled() -> bool {
-    env_bool("KILN_ROCM_FLASH_COLLAPSED_GQA_BWD").unwrap_or(true)
+fn rocm_collapsed_gqa_bwd_enabled(policy: RocmFlashAttentionPolicy) -> bool {
+    policy.collapsed_gqa_backward
 }
 
-fn rocm_native_direct_collapsed_gqa_bwd_enabled() -> bool {
-    env_bool("KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_BWD").unwrap_or(true)
+fn rocm_native_direct_collapsed_gqa_bwd_enabled(policy: RocmFlashAttentionPolicy) -> bool {
+    policy.native_direct_collapsed_gqa_backward
 }
 
+#[cfg(test)]
 fn query_tile_len_for_budget(
     b: usize,
     h: usize,
@@ -1276,6 +1236,15 @@ fn online_tile_lens(
     (q_tile.max(1), k_tile.max(1))
 }
 
+fn tile_len_without_unit_tail(remaining: usize, tile_cap: usize) -> usize {
+    let tile_len = remaining.min(tile_cap.max(1)).max(1);
+    if tile_len > 1 && remaining.saturating_sub(tile_len) == 1 {
+        tile_len - 1
+    } else {
+        tile_len
+    }
+}
+
 fn causal_block_limit(sk: usize, q_start: usize, q_len: usize, causal_offset: isize) -> usize {
     let q_end = q_start.saturating_add(q_len);
     let limit = causal_offset.saturating_add(q_end as isize);
@@ -1368,13 +1337,13 @@ fn sdpa_forward_online_tiled(
         let rows = bh * q_len;
 
         let q_tile = rocm_contig(&map_kt(q3.narrow(1, q_start, q_len))?)?;
-        rocm_sync_device(device)?;
-        let row_m_zero = map_kt(KtTensor::zeros(vec![rows], KtDType::F32, device))?;
+        rocm_sync_tensor(&q_tile)?;
+        let row_m_zero = rocm_zeros_in_tensor_context(&q3, KtDType::F32, vec![rows])?;
         let row_m = map_kt(kiln_tensor::ops::full_like(&row_m_zero, f32::NEG_INFINITY))?;
-        let row_l = map_kt(KtTensor::zeros(vec![rows], KtDType::F32, device))?;
-        let alpha = map_kt(KtTensor::zeros(vec![rows], KtDType::F32, device))?;
-        let beta = map_kt(KtTensor::zeros(vec![rows], KtDType::F32, device))?;
-        let acc = map_kt(KtTensor::zeros(vec![bh, q_len, d], KtDType::F32, device))?;
+        let row_l = rocm_zeros_in_tensor_context(&q3, KtDType::F32, vec![rows])?;
+        let alpha = rocm_zeros_in_tensor_context(&q3, KtDType::F32, vec![rows])?;
+        let beta = rocm_zeros_in_tensor_context(&q3, KtDType::F32, vec![rows])?;
+        let acc = rocm_zeros_in_tensor_context(&q3, KtDType::F32, vec![bh, q_len, d])?;
 
         let block_limit = if causal {
             causal_block_limit(sk, q_start, q_len, causal_offset)
@@ -1383,19 +1352,18 @@ fn sdpa_forward_online_tiled(
         };
         let mut k_start = 0usize;
         while k_start < block_limit {
-            let k_len = (block_limit - k_start).min(key_tile_cap).max(1);
+            let k_len = tile_len_without_unit_tail(block_limit - k_start, key_tile_cap);
             let k_block = rocm_contig(&map_kt(k3.narrow(1, k_start, k_len))?)?;
             let v_block = rocm_contig(&map_kt(v3f.narrow(1, k_start, k_len))?)?;
-            rocm_sync_device(device)?;
+            rocm_sync_tensor(&v_block)?;
 
             let scores = rocm_matmul_rhs_transposed_to_dtype_batch_grouped(
                 &q_tile,
                 &k_block,
                 KtDType::F32,
-                device,
                 &format!("online qk q_start={q_start} k_start={k_start}"),
             )?;
-            rocm_sync_device(device)?;
+            rocm_sync_tensor(&scores)?;
             let scores = scale_mask_scores_f32(
                 scores,
                 bh,
@@ -1407,9 +1375,9 @@ fn sdpa_forward_online_tiled(
                 scale,
                 causal,
             )?;
-            rocm_sync_device(device)?;
+            rocm_sync_tensor(&scores)?;
             let block_m = map_kt(kiln_tensor::rocm_max_axis(&scores, 2))?;
-            rocm_sync_device(device)?;
+            rocm_sync_tensor(&block_m)?;
             let probs = exp_mask_scores_f32(
                 scores,
                 &block_m,
@@ -1421,25 +1389,24 @@ fn sdpa_forward_online_tiled(
                 causal_offset,
                 causal,
             )?;
-            rocm_sync_device(device)?;
+            rocm_sync_tensor(&probs)?;
             let block_l = map_kt(kiln_tensor::rocm_sum_axis(&probs, 2))?;
             let block_out = rocm_matmul_split_inner_f32(
                 &probs,
                 &v_block,
-                device,
                 &format!("online block_out q_start={q_start} k_start={k_start}"),
             )?;
-            rocm_sync_device(device)?;
+            rocm_sync_tensor(&block_out)?;
             let block_m_flat = map_kt(block_m.reshape(vec![rows]))?;
             let block_l_flat = map_kt(block_l.reshape(vec![rows]))?;
 
             // The online path mixes kt matmul/reduce kernels with custom HIP
-            // state kernels that launch from different tensor-owned streams.
+            // state kernels on the tensor-owned stream.
             // Order each producer/consumer handoff explicitly; otherwise a
             // later stream can read block_l/block_out or alpha/beta before the
             // producing stream has finished, which shows up as intermittent
             // NaNs on long ROCm rows.
-            rocm_sync_device(device)?;
+            rocm_sync_tensor(&block_l_flat)?;
             online_update_state_f32(
                 &row_m,
                 &row_l,
@@ -1449,24 +1416,23 @@ fn sdpa_forward_online_tiled(
                 &beta,
                 rows,
             )?;
-            rocm_sync_device(device)?;
+            rocm_sync_tensor(&alpha)?;
             online_update_acc_f32(&acc, &block_out, &alpha, &beta, rows, d)?;
-            rocm_sync_device(device)?;
+            rocm_sync_tensor(&acc)?;
 
             k_start += k_len;
-            rocm_attention_cooperative_yield(device)?;
         }
 
-        let out3 = map_kt(KtTensor::zeros(vec![bh, q_len, d], KtDType::F32, device))?;
-        let lse2 = map_kt(KtTensor::zeros(vec![rows], KtDType::F32, device))?;
+        let out3 = rocm_zeros_in_tensor_context(&q3, KtDType::F32, vec![bh, q_len, d])?;
+        let lse2 = rocm_zeros_in_tensor_context(&q3, KtDType::F32, vec![rows])?;
         online_finalize_f32(&acc, &row_m, &row_l, &out3, &lse2, rows, d)?;
         // Finalize writes out3/lse2 from the custom HIP stream; the following
         // transpose/cast/cat work can launch from tensor-owned kt streams.
         // Keep the online state tensors alive and ordered until final output
         // materialization has consumed them.
-        rocm_sync_device(device)?;
+        rocm_sync_tensor(&out3)?;
         let out_tile = bhsd3_to_bshd_bf16(&out3, b, h, q_len, d)?;
-        rocm_sync_device(device)?;
+        rocm_sync_tensor(&out_tile)?;
         out_tiles.push(out_tile);
         lse_tiles.push(map_kt(lse2.reshape(vec![b, h, q_len]))?);
 
@@ -1477,7 +1443,7 @@ fn sdpa_forward_online_tiled(
     let lse_refs: Vec<&KtTensor> = lse_tiles.iter().collect();
     let out = map_kt(KtTensor::cat(&out_refs, 1))?;
     let lse = map_kt(KtTensor::cat(&lse_refs, 2))?;
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&lse)?;
     Ok((out, lse))
 }
 
@@ -1588,9 +1554,7 @@ fn compute_lse(
     b: usize,
     h: usize,
     sq: usize,
-    device: KtDevice,
 ) -> Result<KtTensor, FlashAttnError> {
-    let _ = device;
     // Reductions over the last (sk) axis -> [b*h, sq], on-device.
     let max_scores = map_kt(kiln_tensor::rocm_max_axis(scores, 2))?; // [b*h, sq]
     let max_p = map_kt(kiln_tensor::rocm_max_axis(p, 2))?; // [b*h, sq]
@@ -1608,7 +1572,7 @@ fn compute_lse(
     let ln_max_p = map_kt(max_p.log())?; // [b*h, sq]
     let lse_flat = map_kt(max_scores.sub(&ln_max_p))?; // [b*h, sq]
     let lse = map_kt(lse_flat.reshape(vec![b, h, sq]))?;
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&lse)?;
     Ok(lse)
 }
 
@@ -1685,10 +1649,10 @@ pub fn sdpa_forward(
     };
     // 5. p = softmax(scores) over last axis -> [b*h, sq, sk]; lse from scores+p.
     let p = map_kt(kiln_tensor::rocm_softmax_last_axis(&masked_scores))?; // [b*h, sq, sk] f32
-    let lse = compute_lse(&masked_scores, &p, b, h, sq, device)?; // [b, h, sq] f32
+    let lse = compute_lse(&masked_scores, &p, b, h, sq)?; // [b, h, sq] f32
 
     // 6. out = p @ v -> [b*h, sq, d]; reshape/transpose back to [b, sq, h, d].
-    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, device, "materialized out3")?; // [b*h, sq, d] f32
+    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, "materialized out3")?; // [b*h, sq, d] f32
     let out_bhsd = map_kt(out3.reshape(vec![b, h, sq, d]))?; // [b, h, sq, d]
     let out_bshd = rocm_contig(&map_kt(out_bhsd.transpose(1, 2))?)?; // [b, sq, h, d]
     let out_bf16 = rocm_cast_to(&out_bshd, KtDType::BF16)?; // [b, sq, h, d] bf16
@@ -1698,7 +1662,7 @@ pub fn sdpa_forward(
     // temporaries cannot be dropped and recycled while later kernels still read
     // them. The caller's post-handoff sync is too late because these locals are
     // gone by then.
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&out_bf16)?;
     Ok((out_bf16, lse))
 }
 
@@ -1762,13 +1726,13 @@ pub fn sdpa_forward_head_major(
     };
 
     let p = map_kt(kiln_tensor::rocm_softmax_last_axis(&masked_scores))?;
-    let lse = compute_lse(&masked_scores, &p, b, h, sq, device)?;
+    let lse = compute_lse(&masked_scores, &p, b, h, sq)?;
 
-    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, device, "head-major out3")?;
+    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, "head-major out3")?;
     let out_bhsd = map_kt(out3.reshape(vec![b, h, sq, d]))?;
     let out_bf16 = rocm_cast_to(&out_bhsd, KtDType::BF16)?;
 
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&out_bf16)?;
     Ok((out_bf16, lse))
 }
 
@@ -1818,12 +1782,13 @@ pub fn flash_attn_fwd_rocm(
 
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
-    if native_scalar_fwd_enabled(sq, sk)
-        || native_tiled_fwd_enabled(sq, sk)
-        || native_streaming_fwd_enabled(sq, sk)
+    let policy = rocm_flash_attention_policy(q)?;
+    if native_scalar_fwd_enabled(policy, sq, sk)
+        || native_tiled_fwd_enabled(policy, sq, sk)
+        || native_streaming_fwd_enabled(policy, sq, sk)
     {
         if let Some(result) =
-            try_native_fwd_bf16(q, k, v, b, sq, sk, h, hk, d, softmax_scale, causal)?
+            try_native_fwd_bf16(q, k, v, b, sq, sk, h, hk, d, softmax_scale, causal, policy)?
         {
             return Ok(result);
         }
@@ -1835,7 +1800,7 @@ pub fn flash_attn_fwd_rocm(
         .map(|bytes| bytes > budget_bytes)
         .unwrap_or(true)
     {
-        if rocm_online_fwd_enabled() && !rectangular_causal_prefix {
+        if rocm_online_fwd_enabled(policy) && !rectangular_causal_prefix {
             return sdpa_forward_online_tiled(
                 q,
                 k,
@@ -1906,13 +1871,14 @@ pub fn flash_attn_fwd_head_major_rocm(
 
     let (b, h, sq, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[2], k.shape()[1]);
+    let policy = rocm_flash_attention_policy(q)?;
     let budget_bytes = materialized_score_budget_bytes();
     let rectangular_causal_prefix = causal && sq != sk;
     let exceeds_materialized_budget = materialized_score_working_set_bytes(b, h, sq, sk)
         .map(|bytes| bytes > budget_bytes)
         .unwrap_or(true);
     if exceeds_materialized_budget {
-        let use_online = rocm_online_fwd_enabled() && !rectangular_causal_prefix;
+        let use_online = rocm_online_fwd_enabled(policy) && !rectangular_causal_prefix;
         let online_plan = if use_online {
             let bh = b.checked_mul(h).ok_or_else(|| {
                 FlashAttnError::Msg("ROCm head-major online batch/head overflow".into())
@@ -2036,95 +2002,8 @@ pub fn flash_attn_fwd_rocm_no_lse(
     if q_shape.len() != 4 || k_shape.len() != 4 || v.shape() != k_shape {
         return Ok(None);
     }
-    let (b, sq, h, d) = (q_shape[0], q_shape[1], q_shape[2], q_shape[3]);
-    let (sk, hk) = (k_shape[1], k_shape[2]);
-    if rocm_ck_no_lse_fwd_enabled() {
-        if let Some(out) =
-            try_ck_fwd_bf16_no_lse(q, k, v, b, sq, sk, h, hk, d, softmax_scale, causal)?
-        {
-            return Ok(Some(out));
-        }
-    }
-
     let (out, _lse) = flash_attn_fwd_rocm(q, k, v, softmax_scale, causal)?;
     Ok(Some(out))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn try_ck_fwd_bf16_no_lse(
-    q: &KtTensor,
-    k: &KtTensor,
-    v: &KtTensor,
-    b: usize,
-    sq: usize,
-    sk: usize,
-    h: usize,
-    hk: usize,
-    d: usize,
-    softmax_scale: f32,
-    causal: bool,
-) -> Result<Option<KtTensor>, FlashAttnError> {
-    if q.dtype() != KtDType::BF16
-        || k.dtype() != KtDType::BF16
-        || v.dtype() != KtDType::BF16
-        || !matches!(d, 128 | 256)
-        || h == 0
-        || hk == 0
-        || h % hk != 0
-        || !causal
-        || sk < sq
-        || !q.is_contiguous()
-        || !k.is_contiguous()
-        || !v.is_contiguous()
-    {
-        return Ok(None);
-    }
-
-    let (q_st, _) = kiln_kt_bridge::rocm_storage_and_byte_offset(q, KtDType::BF16, "q")
-        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
-    let out = kiln_kt_bridge::alloc_rocm_tensor(q_st, KtDType::BF16, vec![b, sq, h, d])
-        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
-
-    let q_ptr = kiln_kt_bridge::rocm_input_device_ptr(q, KtDType::BF16, "q")
-        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
-    let k_ptr = kiln_kt_bridge::rocm_input_device_ptr(k, KtDType::BF16, "k")
-        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
-    let v_ptr = kiln_kt_bridge::rocm_input_device_ptr(v, KtDType::BF16, "v")
-        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
-    let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(&out);
-    let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(q, "q")
-        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
-    let stream = stream_submission.raw_stream();
-
-    let status = unsafe {
-        crate::kiln_rocm_flash_attn_fwd_ck_bf16(
-            q_ptr as *const _,
-            k_ptr as *const _,
-            v_ptr as *const _,
-            out_ptr as *mut _,
-            std::ptr::null_mut(),
-            b as i32,
-            sq as i32,
-            sk as i32,
-            h as i32,
-            hk as i32,
-            d as i32,
-            softmax_scale,
-            if causal { 1 } else { 0 },
-            stream,
-        )
-    };
-    settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa native forward")?;
-    if status == 0 {
-        // The CK/no-LSE launch is async and reads q/k/v after returning.
-        // Synchronize while those borrowed input tensors are still alive;
-        // otherwise ROCm's stream-ordered allocator can recycle a temporary
-        // tile before the kernel finishes consuming it.
-        rocm_sync_device(q.device())?;
-        Ok(Some(out))
-    } else {
-        Ok(None)
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2140,6 +2019,7 @@ fn try_native_fwd_bf16(
     d: usize,
     softmax_scale: f32,
     causal: bool,
+    policy: RocmFlashAttentionPolicy,
 ) -> Result<Option<(KtTensor, KtTensor)>, FlashAttnError> {
     if !native_fwd_shape_supported(q, k, v, h, hk, d) {
         return Ok(None);
@@ -2147,14 +2027,15 @@ fn try_native_fwd_bf16(
     // Native FA-style causal masking is bottom-right aligned for `sq != sk`.
     // The query-tiled wrapper narrows each key prefix so that bottom-right
     // alignment equals the absolute prefix-causal mask for chunked training.
-    if causal && sq != sk && !native_rectangular_causal_fwd_enabled() {
+    if causal && sq != sk && !native_rectangular_causal_fwd_enabled(policy) {
         return Ok(None);
     }
 
-    let q_tile = native_fwd_query_tile_len();
+    let q_tile = native_fwd_query_tile_len(policy);
     let native_single_available =
-        native_scalar_fwd_enabled(sq, sk) || native_tiled_fwd_enabled(sq, sk);
-    let native_single_allowed = native_single_available && native_single_fwd_launch_enabled(sq, sk);
+        native_scalar_fwd_enabled(policy, sq, sk) || native_tiled_fwd_enabled(policy, sq, sk);
+    let native_single_allowed =
+        native_single_available && native_single_fwd_launch_enabled(policy, sq, sk);
     let prefer_native_single = native_single_allowed && (!causal || sq == sk);
     if prefer_native_single {
         let q_c = rocm_contig(q)?;
@@ -2172,13 +2053,13 @@ fn try_native_fwd_bf16(
             d,
             softmax_scale,
             causal,
-            false,
+            policy,
         )? {
             return Ok(Some(result));
         }
     }
 
-    if sq > q_tile && native_tiled_fwd_enabled(sq, sk) {
+    if sq > q_tile && native_tiled_fwd_enabled(policy, sq, sk) {
         if let Some(result) = try_native_fwd_bf16_query_tiled(
             q,
             k,
@@ -2192,6 +2073,7 @@ fn try_native_fwd_bf16(
             softmax_scale,
             causal,
             q_tile,
+            policy,
         )? {
             return Ok(Some(result));
         }
@@ -2213,13 +2095,13 @@ fn try_native_fwd_bf16(
             d,
             softmax_scale,
             causal,
-            false,
+            policy,
         )? {
             return Ok(Some(result));
         }
     }
 
-    if native_streaming_fwd_enabled(sq, sk) {
+    if native_streaming_fwd_enabled(policy, sq, sk) {
         return try_native_streaming_fwd_bf16_query_tiled(
             &q_c,
             &k_c,
@@ -2233,7 +2115,7 @@ fn try_native_fwd_bf16(
             softmax_scale,
             causal,
             q_tile,
-            native_streaming_fwd_key_tile_len(),
+            native_streaming_fwd_key_tile_len(policy),
         );
     }
 
@@ -2271,9 +2153,9 @@ fn try_native_fwd_bf16_query_tiled(
     softmax_scale: f32,
     causal: bool,
     q_tile_len: usize,
+    policy: RocmFlashAttentionPolicy,
 ) -> Result<Option<(KtTensor, KtTensor)>, FlashAttnError> {
     let q_tile_len = q_tile_len.max(1);
-    let device = q.device();
     let causal_offset = sk as isize - sq as isize;
     let k_full = rocm_contig(k)?;
     let v_full = rocm_contig(v)?;
@@ -2290,6 +2172,7 @@ fn try_native_fwd_bf16_query_tiled(
         softmax_scale,
         causal,
         q_tile_len,
+        policy,
     )? {
         return Ok(Some(result));
     }
@@ -2325,6 +2208,7 @@ fn try_native_fwd_bf16_query_tiled(
                 softmax_scale,
                 causal,
                 q_start,
+                policy,
             )?
         } else {
             None
@@ -2333,7 +2217,6 @@ fn try_native_fwd_bf16_query_tiled(
             out_tiles.push(out_tile);
             lse_tiles.push(lse_tile);
             q_start += q_len;
-            rocm_attention_cooperative_yield(device)?;
             continue;
         }
 
@@ -2359,7 +2242,7 @@ fn try_native_fwd_bf16_query_tiled(
             d,
             softmax_scale,
             causal,
-            false,
+            policy,
         )?
         else {
             return Ok(None);
@@ -2367,7 +2250,6 @@ fn try_native_fwd_bf16_query_tiled(
         out_tiles.push(out_tile);
         lse_tiles.push(lse_tile);
         q_start += q_len;
-        rocm_attention_cooperative_yield(device)?;
     }
 
     let out_refs: Vec<&KtTensor> = out_tiles.iter().collect();
@@ -2391,6 +2273,7 @@ fn try_native_fwd_bf16_query_tiled_into(
     softmax_scale: f32,
     causal: bool,
     q_tile_len: usize,
+    policy: RocmFlashAttentionPolicy,
 ) -> Result<Option<(KtTensor, KtTensor)>, FlashAttnError> {
     let (q_st, _) = kiln_kt_bridge::rocm_storage_and_byte_offset(q, KtDType::BF16, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
@@ -2423,11 +2306,11 @@ fn try_native_fwd_bf16_query_tiled_into(
             softmax_scale,
             causal,
             q_start,
+            policy,
         )? {
             return Ok(None);
         }
         q_start += q_len;
-        rocm_attention_cooperative_yield(q.device())?;
     }
 
     Ok(Some((out, lse)))
@@ -2446,7 +2329,7 @@ fn try_ffi_fwd_bf16(
     d: usize,
     softmax_scale: f32,
     causal: bool,
-    use_ck: bool,
+    policy: RocmFlashAttentionPolicy,
 ) -> Result<Option<(KtTensor, KtTensor)>, FlashAttnError> {
     if q.dtype() != KtDType::BF16
         || k.dtype() != KtDType::BF16
@@ -2455,8 +2338,6 @@ fn try_ffi_fwd_bf16(
         || h == 0
         || hk == 0
         || h % hk != 0
-        || (use_ck && (!causal || !matches!(d, 128 | 256)))
-        || (use_ck && causal && sk < sq)
         || !q.is_contiguous()
         || !k.is_contiguous()
         || !v.is_contiguous()
@@ -2482,20 +2363,14 @@ fn try_ffi_fwd_bf16(
 
     // The native FFI kernels launch on the same active ROCm stream as tensor
     // ops and stream-ordered allocation/free. Stream ordering preserves
-    // producer/consumer and temporary-buffer lifetimes; an opt-in fence remains
-    // available for runtime debugging.
-    rocm_native_ffi_sync_if_enabled(q.device())?;
+    // producer/consumer and temporary-buffer lifetimes.
 
     let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(q, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let stream = stream_submission.raw_stream();
+    let ffi_policy = rocm_flash_attention_ffi_policy(policy)?;
     let status = unsafe {
-        let launch = if use_ck {
-            crate::kiln_rocm_flash_attn_fwd_ck_bf16
-        } else {
-            crate::kiln_rocm_flash_attn_fwd_bf16
-        };
-        launch(
+        crate::kiln_rocm_flash_attn_fwd_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
             v_ptr as *const _,
@@ -2509,12 +2384,12 @@ fn try_ffi_fwd_bf16(
             d as i32,
             softmax_scale,
             if causal { 1 } else { 0 },
+            &ffi_policy,
             stream,
         )
     };
     settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa native forward")?;
     if status == 0 {
-        rocm_native_ffi_sync_if_enabled(q.device())?;
         Ok(Some((out, lse)))
     } else {
         Ok(None)
@@ -2536,6 +2411,7 @@ fn try_ffi_fwd_bf16_abs_tile(
     softmax_scale: f32,
     causal: bool,
     q_start: usize,
+    policy: RocmFlashAttentionPolicy,
 ) -> Result<Option<(KtTensor, KtTensor)>, FlashAttnError> {
     if q.dtype() != KtDType::BF16
         || k.dtype() != KtDType::BF16
@@ -2571,11 +2447,10 @@ fn try_ffi_fwd_bf16_abs_tile(
     let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(&out);
     let lse_ptr = kiln_kt_bridge::rocm_output_device_ptr(&lse);
 
-    rocm_native_ffi_sync_if_enabled(q.device())?;
-
     let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(q, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let stream = stream_submission.raw_stream();
+    let ffi_policy = rocm_flash_attention_ffi_policy(policy)?;
     let status = unsafe {
         crate::kiln_rocm_flash_attn_fwd_abs_tile_bf16(
             q_ptr as *const _,
@@ -2593,12 +2468,12 @@ fn try_ffi_fwd_bf16_abs_tile(
             softmax_scale,
             if causal { 1 } else { 0 },
             q_start as i32,
+            &ffi_policy,
             stream,
         )
     };
     settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa native forward")?;
     if status == 0 {
-        rocm_native_ffi_sync_if_enabled(q.device())?;
         Ok(Some((out, lse)))
     } else {
         Ok(None)
@@ -2622,6 +2497,7 @@ fn try_ffi_fwd_bf16_abs_tile_base_into(
     softmax_scale: f32,
     causal: bool,
     q_start: usize,
+    policy: RocmFlashAttentionPolicy,
 ) -> Result<bool, FlashAttnError> {
     if q.dtype() != KtDType::BF16
         || k.dtype() != KtDType::BF16
@@ -2659,11 +2535,10 @@ fn try_ffi_fwd_bf16_abs_tile_base_into(
     let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(out);
     let lse_ptr = kiln_kt_bridge::rocm_output_device_ptr(lse);
 
-    rocm_native_ffi_sync_if_enabled(q.device())?;
-
     let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(q, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let stream = stream_submission.raw_stream();
+    let ffi_policy = rocm_flash_attention_ffi_policy(policy)?;
     let status = unsafe {
         crate::kiln_rocm_flash_attn_fwd_abs_tile_base_into_bf16(
             q_ptr as *const _,
@@ -2681,16 +2556,12 @@ fn try_ffi_fwd_bf16_abs_tile_base_into(
             softmax_scale,
             if causal { 1 } else { 0 },
             q_start as i32,
+            &ffi_policy,
             stream,
         )
     };
     settle_rocm_ffi_submission(stream_submission, status, "rocm-sdpa native forward")?;
-    if status == 0 {
-        rocm_native_ffi_sync_if_enabled(q.device())?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    if status == 0 { Ok(true) } else { Ok(false) }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2711,10 +2582,11 @@ fn try_native_streaming_fwd_bf16_query_tiled(
 ) -> Result<Option<(KtTensor, KtTensor)>, FlashAttnError> {
     let q_tile_len = q_tile_len.max(1);
     let key_tile_len = key_tile_len.max(1);
-    let device = q.device();
     let causal_offset = sk as isize - sq as isize;
     let k_full = rocm_contig(k)?;
     let v_full = rocm_contig(v)?;
+    let (q_st, _) = kiln_kt_bridge::rocm_storage_and_byte_offset(q, KtDType::BF16, "q")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let mut out_tiles = Vec::new();
     let mut lse_tiles = Vec::new();
     let mut q_start = 0usize;
@@ -2731,18 +2603,23 @@ fn try_native_streaming_fwd_bf16_query_tiled(
         }
 
         let q_tile = rocm_contig(&map_kt(q.narrow(1, q_start, q_len))?)?;
-        let out_tile = map_kt(KtTensor::zeros(vec![b, q_len, h, d], KtDType::BF16, device))?;
-        let lse_tile = map_kt(KtTensor::zeros(vec![b, h, q_len], KtDType::F32, device))?;
-        let acc = map_kt(KtTensor::zeros(vec![b, q_len, h, d], KtDType::F32, device))?;
-        let row_l = map_kt(KtTensor::zeros(vec![b, h, q_len], KtDType::F32, device))?;
-        let row_m_zero = map_kt(KtTensor::zeros(vec![b, h, q_len], KtDType::F32, device))?;
+        let out_tile = kiln_kt_bridge::alloc_rocm_tensor(q_st, KtDType::BF16, vec![b, q_len, h, d])
+            .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+        let lse_tile = kiln_kt_bridge::alloc_rocm_tensor(q_st, KtDType::F32, vec![b, h, q_len])
+            .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+        let acc = kiln_kt_bridge::alloc_rocm_tensor(q_st, KtDType::F32, vec![b, q_len, h, d])
+            .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+        let row_l = kiln_kt_bridge::alloc_rocm_tensor(q_st, KtDType::F32, vec![b, h, q_len])
+            .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+        let row_m_zero = kiln_kt_bridge::alloc_rocm_tensor(q_st, KtDType::F32, vec![b, h, q_len])
+            .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
         let row_m = map_kt(kiln_tensor::ops::full_like(&row_m_zero, f32::NEG_INFINITY))?;
 
         // The streaming HIP kernel reads q_tile/k_full/v_full and mutates the
         // online-softmax state buffers in-place. These tensors are produced by
         // async tensor ops immediately above; make the handoff explicit before
         // the first raw-pointer update launch.
-        rocm_sync_device(device)?;
+        rocm_sync_tensor(&row_m)?;
 
         let mut key_start = 0usize;
         while key_start < block_limit {
@@ -2768,7 +2645,6 @@ fn try_native_streaming_fwd_bf16_query_tiled(
                 key_len,
             )?;
             key_start += key_len;
-            rocm_attention_cooperative_yield(device)?;
         }
 
         native_streaming_fwd_finalize_bf16(
@@ -2776,7 +2652,7 @@ fn try_native_streaming_fwd_bf16_query_tiled(
         )?;
         // Finalize reads the streaming state tensors and writes out_tile/lse.
         // Keep row_m/row_l/acc alive until that async kernel has completed.
-        rocm_sync_device(device)?;
+        rocm_sync_tensor(&out_tile)?;
         out_tiles.push(out_tile);
         lse_tiles.push(lse_tile);
         q_start += q_len;
@@ -3187,7 +3063,7 @@ fn sdpa_forward_dyn_tail(
     let scores = map_kt(kiln_tensor::rocm_masked_fill(&scores, &mask_t, NEG_FILL))?;
 
     let p = map_kt(kiln_tensor::rocm_softmax_last_axis(&scores))?;
-    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, device, "dyn-tail out3")?; // [b*h, 1, d]
+    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, "dyn-tail out3")?; // [b*h, 1, d]
     let out_bhsd = map_kt(out3.reshape(vec![b, h, sq, d]))?;
     let out_bshd = rocm_contig(&map_kt(out_bhsd.transpose(1, 2))?)?; // [b, 1, h, d]
     rocm_cast_to(&out_bshd, KtDType::BF16)
@@ -3386,8 +3262,9 @@ pub fn flash_attn_bwd_rocm(
     let device = q.device();
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
+    let policy = rocm_flash_attention_policy(q)?;
 
-    if rocm_native_bwd_preferred(b, h, sq, sk, d) {
+    if rocm_native_bwd_preferred(policy, b, h, sq, sk, d) {
         if let Some(result) = try_native_bwd_bf16(
             dout,
             q,
@@ -3412,7 +3289,7 @@ pub fn flash_attn_bwd_rocm(
     // tiles that fit the materialized score budget, the BLASLt composite is
     // much faster on long-context training. If hipBLASLt has no algorithm for a
     // specific shape, fall back to the exact native kernel instead of failing.
-    if rocm_materialized_bwd_enabled(device, b, h, sq, sk, d) {
+    if rocm_materialized_bwd_enabled(policy, device, b, h, sq, sk, d) {
         match materialized_bwd_composite_rocm(
             dout,
             q,
@@ -3429,6 +3306,9 @@ pub fn flash_attn_bwd_rocm(
         ) {
             Ok(result) => return Ok(result),
             Err(composite_err) => {
+                if rocm_execution_quarantined(q)? {
+                    return Err(composite_err);
+                }
                 if let Some(result) = try_native_bwd_bf16(
                     dout,
                     q,
@@ -3453,7 +3333,7 @@ pub fn flash_attn_bwd_rocm(
     }
 
     let mut online_err: Option<FlashAttnError> = None;
-    if rocm_online_bwd_enabled() {
+    if rocm_online_bwd_enabled(policy) {
         match online_bwd_tiled_rocm(
             dout,
             q,
@@ -3471,7 +3351,12 @@ pub fn flash_attn_bwd_rocm(
             d,
         ) {
             Ok(result) => return Ok(result),
-            Err(err) => online_err = Some(err),
+            Err(err) => {
+                if rocm_execution_quarantined(q)? {
+                    return Err(err);
+                }
+                online_err = Some(err);
+            }
         }
     }
 
@@ -3491,6 +3376,9 @@ pub fn flash_attn_bwd_rocm(
     ) {
         Ok(result) => return Ok(result),
         Err(tiled_err) => {
+            if rocm_execution_quarantined(q)? {
+                return Err(tiled_err);
+            }
             if let Some(result) = try_native_bwd_bf16(
                 dout,
                 q,
@@ -3538,6 +3426,7 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
     let device = q.device();
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
+    let policy = rocm_flash_attention_policy(q)?;
     if hk == h {
         return flash_attn_bwd_rocm(dout, q, k, v, out, softmax_lse, softmax_scale, causal);
     }
@@ -3547,9 +3436,9 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
         )));
     }
 
-    if rocm_collapsed_gqa_bwd_enabled()
-        && rocm_native_direct_collapsed_gqa_bwd_enabled()
-        && rocm_native_bwd_preferred(b, h, sq, sk, d)
+    if rocm_collapsed_gqa_bwd_enabled(policy)
+        && rocm_native_direct_collapsed_gqa_bwd_enabled(policy)
+        && rocm_native_bwd_preferred(policy, b, h, sq, sk, d)
     {
         if let Some(result) = try_native_bwd_bf16_collapsed_gqa(
             dout,
@@ -3571,8 +3460,8 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
         }
     }
 
-    if !rocm_native_bwd_preferred(b, h, sq, sk, d)
-        && rocm_materialized_bwd_enabled(device, b, h, sq, sk, d)
+    if !rocm_native_bwd_preferred(policy, b, h, sq, sk, d)
+        && rocm_materialized_bwd_enabled(policy, device, b, h, sq, sk, d)
     {
         match materialized_bwd_composite_rocm_impl(
             dout,
@@ -3590,7 +3479,10 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
             true,
         ) {
             Ok(result) => return Ok(result),
-            Err(_) => {
+            Err(error) => {
+                if rocm_execution_quarantined(q)? {
+                    return Err(error);
+                }
                 // Fall through to the general ROCm backward below. It has the
                 // native fallback logic for shapes hipBLASLt cannot handle.
             }
@@ -3709,7 +3601,7 @@ fn materialized_bwd_composite_rocm_impl(
     // dv = p^T @ dout   -> [b*h, sk, d]
     let dv3 = {
         let pt = rocm_contig(&map_kt(p.transpose(1, 2))?)?; // [b*h, sk, sq]
-        let dv3 = rocm_matmul_split_inner_f32(&pt, &do3, device, "bwd dv3")?; // [b*h, sk, d]
+        let dv3 = rocm_matmul_split_inner_f32(&pt, &do3, "bwd dv3")?; // [b*h, sk, d]
         drop(pt);
         dv3
     };
@@ -3740,13 +3632,13 @@ fn materialized_bwd_composite_rocm_impl(
     };
 
     // dq = ds @ k * scale   -> [b*h, sq, d]
-    let dq3 = rocm_matmul_split_inner_f32(&ds, &k3, device, "bwd dq3")?; // [b*h, sq, d]
+    let dq3 = rocm_matmul_split_inner_f32(&ds, &k3, "bwd dq3")?; // [b*h, sq, d]
     let dq3 = map_kt(kiln_tensor::rocm_scalar_op(&dq3, SCALAR_MUL, softmax_scale))?;
 
     // dk = ds^T @ q * scale -> [b*h, sk, d]
     let dst = rocm_contig(&map_kt(ds.transpose(1, 2))?)?; // [b*h, sk, sq]
     drop(ds);
-    let dk3 = rocm_matmul_split_inner_f32(&dst, &q3, device, "bwd dk3")?; // [b*h, sk, d]
+    let dk3 = rocm_matmul_split_inner_f32(&dst, &q3, "bwd dk3")?; // [b*h, sk, d]
     drop(dst);
     let dk3 = map_kt(kiln_tensor::rocm_scalar_op(&dk3, SCALAR_MUL, softmax_scale))?;
 
@@ -3868,7 +3760,7 @@ fn materialized_bwd_query_tiled_rocm(
 
         let dv_tile = {
             let pt = rocm_contig(&map_kt(p.transpose(1, 2))?)?; // [b*h, sk, tile_len]
-            let dv = rocm_matmul_split_inner_f32(&pt, &do_tile, device, "bwd tiled dv")?; // [b*h, sk, d]
+            let dv = rocm_matmul_split_inner_f32(&pt, &do_tile, "bwd tiled dv")?; // [b*h, sk, d]
             drop(pt);
             dv
         };
@@ -3888,7 +3780,7 @@ fn materialized_bwd_query_tiled_rocm(
         drop(p);
         drop(dp_minus);
 
-        let dq_tile = rocm_matmul_split_inner_f32(&ds, &k3, device, "bwd tiled dq")?; // [b*h, tile_len, d]
+        let dq_tile = rocm_matmul_split_inner_f32(&ds, &k3, "bwd tiled dq")?; // [b*h, tile_len, d]
         let dq_tile = map_kt(kiln_tensor::rocm_scalar_op(
             &dq_tile,
             SCALAR_MUL,
@@ -3898,7 +3790,7 @@ fn materialized_bwd_query_tiled_rocm(
 
         let dk_tile = {
             let dst = rocm_contig(&map_kt(ds.transpose(1, 2))?)?; // [b*h, sk, tile_len]
-            let dk = rocm_matmul_split_inner_f32(&dst, &q_tile, device, "bwd tiled dk")?; // [b*h, sk, d]
+            let dk = rocm_matmul_split_inner_f32(&dst, &q_tile, "bwd tiled dk")?; // [b*h, sk, d]
             drop(dst);
             map_kt(kiln_tensor::rocm_scalar_op(&dk, SCALAR_MUL, softmax_scale))?
         };
@@ -4016,8 +3908,10 @@ fn online_bwd_tiled_rocm(
     let out3_bf = map_kt(out_bhsd.reshape(vec![bh, sq, d]))?;
     let lse2 = rocm_contig(&map_kt(softmax_lse.reshape(vec![bh, sq]))?)?;
 
-    let dk_acc = map_kt(KtTensor::zeros(vec![bh, sk, d], KtDType::F32, device))?;
-    let dv_acc = map_kt(KtTensor::zeros(vec![bh, sk, d], KtDType::F32, device))?;
+    let dk_acc = rocm_zeros_in_tensor_context(&q3_bf, KtDType::F32, vec![bh, sk, d])
+        .map_err(|error| FlashAttnError::Msg(format!("online backward dk accumulator: {error}")))?;
+    let dv_acc = rocm_zeros_in_tensor_context(&q3_bf, KtDType::F32, vec![bh, sk, d])
+        .map_err(|error| FlashAttnError::Msg(format!("online backward dv accumulator: {error}")))?;
     let mut dq_tiles = Vec::new();
 
     let mut q_start = 0usize;
@@ -4045,7 +3939,12 @@ fn online_bwd_tiled_rocm(
         };
         drop(do_tile);
         drop(out_tile);
-        let dq_acc = map_kt(KtTensor::zeros(vec![bh, q_len, d], KtDType::F32, device))?;
+        let dq_acc = rocm_zeros_in_tensor_context(&q3_bf, KtDType::F32, vec![bh, q_len, d])
+            .map_err(|error| {
+                FlashAttnError::Msg(format!(
+                    "online backward dq accumulator at q_start={q_start}: {error}"
+                ))
+            })?;
 
         let block_limit = if causal {
             causal_block_limit(sk, q_start, q_len, causal_offset)
@@ -4054,7 +3953,7 @@ fn online_bwd_tiled_rocm(
         };
         let mut k_start = 0usize;
         while k_start < block_limit {
-            let k_len = (block_limit - k_start).min(key_tile_cap).max(1);
+            let k_len = tile_len_without_unit_tail(block_limit - k_start, key_tile_cap);
             let k_block_bf = rocm_contig(&map_kt(k3_bf.narrow(1, k_start, k_len))?)?;
             let v_block_bf = rocm_contig(&map_kt(v3_bf.narrow(1, k_start, k_len))?)?;
 
@@ -4140,7 +4039,6 @@ fn online_bwd_tiled_rocm(
             drop(v_block_bf);
 
             k_start += k_len;
-            rocm_attention_cooperative_yield(device)?;
         }
 
         dq_tiles.push(bhsd3_to_bshd_bf16(&dq_acc, b, h, q_len, d)?);
@@ -4225,6 +4123,7 @@ fn try_native_bwd_bf16(
     let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&q_c, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let stream = stream_submission.raw_stream();
+    let ffi_policy = rocm_flash_attention_ffi_policy(rocm_flash_attention_policy(&q_c)?)?;
 
     let status = unsafe {
         crate::kiln_rocm_flash_attn_bwd_bf16(
@@ -4245,6 +4144,7 @@ fn try_native_bwd_bf16(
             d as i32,
             softmax_scale,
             if causal { 1 } else { 0 },
+            &ffi_policy,
             stream,
         )
     };
@@ -4322,6 +4222,7 @@ fn try_native_bwd_bf16_collapsed_gqa(
     let stream_submission = kiln_kt_bridge::rocm_stream_submission_of(&q_c, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let stream = stream_submission.raw_stream();
+    let ffi_policy = rocm_flash_attention_ffi_policy(rocm_flash_attention_policy(&q_c)?)?;
 
     let status = unsafe {
         crate::kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(
@@ -4342,6 +4243,7 @@ fn try_native_bwd_bf16_collapsed_gqa(
             d as i32,
             softmax_scale,
             if causal { 1 } else { 0 },
+            &ffi_policy,
             stream,
         )
     };
@@ -4486,7 +4388,6 @@ fn causal_mask_fill_offset_f32(
         )));
     }
     let scores = rocm_contig(&scores)?;
-    let device = scores.device();
     let scores_ptr = kiln_kt_bridge::rocm_output_device_ptr(&scores);
     let bh_i32 = i32::try_from(bh)
         .map_err(|_| FlashAttnError::Msg(format!("causal mask bh too large: {bh}")))?;
@@ -4520,7 +4421,7 @@ fn causal_mask_fill_offset_f32(
             "causal_mask_fill_offset_f32: FFI returned status {status}"
         )));
     }
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&scores)?;
     Ok(scores)
 }
 
@@ -4544,7 +4445,6 @@ fn scale_mask_scores_f32(
         )));
     }
     let scores = rocm_contig(&scores)?;
-    let device = scores.device();
     let scores_ptr = kiln_kt_bridge::rocm_output_device_ptr(&scores);
     let bh = usize_to_i32("scale mask bh", bh)?;
     let sq = usize_to_i32("scale mask sq", sq)?;
@@ -4576,7 +4476,7 @@ fn scale_mask_scores_f32(
             "scale_mask_scores_f32: FFI returned status {status}"
         )));
     }
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&scores)?;
     Ok(scores)
 }
 
@@ -4608,7 +4508,6 @@ fn exp_mask_scores_f32(
     }
     let scores = rocm_contig(&scores)?;
     let row_max = rocm_contig(row_max)?;
-    let device = scores.device();
     let scores_ptr = kiln_kt_bridge::rocm_output_device_ptr(&scores);
     let row_max_ptr = kiln_kt_bridge::rocm_input_device_ptr(&row_max, KtDType::F32, "row_max")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
@@ -4641,7 +4540,7 @@ fn exp_mask_scores_f32(
             "exp_mask_scores_f32: FFI returned status {status}"
         )));
     }
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&scores)?;
     Ok(scores)
 }
 
@@ -4674,7 +4573,6 @@ fn prob_from_lse_scores_f32(
     }
     let scores = rocm_contig(&scores)?;
     let lse = rocm_contig(lse)?;
-    let device = scores.device();
     let scores_ptr = kiln_kt_bridge::rocm_output_device_ptr(&scores);
     let lse_ptr = kiln_kt_bridge::rocm_input_device_ptr(&lse, KtDType::F32, "lse")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
@@ -4713,7 +4611,7 @@ fn prob_from_lse_scores_f32(
             "prob_from_lse_scores_f32: FFI returned status {status}"
         )));
     }
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&scores)?;
     Ok(scores)
 }
 
@@ -4751,7 +4649,6 @@ fn softmax_bwd_scores_f32(
     let dp = rocm_contig(&dp)?;
     let p = rocm_contig(p)?;
     let d_rows = rocm_contig(d_rows)?;
-    let device = dp.device();
     let dp_ptr = kiln_kt_bridge::rocm_output_device_ptr(&dp);
     let p_ptr = kiln_kt_bridge::rocm_input_device_ptr(&p, KtDType::F32, "p")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
@@ -4790,7 +4687,7 @@ fn softmax_bwd_scores_f32(
             "softmax_bwd_scores_f32: FFI returned status {status}"
         )));
     }
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&dp)?;
     Ok(dp)
 }
 
@@ -4824,7 +4721,6 @@ fn accum_axis1_f32(
             src.is_contiguous()
         )));
     }
-    let device = dst.device();
     let dst_ptr = kiln_kt_bridge::rocm_output_device_ptr(dst);
     let src_ptr = kiln_kt_bridge::rocm_input_device_ptr(src, KtDType::F32, "src")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
@@ -4854,7 +4750,7 @@ fn accum_axis1_f32(
             "accum_axis1_f32: FFI returned status {status}"
         )));
     }
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(dst)?;
     Ok(())
 }
 
@@ -4889,7 +4785,6 @@ fn online_update_state_f32(
     let block_l = rocm_contig(block_l)?;
     let alpha = rocm_contig(alpha)?;
     let beta = rocm_contig(beta)?;
-    let device = row_m.device();
     let row_m_ptr = kiln_kt_bridge::rocm_output_device_ptr(&row_m);
     let row_l_ptr = kiln_kt_bridge::rocm_output_device_ptr(&row_l);
     let block_m_ptr = kiln_kt_bridge::rocm_input_device_ptr(&block_m, KtDType::F32, "block_m")
@@ -4920,7 +4815,7 @@ fn online_update_state_f32(
             "online_update_state_f32: FFI returned status {status}"
         )));
     }
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&row_m)?;
     Ok(())
 }
 
@@ -4961,7 +4856,6 @@ fn online_update_acc_f32(
     let block_out2 = rocm_contig(&map_kt(block_out.reshape(vec![rows, d]))?)?;
     let alpha = rocm_contig(alpha)?;
     let beta = rocm_contig(beta)?;
-    let device = acc2.device();
     let acc_ptr = kiln_kt_bridge::rocm_output_device_ptr(&acc2);
     let block_out_ptr =
         kiln_kt_bridge::rocm_input_device_ptr(&block_out2, KtDType::F32, "block_out")
@@ -4996,7 +4890,7 @@ fn online_update_acc_f32(
             "online_update_acc_f32: FFI returned status {status}"
         )));
     }
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&acc2)?;
     Ok(())
 }
 
@@ -5028,7 +4922,6 @@ fn online_finalize_f32(
     let row_m = rocm_contig(row_m)?;
     let row_l = rocm_contig(row_l)?;
     let lse = rocm_contig(lse)?;
-    let device = acc2.device();
     let acc_ptr = kiln_kt_bridge::rocm_input_device_ptr(&acc2, KtDType::F32, "acc")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
     let row_m_ptr = kiln_kt_bridge::rocm_input_device_ptr(&row_m, KtDType::F32, "row_m")
@@ -5060,7 +4953,7 @@ fn online_finalize_f32(
             "online_finalize_f32: FFI returned status {status}"
         )));
     }
-    rocm_sync_device(device)?;
+    rocm_sync_tensor(&out2)?;
     Ok(())
 }
 
@@ -5149,8 +5042,6 @@ fn _bf16_marker(x: f32) -> bf16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn materialized_force_is_only_a_route_preference() {
@@ -5261,6 +5152,20 @@ mod tests {
         )
         .expect_err("omitting any phase bytes must fail closed");
         assert!(online_backward_tile_phase_peaks(usize::MAX, 2, 2, 2).is_none());
+    }
+
+    #[test]
+    fn bounded_tile_partition_avoids_a_unit_tail_when_possible() {
+        let mut remaining = 17;
+        let mut tiles = Vec::new();
+        while remaining > 0 {
+            let tile = tile_len_without_unit_tail(remaining, 4);
+            tiles.push(tile);
+            remaining -= tile;
+        }
+        assert_eq!(tiles, [4, 4, 4, 3, 2]);
+        assert_eq!(tile_len_without_unit_tail(1, 4), 1);
+        assert_eq!(tile_len_without_unit_tail(2, 4), 2);
     }
 
     #[test]
@@ -5420,40 +5325,5 @@ mod tests {
                 <= effective_score_geometry().materialized_tile_max_elements,
             "tile_len={tile_len} still exceeds score element cap"
         );
-    }
-
-    #[test]
-    fn cooperative_yield_is_opt_in() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
-        unsafe {
-            std::env::remove_var("KILN_ROCM_ATTENTION_COOPERATIVE_YIELD");
-            std::env::remove_var("KILN_ROCM_ATTENTION_YIELD_MS");
-        }
-        rocm_attention_cooperative_yield(KtDevice::Cpu).expect("default yield should be disabled");
-        unsafe {
-            std::env::set_var("KILN_ROCM_ATTENTION_COOPERATIVE_YIELD", "0");
-        }
-        rocm_attention_cooperative_yield(KtDevice::Cpu).expect("explicit false should be disabled");
-        unsafe {
-            std::env::remove_var("KILN_ROCM_ATTENTION_COOPERATIVE_YIELD");
-        }
-    }
-
-    #[test]
-    fn native_ffi_sync_is_opt_in() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
-        unsafe {
-            std::env::remove_var("KILN_ROCM_FLASH_NATIVE_FFI_SYNC");
-        }
-        rocm_native_ffi_sync_if_enabled(KtDevice::Cpu)
-            .expect("default native FFI fence should be disabled");
-        unsafe {
-            std::env::set_var("KILN_ROCM_FLASH_NATIVE_FFI_SYNC", "0");
-        }
-        rocm_native_ffi_sync_if_enabled(KtDevice::Cpu)
-            .expect("explicit false native FFI fence should be disabled");
-        unsafe {
-            std::env::remove_var("KILN_ROCM_FLASH_NATIVE_FFI_SYNC");
-        }
     }
 }

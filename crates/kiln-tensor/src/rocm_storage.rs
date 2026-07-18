@@ -432,11 +432,6 @@ impl RocmStorage {
             })
     }
 
-    /// Crate-internal accessor for the slice owner.
-    pub(crate) fn slice_owner(&self) -> &SliceOwner {
-        &self.slice
-    }
-
     /// Whether dropping this storage after an asynchronously launched consumer
     /// is ordered behind that consumer on `stream`.
     fn owner_release_is_ordered_on(&self, stream: &Arc<kiln_hip::RocmStream>) -> bool {
@@ -1378,6 +1373,18 @@ pub fn rocm_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
 /// Copy a contiguous host (CPU) tensor up to a fresh ROCm buffer on
 /// `device_index`. ROCm analog of `host_to_cuda_copy`.
 pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
+    let ctx = primary_rocm_context(device_index)?;
+    host_to_rocm_copy_with_context(src, &ctx)
+}
+
+/// Copy a contiguous host tensor to a fresh buffer owned by an explicit ROCm
+/// context. This is the policy-preserving upload path for isolated runtimes and
+/// tests that must not mutate process-global configuration.
+pub fn host_to_rocm_copy_with_context(
+    src: &crate::Tensor,
+    ctx: &Arc<RocmContext>,
+) -> Result<crate::Tensor> {
+    let device_index = ctx.ordinal();
     if src.dtype().is_packed() {
         return Err(Error::Msg(format!(
             "host_to_rocm_copy: packed dtype {} not supported",
@@ -1415,8 +1422,7 @@ pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
         )));
     }
 
-    let ctx = primary_rocm_context(device_index)?;
-    let stream = crate::active_rocm_stream(&ctx);
+    let stream = crate::active_rocm_stream(ctx);
     let device_slice = stream
         .clone_htod(bytes)
         .map_err(|e| Error::Msg(format!("host_to_rocm_copy: clone_htod failed: {e:?}")))?;
@@ -1429,7 +1435,7 @@ pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
     // SAFETY: clone_htod synchronizes its stream before returning, so the
     // wrapped slice is fully initialized before any tensor consumer can run.
     let rocm_storage =
-        unsafe { RocmStorage::from_slice_ctx(&ctx, device_index, dtype, device_slice) }?;
+        unsafe { RocmStorage::from_slice_ctx(ctx, device_index, dtype, device_slice) }?;
 
     let storage_arc: crate::Storage = Arc::new(rocm_storage);
     crate::Tensor::from_parts(

@@ -16,19 +16,19 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **574 direct read call sites** and
-**232 process-mutation call sites**. It can
-statically name **105 distinct literal `KILN_*`
-read names** across **212 call sites**.
+The scanner records **566 direct read call sites** and
+**222 process-mutation call sites**. It can
+statically name **102 distinct literal `KILN_*`
+read names** across **209 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 108 | 64 | 0 |
-| Build time/provenance | 328 | 9 | 8 |
-| Test only | 129 | 37 | 224 |
+| Experimental/debug migration | 104 | 64 | 0 |
+| Build time/provenance | 325 | 6 | 8 |
+| Test only | 128 | 37 | 214 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -67,8 +67,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-model/src/marlin_proj.rs` | 3 | 3 |
 | `crates/kiln-model/src/tape_forward.rs` | 3 | 3 |
 | `crates/kiln-core/src/env_flag.rs` | 2 | 0 |
-| `crates/kiln-flash-attn/csrc/rocm_flash_api.cpp` | 2 | 0 |
-| `crates/kiln-flash-attn/src/rocm_sdpa.rs` | 2 | 0 |
 | `crates/kiln-model/src/backend/metal_config.rs` | 2 | 0 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | 2 | 0 |
 | `crates/kiln-server/src/cli.rs` | 2 | 0 |
@@ -170,9 +168,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_QWEN_TOKENIZER_PATH` | Test only | 1 | `crates/kiln-train/src/trajectory_mask.rs` |
 | `KILN_REPO_ROOT` | Build time/provenance | 2 | `crates/kiln-server/src/execution_provenance.rs`, `crates/kiln-train/src/train_receipt.rs` |
 | `KILN_ROCM_ARCHS` | Build time/provenance | 8 | `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-rocblas/build.rs`, `crates/kiln-server/src/execution_provenance.rs`, `crates/kiln-tensor/build.rs` |
-| `KILN_ROCM_DISABLE_CK_FMHA` | Build time/provenance | 1 | `crates/kiln-flash-attn/build.rs` |
-| `KILN_ROCM_ENABLE_CK_FMHA` | Build time/provenance | 1 | `crates/kiln-flash-attn/build.rs` |
-| `KILN_ROCM_ENABLE_CK_FMHA_FWD` | Build time/provenance | 1 | `crates/kiln-flash-attn/build.rs` |
 | `KILN_ROCM_FLASH_BENCH_COLLAPSED_BWD` | Test only | 1 | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` |
 | `KILN_ROCM_FLASH_BENCH_FWD_ONLY` | Test only | 1 | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` |
 | `KILN_ROCM_FLASH_BENCH_HEADS` | Test only | 1 | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` |
@@ -242,9 +237,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-flash-attn/build.rs` | `var_os` | `CARGO_FEATURE_CUDA` | Build time/provenance | 1 |
 | `crates/kiln-flash-attn/build.rs` | `var_os` | `CARGO_FEATURE_ROCM` | Build time/provenance | 1 |
 | `crates/kiln-flash-attn/build.rs` | `var_os` | `NVCC` | Build time/provenance | 1 |
-| `crates/kiln-flash-attn/csrc/rocm_flash_api.cpp` | `getenv` | `name` | Experimental/debug migration | 2 |
-| `crates/kiln-flash-attn/src/rocm_sdpa.rs` | `var` | `name` | Experimental/debug migration | 2 |
-| `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` | `var` | `k` | Test only | 1 |
 | `crates/kiln-flce-kernel/src/kt_api.rs` | `var` | `name` | Experimental/debug migration | 1 |
 | `crates/kiln-gdn-kernel/build.rs` | `var` | `var` | Build time/provenance | 2 |
 | `crates/kiln-gdn-kernel/build.rs` | `var` | `CARGO_FEATURE_CUDA` | Build time/provenance | 1 |

@@ -35,8 +35,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
-    CpuStorage, DType, Device, Element, Error, Layout, Result, Shape, Storage, StorageBackend,
-    TensorId, cpu_zeros, profile,
+    CpuStorage, DType, Device, Element, Error, Layout, Result, Shape, Storage, TensorId, cpu_zeros,
+    profile,
 };
 
 /// kiln-tensor's production tensor handle.

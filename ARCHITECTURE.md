@@ -992,16 +992,16 @@ See
 validation, provenance, restart, and compatibility contract.
 
 Accelerator execution has the same single-authority boundary. Resolved schema
-`kiln.accelerator-runtime-policy.v10` includes
-`accelerator.rocm_kernel_profile`. The server installs one complete 46-leaf
+`kiln.accelerator-runtime-policy.v11` includes
+`accelerator.rocm_kernel_profile`. The server installs one complete 75-leaf
 model/tensor policy before constructing a ROCm context or backend. `qualified` enables the production
 full-attention QKV, GDN projection/gate/recurrent/normalization/decode,
 head-major prefill, fused convolution, and LoRA decode routes, excluding the
 slower gfx1151 multi-block GDN prefill experiment, plus qualified tensor-level
 paged-attention splitting and GQA specializations. `portable_fallback` declines
-all thirty-four accelerated ROCm model/tensor routes while retaining twelve
+all forty-five accelerated ROCm model/tensor routes while retaining thirty
 correctness and bounded-work leaves for training, paged attention, concat,
-finite checks, and RMSNorm. `experimental_multiblock` adds that unqualified
+finite checks, RMSNorm, and flash-attention geometry. `experimental_multiblock` adds that unqualified
 prefill route and requires the experimental serving profile. Model dispatch
 reads process-lifetime policy and low-level operations read their owning
 context; the C++ paged-attention ABI receives explicit route values. No layer

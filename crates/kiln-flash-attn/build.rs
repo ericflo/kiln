@@ -160,21 +160,8 @@ fn build_rocm() {
             cmd.arg(format!("--offload-arch={arch}"));
         }
     }
-    let ck_header = rocm_root
-        .join("include")
-        .join("ck_tile")
-        .join("ops")
-        .join("fmha_bwd.hpp");
-    let enable_ck_tile = env::var("KILN_ROCM_DISABLE_CK_FMHA").is_err()
-        && (ck_header.exists() || env::var("KILN_ROCM_ENABLE_CK_FMHA").is_ok());
     if env::var("KILN_ROCM_WAVE64").is_ok() {
         cmd.arg("-mwavefrontsize64");
-    }
-    if enable_ck_tile {
-        cmd.arg("-DKILN_ENABLE_CK_TILE_FMHA=1");
-    }
-    if env::var("KILN_ROCM_ENABLE_CK_FMHA_FWD").is_ok() {
-        cmd.arg("-DKILN_ENABLE_CK_TILE_FMHA_FWD=1");
     }
     cmd.arg(&src).arg("-o").arg(&obj);
     let status = cmd
@@ -211,9 +198,6 @@ fn build_rocm() {
     println!("cargo:rerun-if-env-changed=HIPCC");
     println!("cargo:rerun-if-env-changed=KILN_ROCM_ARCHS");
     println!("cargo:rerun-if-env-changed=KILN_ROCM_WAVE64");
-    println!("cargo:rerun-if-env-changed=KILN_ROCM_ENABLE_CK_FMHA");
-    println!("cargo:rerun-if-env-changed=KILN_ROCM_DISABLE_CK_FMHA");
-    println!("cargo:rerun-if-env-changed=KILN_ROCM_ENABLE_CK_FMHA_FWD");
 }
 
 fn configure_nvcc_from_cuda_root(cuda_root: &PathBuf) {

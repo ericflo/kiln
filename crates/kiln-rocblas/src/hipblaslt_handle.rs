@@ -235,6 +235,22 @@ impl FfiError {
                 | FfiError::Unknown(_)
         )
     }
+
+    /// Whether a higher layer may retry the request with a different logical
+    /// batching layout without violating the execution-quarantine contract.
+    pub fn permits_layout_fallback(self) -> bool {
+        matches!(
+            self,
+            FfiError::DescCreate
+                | FfiError::LayoutCreate
+                | FfiError::Preference
+                | FfiError::UnsupportedDType
+                | FfiError::UnsupportedEpilogue
+                | FfiError::InvalidShape
+                | FfiError::AlgoDeserialize
+                | FfiError::AlgoBlobTooSmall
+        )
+    }
 }
 
 impl std::fmt::Display for FfiError {
@@ -1106,6 +1122,32 @@ mod tests {
             FfiError::InvalidShape,
         ] {
             assert!(!error.is_fatal_execution(), "{error:?} is pre-dispatch");
+        }
+    }
+
+    #[test]
+    fn layout_fallback_excludes_attempted_or_unavailable_execution() {
+        for error in [
+            FfiError::DescCreate,
+            FfiError::LayoutCreate,
+            FfiError::Preference,
+            FfiError::InvalidShape,
+            FfiError::AlgoDeserialize,
+        ] {
+            assert!(error.permits_layout_fallback(), "{error:?}");
+        }
+        for error in [
+            FfiError::CtxCreate,
+            FfiError::Heuristic,
+            FfiError::Matmul,
+            FfiError::CtxDestroy,
+            FfiError::ResourceCleanup,
+            FfiError::CtxCreatePartial,
+            FfiError::StreamUnavailable,
+            FfiError::DeviceMismatch,
+            FfiError::Unknown(-99),
+        ] {
+            assert!(!error.permits_layout_fallback(), "{error:?}");
         }
     }
 

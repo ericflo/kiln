@@ -159,10 +159,10 @@ pub use fp8::{
 };
 #[cfg(feature = "rocm")]
 pub use kiln_hip::{
-    ROCM_SYNC_REASON_COUNT, RocmBf16MatmulOutputMode, RocmExecutionPolicy, RocmMatmulPolicy,
-    RocmStreamId, RocmStreamSubmission, RocmStridedBatchedMatmulMode, RocmSyncReason,
-    RocmSyncReasonStats, RocmSyncTelemetrySnapshot, RocmSynchronizationMode,
-    RocmTensorKernelPolicy,
+    ROCM_SYNC_REASON_COUNT, RocmBf16MatmulOutputMode, RocmContext, RocmExecutionPolicy,
+    RocmFlashAttentionPolicy, RocmFlashAttentionRouteMode, RocmMatmulPolicy, RocmStreamId,
+    RocmStreamSubmission, RocmStridedBatchedMatmulMode, RocmSyncReason, RocmSyncReasonStats,
+    RocmSyncTelemetrySnapshot, RocmSynchronizationMode, RocmTensorKernelPolicy,
 };
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;
@@ -199,13 +199,13 @@ pub use rocm_matmul::{
 pub use rocm_ops::*;
 #[cfg(feature = "rocm")]
 pub use rocm_storage::{
-    RocmStorage, host_to_rocm_copy, host_to_rocm_copy_ctx, primary_rocm_context,
-    primary_rocm_context_with_execution_policy, rocm_cleanup_quarantined, rocm_contiguous,
-    rocm_execution_policy, rocm_htod_count, rocm_is_available, rocm_log_softmax_last_axis,
-    rocm_log_softmax_last_axis_f32, rocm_mem_get_info, rocm_pool_stats, rocm_slice_set_dim0,
-    rocm_softmax_last_axis, rocm_sync_telemetry_snapshot, rocm_synchronize_compute_stream,
-    rocm_synchronize_compute_stream_for, rocm_synchronize_default_stream,
-    rocm_synchronize_device_for, rocm_synchronize_external_yield,
+    RocmStorage, host_to_rocm_copy, host_to_rocm_copy_ctx, host_to_rocm_copy_with_context,
+    primary_rocm_context, primary_rocm_context_with_execution_policy, rocm_cleanup_quarantined,
+    rocm_contiguous, rocm_execution_policy, rocm_htod_count, rocm_is_available,
+    rocm_log_softmax_last_axis, rocm_log_softmax_last_axis_f32, rocm_mem_get_info, rocm_pool_stats,
+    rocm_slice_set_dim0, rocm_softmax_last_axis, rocm_sync_telemetry_snapshot,
+    rocm_synchronize_compute_stream, rocm_synchronize_compute_stream_for,
+    rocm_synchronize_default_stream, rocm_synchronize_device_for, rocm_synchronize_external_yield,
     rocm_synchronize_external_yield_for_stream,
     rocm_synchronize_legacy_device_same_stream_dependency, rocm_synchronize_same_stream_dependency,
     rocm_synchronize_tensor_same_stream_dependency, rocm_synchronize_tensor_stream,
