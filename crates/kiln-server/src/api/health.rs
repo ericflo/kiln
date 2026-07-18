@@ -396,7 +396,7 @@ struct DecodeRuntimeInfo {
     rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
     batching_configuration: BatchingRuntimeConfig,
     direct_decode_rendezvous: DirectDecodeRendezvousRuntimeState,
-    cuda_graphs: GraphInfo,
+    cuda_graphs: CudaGraphInfo,
     rocm_graphs: RocmGraphInfo,
     metal_graphs: GraphInfo,
     kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState,
@@ -489,6 +489,40 @@ fn memory_governor_runtime_info(
 struct GraphInfo {
     enabled: Option<bool>,
     state: &'static str,
+}
+
+#[derive(Serialize)]
+struct CudaGraphInfo {
+    requested: bool,
+    capture_allowed_by_serving_profile: bool,
+    enabled: Option<bool>,
+    state: &'static str,
+    max_cached_graphs: usize,
+    stable_paged_metadata: bool,
+    batched_capture_available: bool,
+    restart_required_to_change: bool,
+}
+
+fn cuda_graph_info(
+    enabled: Option<bool>,
+    requested: bool,
+    capture_allowed_by_serving_profile: bool,
+    max_cached_graphs: usize,
+) -> CudaGraphInfo {
+    CudaGraphInfo {
+        requested,
+        capture_allowed_by_serving_profile,
+        enabled,
+        state: match enabled {
+            Some(true) => "enabled",
+            Some(false) => "disabled",
+            None => "busy",
+        },
+        max_cached_graphs,
+        stable_paged_metadata: true,
+        batched_capture_available: false,
+        restart_required_to_change: true,
+    }
 }
 
 fn graph_info(enabled: Option<bool>) -> GraphInfo {
@@ -800,7 +834,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         prefix_cache,
         decode_batcher,
         batching_engine,
-        cuda_graphs,
+        cuda_graph_enabled,
         rocm_graphs,
         metal_graphs,
         model_loaded,
@@ -827,7 +861,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 PrefixCacheInfo::from(sched.prefix_cache_stats()),
                 None,
                 None,
-                graph_info(Some(false)),
+                Some(false),
                 rocm_graph_info(rocm_graph_observation),
                 graph_info(Some(false)),
                 true,
@@ -886,7 +920,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 prefix_cache,
                 decode_batcher,
                 batching_engine,
-                graph_info(cuda_graph_enabled),
+                cuda_graph_enabled,
                 rocm_graph_info(rocm_graph_observation),
                 graph_info(metal_graph_enabled),
                 true,
@@ -902,6 +936,12 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let prompt_caches = prompt_caches(&state);
     let memory_observation =
         CachedMemoryGovernorObservation::capture_global_for(state.vram_probe_selector);
+    let cuda_graphs = cuda_graph_info(
+        cuda_graph_enabled,
+        state.memory_config.cuda_graphs,
+        serving_policy.live_graph_capture,
+        state.memory_config.cuda_graph_cache_entries,
+    );
     let decode_runtime = DecodeRuntimeInfo {
         configuration: state.decode_runtime_config,
         accelerator_runtime: state.accelerator_runtime_policy,
@@ -2130,10 +2170,17 @@ mod tests {
             json["decode_runtime"]["direct_decode_rendezvous"]["route_available"],
             false
         );
-        for backend in ["cuda_graphs", "metal_graphs"] {
-            assert_eq!(json["decode_runtime"][backend]["enabled"], false);
-            assert_eq!(json["decode_runtime"][backend]["state"], "disabled");
-        }
+        let cuda_graphs = &json["decode_runtime"]["cuda_graphs"];
+        assert_eq!(cuda_graphs["requested"], true);
+        assert_eq!(cuda_graphs["capture_allowed_by_serving_profile"], false);
+        assert_eq!(cuda_graphs["enabled"], false);
+        assert_eq!(cuda_graphs["state"], "disabled");
+        assert_eq!(cuda_graphs["max_cached_graphs"], 8);
+        assert_eq!(cuda_graphs["stable_paged_metadata"], true);
+        assert_eq!(cuda_graphs["batched_capture_available"], false);
+        assert_eq!(cuda_graphs["restart_required_to_change"], true);
+        assert_eq!(json["decode_runtime"]["metal_graphs"]["enabled"], false);
+        assert_eq!(json["decode_runtime"]["metal_graphs"]["state"], "disabled");
         let rocm_graphs = &json["decode_runtime"]["rocm_graphs"];
         assert_eq!(rocm_graphs["state"], "unavailable");
         assert_eq!(

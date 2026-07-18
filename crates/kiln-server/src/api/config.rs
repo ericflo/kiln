@@ -46,6 +46,7 @@ struct ConfigResponse {
     rocm_graph_telemetry: Option<kiln_model::RocmGraphLiveTelemetry>,
     rocm_graph_telemetry_unavailable_reason:
         Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
+    cuda_graphs: CudaGraphConfigResponse,
     decode_runtime: DecodeRuntimeConfig,
     batching: BatchingConfigResponse,
     prefix_cache: PrefixCacheConfigResponse,
@@ -57,6 +58,32 @@ struct ConfigResponse {
     training: TrainingConfig,
     memory_budget: MemoryBudgetConfig,
     generation: GenerationConfig,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CudaGraphConfigResponse {
+    requested: bool,
+    capture_allowed_by_serving_profile: bool,
+    effective_policy_enabled: bool,
+    max_cached_graphs: usize,
+    stable_paged_metadata: bool,
+    batched_capture_available: bool,
+    restart_required_to_change: bool,
+}
+
+pub(crate) fn cuda_graph_config_response(state: &AppState) -> CudaGraphConfigResponse {
+    let capture_allowed_by_serving_profile =
+        state.serving_profile.runtime_policy().live_graph_capture;
+    CudaGraphConfigResponse {
+        requested: state.memory_config.cuda_graphs,
+        capture_allowed_by_serving_profile,
+        effective_policy_enabled: state.memory_config.cuda_graphs
+            && capture_allowed_by_serving_profile,
+        max_cached_graphs: state.memory_config.cuda_graph_cache_entries,
+        stable_paged_metadata: true,
+        batched_capture_available: false,
+        restart_required_to_change: true,
+    }
 }
 
 #[derive(Serialize)]
@@ -409,6 +436,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         rocm_graph_telemetry: rocm_graph_observation.telemetry,
         rocm_graph_telemetry_unavailable_reason: rocm_graph_observation
             .telemetry_unavailable_reason,
+        cuda_graphs: cuda_graph_config_response(&state),
         decode_runtime: state.decode_runtime_config,
         batching: BatchingConfigResponse {
             configuration: state.batching_runtime_config,
@@ -971,6 +999,16 @@ mod tests {
         assert_eq!(json["serving_profile"]["source"], "environment");
         assert_eq!(json["serving_profile"]["immutable_after_startup"], true);
         assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
+        assert_eq!(json["cuda_graphs"]["requested"], true);
+        assert_eq!(
+            json["cuda_graphs"]["capture_allowed_by_serving_profile"],
+            true
+        );
+        assert_eq!(json["cuda_graphs"]["effective_policy_enabled"], true);
+        assert_eq!(json["cuda_graphs"]["max_cached_graphs"], 8);
+        assert_eq!(json["cuda_graphs"]["stable_paged_metadata"], true);
+        assert_eq!(json["cuda_graphs"]["batched_capture_available"], false);
+        assert_eq!(json["cuda_graphs"]["restart_required_to_change"], true);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
             "kiln.accelerator-runtime-policy.v12"

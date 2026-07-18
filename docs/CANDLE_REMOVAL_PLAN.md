@@ -501,7 +501,12 @@ rm -rf vendor/candle-core/
 sed -i "/candle-core.*path.*vendor/d" Cargo.toml
 ```
 
-## Phase 5 (CUDA graph capture) — bs>1 captured path opt-in (2026-05-26)
+## Phase 5 (CUDA graph capture) — historical bs>1 investigation (2026-05-26)
+
+> The environment switches in this section were retired on 2026-07-18. The
+> batched CUDA graph route is now source-disabled after failing real concurrent
+> serving; this section is retained as investigation evidence, not operator
+> instructions.
 
 `KILN_CUDA_GRAPHS_BATCHED=1` and `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`
 briefly flipped from default-off to default-on in commit `6d564b9a`,
@@ -547,10 +552,9 @@ Bug chain from the attempted default-on flip:
 See `bench-results/cuda-graph-status.md` "Phase 5 sanitizer
 sweep — 2026-05-26" for the full validation trail.
 
-Opt-in flags: `KILN_CUDA_GRAPHS_BATCHED=1` and
-`KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`. Keep them off in production
-until the lm-head captured-output lifetime fix lands and passes a
-fresh RunPod validation cycle.
+The former opt-in names are no longer parsed. Batched capture remains
+unavailable until a source change is backed by fresh NVIDIA sanitizer,
+correctness, resilience, and throughput qualification.
 
 ## KILN_DETECT_ANOMALY (Phase 9 trap) — wired end-to-end (2026-05-26)
 

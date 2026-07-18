@@ -282,6 +282,9 @@ kv_force_blocks = 0                   # 0 disables. A positive one-shot startup 
 cuda_graphs = true                    # CUDA graph capture/replay policy. Non-CUDA backends
                                       # resolve their graph policy separately while config
                                       # consolidation is in progress.
+cuda_graph_cache_entries = 8          # Retained single-row CUDA graph geometry limit (1..=64).
+                                      # Canonical override:
+                                      # KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES.
 
 [teachers]
 # Remote API credentials are server-owned handles. A registration submits only

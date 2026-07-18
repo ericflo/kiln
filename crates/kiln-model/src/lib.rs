@@ -84,6 +84,7 @@ pub use backend::{
 // with the candle-parity opt-in feature; production uses `for_device_kt`.
 pub use backend::{DecodeWeightPrewarmCancelled, DecodeWeightPrewarmPolicy};
 pub use cancel::CancelHandle;
+pub use cuda_graph::CudaGraphExecutionPolicy;
 #[cfg(feature = "cuda")]
 pub use cuda_policy::{CudaKernelPolicy, install_cuda_kernel_policy};
 pub use engine::Engine;

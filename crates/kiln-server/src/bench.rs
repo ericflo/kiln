@@ -3291,7 +3291,7 @@ fn main() -> Result<()> {
         runner_tokenizer,
         model_config.clone(),
         ModelRunnerRuntimeOptions {
-            cuda_graphs: false,
+            cuda_graph: kiln_model::CudaGraphExecutionPolicy::disabled(),
             rocm_graph: kiln_model::RocmGraphExecutionPolicy::lazy_capture_replay(),
             metal_graphs: true,
             max_decode_batch: None,

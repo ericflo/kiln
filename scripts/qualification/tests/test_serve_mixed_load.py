@@ -294,6 +294,18 @@ def health_fixture(
         },
         "decode_runtime": {
             "accelerator_runtime": accelerator_runtime,
+            "cuda_graphs": {
+                "requested": False,
+                "capture_allowed_by_serving_profile": serve.PROFILE_POLICIES[
+                    serving_profile
+                ]["live_graph_capture"],
+                "enabled": False,
+                "state": "disabled",
+                "max_cached_graphs": serve.CUDA_GRAPH_CACHE_ENTRIES,
+                "stable_paged_metadata": True,
+                "batched_capture_available": False,
+                "restart_required_to_change": True,
+            },
             "rocm_graphs": graph,
             "kv_autoscaler": {
                 "requested": kv_autoscale_requested,
@@ -487,6 +499,17 @@ def debug_fixture(
                 "effective": 1 << 30,
                 "source": "config_file",
             },
+        },
+        "cuda_graphs": {
+            "requested": False,
+            "capture_allowed_by_serving_profile": serve.PROFILE_POLICIES[
+                serving_profile
+            ]["live_graph_capture"],
+            "effective_policy_enabled": False,
+            "max_cached_graphs": serve.CUDA_GRAPH_CACHE_ENTRIES,
+            "stable_paged_metadata": True,
+            "batched_capture_available": False,
+            "restart_required_to_change": True,
         },
         "rocm_graphs": {
             field: value
@@ -2234,6 +2257,11 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                         expected["prefix_cache_requested_enabled"],
                     )
                     self.assertEqual(parsed["memory"]["kv_force_blocks"], 0)
+                    self.assertFalse(parsed["memory"]["cuda_graphs"])
+                    self.assertEqual(
+                        parsed["memory"]["cuda_graph_cache_entries"],
+                        serve.CUDA_GRAPH_CACHE_ENTRIES,
+                    )
                     self.assertEqual(
                         parsed["server"]["serving_profile"],
                         expected["serving_profile"],
@@ -2303,6 +2331,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 rocm_graph_mode="disabled",
                 rocm_graph_cache_entries=12,
                 rocm_graph_cache_max_bytes=64 << 20,
+                cuda_graphs=True,
+                cuda_graph_cache_entries=16,
                 kv_force_blocks=7,
             )
             parsed = parse_generated_toml(path.read_text(encoding="utf-8"))
@@ -2330,6 +2360,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(
             parsed["accelerator"]["rocm_graph_cache_max_bytes"], 64 << 20
         )
+        self.assertTrue(parsed["memory"]["cuda_graphs"])
+        self.assertEqual(parsed["memory"]["cuda_graph_cache_entries"], 16)
         self.assertEqual(parsed["memory"]["kv_force_blocks"], 7)
         self.assertEqual(parsed["model"]["path"], str(root / 'model "quoted"'))
 
@@ -2529,6 +2561,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "retained_bytes_accounting_complete"
         ] = False
         health["decode_runtime"]["rocm_graphs"]["quarantined_retained_bytes"] = 4096
+        health["decode_runtime"]["cuda_graphs"]["max_cached_graphs"] = 9
+        debug["cuda_graphs"]["stable_paged_metadata"] = False
         debug["kv_autoscaler"]["requested_source"] = "environment"
         debug["http"]["send_buffer_effective_bytes"] *= 2
         debug["http"]["send_buffer_kernel_readback_bytes"] *= 2
@@ -2544,6 +2578,12 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertTrue(any("retained bytes exceed" in failure for failure in failures))
         self.assertTrue(any("accounting is incomplete" in failure for failure in failures))
         self.assertTrue(any("quarantined retained bytes" in failure for failure in failures))
+        self.assertTrue(
+            any("cuda_graphs.max_cached_graphs=9" in failure for failure in failures)
+        )
+        self.assertTrue(
+            any("cuda_graphs.stable_paged_metadata=False" in failure for failure in failures)
+        )
         self.assertTrue(
             any("debug KV autoscaler requested_source" in failure for failure in failures)
         )

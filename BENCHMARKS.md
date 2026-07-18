@@ -476,10 +476,16 @@ cannot serve as a current comparison receipt. Its p50/p99 request latencies foll
 the aggregate-throughput ordering (vLLM's bs=64 p99 = 2.13 s, kiln's
 bs=64 p99 = 3.46 s).
 
-### Batched CUDA-graph capture mode (KILN_CUDA_GRAPHS_BATCHED=1 +
-###  KILN_CUDA_GRAPHS_BATCHED_NO_REPLAY=1)
+### Historical batched CUDA-graph capture investigation
 
-Same setup as above, with both env flags on. The runner records a
+> The two environment switches named below were retired on 2026-07-18. The
+> unqualified batched route is source-disabled after failing real concurrent
+> serving. These measurements preserve investigation history; they are not
+> current configuration instructions or qualification evidence.
+
+The historical setup used `KILN_CUDA_GRAPHS_BATCHED=1` and
+`KILN_CUDA_GRAPHS_BATCHED_NO_REPLAY=1`. At that source revision, the runner
+recorded a
 batched CUDA graph for the per-step shape, launches it once, then
 evicts the cache so each subsequent step re-captures. The full replay
 path on cache-hit is disabled pending a CUDA-side correctness fix
@@ -497,11 +503,10 @@ eager batched fallback:
 | 32 | 998.4 | 1282.1 | **1.28×** | 0.86×          |
 | 64 | 1181.4| 1401.2 | **1.19×** | 0.73×          |
 
-`kiln batched-capture` column is what `KILN_CUDA_GRAPHS_BATCHED=1
-KILN_CUDA_GRAPHS_BATCHED_NO_REPLAY=1` delivers — every batched
-decode step captures + launches a fresh graph, no replay. At
-bs ≤ 16 kiln now leads vLLM by 19-81 %. At bs=32 the gap to vLLM
-narrows from 33 % to 14 %; at bs=64 from 38 % to 27 %.
+At that historical source revision, the `kiln batched-capture` column captured
+and launched a fresh graph for every batched decode step, with no replay. At
+bs <= 16 kiln led vLLM by 19-81 %. At bs=32 the gap to vLLM narrowed
+from 33 % to 14 %; at bs=64 from 38 % to 27 %.
 
 The remaining bs ≥ 32 gap is the missing replay path: capture has a
 fixed instantiation cost (~1 ms) that gets paid once per step

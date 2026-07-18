@@ -1704,6 +1704,11 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             );
             println!(
                 "  {} {}",
+                style("CUDA graph cache entries:").dim(),
+                config.memory.cuda_graph_cache_entries
+            );
+            println!(
+                "  {} {}",
                 style("Accelerator policy schema:").dim(),
                 accelerator_runtime.schema_id,
             );

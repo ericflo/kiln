@@ -1681,6 +1681,15 @@ async function startServer({
           rocm_graph_cache_entries: { configured: 8, effective: 8, source: 'default' },
           rocm_graph_cache_max_bytes: { configured: GIB, effective: GIB, source: 'default' },
         },
+        cuda_graphs: {
+          requested: true,
+          capture_allowed_by_serving_profile: false,
+          effective_policy_enabled: false,
+          max_cached_graphs: 8,
+          stable_paged_metadata: true,
+          batched_capture_available: false,
+          restart_required_to_change: true,
+        },
         kv_cache: { num_blocks: 1024, num_blocks_source: 'auto', fp8_enabled: true },
         batching: {
           configuration: {
@@ -2797,6 +2806,9 @@ async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Kiln-tensor API routes[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable adapter route set and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Full-attention score ceiling[\s\S]*2,048 MiB[\s\S]*default/, `${prefix} should render immutable full-attention geometry and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA kernel profile[\s\S]*native_default[\s\S]*config_file/, `${prefix} should render the immutable CUDA backend route set and source`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph policy[\s\S]*disabled[\s\S]*profile blocked/, `${prefix} should render the profile-resolved CUDA graph request`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph cache[\s\S]*8/, `${prefix} should render the typed CUDA graph cache bound`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph contract[\s\S]*stable metadata[\s\S]*single-row only/, `${prefix} should render fixed CUDA graph safety invariants`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Strided batched matmul[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable strided-batched route and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*BF16 matmul output[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable BF16-output route and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*ROCm kernel profile[\s\S]*qualified[\s\S]*config_file/, `${prefix} should render the complete immutable ROCm kernel route set and source`);

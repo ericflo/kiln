@@ -170,6 +170,15 @@
         rocm_graph_cache_entries: { configured: 8, effective: 8, source: 'default' },
         rocm_graph_cache_max_bytes: { configured: GIB, effective: GIB, source: 'default' },
       },
+      cuda_graphs: {
+        requested: true,
+        capture_allowed_by_serving_profile: false,
+        effective_policy_enabled: false,
+        max_cached_graphs: 8,
+        stable_paged_metadata: true,
+        batched_capture_available: false,
+        restart_required_to_change: true,
+      },
       rocm_graphs: {
         requested: false,
         capture_requested: false,

@@ -775,9 +775,28 @@ desktop settings UI, and rollout/eval CLIs all expose the same semantics.
 
 ### CUDA Graphs for Decode
 
-After a warmup step, the decode forward pass is captured into a CUDA graph and replayed on subsequent steps. This eliminates kernel launch overhead and provides 10-15% speedup for decode.
+`memory.cuda_graphs` requests single-row CUDA decode capture, while
+`memory.cuda_graph_cache_entries` bounds retained graph geometries and their
+stable device buffers to `1..=64` (default `8`). The owning server resolves
+both fields before device selection and injects one immutable
+`CudaGraphExecutionPolicy`; decode never reads process environment. The
+default `stable` serving profile still resolves execution to eager because it
+does not permit live graph capture.
+
+After a warmup step, an eligible decode forward pass is captured into a CUDA
+graph and replayed on subsequent steps. Historical NVIDIA measurements found
+lower launch overhead, but current performance remains a machine-local NVIDIA
+qualification claim rather than a portable percentage guarantee.
 
 The position value (for RoPE) is updated via `cudaMemcpyHtoDAsync` to a pre-allocated GPU buffer before each graph replay. The graph reads from the same device pointer, seeing the updated position each step.
+
+Paged block-table, sequence-length, KV-slot, rotary, and attention-output
+buffers are always graph-stable and refreshed in place. There is no opt-out:
+transient metadata previously caused stale-pointer faults under concurrent
+block reuse. The in-tree batched capture implementation remains unavailable
+after poisoning the CUDA context in real concurrent serving; no environment
+switch can activate it. Re-enabling it requires a source change and NVIDIA
+correctness, resilience, and throughput evidence.
 
 CUDA graphs are invalidated when LoRA adapters are swapped (different weight pointers). See `crates/kiln-model/src/cuda_graph.rs`.
 
@@ -883,7 +902,8 @@ adapter_dir = "./adapters"
 # num_blocks = 64                   # auto-detected from VRAM if omitted
 inference_memory_fraction = 0.7     # fraction of remaining VRAM for KV cache
 kv_cache_fp8 = false                # halve KV cache memory with FP8
-cuda_graphs = true                  # 10-15% decode speedup
+cuda_graphs = true                  # request qualified single-row capture
+cuda_graph_cache_entries = 8        # retain at most this many captured shapes
 
 [training]
 # grad_checkpoint_segments = 8      # auto-tuned if omitted
@@ -1346,15 +1366,11 @@ kt-typed entrypoints at every production call site. Concretely:
   Silicon. Paired with the `MetalAllocator` (see "kt-tensor allocator
   impls" in `bench-results/cuda-graph-status.md`), the Metal backend
   reaches the same lifecycle contract as CPU + CUDA + Vulkan.
-- **Phase 5 bs>1 CUDA graph capture audit suspects all closed.** All
-  four root-cause intra-graph alloc suspects from
-  `bench-results/cuda-graph-bs2-secondary-audit.md` are resolved. The
-  batched capture/replay path lives in-tree under
-  `KILN_CUDA_GRAPHS_BATCHED=1` (default off); one end-to-end
-  `compute-sanitizer` sweep on the Qwen3.5-4B chat-completion driver
-  remains as the validation gate before defaulting on. See
-  `bench-results/cuda-graph-status.md` for the canonical
-  what's-done-vs-what's-left inventory.
+- **The bs>1 CUDA graph implementation is unavailable.** Historical
+  allocation suspects are closed, but real concurrent serving still poisoned
+  the CUDA context. It is not a hidden opt-in. Re-entry requires a source
+  change plus NVIDIA sanitizer, parity, resilience, and throughput evidence;
+  `bench-results/cuda-graph-status.md` retains the historical investigation.
 - **9 Vulkan ops + 15 Metal kind tags wired through real kernels.**
   The Vulkan backend has 9 ops on real `kiln-vulkan-kernel` compute
   pipelines (the rest are `Ok(None)` fall-through to CPU reference);

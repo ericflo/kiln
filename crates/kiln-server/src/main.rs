@@ -108,12 +108,16 @@ fn resolve_model_runner_runtime_options(
     policy: kiln_server::config::ServingRuntimePolicy,
     accelerator_policy: kiln_server::config::ResolvedAcceleratorRuntimePolicy,
     cuda_graphs_requested: bool,
+    cuda_graph_cache_entries: usize,
     max_decode_batch: Option<usize>,
 ) -> anyhow::Result<ModelRunnerRuntimeOptions> {
     let rocm_graph = kiln_server::accelerator_runtime::model_rocm_graph_policy(accelerator_policy)?;
     Ok(if policy.live_graph_capture {
         ModelRunnerRuntimeOptions {
-            cuda_graphs: cuda_graphs_requested,
+            cuda_graph: kiln_model::CudaGraphExecutionPolicy::try_new(
+                cuda_graphs_requested,
+                cuda_graph_cache_entries,
+            )?,
             rocm_graph,
             metal_graphs: true,
             max_decode_batch,
@@ -762,9 +766,10 @@ async fn main() -> Result<()> {
             serving_policy,
             accelerator_runtime_policy,
             config.memory.cuda_graphs,
+            config.memory.cuda_graph_cache_entries,
             None,
         )?;
-        let device_kt = select_device_with_options_kt(graph_options.cuda_graphs)?;
+        let device_kt = select_device_with_options_kt(graph_options.cuda_graph.enabled())?;
         kiln_server::accelerator_runtime::install_startup_policy(
             device_kt,
             accelerator_runtime_policy,
@@ -2019,6 +2024,7 @@ mod tests {
                 profile.runtime_policy(),
                 accelerator_policy,
                 true,
+                13,
                 Some(17),
             )
             .unwrap();
@@ -2042,10 +2048,10 @@ mod tests {
                 kiln_server::config::ConfigValueSource::ConfigFile,
             ));
         assert_eq!(
-            resolve_model_runner_runtime_options(policy, accelerator_policy, true, Some(17))
+            resolve_model_runner_runtime_options(policy, accelerator_policy, true, 13, Some(17))
                 .unwrap(),
             ModelRunnerRuntimeOptions {
-                cuda_graphs: true,
+                cuda_graph: kiln_model::CudaGraphExecutionPolicy::try_new(true, 13).unwrap(),
                 rocm_graph: kiln_model::RocmGraphExecutionPolicy::lazy_capture_replay(),
                 metal_graphs: true,
                 max_decode_batch: Some(17),
@@ -2053,9 +2059,10 @@ mod tests {
             }
         );
         assert!(
-            !resolve_model_runner_runtime_options(policy, accelerator_policy, false, Some(17))
+            !resolve_model_runner_runtime_options(policy, accelerator_policy, false, 13, Some(17),)
                 .unwrap()
-                .cuda_graphs
+                .cuda_graph
+                .enabled()
         );
     }
 

@@ -319,6 +319,22 @@ kiln serve --served-model-id Qwen3.5-4B-local</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">Use <code>kiln config</code> to validate built-in defaults plus <code>KILN_*</code> environment overrides, or <code>kiln config --file</code> / <code>kiln config -f</code> to validate a TOML file before starting the server.</p>
       </div>
       <div class="card p-6 lg:col-span-2">
+        <p class="label mb-2">CUDA graph policy</p>
+        <h2 class="text-2xl font-semibold tracking-tight mb-4">Bound retained decode graphs at startup</h2>
+        <p class="mb-4" style="color: var(--fg-dim);">Single-row CUDA graph capture and its retained geometry limit are typed memory policy. The cache limit is <code>1..=64</code>, defaults to <code>8</code>, and every change requires restart. Stable paged metadata is mandatory; batched CUDA graph capture is unavailable and has no hidden opt-in.</p>
+<pre class="text-sm"><code>[server]
+serving_profile = "experimental"
+
+[memory]
+cuda_graphs = true
+cuda_graph_cache_entries = 8</code></pre>
+<pre class="text-sm mt-4"><code>kiln config --file kiln.toml
+kiln serve --config kiln.toml
+curl -s http://localhost:8420/v1/config | jq '.cuda_graphs'
+curl -s http://localhost:8420/health | jq '.decode_runtime.cuda_graphs'</code></pre>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">The canonical cache override is <code>KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES</code>. The default <code>stable</code> profile reports the request but resolves capture off; <code>experimental</code> permits the requested single-row policy. Decode never re-reads process environment.</p>
+      </div>
+      <div class="card p-6 lg:col-span-2">
         <p class="label mb-2">Batching policy</p>
         <h2 class="text-2xl font-semibold tracking-tight mb-4">Resolve scheduler controls at startup</h2>
         <p class="mb-4" style="color: var(--fg-dim);">Put production scheduling controls in typed TOML. The canonical environment rule is mechanically derived as <code>KILN_BATCHING_&lt;FIELD&gt;</code>, but files are easier to review and bind into benchmark evidence. Every change requires a server restart.</p>

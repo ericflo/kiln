@@ -17997,9 +17997,8 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // `bench-results/cuda-graph-bs2-secondary-audit.md`). `None`
     // reproduces the legacy positions-based per-call build.
     rope_tables: Option<(&Tensor, &Tensor)>,
-    // CUDA-graph-stable `[batch]` u32 per-row KV-write slot tensor. When
-    // `Some` and `kv_fused_batched_enabled()` is true, the per-row KV slot
-    // writer dispatches the fused batched kernel
+    // Graph-stable `[batch]` u32 per-row KV-write slot tensor. Metal dispatches
+    // the fused batched kernel
     // (`PagedKvCache::write_token_major_native_batch_graph_slot`) instead
     // of the per-row host loop that calls
     // `paged_kv_write_token_major_bf16` with a baked-immediate slot.
@@ -18351,13 +18350,13 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 // `[batch] u32` per-row slot device buffer through
                 // `BatchedPagedDecodeGraphInputs.kv_slot`/Metal graph inputs,
                 // write via the fused batched-slot kernel so the captured graph
-                // re-reads fresh slots on every replay. CUDA keeps its
-                // historical opt-in gate; Metal uses the slot-buffer writer
-                // whenever the runner supplies it.
+                // re-reads fresh slots on every replay. The unqualified CUDA
+                // batched graph route remains unavailable; Metal uses the
+                // slot-buffer writer whenever the runner supplies it.
                 if let Some(slot_tensor) = kv_slot {
                     let use_graph_slot_writer = match k.device() {
                         #[cfg(feature = "cuda")]
-                        Device::Cuda(_) => kv_fused_batched_enabled(),
+                        Device::Cuda(_) => false,
                         #[cfg(feature = "metal")]
                         Device::Metal(_) => true,
                         _ => false,
@@ -29489,7 +29488,7 @@ mod tests {
     /// bs=1 CUDA-graph-capture+replay vs. eager decode parity.
     ///
     /// `cuda_graph.rs` captures the bs=1 decode forward under CUDA stream
-    /// capture (`KILN_CUDA_GRAPHS=true`, the production default) and replays
+    /// capture (under an enabled typed CUDA graph policy) and replays
     /// it on subsequent steps, baking device pointers into the recorded
     /// kernel launches. There was NO correctness gate verifying that a
     /// graph-captured-and-replayed decode produces the SAME logits as the
@@ -29517,9 +29516,8 @@ mod tests {
     /// shape- and value-identical — the only thing that changes between
     /// them is eager vs. captured vs. replayed execution.
     ///
-    /// bs=1 ONLY: the documented dangling-pointer bug is in the bs>1
-    /// BATCHED graph path (`KILN_CUDA_GRAPHS_BATCHED=1`, default-off); this
-    /// test deliberately does NOT exercise that path.
+    /// bs=1 ONLY: the unqualified bs>1 graph path is unavailable; this test
+    /// deliberately does not exercise it.
     #[cfg(feature = "cuda")]
     #[test]
     fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
@@ -29536,13 +29534,8 @@ mod tests {
             eprintln!("fused paged decode disabled; skipping bs=1 CUDA-graph parity test");
             return Ok(());
         }
-        // Serialise against other env-mutating tests — this test flips
-        // `KILN_CUDA_GRAPHS` for its duration. Mirrors the residency tests.
-        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         // #1082: `device` is a kt `Device`; the kt cache constructor takes
-        // it directly and the backend dispatch goes through the kt entry
-        // point. `CudaGraphRunner::new` is candle-typed, so bridge once.
+        // it directly and the backend dispatch goes through the kt entry point.
         let device_kt = device;
         let backend = crate::backend::for_device_kt(&device);
 
@@ -29629,12 +29622,9 @@ mod tests {
             .to_vec1::<f32>()?;
 
         // --- (2) Graph path: warmup -> capture -> replay. ---
-        // Enable graphs for the duration of this test only.
-        let prev_graphs = std::env::var("KILN_CUDA_GRAPHS").ok();
-        unsafe { std::env::set_var("KILN_CUDA_GRAPHS", "true") };
-
         let result = (|| -> Result<()> {
-            let mut runner = crate::cuda_graph::CudaGraphRunner::new(&device_kt, true);
+            let policy = crate::cuda_graph::CudaGraphExecutionPolicy::try_new(true, 8)?;
+            let mut runner = crate::cuda_graph::CudaGraphRunner::new(&device_kt, policy);
             assert!(
                 runner.is_enabled(),
                 "CUDA graph runner must be enabled on a CUDA device"
@@ -29788,11 +29778,6 @@ mod tests {
             Ok(())
         })();
 
-        // Restore the env var regardless of test outcome.
-        match prev_graphs {
-            Some(v) => unsafe { std::env::set_var("KILN_CUDA_GRAPHS", v) },
-            None => unsafe { std::env::remove_var("KILN_CUDA_GRAPHS") },
-        }
         result
     }
 
@@ -34578,34 +34563,4 @@ mod tests {
     // (#1082) Deleted test_cuda_rotary_one_bwd_kt_bridge_default_matches_candle_path:
     //   it exercised the deleted `fused_rotary_one_backward_via_kt_bridge` candle
     //   parity path. Rotary autograd is now `try_tape_rope_cuda` on the kt tape.
-}
-
-/// Read the `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED` env var.
-///
-/// When enabled, the bs>1 paged-decode CUDA-graph path uses the
-/// fused batched-slot KV writer kernel
-/// (`PagedKvCache::write_token_major_native_batch_graph_slot`) so the
-/// per-row destination slots are read from a device tensor at replay
-/// time instead of being baked into the captured kernel args.
-/// Closes suspect 1 in `bench-results/cuda-graph-bs2-secondary-audit.md`
-/// for #1082.
-///
-/// **Default REVERTED to OFF (2026-05-26)** alongside the sibling
-/// `KILN_CUDA_GRAPHS_BATCHED` flip. Concurrent bench against
-/// `kiln serve` showed batched graph capture failing silently with
-/// a swallowed inner error → bad CUDA context → all bs≥2 requests
-/// 500ed. The sanitizer validation under HEAD `a2cb9edb` covered
-/// the bs=1 capture path, not the actual batched capture path the
-/// production server hits. See the matching note on
-/// `batched_graph_enabled()` in `cuda_graph.rs` for the full
-/// post-mortem.
-///
-/// Set `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1` to opt in once the
-/// underlying batched-capture bug is fixed and re-validated against
-/// `bench-concurrent-batch.py`.
-#[cfg(feature = "cuda")]
-fn kv_fused_batched_enabled() -> bool {
-    std::env::var("KILN_CUDA_GRAPHS_BATCHED_KV_FUSED")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
 }

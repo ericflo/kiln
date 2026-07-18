@@ -30,71 +30,19 @@
 //! - Graph is invalidated on LoRA adapter swap (different weight pointers).
 //! - Falls back gracefully to eager execution if capture fails.
 //!
-//! ## Multi-batch (`bs > 1`) capture — not yet implemented
+//! ## Multi-batch (`bs > 1`) capture is unavailable
 //!
-//! Today the runner only captures the `bs = 1` decode shape. The
-//! `paged_batched_decode_step` path for `row_count > 1` runs eager, which is
-//! the single biggest remaining throughput gap vs. vLLM at high concurrency
-//! on Qwen3.5-4B / L40S (kiln 1181 tok/s @ bs=64 vs. vLLM 1907 tok/s — see
-//! `BENCHMARKS.md` "Direct head-to-head" section, commit `5fddb497`).
+//! A batched implementation remains in-tree for continued engineering, but
+//! real concurrent serving poisoned the CUDA context during capture/replay.
+//! `is_batched_enabled()` therefore returns false unconditionally. There is no
+//! process-environment opt-in; re-entry requires a source change plus NVIDIA
+//! sanitizer, parity, resilience, and throughput evidence. The healthy eager
+//! batched path remains authoritative meanwhile.
 //!
-//! ### Proposed structure
-//!
-//! - **`CudaBatchedGraphKey { batch_size, max_seqlen_k, max_blocks_per_seq,
-//!   stable_metadata }`** — same `stable_metadata` cliff as today; batch-size
-//!   bucketed cache.
-//! - **`CapturedBatchedDecodeGraph`** — same fields as `CapturedDecodeGraph`
-//!   but every per-row tensor (`token_buffer`, `position_buffer`,
-//!   `block_table_buffer`, `seqused_k_buffer`, `kv_slot_buffer`,
-//!   `output_logits`, per-full-attn-layer outputs/LSE) sized for `[batch,
-//!   ...]` instead of `[1, ...]`. GDN decode outputs gain a `batch` dim too.
-//! - **Persistent batched `LinearAttentionState` slot per bucket** — the
-//!   current per-row `recurrent_states[layer_idx]` / `conv_states[layer_idx]`
-//!   tensors have new pointers on every `from_batch_rows` call. Capture
-//!   needs stable device addresses, so the runner should own one batched
-//!   state pool keyed on `batch_size` and copy-in the per-row contents
-//!   (via the existing scatter primitives) before each replay.
-//! - **Per-bucket cap** — vLLM captures 51 sizes (1, 2, 4, …, 512); for
-//!   kiln a bounded set like `[1, 2, 4, 8, 16, 32, 64]` covers the
-//!   `KILN_MAX_DECODE_BATCH` default range. Bucket the request batch to
-//!   the next-larger captured size (or fall back to eager).
-//! - **Entry point** — `CudaGraphRunner::decode_step_paged_batched(...)`
-//!   mirroring `decode_step_paged` but taking `&[u32]` / `&[&BlockTable]`
-//!   / `&[usize]` / `&mut [&mut LinearAttentionState]`. Wire into
-//!   `ModelRunner::paged_batched_decode_step` in `generate.rs` at the
-//!   `try_contiguous_batched` branch — before invoking
-//!   `model_forward_paged_batched_decode_hidden`, route through the
-//!   batched graph runner when the bucket is captured.
-//! - **Forward wrapper** — `model_forward_paged_batched_hidden_with_graph_inputs`
-//!   in `forward.rs` mirroring the single-row
-//!   `model_forward_paged_hidden_with_graph_inputs` (HiddenOnly; lm_head runs
-//!   eagerly off-graph — #1082 boxes 432/433), consuming
-//!   `BatchedPagedDecodeGraphInputs` for the stable per-row tensors.
-//!
-//! ### Sequencing
-//!
-//! 1. Land the key + struct + runner fields behind `#[allow(dead_code)]`
-//!    to verify the type design compiles cleanly.
-//! 2. Add the persistent batched-state pool (separate commit) — reuses
-//!    `LinearAttentionState::from_batch_rows` shape but with in-place
-//!    storage via the existing `assemble_gdn_recurrent_resident_batch_rows`
-//!    backend primitive.
-//! 3. Add the batched forward wrapper consuming stable inputs.
-//! 4. Add capture + replay logic.
-//! 5. Wire into `paged_batched_decode_step`.
-//! 6. Bench: target ≥ 1.5× kiln throughput at bs=32-64 to close most of
-//!    the vLLM gap.
-//!
-//! ### Why this hasn't landed yet
-//!
-//! The graph capture has to pin **every** device pointer touched in
-//! the forward, including the GDN recurrent state, the conv state,
-//! per-layer attention scratch, paged-KV pool slots, RoPE tables, and
-//! the LM head output. Any allocation Candle frees between capture and
-//! replay turns the graph into a use-after-free. The bs=1 path
-//! enumerates and pre-allocates these carefully; extending the same
-//! discipline to a batched shape is several commits worth of work and
-//! is currently the top-priority entry on this file's TODO list.
+//! Every graph route requires stable paged metadata. Block-table,
+//! sequence-length, KV-slot, rotary, and attention-output buffers are retained
+//! and refreshed in place; the transient-metadata mode that caused stale
+//! pointer faults has been removed rather than exposed as configuration.
 
 use anyhow::{Context, Result};
 #[cfg(feature = "cuda")]
@@ -131,21 +79,72 @@ use kiln_tensor::Tensor;
 
 use kiln_core::block::BlockTable;
 
+/// Immutable CUDA decode-graph policy installed with a model runner.
+///
+/// Product owners resolve configuration before device selection and inject the
+/// result here. Decode never re-reads process environment, so graph behavior
+/// cannot change underneath an in-flight request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CudaGraphExecutionPolicy {
+    enabled: bool,
+    max_cached_graphs: usize,
+}
+
+impl CudaGraphExecutionPolicy {
+    pub const DEFAULT_MAX_CACHED_GRAPHS: usize = 8;
+    pub const MAX_CACHED_GRAPHS: usize = 64;
+
+    /// Eager CUDA decode with the default dormant cache bound.
+    pub const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            max_cached_graphs: Self::DEFAULT_MAX_CACHED_GRAPHS,
+        }
+    }
+
+    /// Build a policy from validated product configuration.
+    pub fn try_new(enabled: bool, max_cached_graphs: usize) -> Result<Self> {
+        anyhow::ensure!(
+            max_cached_graphs > 0,
+            "CUDA graph cache capacity must be greater than zero"
+        );
+        anyhow::ensure!(
+            max_cached_graphs <= Self::MAX_CACHED_GRAPHS,
+            "CUDA graph cache capacity must not exceed {}",
+            Self::MAX_CACHED_GRAPHS
+        );
+        Ok(Self {
+            enabled,
+            max_cached_graphs,
+        })
+    }
+
+    pub const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    pub const fn max_cached_graphs(self) -> usize {
+        self.max_cached_graphs
+    }
+}
+
+impl Default for CudaGraphExecutionPolicy {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
 /// Holds a captured CUDA graph ready for replay.
 #[cfg(feature = "cuda")]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct CudaGraphKey {
-    stable_metadata: bool,
-    seq_len: usize,
-    block_table: Vec<u32>,
     max_seqlen_k: usize,
     max_blocks_per_seq: usize,
 }
 
 #[cfg(feature = "cuda")]
 impl CudaGraphKey {
-    fn new(block_table: &BlockTable, paged_cache: &PagedKvCacheKt, seq_len: usize) -> Self {
-        let stable_metadata = Self::stable_paged_metadata_enabled();
+    fn new(paged_cache: &PagedKvCacheKt, seq_len: usize) -> Self {
         let attention_len = seq_len + 1;
         // #1082: bucket + size by FA2_KBLOCK_N (=64 for hdim256), NOT a hardcoded
         // 128. Must match `forward.rs::try_flash_attn_paged_decode`'s K_BLOCK_N
@@ -157,29 +156,9 @@ impl CudaGraphKey {
         let pages_per_chunk = kblock_n / paged_cache.block_size();
         let max_blocks_per_seq = (max_seqlen_k / kblock_n) * pages_per_chunk;
         Self {
-            stable_metadata,
-            seq_len: if stable_metadata { 0 } else { seq_len },
-            block_table: if stable_metadata {
-                Vec::new()
-            } else {
-                block_table.blocks.clone()
-            },
             max_seqlen_k,
             max_blocks_per_seq,
         }
-    }
-
-    fn stable_paged_metadata_enabled() -> bool {
-        // #1082: default ON. The persistent block-table buffer (refreshed in
-        // place per replay) reads the CURRENT block table, so it does NOT race
-        // with concurrent block recycling — required for correctness with the
-        // #1082 default block_size=64 (the old transient captured table races
-        // → CUDA_ERROR_ILLEGAL_ADDRESS under concurrent decode) and strictly
-        // more correct for capture/replay at any block_size. Opt out with
-        // KILN_CUDA_GRAPH_STABLE_PAGED_METADATA=0.
-        std::env::var("KILN_CUDA_GRAPH_STABLE_PAGED_METADATA")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on" | "ON"))
-            .unwrap_or(true)
     }
 }
 
@@ -218,67 +197,6 @@ struct CudaGraphOwnerTimeline {
     last_decode_block0: Option<u32>,
 }
 
-/// Read the `KILN_CUDA_GRAPHS_BATCHED` env var.
-///
-/// Two-stage gating: `KILN_CUDA_GRAPHS=true` enables the (existing,
-/// stable) bs=1 capture/replay path; `KILN_CUDA_GRAPHS_BATCHED`
-/// additionally engages the bs>1 capture/replay path. Both must
-/// hold for batched graphs to engage; either being off sends the
-/// bs>1 caller down the eager batched path.
-///
-/// **Default REVERTED to OFF (2026-05-26)** — the earlier flip to ON
-/// at `6d564b9a` was based on `kiln-bench` sequential-decode runs
-/// that never exercised the actual batched concurrent decode path.
-/// Concurrent bench against `kiln serve` showed every bs≥2 request
-/// returning HTTP 500 with a swallowed inner error at
-/// `cuda_graph.rs:1595` (`"batched forward failed during graph
-/// capture"`) → bad CUDA context → `CUDA_ERROR_ILLEGAL_ADDRESS` on
-/// the subsequent replay → eager-batched fallback also fails on the
-/// same poisoned context. The eager-batched path (with this flag
-/// `0`) is healthy: bs=64 → 498 tok/s on A6000 at HEAD `2d9d4fc4`
-/// after the GDN-decode contiguity fix in the same commit.
-///
-/// ⚠️ CORRECTION (2026-06-01, server-path repro): the earlier
-/// "Phase 5 sanitizer sweep" claim that the **bs=1** capture+replay
-/// path was validated is FALSE. Driving the real graph path
-/// (`kiln serve` → `decode_step_paged`, NOT `kiln-bench` which bypasses
-/// the runner) surfaces TWO bugs even at bs=1. See
-/// `bench-results/cuda-graph-box102-findings.md`:
-///   BUG 1 (OOB, root-caused + fix confirmed): the graph-stable
-///   metadata buffers are gated behind `KILN_CUDA_GRAPH_STABLE_PAGED_METADATA`
-///   (default OFF, `cuda_graph.rs:156`). With it off the captured forward
-///   builds a TRANSIENT block_table that is freed after capture, so the
-///   captured `flash_fwd_splitkv_kernel` reads a dangling pointer →
-///   `CUDA_ERROR_ILLEGAL_ADDRESS` (compute-sanitizer: wild/wrapped read
-///   address). Setting the env to `1` eliminates the OOB.
-///   BUG 2 (replay correctness, OPEN): with the env on, replay no longer
-///   crashes but emits token-doubling garbage ("a a thinking thinking …"
-///   vs eager "a thinking …"); not a stream race (persists under
-///   `CUDA_LAUNCH_BLOCKING=1`). This matches the KV-slot-under-replay
-///   suspect below. The keystone is NOT mergeable until BUG 2 is fixed.
-///
-/// Set `KILN_CUDA_GRAPHS_BATCHED=1` to opt in once the underlying
-/// capture bug is fixed and re-validated end-to-end against
-/// `bench-concurrent-batch.py`.
-///
-/// _Historical_: Phase 5 sanitizer sweep on A6000 at HEAD `a2cb9edb`:
-/// decode 74.4 tok/s, mean ITL 13.45ms, peak VRAM 11.2 GB on
-/// Qwen3.5-4B paged decode at
-/// batches 1/4/8/16) AND sanitizer reports `========= ERROR
-/// SUMMARY: 0 errors` under the full live-driver path with
-/// `KILN_CUDA_GRAPHS_BATCHED=1 KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`.
-/// See `bench-results/cuda-graph-status.md` "Phase 5 sanitizer
-/// sweep" section for the validation trail.
-///
-/// Set `KILN_CUDA_GRAPHS_BATCHED=1` (or `true`, `yes`, `on`) to opt
-/// in once the batched-capture bug is fixed.
-#[cfg(feature = "cuda")]
-fn batched_graph_enabled() -> bool {
-    std::env::var("KILN_CUDA_GRAPHS_BATCHED")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
-}
-
 /// Cache key for the (planned, not-yet-wired) batched (`bs > 1`) decode
 /// graph cache. Mirrors [`CudaGraphKey`] but with an explicit
 /// `batch_size` bucket. See the multi-batch design note at the top of
@@ -287,12 +205,9 @@ fn batched_graph_enabled() -> bool {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 #[allow(dead_code)]
 struct CudaBatchedGraphKey {
-    /// Same stable-paged-metadata cliff as `CudaGraphKey`.
-    stable_metadata: bool,
     /// Number of rows the captured graph was specialized for.
     batch_size: usize,
-    /// When `stable_metadata=false`, encodes the per-row seq_len so a
-    /// changed K/V length triggers a re-capture; zero otherwise.
+    /// K/V geometry bucket shared by rows in the captured graph.
     max_seqlen_k: usize,
     /// Padded block-table width, in physical pages.
     max_blocks_per_seq: usize,
@@ -307,7 +222,6 @@ impl CudaBatchedGraphKey {
     /// the same `max_seqlen_k` lets one captured graph serve every
     /// row at that decode step.
     fn new(batch_size: usize, max_seq_len: usize, paged_cache: &PagedKvCacheKt) -> Self {
-        let stable_metadata = CudaGraphKey::stable_paged_metadata_enabled();
         let attention_len = max_seq_len + 1;
         // #1082: bucket + size by FA2_KBLOCK_N (=64 for hdim256), NOT a hardcoded
         // 128. Must match `forward.rs::try_flash_attn_paged_decode`'s K_BLOCK_N
@@ -319,7 +233,6 @@ impl CudaBatchedGraphKey {
         let pages_per_chunk = kblock_n / paged_cache.block_size();
         let max_blocks_per_seq = (max_seqlen_k / kblock_n) * pages_per_chunk;
         Self {
-            stable_metadata,
             batch_size,
             max_seqlen_k,
             max_blocks_per_seq,
@@ -359,14 +272,14 @@ struct CapturedDecodeGraph {
     /// Pre-allocated padded block table buffer on GPU (u32, shape [1, max_blocks_per_seq]).
     /// Updated before replay so paged attention reads current page metadata from
     /// a graph-stable pointer.
-    block_table_buffer: Option<Tensor>,
+    block_table_buffer: Tensor,
     /// Pre-allocated actual K/V attention length buffer on GPU.
     /// #1082: U32 (the kt flash-attn path requires `seqused_k` U32 — same
     /// 4-byte layout the candle i32 buffer carried, which the candle->kt
     /// borrow reinterpreted as U32 anyway).
-    seqused_k_buffer: Option<Tensor>,
+    seqused_k_buffer: Tensor,
     /// Pre-allocated current KV write slot buffer on GPU (u32, shape [1]).
-    kv_slot_buffer: Option<Tensor>,
+    kv_slot_buffer: Tensor,
     /// Pre-allocated RoPE cosine table on GPU (f32, shape [1, rotary_dim / 2]).
     /// Updated before replay so RoPE consumes graph-stable table pointers.
     rotary_cos_buffer: Tensor,
@@ -545,7 +458,11 @@ struct CapturedBatchedDecodeGraph {
 
 /// Manages CUDA graph lifecycle for decode forward passes.
 pub struct CudaGraphRunner {
+    /// Immutable startup policy supplied by the owning product.
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    policy: CudaGraphExecutionPolicy,
     /// Whether CUDA graphs are enabled.
+    /// Runtime capture failure may permanently lower this from the policy.
     enabled: bool,
     /// Captured bs=1 graphs keyed by both decode-row owner and graph geometry.
     /// The graph carries the row's recurrent state through graph-owned buffers,
@@ -592,15 +509,19 @@ pub struct CudaGraphRunner {
 
 impl CudaGraphRunner {
     /// Create a new graph runner. Enabled only on CUDA devices with the `cuda` feature.
-    pub fn new(device: &kiln_tensor::Device, enabled: bool) -> Self {
+    pub fn new(device: &kiln_tensor::Device, policy: CudaGraphExecutionPolicy) -> Self {
         let is_cuda = matches!(device, kiln_tensor::Device::Cuda(_));
-        let actually_enabled = enabled && is_cuda;
+        let actually_enabled = policy.enabled() && is_cuda;
         if actually_enabled {
-            tracing::info!("CUDA graphs enabled for decode");
-        } else if enabled && !is_cuda {
+            tracing::info!(
+                max_cached_graphs = policy.max_cached_graphs(),
+                "CUDA graphs enabled for decode"
+            );
+        } else if policy.enabled() && !is_cuda {
             tracing::debug!("CUDA graphs requested but no CUDA device, using eager decode");
         }
         Self {
+            policy,
             enabled: actually_enabled,
             #[cfg(feature = "cuda")]
             captured: HashMap::new(),
@@ -740,29 +661,15 @@ impl CudaGraphRunner {
         self.captured.len()
     }
 
-    /// Whether multi-batch CUDA graph capture/replay is enabled.
+    /// Whether multi-batch CUDA graph capture/replay is available.
     ///
-    /// Even when `is_enabled()` is true, the batched path is gated on
-    /// a separate opt-in (`KILN_CUDA_GRAPHS_BATCHED=1`) until the
-    /// implementation is fully validated. The graph runner's bs=1
-    /// path is the production default; the batched path lands
-    /// behind this flag so it can be benched in isolation and rolled
-    /// back without re-flipping `KILN_CUDA_GRAPHS`.
+    /// The in-tree implementation remains unqualified after poisoning the CUDA
+    /// context during real concurrent serving. It is deliberately unavailable
+    /// rather than reachable through a hidden process switch. Re-enabling it
+    /// requires a source change plus NVIDIA correctness and resilience evidence.
     #[cfg(feature = "cuda")]
     pub fn is_batched_enabled(&self) -> bool {
-        // #1082 Phase 5: the batched path REQUIRES stable paged metadata.
-        // Unlike `CudaGraphKey`, `CudaBatchedGraphKey` never encodes
-        // seq_len/block_table, so a captured batched graph always replays
-        // within a 128-token K/V bucket — which is only correct when the
-        // paged-decode kernel reads block_table/seqused_k from the
-        // refreshed graph-stable buffers (stable-metadata semantics). With
-        // stable metadata OFF the kernel bakes a step-0 block table and the
-        // replay reads a STALE table as decode appends KV (observed: greedy
-        // divergence that `KILN_CUDA_GRAPH_STABLE_PAGED_METADATA=1` fixes).
-        // Gate batched on it so the feature only activates in its correct
-        // configuration; without it we fall back to the eager batched path
-        // (correct, just no graph). Leaves the bs=1 default untouched.
-        self.enabled && batched_graph_enabled() && CudaGraphKey::stable_paged_metadata_enabled()
+        false
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -854,19 +761,6 @@ impl CudaGraphRunner {
                 "batched CUDA graph: per-bucket warmup iteration (eager)"
             );
             return Ok(None);
-        }
-
-        // Diagnostic: when `KILN_CUDA_GRAPHS_BATCHED_NO_REPLAY=1`,
-        // always evict the cached graph before checking — this
-        // forces every step to re-capture, never replay. If the
-        // bench succeeds under this mode but fails without it,
-        // the fault is isolated to the replay path; if it still
-        // fails, capture itself is broken.
-        if std::env::var("KILN_CUDA_GRAPHS_BATCHED_NO_REPLAY")
-            .map(|v| matches!(v.as_str(), "1" | "true"))
-            .unwrap_or(false)
-        {
-            self.captured_batched.remove(&key);
         }
 
         // Phase 2: replay path on cache hit + adapter-gen match.
@@ -1140,14 +1034,7 @@ impl CudaGraphRunner {
         lora: Option<&LoraWeights>,
         graph_row_id: Option<u64>,
     ) -> Result<Tensor> {
-        // #1082 box-102 diagnostic: KILN_FORCE_EAGER_DECODE=1 forces the bs=1
-        // EAGER decode forward every step (never captures/replays the graph).
-        // If output STILL doubles under this, the doubling is in the bs=1
-        // `model_forward_paged` forward itself, NOT the cuda-graph machinery
-        // (the graph would just be faithfully replaying a buggy forward). The
-        // coherent baseline (graphs off, server) uses a DIFFERENT batched
-        // forward, so it would not reveal a bs=1-forward bug.
-        if !self.enabled || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
+        if !self.enabled {
             return Self::eager_forward(
                 backend,
                 token_id,
@@ -1208,7 +1095,7 @@ impl CudaGraphRunner {
         #[cfg(feature = "cuda")]
         {
             let owner = CudaGraphOwner::from_row_id(graph_row_id);
-            let requested_key = CudaGraphKey::new(block_table, paged_cache, seq_len);
+            let requested_key = CudaGraphKey::new(paged_cache, seq_len);
             let cache_key = CudaGraphCacheKey::new(owner, requested_key.clone());
 
             // Phase 3: replay if we have a valid captured graph
@@ -1291,40 +1178,30 @@ impl CudaGraphRunner {
                             lora,
                         );
                     }
-                    if let (
-                        Some(block_table_buffer),
-                        Some(seqused_k_buffer),
-                        Some(kv_slot_buffer),
-                    ) = (
-                        captured.block_table_buffer.as_ref(),
-                        captured.seqused_k_buffer.as_ref(),
-                        captured.kv_slot_buffer.as_ref(),
+                    if let Err(e) = Self::update_paged_metadata_buffers(
+                        &captured.block_table_buffer,
+                        &captured.seqused_k_buffer,
+                        &captured.kv_slot_buffer,
+                        block_table,
+                        paged_cache,
+                        seq_len,
+                        captured.max_seqlen_k,
                     ) {
-                        if let Err(e) = Self::update_paged_metadata_buffers(
-                            block_table_buffer,
-                            seqused_k_buffer,
-                            kv_slot_buffer,
-                            block_table,
+                        tracing::warn!(
+                            "Failed to update paged graph metadata buffers: {e}, falling back to eager"
+                        );
+                        self.captured.remove(&cache_key);
+                        return Self::eager_forward(
+                            backend,
+                            token_id,
+                            weights,
+                            config,
                             paged_cache,
+                            block_table,
                             seq_len,
-                            captured.max_seqlen_k,
-                        ) {
-                            tracing::warn!(
-                                "Failed to update paged graph metadata buffers: {e}, falling back to eager"
-                            );
-                            self.captured.remove(&cache_key);
-                            return Self::eager_forward(
-                                backend,
-                                token_id,
-                                weights,
-                                config,
-                                paged_cache,
-                                block_table,
-                                seq_len,
-                                linear_state,
-                                lora,
-                            );
-                        }
+                            linear_state,
+                            lora,
+                        );
                     }
 
                     // (#1082 Phase 5) The per-replay input writes above
@@ -1398,7 +1275,7 @@ impl CudaGraphRunner {
                 );
             }
 
-            if self.captured.len() >= Self::max_cached_graphs() {
+            if self.captured.len() >= self.policy.max_cached_graphs() {
                 if self.cache_full_warned {
                     tracing::debug!(
                         cached_graphs = self.captured.len(),
@@ -1560,9 +1437,9 @@ impl CudaGraphRunner {
         output_hidden: &Tensor,
         token_buffer: &Tensor,
         position_buffer: &Tensor,
-        block_table_buffer: Option<&Tensor>,
-        seqused_k_buffer: Option<&Tensor>,
-        kv_slot_buffer: Option<&Tensor>,
+        block_table_buffer: &Tensor,
+        seqused_k_buffer: &Tensor,
+        kv_slot_buffer: &Tensor,
         rotary_cos_buffer: &Tensor,
         rotary_sin_buffer: &Tensor,
         paged_decode_outputs: &[Tensor],
@@ -1572,13 +1449,7 @@ impl CudaGraphRunner {
         let replay_key = ReplayKey::new(
             Backend::Cuda,
             "paged_decode_graph_outputs",
-            vec![
-                key.seq_len,
-                key.block_table.len(),
-                key.max_seqlen_k,
-                key.max_blocks_per_seq,
-                usize::from(key.stable_metadata),
-            ],
+            vec![key.max_seqlen_k, key.max_blocks_per_seq],
             Some(output_hidden.dtype()),
             1,
             true,
@@ -1587,15 +1458,12 @@ impl CudaGraphRunner {
             Self::stable_replay_resource(output_hidden),
             Self::stable_replay_resource(token_buffer),
             Self::stable_replay_resource(position_buffer),
+            Self::stable_replay_resource(block_table_buffer),
+            Self::stable_replay_resource(seqused_k_buffer),
+            Self::stable_replay_resource(kv_slot_buffer),
             Self::stable_replay_resource(rotary_cos_buffer),
             Self::stable_replay_resource(rotary_sin_buffer),
         ];
-        for tensor in [block_table_buffer, seqused_k_buffer, kv_slot_buffer]
-            .into_iter()
-            .flatten()
-        {
-            resources.push(Self::stable_replay_resource(tensor));
-        }
         resources.extend(
             paged_decode_outputs
                 .iter()
@@ -1810,50 +1678,28 @@ impl CudaGraphRunner {
         let output_hidden = Self::new_output_hidden(config, device, dtype)?;
         let rotary_cos_buffer = Self::new_rotary_cos_buffer(config, device, seq_len)?;
         let rotary_sin_buffer = Self::new_rotary_sin_buffer(config, device, seq_len)?;
-        let key = CudaGraphKey::new(block_table, paged_cache, seq_len);
-        let (block_table_buffer, seqused_k_buffer, kv_slot_buffer) = if key.stable_metadata {
-            (
-                Some(Self::new_block_table_buffer(
-                    block_table,
-                    paged_cache,
-                    key.max_seqlen_k,
-                    device,
-                )?),
-                Some(Self::new_seqused_k_buffer(device, seq_len + 1)?),
-                Some(Self::new_kv_slot_buffer(
-                    block_table,
-                    paged_cache,
-                    seq_len,
-                    device,
-                )?),
-            )
-        } else {
-            (None, None, None)
-        };
-        let (paged_decode_outputs, paged_decode_lse) = if key.stable_metadata {
-            Self::new_paged_decode_outputs(config, device, dtype)?
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        let key = CudaGraphKey::new(paged_cache, seq_len);
+        // Stable paged metadata is a correctness invariant: captured kernels
+        // must read current block-table, sequence-length, and KV-slot contents
+        // from retained device pointers on every replay.
+        let block_table_buffer =
+            Self::new_block_table_buffer(block_table, paged_cache, key.max_seqlen_k, device)?;
+        let seqused_k_buffer = Self::new_seqused_k_buffer(device, seq_len + 1)?;
+        let kv_slot_buffer = Self::new_kv_slot_buffer(block_table, paged_cache, seq_len, device)?;
+        let (paged_decode_outputs, paged_decode_lse) =
+            Self::new_paged_decode_outputs(config, device, dtype)?;
         // #1082: the kt graph-stable buffers feed the kt-typed
         // `PagedDecodeGraphInputs` directly — no bridges. Build the
         // struct from references into the owned buffers above.
-        let graph_inputs = match (
-            block_table_buffer.as_ref(),
-            seqused_k_buffer.as_ref(),
-            kv_slot_buffer.as_ref(),
-        ) {
-            (Some(block_table), Some(seqused_k), Some(kv_slot)) => Some(PagedDecodeGraphInputs {
-                block_table,
-                seqused_k,
-                kv_slot,
-                max_seqlen_k: key.max_seqlen_k,
-                rotary_cos: &rotary_cos_buffer,
-                rotary_sin: &rotary_sin_buffer,
-                attn_out: &paged_decode_outputs[..],
-                softmax_lse: &paged_decode_lse[..],
-            }),
-            _ => None,
+        let graph_inputs = PagedDecodeGraphInputs {
+            block_table: &block_table_buffer,
+            seqused_k: &seqused_k_buffer,
+            kv_slot: &kv_slot_buffer,
+            max_seqlen_k: key.max_seqlen_k,
+            rotary_cos: &rotary_cos_buffer,
+            rotary_sin: &rotary_sin_buffer,
+            attn_out: &paged_decode_outputs[..],
+            softmax_lse: &paged_decode_lse[..],
         };
         let gdn_decode_outputs = Self::new_gdn_decode_outputs(config, device)?;
         // #1082 box-102 FIX: no lm-head output buffer for the bs=1 path — the
@@ -1902,7 +1748,7 @@ impl CudaGraphRunner {
                 lora,
                 &token_buffer,
                 &position_buffer,
-                graph_inputs.as_ref(),
+                Some(&graph_inputs),
             )?;
             kiln_tensor::cuda_slice_set_dim0(&output_hidden, &hidden, 0)
                 .context("freeze-pointers warm pass: copy hidden into stable output")?;
@@ -1979,7 +1825,7 @@ impl CudaGraphRunner {
                     lora,
                     &token_buffer,
                     &position_buffer,
-                    graph_inputs.as_ref(),
+                    Some(&graph_inputs),
                 )?;
                 // `hidden` is kt; copy it into the graph-stable kt
                 // `output_hidden` via a KT-NATIVE copy that runs on the capture
@@ -2054,9 +1900,9 @@ impl CudaGraphRunner {
                     &output_hidden,
                     &token_buffer,
                     &position_buffer,
-                    block_table_buffer.as_ref(),
-                    seqused_k_buffer.as_ref(),
-                    kv_slot_buffer.as_ref(),
+                    &block_table_buffer,
+                    &seqused_k_buffer,
+                    &kv_slot_buffer,
                     &rotary_cos_buffer,
                     &rotary_sin_buffer,
                     &paged_decode_outputs,
@@ -2549,15 +2395,6 @@ impl CudaGraphRunner {
         )
         .context("eager decode forward pass failed");
         out
-    }
-
-    #[cfg(feature = "cuda")]
-    fn max_cached_graphs() -> usize {
-        std::env::var("KILN_CUDA_GRAPH_CACHE_MAX")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|&value| value > 0)
-            .unwrap_or(8)
     }
 
     // #1082: every `new_*_buffer` constructor now allocates a kt-native
@@ -3056,20 +2893,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn graph_policy_defaults_eager_and_validates_cache_bounds() {
+        let default_policy = CudaGraphExecutionPolicy::default();
+        assert_eq!(default_policy, CudaGraphExecutionPolicy::disabled());
+        assert!(!default_policy.enabled());
+        assert_eq!(
+            default_policy.max_cached_graphs(),
+            CudaGraphExecutionPolicy::DEFAULT_MAX_CACHED_GRAPHS
+        );
+
+        let enabled = CudaGraphExecutionPolicy::try_new(true, 16).unwrap();
+        assert!(enabled.enabled());
+        assert_eq!(enabled.max_cached_graphs(), 16);
+        assert!(CudaGraphExecutionPolicy::try_new(true, 0).is_err());
+        assert!(
+            CudaGraphExecutionPolicy::try_new(
+                true,
+                CudaGraphExecutionPolicy::MAX_CACHED_GRAPHS + 1,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn test_new_cpu_disables_graphs() {
-        let runner = CudaGraphRunner::new(&kiln_tensor::Device::Cpu, true);
+        let policy = CudaGraphExecutionPolicy::try_new(true, 16).unwrap();
+        let runner = CudaGraphRunner::new(&kiln_tensor::Device::Cpu, policy);
         assert!(!runner.is_enabled());
+        assert_eq!(runner.policy.max_cached_graphs(), 16);
     }
 
     #[test]
     fn test_new_disabled() {
-        let runner = CudaGraphRunner::new(&kiln_tensor::Device::Cpu, false);
+        let runner = CudaGraphRunner::new(
+            &kiln_tensor::Device::Cpu,
+            CudaGraphExecutionPolicy::disabled(),
+        );
         assert!(!runner.is_enabled());
     }
 
     #[test]
     fn test_invalidate_resets_state() {
-        let mut runner = CudaGraphRunner::new(&kiln_tensor::Device::Cpu, false);
+        let mut runner = CudaGraphRunner::new(
+            &kiln_tensor::Device::Cpu,
+            CudaGraphExecutionPolicy::disabled(),
+        );
         runner.warmup_done = true;
         #[cfg(feature = "cuda")]
         {
@@ -3084,7 +2952,10 @@ mod tests {
 
     #[test]
     fn test_multiple_invalidations_increment_generation() {
-        let mut runner = CudaGraphRunner::new(&kiln_tensor::Device::Cpu, false);
+        let mut runner = CudaGraphRunner::new(
+            &kiln_tensor::Device::Cpu,
+            CudaGraphExecutionPolicy::disabled(),
+        );
         runner.invalidate();
         runner.invalidate();
         runner.invalidate();

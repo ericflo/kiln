@@ -16,19 +16,19 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **539 direct read call sites** and
-**222 process-mutation call sites**. It can
-statically name **80 distinct literal `KILN_*`
-read names** across **186 call sites**.
+The scanner records **532 direct read call sites** and
+**219 process-mutation call sites**. It can
+statically name **74 distinct literal `KILN_*`
+read names** across **179 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 77 | 41 | 0 |
+| Experimental/debug migration | 71 | 36 | 0 |
 | Build time/provenance | 325 | 6 | 8 |
-| Test only | 128 | 37 | 214 |
+| Test only | 127 | 36 | 211 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -56,9 +56,8 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/forward.rs` | 22 | 18 |
+| `crates/kiln-model/src/forward.rs` | 21 | 17 |
 | `crates/kiln-model/src/backend/capability.rs` | 9 | 1 |
-| `crates/kiln-model/src/cuda_graph.rs` | 5 | 5 |
 | `crates/kiln-model/src/metal_graph.rs` | 5 | 3 |
 | `crates/kiln-model/src/generate.rs` | 4 | 3 |
 | `crates/kiln-model/src/marlin_proj.rs` | 3 | 3 |
@@ -98,12 +97,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_COMMIT` | Build time/provenance | 2 | `crates/kiln-server/src/execution_provenance.rs`, `crates/kiln-train/src/replay.rs` |
 | `KILN_CONFIG` | Public stable | 2 | `crates/kiln-server/src/config.rs`, `crates/kiln-server/src/logging.rs` |
 | `KILN_CUDA_ARCHS` | Build time/provenance | 8 | `crates/kiln-blas/build.rs`, `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-marlin-gemm/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-tensor/build.rs` |
-| `KILN_CUDA_GRAPHS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_CUDA_GRAPHS_BATCHED` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
-| `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_CUDA_GRAPHS_BATCHED_NO_REPLAY` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
-| `KILN_CUDA_GRAPH_CACHE_MAX` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
-| `KILN_CUDA_GRAPH_STABLE_PAGED_METADATA` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
 | `KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/capability.rs` |
 | `KILN_DETERMINISTIC` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/determinism.rs` |
@@ -130,7 +123,7 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_ENABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP` | Experimental/debug migration | 1 | `crates/kiln-model/src/generate.rs` |
 | `KILN_EVAL_MODE` | Test only | 1 | `crates/kiln-server/src/config.rs` |
 | `KILN_FLASH_ATTN_BWD_DETERMINISTIC` | Experimental/debug migration | 1 | `crates/kiln-flash-attn/src/kt_api.rs` |
-| `KILN_FORCE_EAGER_DECODE` | Experimental/debug migration, Test only | 6 | `crates/kiln-model/src/cuda_graph.rs`, `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/metal_graph.rs` |
+| `KILN_FORCE_EAGER_DECODE` | Experimental/debug migration, Test only | 5 | `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/metal_graph.rs` |
 | `KILN_FORCE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_GPU_TRAINING_MLP_CHUNK_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_KEEP_PROJECTION_ORIGINALS` | Test only | 3 | `crates/kiln-model/src/forward.rs` |

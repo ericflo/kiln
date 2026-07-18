@@ -253,6 +253,15 @@
           "peak_transient_candidate_bytes": 0
         },
         "rocm_graph_telemetry_unavailable_reason": "backend_without_graph_runner",
+        "cuda_graphs": {
+          "requested": false,
+          "capture_allowed_by_serving_profile": false,
+          "effective_policy_enabled": false,
+          "max_cached_graphs": 1,
+          "stable_paged_metadata": true,
+          "batched_capture_available": false,
+          "restart_required_to_change": true
+        },
         "decode_runtime": {
           "deterministic": {
             "enabled": false,
@@ -948,8 +957,14 @@
             "route_available": false
           },
           "cuda_graphs": {
+            "requested": false,
+            "capture_allowed_by_serving_profile": false,
             "enabled": false,
-            "state": "enabled"
+            "state": "enabled",
+            "max_cached_graphs": 1,
+            "stable_paged_metadata": true,
+            "batched_capture_available": false,
+            "restart_required_to_change": true
           },
           "rocm_graphs": {
             "requested": false,
@@ -1487,6 +1502,15 @@
             "effective": 0,
             "source": "default"
           }
+        },
+        "cuda_graphs": {
+          "requested": false,
+          "capture_allowed_by_serving_profile": false,
+          "effective_policy_enabled": false,
+          "max_cached_graphs": 1,
+          "stable_paged_metadata": true,
+          "batched_capture_available": false,
+          "restart_required_to_change": true
         },
         "rocm_synchronization": {
           "active": false,
@@ -3160,6 +3184,7 @@
         "rocm_graphs_unavailable_reason",
         "rocm_graph_telemetry",
         "rocm_graph_telemetry_unavailable_reason",
+        "cuda_graphs",
         "decode_runtime",
         "batching",
         "streaming_prefill",
@@ -3218,6 +3243,9 @@
             }
           ]
         },
+        "cuda_graphs": {
+          "$ref": "#/$defs/CudaGraphConfigResponse"
+        },
         "decode_runtime": {
           "$ref": "#/$defs/DecodeRuntimeConfig"
         },
@@ -3262,6 +3290,100 @@
       ],
       "description": "The startup authority that supplied a resolved configuration value.",
       "x-kiln-rust-type": "ConfigValueSource",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CudaGraphConfigResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested",
+        "capture_allowed_by_serving_profile",
+        "effective_policy_enabled",
+        "max_cached_graphs",
+        "stable_paged_metadata",
+        "batched_capture_available",
+        "restart_required_to_change"
+      ],
+      "properties": {
+        "requested": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "capture_allowed_by_serving_profile": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "effective_policy_enabled": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "max_cached_graphs": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "stable_paged_metadata": {
+          "const": true
+        },
+        "batched_capture_available": {
+          "const": false
+        },
+        "restart_required_to_change": {
+          "const": true
+        }
+      },
+      "description": "Startup-resolved CUDA graph request, cache bound, and fixed safety invariants.",
+      "x-kiln-rust-type": "CudaGraphConfigResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CudaGraphInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested",
+        "capture_allowed_by_serving_profile",
+        "enabled",
+        "state",
+        "max_cached_graphs",
+        "stable_paged_metadata",
+        "batched_capture_available",
+        "restart_required_to_change"
+      ],
+      "properties": {
+        "requested": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "capture_allowed_by_serving_profile": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "enabled": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "enabled",
+            "disabled",
+            "busy"
+          ]
+        },
+        "max_cached_graphs": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "stable_paged_metadata": {
+          "const": true
+        },
+        "batched_capture_available": {
+          "const": false
+        },
+        "restart_required_to_change": {
+          "const": true
+        }
+      },
+      "description": "Configured CUDA graph request, live runner state, bounded cache, and fixed safety invariants.",
+      "x-kiln-rust-type": "CudaGraphInfo",
       "x-kiln-field-schema-status": "complete"
     },
     "CudaKernelProfile": {
@@ -3440,7 +3562,7 @@
           "$ref": "#/$defs/DirectDecodeRendezvousRuntimeState"
         },
         "cuda_graphs": {
-          "$ref": "#/$defs/GraphInfo"
+          "$ref": "#/$defs/CudaGraphInfo"
         },
         "rocm_graphs": {
           "$ref": "#/$defs/RocmGraphInfo"
@@ -5745,6 +5867,7 @@
         "http",
         "decode_runtime",
         "accelerator_runtime",
+        "cuda_graphs",
         "rocm_synchronization",
         "rocm_graphs",
         "rocm_graphs_unavailable_reason",
@@ -5776,6 +5899,9 @@
         },
         "accelerator_runtime": {
           "$ref": "#/$defs/ResolvedAcceleratorRuntimePolicy"
+        },
+        "cuda_graphs": {
+          "$ref": "#/$defs/CudaGraphConfigResponse"
         },
         "rocm_synchronization": {
           "$ref": "#/$defs/RocmSynchronizationRuntimeStats"

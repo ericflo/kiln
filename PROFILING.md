@@ -383,13 +383,12 @@ dependency drop (Tier-1 closeout in `docs/CANDLE_REMOVAL_PLAN.md`).
   expose the same `Owned` / `Pool` / `Frozen` lifecycle that Phase 5
   graph capture depends on — see `bench-results/cuda-graph-status.md`
   for the full inventory.
-- **Phase 5 bs>1 batched CUDA graph path remains the next perf-side
-  unlock.** All four root-cause intra-graph alloc suspects from
-  `bench-results/cuda-graph-bs2-secondary-audit.md` are closed; the
-  batched capture/replay code is in-tree under
-  `KILN_CUDA_GRAPHS_BATCHED=1` (default off). One end-to-end
-  `compute-sanitizer` sweep on the Qwen3.5-4B chat-completion driver
-  is the remaining validation gate before defaulting on.
+- **The bs>1 CUDA graph path is unavailable, not an experimental switch.**
+  Historical allocation suspects are closed, but real concurrent serving
+  poisoned the CUDA context. Re-entry requires a source change plus NVIDIA
+  sanitizer, parity, resilience, and throughput evidence. Current profiles use
+  `memory.cuda_graphs` and `memory.cuda_graph_cache_entries`; decode does not
+  re-read process environment.
 - **9 Vulkan ops + 15 Metal kind tags** are wired through real
   compute pipelines / MPS kernels (the rest still fall through to the
   CPU reference). On CUDA, `KILN_USE_KT_API_ALL=1` is end-to-end

@@ -171,19 +171,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_CUDA_GRAPHS",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
       "argument": "KILN_DISABLE_GDN_KERNEL",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -308,19 +295,6 @@
       "count": 2,
       "language": "rust",
       "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_CUDA_GRAPHS",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
       "path": "crates/kiln-model/src/forward.rs",
       "phase": "runtime",
       "surface": "unit-test"
@@ -2734,86 +2708,8 @@
     },
     {
       "api": "var",
-      "argument": "KILN_CUDA_GRAPHS_BATCHED",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/cuda_graph.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_CUDA_GRAPHS_BATCHED_NO_REPLAY",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/cuda_graph.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_CUDA_GRAPH_CACHE_MAX",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/cuda_graph.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_CUDA_GRAPH_STABLE_PAGED_METADATA",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/cuda_graph.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_FORCE_EAGER_DECODE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/cuda_graph.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "name",
       "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_CUDA_GRAPHS_BATCHED_KV_FUSED",
-      "argument_kind": "literal",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
       "count": 1,
@@ -3043,19 +2939,6 @@
       "path": "crates/kiln-model/src/forward.rs",
       "phase": "runtime",
       "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_CUDA_GRAPHS",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
     },
     {
       "api": "var",
@@ -5411,27 +5294,27 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 186,
-    "literal_kiln_read_names": 80,
+    "literal_kiln_read_call_sites": 179,
+    "literal_kiln_read_names": 74,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
-      "experimental_debug": 41,
+      "experimental_debug": 36,
       "public_stable": 1,
-      "test_only": 37
+      "test_only": 36
     },
-    "process_mutation_call_sites": 222,
+    "process_mutation_call_sites": 219,
     "process_mutation_call_sites_by_classification": {
       "build_time": 8,
-      "test_only": 214
+      "test_only": 211
     },
-    "process_mutation_entries": 134,
-    "read_call_sites": 539,
+    "process_mutation_entries": 132,
+    "read_call_sites": 532,
     "read_call_sites_by_classification": {
       "build_time": 325,
-      "experimental_debug": 77,
+      "experimental_debug": 71,
       "public_stable": 9,
-      "test_only": 128
+      "test_only": 127
     },
-    "read_entries": 281
+    "read_entries": 274
   }
 }

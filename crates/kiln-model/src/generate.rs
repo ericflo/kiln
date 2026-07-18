@@ -32,7 +32,7 @@ use crate::backend::{
     },
 };
 use crate::cancel::CancelHandle;
-use crate::cuda_graph::CudaGraphRunner;
+use crate::cuda_graph::{CudaGraphExecutionPolicy, CudaGraphRunner};
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::forward::lm_head_sample_backend_decode_if;
 use crate::forward::{
@@ -526,7 +526,7 @@ impl InferenceMemoryRuntime {
 /// historical CUDA-only option plus backend defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelRunnerRuntimeOptions {
-    pub cuda_graphs: bool,
+    pub cuda_graph: CudaGraphExecutionPolicy,
     pub rocm_graph: RocmGraphExecutionPolicy,
     pub metal_graphs: bool,
     /// Exact width required by an owning scheduler. `None` leaves standalone
@@ -540,7 +540,7 @@ pub struct ModelRunnerRuntimeOptions {
 impl ModelRunnerRuntimeOptions {
     pub const fn eager_only() -> Self {
         Self {
-            cuda_graphs: false,
+            cuda_graph: CudaGraphExecutionPolicy::disabled(),
             rocm_graph: RocmGraphExecutionPolicy::disabled(),
             metal_graphs: false,
             max_decode_batch: None,
@@ -2861,7 +2861,11 @@ impl ModelRunner {
             tokenizer,
             config,
             ModelRunnerRuntimeOptions {
-                cuda_graphs,
+                cuda_graph: CudaGraphExecutionPolicy::try_new(
+                    cuda_graphs,
+                    CudaGraphExecutionPolicy::DEFAULT_MAX_CACHED_GRAPHS,
+                )
+                .expect("default CUDA graph cache policy must be valid"),
                 rocm_graph: RocmGraphExecutionPolicy::disabled(),
                 metal_graphs: true,
                 max_decode_batch: None,
@@ -2901,7 +2905,7 @@ impl ModelRunner {
         selected_backend: Arc<dyn BackendRuntime>,
     ) -> Self {
         let eos_token_ids = tokenizer.eos_token_ids();
-        let cuda_graph = CudaGraphRunner::new(&execution_device, options.cuda_graphs);
+        let cuda_graph = CudaGraphRunner::new(&execution_device, options.cuda_graph);
         let rocm_graph = RocmGraphRunner::new(&execution_device, options.rocm_graph);
         let rocm_graph_telemetry = rocm_graph.telemetry_handle();
         let metal_graph = MetalGraphRunner::new(&execution_device, options.metal_graphs);

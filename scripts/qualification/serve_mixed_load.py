@@ -107,6 +107,7 @@ MAX_DECODE_BATCH = 8
 MAX_PREFILL_STAGING_SLOTS = 4
 MAX_ACTIVE_REQUESTS = MAX_DECODE_BATCH + MAX_PREFILL_STAGING_SLOTS
 MAX_PREFILL_STAGING_PRIORITY_BURST = 4
+CUDA_GRAPH_CACHE_ENTRIES = 8
 SLO_TTFT_MS = 30_000.0
 SLO_E2E_MS = 120_000.0
 STREAM_READ_POLL_SECONDS = 0.25
@@ -2623,6 +2624,8 @@ def write_server_config(
     rocm_graph_mode: str | None = None,
     rocm_graph_cache_entries: int = 8,
     rocm_graph_cache_max_bytes: int = 1 << 30,
+    cuda_graphs: bool = False,
+    cuda_graph_cache_entries: int = CUDA_GRAPH_CACHE_ENTRIES,
     kv_force_blocks: int = 0,
 ) -> None:
     """Write the complete public qualification launch policy as typed TOML."""
@@ -2700,6 +2703,8 @@ def write_server_config(
         f"kv_autoscale = {'true' if runtime['kv_autoscale_requested'] else 'false'}",
         f"kv_force_blocks = {kv_force_blocks}",
         f"vulkan_buffer_pool_gb = {float(runtime.get('vulkan_buffer_pool_gb', 3.0))}",
+        f"cuda_graphs = {'true' if cuda_graphs else 'false'}",
+        f"cuda_graph_cache_entries = {cuda_graph_cache_entries}",
         "",
         "[prefix_cache]",
         "enabled = "
@@ -3038,6 +3043,50 @@ def accelerator_policy_attestation_failures(
     ]
 
 
+def cuda_graph_policy_attestation_failures(
+    health_value: Any,
+    debug_value: Any,
+    *,
+    serving_profile: str,
+    requested: bool = False,
+    max_cached_graphs: int = CUDA_GRAPH_CACHE_ENTRIES,
+) -> list[str]:
+    capture_allowed = bool(PROFILE_POLICIES[serving_profile]["live_graph_capture"])
+    expected_health = {
+        "requested": requested,
+        "capture_allowed_by_serving_profile": capture_allowed,
+        "enabled": False,
+        "state": "disabled",
+        "max_cached_graphs": max_cached_graphs,
+        "stable_paged_metadata": True,
+        "batched_capture_available": False,
+        "restart_required_to_change": True,
+    }
+    expected_debug = {
+        "requested": requested,
+        "capture_allowed_by_serving_profile": capture_allowed,
+        "effective_policy_enabled": requested and capture_allowed,
+        "max_cached_graphs": max_cached_graphs,
+        "stable_paged_metadata": True,
+        "batched_capture_available": False,
+        "restart_required_to_change": True,
+    }
+    failures: list[str] = []
+    for label, value, expected in (
+        ("health.decode_runtime.cuda_graphs", health_value, expected_health),
+        ("debug.cuda_graphs", debug_value, expected_debug),
+    ):
+        if not isinstance(value, dict):
+            failures.append(f"{label} is missing")
+            continue
+        for field, expected_value in expected.items():
+            if value.get(field) != expected_value:
+                failures.append(
+                    f"{label}.{field}={value.get(field)!r}, expected {expected_value!r}"
+                )
+    return failures
+
+
 def attest_runtime(
     variant: str,
     health: dict[str, Any],
@@ -3123,6 +3172,13 @@ def attest_runtime(
             graph_mode=expected.get("rocm_graph_mode"),
             graph_cache_entries=rocm_graph_cache_entries,
             graph_cache_max_bytes=rocm_graph_cache_max_bytes,
+        )
+    )
+    failures.extend(
+        cuda_graph_policy_attestation_failures(
+            runtime.get("cuda_graphs"),
+            debug.get("cuda_graphs"),
+            serving_profile=expected_profile,
         )
     )
     failures.extend(

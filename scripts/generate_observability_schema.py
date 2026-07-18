@@ -897,6 +897,21 @@ def build_definitions() -> None:
         {"enabled": nullable(ref("Boolean")), "state": {"type": "string", "enum": ["enabled", "disabled", "busy"]}},
         "Nonblocking CUDA or Metal graph state.",
     )
+    add_object(
+        "CudaGraphInfo",
+        "CudaGraphInfo",
+        {
+            "requested": ref("Boolean"),
+            "capture_allowed_by_serving_profile": ref("Boolean"),
+            "enabled": nullable(ref("Boolean")),
+            "state": {"type": "string", "enum": ["enabled", "disabled", "busy"]},
+            "max_cached_graphs": ref("PositiveInteger"),
+            "stable_paged_metadata": {"const": True},
+            "batched_capture_available": {"const": False},
+            "restart_required_to_change": {"const": True},
+        },
+        "Configured CUDA graph request, live runner state, bounded cache, and fixed safety invariants.",
+    )
     batch_snapshot_integer_fields = [
         "snapshot_age_ms", "stream_stall_grace_ms", "queue_depth", "active_decode", "active_prefill",
         "active_resident_prefill",
@@ -983,7 +998,7 @@ def build_definitions() -> None:
             "rocm_synchronization": ref("RocmSynchronizationRuntimeStats"),
             "batching_configuration": ref("BatchingRuntimeConfig"),
             "direct_decode_rendezvous": ref("DirectDecodeRendezvousRuntimeState"),
-            "cuda_graphs": ref("GraphInfo"), "rocm_graphs": ref("RocmGraphInfo"), "metal_graphs": ref("GraphInfo"),
+            "cuda_graphs": ref("CudaGraphInfo"), "rocm_graphs": ref("RocmGraphInfo"), "metal_graphs": ref("GraphInfo"),
             "kv_autoscaler": ref("KvAutoscalerState"), "memory_governor": ref("MemoryGovernorRuntimeInfo"),
             "decode_batcher": nullable(ref("DecodeBatcherStats")),
             "batching_engine": nullable(ref("BatchingEngineSnapshot")),
@@ -1291,6 +1306,15 @@ def build_definitions() -> None:
         "adapter_library_url": ref("String"),
         "logit_cache_dir": ref("String"),
     }, "Startup-resolved operational paths and local-capability access policy retained by request handlers.")
+    add_object("CudaGraphConfigResponse", "CudaGraphConfigResponse", {
+        "requested": ref("Boolean"),
+        "capture_allowed_by_serving_profile": ref("Boolean"),
+        "effective_policy_enabled": ref("Boolean"),
+        "max_cached_graphs": ref("PositiveInteger"),
+        "stable_paged_metadata": {"const": True},
+        "batched_capture_available": {"const": False},
+        "restart_required_to_change": {"const": True},
+    }, "Startup-resolved CUDA graph request, cache bound, and fixed safety invariants.")
     add_object("ConfigResponse", "ConfigResponse", {
         "serving_profile": ref("ServingProfileDiagnostics"),
         "accelerator_runtime": ref("ResolvedAcceleratorRuntimePolicy"),
@@ -1298,6 +1322,7 @@ def build_definitions() -> None:
         "rocm_graphs_unavailable_reason": nullable(ref("RocmGraphUnavailableReason")),
         "rocm_graph_telemetry": nullable(ref("RocmGraphLiveTelemetry")),
         "rocm_graph_telemetry_unavailable_reason": nullable(ref("RocmGraphUnavailableReason")),
+        "cuda_graphs": ref("CudaGraphConfigResponse"),
         "decode_runtime": ref("DecodeRuntimeConfig"), "batching": ref("BatchingConfigResponse"),
         "streaming_prefill": ref("StreamingPrefillRuntimeConfig"), "speculative": ref("SpeculativeConfig"),
         "vram": ref("VramConfig"), "kv_cache": ref("KvCacheConfig"),
@@ -1390,6 +1415,7 @@ def build_definitions() -> None:
         "config_hashes": ref("ConfigHashes"), "http": ref("HttpRuntimeInfo"),
         "decode_runtime": ref("DecodeRuntimeConfig"),
         "accelerator_runtime": ref("ResolvedAcceleratorRuntimePolicy"),
+        "cuda_graphs": ref("CudaGraphConfigResponse"),
         "rocm_synchronization": ref("RocmSynchronizationRuntimeStats"),
         "rocm_graphs": nullable(ref("RocmGraphStats")),
         "rocm_graphs_unavailable_reason": nullable(ref("RocmGraphUnavailableReason")),

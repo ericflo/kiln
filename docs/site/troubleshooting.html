@@ -278,6 +278,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#desktop-app-first-launch">Desktop first launch</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#wrong-binary-or-gpu-path">GPU path</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#memory-budget-or-sampler">Memory budget</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#cuda-graph-policy">CUDA graph policy</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#rocm-token-pauses">ROCm token pauses</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-pauses-or-oom">Prefill pauses/OOM</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#tape-scope-or-removed-switches">Training tape</a>
@@ -522,6 +523,33 @@ curl -s http://localhost:8420/metrics \
           <li>A request-level <code>resident_prefill_used=true</code> is impossible in a conforming production process and should be treated as artifact or contract drift.</li>
           <li>Re-enablement requires production-model semantic parity across changing cohorts and repeated process history. Scheduler counters or a successful HTTP response are not sufficient evidence.</li>
         </ul>
+      </article>
+
+      <article class="card p-6">
+        <h2 id="cuda-graph-policy" class="text-xl font-semibold mb-4">CUDA graph capture is absent, unstable, or unexpectedly eager</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Establish policy</div>
+            <p>Inspect the typed request before attributing behavior to capture. The default <code>stable</code> serving profile disables live graph capture even when <code>memory.cuda_graphs=true</code>.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check the bound</div>
+            <p><code>memory.cuda_graph_cache_entries</code> is <code>1..=64</code>, defaults to <code>8</code>, and is fixed before device selection. Changing it requires restart; malformed, zero, and oversized values stop startup.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Do not bypass invariants</div>
+            <p>Stable paged metadata is mandatory and batched capture is unavailable. Former stable-metadata, batched-enable, no-replay, force-eager, and batched-KV environment probes are retired; setting them cannot alter CUDA decode.</p>
+          </div>
+        </div>
+        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config | jq '.cuda_graphs'
+curl -s http://localhost:8420/health | jq '.decode_runtime.cuda_graphs'
+kiln config --file kiln.toml</code></pre>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Use <code>server.serving_profile="experimental"</code> only for controlled qualification. A CUDA feature
+          compile on a non-NVIDIA host is not runtime evidence. Re-enabling batched capture requires a source
+          change plus real NVIDIA sanitizer, eager-parity, resilience, and throughput evidence; it cannot be
+          promoted through configuration.
+        </p>
       </article>
 
       <article class="card p-6">

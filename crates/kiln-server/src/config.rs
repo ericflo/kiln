@@ -3516,6 +3516,10 @@ pub struct MemoryConfig {
     /// Automatically disabled on non-CUDA devices.
     /// Default: true
     pub cuda_graphs: bool,
+    /// Maximum retained single-row CUDA decode graphs. Each entry owns graph
+    /// handles and graph-stable device buffers; the bound is fixed at startup.
+    /// Valid range: 1..=64. Default: 8.
+    pub cuda_graph_cache_entries: usize,
 }
 
 /// Training-specific settings. Canonical startup overrides use
@@ -5963,6 +5967,7 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     ),
     public_env_field!(bool, memory.kv_cache_fp8, "KILN_KV_CACHE_FP8"),
     public_env_field!(bool, memory.cuda_graphs, "KILN_CUDA_GRAPHS"),
+    public_env_field!(usize, memory.cuda_graph_cache_entries),
     public_env_field!(
         some_usize,
         training.grad_checkpoint_segments,
@@ -6212,6 +6217,7 @@ impl Default for MemoryConfig {
             // uses GPU kt_cos/kt_sin — now both compute on-device. Verified
             // bit-identical over 512-token decodes (BF16 + W4A16, multiple prompts).
             cuda_graphs: true,
+            cuda_graph_cache_entries: 8,
         }
     }
 }
@@ -6738,6 +6744,15 @@ impl KilnConfig {
         if self.memory.probe_ms == 0 {
             anyhow::bail!("memory.probe_ms must be > 0, got 0");
         }
+        if !(1..=kiln_model::CudaGraphExecutionPolicy::MAX_CACHED_GRAPHS)
+            .contains(&self.memory.cuda_graph_cache_entries)
+        {
+            anyhow::bail!(
+                "memory.cuda_graph_cache_entries must be in 1..={}, got {}",
+                kiln_model::CudaGraphExecutionPolicy::MAX_CACHED_GRAPHS,
+                self.memory.cuda_graph_cache_entries
+            );
+        }
         if self.memory.kv_force_blocks.target().is_some() {
             if !self.memory.kv_autoscale.enabled() {
                 anyhow::bail!("memory.kv_force_blocks requires memory.kv_autoscale=true");
@@ -7185,6 +7200,7 @@ mod tests {
         "KILN_BATCHING_ROWWISE_DECODE",
         "KILN_LOGGING_FORMAT",
         "KILN_LOGGING_LEVEL",
+        "KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES",
         "KILN_MEMORY_CUDA_GRAPHS",
         "KILN_MEMORY_FLOOR_GB",
         "KILN_MEMORY_GPU_MEMORY_GB",
@@ -7585,6 +7601,7 @@ mod tests {
         );
         assert!(!config.memory.kv_cache_fp8);
         assert!(config.memory.cuda_graphs); // #34: default-ON
+        assert_eq!(config.memory.cuda_graph_cache_entries, 8);
         assert!(!config.training.no_grad_checkpoint);
         assert_eq!(
             config.training.recompute_checkpoint_boundaries.mode(),
@@ -8477,7 +8494,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 105);
+        assert_eq!(original_len, 106);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -8548,7 +8565,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 110);
+        assert_eq!(serialized_leaves.len(), 111);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -8659,6 +8676,7 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_MEMORY_KV_FORCE_BLOCKS", "0"),
             ("KILN_MEMORY_KV_CACHE_FP8", "true"),
             ("KILN_MEMORY_CUDA_GRAPHS", "false"),
+            ("KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES", "13"),
             ("KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS", "4"),
             ("KILN_TRAINING_NO_GRAD_CHECKPOINT", "true"),
             ("KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES", "enabled"),
@@ -8845,6 +8863,7 @@ rocm_graph_cache_max_bytes = 17179869184
         );
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
+        assert_eq!(config.memory.cuda_graph_cache_entries, 13);
         assert_eq!(config.training.grad_checkpoint_segments, Some(4));
         assert!(config.training.no_grad_checkpoint);
         assert_eq!(
@@ -10208,6 +10227,16 @@ direct_decode_rendezvous_mixed_seq_lens = false
             ("KILN_MEMORY_FLOOR_GB", "-0.5", "memory.floor_gb"),
             ("KILN_MEMORY_FLOOR_GB", "inf", "memory.floor_gb"),
             ("KILN_MEMORY_PROBE_MS", "0", "memory.probe_ms"),
+            (
+                "KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES",
+                "0",
+                "memory.cuda_graph_cache_entries",
+            ),
+            (
+                "KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES",
+                "65",
+                "memory.cuda_graph_cache_entries",
+            ),
         ] {
             environment.set(name, invalid);
             let error = KilnConfig::load(Some(path.to_str().unwrap())).unwrap_err();
@@ -10679,6 +10708,7 @@ kv_autoscale = false
 kv_force_blocks = 0
 kv_cache_fp8 = true
 cuda_graphs = false
+cuda_graph_cache_entries = 16
 
 [training]
 grad_checkpoint_segments = 8
@@ -10812,6 +10842,7 @@ composed_cache_max_entries = 8
         );
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
+        assert_eq!(config.memory.cuda_graph_cache_entries, 16);
         assert_eq!(config.training.grad_checkpoint_segments, Some(8));
         assert_eq!(
             config.training.recompute_checkpoint_boundaries.mode(),
@@ -11256,6 +11287,17 @@ port = 3000
         let mut zero_probe = KilnConfig::default();
         zero_probe.memory.probe_ms = 0;
         assert!(zero_probe.validate().is_err());
+
+        for invalid in [
+            0,
+            kiln_model::CudaGraphExecutionPolicy::MAX_CACHED_GRAPHS + 1,
+        ] {
+            let mut config = KilnConfig::default();
+            config.memory.cuda_graph_cache_entries = invalid;
+            let detail = config.validate().unwrap_err().to_string();
+            assert!(detail.contains("memory.cuda_graph_cache_entries"));
+            assert!(detail.contains(&invalid.to_string()));
+        }
 
         let mut unrepresentable_capacity = KilnConfig::default();
         unrepresentable_capacity.memory.gpu_memory_gb = Some(f64::MAX);

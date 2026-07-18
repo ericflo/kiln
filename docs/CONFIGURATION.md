@@ -119,18 +119,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 110 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 111 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 110 fixed fields:
+credential. Of the 111 fixed fields:
 
-- 105 implement the canonical mechanical environment name;
+- 106 implement the canonical mechanical environment name;
 - 71 also retain one or more deprecated compatibility spellings (76 aliases
   total);
 - 5 are config-file-only and have no environment override;
 - the 76 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 110 fixed fields and both dynamic credential fields.
+The tables below cover all 111 fixed fields and both dynamic credential fields.
 The schema additionally records the accepted deprecated TOML-only
 `streaming_prefill.enabled` compatibility field so validators match the loader.
 
@@ -905,6 +905,7 @@ not construct a model; inspect `/v1/config` after restart for those facts.
 | `memory.kv_force_blocks` | unsigned integer; `0` (disabled) | `KILN_MEMORY_KV_FORCE_BLOCKS` (implemented) | `KILN_KV_FORCE_BLOCKS` (deprecated compatibility) | A positive value requests one exact startup resize before the normal autoscaler loop. It requires `memory.kv_autoscale=true` and `server.serving_profile="maintenance"`; every other combination fails configuration validation. Zero disables the one-shot operation. The resize still uses full replacement-pool reservation, exclusive GPU ownership, graph invalidation, transactional publication, and typed `forced_configuration` attribution. This is an offline maintenance/qualification control, not a per-request tuning knob. |
 | `memory.kv_cache_fp8` | boolean; `false` | `KILN_MEMORY_KV_CACHE_FP8` (implemented) | `KILN_KV_CACHE_FP8` (deprecated compatibility) | Requests E4M3FN KV storage. Backend storage policy may reject or disable the request when unsupported. |
 | `memory.cuda_graphs` | boolean; `true` | `KILN_MEMORY_CUDA_GRAPHS` (implemented) | `KILN_CUDA_GRAPHS` (deprecated compatibility) | CUDA-only request. Non-CUDA backends ignore it, and a serving profile with live graph capture disabled selects eager-only execution regardless of this value. |
+| `memory.cuda_graph_cache_entries` | unsigned integer; `8` | `KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES` (implemented) | None | `1..=64`. Bounds retained single-row CUDA decode graphs and their graph-stable device buffers. Resolved once before device selection; decode never re-reads process environment. The unqualified batched CUDA graph route remains unavailable. |
 
 Capacity detection is device-scoped. Discrete accelerators use the selected
 device's driver-reported VRAM and never count GTT as device-local capacity.
