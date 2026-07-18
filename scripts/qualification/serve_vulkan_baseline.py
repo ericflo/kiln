@@ -263,11 +263,11 @@ class RunEvidence:
         if self.warmup is not None and self.waves:
             results = [result for wave in self.waves for result in wave.results]
             successes = [result for result in results if result.success]
-            attributed, unexplained = mixed.classify_itl_outliers(
+            outliers = mixed.classify_itl_outliers(
                 self.warmup.itl_ms, successes, measurement_events
             )
-            self.values["attributed_itl_outlier_count"] = attributed
-            self.values["unexplained_itl_outlier_count"] = unexplained
+            self.values["attributed_itl_outlier_count"] = outliers.attributed
+            self.values["unexplained_itl_outlier_count"] = outliers.unexplained
 
     def serialized_details(self, error: str | None = None) -> str:
         value = {
@@ -499,7 +499,7 @@ def metric_values(
     finished = max((result.finished for result in results), default=started)
     duration = max(finished - started, 1e-9)
     itls = [gap for result in successes for gap in result.itl_ms]
-    attributed, unexplained = mixed.classify_itl_outliers(
+    outliers = mixed.classify_itl_outliers(
         warmup.itl_ms, successes, events
     )
     batching_before = mixed.batching_snapshot(before)
@@ -508,7 +508,7 @@ def metric_values(
     categories = [event.category for event in events]
     graph_categories = {"graph_capture", "graph_fallback", "graph_sync"}
     values: dict[str, float | int] = {
-        "attributed_itl_outlier_count": attributed,
+        "attributed_itl_outlier_count": outliers.attributed,
         "batching_batched_decode_forward_count": _delta(
             batching_before, batching_after, "total_batched_decode_forwards"
         ),
@@ -565,7 +565,7 @@ def metric_values(
         "shutdown_forced_count": 0,
         "shutdown_nonzero_count": 0,
         "snapshot_residue_count": 0,
-        "unexplained_itl_outlier_count": unexplained,
+        "unexplained_itl_outlier_count": outliers.unexplained,
         **external_sync,
     }
     for wave in waves:

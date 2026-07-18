@@ -2841,33 +2841,58 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         )
         inside = serve.ObservedEvent(0.5, "memory_reclaim", "trim")
         outside = serve.ObservedEvent(0.8, "kv_resize", "resize")
-        attributed, unexplained = serve.classify_itl_outliers(
+        counts = serve.classify_itl_outliers(
             [100.0, 100.0], [result], [inside, outside]
         )
-        self.assertEqual((attributed, unexplained), (1, 0))
-        attributed, unexplained = serve.classify_itl_outliers(
+        self.assertEqual(
+            counts,
+            serve.ItlOutlierCounts(1, 0, 1, 0),
+        )
+        counts = serve.classify_itl_outliers(
             [100.0, 100.0], [result], [outside]
         )
-        self.assertEqual((attributed, unexplained), (0, 1))
+        self.assertEqual(counts, serve.ItlOutlierCounts(0, 0, 0, 1))
         synchronization = serve.ObservedEvent(
             0.5, "external_yield_sync", "slow attributed synchronization"
         )
-        attributed, unexplained = serve.classify_itl_outliers(
+        counts = serve.classify_itl_outliers(
             [100.0, 100.0], [result], [synchronization]
         )
-        self.assertEqual((attributed, unexplained), (1, 0))
+        self.assertEqual(counts, serve.ItlOutlierCounts(1, 0, 1, 0))
         thermal_pacing = serve.ObservedEvent(
             0.5, "host_thermal_pacing", "qualification pause"
         )
-        attributed, unexplained = serve.classify_itl_outliers(
-            [100.0, 100.0], [result], [thermal_pacing]
-        )
-        self.assertEqual((attributed, unexplained), (1, 0))
         prefill = serve.ObservedEvent(0.7, "actor_prefill", "slow prefill")
-        attributed, unexplained = serve.classify_itl_outliers(
+        counts = serve.classify_itl_outliers(
+            [100.0, 100.0], [result], [prefill, thermal_pacing]
+        )
+        self.assertEqual(counts, serve.ItlOutlierCounts(1, 1, 0, 0))
+        counts = serve.classify_itl_outliers(
             [100.0, 100.0], [result], [prefill]
         )
-        self.assertEqual((attributed, unexplained), (1, 0))
+        self.assertEqual(counts, serve.ItlOutlierCounts(1, 0, 1, 0))
+
+    def test_itl_gate_accepts_only_reconciled_thermal_attribution(self) -> None:
+        values = {
+            "attributed_itl_outlier_count": 95,
+            "host_thermal_pacing_itl_outlier_count": 95,
+            "non_thermal_attributed_itl_outlier_count": 0,
+            "unexplained_itl_outlier_count": 0,
+        }
+        self.assertEqual(serve.itl_outlier_gate_failures(values), [])
+
+        values["non_thermal_attributed_itl_outlier_count"] = 1
+        failures = serve.itl_outlier_gate_failures(values)
+        self.assertTrue(any("did not reconcile" in failure for failure in failures))
+        self.assertTrue(any("non-thermal runtime" in failure for failure in failures))
+
+        values.update(
+            attributed_itl_outlier_count=96,
+            unexplained_itl_outlier_count=1,
+        )
+        failures = serve.itl_outlier_gate_failures(values)
+        self.assertFalse(any("did not reconcile" in failure for failure in failures))
+        self.assertTrue(any("unexplained" in failure for failure in failures))
 
     def test_metric_values_use_runtime_counter_deltas(self) -> None:
         result = serve.StreamResult(

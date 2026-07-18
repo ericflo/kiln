@@ -69,7 +69,7 @@ RUNTIME_HOST_THERMAL_POLICY = thermal.HostThermalPolicy(
 )
 BUILD_TIMEOUT_SECONDS = 900.0
 STARTUP_TIMEOUT_SECONDS = 240.0
-REQUEST_TIMEOUT_SECONDS = 120.0
+REQUEST_TIMEOUT_SECONDS = 180.0
 OVERALL_TIMEOUT_SECONDS = 1200.0
 NORMAL_REQUESTS = 8
 NORMAL_MAX_TOKENS = 128
@@ -610,6 +610,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "host_thermal_pacing_active_end": ("bool", "exact", True),
     "host_thermal_pacing_completed_event_count": ("count", "sum", False),
     "host_thermal_pacing_event_count": ("count", "sum", True),
+    "host_thermal_pacing_itl_outlier_count": ("count", "sum", True),
     "host_thermal_pacing_max_seconds": ("s", "max", True),
     "host_thermal_pacing_max_start_millicelsius": (
         "millicelsius",
@@ -626,6 +627,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "length_terminated_request_count": ("count", "sum", False),
     "long_prefill_prompt_tokens": ("tokens", "exact", False),
     "memory_reclaim_event_count": ("count", "sum", True),
+    "non_thermal_attributed_itl_outlier_count": ("count", "sum", True),
     "output_token_throughput_per_second": ("tokens/s", "rate", False),
     "peak_gpu_memory_used_bytes": ("bytes", "max", True),
     "prefix_cache_active_leases_end": ("leases", "exact", True),
@@ -2067,6 +2069,14 @@ class ObservedEvent:
     category: str
     message: str
     fields: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(frozen=True)
+class ItlOutlierCounts:
+    attributed: int
+    host_thermal_pacing: int
+    non_thermal_attributed: int
+    unexplained: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -4194,7 +4204,7 @@ def classify_itl_outliers(
     warmup_gaps: list[float],
     results: list[StreamResult],
     events: list[ObservedEvent],
-) -> tuple[int, int]:
+) -> ItlOutlierCounts:
     history: deque[float] = deque(
         (gap for gap in warmup_gaps if gap >= 0), maxlen=OUTLIER_HISTORY_SIZE
     )
@@ -4206,6 +4216,8 @@ def classify_itl_outliers(
             gaps.append((after, before, (after - before) * 1000.0))
     gaps.sort(key=lambda item: item[0])
     attributed = 0
+    host_thermal_pacing = 0
+    non_thermal_attributed = 0
     unexplained = 0
     attributable = {
         "actor_admission",
@@ -4228,21 +4240,58 @@ def classify_itl_outliers(
             nearby = [
                 event
                 for event in events
-                if event.category in attributable and before - 0.05 <= event.observed <= after + 0.10
+                if event.category in attributable
+                and before - 0.05 <= event.observed <= after + 0.10
             ]
+            nearby_categories = {event.category for event in nearby}
             if nearby:
                 attributed += 1
+                if "host_thermal_pacing" in nearby_categories:
+                    host_thermal_pacing += 1
+                    attribution_class = "host_thermal_pacing"
+                else:
+                    non_thermal_attributed += 1
+                    attribution_class = "runtime_event"
             else:
                 unexplained += 1
+                attribution_class = "unexplained"
             trace(
                 "itl_outlier",
                 attributed=bool(nearby),
+                attribution_class=attribution_class,
                 gap_ms=gap_ms,
-                nearby_categories=sorted({event.category for event in nearby}),
+                nearby_categories=sorted(nearby_categories),
                 threshold_ms=threshold,
             )
         history.append(gap_ms)
-    return attributed, unexplained
+    return ItlOutlierCounts(
+        attributed=attributed,
+        host_thermal_pacing=host_thermal_pacing,
+        non_thermal_attributed=non_thermal_attributed,
+        unexplained=unexplained,
+    )
+
+
+def itl_outlier_gate_failures(values: dict[str, float | int]) -> list[str]:
+    attributed = values["attributed_itl_outlier_count"]
+    thermal = values["host_thermal_pacing_itl_outlier_count"]
+    non_thermal = values["non_thermal_attributed_itl_outlier_count"]
+    unexplained = values["unexplained_itl_outlier_count"]
+    failures: list[str] = []
+    if attributed != thermal + non_thermal:
+        failures.append(
+            "ITL outlier attribution counts did not reconcile: "
+            f"attributed={attributed}, host_thermal_pacing={thermal}, "
+            f"non_thermal={non_thermal}"
+        )
+    if unexplained != 0:
+        failures.append(f"{unexplained} ITL outliers were unexplained")
+    if non_thermal != 0:
+        failures.append(
+            f"{non_thermal} healthy-request ITL outliers coincided with "
+            "non-thermal runtime events"
+        )
+    return failures
 
 
 def metric_values(
@@ -4301,7 +4350,7 @@ def metric_values(
         result.ttft_ms <= SLO_TTFT_MS and result.e2e_ms <= SLO_E2E_MS
         for result in successes
     )
-    attributed, unexplained = classify_itl_outliers(warmup.itl_ms, successes, events)
+    outliers = classify_itl_outliers(warmup.itl_ms, successes, events)
     batching_start = batching_snapshot(health_measurement_start)
     batching_end = batching_snapshot(health_end)
     prefix_start = prefix_cache_snapshot(health_measurement_start)
@@ -4330,7 +4379,7 @@ def metric_values(
     )
     categories = [event.category for event in events]
     values: dict[str, float | int] = {
-        "attributed_itl_outlier_count": attributed,
+        "attributed_itl_outlier_count": outliers.attributed,
         "batching_admission_call_count": admission_calls,
         "batching_admission_ms_max": batching_end["max_admission_ms"],
         "batching_admission_ms_total": counter_delta(
@@ -4439,6 +4488,7 @@ def metric_values(
         "graph_pre_measurement_capture_success_count": graph_start["capture_successes"],
         "graph_pre_measurement_failure_count": graph_start["failures"],
         "graph_pre_measurement_replay_success_count": graph_start["replay_successes"],
+        "host_thermal_pacing_itl_outlier_count": outliers.host_thermal_pacing,
         "itl_ms_p50": percentile_r7(itls, 0.5),
         "itl_ms_p99": percentile_r7(itls, 0.99),
         "itl_ms_p999": percentile_r7(itls, 0.999),
@@ -4448,6 +4498,9 @@ def metric_values(
         "length_terminated_request_count": length_terminated_requests,
         "long_prefill_prompt_tokens": long_prefill.prompt_tokens,
         "memory_reclaim_event_count": categories.count("memory_reclaim"),
+        "non_thermal_attributed_itl_outlier_count": (
+            outliers.non_thermal_attributed
+        ),
         "output_token_throughput_per_second": completion_tokens / window,
         "peak_gpu_memory_used_bytes": peak_memory,
         "prefix_cache_active_leases_end": prefix_end["active_leases"],
@@ -4493,7 +4546,7 @@ def metric_values(
         "ttft_ms_p50": percentile_r7(ttfts, 0.5),
         "ttft_ms_p99": percentile_r7(ttfts, 0.99),
         "ttft_ms_p999": percentile_r7(ttfts, 0.999),
-        "unexplained_itl_outlier_count": unexplained,
+        "unexplained_itl_outlier_count": outliers.unexplained,
         "zero_token_response_count": zero_tokens,
     }
     values.update(external_yield_sync)
@@ -5168,15 +5221,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             status_failures.append("ROCm graph capture failed during qualification")
         if values["graph_measured_replay_failure_count"] != 0:
             status_failures.append("ROCm graph replay failed during qualification")
-        if values["unexplained_itl_outlier_count"] != 0:
-            status_failures.append(
-                f"{values['unexplained_itl_outlier_count']} ITL outliers were unexplained"
-            )
-        if values["attributed_itl_outlier_count"] != 0:
-            status_failures.append(
-                f"{values['attributed_itl_outlier_count']} healthy-request ITL outliers "
-                "coincided with runtime events"
-            )
+        status_failures.extend(itl_outlier_gate_failures(values))
         if values["response_queue_delay_ms_p999"] > OUTLIER_ABSOLUTE_MS:
             status_failures.append(
                 "healthy response-channel queue delay exceeded the 250 ms stall threshold"

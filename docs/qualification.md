@@ -646,6 +646,13 @@ health baseline before starting the original workload. Sampled counters and
 latencies therefore remain dedicated evidence rather than silently changing
 the long-standing deterministic mixed-load denominator.
 
+The mixed-load client and server each use the same 180-second per-request
+containment bound. Cooling remains inside that wall clock. The alignment lets
+the deliberately long prefill reach the server's terminal result under required
+host pacing instead of having the client abandon a still-valid request at an
+older, shorter local deadline; it does not remove or normalize the measured
+TTFT, E2E latency, workload duration, or sustainable throughput cost.
+
 Measured mixed-load, development-soak, and endurance receipts also retain the
 complete validated request-phase population instead of discarding terminal
 performance metadata. Every fixed phase `P` has a
@@ -697,7 +704,14 @@ calling the host ready.
 
 The receipt retains start/peak/end package temperature, guard error and trip
 counts, pacing start/completion counts, total and maximum pacing seconds,
-hottest pacing start, and whether a pause remained active at teardown. It also
+hottest pacing start, and whether a pause remained active at teardown. Adaptive
+ITL evidence retains the total attributed count and partitions it into
+`host_thermal_pacing_itl_outlier_count` and
+`non_thermal_attributed_itl_outlier_count`. A mixed-load pass permits the first
+only when every attributed gap reconciles to one of those two counts; it still
+requires both the non-thermal attributed count and unexplained count to be zero.
+This makes the required external controller visible without allowing a model,
+scheduler, allocator, graph, or synchronization pause to hide behind it. It also
 retains cooldown active/completed/timeout counts, duration, sample count,
 consecutive stable count, and post-exit peak. A pass requires zero guard error,
 trip, cooldown timeout, or active final controller; exactly one completed

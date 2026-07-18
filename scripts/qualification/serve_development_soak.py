@@ -46,6 +46,7 @@ MAX_TOKENS = 32
 CANCEL_EVERY_WAVES = 5
 CANCELLATION_MAX_TOKENS = 512
 CANCELLATION_PROMPT_WORDS = 48
+ROCM_REQUEST_TIMEOUT_SECONDS = 120.0
 QUALIFICATION_DURATION_SECONDS = 1800.0
 VULKAN_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
 CASE_TEARDOWN_GRACE_SECONDS = 180.0
@@ -202,7 +203,7 @@ ROCM_RUNTIME = SoakRuntime(
     cancel_every_waves=CANCEL_EVERY_WAVES,
     cancellation_max_tokens=CANCELLATION_MAX_TOKENS,
     cancellation_prompt_words=CANCELLATION_PROMPT_WORDS,
-    request_timeout_seconds=mixed.REQUEST_TIMEOUT_SECONDS,
+    request_timeout_seconds=ROCM_REQUEST_TIMEOUT_SECONDS,
     max_steady_state_warmup_waves=MAX_STEADY_STATE_WARMUP_WAVES,
     graph_cache_max=ROCM_GRAPH_CACHE_MAX,
     min_stabilization_cycles=MIN_STABILIZATION_CYCLES,
@@ -2445,14 +2446,14 @@ def measurement_result_evidence(
         for result in results
         if valid_stream_result(result, expected_completion_tokens)
     ]
-    attributed, unexplained = mixed.classify_itl_outliers(
+    outliers = mixed.classify_itl_outliers(
         warmup_itl_ms, successes, measurement_events
     )
     itls = [gap for result in successes for gap in result.itl_ms]
     ttfts = [result.ttft_ms for result in successes]
     prompt_tokens = [result.prompt_tokens for result in successes]
     values: dict[str, float | int] = {
-        "attributed_itl_outlier_count": attributed,
+        "attributed_itl_outlier_count": outliers.attributed,
         "cancellation_confirmed_count": cancellation_count,
         "completion_token_count": sum(
             result.completion_tokens for result in successes
@@ -2477,14 +2478,19 @@ def measurement_result_evidence(
         "ttft_ms_p50": mixed.percentile_r7(ttfts, 0.5),
         "ttft_ms_p99": mixed.percentile_r7(ttfts, 0.99),
         "ttft_ms_p999": mixed.percentile_r7(ttfts, 0.999),
-        "unexplained_itl_outlier_count": unexplained,
+        "unexplained_itl_outlier_count": outliers.unexplained,
         "wave_count": wave_count,
         "zero_token_response_count": sum(
             result.completion_tokens == 0 for result in results
         ),
     }
     values.update(mixed.latency_phase_metric_values(successes))
-    return MeasurementResultEvidence(values, successes, attributed, unexplained)
+    return MeasurementResultEvidence(
+        values,
+        successes,
+        outliers.attributed,
+        outliers.unexplained,
+    )
 
 
 def invalid_stream_results_summary(

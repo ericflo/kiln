@@ -1776,7 +1776,10 @@ kiln serve --config kiln.toml</code></pre>
           <code>k10temp/Tctl</code> controller stops the server process group at 88 C, resumes it at
           86 C, and fails closed at 97 C. Temperature, guard errors/trips, and complete pacing
           intervals are receipt metrics; cooling remains inside latency and throughput wall clocks
-          and is attributed as <code>host_thermal_pacing</code>. Before <code>SIGTERM</code>, teardown
+          and is attributed as <code>host_thermal_pacing</code>. The mixed-load client and server share
+          a 180-second request bound. Receipts partition attributed ITL gaps into thermal-paced and
+          non-thermal counts; only a reconciled thermal-only population may pass, and unexplained
+          gaps must remain zero. Before <code>SIGTERM</code>, teardown
           disables new stops and releases any paced group while the hard limit stays active. After
           process exit, the runner requires eight consecutive 250 ms readings at or below 75 C,
           bounded to 180 seconds. Cooldown active/completed/timeout counts, duration, sample count,

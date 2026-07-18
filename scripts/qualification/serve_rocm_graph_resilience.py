@@ -456,14 +456,15 @@ def run_arm(
             )
 
         events = server_log.events_since(measured_started)
-        attributed, unexplained = mixed.classify_itl_outliers(
+        outliers = mixed.classify_itl_outliers(
             warmup.itl_ms, results, events
         )
-        evidence.attributed_itl_outliers[arm] = attributed
-        evidence.unexplained_itl_outliers[arm] = unexplained
-        if attributed or unexplained:
+        evidence.attributed_itl_outliers[arm] = outliers.attributed
+        evidence.unexplained_itl_outliers[arm] = outliers.unexplained
+        if outliers.attributed or outliers.unexplained:
             raise ResilienceError(
-                f"{arm} observed {attributed} attributed and {unexplained} unexplained ITL outliers"
+                f"{arm} observed {outliers.attributed} attributed and "
+                f"{outliers.unexplained} unexplained ITL outliers"
             )
         device_faults = [event for event in events if event.category == "device_fault"]
         if device_faults:
@@ -477,8 +478,8 @@ def run_arm(
             graph_start=graph_start,
             graph_end=graph_end,
             peak_gpu_memory_used_bytes=max(sampler.samples, default=0),
-            attributed_itl_outliers=attributed,
-            unexplained_itl_outliers=unexplained,
+            attributed_itl_outliers=outliers.attributed,
+            unexplained_itl_outliers=outliers.unexplained,
         )
     finally:
         sampler.close()
@@ -496,13 +497,13 @@ def run_arm(
         if measured_started is not None and warmup is not None:
             events = server_log.events_since(measured_started)
             try:
-                attributed, unexplained = mixed.classify_itl_outliers(
+                outliers = mixed.classify_itl_outliers(
                     warmup.itl_ms,
                     results,
                     events,
                 )
-                evidence.attributed_itl_outliers[arm] = attributed
-                evidence.unexplained_itl_outliers[arm] = unexplained
+                evidence.attributed_itl_outliers[arm] = outliers.attributed
+                evidence.unexplained_itl_outliers[arm] = outliers.unexplained
             except Exception:
                 pass
         residue = mixed.snapshot_payload_residue(snapshot_dir)
