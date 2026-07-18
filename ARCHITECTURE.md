@@ -871,6 +871,9 @@ rowwise_decode = false                # one true batched forward per cohort
 prefix_aware_admission = true         # retain strict-prefix reuse opportunity
 prefill_admission_quantum = "auto"    # backend-owned prompt-admission cadence
 
+[accelerator]
+rocm_kernel_profile = "qualified"     # complete immutable ROCm model-kernel route set
+
 [model]
 path = "/models/Qwen3.5-4B"        # omit for mock mode
 model_id = "Qwen/Qwen3.5-4B"       # HuggingFace model ID; served as "Qwen3.5-4B" by default
@@ -940,6 +943,7 @@ tool-call rendering.
 | `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` | `auto` or a positive multiple-of-64 tape tile |
 | `KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS` | `auto` or a positive multiple-of-64 detached full-attention tile |
 | `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` | Strict boolean final-tile LM-head optimization |
+| `KILN_ACCELERATOR_ROCM_KERNEL_PROFILE` | `qualified`, `portable_fallback`, or experimental-only `experimental_multiblock` complete ROCm route set |
 | `KILN_MEMORY_GPU_MEMORY_GB` | Override GPU VRAM detection |
 | `KILN_MEMORY_NUM_BLOCKS` | Override KV cache block count |
 | `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` | Override gradient checkpoint segments |
@@ -986,6 +990,20 @@ backend availability, actor activity, worker activity, and route availability.
 See
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for the complete schema,
 validation, provenance, restart, and compatibility contract.
+
+Accelerator execution has the same single-authority boundary. Resolved schema
+`kiln.accelerator-runtime-policy.v9` includes
+`accelerator.rocm_kernel_profile`. The server installs one complete model
+policy before constructing a ROCm backend. `qualified` enables the production
+full-attention QKV, GDN projection/gate/recurrent/normalization/decode,
+head-major prefill, fused convolution, and LoRA decode routes, excluding the
+slower gfx1151 multi-block GDN prefill experiment. `portable_fallback` declines
+all fifteen profile-governed ROCm model routes. `experimental_multiblock` adds that
+unqualified prefill route and requires the experimental serving profile. Each
+backend captures the policy at construction, so inference does not reread the
+environment or admit per-kernel mixtures. Retired route variables and their
+legacy CUDA-spelled fallbacks are not accepted as ROCm profile aliases; any
+remaining CUDA-only controls are a later CUDA-host migration.
 
 Streaming prefill follows the same authority boundary. After the backend is
 selected, startup resolves one immutable `StreamingPrefillRuntimeConfig` and

@@ -125,8 +125,8 @@ pub const DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MIN: u64 = 64 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024 * 1024;
 /// Versioned schema identity shared by config, health, and debug diagnostics.
-pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v8";
-pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 8;
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v9";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 9;
 
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
@@ -1683,6 +1683,99 @@ impl<'de> Deserialize<'de> for RocmBf16MatmulOutputModeSetting {
     }
 }
 
+/// Closed process-lifetime ROCm kernel route set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RocmKernelProfile {
+    /// Strix Halo-qualified native route set. This is the production default.
+    #[default]
+    Qualified,
+    /// Decline all profile-governed routes and use portable model fallbacks.
+    PortableFallback,
+    /// Qualified routes plus the unqualified multi-block GDN prefill kernel.
+    ExperimentalMultiblock,
+}
+
+impl RocmKernelProfile {
+    fn parse(raw: &str, label: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "qualified" => Ok(Self::Qualified),
+            "portable_fallback" => Ok(Self::PortableFallback),
+            "experimental_multiblock" => Ok(Self::ExperimentalMultiblock),
+            _ => anyhow::bail!(
+                "{label} must be one of qualified, portable_fallback, or experimental_multiblock; got {raw:?}"
+            ),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Qualified => "qualified",
+            Self::PortableFallback => "portable_fallback",
+            Self::ExperimentalMultiblock => "experimental_multiblock",
+        }
+    }
+}
+
+impl fmt::Display for RocmKernelProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Source-tracked ROCm kernel profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RocmKernelProfileSetting {
+    profile: RocmKernelProfile,
+    source: ConfigValueSource,
+}
+
+impl RocmKernelProfileSetting {
+    pub const fn new(profile: RocmKernelProfile, source: ConfigValueSource) -> Self {
+        Self { profile, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let profile = RocmKernelProfile::parse(raw, name)?;
+        Ok(Self::new(profile, ConfigValueSource::Environment))
+    }
+
+    pub const fn profile(self) -> RocmKernelProfile {
+        self.profile
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for RocmKernelProfileSetting {
+    fn default() -> Self {
+        Self::new(RocmKernelProfile::Qualified, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for RocmKernelProfileSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.profile.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RocmKernelProfileSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let profile = RocmKernelProfile::parse(&raw, "accelerator.rocm_kernel_profile")
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self::new(profile, ConfigValueSource::ConfigFile))
+    }
+}
+
 /// Configured ROCm graph lifecycle.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2125,6 +2218,7 @@ pub struct ResolvedAcceleratorRuntimePolicy {
     pub rocm_synchronization_mode: ResolvedAcceleratorValue<RocmSynchronizationMode>,
     pub rocm_strided_batched_matmul_mode: ResolvedAcceleratorValue<RocmStridedBatchedMatmulMode>,
     pub rocm_bf16_matmul_output_mode: ResolvedAcceleratorValue<RocmBf16MatmulOutputMode>,
+    pub rocm_kernel_profile: ResolvedAcceleratorValue<RocmKernelProfile>,
     pub rocm_graph_mode: ResolvedAcceleratorValue<RocmGraphMode>,
     pub rocm_graph_cache_entries: ResolvedAcceleratorValue<usize>,
     pub rocm_graph_cache_max_bytes: ResolvedAcceleratorValue<u64>,
@@ -2142,6 +2236,7 @@ pub struct AcceleratorRuntimeConfig {
     pub rocm_synchronization_mode: RocmSynchronizationModeSetting,
     pub rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting,
     pub rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting,
+    pub rocm_kernel_profile: RocmKernelProfileSetting,
     pub rocm_graph_mode: RocmGraphModeSetting,
     pub rocm_graph_cache_entries: RocmGraphCacheEntries,
     pub rocm_graph_cache_max_bytes: RocmGraphCacheMaxBytes,
@@ -2203,6 +2298,11 @@ impl AcceleratorRuntimeConfig {
                 effective: self.rocm_bf16_matmul_output_mode.mode(),
                 source: self.rocm_bf16_matmul_output_mode.source(),
             },
+            rocm_kernel_profile: ResolvedAcceleratorValue {
+                configured: self.rocm_kernel_profile.profile(),
+                effective: self.rocm_kernel_profile.profile(),
+                source: self.rocm_kernel_profile.source(),
+            },
             rocm_graph_mode: ResolvedAcceleratorValue {
                 configured: configured_graph_mode,
                 effective: effective_graph_mode,
@@ -2258,6 +2358,13 @@ impl AcceleratorRuntimeConfig {
                 self.rocm_bf16_matmul_output_mode.mode()
             );
         }
+        if self.rocm_kernel_profile.profile() == RocmKernelProfile::ExperimentalMultiblock
+            && profile != ServingProfile::Experimental
+        {
+            anyhow::bail!(
+                "accelerator.rocm_kernel_profile=experimental_multiblock requires server.serving_profile=experimental; got {profile}"
+            );
+        }
         if matches!(
             self.rocm_graph_mode.mode(),
             RocmGraphMode::WarmupThenEager | RocmGraphMode::LazyCaptureReplay
@@ -2286,6 +2393,7 @@ impl Default for AcceleratorRuntimeConfig {
             rocm_synchronization_mode: RocmSynchronizationModeSetting::default(),
             rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting::default(),
             rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting::default(),
+            rocm_kernel_profile: RocmKernelProfileSetting::default(),
             rocm_graph_mode: RocmGraphModeSetting::default(),
             rocm_graph_cache_entries: RocmGraphCacheEntries::default(),
             rocm_graph_cache_max_bytes: RocmGraphCacheMaxBytes::default(),
@@ -4995,6 +5103,12 @@ impl NormalizedEnvValue for RocmBf16MatmulOutputModeSetting {
     }
 }
 
+impl NormalizedEnvValue for RocmKernelProfileSetting {
+    fn normalized_env_value(&self) -> String {
+        self.profile().as_str().to_owned()
+    }
+}
+
 impl NormalizedEnvValue for RocmGraphModeSetting {
     fn normalized_env_value(&self) -> String {
         self.mode().as_str().to_owned()
@@ -5316,6 +5430,9 @@ macro_rules! public_env_parser {
     (rocm_bf16_matmul_output_mode) => {
         RocmBf16MatmulOutputModeSetting::from_named_environment_value
     };
+    (rocm_kernel_profile) => {
+        RocmKernelProfileSetting::from_named_environment_value
+    };
     (rocm_graph_mode) => {
         RocmGraphModeSetting::from_named_environment_value
     };
@@ -5559,6 +5676,7 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
             DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT_ENV
         ]
     ),
+    public_env_field!(rocm_kernel_profile, accelerator.rocm_kernel_profile),
     public_env_field!(
         reject_multiple_aliases,
         rocm_graph_mode,
@@ -6932,6 +7050,7 @@ mod tests {
         "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES",
         "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES",
         "KILN_ACCELERATOR_ROCM_GRAPH_MODE",
+        "KILN_ACCELERATOR_ROCM_KERNEL_PROFILE",
         "KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE",
         "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE",
         "KILN_ACCELERATOR_VULKAN_DEVICE_INDEX",
@@ -7232,6 +7351,10 @@ mod tests {
             RocmBf16MatmulOutputMode::Auto
         );
         assert_eq!(
+            config.accelerator.rocm_kernel_profile.profile(),
+            RocmKernelProfile::Qualified
+        );
+        assert_eq!(
             config.accelerator.rocm_graph_mode.mode(),
             RocmGraphMode::Profile
         );
@@ -7251,6 +7374,7 @@ mod tests {
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_strided_batched_matmul_mode.source(),
             config.accelerator.rocm_bf16_matmul_output_mode.source(),
+            config.accelerator.rocm_kernel_profile.source(),
             config.accelerator.rocm_graph_mode.source(),
             config.accelerator.rocm_graph_cache_entries.source(),
             config.accelerator.rocm_graph_cache_max_bytes.source(),
@@ -7529,6 +7653,14 @@ mod tests {
                 }
             );
             assert_eq!(
+                resolved.rocm_kernel_profile,
+                ResolvedAcceleratorValue {
+                    configured: RocmKernelProfile::Qualified,
+                    effective: RocmKernelProfile::Qualified,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
                 resolved.rocm_graph_mode,
                 ResolvedAcceleratorValue {
                     configured: RocmGraphMode::Profile,
@@ -7559,8 +7691,8 @@ mod tests {
             ConfigValueSource::Environment,
         )))
         .unwrap();
-        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v8");
-        assert_eq!(json["version"], 8);
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v9");
+        assert_eq!(json["version"], 9);
         assert_eq!(
             json["vulkan_kernel_policy_schema_id"],
             "kiln.vulkan-kernel-policy.v3"
@@ -7577,6 +7709,9 @@ mod tests {
         assert_eq!(json["full_attention_score_budget_mib"]["effective"], 2048);
         assert!(json["vulkan_device_index"]["effective"].is_null());
         assert_eq!(json["vulkan_validation"]["effective"], false);
+        assert_eq!(json["rocm_kernel_profile"]["configured"], "qualified");
+        assert_eq!(json["rocm_kernel_profile"]["effective"], "qualified");
+        assert_eq!(json["rocm_kernel_profile"]["source"], "default");
         assert_eq!(json["rocm_graph_mode"]["configured"], "profile");
         assert_eq!(json["rocm_graph_mode"]["effective"], "lazy_capture_replay");
         assert_eq!(json["rocm_graph_mode"]["source"], "default");
@@ -7597,6 +7732,7 @@ vulkan_validation = true
 rocm_synchronization_mode = "stream_ordered"
 rocm_strided_batched_matmul_mode = "disabled"
 rocm_bf16_matmul_output_mode = "f32_then_cast"
+rocm_kernel_profile = "experimental_multiblock"
 rocm_graph_mode = "warmup_then_eager"
 rocm_graph_cache_entries = 64
 rocm_graph_cache_max_bytes = 17179869184
@@ -7625,6 +7761,10 @@ rocm_graph_cache_max_bytes = 17179869184
             RocmBf16MatmulOutputMode::F32ThenCast
         );
         assert_eq!(
+            config.accelerator.rocm_kernel_profile.profile(),
+            RocmKernelProfile::ExperimentalMultiblock
+        );
+        assert_eq!(
             config.accelerator.rocm_graph_mode.mode(),
             RocmGraphMode::WarmupThenEager
         );
@@ -7640,6 +7780,7 @@ rocm_graph_cache_max_bytes = 17179869184
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_strided_batched_matmul_mode.source(),
             config.accelerator.rocm_bf16_matmul_output_mode.source(),
+            config.accelerator.rocm_kernel_profile.source(),
             config.accelerator.rocm_graph_mode.source(),
             config.accelerator.rocm_graph_cache_entries.source(),
             config.accelerator.rocm_graph_cache_max_bytes.source(),
@@ -7697,6 +7838,8 @@ rocm_graph_cache_max_bytes = 17179869184
             "[accelerator]\nrocm_strided_batched_matmul_mode = true\n".to_owned(),
             "[accelerator]\nrocm_bf16_matmul_output_mode = \"bf16\"\n".to_owned(),
             "[accelerator]\nrocm_bf16_matmul_output_mode = false\n".to_owned(),
+            "[accelerator]\nrocm_kernel_profile = \"individual_switches\"\n".to_owned(),
+            "[accelerator]\nrocm_kernel_profile = true\n".to_owned(),
             "[accelerator]\nrocm_graph_mode = \"automatic\"\n".to_owned(),
             "[accelerator]\nrocm_graph_mode = false\n".to_owned(),
             "[accelerator]\nrocm_graph_cache_entries = 0\n".to_owned(),
@@ -7752,6 +7895,20 @@ rocm_graph_cache_max_bytes = 17179869184
                 assert!(detail.contains("accelerator.rocm_graph_mode"), "{detail}");
                 assert!(detail.contains("experimental"), "{detail}");
             }
+
+            let mut gated = KilnConfig::default();
+            gated.server.serving_profile =
+                ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
+            gated.accelerator.rocm_kernel_profile = RocmKernelProfileSetting::new(
+                RocmKernelProfile::ExperimentalMultiblock,
+                ConfigValueSource::ConfigFile,
+            );
+            let detail = gated.validate().unwrap_err().to_string();
+            assert!(
+                detail.contains("accelerator.rocm_kernel_profile"),
+                "{detail}"
+            );
+            assert!(detail.contains("experimental"), "{detail}");
 
             let mut gated = KilnConfig::default();
             gated.server.serving_profile =
@@ -7813,8 +7970,50 @@ rocm_graph_cache_max_bytes = 17179869184
                 allowed.accelerator.rocm_graph_mode =
                     RocmGraphModeSetting::new(allowed_mode, ConfigValueSource::ConfigFile);
                 allowed.validate().unwrap();
+
+                allowed.accelerator.rocm_kernel_profile = RocmKernelProfileSetting::new(
+                    RocmKernelProfile::PortableFallback,
+                    ConfigValueSource::ConfigFile,
+                );
+                allowed.validate().unwrap();
             }
         }
+    }
+
+    #[test]
+    fn rocm_kernel_profile_environment_is_canonical_strict_and_source_tracked() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+
+        for (raw, expected) in [
+            ("qualified", RocmKernelProfile::Qualified),
+            ("portable_fallback", RocmKernelProfile::PortableFallback),
+            (
+                "experimental_multiblock",
+                RocmKernelProfile::ExperimentalMultiblock,
+            ),
+        ] {
+            environment.set("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE", raw);
+            let mut config = KilnConfig::default();
+            config.apply_env_overrides().unwrap();
+            assert_eq!(config.accelerator.rocm_kernel_profile.profile(), expected);
+            assert_eq!(
+                config.accelerator.rocm_kernel_profile.source(),
+                ConfigValueSource::Environment
+            );
+            environment.remove("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE");
+        }
+
+        environment.set("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE", "custom");
+        let detail = KilnConfig::default()
+            .apply_env_overrides()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            detail.contains("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE"),
+            "{detail}"
+        );
+        assert!(detail.contains("qualified"), "{detail}");
     }
 
     #[test]
@@ -8112,7 +8311,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 103);
+        assert_eq!(original_len, 104);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -8183,7 +8382,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 108);
+        assert_eq!(serialized_leaves.len(), 109);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -8236,6 +8435,10 @@ rocm_graph_cache_max_bytes = 17179869184
             (
                 "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE",
                 "stream_ordered",
+            ),
+            (
+                "KILN_ACCELERATOR_ROCM_KERNEL_PROFILE",
+                "experimental_multiblock",
             ),
             ("KILN_ACCELERATOR_ROCM_GRAPH_MODE", "lazy_capture_replay"),
             ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES", "13"),
@@ -8361,6 +8564,10 @@ rocm_graph_cache_max_bytes = 17179869184
         assert_eq!(
             config.accelerator.rocm_synchronization_mode.mode(),
             RocmSynchronizationMode::StreamOrdered
+        );
+        assert_eq!(
+            config.accelerator.rocm_kernel_profile.profile(),
+            RocmKernelProfile::ExperimentalMultiblock
         );
         assert_eq!(
             config.accelerator.rocm_graph_mode.mode(),
@@ -8567,6 +8774,7 @@ rocm_graph_cache_max_bytes = 17179869184
             config.server.serving_profile.source(),
             config.accelerator.kt_api_mode.source(),
             config.accelerator.rocm_synchronization_mode.source(),
+            config.accelerator.rocm_kernel_profile.source(),
             config.accelerator.rocm_graph_mode.source(),
             config.accelerator.rocm_graph_cache_entries.source(),
             config.accelerator.rocm_graph_cache_max_bytes.source(),
@@ -8827,6 +9035,7 @@ rocm_graph_cache_max_bytes = 17179869184
         for (name, invalid) in [
             ("KILN_SERVER_SERVING_PROFILE", "sometimes"),
             ("KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE", "eventually"),
+            ("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE", "custom"),
             ("KILN_ACCELERATOR_ROCM_GRAPH_MODE", "automatic"),
             ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES", "0"),
             ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES", "67108863"),

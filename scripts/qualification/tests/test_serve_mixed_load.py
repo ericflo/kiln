@@ -190,8 +190,8 @@ def health_fixture(
         },
     }
     accelerator_runtime = {
-        "schema_id": "kiln.accelerator-runtime-policy.v8",
-        "version": 8,
+        "schema_id": "kiln.accelerator-runtime-policy.v9",
+        "version": 9,
         "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
         "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
         "serving_profile": serving_profile,
@@ -229,6 +229,11 @@ def health_fixture(
         "rocm_bf16_matmul_output_mode": {
             "configured": "auto",
             "effective": "auto",
+            "source": "config_file",
+        },
+        "rocm_kernel_profile": {
+            "configured": "qualified",
+            "effective": "qualified",
             "source": "config_file",
         },
         "rocm_graph_mode": {
@@ -390,8 +395,8 @@ def debug_fixture(
 
     return {
         "accelerator_runtime": {
-            "schema_id": "kiln.accelerator-runtime-policy.v8",
-            "version": 8,
+            "schema_id": "kiln.accelerator-runtime-policy.v9",
+            "version": 9,
             "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
             "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
             "serving_profile": serving_profile,
@@ -429,6 +434,11 @@ def debug_fixture(
             "rocm_bf16_matmul_output_mode": {
                 "configured": "auto",
                 "effective": "auto",
+                "source": "config_file",
+            },
+            "rocm_kernel_profile": {
+                "configured": "qualified",
+                "effective": "qualified",
                 "source": "config_file",
             },
             "rocm_graph_mode": {
@@ -515,9 +525,9 @@ class ServeMixedLoadTests(unittest.TestCase):
     def test_accelerator_policy_version_is_derived_from_schema_identity(self) -> None:
         self.assertEqual(
             serve.ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID,
-            "kiln.accelerator-runtime-policy.v8",
+            "kiln.accelerator-runtime-policy.v9",
         )
-        self.assertEqual(serve.ACCELERATOR_RUNTIME_POLICY_VERSION, 8)
+        self.assertEqual(serve.ACCELERATOR_RUNTIME_POLICY_VERSION, 9)
         self.assertEqual(
             serve.ACCELERATOR_RUNTIME_POLICY_VERSION,
             int(serve.ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID.rsplit(".v", 1)[1]),
@@ -1914,6 +1924,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                         "auto",
                     )
                     self.assertEqual(
+                        parsed["accelerator"]["rocm_kernel_profile"],
+                        "qualified",
+                    )
+                    self.assertEqual(
                         parsed["accelerator"]["rocm_graph_mode"],
                         "profile" if expected["rocm_graphs_requested"] else "disabled",
                     )
@@ -1939,6 +1953,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 rocm_synchronization_mode="stream_ordered",
                 rocm_strided_batched_matmul_mode="enabled",
                 rocm_bf16_matmul_output_mode="native_bf16",
+                rocm_kernel_profile="portable_fallback",
                 rocm_graph_mode="disabled",
                 rocm_graph_cache_entries=12,
                 rocm_graph_cache_max_bytes=64 << 20,
@@ -1959,6 +1974,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(
             parsed["accelerator"]["rocm_bf16_matmul_output_mode"],
             "native_bf16",
+        )
+        self.assertEqual(
+            parsed["accelerator"]["rocm_kernel_profile"],
+            "portable_fallback",
         )
         self.assertEqual(parsed["accelerator"]["rocm_graph_mode"], "disabled")
         self.assertEqual(parsed["accelerator"]["rocm_graph_cache_entries"], 12)

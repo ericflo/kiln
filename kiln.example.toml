@@ -150,6 +150,10 @@ rocm_bf16_matmul_output_mode = "auto" # auto | native_bf16 | f32_then_cast. Auto
                                       # qualified ROCm 7.2 BF16-output workaround; explicit
                                       # routes require the experimental profile. Override with
                                       # KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE.
+rocm_kernel_profile = "qualified"     # qualified | portable_fallback | experimental_multiblock.
+                                      # One complete immutable route set replaces the retired
+                                      # per-kernel switches. Override mechanically with
+                                      # KILN_ACCELERATOR_ROCM_KERNEL_PROFILE.
 rocm_graph_mode = "profile"           # profile | disabled | warmup_then_eager |
                                       # lazy_capture_replay. Profile resolves to disabled under
                                       # stable/maintenance and lazy capture/replay under

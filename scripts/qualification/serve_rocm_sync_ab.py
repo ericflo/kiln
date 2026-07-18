@@ -286,6 +286,11 @@ def expected_policy(mode: str) -> dict[str, Any]:
             "effective": "auto",
             "source": "config_file",
         },
+        "rocm_kernel_profile": {
+            "configured": "qualified",
+            "effective": "qualified",
+            "source": "config_file",
+        },
         "rocm_graph_mode": {
             "configured": "disabled",
             "effective": "disabled",

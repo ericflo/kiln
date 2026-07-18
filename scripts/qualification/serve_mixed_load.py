@@ -98,7 +98,7 @@ PROMPT_MARKER_FORMAT = "QUAL-{seed}-{role}"
 RESPONSE_ORACLE = "ascending_zero_padded_integers_prefix_v1"
 RESPONSE_ORACLE_INTEGER_WIDTH = 6
 RESPONSE_DIAGNOSTIC_MAX_CHARACTERS = 256
-ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v8"
+ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v9"
 ACCELERATOR_RUNTIME_POLICY_VERSION = int(
     ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID.rsplit(".v", 1)[1]
 )
@@ -2262,6 +2262,7 @@ def write_server_config(
     rocm_synchronization_mode: str | None = None,
     rocm_strided_batched_matmul_mode: str = "auto",
     rocm_bf16_matmul_output_mode: str = "auto",
+    rocm_kernel_profile: str = "qualified",
     rocm_graph_mode: str | None = None,
     rocm_graph_cache_entries: int = 8,
     rocm_graph_cache_max_bytes: int = 1 << 30,
@@ -2309,6 +2310,7 @@ def write_server_config(
         "rocm_strided_batched_matmul_mode = "
         + _toml_string(rocm_strided_batched_matmul_mode),
         "rocm_bf16_matmul_output_mode = " + _toml_string(rocm_bf16_matmul_output_mode),
+        "rocm_kernel_profile = " + _toml_string(rocm_kernel_profile),
         f"rocm_graph_mode = {_toml_string(rocm_graph_mode)}",
         f"rocm_graph_cache_entries = {rocm_graph_cache_entries}",
         f"rocm_graph_cache_max_bytes = {rocm_graph_cache_max_bytes}",
@@ -2635,6 +2637,11 @@ def accelerator_policy_attestation_failures(
         "rocm_bf16_matmul_output_mode": {
             "configured": "auto",
             "effective": "auto",
+            "source": "config_file",
+        },
+        "rocm_kernel_profile": {
+            "configured": "qualified",
+            "effective": "qualified",
             "source": "config_file",
         },
         "rocm_graph_mode": {

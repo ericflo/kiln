@@ -3,7 +3,7 @@
 Sources of truth:
 
 - `bench-results/preserve-list-nvtx.csv` (242 call sites, 155 distinct range names)
-- `bench-results/preserve-list-env.csv` (1301 call sites, 462 distinct `KILN_*` vars; 16 go through `env_flag` / `env_tristate`)
+- `bench-results/preserve-list-env.csv` (1285 call sites, 454 distinct `KILN_*` vars; 14 go through `env_flag` / `env_tristate`)
 - `bench-results/preserve-list-backend-runtime.csv` (0 trait methods whose signature still mentions a candle type)
 
 Regenerate: `scripts/audit-preserve-list.sh`.

@@ -2,6 +2,17 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
+- ROCm kernel policy consolidation: replaced the independent production
+  model-kernel environment gates with the immutable typed
+  `accelerator.rocm_kernel_profile`. `qualified` installs the complete
+  Strix Halo-qualified route set, `portable_fallback` declines all fifteen
+  profile-governed routes for reference comparison, and experimental-only
+  `experimental_multiblock` adds the unqualified multi-block GDN prefill
+  route. The server installs one complete policy before backend construction,
+  backend hot paths no longer read these environment variables, and the
+  resolved v9 policy is reported by CLI, API, health, trusted debug, dashboard,
+  qualification attestations, schemas, and the website. Retired per-kernel
+  names are not compatibility aliases.
 - training configuration boundary: removed the remaining process-global ECHO,
   adapter-smoke, GRPO shared-reference, and OPD sampler/rendering controls from
   `kiln-train`. Their typed request-local replacements are carried through API

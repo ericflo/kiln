@@ -119,18 +119,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 108 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 109 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 108 fixed fields:
+credential. Of the 109 fixed fields:
 
-- 103 implement the canonical mechanical environment name;
+- 104 implement the canonical mechanical environment name;
 - 71 also retain one or more deprecated compatibility spellings (76 aliases
   total);
 - 5 are config-file-only and have no environment override;
 - the 76 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 108 fixed fields and both dynamic credential fields.
+The tables below cover all 109 fixed fields and both dynamic credential fields.
 The schema additionally records the accepted deprecated TOML-only
 `streaming_prefill.enabled` compatibility field so validators match the loader.
 
@@ -180,7 +180,7 @@ disabled.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v8`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v9`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
 dashboard all report the same configured/effective/source values, plus the
 compiled Vulkan kernel-policy schema ID; lower model, tensor, and kernel paths
@@ -195,6 +195,7 @@ do not re-read these public environment names.
 | `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
 | `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | `KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL` and `KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
 | `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | `KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT` and `KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT` (deprecated compatibility) | `auto`, `native_bf16`, or `f32_then_cast`, case-insensitive. `auto` applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
+| `accelerator.rocm_kernel_profile` | string enum; `"qualified"` | `KILN_ACCELERATOR_ROCM_KERNEL_PROFILE` (implemented) | none | `qualified`, `portable_fallback`, or `experimental_multiblock`, case-insensitive. `qualified` installs the complete Strix Halo-qualified production route set; `portable_fallback` declines all fifteen profile-governed ROCm model routes and uses supported portable fallbacks; `experimental_multiblock` adds the unqualified multi-block GDN prefill kernel and requires `server.serving_profile = "experimental"`. The profile is immutable after startup. Retired per-kernel disable/enable environment variables are not accepted as ROCm profile aliases. Restart required. |
 | `accelerator.rocm_graph_mode` | string enum; `"profile"` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` (implemented) | `KILN_ROCM_GRAPHS` and `KILN_ROCM_GRAPH_CAPTURE` (deprecated compatibility) | `profile`, `disabled`, `warmup_then_eager`, or `lazy_capture_replay`, case-insensitive. `profile` resolves to `disabled` under stable/maintenance and `lazy_capture_replay` under experimental. The two explicit non-disabled modes require the experimental profile. Restart required. |
 | `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | `KILN_ROCM_GRAPH_CACHE_MAX` (deprecated compatibility) | `1..=64`. Bounds retained native graph entries in every product and embedding constructor. At saturation, admission reclaims idle owners first and then the minimum fair-LRU active entries while preserving one graph per active owner after the incoming candidate. Zero or unbounded capacities are rejected. Restart required. |
 | `accelerator.rocm_graph_cache_max_bytes` | unsigned integer bytes; `1073741824` (1 GiB) | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` (implemented) | none | `67108864..=17179869184` (64 MiB through 16 GiB). Independently bounds requested physical bytes retained by graph-owned stable tensors, capture arenas, private-stream hipBLASLt workspaces, and owner slot state. Opaque HIP graph/exec/stream/event overhead is counted as objects and remains subject to live driver-pressure policy. Restart required. |

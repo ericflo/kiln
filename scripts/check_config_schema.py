@@ -265,6 +265,24 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
         ),
         (
             {
+                "server": {"serving_profile": "experimental"},
+                "accelerator": {"rocm_kernel_profile": "experimental_multiblock"},
+            },
+            True,
+            "experimental ROCm kernel profile",
+        ),
+        (
+            {"accelerator": {"rocm_kernel_profile": "experimental_multiblock"}},
+            False,
+            "experimental ROCm kernel default profile rejection",
+        ),
+        (
+            {"accelerator": {"rocm_kernel_profile": "portable_fallback"}},
+            True,
+            "portable ROCm fallback profile",
+        ),
+        (
+            {
                 "server": {"serving_profile": "maintenance"},
                 "memory": {"kv_force_blocks": 8, "kv_autoscale": True},
             },

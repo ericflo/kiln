@@ -341,7 +341,8 @@ Capability profile:
 - Matmul mirrors CUDA through hipBLASLt for F32/BF16/F16.
 - GDN/RMSNorm/conv1d/optimizer paths largely mirror CUDA through HIP-compatible
   kernel crates.
-- ROCm has head-major prefill support gated by `KILN_ROCM_HEAD_MAJOR_PREFILL`.
+- ROCm's qualified typed kernel profile includes head-major prefill; the
+  portable fallback profile declines it without a hot-path environment read.
 - Some code still carries CUDA names, comments, and telemetry strings.
 - The earlier `supports_linear_decode_argmax` mismatch is resolved: ROCm now
   reports `Declined` for that support predicate until a native argmax path

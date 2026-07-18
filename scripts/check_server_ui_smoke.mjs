@@ -1634,8 +1634,8 @@ async function startServer({
           },
         },
         accelerator_runtime: {
-          schema_id: 'kiln.accelerator-runtime-policy.v8',
-          version: 8,
+          schema_id: 'kiln.accelerator-runtime-policy.v9',
+          version: 9,
           vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v3',
           vulkan_device_policy_schema_id: 'kiln.vulkan-device-policy.v1',
           serving_profile: 'stable',
@@ -1666,6 +1666,11 @@ async function startServer({
             configured: 'auto',
             effective: 'auto',
             source: 'default',
+          },
+          rocm_kernel_profile: {
+            configured: 'qualified',
+            effective: 'qualified',
+            source: 'config_file',
           },
           rocm_graph_mode: { configured: 'profile', effective: 'disabled', source: 'default' },
           rocm_graph_cache_entries: { configured: 8, effective: 8, source: 'default' },
@@ -2779,7 +2784,7 @@ async function expectDirectDecodeRendezvousRuntimeConfig(page, scenarioLabel) {
 async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   const prefix = `${scenarioLabel} ROCm matmul runtime config`;
   const selector = '#runtime-config-body';
-  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v8[\s\S]*v8/, `${prefix} should render policy schema v8`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v9[\s\S]*v9/, `${prefix} should render policy schema v9`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan kernel policy[\s\S]*kiln\.vulkan-kernel-policy\.v3/, `${prefix} should render the qualified Vulkan kernel policy schema`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan device policy[\s\S]*kiln\.vulkan-device-policy\.v1/, `${prefix} should render the immutable Vulkan device policy schema`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan physical device[\s\S]*automatic[\s\S]*config_file/, `${prefix} should render automatic Vulkan physical-device selection and source`);
@@ -2788,6 +2793,7 @@ async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Full-attention score ceiling[\s\S]*2,048 MiB[\s\S]*default/, `${prefix} should render immutable full-attention geometry and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Strided batched matmul[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable strided-batched route and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*BF16 matmul output[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable BF16-output route and source`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*ROCm kernel profile[\s\S]*qualified[\s\S]*config_file/, `${prefix} should render the complete immutable ROCm kernel route set and source`);
 }
 
 async function expectStreamingPrefillRuntimeConfig(page, scenarioLabel) {

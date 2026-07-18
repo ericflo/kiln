@@ -3,9 +3,9 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-#[cfg(feature = "rocm")]
-use crate::config::RocmSynchronizationMode;
 use crate::config::{KtApiMode, ResolvedAcceleratorRuntimePolicy, RocmGraphMode};
+#[cfg(feature = "rocm")]
+use crate::config::{RocmKernelProfile, RocmSynchronizationMode};
 
 /// Stable backend-health detail used when ROCm cannot prove safe cleanup.
 pub const ROCM_CLEANUP_QUARANTINE_REASON: &str =
@@ -128,6 +128,19 @@ fn model_kt_api_mode(policy: ResolvedAcceleratorRuntimePolicy) -> kiln_model::Kt
     }
 }
 
+#[cfg(feature = "rocm")]
+fn model_rocm_kernel_policy(
+    policy: ResolvedAcceleratorRuntimePolicy,
+) -> kiln_model::RocmKernelPolicy {
+    match policy.rocm_kernel_profile.effective {
+        RocmKernelProfile::Qualified => kiln_model::RocmKernelPolicy::qualified(),
+        RocmKernelProfile::PortableFallback => kiln_model::RocmKernelPolicy::portable_fallback(),
+        RocmKernelProfile::ExperimentalMultiblock => {
+            kiln_model::RocmKernelPolicy::experimental_multiblock()
+        }
+    }
+}
+
 /// Install accelerator policy needed to select or create a primary device.
 ///
 /// This must run before device probing: Vulkan physical-device selection and
@@ -173,6 +186,8 @@ pub fn install_startup_policy(
 
     #[cfg(feature = "rocm")]
     {
+        kiln_model::install_rocm_kernel_policy(model_rocm_kernel_policy(policy))
+            .context("failed to install immutable ROCm kernel-route policy")?;
         let synchronization_mode = match policy.rocm_synchronization_mode.effective {
             RocmSynchronizationMode::LegacyHostBarriers => {
                 kiln_tensor::RocmSynchronizationMode::LegacyHostBarriers
@@ -285,6 +300,8 @@ mod tests {
         AcceleratorRuntimeConfig, ConfigValueSource, KtApiModeSetting, ServingProfile,
         ServingProfileSetting,
     };
+    #[cfg(feature = "rocm")]
+    use crate::config::{RocmKernelProfile, RocmKernelProfileSetting};
 
     #[test]
     fn kt_api_modes_map_exactly_to_the_model_authority() {
@@ -300,6 +317,34 @@ mod tests {
                 ConfigValueSource::ConfigFile,
             ));
             assert_eq!(model_kt_api_mode(policy), expected);
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn rocm_kernel_profiles_map_exactly_to_complete_model_policies() {
+        for configured in [
+            RocmKernelProfile::Qualified,
+            RocmKernelProfile::PortableFallback,
+            RocmKernelProfile::ExperimentalMultiblock,
+        ] {
+            let mut config = AcceleratorRuntimeConfig::default();
+            config.rocm_kernel_profile =
+                RocmKernelProfileSetting::new(configured, ConfigValueSource::ConfigFile);
+            let policy = config.resolved_policy(ServingProfileSetting::new(
+                ServingProfile::Experimental,
+                ConfigValueSource::ConfigFile,
+            ));
+            let expected = match configured {
+                RocmKernelProfile::Qualified => kiln_model::RocmKernelPolicy::qualified(),
+                RocmKernelProfile::PortableFallback => {
+                    kiln_model::RocmKernelPolicy::portable_fallback()
+                }
+                RocmKernelProfile::ExperimentalMultiblock => {
+                    kiln_model::RocmKernelPolicy::experimental_multiblock()
+                }
+            };
+            assert_eq!(model_rocm_kernel_policy(policy), expected);
         }
     }
 

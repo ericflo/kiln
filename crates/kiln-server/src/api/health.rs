@@ -2032,7 +2032,7 @@ mod tests {
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v8"
+            "kiln.accelerator-runtime-policy.v9"
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["vulkan_kernel_policy_schema_id"],
@@ -2073,6 +2073,10 @@ mod tests {
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["rocm_bf16_matmul_output_mode"]["effective"],
             "auto"
+        );
+        assert_eq!(
+            json["decode_runtime"]["accelerator_runtime"]["rocm_kernel_profile"]["effective"],
+            "qualified"
         );
         assert_eq!(
             json["decode_runtime"]["rocm_synchronization"]["active"],

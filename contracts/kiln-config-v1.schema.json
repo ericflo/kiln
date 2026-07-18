@@ -418,6 +418,21 @@
           "x-kiln-environment": "KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT and KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT (deprecated compatibility)",
           "x-kiln-validation": "auto, native_bf16, or f32_then_cast, case-insensitive. auto applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required."
         },
+        "rocm_kernel_profile": {
+          "type": "string",
+          "enum": [
+            "qualified",
+            "portable_fallback",
+            "experimental_multiblock"
+          ],
+          "default": "qualified",
+          "description": "qualified, portable_fallback, or experimental_multiblock, case-insensitive. qualified installs the complete Strix Halo-qualified production route set; portable_fallback declines all fifteen profile-governed ROCm model routes and uses supported portable fallbacks; experimental_multiblock adds the unqualified multi-block GDN prefill kernel and requires server.serving_profile = \"experimental\". The profile is immutable after startup. Retired per-kernel disable/enable environment variables are not accepted as ROCm profile aliases. Restart required.",
+          "x-kiln-path": "accelerator.rocm_kernel_profile",
+          "x-kiln-type-and-default": "string enum; \"qualified\"",
+          "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_KERNEL_PROFILE (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "qualified, portable_fallback, or experimental_multiblock, case-insensitive. qualified installs the complete Strix Halo-qualified production route set; portable_fallback declines all fifteen profile-governed ROCm model routes and uses supported portable fallbacks; experimental_multiblock adds the unqualified multi-block GDN prefill kernel and requires server.serving_profile = \"experimental\". The profile is immutable after startup. Retired per-kernel disable/enable environment variables are not accepted as ROCm profile aliases. Restart required."
+        },
         "rocm_graph_mode": {
           "type": "string",
           "enum": [
@@ -1743,6 +1758,42 @@
         "properties": {
           "accelerator": {
             "properties": {
+              "rocm_kernel_profile": {
+                "const": "experimental_multiblock"
+              }
+            },
+            "required": [
+              "rocm_kernel_profile"
+            ]
+          }
+        },
+        "required": [
+          "accelerator"
+        ]
+      },
+      "then": {
+        "properties": {
+          "server": {
+            "properties": {
+              "serving_profile": {
+                "const": "experimental"
+              }
+            },
+            "required": [
+              "serving_profile"
+            ]
+          }
+        },
+        "required": [
+          "server"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "accelerator": {
+            "properties": {
               "rocm_graph_mode": {
                 "enum": [
                   "warmup_then_eager",
@@ -1825,9 +1876,9 @@
       }
     }
   ],
-  "x-kiln-field-count": 108,
+  "x-kiln-field-count": 109,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 103,
+  "x-kiln-canonical-environment-count": 104,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 71,
   "x-kiln-compatibility-alias-count": 76,

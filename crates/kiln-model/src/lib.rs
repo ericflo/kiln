@@ -80,6 +80,8 @@ pub use backend::{
 };
 // (#1082 candle removal) `backend::for_device` (candle-typed shim) was deleted
 // with the candle-parity opt-in feature; production uses `for_device_kt`.
+#[cfg(feature = "rocm")]
+pub use backend::rocm::{RocmKernelPolicy, install_rocm_kernel_policy};
 pub use backend::{DecodeWeightPrewarmCancelled, DecodeWeightPrewarmPolicy};
 pub use cancel::CancelHandle;
 pub use engine::Engine;

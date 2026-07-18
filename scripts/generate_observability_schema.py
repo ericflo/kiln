@@ -184,6 +184,12 @@ def build_definitions() -> None:
         "The process-lifetime ROCm BF16-output matmul route.",
     )
     add_enum(
+        "RocmKernelProfile",
+        "RocmKernelProfile",
+        ["qualified", "portable_fallback", "experimental_multiblock"],
+        "The complete process-lifetime ROCm model-kernel route set.",
+    )
+    add_enum(
         "RocmGraphMode",
         "RocmGraphMode",
         ["profile", "disabled", "warmup_then_eager", "lazy_capture_replay"],
@@ -422,6 +428,11 @@ def build_definitions() -> None:
             "RocmBf16MatmulOutputMode",
             ref("RocmBf16MatmulOutputMode"),
         ),
+        (
+            "ResolvedRocmKernelProfile",
+            "RocmKernelProfile",
+            ref("RocmKernelProfile"),
+        ),
         ("ResolvedRocmGraphMode", "RocmGraphMode", ref("RocmGraphMode")),
         ("ResolvedAcceleratorInteger", "usize | u64", ref("NonNegativeInteger")),
         ("ResolvedAcceleratorOptionalInteger", "Option<usize>", nullable(ref("NonNegativeInteger"))),
@@ -456,6 +467,7 @@ def build_definitions() -> None:
                 "ResolvedRocmStridedBatchedMatmulMode"
             ),
             "rocm_bf16_matmul_output_mode": ref("ResolvedRocmBf16MatmulOutputMode"),
+            "rocm_kernel_profile": ref("ResolvedRocmKernelProfile"),
             "rocm_graph_mode": ref("ResolvedRocmGraphMode"),
             "rocm_graph_cache_entries": ref("ResolvedAcceleratorInteger"),
             "rocm_graph_cache_max_bytes": ref("ResolvedAcceleratorInteger"),

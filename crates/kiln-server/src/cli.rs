@@ -1768,6 +1768,12 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 accelerator_runtime.rocm_bf16_matmul_output_mode.source,
             );
             println!(
+                "  {} {} (source: {})",
+                style("ROCm kernel profile:").dim(),
+                accelerator_runtime.rocm_kernel_profile.effective,
+                accelerator_runtime.rocm_kernel_profile.source,
+            );
+            println!(
                 "  {} {} -> {} (source: {})",
                 style("ROCm graph mode:").dim(),
                 accelerator_runtime.rocm_graph_mode.configured,

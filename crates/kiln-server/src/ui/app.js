@@ -1977,6 +1977,7 @@ function renderRuntimeConfigBody(cfg) {
   const rocmSynchronization = acceleratorRuntime.rocm_synchronization_mode || {};
   const rocmStridedBatchedMatmul = acceleratorRuntime.rocm_strided_batched_matmul_mode || {};
   const rocmBf16MatmulOutput = acceleratorRuntime.rocm_bf16_matmul_output_mode || {};
+  const rocmKernelProfile = acceleratorRuntime.rocm_kernel_profile || {};
   const rocmGraphMode = acceleratorRuntime.rocm_graph_mode || {};
   const rocmGraphCache = acceleratorRuntime.rocm_graph_cache_entries || {};
   const rocmGraphBudget = acceleratorRuntime.rocm_graph_cache_max_bytes || {};
@@ -2259,6 +2260,7 @@ function renderRuntimeConfigBody(cfg) {
         ${runtimeConfigRow('Synchronization', `<strong>${escapeHtml(rocmSynchronization.effective || '—')}</strong>${srcChip(rocmSynchronization.source)}`, 'Effective ROCm synchronization discipline. Stream-ordered mode is restricted to the experimental serving profile until locally qualified.')}
         ${runtimeConfigRow('Strided batched matmul', `<strong>${escapeHtml(rocmStridedBatchedMatmul.effective || '—')}</strong>${srcChip(rocmStridedBatchedMatmul.source)}`, 'Immutable ROCm hipBLASLt batched route. Auto retains the qualified gfx115x large-attention correctness guard; explicit routes require the experimental serving profile.')}
         ${runtimeConfigRow('BF16 matmul output', `<strong>${escapeHtml(rocmBf16MatmulOutput.effective || '—')}</strong>${srcChip(rocmBf16MatmulOutput.source)}`, 'Immutable ROCm BF16-output route. Auto retains the qualified ROCm 7.2 F32-output-then-BF16-cast guard; explicit routes require the experimental serving profile.')}
+        ${runtimeConfigRow('ROCm kernel profile', `<strong>${escapeHtml(rocmKernelProfile.effective || '—')}</strong>${srcChip(rocmKernelProfile.source)}`, 'Complete immutable ROCm model-kernel route set. Qualified is the production set, portable fallback declines all fifteen profile-governed routes, and experimental multiblock requires the experimental serving profile.')}
         ${runtimeConfigRow('Graph configured', `<strong>${escapeHtml(rocmGraphMode.configured || '—')}</strong>${srcChip(rocmGraphMode.source)}`, 'Configured graph lifecycle before serving-profile resolution.')}
         ${runtimeConfigRow('Graph effective', `<strong>${escapeHtml(rocmGraphMode.effective || '—')}</strong>`, 'Effective immutable graph lifecycle. Stable and maintenance profiles resolve profile mode to disabled.')}
         ${runtimeConfigRow('Graph cache', `<strong>${num(rocmGraphCache.effective)}</strong>${srcChip(rocmGraphCache.source)}`, 'Bounded number of retained ROCm graph entries; valid range 1 through 64.')}

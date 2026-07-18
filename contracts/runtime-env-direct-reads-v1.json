@@ -3110,149 +3110,6 @@
       "surface": "source"
     },
     {
-      "api": "env_flag",
-      "argument": "KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/rocm.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_ROCM_HEAD_MAJOR_PREFILL",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/rocm.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "legacy_cuda_name",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/rocm.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "rocm_name",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/rocm.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_FUSED_CONV1D",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/rocm.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_FUSED_GDN_DECODE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/rocm.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/rocm.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_FUSED_GDN_GATES",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/rocm.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/rocm.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/rocm.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_GDN_KERNEL",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/rocm.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "KILN_TENSOR_VULKAN_TEST",
       "argument_kind": "literal",
@@ -6399,11 +6256,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 246,
-    "literal_kiln_read_names": 129,
+    "literal_kiln_read_call_sites": 237,
+    "literal_kiln_read_names": 127,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 88,
+      "experimental_debug": 86,
       "public_stable": 1,
       "test_only": 37
     },
@@ -6413,13 +6270,13 @@
       "test_only": 228
     },
     "process_mutation_entries": 145,
-    "read_call_sites": 611,
+    "read_call_sites": 600,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 144,
+      "experimental_debug": 133,
       "public_stable": 9,
       "test_only": 130
     },
-    "read_entries": 346
+    "read_entries": 335
   }
 }

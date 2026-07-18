@@ -30,7 +30,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | Backend | Source Modules | Override Count | Support Methods | Native Env Gates | Legacy Env Aliases |
 |---|---|---:|---:|---:|---:|
 | `cuda` | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 16 | 7 | 0 |
-| `rocm` | `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 17 | 9 | 7 |
+| `rocm` | `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 17 | 0 | 0 |
 | `metal` | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_attention.rs`, `crates/kiln-model/src/backend/metal_config.rs`, `crates/kiln-model/src/backend/metal_conv1d.rs`, `crates/kiln-model/src/backend/metal_core.rs`, `crates/kiln-model/src/backend/metal_dense.rs`, `crates/kiln-model/src/backend/metal_gdn.rs`, `crates/kiln-model/src/backend/metal_icb.rs`, `crates/kiln-model/src/backend/metal_lm_head.rs`, `crates/kiln-model/src/backend/metal_msl.rs`, `crates/kiln-model/src/backend/metal_norm.rs`, `crates/kiln-model/src/backend/metal_paged.rs`, `crates/kiln-model/src/backend/metal_pipeline.rs`, `crates/kiln-model/src/backend/metal_precompile.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_runtime.rs`, `crates/kiln-model/src/backend/metal_training.rs` | 0 | 20 | 47 | 0 |
 | `vulkan` | `crates/kiln-model/src/backend/vulkan.rs`, `crates/kiln-model/src/backend/vulkan_attention.rs`, `crates/kiln-model/src/backend/vulkan_config.rs`, `crates/kiln-model/src/backend/vulkan_conv1d.rs`, `crates/kiln-model/src/backend/vulkan_decode_state.rs`, `crates/kiln-model/src/backend/vulkan_dense.rs`, `crates/kiln-model/src/backend/vulkan_device.rs`, `crates/kiln-model/src/backend/vulkan_gdn.rs`, `crates/kiln-model/src/backend/vulkan_linear.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/src/backend/vulkan_resources.rs`, `crates/kiln-model/src/backend/vulkan_tensor_bridge.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/src/backend/vulkan_weights.rs` | 0 | 21 | 0 | 0 |
 
@@ -85,7 +85,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `rocm` | `runtime_supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_update` | no | none |
 | `rocm` | `runtime_supports_flash_attn_paged_decode` | `dynamic` | `NativeWithConstraints` | `runtime_flash_attn_paged_decode` | no | none |
 | `rocm` | `runtime_supports_flash_attn_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_flash_attn_prefill` | no | none |
-| `rocm` | `runtime_supports_flash_attn_prefill_head_major` | `env_gated` | `NativeWithConstraints` | `runtime_flash_attn_prefill_head_major` | no | env |
+| `rocm` | `runtime_supports_flash_attn_prefill_head_major` | `dynamic` | `NativeWithConstraints` | `runtime_flash_attn_prefill_head_major` | no | none |
 | `rocm` | `runtime_supports_gdn_chunk_prep` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_chunk_prep` | no | none |
 | `rocm` | `runtime_supports_gdn_chunk_scan` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_chunk_scan` | no | none |
 | `rocm` | `runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk` | `dynamic` | `NativeWithConstraints` | `` | no | none |
@@ -302,24 +302,7 @@ No literal-true support predicate currently pairs with an always-declining metho
 - `KILN_DISABLE_CUDA_LORA_DECODE_ADD`
 
 ### ROCM
-- `KILN_DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ`
-- `KILN_DISABLE_ROCM_GDN_AB_IN_PROJ`
-- `KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT`
-- `KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM`
-- `KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ`
-- `KILN_DISABLE_ROCM_GDN_PREFILL_GATES`
-- `KILN_DISABLE_ROCM_LORA_DECODE_ADD`
-- `KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK`
-- `KILN_ROCM_HEAD_MAJOR_PREFILL`
-
-Legacy aliases honored for compatibility:
-- `KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ`
-- `KILN_DISABLE_CUDA_GDN_AB_IN_PROJ`
-- `KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT`
-- `KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM`
-- `KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ`
-- `KILN_DISABLE_CUDA_GDN_PREFILL_GATES`
-- `KILN_DISABLE_CUDA_LORA_DECODE_ADD`
+- none detected
 
 ### METAL
 - `KILN_DISABLE_METAL_ATTN_GATE_FUSION`

@@ -24,6 +24,104 @@ static ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static ROCM_FLASH_ATTN_TRACKED_DECLINES: AtomicU64 = AtomicU64::new(0);
 static ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static ROCM_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_KERNEL_POLICY: OnceLock<RocmKernelPolicy> = OnceLock::new();
+
+/// Immutable ROCm kernel-route policy installed before backend construction.
+///
+/// The server exposes a small closed profile vocabulary and maps it to one of
+/// these complete policies. Embedders that do not install a policy receive the
+/// qualified production defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RocmKernelPolicy {
+    full_attn_qkv_in_proj: bool,
+    gdn_ab_in_proj: bool,
+    gdn_prefill_ab_in_proj: bool,
+    gdn_prefill_gates: bool,
+    head_major_prefill: bool,
+    gdn: bool,
+    gdn_gates: bool,
+    gdn_gated_rms_norm: bool,
+    gdn_decode_fused: bool,
+    gdn_decode_unexpanded_qk: bool,
+    gdn_decode_qk_norm_recurrent: bool,
+    gdn_decode_qk_norm_recurrent_rmsnorm: bool,
+    fused_conv1d: bool,
+    lora_decode_add: bool,
+    gdn_full_chunk_forward_multiblock: bool,
+}
+
+impl RocmKernelPolicy {
+    /// Qualified Strix Halo production policy.
+    pub const fn qualified() -> Self {
+        Self {
+            full_attn_qkv_in_proj: true,
+            gdn_ab_in_proj: true,
+            gdn_prefill_ab_in_proj: true,
+            gdn_prefill_gates: true,
+            head_major_prefill: true,
+            gdn: true,
+            gdn_gates: true,
+            gdn_gated_rms_norm: true,
+            gdn_decode_fused: true,
+            gdn_decode_unexpanded_qk: true,
+            gdn_decode_qk_norm_recurrent: true,
+            gdn_decode_qk_norm_recurrent_rmsnorm: true,
+            fused_conv1d: true,
+            lora_decode_add: true,
+            gdn_full_chunk_forward_multiblock: false,
+        }
+    }
+
+    /// Reference-oriented policy that declines every route governed by this
+    /// profile and lets the portable model path handle supported operations.
+    pub const fn portable_fallback() -> Self {
+        Self {
+            full_attn_qkv_in_proj: false,
+            gdn_ab_in_proj: false,
+            gdn_prefill_ab_in_proj: false,
+            gdn_prefill_gates: false,
+            head_major_prefill: false,
+            gdn: false,
+            gdn_gates: false,
+            gdn_gated_rms_norm: false,
+            gdn_decode_fused: false,
+            gdn_decode_unexpanded_qk: false,
+            gdn_decode_qk_norm_recurrent: false,
+            gdn_decode_qk_norm_recurrent_rmsnorm: false,
+            fused_conv1d: false,
+            lora_decode_add: false,
+            gdn_full_chunk_forward_multiblock: false,
+        }
+    }
+
+    /// Qualified policy plus the unqualified multi-block GDN prefill route.
+    pub const fn experimental_multiblock() -> Self {
+        Self {
+            gdn_full_chunk_forward_multiblock: true,
+            ..Self::qualified()
+        }
+    }
+}
+
+impl Default for RocmKernelPolicy {
+    fn default() -> Self {
+        Self::qualified()
+    }
+}
+
+/// Install process-lifetime ROCm kernel policy. Reinstalling the same value is
+/// idempotent; conflicting values fail instead of changing live dispatch.
+pub fn install_rocm_kernel_policy(policy: RocmKernelPolicy) -> Result<()> {
+    match ROCM_KERNEL_POLICY.set(policy) {
+        Ok(()) => Ok(()),
+        Err(policy) if ROCM_KERNEL_POLICY.get() == Some(&policy) => Ok(()),
+        Err(_) => anyhow::bail!("ROCm kernel policy was already installed with a different value"),
+    }
+}
+
+fn rocm_kernel_policy() -> RocmKernelPolicy {
+    *ROCM_KERNEL_POLICY.get_or_init(RocmKernelPolicy::default)
+}
 
 pub fn optimizer_dispatch_success_counts() -> (u64, u64) {
     (
@@ -49,44 +147,7 @@ pub fn reset_linear_prefill_success_counts() {
     ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
-fn rocm_full_attn_qkv_in_proj_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !rocm_or_legacy_disable_env_set(
-            "KILN_DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ",
-            "KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ",
-        )
-    })
-}
-
 const ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS: usize = 128;
-
-fn rocm_gdn_ab_in_proj_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !rocm_or_legacy_disable_env_set(
-            "KILN_DISABLE_ROCM_GDN_AB_IN_PROJ",
-            "KILN_DISABLE_CUDA_GDN_AB_IN_PROJ",
-        )
-    })
-}
-
-fn rocm_gdn_prefill_ab_in_proj_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !rocm_or_legacy_disable_env_set(
-            "KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ",
-            "KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ",
-        )
-    })
-}
-
-fn rocm_gdn_ab_in_proj_seq_enabled(seq_len: usize) -> bool {
-    rocm_gdn_ab_in_proj_enabled()
-        && (seq_len == 1
-            || (seq_len <= ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS
-                && rocm_gdn_prefill_ab_in_proj_enabled()))
-}
 
 pub fn flash_attn_tracked_decline_count() -> u64 {
     ROCM_FLASH_ATTN_TRACKED_DECLINES.load(Ordering::Relaxed)
@@ -98,7 +159,7 @@ pub fn reset_flash_attn_tracked_decline_count() {
 
 /// `(multiblock_path_successes, single_block_path_successes)` for
 /// `gdn_full_chunk_forward`. Used by tests and bench tooling to confirm which
-/// kernel actually ran under a given env-var configuration.
+/// kernel actually ran under the installed typed policy.
 pub fn gdn_full_chunk_forward_dispatch_counts() -> (u64, u64) {
     (
         ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.load(Ordering::Relaxed),
@@ -112,10 +173,6 @@ pub fn reset_gdn_full_chunk_forward_dispatch_counts() {
 }
 
 const ROCM_RESIDENT_TENSOR_IDS_POISONED: &str = "ROCm resident TensorId registry mutex poisoned";
-
-fn rocm_or_legacy_disable_env_set(rocm_name: &str, legacy_cuda_name: &str) -> bool {
-    std::env::var(rocm_name).is_ok() || std::env::var(legacy_cuda_name).is_ok()
-}
 
 fn rocm_optimizer_args_ready_for_kt(
     registry: &super::cuda_rocm_common::ResidentTensorIdRegistry,
@@ -142,14 +199,16 @@ pub struct RocmBackend {
     /// zero reads; `new` now takes a `kiln_tensor::Device` directly.)
     device_kt: kiln_tensor::Device,
     resident_tensor_ids: super::cuda_rocm_common::ResidentTensorIdRegistry,
-    /// Cached at construction: reading env vars per decode step × 24 GDN layers
-    /// shows up in decode NVTX captures. Env vars don't change at runtime.
+    full_attn_qkv_in_proj_enabled: bool,
+    gdn_ab_in_proj_enabled: bool,
+    gdn_prefill_ab_in_proj_enabled: bool,
+    gdn_prefill_gates_enabled: bool,
+    head_major_prefill_enabled: bool,
+    /// Cached from immutable startup policy before any dispatch.
     gdn_enabled: bool,
-    /// Same pattern: cache the env-var read. The fused gates kernel is
-    /// gated behind its own kill switch so it can be disabled independently.
+    /// Fused gates kernel authority from the same immutable policy.
     gdn_gates_enabled: bool,
-    /// Kill switch for the fused GDN gated RMSNorm kernel (decode/prefill
-    /// kiln/gdn/gated_norm region).
+    /// Fused GDN gated RMSNorm policy for decode and prefill.
     gdn_gated_rms_norm_enabled: bool,
     /// Experimental fused native-MTP decode GDN gates + recurrent update.
     /// Opt-in only until output parity is proven.
@@ -163,32 +222,13 @@ pub struct RocmBackend {
     /// Fuses GDN decode Q/K L2-normalization, gates, recurrent update, and
     /// gated RMSNorm into one single-token ROCm launch.
     gdn_decode_qk_norm_recurrent_rmsnorm_enabled: bool,
-    /// Kill switch for the fused causal_conv1d_update kernel (decode
-    /// kiln/gdn/conv region). When off, forward.rs falls back to the
-    /// candle to_f32/cat/sum/narrow chain.
+    /// Fused causal-convolution policy. When off, `forward.rs` uses its
+    /// portable reference path.
     fused_conv1d_enabled: bool,
-    // Phase 7 (#1082): the rocm_use_kt_api_conv1d gate was removed once
-    // the kt-typed surface (causal_conv1d_{update,prefill}_kt +
-    // supports{,_prefill}_kt) became the only path. The escape hatch
-    // for the conv kernel as a whole is still `fused_conv1d_enabled`
-    // (KILN_DISABLE_FUSED_CONV1D), which falls back to forward.rs's
-    // candle to_f32/cat/sum/narrow chain — the kt-typed path is bit-
-    // exact with the previous kt-API code (same FFI symbol).
-    // Phase 7 (#1082): the rocm_use_kt_api_gdn gate was removed once
-    // all 10 GDN dispatch wires (forward_substitution, recurrent_step,
-    // chunk_prep, chunk_scan, full_chunk_forward[_multiblock],
-    // gates, gated_rms_norm, plus the 4 decode_* wires:
-    // gates_recurrent, qk_norm_gates_recurrent,
-    // qk_norm_gates_recurrent_rmsnorm) became kt-only. The whole-
-    // kernel kill switch `KILN_DISABLE_GDN_KERNEL=1` plus the per-
-    // wire decode-fused kill switches (KILN_DISABLE_FUSED_GDN_DECODE,
-    // KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT[_RMSNORM]) still
-    // fall back to forward.rs's candle reference paths. The kt-typed
-    // path is bit-exact with the previous kt-API code (same FFI
-    // symbol). All 11 GDN dispatch wires (including the formerly
-    // candle-typed single-block `gdn_full_chunk_forward` fall-through
-    // inside the multiblock dispatcher) are now kt-only after the
-    // `gdn_full_chunk_forward_kt` single-block wire landed.
+    // Phase 7 (#1082): the operation-level kt/candle switches were removed
+    // once every convolution, GDN, and flash-attention wire became kt-only.
+    // The closed startup profile now selects complete native or portable
+    // route sets without process-environment reads inside the backend.
     // Phase 7 (#1082): all 4 flash-attn dispatch sites in this
     // backend are now kt-only after `aab07fa7` landed the
     // `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`
@@ -202,71 +242,45 @@ pub struct RocmBackend {
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
     /// Multi-block dv-tiled `gdn_full_chunk_forward`. The CUDA/HIP-oriented
-    /// multiblock variant is bit-exact, but is slower on the gfx1151 ROCm
-    /// long-context prefill path. Keep it opt-in for retuning on other GPUs.
-    /// `KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK=1` remains a hard off.
+    /// variant is bit-exact, but slower on gfx1151 long-context prefill, so
+    /// only the typed experimental profile enables it.
     gdn_full_chunk_forward_multiblock_enabled: bool,
 }
 
 impl RocmBackend {
     pub fn new(device: kiln_tensor::Device) -> Self {
+        Self::new_with_kernel_policy(device, rocm_kernel_policy())
+    }
+
+    fn new_with_kernel_policy(device: kiln_tensor::Device, policy: RocmKernelPolicy) -> Self {
         debug_assert!(
             matches!(device, kiln_tensor::Device::Rocm(_)),
             "RocmBackend created on non-ROCm device"
         );
-        let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
-        let gdn_gates_enabled =
-            gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
-        let gdn_gated_rms_norm_enabled =
-            gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
-        let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
-        // #1082: the dedicated per-operation KT disable gate was
-        // removed once the kt-typed conv1d surface became the only
-        // path in `causal_conv1d_{update,prefill}`. The whole-kernel
-        // kill switch `KILN_DISABLE_FUSED_CONV1D=1` still falls back
-        // to forward.rs's candle to_f32/cat/sum/narrow chain.
-        // #1082: the dedicated per-operation KT disable gate was
-        // removed once the kt-typed GDN surface became the only path
-        // across all 10 dispatch wires. The whole-kernel kill switch
-        // `KILN_DISABLE_GDN_KERNEL=1` (plus the per-wire decode-fused
-        // kill switches) still falls back to forward.rs's candle
-        // reference paths.
-        // #1082: flipped default ON. The kt path is bit-exact by
-        // construction — all 4 wired flash_attn dispatch sites bottom
-        // out in the same FFI symbols as the candle shim, with only
-        // the Rust shell types changing. The `with_graph_outputs`
-        // site retains its `graph_outputs.is_none()` guard so the
-        // caller-owned-output path keeps using the candle wrapper.
-        // The per-operation KT disable gate was removed alongside the
-        // 3 sites where the kt-typed path is the only path. The
-        // 4th site checks `graph_outputs.is_none()` directly.
-        let gdn_decode_fused_enabled = gdn_gates_enabled
-            && gdn_gated_rms_norm_enabled
-            && std::env::var("KILN_DISABLE_FUSED_GDN_DECODE").is_err();
-        let gdn_decode_unexpanded_qk_enabled = gdn_decode_fused_enabled
-            && std::env::var("KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK").is_err();
-        let gdn_decode_qk_norm_recurrent_enabled = gdn_decode_unexpanded_qk_enabled
-            && !rocm_or_legacy_disable_env_set(
-                "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT",
-                "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT",
-            );
-        let gdn_decode_qk_norm_recurrent_rmsnorm_enabled = gdn_decode_qk_norm_recurrent_enabled
-            && !rocm_or_legacy_disable_env_set(
-                "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
-                "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
-            );
-        let lora_decode_add_enabled = !rocm_or_legacy_disable_env_set(
-            "KILN_DISABLE_ROCM_LORA_DECODE_ADD",
-            "KILN_DISABLE_CUDA_LORA_DECODE_ADD",
-        );
-        let gdn_full_chunk_forward_multiblock_enabled = gdn_enabled
-            && kiln_core::env_flag::env_flag("KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK", false)
-            && std::env::var("KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK").is_err();
+        let gdn_enabled = policy.gdn;
+        let gdn_gates_enabled = gdn_enabled && policy.gdn_gates;
+        let gdn_gated_rms_norm_enabled = gdn_enabled && policy.gdn_gated_rms_norm;
+        let fused_conv1d_enabled = policy.fused_conv1d;
+        let gdn_decode_fused_enabled =
+            gdn_gates_enabled && gdn_gated_rms_norm_enabled && policy.gdn_decode_fused;
+        let gdn_decode_unexpanded_qk_enabled =
+            gdn_decode_fused_enabled && policy.gdn_decode_unexpanded_qk;
+        let gdn_decode_qk_norm_recurrent_enabled =
+            gdn_decode_unexpanded_qk_enabled && policy.gdn_decode_qk_norm_recurrent;
+        let gdn_decode_qk_norm_recurrent_rmsnorm_enabled =
+            gdn_decode_qk_norm_recurrent_enabled && policy.gdn_decode_qk_norm_recurrent_rmsnorm;
+        let gdn_full_chunk_forward_multiblock_enabled =
+            gdn_enabled && policy.gdn_full_chunk_forward_multiblock;
         let device_kt = device;
         Self {
             device_kt,
             resident_tensor_ids: crate::backend::cuda_rocm_common::new_resident_tensor_id_registry(
             ),
+            full_attn_qkv_in_proj_enabled: policy.full_attn_qkv_in_proj,
+            gdn_ab_in_proj_enabled: gdn_enabled && policy.gdn_ab_in_proj,
+            gdn_prefill_ab_in_proj_enabled: gdn_enabled && policy.gdn_prefill_ab_in_proj,
+            gdn_prefill_gates_enabled: gdn_gates_enabled && policy.gdn_prefill_gates,
+            head_major_prefill_enabled: policy.head_major_prefill,
             gdn_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
@@ -275,7 +289,7 @@ impl RocmBackend {
             gdn_decode_qk_norm_recurrent_enabled,
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled,
             fused_conv1d_enabled,
-            lora_decode_add_enabled,
+            lora_decode_add_enabled: policy.lora_decode_add,
             gdn_full_chunk_forward_multiblock_enabled,
         }
     }
@@ -345,7 +359,7 @@ impl AttentionBackend for RocmBackend {
     }
 
     fn runtime_supports_flash_attn_prefill_head_major(&self) -> bool {
-        kiln_core::env_flag::env_flag("KILN_ROCM_HEAD_MAJOR_PREFILL", true)
+        self.head_major_prefill_enabled
     }
 
     fn runtime_supports_flash_attn_paged_decode(&self) -> bool {
@@ -1582,7 +1596,10 @@ impl GdnBackend for RocmBackend {
         let Some(ab_dim) = nv.checked_mul(2) else {
             return Ok(None);
         };
-        if !rocm_gdn_ab_in_proj_seq_enabled(seq_len)
+        if !self.gdn_ab_in_proj_enabled
+            || (seq_len != 1
+                && (seq_len > ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS
+                    || !self.gdn_prefill_ab_in_proj_enabled))
             || actual_seq_len != seq_len
             || seq_len == 0
             || x.dtype() != kiln_tensor::DType::BF16
@@ -1616,12 +1633,7 @@ impl GdnBackend for RocmBackend {
     ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
         let dims = a.dims();
         let is_t1_decode = dims.len() >= 2 && dims[dims.len() - 2] == 1;
-        if !is_t1_decode
-            && rocm_or_legacy_disable_env_set(
-                "KILN_DISABLE_ROCM_GDN_PREFILL_GATES",
-                "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
-            )
-        {
+        if !is_t1_decode && !self.gdn_prefill_gates_enabled {
             tracing::debug!(
                 a_shape = ?a.shape(),
                 a_log_dtype = ?a_log.dtype(),
@@ -2184,7 +2196,7 @@ impl LinearBackend for RocmBackend {
             kiln_tensor::Tensor,
         )>,
     > {
-        if !rocm_full_attn_qkv_in_proj_enabled()
+        if !self.full_attn_qkv_in_proj_enabled
             || x.track_op()
             || x.dtype() != kiln_tensor::DType::BF16
             || !rocm_tensors_on_device(&[x])
@@ -2344,6 +2356,11 @@ mod tests {
             device_kt: kiln_tensor::Device::Cpu,
             resident_tensor_ids: crate::backend::cuda_rocm_common::new_resident_tensor_id_registry(
             ),
+            full_attn_qkv_in_proj_enabled: false,
+            gdn_ab_in_proj_enabled: false,
+            gdn_prefill_ab_in_proj_enabled: false,
+            gdn_prefill_gates_enabled: false,
+            head_major_prefill_enabled: false,
             gdn_enabled: false,
             gdn_gates_enabled: false,
             gdn_gated_rms_norm_enabled: false,
@@ -2355,6 +2372,52 @@ mod tests {
             lora_decode_add_enabled: false,
             gdn_full_chunk_forward_multiblock_enabled: false,
         }
+    }
+
+    #[test]
+    fn kernel_profiles_are_complete_backend_local_policies() {
+        let routes = |backend: &RocmBackend| {
+            [
+                backend.full_attn_qkv_in_proj_enabled,
+                backend.gdn_ab_in_proj_enabled,
+                backend.gdn_prefill_ab_in_proj_enabled,
+                backend.gdn_prefill_gates_enabled,
+                backend.head_major_prefill_enabled,
+                backend.gdn_enabled,
+                backend.gdn_gates_enabled,
+                backend.gdn_gated_rms_norm_enabled,
+                backend.gdn_decode_fused_enabled,
+                backend.gdn_decode_unexpanded_qk_enabled,
+                backend.gdn_decode_qk_norm_recurrent_enabled,
+                backend.gdn_decode_qk_norm_recurrent_rmsnorm_enabled,
+                backend.fused_conv1d_enabled,
+                backend.lora_decode_add_enabled,
+                backend.gdn_full_chunk_forward_multiblock_enabled,
+            ]
+        };
+        let qualified = RocmBackend::new_with_kernel_policy(
+            kiln_tensor::Device::Rocm(0),
+            RocmKernelPolicy::qualified(),
+        );
+        assert_eq!(
+            routes(&qualified),
+            [
+                true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+                false,
+            ]
+        );
+
+        let fallback = RocmBackend::new_with_kernel_policy(
+            kiln_tensor::Device::Rocm(0),
+            RocmKernelPolicy::portable_fallback(),
+        );
+        assert_eq!(routes(&fallback), [false; 15]);
+
+        let experimental = RocmBackend::new_with_kernel_policy(
+            kiln_tensor::Device::Rocm(0),
+            RocmKernelPolicy::experimental_multiblock(),
+        );
+        assert_eq!(routes(&experimental), [true; 15]);
     }
 
     #[test]

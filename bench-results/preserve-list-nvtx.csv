@@ -75,7 +75,7 @@ kiln/cat_dim2_kt,1,crates/kiln-model/src/forward.rs:7196
 kiln/concat_last_dim_kt,1,crates/kiln-model/src/forward.rs:7048
 kiln/cos_kt,1,crates/kiln-model/src/forward.rs:7502
 kiln/exp_kt,1,crates/kiln-model/src/forward.rs:7536
-kiln/flash_attn_head_major_kt,1,crates/kiln-model/src/backend/rocm.rs:433
+kiln/flash_attn_head_major_kt,1,crates/kiln-model/src/backend/rocm.rs:447
 kiln/flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs,1,crates/kiln-model/src/forward.rs:17543
 kiln/gdn/conv,1,crates/kiln-model/src/forward.rs:13476
 kiln/gdn/conv/layout,1,crates/kiln-model/src/forward.rs:13486

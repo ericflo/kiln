@@ -151,8 +151,8 @@
     '/v1/config': () => ({
       serving_profile: { profile: 'stable', source: 'default' },
       accelerator_runtime: {
-        schema_id: 'kiln.accelerator-runtime-policy.v8',
-        version: 8,
+        schema_id: 'kiln.accelerator-runtime-policy.v9',
+        version: 9,
         vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v3',
         vulkan_device_policy_schema_id: 'kiln.vulkan-device-policy.v1',
         serving_profile: 'stable',
@@ -164,6 +164,7 @@
         rocm_synchronization_mode: { configured: 'legacy_host_barriers', effective: 'legacy_host_barriers', source: 'default' },
         rocm_strided_batched_matmul_mode: { configured: 'auto', effective: 'auto', source: 'default' },
         rocm_bf16_matmul_output_mode: { configured: 'auto', effective: 'auto', source: 'default' },
+        rocm_kernel_profile: { configured: 'qualified', effective: 'qualified', source: 'default' },
         rocm_graph_mode: { configured: 'profile', effective: 'disabled', source: 'default' },
         rocm_graph_cache_entries: { configured: 8, effective: 8, source: 'default' },
         rocm_graph_cache_max_bytes: { configured: GIB, effective: GIB, source: 'default' },
