@@ -175,6 +175,42 @@ bounded timeout. The receipt retains TTFT, client-visible ITL, end-to-end
 latency, request throughput, output-token throughput, SLO goodput, dispatch
 spread, prompt/output hashes, DRM memory, failures, and Kiln batching deltas.
 
+Driver v7 retains one ordered `output_evidence` row for every successful
+request. Hash-only evidence is the default and includes the combined semantic
+output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
+tokens, and finish reason. The validator requires these rows to cover exactly
+the successful request indices, reproduce the aggregate output-set hash, and
+reproduce the run's completion-token total. An aggregate mismatch can therefore
+no longer hide whether one request or the entire row diverged.
+
+### Output divergence diagnostics
+
+Use `--output-evidence full` on both engine arms when investigating exact-output
+parity. In addition to the mandatory hashes, each request retains its reasoning
+and visible content as canonical padded base64. This mode is explicit because
+generated output becomes part of the receipt and may be unsuitable for public
+retention when prompts can contain private data. The benchmark's fixed prompts
+contain no operator input, but repositories that adapt the driver must make
+their own disclosure decision.
+
+Full evidence is bounded to 1 MiB of combined UTF-8 reasoning and content per
+request. Exceeding the bound fails closed instead of silently truncating the
+correctness record. Receipt validation decodes the text, enforces canonical
+base64 and UTF-8, and recomputes byte counts plus the separate and combined
+hashes. When both paired receipts contain full evidence, an `output_mismatch`
+reports:
+
+- the mismatch count and ordered request indices;
+- the exact fields that differ for each request;
+- the expected and actual combined output hashes; and
+- the first divergent UTF-8 byte in reasoning and visible content.
+
+The offsets are bytes, not tokenizer IDs. They remain meaningful across engines
+without importing either engine's tokenizer into the measurement driver. If
+either arm is hash-only, request cardinality and changed fields still remain
+available, while the byte offsets are null and `exact_output_compared` is
+false. Full text is never copied into the comparison summary itself.
+
 ### Current Strix Halo ROCm comparison
 
 The first exact-source pair uses commit `8f1e026b3`, Qwen3.5-4B, the fast
@@ -224,6 +260,7 @@ python3 scripts/bench-concurrent-batch.py \
   --memory-limit-bytes 50000000000 \
   --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-c32-v1.json \
   --server-launch-config qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v1.json \
+  --output-evidence hashes \
   --out .qualification/serving/greedy-short.kiln.json
 ```
 
@@ -250,7 +287,8 @@ failures still return without a receipt because no measured lifecycle began.
 `scripts/run-serving-benchmark-campaign.py` runs all five profiles. In owned
 mode each profile gets a fresh process group and a run-specific log. This avoids
 cross-profile allocator/cache state and keeps startup and teardown independently
-auditable.
+auditable. Campaign summary v3 records the selected output-evidence mode and
+forwards it unchanged to every profile.
 
 ```bash
 python3 scripts/run-serving-benchmark-campaign.py \
@@ -264,7 +302,8 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
   --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-c32-v1.json \
-  --server-launch-config qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v1.json
+  --server-launch-config qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v1.json \
+  --output-evidence hashes
 ```
 
 For a vLLM campaign, add `--reference-dir` pointing at the matching Kiln
@@ -284,14 +323,16 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v6 is the current contract. It retains the v5 mandatory
-post-provenance, pre-process cooldown and adds the structured startup-failure
-evidence described above. It also validates embedded vLLM identity objects by
-JSON value while continuing to bind the launcher's exact canonical JSON bytes;
-sorting the outer receipt cannot change identity semantics. Owned evidence
-contains the content-hashed launch document, absolute server-log fingerprint,
-shutdown signal/status/timing, forced-shutdown flag, and process-group liveness.
-Attached and explicitly unsafe runs serialize null lifecycle artifacts so
-ownership cannot be inferred from missing fields. Historical driver v2 through
-v5 receipts remain valid under their original contracts, but do not satisfy
-current performance acceptance.
+Driver v7 is the current contract. It adds mandatory ordered per-request output
+evidence and structured mismatch localization to the v6 lifecycle contract.
+Driver v6 retains the v5 mandatory post-provenance, pre-process cooldown and
+adds the structured startup-failure evidence described above. It also validates
+embedded vLLM identity objects by JSON value while continuing to bind the
+launcher's exact canonical JSON bytes; sorting the outer receipt cannot change
+identity semantics. Owned evidence contains the content-hashed launch document,
+absolute server-log fingerprint, shutdown signal/status/timing,
+forced-shutdown flag, and process-group liveness. Attached and explicitly
+unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
+from missing fields. Historical driver v2 through v6 receipts remain valid
+under their original contracts, but do not satisfy the current v7 correctness
+evidence contract or current performance acceptance.

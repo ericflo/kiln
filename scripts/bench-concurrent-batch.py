@@ -39,11 +39,13 @@ SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 HOST_THERMAL_POLICY_SCHEMA = "kiln.host-thermal-policy.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "6"
-SUPPORTED_DRIVER_VERSIONS = {"2", "3", "4", "5", DRIVER_VERSION}
-THERMAL_DRIVER_VERSIONS = {"3", "4", "5", DRIVER_VERSION}
-LIFECYCLE_DRIVER_VERSIONS = {"4", "5", DRIVER_VERSION}
-PRELAUNCH_DRIVER_VERSIONS = {"5", DRIVER_VERSION}
+DRIVER_VERSION = "7"
+SUPPORTED_DRIVER_VERSIONS = {"2", "3", "4", "5", "6", DRIVER_VERSION}
+THERMAL_DRIVER_VERSIONS = {"3", "4", "5", "6", DRIVER_VERSION}
+LIFECYCLE_DRIVER_VERSIONS = {"4", "5", "6", DRIVER_VERSION}
+PRELAUNCH_DRIVER_VERSIONS = {"5", "6", DRIVER_VERSION}
+OUTPUT_EVIDENCE_DRIVER_VERSIONS = {DRIVER_VERSION}
+OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
 ROOT = Path(__file__).resolve().parents[1]
@@ -218,6 +220,19 @@ RUN_KEYS = {
     "verdict",
 }
 RUN_KEYS_V3 = RUN_KEYS | {"prompt_token_counts", "host_thermal"}
+RUN_KEYS_V7 = RUN_KEYS_V3 | {"output_evidence"}
+OUTPUT_EVIDENCE_KEYS = {
+    "index",
+    "output_sha256",
+    "reasoning_sha256",
+    "content_sha256",
+    "reasoning_utf8_bytes",
+    "content_utf8_bytes",
+    "completion_tokens",
+    "finish_reason",
+    "exact_output",
+}
+EXACT_OUTPUT_KEYS = {"reasoning_content_base64", "content_base64"}
 MODEL_IDENTITY_KEYS = {
     "id",
     "path",
@@ -1269,6 +1284,139 @@ def validate_run_host_thermal(
     )
 
 
+def _decode_canonical_base64_text(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise BenchmarkError(f"{label} must be a base64 string")
+    try:
+        encoded = value.encode("ascii")
+        raw = base64.b64decode(encoded, validate=True)
+    except (UnicodeEncodeError, binascii.Error) as exc:
+        raise BenchmarkError(f"{label} must be canonical base64") from exc
+    if base64.b64encode(raw) != encoded:
+        raise BenchmarkError(f"{label} must use canonical padded base64")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BenchmarkError(f"{label} must encode UTF-8 text") from exc
+
+
+def output_set_evidence_row(evidence: dict[str, Any]) -> dict[str, Any]:
+    return {
+        name: evidence[name]
+        for name in (
+            "index",
+            "output_sha256",
+            "reasoning_sha256",
+            "content_sha256",
+            "reasoning_utf8_bytes",
+            "content_utf8_bytes",
+            "completion_tokens",
+            "finish_reason",
+        )
+    }
+
+
+def validate_output_evidence(
+    value: Any,
+    *,
+    label: str,
+    concurrency: int,
+    success_count: int,
+    error_indices: set[int],
+    completion_tokens: int,
+    output_set_sha256: str,
+) -> None:
+    if not isinstance(value, list) or len(value) != success_count:
+        raise BenchmarkError(
+            f"{label} must contain exactly one row per successful request"
+        )
+    seen: set[int] = set()
+    previous_index = -1
+    aggregate_rows: list[dict[str, Any]] = []
+    exact_modes: set[bool] = set()
+    evidence_completion_tokens = 0
+    for position, evidence_value in enumerate(value):
+        evidence_label = f"{label}[{position}]"
+        evidence = _object(evidence_value, evidence_label)
+        _exact_keys(evidence, OUTPUT_EVIDENCE_KEYS, evidence_label)
+        index = evidence["index"]
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < concurrency
+            or index in seen
+            or index in error_indices
+        ):
+            raise BenchmarkError(f"{evidence_label}.index is invalid or duplicate")
+        if index <= previous_index:
+            raise BenchmarkError(f"{label} must be ordered by request index")
+        previous_index = index
+        seen.add(index)
+        for name in ("output_sha256", "reasoning_sha256", "content_sha256"):
+            _sha256(evidence[name], f"{evidence_label}.{name}")
+        reasoning_bytes = _nonnegative_int(
+            evidence["reasoning_utf8_bytes"],
+            f"{evidence_label}.reasoning_utf8_bytes",
+        )
+        content_bytes = _nonnegative_int(
+            evidence["content_utf8_bytes"],
+            f"{evidence_label}.content_utf8_bytes",
+        )
+        request_tokens = _positive_int(
+            evidence["completion_tokens"], f"{evidence_label}.completion_tokens"
+        )
+        evidence_completion_tokens += request_tokens
+        if (
+            not isinstance(evidence["finish_reason"], str)
+            or not evidence["finish_reason"]
+        ):
+            raise BenchmarkError(f"{evidence_label}.finish_reason must be non-empty")
+        exact = evidence["exact_output"]
+        exact_modes.add(exact is not None)
+        if exact is not None:
+            if (
+                reasoning_bytes + content_bytes
+                > OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST
+            ):
+                raise BenchmarkError(
+                    f"{evidence_label} exceeds the per-request evidence bound"
+                )
+            exact_object = _object(exact, f"{evidence_label}.exact_output")
+            _exact_keys(
+                exact_object,
+                EXACT_OUTPUT_KEYS,
+                f"{evidence_label}.exact_output",
+            )
+            reasoning = _decode_canonical_base64_text(
+                exact_object["reasoning_content_base64"],
+                f"{evidence_label}.exact_output.reasoning_content_base64",
+            )
+            content = _decode_canonical_base64_text(
+                exact_object["content_base64"],
+                f"{evidence_label}.exact_output.content_base64",
+            )
+            if len(reasoning.encode("utf-8")) != reasoning_bytes:
+                raise BenchmarkError(f"{evidence_label} reasoning byte count disagrees")
+            if len(content.encode("utf-8")) != content_bytes:
+                raise BenchmarkError(f"{evidence_label} content byte count disagrees")
+            if text_sha256(reasoning) != evidence["reasoning_sha256"]:
+                raise BenchmarkError(f"{evidence_label} reasoning hash disagrees")
+            if text_sha256(content) != evidence["content_sha256"]:
+                raise BenchmarkError(f"{evidence_label} content hash disagrees")
+            if text_sha256(reasoning + "\x1e" + content) != evidence["output_sha256"]:
+                raise BenchmarkError(f"{evidence_label} output hash disagrees")
+        aggregate_rows.append(output_set_evidence_row(evidence))
+    if len(exact_modes) > 1:
+        raise BenchmarkError(f"{label} mixes hash-only and full output evidence")
+    expected_indices = set(range(concurrency)) - error_indices
+    if seen != expected_indices:
+        raise BenchmarkError(f"{label} does not cover every successful request")
+    if evidence_completion_tokens != completion_tokens:
+        raise BenchmarkError(f"{label} completion-token total disagrees with its run")
+    if canonical_sha256(aggregate_rows) != output_set_sha256:
+        raise BenchmarkError(f"{label} does not reproduce output_set_sha256")
+
+
 def validate_benchmark_run(
     value: Any,
     *,
@@ -1281,11 +1429,12 @@ def validate_benchmark_run(
     workload_profile: str | None,
 ) -> None:
     row = _object(value, label)
-    _exact_keys(
-        row,
-        RUN_KEYS_V3 if driver_version in THERMAL_DRIVER_VERSIONS else RUN_KEYS,
-        label,
-    )
+    run_keys = RUN_KEYS
+    if driver_version in THERMAL_DRIVER_VERSIONS:
+        run_keys = RUN_KEYS_V3
+    if driver_version in OUTPUT_EVIDENCE_DRIVER_VERSIONS:
+        run_keys = RUN_KEYS_V7
+    _exact_keys(row, run_keys, label)
     if row["concurrency"] != concurrency or row["repeat"] != repeat:
         raise BenchmarkError(f"{label} does not match its declared concurrency/repeat")
     if row["request_count"] != concurrency:
@@ -1381,6 +1530,16 @@ def validate_benchmark_run(
                 raise BenchmarkError(
                     f"{label}.prompt_token_counts does not align with request errors"
                 )
+    if driver_version in OUTPUT_EVIDENCE_DRIVER_VERSIONS:
+        validate_output_evidence(
+            row["output_evidence"],
+            label=f"{label}.output_evidence",
+            concurrency=concurrency,
+            success_count=row["success_count"],
+            error_indices=error_indices,
+            completion_tokens=row["completion_tokens"],
+            output_set_sha256=row["output_set_sha256"],
+        )
     gates = row["gates"]
     if not isinstance(gates, list) or not gates:
         raise BenchmarkError(f"{label}.gates must be a non-empty array")
@@ -1818,6 +1977,128 @@ def validate_server_lifecycle(
         and shutdown["returncode"] in launch.acceptable_exit_codes
     )
     return mode, passed
+
+
+def validate_comparison_mismatches(value: Any, label: str) -> None:
+    if not isinstance(value, list):
+        raise BenchmarkError(f"{label} must be an array")
+    seen_runs: set[tuple[int, int]] = set()
+    for position, mismatch_value in enumerate(value):
+        mismatch_label = f"{label}[{position}]"
+        mismatch = _object(mismatch_value, mismatch_label)
+        base_keys = {"concurrency", "repeat", "reason"}
+        reason = mismatch.get("reason")
+        if reason == "output_mismatch":
+            _exact_keys(
+                mismatch,
+                base_keys
+                | {
+                    "mismatch_count",
+                    "mismatched_request_indices",
+                    "request_mismatches",
+                },
+                mismatch_label,
+            )
+        else:
+            _exact_keys(mismatch, base_keys, mismatch_label)
+        concurrency = _positive_int(
+            mismatch["concurrency"], f"{mismatch_label}.concurrency"
+        )
+        repeat = _nonnegative_int(mismatch["repeat"], f"{mismatch_label}.repeat")
+        run = (concurrency, repeat)
+        if run in seen_runs:
+            raise BenchmarkError(f"{label} has duplicate run coordinates")
+        seen_runs.add(run)
+        if reason not in {
+            "missing_run",
+            "prompt_mismatch",
+            "prompt_token_mismatch",
+            "output_mismatch",
+        }:
+            raise BenchmarkError(f"{mismatch_label}.reason is unsupported")
+        if reason != "output_mismatch":
+            continue
+        request_mismatches = mismatch["request_mismatches"]
+        indices = mismatch["mismatched_request_indices"]
+        mismatch_count = _positive_int(
+            mismatch["mismatch_count"], f"{mismatch_label}.mismatch_count"
+        )
+        if (
+            not isinstance(request_mismatches, list)
+            or not isinstance(indices, list)
+            or mismatch_count != len(request_mismatches)
+            or mismatch_count != len(indices)
+        ):
+            raise BenchmarkError(f"{mismatch_label} request mismatch counts disagree")
+        expected_indices: list[int] = []
+        for request_position, request_value in enumerate(request_mismatches):
+            request_label = (
+                f"{mismatch_label}.request_mismatches[{request_position}]"
+            )
+            request = _object(request_value, request_label)
+            _exact_keys(
+                request,
+                {
+                    "index",
+                    "fields",
+                    "expected_output_sha256",
+                    "actual_output_sha256",
+                    "exact_output_compared",
+                    "reasoning_first_divergent_utf8_byte",
+                    "content_first_divergent_utf8_byte",
+                },
+                request_label,
+            )
+            index = _nonnegative_int(request["index"], f"{request_label}.index")
+            if index >= concurrency or (
+                expected_indices and index <= expected_indices[-1]
+            ):
+                raise BenchmarkError(f"{request_label}.index is invalid or unordered")
+            expected_indices.append(index)
+            fields = request["fields"]
+            allowed_fields = {
+                "output_sha256",
+                "reasoning_sha256",
+                "content_sha256",
+                "reasoning_utf8_bytes",
+                "content_utf8_bytes",
+                "completion_tokens",
+                "finish_reason",
+            }
+            if (
+                not isinstance(fields, list)
+                or not fields
+                or any(not isinstance(field, str) for field in fields)
+                or len(fields) != len(set(fields))
+                or fields != sorted(fields)
+                or any(field not in allowed_fields for field in fields)
+            ):
+                raise BenchmarkError(f"{request_label}.fields is invalid")
+            _sha256(
+                request["expected_output_sha256"],
+                f"{request_label}.expected_output_sha256",
+            )
+            _sha256(
+                request["actual_output_sha256"],
+                f"{request_label}.actual_output_sha256",
+            )
+            if not isinstance(request["exact_output_compared"], bool):
+                raise BenchmarkError(
+                    f"{request_label}.exact_output_compared must be boolean"
+                )
+            for name in (
+                "reasoning_first_divergent_utf8_byte",
+                "content_first_divergent_utf8_byte",
+            ):
+                offset = request[name]
+                if offset is not None:
+                    _nonnegative_int(offset, f"{request_label}.{name}")
+                if not request["exact_output_compared"] and offset is not None:
+                    raise BenchmarkError(
+                        f"{request_label}.{name} requires exact output comparison"
+                    )
+        if indices != expected_indices:
+            raise BenchmarkError(f"{mismatch_label} request indices disagree")
 
 
 def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
@@ -2369,6 +2650,14 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             comparison["mismatches"], list
         ):
             raise BenchmarkError("receipt.comparison has invalid field types")
+        if driver_version in OUTPUT_EVIDENCE_DRIVER_VERSIONS:
+            validate_comparison_mismatches(
+                comparison["mismatches"], "receipt.comparison.mismatches"
+            )
+            if comparison["matched"] != (not comparison["mismatches"]):
+                raise BenchmarkError(
+                    "receipt.comparison matched flag disagrees with mismatches"
+                )
         if (
             driver_version in THERMAL_DRIVER_VERSIONS
             and comparison["comparison_mode"] != workload["comparison_mode"]
@@ -2568,6 +2857,39 @@ class RequestResult:
     @property
     def output_sha256(self) -> str:
         return text_sha256(self.reasoning_content + "\x1e" + self.content)
+
+
+def output_evidence(result: RequestResult, mode: str) -> dict[str, Any]:
+    if mode not in {"hashes", "full"}:
+        raise BenchmarkError(f"unsupported output evidence mode: {mode!r}")
+    reasoning_bytes = result.reasoning_content.encode("utf-8")
+    content_bytes = result.content.encode("utf-8")
+    if (
+        mode == "full"
+        and len(reasoning_bytes) + len(content_bytes)
+        > OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST
+    ):
+        raise BenchmarkError(
+            f"request {result.index} output exceeds the "
+            f"{OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST}-byte evidence bound"
+        )
+    exact_output = None
+    if mode == "full":
+        exact_output = {
+            "reasoning_content_base64": base64.b64encode(reasoning_bytes).decode("ascii"),
+            "content_base64": base64.b64encode(content_bytes).decode("ascii"),
+        }
+    return {
+        "index": result.index,
+        "output_sha256": result.output_sha256,
+        "reasoning_sha256": text_sha256(result.reasoning_content),
+        "content_sha256": text_sha256(result.content),
+        "reasoning_utf8_bytes": len(reasoning_bytes),
+        "content_utf8_bytes": len(content_bytes),
+        "completion_tokens": result.completion_tokens,
+        "finish_reason": result.finish_reason,
+        "exact_output": exact_output,
+    }
 
 
 def failed_result(
@@ -2895,6 +3217,7 @@ def summarize_run(
     memory_limit_bytes: int | None,
     server: dict[str, Any] | None,
     diagnostics_error: str | None,
+    output_evidence_mode: str = "hashes",
 ) -> dict[str, Any]:
     successes = [result for result in results if result.error is None]
     errors = [
@@ -3001,14 +3324,12 @@ def summarize_run(
                 f"batching-engine error delta: {server['total_errors']}",
             )
         )
-    output_rows = [
-        {
-            "index": result.index,
-            "output_sha256": result.output_sha256,
-            "completion_tokens": result.completion_tokens,
-            "finish_reason": result.finish_reason,
-        }
+    output_evidence_rows = [
+        output_evidence(result, output_evidence_mode)
         for result in sorted(successes, key=lambda result: result.index)
+    ]
+    output_rows = [
+        output_set_evidence_row(evidence) for evidence in output_evidence_rows
     ]
     prompt_rows = [
         {"index": result.index, "prompt_sha256": result.prompt_sha256}
@@ -3054,6 +3375,7 @@ def summarize_run(
         ),
         "prompt_set_sha256": canonical_sha256(prompt_rows),
         "output_set_sha256": canonical_sha256(output_rows),
+        "output_evidence": output_evidence_rows,
         "memory": memory,
         "server": server,
         "gates": gates,
@@ -3172,6 +3494,7 @@ def run_once(
         memory_limit_bytes=args.memory_limit_bytes,
         server=server_delta,
         diagnostics_error=diagnostics_error,
+        output_evidence_mode=args.output_evidence,
     )
 
 
@@ -3225,15 +3548,97 @@ def compare_reference(receipt: dict[str, Any], reference_path: Path) -> dict[str
             comparison_mode == "exact_output"
             and current["output_set_sha256"] != expected["output_set_sha256"]
         ):
-            mismatches.append(
-                {"concurrency": key[0], "repeat": key[1], "reason": "output_mismatch"}
-            )
+            mismatches.append(output_mismatch_detail(current, expected))
     return {
         "reference_receipt_sha256": "sha256:" + hashlib.sha256(reference_bytes).hexdigest(),
         "reference_engine": reference.get("engine"),
         "comparison_mode": comparison_mode,
         "matched": not mismatches,
         "mismatches": mismatches,
+    }
+
+
+def first_divergent_utf8_byte(left: bytes, right: bytes) -> int | None:
+    for index, (left_byte, right_byte) in enumerate(zip(left, right)):
+        if left_byte != right_byte:
+            return index
+    if len(left) != len(right):
+        return min(len(left), len(right))
+    return None
+
+
+def exact_output_bytes(evidence: dict[str, Any]) -> tuple[bytes, bytes] | None:
+    exact = evidence["exact_output"]
+    if exact is None:
+        return None
+    return (
+        base64.b64decode(exact["reasoning_content_base64"], validate=True),
+        base64.b64decode(exact["content_base64"], validate=True),
+    )
+
+
+def output_mismatch_detail(
+    current: dict[str, Any], expected: dict[str, Any]
+) -> dict[str, Any]:
+    current_evidence = {row["index"]: row for row in current["output_evidence"]}
+    expected_evidence = {row["index"]: row for row in expected["output_evidence"]}
+    request_mismatches: list[dict[str, Any]] = []
+    compared_fields = (
+        "output_sha256",
+        "reasoning_sha256",
+        "content_sha256",
+        "reasoning_utf8_bytes",
+        "content_utf8_bytes",
+        "completion_tokens",
+        "finish_reason",
+    )
+    for index in sorted(set(current_evidence) | set(expected_evidence)):
+        actual = current_evidence.get(index)
+        reference = expected_evidence.get(index)
+        if actual is None or reference is None:
+            raise BenchmarkError(
+                "output evidence does not cover the same successful request indices"
+            )
+        fields = sorted(
+            name for name in compared_fields if actual[name] != reference[name]
+        )
+        if not fields:
+            continue
+        actual_exact = exact_output_bytes(actual)
+        reference_exact = exact_output_bytes(reference)
+        exact_compared = actual_exact is not None and reference_exact is not None
+        reasoning_offset = content_offset = None
+        if exact_compared:
+            assert actual_exact is not None and reference_exact is not None
+            reasoning_offset = first_divergent_utf8_byte(
+                reference_exact[0], actual_exact[0]
+            )
+            content_offset = first_divergent_utf8_byte(
+                reference_exact[1], actual_exact[1]
+            )
+        request_mismatches.append(
+            {
+                "index": index,
+                "fields": fields,
+                "expected_output_sha256": reference["output_sha256"],
+                "actual_output_sha256": actual["output_sha256"],
+                "exact_output_compared": exact_compared,
+                "reasoning_first_divergent_utf8_byte": reasoning_offset,
+                "content_first_divergent_utf8_byte": content_offset,
+            }
+        )
+    if not request_mismatches:
+        raise BenchmarkError(
+            "output_set_sha256 differs but per-request output evidence matches"
+        )
+    indices = [row["index"] for row in request_mismatches]
+    return {
+        "concurrency": current["concurrency"],
+        "repeat": current["repeat"],
+        "reason": "output_mismatch",
+        "mismatch_count": len(request_mismatches),
+        "mismatched_request_indices": indices,
+        "request_mismatches": request_mismatches,
     }
 
 
@@ -3483,6 +3888,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Name of the environment variable containing the bearer token",
     )
     parser.add_argument("--reference-receipt", type=Path)
+    parser.add_argument(
+        "--output-evidence",
+        choices=("hashes", "full"),
+        default="hashes",
+        help=(
+            "retain per-request hashes, or bounded base64 output text for "
+            "first-divergence diagnostics"
+        ),
+    )
     parser.add_argument(
         "--validate-receipt",
         nargs="+",

@@ -79,6 +79,9 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             str(root / "host-thermal-policy.json"),
         )
         self.assertEqual(command[command.index("--server-pid") + 1], "4321")
+        self.assertEqual(
+            command[command.index("--output-evidence") + 1], "hashes"
+        )
 
     def test_campaign_runs_every_profile_and_self_hashes_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -103,6 +106,7 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             )
             self.assertEqual(summary["verdict"], "passed")
             self.assertEqual(summary["server_owner"]["server_pid"], 4321)
+            self.assertEqual(summary["output_evidence"], "hashes")
             self.assertEqual(
                 summary["server_owner"]["mode"], "attached_process_group"
             )
@@ -128,6 +132,19 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--server-launch-config") + 1],
             str(launch_config),
+        )
+
+    def test_campaign_can_request_full_output_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = campaign.parse_args(
+                [*required_args(root), "--output-evidence", "full"]
+            )
+            command = campaign.benchmark_command(
+                args, "greedy-short", root / "greedy-short.kiln.json"
+            )
+        self.assertEqual(
+            command[command.index("--output-evidence") + 1], "full"
         )
 
 

@@ -17,7 +17,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "scripts" / "bench-concurrent-batch.py"
-SCHEMA = "kiln.serving-benchmark-campaign.v2"
+SCHEMA = "kiln.serving-benchmark-campaign.v3"
 PROFILES = (
     "greedy-short",
     "api-default-sampled",
@@ -97,6 +97,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--slo-e2e-ms", type=float, default=60_000.0)
     parser.add_argument("--timeout-secs", type=float, default=600.0)
     parser.add_argument("--api-key-env")
+    parser.add_argument(
+        "--output-evidence",
+        choices=("hashes", "full"),
+        default="hashes",
+        help="per-request hash evidence or bounded full output diagnostics",
+    )
     args = parser.parse_args(argv)
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}", args.campaign_id) is None:
         parser.error("campaign-id must be 3..64 portable identifier characters")
@@ -166,6 +172,8 @@ def benchmark_command(
         str(args.slo_e2e_ms),
         "--timeout-secs",
         str(args.timeout_secs),
+        "--output-evidence",
+        args.output_evidence,
         "--out",
         str(output),
     ]
@@ -216,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
             "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "campaign_id": args.campaign_id,
             "engine": args.engine,
+            "output_evidence": args.output_evidence,
             "host_thermal_policy": {
                 "path": str(args.host_thermal_policy.resolve()),
                 "sha256": file_sha256(args.host_thermal_policy),

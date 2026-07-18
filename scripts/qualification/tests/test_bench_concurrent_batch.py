@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import importlib.util
 import io
@@ -731,6 +732,19 @@ class ServingBenchmarkTests(unittest.TestCase):
                     "prompt_token_counts": [42],
                     "prompt_set_sha256": "sha256:prompts",
                     "output_set_sha256": "sha256:outputs",
+                    "output_evidence": [
+                        {
+                            "index": 0,
+                            "output_sha256": "sha256:" + "a" * 64,
+                            "reasoning_sha256": "sha256:" + "b" * 64,
+                            "content_sha256": "sha256:" + "c" * 64,
+                            "reasoning_utf8_bytes": 0,
+                            "content_utf8_bytes": 4,
+                            "completion_tokens": 1,
+                            "finish_reason": "length",
+                            "exact_output": None,
+                        }
+                    ],
                 }
             ],
         }
@@ -743,11 +757,23 @@ class ServingBenchmarkTests(unittest.TestCase):
                 comparison = bench.compare_reference(current, path)
                 self.assertTrue(comparison["matched"])
                 reference["runs"][0]["output_set_sha256"] = "sha256:different"
+                reference["runs"][0]["output_evidence"][0]["output_sha256"] = (
+                    "sha256:" + "d" * 64
+                )
                 path.write_text(json.dumps(reference))
                 comparison = bench.compare_reference(current, path)
                 self.assertFalse(comparison["matched"])
                 self.assertEqual(
                     comparison["mismatches"][0]["reason"], "output_mismatch"
+                )
+                self.assertEqual(comparison["mismatches"][0]["mismatch_count"], 1)
+                self.assertEqual(
+                    comparison["mismatches"][0]["mismatched_request_indices"], [0]
+                )
+                self.assertFalse(
+                    comparison["mismatches"][0]["request_mismatches"][0][
+                        "exact_output_compared"
+                    ]
                 )
 
                 reference["workload"]["comparison_mode"] = "inputs_only"
@@ -777,6 +803,91 @@ class ServingBenchmarkTests(unittest.TestCase):
                     bench.BenchmarkError, "duplicate JSON object key"
                 ):
                     bench.compare_reference(current, path)
+
+    def test_full_output_evidence_is_bounded_validated_and_locates_divergence(
+        self,
+    ) -> None:
+        now = time.perf_counter()
+        expected_result = bench.RequestResult(
+            index=0,
+            prompt_sha256="sha256:prompt",
+            started=now,
+            ended=now + 0.1,
+            semantic_times=[now + 0.05],
+            content="caf\u00e9",
+            reasoning_content="alpha",
+            prompt_tokens=10,
+            completion_tokens=1,
+            total_tokens=11,
+            finish_reason="length",
+            done=True,
+            error=None,
+        )
+        actual_result = dataclasses.replace(
+            expected_result,
+            content="cafe",
+            reasoning_content="alphi",
+        )
+        expected_evidence = bench.output_evidence(expected_result, "full")
+        actual_evidence = bench.output_evidence(actual_result, "full")
+        expected_row = {
+            "concurrency": 1,
+            "repeat": 0,
+            "output_evidence": [expected_evidence],
+        }
+        actual_row = {
+            "concurrency": 1,
+            "repeat": 0,
+            "output_evidence": [actual_evidence],
+        }
+        mismatch = bench.output_mismatch_detail(actual_row, expected_row)
+        request = mismatch["request_mismatches"][0]
+        self.assertEqual(mismatch["mismatch_count"], 1)
+        self.assertTrue(request["exact_output_compared"])
+        self.assertEqual(request["reasoning_first_divergent_utf8_byte"], 4)
+        self.assertEqual(request["content_first_divergent_utf8_byte"], 3)
+
+        separator_left = dataclasses.replace(
+            expected_result, reasoning_content="a", content="b\x1ec"
+        )
+        separator_right = dataclasses.replace(
+            expected_result, reasoning_content="a\x1eb", content="c"
+        )
+        left_evidence = bench.output_evidence(separator_left, "hashes")
+        right_evidence = bench.output_evidence(separator_right, "hashes")
+        self.assertEqual(
+            left_evidence["output_sha256"], right_evidence["output_sha256"]
+        )
+        self.assertNotEqual(
+            bench.canonical_sha256(bench.output_set_evidence_row(left_evidence)),
+            bench.canonical_sha256(bench.output_set_evidence_row(right_evidence)),
+        )
+
+        output_rows = [bench.output_set_evidence_row(expected_evidence)]
+        bench.validate_comparison_mismatches([mismatch], "fixture comparison")
+        bench.validate_output_evidence(
+            [expected_evidence],
+            label="fixture",
+            concurrency=1,
+            success_count=1,
+            error_indices=set(),
+            completion_tokens=1,
+            output_set_sha256=bench.canonical_sha256(output_rows),
+        )
+        tampered = json.loads(json.dumps(expected_evidence))
+        tampered["exact_output"]["content_base64"] = base64.b64encode(
+            b"fake"
+        ).decode()
+        with self.assertRaisesRegex(bench.BenchmarkError, "content byte count disagrees"):
+            bench.validate_output_evidence(
+                [tampered],
+                label="fixture",
+                concurrency=1,
+                success_count=1,
+                error_indices=set(),
+                completion_tokens=1,
+                output_set_sha256=bench.canonical_sha256(output_rows),
+            )
 
     def test_memory_sampler_records_peak_delta(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

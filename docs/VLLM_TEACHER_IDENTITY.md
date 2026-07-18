@@ -619,8 +619,12 @@ for high-concurrency ROCm serving. It does not close correctness: all four
 greedy output-set hashes differed, so the vLLM receipt failed exact comparison.
 Both engines also recorded zero SLO-goodput because the conservative host guard
 inserted multi-second process stops. Preserve the pair as counterevidence;
-diagnose the first output divergence and continuous thermal policy before
-expanding the claim or treating the throughput rows as unpaced latency data.
+rerun both arms with driver-v7 `--output-evidence full` so the retained
+comparison identifies every mismatched request and the first divergent UTF-8
+byte in reasoning and visible content. Then diagnose the numerical cause and
+continuous thermal policy before expanding the claim or treating the throughput
+rows as unpaced latency data. Hash-only v7 runs still retain per-request
+reasoning/content fingerprints without publishing generated text.
 
 Do not copy this manifest to another machine and call it qualified. Recreate
 the isolated runtime there, emit a new manifest through the exact launch argv,
