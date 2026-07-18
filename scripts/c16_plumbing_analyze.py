@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Phase C16 — MTP accept/reject plumbing verifier.
 
-Reads one or more Phase C1 attribution CSVs (produced by
-`KILN_C1_ATTR_PATH=...` on `kiln-bench --spec mtp --temperature 0` runs) and
+Reads one or more Phase C1 attribution CSVs (produced historically by the
+retired `KILN_C1_ATTR_PATH=...` capture path on `kiln-bench --spec mtp
+--temperature 0` runs) and
 audits the four plumbing hypotheses the C15 verdict handed off to C16:
 
     H1  mtp_logits indexing — is greedy `accepted` the same as `topk_match`?

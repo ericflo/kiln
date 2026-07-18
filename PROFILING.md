@@ -113,6 +113,19 @@
 > NVTX ranges. Historical reports remain evidence only; current source no longer
 > recognizes these controls.
 
+> **Legacy tape, ROCm fallback, and MTP C1 trace controls were retired on
+> 2026-07-17.** `KILN_CP4_DEBUG` printed the entire autograd tape and every
+> skipped node, then rescanned deposited gradient keys in SFT, GRPO, and OPD.
+> `KILN_ROCM_PROFILE` maintained process-global fallback tallies and printed
+> periodic host-copy records; `KILN_ROCM_BT` captured symbolized backtraces from
+> copy paths. `KILN_C1_ATTR_PATH` added a process-global per-token sink, extra
+> logit readbacks, and CSV file output to the MTP decode benchmark. Current
+> source retains anomaly detection, exact gradient contracts, structured
+> device-op fallback metrics, capture-scoped H2D observers, and MTP
+> accepted/attempted counters. Historical C1 CSVs and their analysis scripts
+> remain valid evidence, but current source no longer produces new C1 traces or
+> recognizes these controls.
+
 > **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
 > priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are

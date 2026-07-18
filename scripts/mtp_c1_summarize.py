@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Summarize Phase C1 MTP acceptance-rate attribution CSVs.
 
-Reads one or more CSV files produced by `KILN_C1_ATTR_PATH=...` on
-`kiln-bench --spec mtp --temperature 0` runs, and prints:
+Reads one or more historical CSV files produced by the retired
+`KILN_C1_ATTR_PATH=...` capture path on `kiln-bench --spec mtp
+--temperature 0` runs, and prints:
 
   - overall acceptance rate α = accepted / total
   - overall top-k match rate (mtp_top1 == main_top1)

@@ -16,19 +16,19 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **632 direct read call sites** and
-**255 process-mutation call sites**. It can
-statically name **142 distinct literal `KILN_*`
-read names** across **266 call sites**.
+The scanner records **625 direct read call sites** and
+**252 process-mutation call sites**. It can
+statically name **138 distinct literal `KILN_*`
+read names** across **259 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 160 | 101 | 0 |
+| Experimental/debug migration | 153 | 97 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
-| Test only | 135 | 41 | 247 |
+| Test only | 135 | 41 | 244 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -60,7 +60,7 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
 | `crates/kiln-model/src/backend/rocm.rs` | 11 | 9 |
 | `crates/kiln-model/src/backend/capability.rs` | 9 | 1 |
-| `crates/kiln-server/src/bench.rs` | 9 | 8 |
+| `crates/kiln-server/src/bench.rs` | 8 | 7 |
 | `crates/kiln-model/src/cuda_graph.rs` | 5 | 5 |
 | `crates/kiln-model/src/metal_graph.rs` | 5 | 3 |
 | `crates/kiln-model/src/tape_forward.rs` | 5 | 5 |
@@ -71,8 +71,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` | 4 | 4 |
 | `crates/kiln-train/src/lib.rs` | 4 | 4 |
 | `crates/kiln-model/src/marlin_proj.rs` | 3 | 3 |
-| `crates/kiln-train/src/opd.rs` | 3 | 3 |
-| `crates/kiln-train/src/trainer.rs` | 3 | 3 |
 | `crates/kiln-core/src/env_flag.rs` | 2 | 0 |
 | `crates/kiln-flash-attn/csrc/rocm_flash_api.cpp` | 2 | 0 |
 | `crates/kiln-flash-attn/src/rocm_sdpa.rs` | 2 | 0 |
@@ -82,9 +80,9 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-tensor/src/metal_kernels.rs` | 2 | 2 |
 | `crates/kiln-tensor/src/rocm_ops/concat.rs` | 2 | 2 |
 | `crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs` | 2 | 2 |
-| `crates/kiln-tensor/src/rocm_storage.rs` | 2 | 2 |
+| `crates/kiln-train/src/opd.rs` | 2 | 2 |
+| `crates/kiln-train/src/trainer.rs` | 2 | 2 |
 | `crates/kiln-autograd/src/anomaly.rs` | 1 | 1 |
-| `crates/kiln-autograd/src/tape.rs` | 1 | 1 |
 | `crates/kiln-blas/src/algo_cache.rs` | 1 | 0 |
 | `crates/kiln-core/src/config_hashes.rs` | 1 | 0 |
 | `crates/kiln-eval/src/scorers/python_doctest.rs` | 1 | 1 |
@@ -92,7 +90,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-flce-kernel/src/kt_api.rs` | 1 | 0 |
 | `crates/kiln-memory/src/vram.rs` | 1 | 0 |
 | `crates/kiln-model/src/backend/metal_attention.rs` | 1 | 0 |
-| `crates/kiln-model/src/c1_attr.rs` | 1 | 1 |
 | `crates/kiln-opd-loss-kernel/src/lib.rs` | 1 | 1 |
 | `crates/kiln-rmsnorm-kernel/src/kt_api.rs` | 1 | 1 |
 | `crates/kiln-rocblas/src/algo_cache.rs` | 1 | 0 |
@@ -116,12 +113,10 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_BENCH_FORCE_MTP` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
 | `KILN_BENCH_LOG_ITL` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
 | `KILN_BENCH_LOG_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
-| `KILN_C1_ATTR_PATH` | Experimental/debug migration | 2 | `crates/kiln-model/src/c1_attr.rs`, `crates/kiln-server/src/bench.rs` |
 | `KILN_CHECKPOINT_KILL_CHILD_ROOT` | Test only | 1 | `crates/kiln-train/src/checkpoint.rs` |
 | `KILN_CHECKPOINT_KILL_CHILD_STAGE` | Test only | 1 | `crates/kiln-train/src/checkpoint.rs` |
 | `KILN_COMMIT` | Build time/provenance | 2 | `crates/kiln-server/src/execution_provenance.rs`, `crates/kiln-train/src/replay.rs` |
 | `KILN_CONFIG` | Public stable | 2 | `crates/kiln-server/src/config.rs`, `crates/kiln-server/src/logging.rs` |
-| `KILN_CP4_DEBUG` | Experimental/debug migration | 3 | `crates/kiln-autograd/src/tape.rs`, `crates/kiln-train/src/opd.rs`, `crates/kiln-train/src/trainer.rs` |
 | `KILN_CUDA_ARCHS` | Build time/provenance | 8 | `crates/kiln-blas/build.rs`, `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-marlin-gemm/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-tensor/build.rs` |
 | `KILN_CUDA_GRAPHS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_CUDA_GRAPHS_BATCHED` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
@@ -204,7 +199,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_QWEN_TOKENIZER_PATH` | Test only | 1 | `crates/kiln-train/src/trajectory_mask.rs` |
 | `KILN_REPO_ROOT` | Build time/provenance | 2 | `crates/kiln-server/src/execution_provenance.rs`, `crates/kiln-train/src/train_receipt.rs` |
 | `KILN_ROCM_ARCHS` | Build time/provenance | 8 | `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-rocblas/build.rs`, `crates/kiln-server/src/execution_provenance.rs`, `crates/kiln-tensor/build.rs` |
-| `KILN_ROCM_BT` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_storage.rs` |
 | `KILN_ROCM_CONCAT_AXIS0_ROW_COPY` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/concat.rs` |
 | `KILN_ROCM_DISABLE_CK_FMHA` | Build time/provenance | 1 | `crates/kiln-flash-attn/build.rs` |
 | `KILN_ROCM_ENABLE_CK_FMHA` | Build time/provenance | 1 | `crates/kiln-flash-attn/build.rs` |
@@ -222,7 +216,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_ROCM_IS_FINITE_LARGE_HOST_SCAN` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs` |
 | `KILN_ROCM_PAGED_ATTN_MAX_SPLITS` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` |
 | `KILN_ROCM_PAGED_ATTN_SPLIT_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` |
-| `KILN_ROCM_PROFILE` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/rocm_storage.rs` |
 | `KILN_ROCM_RMSNORM_ROW_TILE_ROWS` | Experimental/debug migration | 1 | `crates/kiln-rmsnorm-kernel/src/kt_api.rs` |
 | `KILN_ROCM_SPLIT_Q_GATE_ROW_TILE_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_ROCM_TAPE_FLASH_MATERIALIZED` | Experimental/debug migration | 1 | `crates/kiln-model/src/tape_forward.rs` |

@@ -22,11 +22,10 @@ use kiln_hip::{
     RocmSyncReason, RocmSyncTelemetrySnapshot,
 };
 
-/// Diagnostic: counts host<->device round-trips (each one synchronizes its
-/// stream via `memcpy_dtoh`/`memcpy_htod`). When `KILN_ROCM_PROFILE` is set,
-/// `rocm_to_host_copy` / `host_to_rocm_copy` bump these and emit a periodic
-/// line so we can see whether the prefill hot path is host-bound.
-pub static ROCM_DTOH_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Process-wide count of successful host-to-device copies.
+///
+/// Capture-safety decisions use [`with_rocm_htod_observer`] instead: this
+/// aggregate can change because another thread or ROCm device made progress.
 pub static ROCM_HTOD_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
@@ -84,71 +83,8 @@ fn record_rocm_htod(device_index: usize) {
     });
 }
 
-/// Process-wide diagnostic count of successful host-to-device copies.
-///
-/// Capture-safety decisions use [`with_rocm_htod_observer`] instead: this
-/// aggregate can change because another thread or ROCm device made progress.
 pub fn rocm_htod_count() -> u64 {
     ROCM_HTOD_COUNT.load(Ordering::Relaxed)
-}
-
-#[inline]
-fn rocm_profile_on() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("KILN_ROCM_PROFILE").is_ok())
-}
-
-/// Diagnostic (KILN_ROCM_BT=1): print a symbolized backtrace the FIRST time each
-/// distinct (direction, shape) host round-trip happens past warmup, so we can
-/// localize every remaining decode-region sync (the hard prerequisite for HIP
-/// graph capture). Build with `RUSTFLAGS=-Cdebuginfo=1` so frames symbolize.
-fn rocm_bt_once(dir: &str, shape: &[usize], total: u64) {
-    if total < 1000 {
-        return; // skip weight-load / warmup
-    }
-    static ON: OnceLock<bool> = OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var("KILN_ROCM_BT").is_ok()) {
-        return;
-    }
-    static SEEN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
-    let key = format!("{dir}{shape:?}");
-    let mut seen = SEEN
-        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
-        .lock()
-        .unwrap();
-    if seen.len() < 16 && seen.insert(key) {
-        eprintln!(
-            "[rocm-bt] {dir} {shape:?}:\n{}",
-            std::backtrace::Backtrace::force_capture()
-        );
-    }
-}
-
-/// Diagnostic: tallies how often each generic `DeviceOp` falls through to the
-/// CPU host-fallback path (a full D2H→cpu_fwd→H2D round-trip per call). When
-/// `KILN_ROCM_PROFILE` is set, the running tally per op-name is printed every
-/// 100 fallbacks so we can see which ops dominate the host-bound prefill.
-pub fn rocm_log_host_fallback(op_name: &str, shape: &[usize]) {
-    if !rocm_profile_on() {
-        return;
-    }
-    static TALLY: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-    static TOTAL: AtomicU64 = AtomicU64::new(0);
-    let n = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
-    let mut map = TALLY
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap();
-    *map.entry(op_name.to_string()).or_insert(0) += 1;
-    if n % 100 == 0 {
-        let mut v: Vec<(String, u64)> = map.iter().map(|(k, c)| (k.clone(), *c)).collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
-        let top: Vec<String> = v.iter().take(12).map(|(k, c)| format!("{k}={c}")).collect();
-        eprintln!(
-            "[rocm-fallback] total={n} last={op_name}{shape:?} top: {}",
-            top.join(" ")
-        );
-    }
 }
 
 use crate::{DType, Device, Error, Result, StorageBackend};
@@ -1404,18 +1340,6 @@ pub fn rocm_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
                 "rocm_to_host_copy: direct range copy failed: {e:?}"
             ))
         })?;
-        if rocm_profile_on() {
-            let n = ROCM_DTOH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            rocm_bt_once("dtoh", src.shape(), n);
-            if n % 200 == 0 {
-                eprintln!(
-                    "[rocm-profile] dtoh={} htod={} (last shape {:?})",
-                    n,
-                    ROCM_HTOD_COUNT.load(Ordering::Relaxed),
-                    src.shape()
-                );
-            }
-        }
         let cpu_storage = crate::CpuStorage::from_bytes(dtype, host_bytes)?;
         let storage_arc: crate::Storage = Arc::new(cpu_storage);
         return crate::Tensor::from_parts(
@@ -1441,19 +1365,6 @@ pub fn rocm_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
     let host_bytes = stream
         .memcpy_dtoh(contig_storage.slice())
         .map_err(|e| Error::Msg(format!("rocm_to_host_copy: memcpy_dtoh failed: {e:?}")))?;
-
-    if rocm_profile_on() {
-        let n = ROCM_DTOH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        rocm_bt_once("dtoh", src.shape(), n);
-        if n % 200 == 0 {
-            eprintln!(
-                "[rocm-profile] dtoh={} htod={} (last shape {:?})",
-                n,
-                ROCM_HTOD_COUNT.load(Ordering::Relaxed),
-                src.shape()
-            );
-        }
-    }
 
     let cpu_storage = crate::CpuStorage::from_bytes(dtype, host_bytes)?;
     let storage_arc: crate::Storage = Arc::new(cpu_storage);
@@ -1511,20 +1422,9 @@ pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
         .map_err(|e| Error::Msg(format!("host_to_rocm_copy: clone_htod failed: {e:?}")))?;
 
     // Notify capture-safety observers scoped to this thread and device. Keep the
-    // process-wide atomic as diagnostic profiling data only.
+    // process-wide aggregate for compatibility with the public counter API.
     record_rocm_htod(device_index);
-    let n = ROCM_HTOD_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if rocm_profile_on() {
-        rocm_bt_once("htod", src.shape(), n);
-        if n % 200 == 0 {
-            eprintln!(
-                "[rocm-profile] htod={} dtoh={} (last shape {:?})",
-                n,
-                ROCM_DTOH_COUNT.load(Ordering::Relaxed),
-                src.shape()
-            );
-        }
-    }
+    ROCM_HTOD_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // SAFETY: clone_htod synchronizes its stream before returning, so the
     // wrapped slice is fully initialized before any tensor consumer can run.

@@ -40,7 +40,6 @@ use kiln_core::token::TokenId;
 
 use crate::PagedKvCacheKt;
 use crate::backend::BackendRuntime;
-use crate::c1_attr;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward_embed, model_forward_head, model_forward_kt,
     model_forward_paged, model_forward_paged_with_last_hidden, model_forward_segment,
@@ -212,16 +211,6 @@ fn logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Vec<f32>> {
     }
 
     Ok(probs)
-}
-
-fn top1_logit(logits: &Tensor) -> Result<f32> {
-    logits
-        .flatten_all()?
-        .to_dtype(DType::F32)?
-        .to_vec1::<f32>()?
-        .into_iter()
-        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .context("cannot select top-1 logit from an empty tensor")
 }
 
 /// #1082: Device-dispatched fast path for `logits_to_probs`. Extracts the
@@ -923,43 +912,6 @@ pub fn speculative_mtp_decode_step(
     let mut hit_eos = false;
     let draft_accepted = target_at_0 == draft_token;
 
-    // Phase C1 — MTP acceptance-rate attribution (greedy).
-    // Under greedy decoding `accepted == (mtp_top1 == main_top1)` must hold
-    // by construction; recording both independently lets the CSV analyzer
-    // verify that invariant and attribute any low α to either an MTP head
-    // bug (tokens disagree) or a verification/sampling bug (tokens agree
-    // but accept flips false). Off by default; enabled with
-    // `KILN_C1_ATTR_PATH=<path>`.
-    let c1_attr_enabled = c1_attr::is_enabled();
-    let verify_pos0 = if c1_attr_enabled {
-        Some(verify_logits.narrow(1, 0, 1)?.squeeze(1)?)
-    } else {
-        None
-    };
-
-    if c1_attr_enabled {
-        let mtp_top1_logit = top1_logit(&mtp_logits).unwrap_or(f32::NAN);
-        let main_top1_logit = top1_logit(
-            verify_pos0
-                .as_ref()
-                .expect("verify pos-0 tensor materialized for C1 attribution"),
-        )
-        .unwrap_or(f32::NAN);
-        c1_attr::push_row(c1_attr::C1Row {
-            step_idx: c1_attr::next_step_idx(),
-            pos_in_k: 0, // Qwen3.5-4B k=1 MTP: one draft per step.
-            base_pos,
-            mtp_pos,
-            last_token,
-            mtp_top1: draft_token,
-            mtp_top1_logit,
-            main_top1: target_at_0,
-            main_top1_logit,
-            accepted: draft_accepted,
-            topk_match: draft_token == target_at_0,
-        });
-    }
-
     let mut new_h_prev = hidden_after_draft.clone();
     let (base_advance, mtp_advance) = if draft_accepted {
         // ACCEPT: draft_token matches target. Emit [draft, bonus].
@@ -1119,12 +1071,6 @@ mod tests {
         for &p in &probs {
             assert!(p >= 0.0, "probability should be non-negative, got {p}");
         }
-    }
-
-    #[test]
-    fn top1_logit_reports_maximum_independently_of_token_selection() {
-        let logits = Tensor::new(&[-4.0_f32, 3.5, 1.25, 3.0], &kiln_tensor::Device::Cpu).unwrap();
-        assert_eq!(top1_logit(&logits).unwrap(), 3.5);
     }
 
     #[test]

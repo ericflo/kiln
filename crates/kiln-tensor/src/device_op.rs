@@ -219,7 +219,6 @@ pub fn dispatch1<Op: DeviceOp1 + ?Sized>(op: &Op, input: &Tensor) -> Result<Tens
         #[cfg(feature = "rocm")]
         Device::Rocm(_) => {
             crate::profile::emit_device_op_host_fallback(dev.backend(), 1);
-            crate::rocm_storage::rocm_log_host_fallback(op.name(), input.shape());
             let cpu_in = input.to_device(Device::Cpu)?;
             if let Some(t) = op.cpu_fwd(&cpu_in)? {
                 return t.to_device(dev);
@@ -297,7 +296,6 @@ pub fn dispatch2<Op: DeviceOp2 + ?Sized>(op: &Op, a: &Tensor, b: &Tensor) -> Res
         #[cfg(feature = "rocm")]
         Device::Rocm(_) => {
             crate::profile::emit_device_op_host_fallback(dev.backend(), 2);
-            crate::rocm_storage::rocm_log_host_fallback(op.name(), a.shape());
             let cpu_a = a.to_device(Device::Cpu)?;
             let cpu_b = b.to_device(Device::Cpu)?;
             if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b)? {
@@ -372,7 +370,6 @@ pub fn dispatch3<Op: DeviceOp3 + ?Sized>(
         #[cfg(feature = "rocm")]
         Device::Rocm(_) => {
             crate::profile::emit_device_op_host_fallback(dev.backend(), 3);
-            crate::rocm_storage::rocm_log_host_fallback(op.name(), a.shape());
             let cpu_a = a.to_device(Device::Cpu)?;
             let cpu_b = b.to_device(Device::Cpu)?;
             let cpu_c = c.to_device(Device::Cpu)?;

@@ -8,7 +8,8 @@ opts out), detached no-head hiddens, FLCE root over shifted ids/mask
 one-layer params shuffle, saved under the PR-A keys, soft-fail so a
 draft-head problem never loses the main adapter. Remaining: the
 attended GPU validations at the foot of this doc (CE decreases over a
-real run; acceptance-rate A/B with KILN_C1_ATTR_PATH).
+real run; acceptance-rate A/B using the structured draft accepted/attempted
+counts already returned by serving and benchmark paths).
 
 ## Why
 
@@ -78,9 +79,9 @@ tensors) and skipped silently when the model has no MTP weights.
 - Validation (bounded, attended): finite-difference check on one MTP
   LoRA pair (mirror `grpo_logit_grad_matches_finite_difference_f32`);
   CE-decreases-over-epochs assertion on a tiny fixture; then one real
-  adapter on the rig with the C1 attribution CSV
-  (`KILN_C1_ATTR_PATH`) comparing acceptance rate: base draft vs
-  aligned draft on the same prompts.
+  adapter on the rig comparing the structured acceptance counts for the base
+  draft and aligned draft on the same prompts. The retired C1 CSV sink is
+  historical analysis instrumentation, not a runtime validation dependency.
 
 ## Follow-ups after PR-B
 

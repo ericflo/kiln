@@ -88,7 +88,6 @@ KILN_TRAINING_TRACKED_JOB_TTL_SECS,6,crates/kiln-server/src/config.rs:5596,no,no
 KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK,6,crates/kiln-model/src/generate.rs:11306,no,no,kiln-model
 KILN_BATCHING_PREFIX_AWARE_ADMISSION,5,crates/kiln-server/src/config.rs:6754,no,no,kiln-server
 KILN_BATCHING_ROWWISE_DECODE,5,crates/kiln-server/src/config.rs:6756,no,no,kiln-server
-KILN_C1_ATTR_PATH,5,crates/kiln-server/src/bench.rs:2514,no,yes,kiln-model;kiln-server
 KILN_DISABLE_GDN_KERNEL,5,crates/kiln-model/src/forward.rs:36740,no,yes,kiln-model
 KILN_DISABLE_VULKAN_MLP_BF16_ROWS8,5,crates/kiln-vulkan-kernel/src/kernels.rs:50,no,yes,kiln-model;kiln-vulkan-kernel
 KILN_ECHO_ENV_MASK_MODE,5,crates/kiln-train/src/lib.rs:1901,no,yes,kiln-train
@@ -152,7 +151,6 @@ KILN_TRAINING_LOGIT_CACHE_DIR,4,crates/kiln-server/src/config.rs:6826,no,no,kiln
 KILN_VULKAN_DEVICE,4,crates/kiln-vulkan-kernel/src/device.rs:134,no,yes,kiln-memory;kiln-vulkan-kernel
 KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE,3,crates/kiln-server/src/config.rs:6738,no,no,kiln-server
 KILN_ADAPTERS_LIBRARY_URL,3,crates/kiln-server/src/config.rs:6741,no,no,kiln-server
-KILN_CP4_DEBUG,3,crates/kiln-train/src/opd.rs:5259,no,yes,kiln-autograd;kiln-train
 KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT,3,crates/kiln-model/src/backend/cuda.rs:232,no,yes,kiln-model
 KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM,3,crates/kiln-model/src/backend/cuda.rs:234,no,yes,kiln-model
 KILN_DISABLE_CUDA_GDN_PREFILL_GATES,3,crates/kiln-model/src/backend/cuda.rs:1552,no,yes,kiln-model
@@ -500,7 +498,6 @@ KILN_QUALIFICATION_CASE_RESULT,1,crates/kiln-server/src/bench.rs:1442,no,no,kiln
 KILN_QUALIFICATION_HF_LOGITS_PATH,1,crates/kiln-model/tests/vk_resident_decode_parity.rs:37,no,no,kiln-model
 KILN_QWEN_TOKENIZER_PATH,1,crates/kiln-train/src/trajectory_mask.rs:846,no,yes,kiln-train
 KILN_REMOTE_ACCESS_TOKEN,1,crates/kiln-server/src/execution_provenance.rs:308,no,no,kiln-server
-KILN_ROCM_BT,1,crates/kiln-tensor/src/rocm_storage.rs:110,no,yes,kiln-tensor
 KILN_ROCM_CONCAT_AXIS0_ROW_COPY,1,crates/kiln-tensor/src/rocm_ops/concat.rs:228,no,yes,kiln-tensor
 KILN_ROCM_DISABLE_CK_FMHA,1,crates/kiln-flash-attn/build.rs:168,no,yes,kiln-flash-attn
 KILN_ROCM_ENABLE_CK_FMHA,1,crates/kiln-flash-attn/build.rs:169,no,yes,kiln-flash-attn
@@ -540,7 +537,6 @@ KILN_ROCM_PAGED_ATTN_SPLIT_TOKENS,1,crates/kiln-tensor/src/rocm_ops/paged_decode
 KILN_ROCM_PAGED_DECODE,1,crates/kiln-model/src/backend/capability.rs:2177,no,no,kiln-model
 KILN_ROCM_PD_DEVSYNC,1,crates/kiln-model/src/forward.rs:20142,no,yes,kiln-model
 KILN_ROCM_PD_SYNC,1,crates/kiln-model/src/forward.rs:20145,no,yes,kiln-model
-KILN_ROCM_PROFILE,1,crates/kiln-tensor/src/rocm_storage.rs:98,no,yes,kiln-tensor
 KILN_ROCM_RMSNORM_ROW_TILE_ROWS,1,crates/kiln-rmsnorm-kernel/src/kt_api.rs:50,no,yes,kiln-rmsnorm-kernel
 KILN_ROCM_SPLIT_Q_GATE_ROW_TILE_TOKENS,1,crates/kiln-model/src/forward.rs:17207,no,yes,kiln-model
 KILN_ROCM_TAPE_FLASH_MATERIALIZED,1,crates/kiln-model/src/tape_forward.rs:2018,yes,no,kiln-model

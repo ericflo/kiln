@@ -16199,30 +16199,6 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     // kt producer.
     // (#1082) keyed by `Parameter::tensor_id()` (== the LoRA primary kt
     // tensor id the tape adapter registered as the candle-input key).
-    let param_raw_ids: std::collections::HashSet<u64> = params
-        .all_params()
-        .iter()
-        .map(|p| p.tensor_id().as_raw())
-        .collect();
-
-    // #1082 CP-4 diagnostic: how deep did the tape walk reach, and how many
-    // of those are LoRA params? (Decode the kt-param namespace tag so the
-    // count reflects genuine tagged LoRA-param deposits, not candle-keyed
-    // entries — see `decode_kt_param_deposit`.)
-    if std::env::var("KILN_CP4_DEBUG").is_ok() {
-        let reached = grads_by_candle_raw.len();
-        let var_matches = grads_by_candle_raw
-            .keys()
-            .filter_map(|k| kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(*k as u64))
-            .filter(|param_raw| param_raw_ids.contains(param_raw))
-            .count();
-        eprintln!(
-            "[CP4-DEBUG] grpo(kt) tape walk reached {reached} mapped inputs; \
-             {var_matches} are LoRA params (of {})",
-            param_raw_ids.len()
-        );
-    }
-
     let mut grads = kiln_autograd::GradStore::new();
     for (key_raw, kt_grad) in grads_by_candle_raw {
         let Some(param_raw) = kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)

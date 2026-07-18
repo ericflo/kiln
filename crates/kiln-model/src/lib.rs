@@ -1,6 +1,5 @@
 pub mod adapter_merge;
 pub mod backend;
-pub mod c1_attr;
 pub mod cancel;
 pub mod cuda_graph;
 // (#1082 Wave F2) `cuda_train` deleted — the hand-rolled candle-autograd
