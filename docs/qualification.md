@@ -617,6 +617,18 @@ performance metadata is enabled, and an escaped output excerpt capped at 256
 characters. This bound preserves actionable corruption evidence without
 allowing model output to exhaust the result-detail envelope.
 
+Before the ordinary mixed-load measurement window, every ROCm arm also runs a
+separate fixed-seed sampled profile at concurrency eight: 32 tokens per request,
+temperature 0.7, top-p 0.9, top-k 40, and min-p 0.0. Those requests disable
+thinking, ignore EOS, and retain terminal performance metadata, but use a
+sampling-appropriate semantic oracle: exactly one nonempty plain-text choice,
+with no reasoning content or tool calls. Random output is not compared with the
+greedy ascending-integer sequence. The driver waits for all eight streams and
+the batching engine to drain, reattests runtime policy, and captures a fresh
+health baseline before starting the original workload. Sampled counters and
+latencies therefore remain dedicated evidence rather than silently changing
+the long-standing deterministic mixed-load denominator.
+
 Measured mixed-load, development-soak, and endurance receipts also retain the
 complete validated request-phase population instead of discarding terminal
 performance metadata. Every fixed phase `P` has a
@@ -628,6 +640,18 @@ next forward, so these totals rank candidates within their documented layer;
 they must not be summed into a synthetic critical path. This makes pre/post
 optimization receipts sufficient to decide whether sampling, readback,
 synchronization, queueing, or model execution actually moved.
+
+The sampled wave emits `sampled_profile_*` request, fixed-output, phase,
+throughput, and batching metrics. It requires a measured `sampling_ms` value on
+all eight ROCm requests, positive total sampled-tail and actor-decode duration,
+zero separate `readback_ms` observations, no batching errors, at least one
+batched decode forward, more decode rows than forwards, and an observed batch
+width of at least two. `sampled_profile_output_token_throughput_per_second` is
+the aggregate 256-token completion count divided by the concurrent wave wall
+window. `sampled_profile_per_request_output_token_throughput_per_second_p50` is
+the median of each request's completion count divided by its own end-to-end
+wall time. Neither is a transformer-only kernel rate, and the narrower sampling
+phase remains contained by the broad actor `decode_ms` interval.
 
 ### Vulkan serving baseline
 

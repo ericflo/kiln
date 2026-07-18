@@ -1760,6 +1760,16 @@ kiln serve --config kiln.toml</code></pre>
           nullability, rolling-statistics, and Prometheus contract is documented in
           <a href="https://github.com/ericflo/kiln/blob/main/docs/LATENCY_OBSERVABILITY.md">Latency Observability</a>.
         </p>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          The ROCm mixed-load qualification runs an isolated fixed-seed sampled profile before its
+          greedy measurement window: eight concurrent requests, 32 tokens each, temperature 0.7,
+          top-p 0.9, top-k 40, and min-p 0.0. Dedicated <code>sampled_profile_*</code> metrics retain
+          aggregate completion-window throughput, median per-request throughput, broad decode and
+          sampled-tail costs, nullable readback population, and batch-width evidence. The driver
+          drains the actor and captures a new health baseline before ordinary load, so the profile
+          cannot contaminate established mixed-load counters. A pass requires sampled attribution
+          for every request, no separately claimed readback timing, and proven multi-row decode.
+        </p>
         <h3 id="prompt-logprobs" class="text-xl font-semibold mt-6 mb-3">Score prompt tokens</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           Set <code>max_tokens</code> to <code>0</code> or <code>1</code> and request

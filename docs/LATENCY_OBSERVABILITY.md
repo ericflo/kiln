@@ -214,6 +214,24 @@ is a hard qualification failure. These are source-bound measured-window
 aggregates, not values reconstructed from threshold-filtered logs. Older
 receipts created before this contract are not backfilled.
 
+The ROCm mixed-load workload runs a separate fixed-seed sampled profile before
+its ordinary measurement window: eight concurrent requests, 32 output tokens
+each, temperature 0.7, top-p 0.9, top-k 40, and min-p 0.0. It waits for the
+batching engine to drain and takes a fresh health baseline before starting the
+existing greedy workload, so sampled-profile counters cannot contaminate the
+deterministic mixed-load metrics. Dedicated `sampled_profile_*` metrics retain
+request/completion counts, aggregate completion-window throughput, median
+per-request end-to-end throughput, TTFT/E2E percentiles, decode and sampling
+phase totals/populations/percentiles, the readback population, and decode
+forward/row/batch-width evidence. The sampled semantic oracle requires one
+nonempty plain-text choice with thinking and tools absent; it does not require
+random output to match the greedy ascending-integer oracle. A pass requires all
+eight exact-length requests, terminal phase metadata, a positive sampled-tail
+duration for every request, zero separate readback observations, and proven
+multi-row decode. Aggregate throughput describes the eight-request service
+window; the per-request p50 describes individual request wall time. They answer
+different questions and must not be substituted for one another.
+
 Phase values are blocking candidates, not an additive critical-path
 decomposition. Work can overlap, especially response delivery with the next
 actor forward, and the broad `decode_ms` interval contains any measured backend

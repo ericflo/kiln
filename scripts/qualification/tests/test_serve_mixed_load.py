@@ -625,6 +625,19 @@ class ServeMixedLoadTests(unittest.TestCase):
                 self.assertFalse(serve.qualified_stream_success(result))
                 self.assertIn(failure, serve.bounded_response_text(result))
 
+    def test_sampled_response_oracle_accepts_arbitrary_plain_text_only(self) -> None:
+        result = stream_result_with_text("not an ascending sequence")
+        self.assertIsNone(serve.sampled_response_oracle_failure(result))
+
+        whitespace = stream_result_with_text("   ")
+        self.assertIn(
+            "non-whitespace", serve.sampled_response_oracle_failure(whitespace)
+        )
+        reasoning = stream_result_with_deltas(
+            [{"choices": [{"delta": {"reasoning_content": "hidden"}}]}]
+        )
+        self.assertIn("reasoning", serve.sampled_response_oracle_failure(reasoning))
+
     def test_response_diagnostic_is_bounded_and_escaped(self) -> None:
         output = "000000\n" + "x" * 400
         rendered = serve.bounded_response_text(stream_result_with_text(output))
@@ -1029,6 +1042,14 @@ class ServeMixedLoadTests(unittest.TestCase):
             "response_oracle": serve.RESPONSE_ORACLE,
             "response_oracle_integer_width": serve.RESPONSE_ORACLE_INTEGER_WIDTH,
             "request_timeout_seconds": int(serve.REQUEST_TIMEOUT_SECONDS),
+            "sampled_profile_max_tokens": serve.SAMPLED_PROFILE_MAX_TOKENS,
+            "sampled_profile_min_p": serve.SAMPLED_PROFILE_MIN_P,
+            "sampled_profile_prompt_words": serve.SAMPLED_PROFILE_PROMPT_WORDS,
+            "sampled_profile_requests": serve.SAMPLED_PROFILE_REQUESTS,
+            "sampled_profile_seed_offset": serve.SAMPLED_PROFILE_SEED_OFFSET,
+            "sampled_profile_temperature": serve.SAMPLED_PROFILE_TEMPERATURE,
+            "sampled_profile_top_k": serve.SAMPLED_PROFILE_TOP_K,
+            "sampled_profile_top_p": serve.SAMPLED_PROFILE_TOP_P,
             "slow_socket_buffer_bytes": serve.SLOW_SOCKET_BUFFER_BYTES,
             "slow_max_tokens": serve.SLOW_MAX_TOKENS,
             "startup_timeout_seconds": int(serve.STARTUP_TIMEOUT_SECONDS),
@@ -1530,6 +1551,62 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(values["latency_phase_sampling_request_count"], 1)
         self.assertEqual(values["latency_phase_readback_ms_total"], 0)
         self.assertEqual(values["latency_phase_readback_request_count"], 0)
+
+    def test_sampled_profile_metrics_preserve_phase_boundary_and_batch_evidence(self) -> None:
+        results = []
+        for index in range(serve.SAMPLED_PROFILE_REQUESTS):
+            token_times = [1.0 + step * 0.01 for step in range(32)]
+            result = serve.StreamResult(
+                name=f"sampled-{index}",
+                marker=f"sampled-{index}",
+                started=0.5,
+                finished=2.5,
+                semantic_times=[1.0],
+                token_ready_times=token_times,
+                token_queue_delays_ms=[0.0] * 32,
+                prompt_tokens=20,
+                completion_tokens=32,
+                usage_records=1,
+                finish_reason="length",
+                done=True,
+                cancelled=False,
+                error=None,
+                semantic_deltas=[
+                    {"choices": [{"delta": {"content": f"sampled {index}"}}]}
+                ],
+                latency_phases={
+                    f"{phase}_ms": None for phase in serve.LATENCY_PHASE_NAMES
+                },
+            )
+            result.latency_phases["decode_ms"] = 100.0 + index
+            result.latency_phases["sampling_ms"] = 20.0 + index
+            results.append(result)
+
+        before = health_fixture(kv_autoscale=False, rocm_graphs=True)
+        after = json.loads(json.dumps(before))
+        after_batching = after["decode_runtime"]["batching_engine"]
+        after_batching.update(
+            {
+                "total_decode_forwards": 32,
+                "total_batched_decode_forwards": 31,
+                "total_decode_rows": 256,
+                "max_observed_batch_size": 8,
+            }
+        )
+
+        values = serve.sampled_profile_metric_values(results, before, after)
+
+        self.assertEqual(values["sampled_profile_request_count"], 8)
+        self.assertEqual(values["sampled_profile_completion_token_count"], 256)
+        self.assertEqual(values["sampled_profile_sampling_ms_total"], 188.0)
+        self.assertEqual(values["sampled_profile_sampling_request_count"], 8)
+        self.assertEqual(values["sampled_profile_readback_request_count"], 0)
+        self.assertEqual(
+            values["sampled_profile_batching_batched_decode_forward_count"], 31
+        )
+        self.assertEqual(
+            serve.sampled_profile_contract_failures(values), []
+        )
 
     def test_percentile_uses_r7_linear_interpolation(self) -> None:
         self.assertEqual(serve.percentile_r7([], 0.99), 0.0)
@@ -2714,6 +2791,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
 
         values = serve.metric_values(
             measured=[result],
+            sampled_profile=[],
             warmup=warmup,
             long_prefill=result,
             cancellation_confirmed=True,
@@ -2727,6 +2805,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             ),
             peak_memory=123,
             health_after_warmup=before,
+            health_before_sampled_profile=before,
+            health_after_sampled_profile=before,
             health_measurement_start=measurement_start,
             health_end=end,
             events=[],
@@ -2909,6 +2989,18 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
     def test_request_body_can_pin_a_named_adapter(self) -> None:
         body = serve.request_body("prompt", 12, 7, adapter="qualification-adapter")
         self.assertEqual(body["adapter"], "qualification-adapter")
+
+    def test_request_body_accepts_typed_sampled_profile(self) -> None:
+        body = serve.request_body(
+            "prompt", 12, 7, sampling=serve.SAMPLED_PROFILE_SAMPLING
+        )
+        self.assertEqual(body["temperature"], serve.SAMPLED_PROFILE_TEMPERATURE)
+        self.assertEqual(body["top_p"], serve.SAMPLED_PROFILE_TOP_P)
+        self.assertEqual(body["top_k"], serve.SAMPLED_PROFILE_TOP_K)
+        self.assertEqual(body["min_p"], serve.SAMPLED_PROFILE_MIN_P)
+
+        with self.assertRaisesRegex(ValueError, "top_p"):
+            serve.RequestSampling(temperature=0.7, top_p=1.1, top_k=40, min_p=0.0)
 
     def test_workload_markers_are_variant_invariant_and_path_safe(self) -> None:
         markers = {

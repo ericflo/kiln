@@ -1204,6 +1204,11 @@ Qualification retains the same closed phase object as per-phase measured-window
 time totals and observation counts. A successful request that omits terminal
 phase metadata fails the mixed-load, development-soak, and endurance gates;
 unsupported nullable backend phases remain distinguishable from measured zero.
+The ROCm mixed-load gate additionally runs an isolated eight-request,
+fixed-seed sampled profile before the greedy measurement window. Its dedicated
+metrics retain aggregate and median per-request throughput, sampled-tail versus
+broad decode cost, nullable readback population, and multi-row batching proof;
+the driver drains and resets its health baseline before the ordinary workload.
 The same values appear in health and debug snapshots. A phase crossing 100 ms
 emits one structured `slow_batching_actor_phase` event with the bounded phase
 name and work size, which lets qualification correlate a token gap without

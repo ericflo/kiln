@@ -68,6 +68,14 @@ PRESSURE_PEER_MAX_TOKENS = 128
 PRESSURE_PEER_SEED_OFFSET = 103
 WARMUP_MAX_TOKENS = 32
 MAX_WARMUP_REQUESTS = 4
+SAMPLED_PROFILE_REQUESTS = 8
+SAMPLED_PROFILE_PROMPT_WORDS = 64
+SAMPLED_PROFILE_MAX_TOKENS = 32
+SAMPLED_PROFILE_SEED_OFFSET = 1_000
+SAMPLED_PROFILE_TEMPERATURE = 0.7
+SAMPLED_PROFILE_TOP_P = 0.9
+SAMPLED_PROFILE_TOP_K = 40
+SAMPLED_PROFILE_MIN_P = 0.0
 SLOW_MAX_TOKENS = 4096
 CANCELLATION_AFTER_DELTAS = 4
 MEMORY_POLL_INTERVAL_SECONDS = 0.5
@@ -215,6 +223,32 @@ class SourceBuildSpec:
         return config
 
 
+@dataclasses.dataclass(frozen=True)
+class RequestSampling:
+    temperature: float
+    top_p: float
+    top_k: int
+    min_p: float
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.temperature) or self.temperature < 0:
+            raise ValueError("sampling temperature must be finite and nonnegative")
+        for label, value in (("top_p", self.top_p), ("min_p", self.min_p)):
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"sampling {label} must be finite and in [0, 1]")
+        if isinstance(self.top_k, bool) or not isinstance(self.top_k, int) or self.top_k < 0:
+            raise ValueError("sampling top_k must be a nonnegative integer")
+
+
+GREEDY_SAMPLING = RequestSampling(temperature=0.0, top_p=1.0, top_k=1, min_p=0.0)
+SAMPLED_PROFILE_SAMPLING = RequestSampling(
+    temperature=SAMPLED_PROFILE_TEMPERATURE,
+    top_p=SAMPLED_PROFILE_TOP_P,
+    top_k=SAMPLED_PROFILE_TOP_K,
+    min_p=SAMPLED_PROFILE_MIN_P,
+)
+
+
 ROCM_BUILD_SPEC = SourceBuildSpec(
     backend="ROCm",
     features=BUILD_FEATURES,
@@ -306,6 +340,14 @@ def _variant_config(
             "response_oracle": RESPONSE_ORACLE,
             "response_oracle_integer_width": RESPONSE_ORACLE_INTEGER_WIDTH,
             "request_timeout_seconds": int(REQUEST_TIMEOUT_SECONDS),
+            "sampled_profile_max_tokens": SAMPLED_PROFILE_MAX_TOKENS,
+            "sampled_profile_min_p": SAMPLED_PROFILE_MIN_P,
+            "sampled_profile_prompt_words": SAMPLED_PROFILE_PROMPT_WORDS,
+            "sampled_profile_requests": SAMPLED_PROFILE_REQUESTS,
+            "sampled_profile_seed_offset": SAMPLED_PROFILE_SEED_OFFSET,
+            "sampled_profile_temperature": SAMPLED_PROFILE_TEMPERATURE,
+            "sampled_profile_top_k": SAMPLED_PROFILE_TOP_K,
+            "sampled_profile_top_p": SAMPLED_PROFILE_TOP_P,
             "slow_socket_buffer_bytes": SLOW_SOCKET_BUFFER_BYTES,
             "slow_max_tokens": SLOW_MAX_TOKENS,
             "startup_timeout_seconds": int(STARTUP_TIMEOUT_SECONDS),
@@ -523,6 +565,40 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "response_queue_delay_ms_p50": ("ms", "p50", True),
     "response_queue_delay_ms_p99": ("ms", "p99", True),
     "response_queue_delay_ms_p999": ("ms", "p99.9", True),
+    "sampled_profile_batching_batched_decode_forward_count": ("count", "sum", False),
+    "sampled_profile_batching_decode_forward_count": ("count", "sum", False),
+    "sampled_profile_batching_decode_row_count": ("rows", "sum", False),
+    "sampled_profile_batching_max_observed_batch_size_end": ("rows", "max", False),
+    "sampled_profile_batching_total_error_count": ("count", "sum", True),
+    "sampled_profile_completion_token_count": ("tokens", "sum", False),
+    "sampled_profile_decode_ms_p50": ("ms", "p50", True),
+    "sampled_profile_decode_ms_p99": ("ms", "p99", True),
+    "sampled_profile_decode_ms_total": ("ms", "sum", True),
+    "sampled_profile_decode_request_count": ("count", "sum", False),
+    "sampled_profile_duration_seconds": ("s", "exact", True),
+    "sampled_profile_e2e_ms_p50": ("ms", "p50", True),
+    "sampled_profile_e2e_ms_p99": ("ms", "p99", True),
+    "sampled_profile_fixed_output_mismatch_count": ("count", "sum", True),
+    "sampled_profile_latency_phase_metadata_missing_count": ("count", "sum", True),
+    "sampled_profile_length_terminated_request_count": ("count", "sum", False),
+    "sampled_profile_output_token_throughput_per_second": ("tokens/s", "rate", False),
+    "sampled_profile_per_request_output_token_throughput_per_second_p50": (
+        "tokens/s",
+        "p50",
+        False,
+    ),
+    "sampled_profile_readback_ms_total": ("ms", "sum", True),
+    "sampled_profile_readback_request_count": ("count", "sum", False),
+    "sampled_profile_request_count": ("count", "sum", False),
+    "sampled_profile_request_failure_count": ("count", "sum", True),
+    "sampled_profile_response_oracle_failure_count": ("count", "sum", True),
+    "sampled_profile_sampling_ms_p50": ("ms", "p50", True),
+    "sampled_profile_sampling_ms_p99": ("ms", "p99", True),
+    "sampled_profile_sampling_ms_total": ("ms", "sum", True),
+    "sampled_profile_sampling_request_count": ("count", "sum", False),
+    "sampled_profile_ttft_ms_p50": ("ms", "p50", True),
+    "sampled_profile_ttft_ms_p99": ("ms", "p99", True),
+    "sampled_profile_zero_token_response_count": ("count", "sum", True),
     "slo_goodput_requests_per_second": ("requests/s", "rate", False),
     "slow_consumer_peer_success_count": ("count", "sum", False),
     "ttft_ms_p50": ("ms", "p50", True),
@@ -1249,6 +1325,15 @@ def deterministic_response_oracle_failure(result: StreamResult) -> str | None:
     return None
 
 
+def sampled_response_oracle_failure(result: StreamResult) -> str | None:
+    output, structural_failure = streamed_plain_text(result)
+    if structural_failure is not None:
+        return structural_failure
+    if not output.strip():
+        return "sampled response contained no non-whitespace plain-text output"
+    return None
+
+
 def qualified_stream_success(result: StreamResult) -> bool:
     return result.success and deterministic_response_oracle_failure(result) is None
 
@@ -1270,6 +1355,7 @@ def request_body(
     seed: int,
     *,
     adapter: str | None = None,
+    sampling: RequestSampling = GREEDY_SAMPLING,
 ) -> dict[str, Any]:
     return {
         "model": MODEL_ID,
@@ -1277,10 +1363,10 @@ def request_body(
         "adapter": adapter,
         "max_tokens": max_tokens,
         "ignore_eos": True,
-        "temperature": 0.0,
-        "top_p": 1.0,
-        "top_k": 1,
-        "min_p": 0.0,
+        "temperature": sampling.temperature,
+        "top_p": sampling.top_p,
+        "top_k": sampling.top_k,
+        "min_p": sampling.min_p,
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
         "repetition_penalty": 1.0,
@@ -1436,6 +1522,7 @@ def run_stream(
     abort_event: threading.Event | None = None,
     request_timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
     adapter: str | None = None,
+    sampling: RequestSampling = GREEDY_SAMPLING,
 ) -> StreamResult:
     started = time.monotonic()
     if not math.isfinite(request_timeout_seconds) or request_timeout_seconds <= 0:
@@ -1474,6 +1561,7 @@ def run_stream(
             max_tokens,
             seed,
             adapter=adapter,
+            sampling=sampling,
         )
         payload = json.dumps(body, separators=(",", ":"))
         connection.request(
@@ -3568,6 +3656,221 @@ def batching_engine_drained(batching: Any) -> bool:
     return all(value == 0 for value in values.values())
 
 
+def wait_for_batching_drain(
+    port: int, absolute_deadline: float, label: str
+) -> dict[str, Any]:
+    deadline = min(time.monotonic() + 10.0, absolute_deadline)
+    last_fields: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        health = json_request(port, "GET", "/health")
+        runtime = health.get("decode_runtime")
+        batching = runtime.get("batching_engine") if isinstance(runtime, dict) else None
+        graph = runtime.get("rocm_graphs") if isinstance(runtime, dict) else None
+        if isinstance(batching, dict):
+            last_fields = {
+                field: batching.get(field)
+                for field in (
+                    "active_decode",
+                    "active_prefill",
+                    "active_resident_prefill",
+                    "active_staged_requests",
+                    "queue_depth",
+                )
+            }
+        graph_stable = not isinstance(graph, dict) or graph.get("state") != "busy"
+        if batching_engine_drained(batching) and graph_stable:
+            graph_snapshot(health)
+            batching_snapshot(health)
+            external_yield_sync_snapshot(health)
+            return health
+        time.sleep(0.05)
+    raise TimeoutError(f"{label} did not drain within 10 seconds; last state={last_fields}")
+
+
+def run_sampled_profile(
+    port: int, seed: int, absolute_deadline: float
+) -> list[StreamResult]:
+    barrier = threading.Barrier(SAMPLED_PROFILE_REQUESTS)
+    abort = threading.Event()
+
+    def run_one(index: int) -> StreamResult:
+        barrier.wait(
+            timeout=remaining_until(
+                absolute_deadline, "sampled profile dispatch", REQUEST_TIMEOUT_SECONDS
+            )
+        )
+        return run_stream(
+            port,
+            name=f"sampled-profile-{index:02d}",
+            marker=workload_marker(seed, f"sampled-profile-{index:02d}"),
+            prompt_words=SAMPLED_PROFILE_PROMPT_WORDS,
+            max_tokens=SAMPLED_PROFILE_MAX_TOKENS,
+            seed=seed + SAMPLED_PROFILE_SEED_OFFSET + index,
+            absolute_deadline=absolute_deadline,
+            abort_event=abort,
+            sampling=SAMPLED_PROFILE_SAMPLING,
+        )
+
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=SAMPLED_PROFILE_REQUESTS,
+        thread_name_prefix="qualification-sampled-profile",
+    )
+    futures = [pool.submit(run_one, index) for index in range(SAMPLED_PROFILE_REQUESTS)]
+    try:
+        return [
+            future.result(
+                timeout=remaining_until(absolute_deadline, "sampled profile")
+            )
+            for future in futures
+        ]
+    finally:
+        abort.set()
+        for future in futures:
+            future.cancel()
+        _, unfinished = concurrent.futures.wait(
+            futures,
+            timeout=max(0.0, min(10.0, absolute_deadline - time.monotonic())),
+        )
+        pool.shutdown(wait=False, cancel_futures=True)
+        if unfinished:
+            raise QualificationError(
+                f"sampled profile left {len(unfinished)} request workers during cleanup"
+            )
+
+
+def sampled_profile_metric_values(
+    results: list[StreamResult],
+    health_start: dict[str, Any],
+    health_end: dict[str, Any],
+) -> dict[str, float | int]:
+    successes = [
+        result
+        for result in results
+        if result.success and sampled_response_oracle_failure(result) is None
+    ]
+    start = min((result.started for result in results), default=time.monotonic())
+    finish = max((result.finished for result in results), default=start)
+    duration = max(finish - start, 1e-9)
+    completion_tokens = sum(result.completion_tokens for result in successes)
+    e2e = [result.e2e_ms for result in successes]
+    ttft = [result.ttft_ms for result in successes]
+    per_request_throughput = [
+        result.completion_tokens / max(result.finished - result.started, 1e-9)
+        for result in successes
+    ]
+
+    def phase_observations(phase: str) -> list[float]:
+        field = f"{phase}_ms"
+        return [
+            float(result.latency_phases[field])
+            for result in successes
+            if result.latency_phases is not None
+            and result.latency_phases[field] is not None
+        ]
+
+    decode = phase_observations("decode")
+    sampling = phase_observations("sampling")
+    readback = phase_observations("readback")
+    batching_start = batching_snapshot(health_start)
+    batching_end = batching_snapshot(health_end)
+    return {
+        "sampled_profile_batching_batched_decode_forward_count": counter_delta(
+            batching_start, batching_end, "total_batched_decode_forwards"
+        ),
+        "sampled_profile_batching_decode_forward_count": counter_delta(
+            batching_start, batching_end, "total_decode_forwards"
+        ),
+        "sampled_profile_batching_decode_row_count": counter_delta(
+            batching_start, batching_end, "total_decode_rows"
+        ),
+        "sampled_profile_batching_max_observed_batch_size_end": batching_end[
+            "max_observed_batch_size"
+        ],
+        "sampled_profile_batching_total_error_count": counter_delta(
+            batching_start, batching_end, "total_errors"
+        ),
+        "sampled_profile_completion_token_count": completion_tokens,
+        "sampled_profile_decode_ms_p50": percentile_r7(decode, 0.5),
+        "sampled_profile_decode_ms_p99": percentile_r7(decode, 0.99),
+        "sampled_profile_decode_ms_total": sum(decode),
+        "sampled_profile_decode_request_count": len(decode),
+        "sampled_profile_duration_seconds": duration,
+        "sampled_profile_e2e_ms_p50": percentile_r7(e2e, 0.5),
+        "sampled_profile_e2e_ms_p99": percentile_r7(e2e, 0.99),
+        "sampled_profile_fixed_output_mismatch_count": sum(
+            result.finish_reason != "length"
+            or result.completion_tokens != SAMPLED_PROFILE_MAX_TOKENS
+            for result in results
+        ),
+        "sampled_profile_latency_phase_metadata_missing_count": sum(
+            result.latency_phases is None for result in successes
+        ),
+        "sampled_profile_length_terminated_request_count": sum(
+            result.finish_reason == "length" for result in successes
+        ),
+        "sampled_profile_output_token_throughput_per_second": completion_tokens
+        / duration,
+        "sampled_profile_per_request_output_token_throughput_per_second_p50": percentile_r7(
+            per_request_throughput, 0.5
+        ),
+        "sampled_profile_readback_ms_total": sum(readback),
+        "sampled_profile_readback_request_count": len(readback),
+        "sampled_profile_request_count": len(results),
+        "sampled_profile_request_failure_count": len(results) - len(successes),
+        "sampled_profile_response_oracle_failure_count": sum(
+            sampled_response_oracle_failure(result) is not None for result in results
+        ),
+        "sampled_profile_sampling_ms_p50": percentile_r7(sampling, 0.5),
+        "sampled_profile_sampling_ms_p99": percentile_r7(sampling, 0.99),
+        "sampled_profile_sampling_ms_total": sum(sampling),
+        "sampled_profile_sampling_request_count": len(sampling),
+        "sampled_profile_ttft_ms_p50": percentile_r7(ttft, 0.5),
+        "sampled_profile_ttft_ms_p99": percentile_r7(ttft, 0.99),
+        "sampled_profile_zero_token_response_count": sum(
+            result.completion_tokens == 0 for result in results
+        ),
+    }
+
+
+def sampled_profile_contract_failures(
+    values: dict[str, float | int],
+) -> list[str]:
+    failures: list[str] = []
+    expected_tokens = SAMPLED_PROFILE_REQUESTS * SAMPLED_PROFILE_MAX_TOKENS
+    exact_expectations = {
+        "sampled_profile_request_count": SAMPLED_PROFILE_REQUESTS,
+        "sampled_profile_request_failure_count": 0,
+        "sampled_profile_response_oracle_failure_count": 0,
+        "sampled_profile_fixed_output_mismatch_count": 0,
+        "sampled_profile_completion_token_count": expected_tokens,
+        "sampled_profile_length_terminated_request_count": SAMPLED_PROFILE_REQUESTS,
+        "sampled_profile_latency_phase_metadata_missing_count": 0,
+        "sampled_profile_decode_request_count": SAMPLED_PROFILE_REQUESTS,
+        "sampled_profile_sampling_request_count": SAMPLED_PROFILE_REQUESTS,
+        "sampled_profile_readback_request_count": 0,
+        "sampled_profile_batching_total_error_count": 0,
+        "sampled_profile_zero_token_response_count": 0,
+    }
+    for name, expected in exact_expectations.items():
+        if values.get(name) != expected:
+            failures.append(
+                f"{name}={values.get(name)!r}, expected exact value {expected}"
+            )
+    if values.get("sampled_profile_sampling_ms_total", 0) <= 0:
+        failures.append("sampled profile reported no positive sampling-tail duration")
+    if values.get("sampled_profile_decode_ms_total", 0) <= 0:
+        failures.append("sampled profile reported no positive actor-decode duration")
+    if values.get("sampled_profile_batching_batched_decode_forward_count", 0) < 1:
+        failures.append("sampled profile executed no batched decode forward")
+    decode_forwards = values.get("sampled_profile_batching_decode_forward_count", 0)
+    decode_rows = values.get("sampled_profile_batching_decode_row_count", 0)
+    if decode_rows <= decode_forwards:
+        failures.append("sampled profile decode rows do not prove multi-row batching")
+    if values.get("sampled_profile_batching_max_observed_batch_size_end", 0) < 2:
+        failures.append("sampled profile never observed a multi-row decode batch")
+    return failures
+
+
 def cancellation_recorded(records: list[Any], marker: str) -> bool:
     return any(
         isinstance(record, dict)
@@ -3672,6 +3975,7 @@ def classify_itl_outliers(
 def metric_values(
     *,
     measured: list[StreamResult],
+    sampled_profile: list[StreamResult],
     warmup: StreamResult,
     long_prefill: StreamResult,
     cancellation_confirmed: bool,
@@ -3680,6 +3984,8 @@ def metric_values(
     pressure_window: DeliveryPressureWindow | None,
     peak_memory: int,
     health_after_warmup: dict[str, Any],
+    health_before_sampled_profile: dict[str, Any],
+    health_after_sampled_profile: dict[str, Any],
     health_measurement_start: dict[str, Any],
     health_end: dict[str, Any],
     events: list[ObservedEvent],
@@ -3868,6 +4174,13 @@ def metric_values(
     values.update(external_yield_sync)
     values.update(pressure_peer_timing_values(pressure_peer, pressure_window))
     values.update(latency_phase_metric_values(successes))
+    values.update(
+        sampled_profile_metric_values(
+            sampled_profile,
+            health_before_sampled_profile,
+            health_after_sampled_profile,
+        )
+    )
     for phase_name in GRAPH_PHASE_NAMES:
         values[f"graph_{phase_name}_call_count"] = counter_delta(
             graph_start, graph_end, f"phase_{phase_name}_calls"
@@ -4123,6 +4436,22 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 f"ROCm graph warmup did not capture and replay within {MAX_WARMUP_REQUESTS} requests"
             )
         assert warmup is not None
+        health_before_sampled_profile = health_measurement_start
+        sampled_profile = run_sampled_profile(port, seed, overall_deadline)
+        health_after_sampled_profile = wait_for_batching_drain(
+            port, overall_deadline, "sampled profile"
+        )
+        sampled_profile_attestation = attest_runtime(
+            variant,
+            health_after_sampled_profile,
+            json_request(port, "GET", "/v1/debug/model-state"),
+        )
+        if sampled_profile_attestation:
+            raise QualificationError(
+                "post-sampled-profile runtime attestation failed: "
+                + " | ".join(sampled_profile_attestation)
+            )
+        health_measurement_start = health_after_sampled_profile
         measurement_started = time.monotonic()
         sampler.start()
         first_token = threading.Event()
@@ -4282,6 +4611,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         policy_events = server_log.events_since(policy_events_started)
         values = metric_values(
             measured=measured,
+            sampled_profile=sampled_profile,
             warmup=warmup,
             long_prefill=long_prefill,
             cancellation_confirmed=cancellation_confirmed,
@@ -4290,6 +4620,8 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             pressure_window=pressure_window,
             peak_memory=max(sampler.samples, default=0),
             health_after_warmup=health_measurement_start,
+            health_before_sampled_profile=health_before_sampled_profile,
+            health_after_sampled_profile=health_after_sampled_profile,
             health_measurement_start=health_measurement_start,
             health_end=health_end,
             events=measurement_events,
@@ -4306,6 +4638,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 final_blocks_total=batching_snapshot(health_end)["blocks_total"],
             ),
         ]
+        status_failures.extend(sampled_profile_contract_failures(values))
         for phase, metric_name in (
             ("admission", "batching_slow_admission_count"),
             ("prefill", "batching_slow_prefill_forward_count"),
@@ -4421,6 +4754,23 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             status_failures.append("GPU memory sampler collected no values")
         if sampler.errors:
             status_failures.append("GPU memory sampler errors: " + ", ".join(sampler.errors))
+        for sampled_result in sampled_profile:
+            trace(
+                "sampled_profile_result",
+                completion_tokens=sampled_result.completion_tokens,
+                e2e_ms=sampled_result.e2e_ms,
+                error=sampled_result.error,
+                finish_reason=sampled_result.finish_reason,
+                name=sampled_result.name,
+                response_oracle_failure=sampled_response_oracle_failure(sampled_result),
+                response_text=bounded_response_text(sampled_result),
+                sampling_ms=(
+                    sampled_result.latency_phases.get("sampling_ms")
+                    if sampled_result.latency_phases is not None
+                    else None
+                ),
+                ttft_ms=sampled_result.ttft_ms,
+            )
         for result in [warmup, *measured, cancellation]:
             trace(
                 "request_result",
