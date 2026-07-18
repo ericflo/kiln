@@ -83,6 +83,8 @@ SAMPLED_PROFILE_TEMPERATURE = 0.7
 SAMPLED_PROFILE_TOP_P = 0.9
 SAMPLED_PROFILE_TOP_K = 40
 SAMPLED_PROFILE_MIN_P = 0.0
+SAMPLED_PROFILE_ORDER = "after_measured_deterministic_window"
+SAMPLED_PROFILE_POST_DETERMINISM_CANARY = "exact_replay_of_normal_00_v1"
 SLOW_MAX_TOKENS = 4096
 CANCELLATION_AFTER_DELTAS = 4
 MEMORY_POLL_INTERVAL_SECONDS = 0.5
@@ -350,6 +352,10 @@ def _variant_config(
             "request_timeout_seconds": int(REQUEST_TIMEOUT_SECONDS),
             "sampled_profile_max_tokens": SAMPLED_PROFILE_MAX_TOKENS,
             "sampled_profile_min_p": SAMPLED_PROFILE_MIN_P,
+            "sampled_profile_order": SAMPLED_PROFILE_ORDER,
+            "sampled_profile_post_determinism_canary": (
+                SAMPLED_PROFILE_POST_DETERMINISM_CANARY
+            ),
             "sampled_profile_prompt_words": SAMPLED_PROFILE_PROMPT_WORDS,
             "sampled_profile_requests": SAMPLED_PROFILE_REQUESTS,
             "sampled_profile_seed_offset": SAMPLED_PROFILE_SEED_OFFSET,
@@ -645,6 +651,21 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "sampled_profile_per_request_output_token_throughput_per_second_p50": (
         "tokens/s",
         "p50",
+        False,
+    ),
+    "sampled_profile_post_determinism_canary_completion_token_count": (
+        "tokens",
+        "exact",
+        False,
+    ),
+    "sampled_profile_post_determinism_canary_failure_count": (
+        "count",
+        "sum",
+        True,
+    ),
+    "sampled_profile_post_determinism_canary_token_match_count": (
+        "count",
+        "sum",
         False,
     ),
     "sampled_profile_readback_ms_total": ("ms", "sum", True),
@@ -1436,6 +1457,54 @@ def token_id_diagnostic(result: StreamResult) -> str:
             separators=(",", ":"),
         )
     return f"token_ids_sha256=sha256:{digest}; token_ids={rendered}"
+
+
+def post_sampled_determinism_canary_failures(
+    baseline: StreamResult, canary: StreamResult
+) -> list[str]:
+    failures: list[str] = []
+    if baseline.name != "normal-00":
+        failures.append(
+            f"post-sampled determinism baseline must be normal-00, got {baseline.name!r}"
+        )
+    if baseline.marker != canary.marker:
+        failures.append("post-sampled determinism canary changed the prompt marker")
+    for label, result in (("baseline", baseline), ("canary", canary)):
+        oracle_failure = deterministic_response_oracle_failure(result)
+        if not result.success or oracle_failure is not None:
+            failures.append(
+                f"post-sampled determinism {label} failed {RESPONSE_ORACLE}: "
+                f"{result.error or oracle_failure or result.finish_reason}; "
+                f"{token_id_diagnostic(result)}"
+            )
+        if len(result.token_ids) != result.completion_tokens:
+            failures.append(
+                f"post-sampled determinism {label} retained "
+                f"{len(result.token_ids)} token IDs for "
+                f"{result.completion_tokens} completion tokens"
+            )
+    if baseline.prompt_tokens != canary.prompt_tokens:
+        failures.append(
+            "post-sampled determinism canary changed prompt tokenization: "
+            f"{baseline.prompt_tokens} != {canary.prompt_tokens}"
+        )
+    if baseline.finish_reason != canary.finish_reason:
+        failures.append(
+            "post-sampled determinism canary changed finish reason: "
+            f"{baseline.finish_reason!r} != {canary.finish_reason!r}"
+        )
+    if baseline.completion_tokens != canary.completion_tokens:
+        failures.append(
+            "post-sampled determinism canary changed completion count: "
+            f"{baseline.completion_tokens} != {canary.completion_tokens}"
+        )
+    if baseline.token_ids != canary.token_ids:
+        failures.append(
+            "post-sampled determinism canary token IDs differ: "
+            f"baseline {token_id_diagnostic(baseline)}; "
+            f"canary {token_id_diagnostic(canary)}"
+        )
+    return failures
 
 
 def request_body(
@@ -4065,6 +4134,8 @@ def metric_values(
     *,
     measured: list[StreamResult],
     sampled_profile: list[StreamResult],
+    determinism_baseline: StreamResult,
+    post_sampled_determinism_canary: StreamResult,
     warmup: StreamResult,
     long_prefill: StreamResult,
     cancellation_confirmed: bool,
@@ -4098,6 +4169,18 @@ def metric_values(
     prompt_tokens = sum(result.prompt_tokens for result in successes)
     failures = len(measured) - len(successes)
     zero_tokens = sum(result.completion_tokens == 0 for result in measured)
+    determinism_canary_failures = post_sampled_determinism_canary_failures(
+        determinism_baseline, post_sampled_determinism_canary
+    )
+    determinism_token_match = (
+        bool(determinism_baseline.token_ids)
+        and determinism_baseline.token_ids
+        == post_sampled_determinism_canary.token_ids
+        and len(determinism_baseline.token_ids)
+        == determinism_baseline.completion_tokens
+        and len(post_sampled_determinism_canary.token_ids)
+        == post_sampled_determinism_canary.completion_tokens
+    )
     slo_good = sum(
         result.ttft_ms <= SLO_TTFT_MS and result.e2e_ms <= SLO_E2E_MS
         for result in successes
@@ -4252,6 +4335,15 @@ def metric_values(
         "response_queue_delay_ms_p50": percentile_r7(queue_delays, 0.5),
         "response_queue_delay_ms_p99": percentile_r7(queue_delays, 0.99),
         "response_queue_delay_ms_p999": percentile_r7(queue_delays, 0.999),
+        "sampled_profile_post_determinism_canary_completion_token_count": (
+            post_sampled_determinism_canary.completion_tokens
+        ),
+        "sampled_profile_post_determinism_canary_failure_count": int(
+            bool(determinism_canary_failures)
+        ),
+        "sampled_profile_post_determinism_canary_token_match_count": int(
+            determinism_token_match
+        ),
         "slo_goodput_requests_per_second": slo_good / window,
         "slow_consumer_peer_success_count": slow_peer_success,
         "ttft_ms_p50": percentile_r7(ttfts, 0.5),
@@ -4545,23 +4637,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 f"ROCm graph warmup did not capture and replay within {MAX_WARMUP_REQUESTS} requests"
             )
         assert warmup is not None
-        health_before_sampled_profile = health_measurement_start
-        thermal_guard.set_phase("sampled-profile")
-        sampled_profile = run_sampled_profile(port, seed, overall_deadline)
-        health_after_sampled_profile = wait_for_batching_drain(
-            port, overall_deadline, "sampled profile"
-        )
-        sampled_profile_attestation = attest_runtime(
-            variant,
-            health_after_sampled_profile,
-            json_request(port, "GET", "/v1/debug/model-state"),
-        )
-        if sampled_profile_attestation:
-            raise QualificationError(
-                "post-sampled-profile runtime attestation failed: "
-                + " | ".join(sampled_profile_attestation)
-            )
-        health_measurement_start = health_after_sampled_profile
+        health_after_warmup = health_measurement_start
         measurement_started = time.monotonic()
         thermal_guard.set_phase("measurement")
         sampler.start()
@@ -4713,19 +4789,72 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         )
         if process.poll() is not None:
             raise QualificationError(f"server exited during mixed load ({process.returncode})")
+        measurement_events = server_log.events_since(measurement_started)
+        measurement_events.extend(
+            thermal_guard.pacing_events_since(measurement_started)
+        )
+
+        # Keep randomized sampling out of the deterministic acceptance window.
+        # The server process remains shared so the profile still exercises the
+        # production lifecycle, but its cache and recurrent-state effects cannot
+        # alter the fixed-output correctness and historical performance sample.
+        health_before_sampled_profile = health_end
+        thermal_guard.set_phase("sampled-profile")
+        sampled_profile = run_sampled_profile(port, seed, overall_deadline)
+        health_after_sampled_profile = wait_for_batching_drain(
+            port, overall_deadline, "sampled profile"
+        )
+        sampled_profile_attestation = attest_runtime(
+            variant,
+            health_after_sampled_profile,
+            json_request(port, "GET", "/v1/debug/model-state"),
+        )
+        if sampled_profile_attestation:
+            raise QualificationError(
+                "post-sampled-profile runtime attestation failed: "
+                + " | ".join(sampled_profile_attestation)
+            )
+        determinism_baseline = next(
+            result for result in measured if result.name == "normal-00"
+        )
+        thermal_guard.set_phase("post-sampled-determinism-canary")
+        post_sampled_determinism_canary = run_stream(
+            port,
+            name="post-sampled-determinism-canary",
+            marker=determinism_baseline.marker,
+            prompt_words=normal_word_counts[0],
+            max_tokens=NORMAL_MAX_TOKENS,
+            seed=seed + 10,
+            absolute_deadline=overall_deadline,
+        )
+        health_after_post_sampled_canary = wait_for_batching_drain(
+            port, overall_deadline, "post-sampled determinism canary"
+        )
+        post_sampled_canary_attestation = attest_runtime(
+            variant,
+            health_after_post_sampled_canary,
+            json_request(port, "GET", "/v1/debug/model-state"),
+        )
+        if post_sampled_canary_attestation:
+            raise QualificationError(
+                "post-sampled determinism canary runtime attestation failed: "
+                + " | ".join(post_sampled_canary_attestation)
+            )
+        if process.poll() is not None:
+            raise QualificationError(
+                f"server exited during post-sampled determinism canary ({process.returncode})"
+            )
         long_prefill = next(result for result in measured if result.name == "long-prefill")
         pressure_peer = next(result for result in measured if result.name == "pressure-peer")
         slow_peer_success = int(
             healthy_peer_overlaps_pressure(pressure_peer, pressure_window)
         )
-        measurement_events = server_log.events_since(measurement_started)
-        measurement_events.extend(
-            thermal_guard.pacing_events_since(measurement_started)
-        )
         policy_events = server_log.events_since(policy_events_started)
         values = metric_values(
             measured=measured,
             sampled_profile=sampled_profile,
+            determinism_baseline=determinism_baseline,
+            post_sampled_determinism_canary=post_sampled_determinism_canary,
             warmup=warmup,
             long_prefill=long_prefill,
             cancellation_confirmed=cancellation_confirmed,
@@ -4733,7 +4862,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             pressure_peer=pressure_peer,
             pressure_window=pressure_window,
             peak_memory=max(sampler.samples, default=0),
-            health_after_warmup=health_measurement_start,
+            health_after_warmup=health_after_warmup,
             health_before_sampled_profile=health_before_sampled_profile,
             health_after_sampled_profile=health_after_sampled_profile,
             health_measurement_start=health_measurement_start,
@@ -4752,10 +4881,17 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 initial_blocks_total=batching_snapshot(health_before_warmup)[
                     "blocks_total"
                 ],
-                final_blocks_total=batching_snapshot(health_end)["blocks_total"],
+                final_blocks_total=batching_snapshot(
+                    health_after_post_sampled_canary
+                )["blocks_total"],
             ),
         ]
         status_failures.extend(sampled_profile_contract_failures(values))
+        status_failures.extend(
+            post_sampled_determinism_canary_failures(
+                determinism_baseline, post_sampled_determinism_canary
+            )
+        )
         if thermal_guard.trip_reason is not None:
             status_failures.append(thermal_guard.trip_reason)
         if thermal_guard.errors:
@@ -4897,7 +5033,12 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 ),
                 ttft_ms=sampled_result.ttft_ms,
             )
-        for result in [warmup, *measured, cancellation]:
+        for result in [
+            warmup,
+            *measured,
+            cancellation,
+            post_sampled_determinism_canary,
+        ]:
             trace(
                 "request_result",
                 cancelled=result.cancelled,
@@ -4927,8 +5068,10 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             slow.close()
         sampler.close()
         thermal_guard.set_phase("teardown")
-        thermal_guard.close()
-        shutdown_outcome = terminate_process(process)
+        try:
+            shutdown_outcome = terminate_process(process)
+        finally:
+            thermal_guard.close()
         server_log.join()
         snapshot_residue = snapshot_payload_residue(snapshot_dir)
         trace(

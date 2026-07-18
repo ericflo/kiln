@@ -652,6 +652,28 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertIn("token_ids=[0,42,248319]", normal_failure)
         self.assertRegex(normal_failure, r"token_ids_sha256=sha256:[0-9a-f]{64}")
 
+    def test_post_sampled_canary_requires_exact_token_replay(self) -> None:
+        baseline = stream_result_with_text("000000", name="normal-00")
+        canary = stream_result_with_text(
+            "000000", name="post-sampled-determinism-canary"
+        )
+        baseline.token_ids = [15, 16]
+        canary.token_ids = [15, 16]
+
+        self.assertEqual(
+            serve.post_sampled_determinism_canary_failures(baseline, canary),
+            [],
+        )
+
+        canary.token_ids[-1] = 17
+        failures = serve.post_sampled_determinism_canary_failures(
+            baseline, canary
+        )
+        self.assertTrue(any("token IDs differ" in failure for failure in failures))
+        self.assertTrue(
+            all("token_ids_sha256=sha256:" in failure for failure in failures)
+        )
+
     def test_sampled_response_oracle_accepts_arbitrary_plain_text_only(self) -> None:
         result = stream_result_with_text("not an ascending sequence")
         self.assertIsNone(serve.sampled_response_oracle_failure(result))
@@ -1071,6 +1093,10 @@ class ServeMixedLoadTests(unittest.TestCase):
             "request_timeout_seconds": int(serve.REQUEST_TIMEOUT_SECONDS),
             "sampled_profile_max_tokens": serve.SAMPLED_PROFILE_MAX_TOKENS,
             "sampled_profile_min_p": serve.SAMPLED_PROFILE_MIN_P,
+            "sampled_profile_order": serve.SAMPLED_PROFILE_ORDER,
+            "sampled_profile_post_determinism_canary": (
+                serve.SAMPLED_PROFILE_POST_DETERMINISM_CANARY
+            ),
             "sampled_profile_prompt_words": serve.SAMPLED_PROFILE_PROMPT_WORDS,
             "sampled_profile_requests": serve.SAMPLED_PROFILE_REQUESTS,
             "sampled_profile_seed_offset": serve.SAMPLED_PROFILE_SEED_OFFSET,
@@ -1190,6 +1216,8 @@ class ServeMixedLoadTests(unittest.TestCase):
         process = mock.Mock(pid=4321)
         server_log = mock.Mock()
         guard = mock.Mock()
+        lifecycle: list[str] = []
+        guard.close.side_effect = lambda: lifecycle.append("guard.close")
         guard.trip_reason = "host k10temp/Tctl reached the safety limit"
         guard.errors = ["sensor read failed"]
         guard.metric_values.return_value = {
@@ -1238,7 +1266,10 @@ class ServeMixedLoadTests(unittest.TestCase):
                 mock.patch.object(
                     serve,
                     "terminate_process",
-                    return_value=serve.ShutdownOutcome(0, False, 10.0),
+                    side_effect=lambda _process: (
+                        lifecycle.append("terminate_process")
+                        or serve.ShutdownOutcome(0, False, 10.0)
+                    ),
                 ),
                 mock.patch.object(
                     serve, "snapshot_payload_residue", return_value=[]
@@ -1255,6 +1286,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(values["host_thermal_pacing_event_count"], 1)
         self.assertIn("startup failed closed", details or "")
         self.assertIn("sensor read failed", details or "")
+        self.assertEqual(lifecycle, ["terminate_process", "guard.close"])
 
     def test_cargo_resolution_uses_rustup_home_when_path_omits_cargo(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2764,7 +2796,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
 
     def test_metric_values_use_runtime_counter_deltas(self) -> None:
         result = serve.StreamResult(
-            name="long-prefill",
+            name="normal-00",
             marker="m",
             started=1.0,
             finished=1.5,
@@ -2778,6 +2810,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             done=True,
             cancelled=False,
             error=None,
+            token_ids=[15, 15],
             semantic_deltas=[
                 {"choices": [{"delta": {"content": "000000"}}]}
             ],
@@ -2918,6 +2951,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         values = serve.metric_values(
             measured=[result],
             sampled_profile=[],
+            determinism_baseline=result,
+            post_sampled_determinism_canary=result,
             warmup=warmup,
             long_prefill=result,
             cancellation_confirmed=True,
@@ -2940,6 +2975,18 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["client_backpressure_event_count"], 2)
         self.assertEqual(values["client_backpressure_wait_ms"], 750)
         self.assertEqual(values["client_stall_eviction_count"], 1)
+        self.assertEqual(
+            values[
+                "sampled_profile_post_determinism_canary_completion_token_count"
+            ],
+            2,
+        )
+        self.assertEqual(
+            values["sampled_profile_post_determinism_canary_failure_count"], 0
+        )
+        self.assertEqual(
+            values["sampled_profile_post_determinism_canary_token_match_count"], 1
+        )
         self.assertAlmostEqual(
             values["pressure_peer_first_ready_after_dispatch_ms"], 100.0
         )
