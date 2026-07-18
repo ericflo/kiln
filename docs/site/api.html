@@ -1779,7 +1779,18 @@ kiln serve --config kiln.toml</code></pre>
           output, forbids explanation, refusal, summaries, and output-limit discussion, and uses
           only nonnumeric <code>itemNN</code> padding that is explicitly unrelated to output length.
           Receipts record both the prompt identity and
-          <code>response_oracle_target_integer_count = 1024</code> for exact A/B configuration identity.
+          <code>response_oracle_target_integer_count = 1024</code>, plus
+          <code>long_prefill_marker_role = "long-prefill"</code>. The diagnostic and acceptance
+          paths therefore tokenize the same named long request for exact A/B configuration identity.
+        </p>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          Slow-consumer containment dispatches its pressure peer before opening the stalled socket
+          and waits for that peer's first producer-ready token. Acceptance then requires additional
+          producer-ready tokens during and after the request-attributed backpressure window. The
+          typed schedule records
+          <code>pressure_peer_dispatch = "before_slow_start_after_first_token"</code>, proving
+          continuity of an already-decoding request instead of comparing a queued peer with a
+          pressure interval that began first.
         </p>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           The same ROCm gate records a typed Strix Halo thermal policy across server startup,

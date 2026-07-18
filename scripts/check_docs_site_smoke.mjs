@@ -1289,6 +1289,9 @@ function validateSftLossRouteDocumentationSourceContract() {
     'exactly 1,024 ascending six-digit integers',
     'server truncation before the target is expected',
     'response_oracle_target_integer_count = 1024',
+    'long_prefill_marker_role = "long-prefill"',
+    'before_slow_start_after_first_token',
+    'first producer-ready token',
   ]);
   if (missingApiTerms.length > 0) {
     fail(`docs/site/api.html: SFT v4 versus GRPO/OPD v3 checkpoint wording missing terms: ${missingApiTerms.join(', ')}`);

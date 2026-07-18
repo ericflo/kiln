@@ -75,9 +75,11 @@ NORMAL_REQUESTS = 8
 NORMAL_MAX_TOKENS = 128
 LONG_PREFILL_WORDS = 1536
 LONG_PREFILL_MAX_TOKENS = 32
+LONG_PREFILL_MARKER_ROLE = "long-prefill"
 PRESSURE_PEER_PROMPT_WORDS = 64
 PRESSURE_PEER_MAX_TOKENS = 128
 PRESSURE_PEER_SEED_OFFSET = 103
+PRESSURE_PEER_DISPATCH = "before_slow_start_after_first_token"
 WARMUP_MAX_TOKENS = 32
 MAX_WARMUP_REQUESTS = 4
 SAMPLED_PROFILE_REQUESTS = 8
@@ -334,6 +336,7 @@ def _variant_config(
         },
         "workload": {
             "cancellation_after_semantic_deltas": CANCELLATION_AFTER_DELTAS,
+            "long_prefill_marker_role": LONG_PREFILL_MARKER_ROLE,
             "long_prefill_max_tokens": LONG_PREFILL_MAX_TOKENS,
             "long_prefill_words": LONG_PREFILL_WORDS,
             "max_warmup_requests": MAX_WARMUP_REQUESTS,
@@ -347,7 +350,7 @@ def _variant_config(
             "outlier_history_size": OUTLIER_HISTORY_SIZE,
             "outlier_multiplier": int(OUTLIER_MULTIPLIER),
             "overall_timeout_seconds": int(OVERALL_TIMEOUT_SECONDS),
-            "pressure_peer_dispatch": "after_slow_headers_before_pressure_wait",
+            "pressure_peer_dispatch": PRESSURE_PEER_DISPATCH,
             "pressure_peer_max_tokens": PRESSURE_PEER_MAX_TOKENS,
             "pressure_peer_prompt_words": PRESSURE_PEER_PROMPT_WORDS,
             "pressure_peer_seed_offset": PRESSURE_PEER_SEED_OFFSET,
@@ -4870,7 +4873,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 run_stream,
                 port,
                 name="long-prefill",
-                marker=workload_marker(seed, "long"),
+                marker=workload_marker(seed, LONG_PREFILL_MARKER_ROLE),
                 prompt_words=LONG_PREFILL_WORDS,
                 max_tokens=LONG_PREFILL_MAX_TOKENS,
                 seed=seed + 100,
@@ -4890,6 +4893,30 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 abort_event=abort_workers,
             )
             submitted.extend((long_future, cancel_future))
+            pressure_peer_first_token = threading.Event()
+            pressure_peer_future = pool.submit(
+                run_stream,
+                port,
+                name="pressure-peer",
+                marker=workload_marker(seed, "pressure-peer"),
+                prompt_words=PRESSURE_PEER_PROMPT_WORDS,
+                max_tokens=PRESSURE_PEER_MAX_TOKENS,
+                seed=seed + PRESSURE_PEER_SEED_OFFSET,
+                first_token_event=pressure_peer_first_token,
+                absolute_deadline=overall_deadline,
+                abort_event=abort_workers,
+            )
+            submitted.append(pressure_peer_future)
+            if not pressure_peer_first_token.wait(
+                timeout=remaining_until(
+                    overall_deadline,
+                    "pressure peer first token",
+                    REQUEST_TIMEOUT_SECONDS,
+                )
+            ):
+                raise QualificationError(
+                    "pressure peer did not produce a token before slow-consumer pressure"
+                )
             pressure_observed_since = time.monotonic()
             slow_pressure_baseline = batching_snapshot(
                 json_request(port, "GET", "/health")
@@ -4902,18 +4929,6 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 raise TimeoutError("slow consumer did not report response headers")
             if slow.error is not None:
                 raise QualificationError(f"slow consumer failed: {slow.error}")
-            pressure_peer_future = pool.submit(
-                run_stream,
-                port,
-                name="pressure-peer",
-                marker=workload_marker(seed, "pressure-peer"),
-                prompt_words=PRESSURE_PEER_PROMPT_WORDS,
-                max_tokens=PRESSURE_PEER_MAX_TOKENS,
-                seed=seed + PRESSURE_PEER_SEED_OFFSET,
-                absolute_deadline=overall_deadline,
-                abort_event=abort_workers,
-            )
-            submitted.append(pressure_peer_future)
             pressure_window, delivery_pressure_observed, _ = wait_for_delivery_pressure(
                 port,
                 slow_pressure_baseline,

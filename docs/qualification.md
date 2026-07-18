@@ -643,8 +643,10 @@ for one million integers. The instruction requires immediate sequence output
 and forbids early stopping, end markers, explanation, refusal, summaries, or
 discussion of output limits. Prompt-length padding uses nonnumeric `itemNN`
 tokens and explicitly has no relationship to response length. Every arm records
-both the prompt identity and `response_oracle_target_integer_count = 1024`, so a
-wording or denominator change invalidates direct A/B configuration identity.
+the prompt identity, `response_oracle_target_integer_count = 1024`, and
+`long_prefill_marker_role = "long-prefill"`. The diagnostic and acceptance
+paths therefore tokenize the same named long request; a wording, denominator,
+or marker-role change invalidates direct A/B configuration identity.
 
 Before the ordinary mixed-load measurement window, every ROCm arm also runs a
 separate fixed-seed sampled profile at concurrency eight: 32 tokens per request,
@@ -1112,7 +1114,9 @@ final layer completes. Every third prefill dispatch remains round-robin; the
 other two may accelerate the shortest tail of at most four token chunks.
 The receipt records this bounded-priority count and fails when the mixed
 workload does not exercise it. Any ITL outlier remains a failure even when its
-phase is explained.
+phase is explained unless it overlaps the required named-host thermal pacing
+controller. Thermal-attributed counts must reconcile exactly; non-thermal
+attributed and unexplained counts remain disqualifying.
 The same run attests an effective decode width of eight, four bounded
 short-prefill staging slots, and a total active-request ceiling of twelve in
 both health and debug state. It also requires a maximum staged-priority burst
@@ -1125,6 +1129,12 @@ occupancy, and the waiting queue all to reach zero. This proves that the latency
 path ran without treating the staging capacity as a wider backend decode batch
 or accepting an active prefill as drained.
 The pressure peer also requires terminal request-scoped performance metadata.
+The driver dispatches it before the slow consumer and waits for its first
+producer-ready token before opening the stalled socket. The acceptance window
+then requires further producer-ready tokens during and after the slow
+consumer's request-attributed backpressure interval. This ordering proves
+continuity of an already-decoding peer instead of falsely requiring a queued
+request to have emitted before a pressure window that already started.
 Its actor queue, slot-admission, and admission-to-first-ready wall durations are
 recorded separately and must fit inside TTFT; accumulated model prefill must fit
 inside admission plus admitted-prefill wall time. Missing, duplicate,

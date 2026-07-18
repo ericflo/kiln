@@ -1107,6 +1107,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         }
         expected_schedule = {
             "cancellation_after_semantic_deltas": serve.CANCELLATION_AFTER_DELTAS,
+            "long_prefill_marker_role": serve.LONG_PREFILL_MARKER_ROLE,
             "long_prefill_max_tokens": serve.LONG_PREFILL_MAX_TOKENS,
             "long_prefill_words": serve.LONG_PREFILL_WORDS,
             "max_warmup_requests": serve.MAX_WARMUP_REQUESTS,
@@ -1120,7 +1121,7 @@ class ServeMixedLoadTests(unittest.TestCase):
             "outlier_history_size": serve.OUTLIER_HISTORY_SIZE,
             "outlier_multiplier": int(serve.OUTLIER_MULTIPLIER),
             "overall_timeout_seconds": int(serve.OVERALL_TIMEOUT_SECONDS),
-            "pressure_peer_dispatch": "after_slow_headers_before_pressure_wait",
+            "pressure_peer_dispatch": serve.PRESSURE_PEER_DISPATCH,
             "pressure_peer_max_tokens": serve.PRESSURE_PEER_MAX_TOKENS,
             "pressure_peer_prompt_words": serve.PRESSURE_PEER_PROMPT_WORDS,
             "pressure_peer_seed_offset": serve.PRESSURE_PEER_SEED_OFFSET,
@@ -3282,6 +3283,15 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             for variant in serve.VARIANT_CONFIGS
         }
         self.assertEqual(set(markers.values()), {"QUAL-20260709-normal-00"})
+        self.assertEqual(serve.LONG_PREFILL_MARKER_ROLE, "long-prefill")
+        self.assertEqual(
+            serve.workload_marker(20260709, serve.LONG_PREFILL_MARKER_ROLE),
+            "QUAL-20260709-long-prefill",
+        )
+        self.assertEqual(
+            serve.PRESSURE_PEER_DISPATCH,
+            "before_slow_start_after_first_token",
+        )
         self.assertTrue(
             all(
                 config["workload"]["prompt_identity"] == serve.PROMPT_IDENTITY
