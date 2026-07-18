@@ -799,6 +799,10 @@ pub enum TrainCommands {
         #[arg(long)]
         adapter_smoke_test: bool,
 
+        /// JSON string array or single-text file containing smoke-test prompts
+        #[arg(long, requires = "adapter_smoke_test")]
+        adapter_smoke_prompts_file: Option<String>,
+
         /// Scan every backward gradient for NaN/Inf and fail at its producer
         #[arg(long)]
         detect_anomaly: bool,
@@ -833,6 +837,14 @@ pub enum TrainCommands {
         /// Run an adapter-effect smoke test after successful training
         #[arg(long)]
         adapter_smoke_test: bool,
+
+        /// JSON string array or single-text file containing smoke-test prompts
+        #[arg(long, requires = "adapter_smoke_test")]
+        adapter_smoke_prompts_file: Option<String>,
+
+        /// Use the per-completion reference fallback instead of shared prefix state
+        #[arg(long)]
+        no_shared_prefix_reference: bool,
 
         /// Scan every backward gradient for NaN/Inf and fail at its producer
         #[arg(long)]
@@ -872,6 +884,17 @@ pub enum TrainCommands {
         /// Scan every backward gradient for NaN/Inf and fail at its producer
         #[arg(long)]
         detect_anomaly: bool,
+
+        /// Layer segments for the memory-bounded student sampler
+        #[arg(long)]
+        sampler_segments: Option<std::num::NonZeroUsize>,
+
+        /// Student rollout-prefix construction algorithm
+        #[arg(
+            long,
+            value_parser = ["legacy_action_boundary", "chat_template"]
+        )]
+        rollout_prompt_rendering: Option<String>,
 
         /// Emit an exact resumable checkpoint every N committed optimizer steps
         #[arg(long)]
@@ -2572,6 +2595,34 @@ async fn chat_verify_output(
 }
 
 /// Run the `train sft` CLI subcommand.
+fn load_adapter_smoke_prompts(path: Option<&str>) -> anyhow::Result<Option<Vec<String>>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let contents = std::fs::read_to_string(path)
+        .map_err(|error| anyhow::anyhow!("Failed to read adapter smoke prompts {path}: {error}"))?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Adapter smoke prompts file {path} is empty");
+    }
+    let prompts = if trimmed.starts_with('[') {
+        serde_json::from_str::<Vec<String>>(trimmed).map_err(|error| {
+            anyhow::anyhow!("Invalid JSON string array in adapter smoke prompts {path}: {error}")
+        })?
+    } else {
+        vec![contents]
+    };
+    if prompts.is_empty() {
+        anyhow::bail!("Adapter smoke prompts file {path} contains an empty JSON array");
+    }
+    for (index, prompt) in prompts.iter().enumerate() {
+        if prompt.trim().is_empty() {
+            anyhow::bail!("Adapter smoke prompts file {path} has a blank prompt at index {index}");
+        }
+    }
+    Ok(Some(prompts))
+}
+
 pub async fn run_train_sft(
     url: &str,
     file: &str,
@@ -2581,10 +2632,12 @@ pub async fn run_train_sft(
     lora_rank: Option<usize>,
     invalid_row_policy: &str,
     adapter_smoke_test: bool,
+    adapter_smoke_prompts_file: Option<&str>,
     detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<()> {
+    let adapter_smoke_prompts = load_adapter_smoke_prompts(adapter_smoke_prompts_file)?;
     // Skip must reach the server with raw JSONL intact so malformed rows can
     // receive stable rejection hashes. Fail-mode legacy non-JSONL inputs keep
     // the inline parsing behavior for compatibility.
@@ -2602,6 +2655,7 @@ pub async fn run_train_sft(
             lora_rank,
             invalid_row_policy,
             adapter_smoke_test,
+            adapter_smoke_prompts.as_deref(),
             detect_anomaly,
             checkpoint_interval,
             resume_checkpoint,
@@ -2636,6 +2690,7 @@ pub async fn run_train_sft(
             lora_rank,
             invalid_row_policy,
             adapter_smoke_test,
+            adapter_smoke_prompts.as_deref(),
             detect_anomaly,
             checkpoint_interval,
             resume_checkpoint,
@@ -2652,16 +2707,21 @@ pub async fn run_train_grpo(
     adapter: &str,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    adapter_smoke_prompts_file: Option<&str>,
+    no_shared_prefix_reference: bool,
     detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<()> {
+    let adapter_smoke_prompts = load_adapter_smoke_prompts(adapter_smoke_prompts_file)?;
     let body = if is_grpo_jsonl_path(file) {
         build_grpo_jsonl_training_payload(
             file,
             adapter,
             lora_rank,
             adapter_smoke_test,
+            adapter_smoke_prompts.as_deref(),
+            no_shared_prefix_reference,
             detect_anomaly,
             checkpoint_interval,
             resume_checkpoint,
@@ -2678,6 +2738,8 @@ pub async fn run_train_grpo(
             adapter,
             lora_rank,
             adapter_smoke_test,
+            adapter_smoke_prompts.as_deref(),
+            no_shared_prefix_reference,
             detect_anomaly,
             checkpoint_interval,
             resume_checkpoint,
@@ -2701,6 +2763,8 @@ pub async fn run_train_opd(
     teacher: Option<&str>,
     lora_rank: Option<usize>,
     detect_anomaly: bool,
+    sampler_segments: Option<usize>,
+    rollout_prompt_rendering: Option<&str>,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -2714,6 +2778,8 @@ pub async fn run_train_opd(
         teacher,
         lora_rank,
         detect_anomaly,
+        sampler_segments,
+        rollout_prompt_rendering,
         checkpoint_interval,
         resume_checkpoint,
     )?;
@@ -2806,6 +2872,7 @@ fn build_sft_jsonl_training_payload(
     lora_rank: Option<usize>,
     invalid_row_policy: &str,
     adapter_smoke_test: bool,
+    adapter_smoke_prompts: Option<&[String]>,
     detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
@@ -2831,6 +2898,9 @@ fn build_sft_jsonl_training_payload(
     if adapter_smoke_test {
         config["adapter_smoke_test"] = serde_json::json!(true);
     }
+    if let Some(prompts) = adapter_smoke_prompts {
+        config["adapter_smoke_prompts"] = serde_json::json!(prompts);
+    }
     if detect_anomaly {
         config["detect_anomaly"] = serde_json::json!(true);
     }
@@ -2851,6 +2921,8 @@ fn build_grpo_jsonl_training_payload(
     adapter: &str,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    adapter_smoke_prompts: Option<&[String]>,
+    no_shared_prefix_reference: bool,
     detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
@@ -2869,6 +2941,12 @@ fn build_grpo_jsonl_training_payload(
     }
     if adapter_smoke_test {
         config["adapter_smoke_test"] = serde_json::json!(true);
+    }
+    if let Some(prompts) = adapter_smoke_prompts {
+        config["adapter_smoke_prompts"] = serde_json::json!(prompts);
+    }
+    if no_shared_prefix_reference {
+        config["shared_prefix_reference"] = serde_json::json!(false);
     }
     if detect_anomaly {
         config["detect_anomaly"] = serde_json::json!(true);
@@ -2893,6 +2971,7 @@ fn build_sft_training_payload(
     lora_rank: Option<usize>,
     invalid_row_policy: &str,
     adapter_smoke_test: bool,
+    adapter_smoke_prompts: Option<&[String]>,
     detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
@@ -2912,6 +2991,9 @@ fn build_sft_training_payload(
     }
     if adapter_smoke_test {
         config["adapter_smoke_test"] = serde_json::json!(true);
+    }
+    if let Some(prompts) = adapter_smoke_prompts {
+        config["adapter_smoke_prompts"] = serde_json::json!(prompts);
     }
     if detect_anomaly {
         config["detect_anomaly"] = serde_json::json!(true);
@@ -2934,6 +3016,8 @@ fn build_grpo_training_payload(
     adapter: &str,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    adapter_smoke_prompts: Option<&[String]>,
+    no_shared_prefix_reference: bool,
     detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
@@ -2956,6 +3040,12 @@ fn build_grpo_training_payload(
     if adapter_smoke_test {
         config_obj.insert("adapter_smoke_test".into(), serde_json::json!(true));
     }
+    if let Some(prompts) = adapter_smoke_prompts {
+        config_obj.insert("adapter_smoke_prompts".into(), serde_json::json!(prompts));
+    }
+    if no_shared_prefix_reference {
+        config_obj.insert("shared_prefix_reference".into(), serde_json::json!(false));
+    }
     if detect_anomaly {
         config_obj.insert("detect_anomaly".into(), serde_json::json!(true));
     }
@@ -2975,6 +3065,8 @@ fn build_opd_training_payload(
     teacher_override: Option<&str>,
     lora_rank: Option<usize>,
     detect_anomaly: bool,
+    sampler_segments: Option<usize>,
+    rollout_prompt_rendering: Option<&str>,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
@@ -3026,6 +3118,15 @@ fn build_opd_training_payload(
     }
     if detect_anomaly {
         config.insert("detect_anomaly".into(), serde_json::json!(true));
+    }
+    if let Some(segments) = sampler_segments {
+        config.insert("sampler_segments".into(), serde_json::json!(segments));
+    }
+    if let Some(rendering) = rollout_prompt_rendering {
+        config.insert(
+            "rollout_prompt_rendering".into(),
+            serde_json::json!(rendering),
+        );
     }
     if let Some(interval) = checkpoint_interval {
         config.insert("checkpoint_interval".into(), serde_json::json!(interval));
@@ -4414,6 +4515,7 @@ checkpoint_boundary_cache_gb = 2.5
             Some(8),
             "fail",
             false,
+            None,
             false,
             None,
             None,
@@ -4438,6 +4540,7 @@ checkpoint_boundary_cache_gb = 2.5
             None,
             "fail",
             false,
+            None,
             false,
             None,
             None,
@@ -4461,6 +4564,7 @@ checkpoint_boundary_cache_gb = 2.5
             None,
             "fail",
             false,
+            None,
             false,
             None,
             None,
@@ -4480,6 +4584,7 @@ checkpoint_boundary_cache_gb = 2.5
             None,
             "fail",
             true,
+            None,
             true,
             None,
             None,
@@ -4499,6 +4604,7 @@ checkpoint_boundary_cache_gb = 2.5
             None,
             "skip",
             false,
+            None,
             false,
             Some(25),
             Some("sft-adapter-checkpoint-step-00000025.kiln-checkpoint"),
@@ -4529,10 +4635,13 @@ checkpoint_boundary_cache_gb = 2.5
             .unwrap()
             .insert("adapter_name".to_string(), json!("legacy-top-level"));
 
+        let smoke_prompts = vec!["Return one word.".to_string()];
         let body = build_grpo_training_payload(
             body,
             "grpo-adapter",
             Some(16),
+            true,
+            Some(&smoke_prompts),
             true,
             true,
             Some(25),
@@ -4544,6 +4653,11 @@ checkpoint_boundary_cache_gb = 2.5
         assert_eq!(body["config"]["learning_rate"], 5e-5);
         assert_eq!(body["config"]["lora_rank"], 16);
         assert_eq!(body["config"]["adapter_smoke_test"], true);
+        assert_eq!(
+            body["config"]["adapter_smoke_prompts"],
+            serde_json::json!(smoke_prompts)
+        );
+        assert_eq!(body["config"]["shared_prefix_reference"], false);
         assert_eq!(body["config"]["detect_anomaly"], true);
         assert_eq!(body["config"]["checkpoint_interval"], 25);
         assert_eq!(
@@ -4564,9 +4678,18 @@ checkpoint_boundary_cache_gb = 2.5
             }],
         });
 
-        let body =
-            build_grpo_training_payload(body, "grpo-adapter", None, false, false, None, None)
-                .unwrap();
+        let body = build_grpo_training_payload(
+            body,
+            "grpo-adapter",
+            None,
+            false,
+            None,
+            false,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(body["config"]["output_name"], "grpo-adapter");
         assert!(body["config"].get("lora_rank").is_none());
@@ -4589,6 +4712,8 @@ checkpoint_boundary_cache_gb = 2.5
             "grpo-jsonl",
             Some(12),
             true,
+            None,
+            false,
             false,
             Some(2),
             Some("grpo-jsonl-checkpoint-step-00000002.kiln-checkpoint"),
@@ -4625,6 +4750,7 @@ checkpoint_boundary_cache_gb = 2.5
             Some(8),
             "fail",
             false,
+            None,
             false,
             None,
             None,
@@ -4650,6 +4776,8 @@ checkpoint_boundary_cache_gb = 2.5
             Some("teacher-v2"),
             Some(24),
             true,
+            Some(12),
+            Some("chat_template"),
             Some(25),
             Some("opd-adapter-checkpoint-step-00000025.kiln-checkpoint"),
         )
@@ -4659,6 +4787,8 @@ checkpoint_boundary_cache_gb = 2.5
         assert_eq!(body["config"]["output_name"], "opd-adapter");
         assert_eq!(body["config"]["lora_rank"], 24);
         assert_eq!(body["config"]["detect_anomaly"], true);
+        assert_eq!(body["config"]["sampler_segments"], 12);
+        assert_eq!(body["config"]["rollout_prompt_rendering"], "chat_template");
         assert_eq!(body["config"]["top_k"], 16);
         assert_eq!(body["config"]["seed"], 73);
         assert_eq!(body["config"]["checkpoint_interval"], 25);
@@ -4682,6 +4812,8 @@ checkpoint_boundary_cache_gb = 2.5
             false,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(body["prompts"], json!([prompt]));
@@ -4700,6 +4832,8 @@ checkpoint_boundary_cache_gb = 2.5
             false,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(dataset["teacher"], "teacher-v1");
@@ -4712,6 +4846,8 @@ checkpoint_boundary_cache_gb = 2.5
             None,
             None,
             false,
+            None,
+            None,
             None,
             None,
         )
@@ -4728,6 +4864,8 @@ checkpoint_boundary_cache_gb = 2.5
             None,
             None,
             false,
+            None,
+            None,
             None,
             None,
         )
@@ -4748,6 +4886,8 @@ checkpoint_boundary_cache_gb = 2.5
             false,
             None,
             None,
+            None,
+            None,
         )
         .unwrap_err();
         assert!(missing.to_string().contains("--teacher"));
@@ -4762,6 +4902,8 @@ checkpoint_boundary_cache_gb = 2.5
             None,
             None,
             false,
+            None,
+            None,
             None,
             None,
         )
@@ -5042,6 +5184,56 @@ checkpoint_boundary_cache_gb = 2.5
     }
 
     #[test]
+    fn adapter_smoke_prompt_files_are_explicit_validated_inputs() {
+        use clap::Parser;
+
+        assert!(
+            Cli::try_parse_from([
+                "kiln",
+                "train",
+                "sft",
+                "--file",
+                "rows.jsonl",
+                "--adapter-smoke-prompts-file",
+                "prompts.json",
+            ])
+            .is_err()
+        );
+        Cli::try_parse_from([
+            "kiln",
+            "train",
+            "sft",
+            "--file",
+            "rows.jsonl",
+            "--adapter-smoke-test",
+            "--adapter-smoke-prompts-file",
+            "prompts.json",
+        ])
+        .expect("explicit smoke test should accept a prompt file");
+
+        let path = std::env::temp_dir().join(format!(
+            "kiln-cli-adapter-smoke-prompts-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"["Return one word.","Say done."]"#).unwrap();
+        assert_eq!(
+            load_adapter_smoke_prompts(path.to_str()).unwrap(),
+            Some(vec!["Return one word.".into(), "Say done.".into()])
+        );
+
+        std::fs::write(&path, "Return one word.\nKeep this second line.").unwrap();
+        assert_eq!(
+            load_adapter_smoke_prompts(path.to_str()).unwrap(),
+            Some(vec!["Return one word.\nKeep this second line.".into()])
+        );
+
+        std::fs::write(&path, "[]").unwrap();
+        let error = load_adapter_smoke_prompts(path.to_str()).unwrap_err();
+        assert!(error.to_string().contains("empty JSON array"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn parses_hf_sft_export_and_requires_exactly_one_source() {
         use clap::Parser;
         let cli = Cli::try_parse_from([
@@ -5275,6 +5467,7 @@ checkpoint_boundary_cache_gb = 2.5
             "demo",
             "--checkpoint-interval",
             "25",
+            "--no-shared-prefix-reference",
             "--detect-anomaly",
             "--resume-checkpoint",
             "demo-checkpoint-step-00000025.kiln-checkpoint",
@@ -5285,6 +5478,7 @@ checkpoint_boundary_cache_gb = 2.5
                 checkpoint_interval,
                 resume_checkpoint,
                 detect_anomaly,
+                no_shared_prefix_reference,
                 ..
             })) => {
                 assert_eq!(
@@ -5296,6 +5490,7 @@ checkpoint_boundary_cache_gb = 2.5
                     Some("demo-checkpoint-step-00000025.kiln-checkpoint")
                 );
                 assert!(detect_anomaly);
+                assert!(no_shared_prefix_reference);
             }
             other => panic!("expected Train(Grpo), got {:?}", other.is_some()),
         }
@@ -5333,6 +5528,10 @@ checkpoint_boundary_cache_gb = 2.5
             "24",
             "--checkpoint-interval",
             "25",
+            "--sampler-segments",
+            "12",
+            "--rollout-prompt-rendering",
+            "chat_template",
             "--detect-anomaly",
             "--resume-checkpoint",
             "demo-checkpoint-step-00000025.kiln-checkpoint",
@@ -5345,6 +5544,8 @@ checkpoint_boundary_cache_gb = 2.5
                 teacher,
                 lora_rank,
                 detect_anomaly,
+                sampler_segments,
+                rollout_prompt_rendering,
                 checkpoint_interval,
                 resume_checkpoint,
                 url,
@@ -5354,6 +5555,8 @@ checkpoint_boundary_cache_gb = 2.5
                 assert_eq!(teacher.as_deref(), Some("teacher-v1"));
                 assert_eq!(lora_rank, Some(24));
                 assert!(detect_anomaly);
+                assert_eq!(sampler_segments.map(std::num::NonZeroUsize::get), Some(12));
+                assert_eq!(rollout_prompt_rendering.as_deref(), Some("chat_template"));
                 assert_eq!(
                     checkpoint_interval.map(std::num::NonZeroUsize::get),
                     Some(25)

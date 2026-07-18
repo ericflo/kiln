@@ -1861,123 +1861,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_ECHO_ENABLED",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_ECHO_ENV_MASK_MODE",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_ECHO_LAMBDA",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_ECHO_WARNING_FILTER",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_ECHO_ENABLED",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_ECHO_ENV_MASK_MODE",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_ECHO_LAMBDA",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 3,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_ECHO_WARNING_FILTER",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_OPD_USE_CHAT_TEMPLATE_RENDER",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
       "argument": "& env_name",
       "argument_kind": "expression",
       "classification": "test_only",
@@ -5971,58 +5854,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_ECHO_ENABLED",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "example source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/examples/cuda_grpo_ablation.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ECHO_ENV_MASK_MODE",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "example source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/examples/cuda_grpo_ablation.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ECHO_LAMBDA",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "example source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/examples/cuda_grpo_ablation.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ECHO_WARNING_FILTER",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "example source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/examples/cuda_grpo_ablation.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "var",
       "argument": "KILN_CHECKPOINT_KILL_CHILD_STAGE",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -6061,58 +5892,6 @@
       "surface": "unit-test"
     },
     {
-      "api": "var",
-      "argument": "KILN_ECHO_ENABLED",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ECHO_ENV_MASK_MODE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ECHO_LAMBDA",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ECHO_WARNING_FILTER",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/lib.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "CARGO_PKG_VERSION",
       "argument_kind": "literal",
@@ -6123,32 +5902,6 @@
       "operation": "read",
       "path": "crates/kiln-train/src/opd.rs",
       "phase": "compile-time",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_OPD_SAMPLER_SEGMENTS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_OPD_USE_CHAT_TEMPLATE_RENDER",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/opd.rs",
-      "phase": "runtime",
       "surface": "source"
     },
     {
@@ -6318,32 +6071,6 @@
       "operation": "read",
       "path": "crates/kiln-train/src/trainer.rs",
       "phase": "compile-time",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_DISABLE_GRPO_SHARED_PREFIX_REF",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var_os",
-      "argument": "KILN_ADAPTER_SMOKE_PROMPT_FILE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
       "surface": "source"
     },
     {
@@ -6672,27 +6399,27 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 258,
-    "literal_kiln_read_names": 137,
+    "literal_kiln_read_call_sites": 246,
+    "literal_kiln_read_names": 129,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 96,
+      "experimental_debug": 88,
       "public_stable": 1,
-      "test_only": 41
+      "test_only": 37
     },
-    "process_mutation_call_sites": 248,
+    "process_mutation_call_sites": 236,
     "process_mutation_call_sites_by_classification": {
       "build_time": 8,
-      "test_only": 240
+      "test_only": 228
     },
-    "process_mutation_entries": 154,
-    "read_call_sites": 623,
+    "process_mutation_entries": 145,
+    "read_call_sites": 611,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 152,
+      "experimental_debug": 144,
       "public_stable": 9,
-      "test_only": 134
+      "test_only": 130
     },
-    "read_entries": 358
+    "read_entries": 346
   }
 }

@@ -81,7 +81,7 @@ Sweep λ ∈ {0.01, 0.02, 0.05, 0.10}. Paper §3.3 productive range is
 kiln's setup.
 
 **H_echo_warning_filter_off**
-Run with `KILN_ECHO_WARNING_FILTER=false`. Paper §3.2 shows warnings
+Run with `config.loss.echo.warning_filter=false`. Paper §3.2 shows warnings
 memorize within ~60 steps; with the filter off we expect a worse
 dynamics-holdout score even if composite is similar.
 

@@ -5158,6 +5158,11 @@ function toastTrainingSubmission(res, fallback) {
   toast(`${res?.message || fallback}${suffix}`, 'ok');
 }
 
+function readAdapterSmokePrompts(form) {
+  const raw = form.adapter_smoke_prompts?.value || '';
+  return raw.split(/\r?\n/).map(prompt => prompt.trim()).filter(Boolean);
+}
+
 // --- SFT Form ---
 document.getElementById('sft-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -5188,6 +5193,9 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
     if (checkpointInterval !== null) config.checkpoint_interval = checkpointInterval;
     if (resumeCheckpoint !== null) config.resume_checkpoint = resumeCheckpoint;
     if (form.detect_anomaly.checked) config.detect_anomaly = true;
+    const smokePrompts = readAdapterSmokePrompts(form);
+    if (form.adapter_smoke_test.checked || smokePrompts.length) config.adapter_smoke_test = true;
+    if (smokePrompts.length) config.adapter_smoke_prompts = smokePrompts;
     const held = trainingData.sft;
     let body;
     if (held && held.datasetName) {
@@ -5245,6 +5253,10 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
     if (checkpointInterval !== null) config.checkpoint_interval = checkpointInterval;
     if (resumeCheckpoint !== null) config.resume_checkpoint = resumeCheckpoint;
     if (form.detect_anomaly.checked) config.detect_anomaly = true;
+    const smokePrompts = readAdapterSmokePrompts(form);
+    if (form.adapter_smoke_test.checked || smokePrompts.length) config.adapter_smoke_test = true;
+    if (smokePrompts.length) config.adapter_smoke_prompts = smokePrompts;
+    config.shared_prefix_reference = form.shared_prefix_reference.checked;
     const held = trainingData.grpo;
     let body;
     if (held && held.datasetName) {
@@ -10598,6 +10610,18 @@ async function prepareTrainingResume(j, checkpoint) {
     if (autoLoad && typeof config.auto_load === 'boolean') autoLoad.checked = config.auto_load;
     const detectAnomaly = document.getElementById('opd-detect-anomaly');
     if (detectAnomaly) detectAnomaly.checked = config.detect_anomaly === true;
+    setTrainingFormValue(
+      'opd-sampler-segments',
+      Number.isInteger(config.sampler_segments) && config.sampler_segments > 0
+        ? config.sampler_segments
+        : '',
+    );
+    setTrainingFormValue(
+      'opd-rollout-prompt-rendering',
+      config.rollout_prompt_rendering === 'chat_template'
+        ? 'chat_template'
+        : 'legacy_action_boundary',
+    );
     setTrainingFormValue('opd-prompts', '');
 
     let teachers = [];
@@ -10684,6 +10708,16 @@ async function prepareTrainingResume(j, checkpoint) {
   if (autoLoad && typeof config.auto_load === 'boolean') autoLoad.checked = config.auto_load;
   const detectAnomaly = document.getElementById(kind + '-detect-anomaly');
   if (detectAnomaly) detectAnomaly.checked = config.detect_anomaly === true;
+  const smokeTest = document.getElementById(kind + '-adapter-smoke-test');
+  if (smokeTest) smokeTest.checked = config.adapter_smoke_test === true;
+  setTrainingFormValue(
+    kind + '-adapter-smoke-prompts',
+    Array.isArray(config.adapter_smoke_prompts) ? config.adapter_smoke_prompts.join('\n') : '',
+  );
+  if (kind === 'grpo') {
+    const sharedPrefix = document.getElementById('grpo-shared-prefix-reference');
+    if (sharedPrefix) sharedPrefix.checked = config.shared_prefix_reference !== false;
+  }
 
   const advanced = document.getElementById(kind + '-advanced');
   const advancedToggle = document.getElementById(kind + '-adv-toggle');
@@ -11858,6 +11892,10 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
     if (checkpointInterval !== null) body.config.checkpoint_interval = checkpointInterval;
     if (resumeCheckpoint !== null) body.config.resume_checkpoint = resumeCheckpoint;
     if (form.detect_anomaly.checked) body.config.detect_anomaly = true;
+    const samplerSegments = parseOptionalPositiveIntegerField(
+      form.sampler_segments.value, 'OPD sampler segments');
+    if (samplerSegments !== null) body.config.sampler_segments = samplerSegments;
+    body.config.rollout_prompt_rendering = form.rollout_prompt_rendering.value;
     setTrainingSubmitBusy(form, true, 'Submitting OPD…');
     const res = await api('/v1/train/opd', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toastTrainingSubmission(res, 'Distillation job queued');

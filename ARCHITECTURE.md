@@ -1260,6 +1260,15 @@ potential device synchronization per produced gradient, so the default is
 opt-in under each training form's advanced controls. The effective job config
 and exact checkpoint retain the selection.
 
+Other training execution choices follow the same request boundary. SFT and
+GRPO carry optional `adapter_smoke_prompts` as request data; GRPO records the
+`shared_prefix_reference` policy; OPD records `sampler_segments` and the
+`rollout_prompt_rendering` algorithm; and ECHO is represented only by the
+typed `loss.echo` object. The training library does not reread process state
+for any of those choices. The only runtime environment adapter retained in
+`kiln-train` is the deliberately narrow remote-teacher credential provider,
+which resolves a named secret without changing execution policy.
+
 ### What's NOT yet ported (subsequent PRs)
 
 - Per-backend GPU `DeviceOp` impls — Phase 2 fills these in (CUDA via

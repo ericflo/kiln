@@ -504,6 +504,18 @@ server-side default, so omit anything you don't want to override:
   via `/v1/adapters` (e.g., for A/B testing). If `output_name` is already
   physically loaded, Kiln must reload that same name at its revision barrier
   even when this is `false`; use a new versioned name for a truly idle output.
+- **`adapter_smoke_test` / `adapter_smoke_prompts`** — the boolean enables the
+  post-training base-versus-adapter canary. The optional prompt array replaces
+  the built-in canaries and requires the boolean to be true. The CLI accepts
+  `--adapter-smoke-test --adapter-smoke-prompts-file PATH`; the file is read by
+  the client as either a JSON string array or one text prompt, so the server
+  never depends on ambient filesystem or environment state.
+- **`shared_prefix_reference`** — defaults `true`. Reuses qualified prompt-side
+  KL-reference state across completions; Vulkan currently keeps the exact
+  per-completion fallback regardless. Set false, pass
+  `--no-shared-prefix-reference`, or clear the browser toggle only for an
+  explicit correctness/performance comparison. The choice is retained in the
+  effective config and receipt.
 - **`detect_anomaly`** — defaults `false`. When enabled, every full or
   checkpoint-segment tape scans each backward operation's returned gradients
   and fails at the first NaN or Inf with the operation name and tape position.

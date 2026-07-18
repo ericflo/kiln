@@ -368,6 +368,7 @@ fn main() -> Result<()> {
         seed: Some(0xC0DA_5EED),
         optimizer: Optimizer::default(),
         adapter_smoke_test: false,
+        adapter_smoke_prompts: None,
     };
     if layout.flattened {
         println!(

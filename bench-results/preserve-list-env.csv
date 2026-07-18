@@ -42,7 +42,6 @@ KILN_DECODE_BATCH_MAX,7,crates/kiln-server/src/config.rs:5687,no,no,kiln-server
 KILN_DECODE_BATCH_MIXED_SEQ,7,crates/kiln-server/src/config.rs:5697,no,no,kiln-server
 KILN_DECODE_BATCH_WAIT_US,7,crates/kiln-server/src/config.rs:5692,no,no,kiln-server
 KILN_DETACHED_FULL_ATTN_TILE_TOKENS,7,crates/kiln-server/src/config.rs:5839,no,no,kiln-server
-KILN_ECHO_LAMBDA,7,crates/kiln-train/src/lib.rs:1909,no,yes,kiln-train
 KILN_HTTP_SEND_BUFFER_BYTES,7,crates/kiln-server/src/config.rs:5593,no,no,kiln-server
 KILN_PREFIX_CACHE_ENABLED,7,crates/kiln-server/src/config.rs:5797,no,no,kiln-server
 KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL,7,crates/kiln-flash-attn/src/rocm_sdpa.rs:561,yes,no,kiln-flash-attn;kiln-model
@@ -58,7 +57,6 @@ KILN_BATCH_DECODE_ROWWISE,6,crates/kiln-server/src/config.rs:5667,no,no,kiln-ser
 KILN_BATCH_PREFILL_ADMISSION_QUANTUM,6,crates/kiln-server/src/config.rs:5677,no,no,kiln-server
 KILN_BATCH_PREFIX_AWARE_ADMISSION,6,crates/kiln-server/src/config.rs:5672,no,no,kiln-server
 KILN_DEFAULT_NO_THINK,6,crates/kiln-server/src/config.rs:5626,no,no,kiln-server
-KILN_ECHO_ENABLED,6,crates/kiln-train/src/lib.rs:1897,no,yes,kiln-train
 KILN_HOST,6,crates/kiln-server/src/config.rs:5578,no,no,kiln-server
 KILN_INFERENCE_MEMORY_FRACTION,6,crates/kiln-server/src/config.rs:5712,no,no,kiln-server
 KILN_LOG_LEVEL,6,crates/kiln-server/src/config.rs:5795,no,no,kiln-server
@@ -82,8 +80,6 @@ KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK,6,crates/kiln-model/src/generate.rs:11
 KILN_ACCELERATOR_VULKAN_DEVICE_INDEX,5,crates/kiln-server/src/config.rs:6937,no,no,kiln-server
 KILN_BATCHING_PREFIX_AWARE_ADMISSION,5,crates/kiln-server/src/config.rs:6954,no,no,kiln-server
 KILN_BATCHING_ROWWISE_DECODE,5,crates/kiln-server/src/config.rs:6956,no,no,kiln-server
-KILN_ECHO_ENV_MASK_MODE,5,crates/kiln-train/src/lib.rs:1913,no,yes,kiln-train
-KILN_ECHO_WARNING_FILTER,5,crates/kiln-train/src/lib.rs:1921,no,yes,kiln-train
 KILN_KV_CACHE_FP8,5,crates/kiln-server/src/config.rs:5737,no,no,kiln-server
 KILN_MAX_BATCH_TOKENS,5,crates/kiln-server/src/config.rs:2567,no,no,kiln-server
 KILN_MAX_PREFILL_LAYERS_PER_CYCLE,5,crates/kiln-server/src/config.rs:2695,no,no,kiln-server
@@ -107,7 +103,7 @@ KILN_DECODE_HOT_PATH_DEBUG_FALLBACK,4,crates/kiln-model/src/generate.rs:11153,ye
 KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER,4,crates/kiln-model/src/forward.rs:21607,no,yes,kiln-model
 KILN_DISABLE_GDN_KERNEL,4,crates/kiln-model/src/forward.rs:32368,no,yes,kiln-model
 KILN_DISABLE_RMSNORM_BACKWARD,4,crates/kiln-server/examples/phase10_rmsnorm_bench.rs:198,no,yes,kiln-model;kiln-server
-KILN_DISABLE_RMSNORM_KERNEL,4,crates/kiln-server/examples/phase10_rmsnorm_bench.rs:366,no,yes,kiln-model;kiln-server
+KILN_DISABLE_RMSNORM_KERNEL,4,crates/kiln-server/examples/phase10_rmsnorm_bench.rs:367,no,yes,kiln-model;kiln-server
 KILN_DROP_PROJECTION_ORIGINALS,4,crates/kiln-model/src/forward.rs:26835,no,yes,kiln-model
 KILN_FOLD_REASONING_INTO_CONTENT,4,crates/kiln-server/src/config.rs:5641,no,no,kiln-server
 KILN_LOG_FORMAT,4,crates/kiln-server/src/config.rs:5796,no,no,kiln-server
@@ -198,7 +194,6 @@ KILN_MODEL_ADAPTER_DIR,2,crates/kiln-server/src/config.rs:6971,no,no,kiln-server
 KILN_MODEL_ID,2,crates/kiln-server/src/config.rs:5700,no,no,kiln-server
 KILN_MODEL_MODEL_ID,2,crates/kiln-server/src/config.rs:6972,no,no,kiln-server
 KILN_MODEL_TOKENIZER_PATH,2,crates/kiln-server/src/config.rs:6976,no,no,kiln-server
-KILN_OPD_USE_CHAT_TEMPLATE_RENDER,2,crates/kiln-train/src/opd.rs:2930,no,yes,kiln-train
 KILN_PI_BIN,2,crates/kiln-server/src/config.rs:5888,no,no,kiln-server
 KILN_PI_SESSIONS_DIR,2,crates/kiln-server/src/config.rs:5892,no,no,kiln-server
 KILN_QUALIFICATION_MODEL_PATH,2,crates/kiln-train/tests/qwen35_sft_oracle.rs:53,no,no,kiln-model;kiln-train
@@ -242,7 +237,6 @@ KILN_VULKAN_VALIDATION,2,crates/kiln-server/src/config.rs:5538,no,no,kiln-server
 KILN_W4A16,2,crates/kiln-core/src/env_flag.rs:19,yes,no,kiln-core;kiln-model
 KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE,1,crates/kiln-server/src/config.rs:6931,no,no,kiln-server
 KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE,1,crates/kiln-server/src/config.rs:6935,no,no,kiln-server
-KILN_ADAPTER_SMOKE_PROMPT_FILE,1,crates/kiln-train/src/trainer.rs:731,no,no,kiln-train
 KILN_AGENT_SELF_IMPROVE,1,crates/kiln-server/src/config.rs:7039,no,no,kiln-server
 KILN_ALLOW_FP8_ON_METAL,1,crates/kiln-model/src/backend/capability.rs:2442,no,no,kiln-model
 KILN_BENCH_FORCE_MTP,1,crates/kiln-server/src/bench.rs:1449,no,yes,kiln-server
@@ -273,7 +267,6 @@ KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL,1,crates/kiln-model/src/forward.rs:354,no
 KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH,1,crates/kiln-model/src/forward.rs:18431,no,yes,kiln-model
 KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE,1,crates/kiln-model/src/forward.rs:10726,no,yes,kiln-model
 KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING,1,crates/kiln-model/src/forward.rs:7904,no,no,kiln-model
-KILN_DISABLE_GRPO_SHARED_PREFIX_REF,1,crates/kiln-train/src/trainer.rs:11356,yes,no,kiln-train
 KILN_DISABLE_METAL_ATTN_GATE_FUSION,1,crates/kiln-model/src/backend/metal_config.rs:38,no,no,kiln-model
 KILN_DISABLE_METAL_CONV1D_PREFILL,1,crates/kiln-model/src/backend/metal_config.rs:5,no,no,kiln-model
 KILN_DISABLE_METAL_FUSED_CONV1D,1,crates/kiln-model/src/backend/metal_config.rs:7,no,no,kiln-model
@@ -384,7 +377,6 @@ KILN_METAL_LORA_QKV_LINEAR_BENCH_WARMUP,1,crates/kiln-model/src/forward.rs:26594
 KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM,1,crates/kiln-server/src/config.rs:6977,no,no,kiln-server
 KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND,1,crates/kiln-server/src/config.rs:6978,no,no,kiln-server
 KILN_MTP_BYTE_EQ_MODEL,1,crates/kiln-model/tests/mtp_byte_eq.rs:35,no,no,kiln-model
-KILN_OPD_SAMPLER_SEGMENTS,1,crates/kiln-train/src/opd.rs:2745,no,yes,kiln-train
 KILN_QUALIFICATION_CASE_RESULT,1,crates/kiln-server/src/bench.rs:1442,no,no,kiln-server
 KILN_QUALIFICATION_HF_LOGITS_PATH,1,crates/kiln-model/tests/vk_resident_decode_parity.rs:37,no,no,kiln-model
 KILN_QWEN_TOKENIZER_PATH,1,crates/kiln-train/src/trajectory_mask.rs:846,no,yes,kiln-train
@@ -444,13 +436,13 @@ KILN_TAPE_OFFLOAD_MIN_BYTES,1,crates/kiln-model/src/tape_forward.rs:1900,no,yes,
 KILN_TEACHERS_CREDENTIALS,1,crates/kiln-server/src/config.rs:7040,no,no,kiln-server
 KILN_TENSOR_ROCM_TEST,1,crates/kiln-tensor/src/rocm_allocator.rs:188,no,yes,kiln-tensor
 KILN_TEST_MISSING_TEACHER_SECRET,1,crates/kiln-server/src/config.rs:10167,no,no,kiln-server
-KILN_TEST_NATIVE_TRAINING_FLAG,1,crates/kiln-server/src/training_queue.rs:6773,no,no,kiln-server
+KILN_TEST_NATIVE_TRAINING_FLAG,1,crates/kiln-server/src/training_queue.rs:6774,no,no,kiln-server
 KILN_TEST_ORIGIN_SCOPED_SECRET_MUST_NOT_LEAK,1,crates/kiln-server/tests/remote_teacher_identity.rs:272,no,no,kiln-server
 KILN_TEST_REMOTE_KEY_INTENTIONALLY_UNSET,1,crates/kiln-server/tests/agent_teacher_validation.rs:460,no,no,kiln-server
 KILN_TEST_REMOTE_SECRET_INTENTIONALLY_MISSING_8CC28B,1,crates/kiln-server/tests/remote_teacher_identity.rs:305,no,no,kiln-server
 KILN_TEST_REMOTE_TEACHER_HANDLE_SECRET_716D3C,1,crates/kiln-server/tests/remote_teacher_identity.rs:338,no,no,kiln-server
 KILN_TEST_SCOPED_TEACHER_SECRET,1,crates/kiln-server/src/config.rs:10114,no,no,kiln-server
-KILN_TEST_SERVER_NATIVE_TRAINING_POLICY,1,crates/kiln-server/src/training_queue.rs:6814,no,no,kiln-server
+KILN_TEST_SERVER_NATIVE_TRAINING_POLICY,1,crates/kiln-server/src/training_queue.rs:6815,no,no,kiln-server
 KILN_VK_ATTENTION_HISTORY,1,crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs:700,no,no,kiln-vulkan-kernel
 KILN_VK_MICROBENCH_BATCHES,1,crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs:79,no,yes,kiln-vulkan-kernel
 KILN_VK_MICROBENCH_ONLY,1,crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs:97,no,yes,kiln-vulkan-kernel

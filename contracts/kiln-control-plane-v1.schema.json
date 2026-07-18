@@ -2368,6 +2368,23 @@
         "adapter_smoke_test": {
           "$ref": "#/$defs/Boolean"
         },
+        "adapter_smoke_prompts": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/NonEmptyString"
+              },
+              "minItems": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shared_prefix_reference": {
+          "$ref": "#/$defs/Boolean"
+        },
         "loss": {
           "$ref": "#/$defs/LossConfig"
         }
@@ -3088,6 +3105,19 @@
         "max_tokens": {
           "$ref": "#/$defs/PositiveInteger"
         },
+        "sampler_segments": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rollout_prompt_rendering": {
+          "$ref": "#/$defs/OpdRolloutPromptRendering"
+        },
         "stable_opd": {
           "$ref": "#/$defs/StableOpdMode"
         },
@@ -3346,6 +3376,16 @@
       ],
       "description": "Direct OPD submission using inline prompts or a server-local replay dataset.",
       "x-kiln-rust-type": "OpdRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpdRolloutPromptRendering": {
+      "type": "string",
+      "enum": [
+        "legacy_action_boundary",
+        "chat_template"
+      ],
+      "description": "Student rollout-prefix construction algorithm; chat_template is experimental.",
+      "x-kiln-rust-type": "kiln_train::OpdRolloutPromptRendering",
       "x-kiln-field-schema-status": "complete"
     },
     "OpdTrainingMode": {
@@ -4338,6 +4378,20 @@
         },
         "adapter_smoke_test": {
           "$ref": "#/$defs/Boolean"
+        },
+        "adapter_smoke_prompts": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/NonEmptyString"
+              },
+              "minItems": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "description": "Complete native SFT configuration. Unknown fields fail admission.",

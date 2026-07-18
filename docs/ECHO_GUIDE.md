@@ -96,21 +96,23 @@ curl -X POST http://localhost:8420/v1/train/agentic \
 
 The legacy `/v1/train/grpo` endpoint accepts the same payload shape; both routes serve the same handler. Legacy clients posting `{ groups: [{messages, completions: [{text, reward}, ...]}] }` keep working — `completions` is a serde alias for `rollouts`, and `text`-only rollouts deserialize as one-segment Action trajectories.
 
-### From environment variables
+### Typed configuration and CLI
 
-For ops / CI orchestration without editing the request payload:
+ECHO has no process-global environment overrides. Its complete policy is the
+request-local `config.loss.echo` object shown above:
 
-| Variable | Effect |
-| --- | --- |
-| `KILN_ECHO_ENABLED=0` (or `false`/`no`) | disable ECHO globally |
-| `KILN_ECHO_ENABLED=1` | enable ECHO with default knobs |
-| `KILN_ECHO_LAMBDA=0.02` | override λ (auto-enables if previously off) |
-| `KILN_ECHO_ENV_MASK_MODE=env_only` (default) \| `full_obs` | which env positions to mask |
-| `KILN_ECHO_WARNING_FILTER=false` | include harness warning prefix in env_mask |
+| Field | Default | Effect |
+| --- | --- | --- |
+| `loss.echo` | enabled | Set to `null` to disable ECHO for this job. |
+| `loss.echo.lambda` | `0.05` | Environment-token cross-entropy coefficient. |
+| `loss.echo.env_mask_mode` | `env_only` | `env_only` or `full_obs` observation masking. |
+| `loss.echo.warning_filter` | `true` | Exclude harness warning prefixes when true. |
 
-Env vars take **precedence over CLI flags** in `cuda_grpo_ablation` — CLI is for inline dev tweaks; env vars are the right tool for shell-scripted orchestration.
-
-Note: `KILN_ECHO_ENABLED=1` / `KILN_ECHO_LAMBDA` produce an *enabled* config — which matches the default — so in practice they're for re-enabling ECHO after a `--no-echo` / `loss.echo: null` opt-out, or for overriding λ across a fleet of runs.
+The `cuda_grpo_ablation` development command exposes `--echo-lambda` and
+`--no-echo`; the ordinary `kiln train grpo` command preserves the exact typed
+`config.loss` object from its JSON input. Effective config, checkpoints, and
+training receipts therefore describe the policy that actually ran, and two
+concurrent jobs cannot override one another.
 
 ## How to read the diagnostics
 

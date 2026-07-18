@@ -794,17 +794,18 @@ pub use opd::{
     LoadedOffPolicyDistillationDataset, NewKnowledgeSource,
     OFF_POLICY_DISTILLATION_MANIFEST_SCHEMA_V1, OffPolicyDistillationExample,
     OffPolicyDistillationManifestV1, OffPolicyDistillationSummary, OffPolicyLossBreakdown,
-    OpdConfig, OpdLossGranularity, OpdObjective, OpdPrompt, OpdRequest, OpdTrainingMode,
-    PreparedOffPolicyDistillation, SelfDistillMode, StableOpdCoefficients, StableOpdLossInputs,
-    StableOpdLossOutputs, TeacherActionToken, TeacherTopLogprob, TipTokenClass, cold_start_probe,
-    cold_start_probe_default, compose_off_policy_distillation_loss, compute_agentic_loss_weights,
-    compute_initial_overlap, compute_stable_opd_loss, default_beta_kl, default_lambda_sft,
-    default_lambda_verifier, default_opd_samples_per_prompt, default_opd_top_k,
-    default_score_decay_steps, default_score_earliest_weight, default_tip_tool_call_weight,
-    default_tip_tool_name_weight, load_off_policy_distillation_dataset,
-    load_off_policy_distillation_jsonl, parse_off_policy_distillation_dataset_str,
-    parse_off_policy_distillation_jsonl_str, prepare_off_policy_distillation_dataset,
-    prepare_off_policy_distillation_dataset_with_identity, resolve_opd_top_k,
+    OpdConfig, OpdLossGranularity, OpdObjective, OpdPrompt, OpdRequest, OpdRolloutPromptRendering,
+    OpdTrainingMode, PreparedOffPolicyDistillation, SelfDistillMode, StableOpdCoefficients,
+    StableOpdLossInputs, StableOpdLossOutputs, TeacherActionToken, TeacherTopLogprob,
+    TipTokenClass, cold_start_probe, cold_start_probe_default,
+    compose_off_policy_distillation_loss, compute_agentic_loss_weights, compute_initial_overlap,
+    compute_stable_opd_loss, default_beta_kl, default_lambda_sft, default_lambda_verifier,
+    default_opd_samples_per_prompt, default_opd_top_k, default_score_decay_steps,
+    default_score_earliest_weight, default_tip_tool_call_weight, default_tip_tool_name_weight,
+    load_off_policy_distillation_dataset, load_off_policy_distillation_jsonl,
+    parse_off_policy_distillation_dataset_str, parse_off_policy_distillation_jsonl_str,
+    prepare_off_policy_distillation_dataset, prepare_off_policy_distillation_dataset_with_identity,
+    resolve_opd_top_k,
 };
 pub use train_receipt::{
     ADAPTER_CANARY_STATUS_FILENAME, AdapterCanaryCheckReceipt, AdapterCanaryState,
@@ -1187,6 +1188,11 @@ pub struct SftConfig {
     /// record the result in `train_receipt.json`.
     #[serde(default)]
     pub adapter_smoke_test: bool,
+    /// Optional request-local prompts for the adapter smoke test. `None` uses
+    /// the built-in canary prompts. Every supplied prompt must be non-empty,
+    /// and this field is rejected unless `adapter_smoke_test` is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_smoke_prompts: Option<Vec<String>>,
 }
 
 fn default_auto_load() -> bool {
@@ -1234,6 +1240,11 @@ impl SftConfig {
             self.grad_checkpoint_segments != Some(0),
             "SFT grad_checkpoint_segments must be greater than zero"
         );
+        validate_adapter_smoke_prompts(
+            "SFT",
+            self.adapter_smoke_test,
+            self.adapter_smoke_prompts.as_deref(),
+        )?;
         for (field, value) in [
             ("base_adapter", self.base_adapter.as_deref()),
             ("output_name", self.output_name.as_deref()),
@@ -1270,6 +1281,7 @@ impl Default for SftConfig {
             seed: None,
             optimizer: Optimizer::default(),
             adapter_smoke_test: false,
+            adapter_smoke_prompts: None,
         }
     }
 }
@@ -1668,9 +1680,18 @@ pub struct GrpoConfig {
     /// record the result in `train_receipt.json`.
     #[serde(default)]
     pub adapter_smoke_test: bool,
-    /// Composition of per-token training objectives. ECHO is OFF by
-    /// default until its env-CE term regains a kt-tape gradient root
-    /// (#1082); OPD's slot is reserved but empty. See `LossConfig`.
+    /// Optional request-local prompts for the adapter smoke test. `None` uses
+    /// the built-in canary prompts. Every supplied prompt must be non-empty,
+    /// and this field is rejected unless `adapter_smoke_test` is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_smoke_prompts: Option<Vec<String>>,
+    /// Reuse the prompt-side reference-policy state across completions when
+    /// the selected backend has a qualified shared-prefix path. Disable only
+    /// for an explicit correctness or performance comparison.
+    #[serde(default = "default_shared_prefix_reference")]
+    pub shared_prefix_reference: bool,
+    /// Composition of per-token training objectives. ECHO defaults on at
+    /// lambda 0.05; OPD's slot is reserved but empty. See `LossConfig`.
     #[serde(default)]
     pub loss: LossConfig,
 }
@@ -1876,72 +1897,31 @@ impl LossConfig {
     pub fn echo_enabled(&self) -> bool {
         self.echo.is_some() && self.echo_lambda() != 0.0
     }
+}
 
-    /// Apply environment-variable overrides on top of an existing
-    /// `LossConfig`. Honors:
-    ///
-    /// - `KILN_ECHO_ENABLED` — `0`/`false`/`no` → disable ECHO
-    ///   (`loss.echo = None`); `1`/`true`/`yes` → enable with current
-    ///   `lambda` (or default 0.05 if previously disabled).
-    /// - `KILN_ECHO_LAMBDA` — overrides `lambda` on the existing
-    ///   `EchoConfig`; if ECHO is disabled and this is set, ECHO is
-    ///   re-enabled with the given lambda.
-    /// - `KILN_ECHO_ENV_MASK_MODE` — `env_only` (default) | `full_obs`.
-    /// - `KILN_ECHO_WARNING_FILTER` — bool, default true.
-    ///
-    /// Call this from CLI entry points (cuda_grpo_ablation, vk_train CLI,
-    /// future kiln-server route handlers) so users can toggle ECHO from
-    /// the shell without editing JSON.
-    pub fn apply_kiln_echo_env_overrides(&mut self) {
-        // KILN_ECHO_ENABLED — explicit disable wins over anything else.
-        if let Ok(val) = std::env::var("KILN_ECHO_ENABLED") {
-            let v = val.to_lowercase();
-            if v == "0" || v == "false" || v == "no" {
-                self.echo = None;
-            } else if v == "1" || v == "true" || v == "yes" {
-                self.echo.get_or_insert_with(EchoConfig::default);
-            }
-        }
-
-        // The remaining knobs only make sense when ECHO is on. Apply
-        // them on the current EchoConfig (creating one if needed when
-        // any knob is set).
-        let lambda_override = std::env::var("KILN_ECHO_LAMBDA")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok());
-        let mask_mode_override =
-            std::env::var("KILN_ECHO_ENV_MASK_MODE").ok().and_then(|v| {
-                match v.to_lowercase().as_str() {
-                    "env_only" | "envonly" => Some(EnvMaskMode::EnvOnly),
-                    "full_obs" | "fullobs" => Some(EnvMaskMode::FullObs),
-                    _ => None,
-                }
-            });
-        let warning_filter_override =
-            std::env::var("KILN_ECHO_WARNING_FILTER")
-                .ok()
-                .and_then(|v| match v.to_lowercase().as_str() {
-                    "0" | "false" | "no" => Some(false),
-                    "1" | "true" | "yes" => Some(true),
-                    _ => None,
-                });
-
-        if lambda_override.is_some()
-            || mask_mode_override.is_some()
-            || warning_filter_override.is_some()
-        {
-            let cfg = self.echo.get_or_insert_with(EchoConfig::default);
-            if let Some(lambda) = lambda_override {
-                cfg.lambda = lambda;
-            }
-            if let Some(mode) = mask_mode_override {
-                cfg.env_mask_mode = mode;
-            }
-            if let Some(wf) = warning_filter_override {
-                cfg.warning_filter = wf;
-            }
-        }
+fn validate_adapter_smoke_prompts(
+    mode: &str,
+    enabled: bool,
+    prompts: Option<&[String]>,
+) -> anyhow::Result<()> {
+    let Some(prompts) = prompts else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        enabled,
+        "{mode} adapter_smoke_prompts requires adapter_smoke_test=true"
+    );
+    anyhow::ensure!(
+        !prompts.is_empty(),
+        "{mode} adapter_smoke_prompts must contain at least one prompt"
+    );
+    for (index, prompt) in prompts.iter().enumerate() {
+        anyhow::ensure!(
+            !prompt.trim().is_empty(),
+            "{mode} adapter_smoke_prompts[{index}] must not be blank"
+        );
     }
+    Ok(())
 }
 
 impl GrpoConfig {
@@ -2031,6 +2011,12 @@ impl GrpoConfig {
                 return Err("entropy_aware_kl_quantile requires an enabled KL penalty".to_string());
             }
         }
+        validate_adapter_smoke_prompts(
+            "GRPO",
+            self.adapter_smoke_test,
+            self.adapter_smoke_prompts.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
         Ok(())
     }
 }
@@ -2071,9 +2057,15 @@ impl Default for GrpoConfig {
             seed: None,
             optimizer: Optimizer::default(),
             adapter_smoke_test: false,
+            adapter_smoke_prompts: None,
+            shared_prefix_reference: true,
             loss: LossConfig::default(),
         }
     }
+}
+
+fn default_shared_prefix_reference() -> bool {
+    true
 }
 
 /// Immutable identity of the exact corpus admitted for one training job.
@@ -2748,6 +2740,37 @@ mod tests {
     }
 
     #[test]
+    fn training_execution_controls_are_typed_validated_and_round_trip() {
+        let prompts = vec!["Return one word.".to_string()];
+
+        let mut sft = SftConfig {
+            adapter_smoke_test: true,
+            adapter_smoke_prompts: Some(prompts.clone()),
+            ..SftConfig::default()
+        };
+        sft.validate_native_contract().unwrap();
+        assert_eq!(
+            serde_json::to_value(&sft).unwrap()["adapter_smoke_prompts"],
+            serde_json::json!(prompts)
+        );
+        sft.adapter_smoke_test = false;
+        assert!(sft.validate_native_contract().is_err());
+
+        let grpo: GrpoConfig = serde_json::from_value(serde_json::json!({
+            "adapter_smoke_test": true,
+            "adapter_smoke_prompts": ["Return JSON."],
+            "shared_prefix_reference": false,
+        }))
+        .unwrap();
+        grpo.validate_policy_config().unwrap();
+        assert!(!grpo.shared_prefix_reference);
+        assert_eq!(
+            serde_json::to_value(grpo).unwrap()["adapter_smoke_prompts"][0],
+            "Return JSON."
+        );
+    }
+
+    #[test]
     fn effective_learning_rate_prefers_explicit_value() {
         let mut sft = SftConfig::default();
         assert_eq!(sft.effective_learning_rate(), 1e-3); // Muon default
@@ -3118,32 +3141,8 @@ mod tests {
         assert_eq!(config.kl_coeff, 0.1);
     }
 
-    // ECHO LossConfig + env-var override tests. Env-var manipulation is
-    // process-global; each test scrubs the env vars at start to keep the
-    // suite hermetic regardless of order. We use the modern `unsafe`
-    // wrappers on Rust 1.83+ to make the mutation explicit.
-    //
-    // ENV_LOCK serializes the env-var-touching tests against each other
-    // so cargo test's default parallel runner doesn't race on the
-    // process-global env state. Mirrors `trainer::tests::ENV_LOCK`.
-    // Acquire via `_env_guard = ENV_LOCK.lock().unwrap_or_else(...)` at
-    // the top of every test that calls `clear_kiln_echo_env_vars` or
-    // `std::env::set_var`.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn clear_kiln_echo_env_vars() {
-        unsafe {
-            std::env::remove_var("KILN_ECHO_ENABLED");
-            std::env::remove_var("KILN_ECHO_LAMBDA");
-            std::env::remove_var("KILN_ECHO_ENV_MASK_MODE");
-            std::env::remove_var("KILN_ECHO_WARNING_FILTER");
-        }
-    }
-
     #[test]
     fn loss_config_default_has_echo_on_again() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
         let cfg = LossConfig::default();
         // Resurrection PR2: the env-CE term regained its gradient root on
         // the fused GRPO tape node, so the paper default (λ=0.05) is the
@@ -3160,9 +3159,6 @@ mod tests {
 
     #[test]
     fn loss_config_validation_rejects_untrainable_compositions() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
-
         // ECHO + env tokens trains again (resurrection PR2) — both shapes
         // validate.
         let mut cfg = LossConfig::default();
@@ -3193,8 +3189,6 @@ mod tests {
 
     #[test]
     fn loss_config_echo_lambda_returns_zero_when_disabled() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
         let mut cfg = LossConfig::default();
         cfg.echo = None;
         assert_eq!(cfg.echo_lambda(), 0.0);
@@ -3202,120 +3196,13 @@ mod tests {
     }
 
     #[test]
-    fn kiln_echo_enabled_false_disables_echo() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
-        unsafe { std::env::set_var("KILN_ECHO_ENABLED", "false") };
-        // Start from an explicitly-enabled config (the default is now OFF)
-        // so the env override has something to disable.
-        let mut cfg = LossConfig::default();
-        cfg.echo = Some(EchoConfig::default());
-        cfg.apply_kiln_echo_env_overrides();
-        assert!(cfg.echo.is_none(), "KILN_ECHO_ENABLED=false should disable");
-        clear_kiln_echo_env_vars();
-    }
-
-    #[test]
-    fn kiln_echo_lambda_overrides_value() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
-        unsafe { std::env::set_var("KILN_ECHO_LAMBDA", "0.02") };
-        let mut cfg = LossConfig::default();
-        cfg.apply_kiln_echo_env_overrides();
-        assert!(
-            (cfg.echo_lambda() - 0.02).abs() < 1e-12,
-            "KILN_ECHO_LAMBDA=0.02 should override; got {}",
-            cfg.echo_lambda()
-        );
-        clear_kiln_echo_env_vars();
-    }
-
-    #[test]
-    fn kiln_echo_lambda_re_enables_when_previously_disabled() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
-        unsafe { std::env::set_var("KILN_ECHO_LAMBDA", "0.03") };
-        let mut cfg = LossConfig::default();
-        cfg.echo = None; // explicitly disabled before override
-        cfg.apply_kiln_echo_env_overrides();
-        assert!(
-            cfg.echo.is_some(),
-            "setting LAMBDA env var should also re-enable ECHO"
-        );
-        assert!((cfg.echo_lambda() - 0.03).abs() < 1e-12);
-        clear_kiln_echo_env_vars();
-    }
-
-    #[test]
-    fn kiln_echo_env_mask_mode_overrides() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
-        unsafe { std::env::set_var("KILN_ECHO_ENV_MASK_MODE", "full_obs") };
-        let mut cfg = LossConfig::default();
-        cfg.apply_kiln_echo_env_overrides();
-        let echo = cfg.echo.expect("ECHO should still be on");
-        assert_eq!(echo.env_mask_mode, EnvMaskMode::FullObs);
-        clear_kiln_echo_env_vars();
-    }
-
-    #[test]
-    fn kiln_echo_warning_filter_overrides() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
-        unsafe { std::env::set_var("KILN_ECHO_WARNING_FILTER", "false") };
-        let mut cfg = LossConfig::default();
-        cfg.apply_kiln_echo_env_overrides();
-        let echo = cfg.echo.expect("ECHO should still be on");
-        assert!(!echo.warning_filter);
-        clear_kiln_echo_env_vars();
-    }
-
-    #[test]
-    fn kiln_echo_enabled_true_with_lambda_combo() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
-        unsafe {
-            std::env::set_var("KILN_ECHO_ENABLED", "true");
-            std::env::set_var("KILN_ECHO_LAMBDA", "0.1");
-        }
-        let mut cfg = LossConfig::default();
-        cfg.echo = None;
-        cfg.apply_kiln_echo_env_overrides();
-        assert!(cfg.echo.is_some());
-        assert!((cfg.echo_lambda() - 0.1).abs() < 1e-12);
-        clear_kiln_echo_env_vars();
-    }
-
-    #[test]
-    fn kiln_echo_no_env_vars_leaves_config_unchanged() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
-        // Both the (ON again) default and an explicit config survive a
-        // pass with no env vars set.
-        let mut cfg = LossConfig::default();
-        cfg.apply_kiln_echo_env_overrides();
-        assert!(cfg.echo.is_some(), "default ON stays ON");
-
-        let mut cfg = LossConfig::default();
-        cfg.echo = Some(EchoConfig::default());
-        let original_lambda = cfg.echo_lambda();
-        cfg.apply_kiln_echo_env_overrides();
-        assert!((cfg.echo_lambda() - original_lambda).abs() < 1e-12);
-        assert!(cfg.echo.is_some(), "explicit opt-in stays on");
-    }
-
-    #[test]
     fn loss_config_no_policy_loss_default_is_false() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
         let cfg = LossConfig::default();
         assert!(!cfg.no_policy_loss);
     }
 
     #[test]
     fn loss_config_no_policy_loss_serde_round_trip() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
         let cfg = LossConfig {
             echo: Some(EchoConfig::default()),
             opd: None,
@@ -3340,8 +3227,6 @@ mod tests {
         // Every EchoConfig field set away from its default — pin the
         // wire format so a future field rename or default change is a
         // loud test failure rather than a silent compatibility break.
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
         let custom = EchoConfig {
             lambda: 0.027,
             env_mask_mode: EnvMaskMode::FullObs,
@@ -3369,8 +3254,6 @@ mod tests {
     fn echo_config_partial_payload_fills_defaults() {
         // HTTP clients may send only `{"lambda": ...}` — the other fields
         // must fall back to their `#[serde(default = ...)]` values.
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_kiln_echo_env_vars();
         let json = r#"{"lambda": 0.012}"#;
         let parsed: EchoConfig = serde_json::from_str(json).unwrap();
         assert!((parsed.lambda - 0.012).abs() < 1e-12);

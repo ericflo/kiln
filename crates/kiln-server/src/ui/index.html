@@ -640,6 +640,17 @@
                 </label>
                 <div class="form-help">Fail at the first backward operation that produces NaN or Inf. Adds synchronization-heavy checks.</div>
               </div>
+              <div class="form-group">
+                <label for="sft-adapter-smoke-test" style="display:flex; align-items:center; gap:var(--space-2); text-transform:none; font-weight:500;">
+                  <input type="checkbox" id="sft-adapter-smoke-test" name="adapter_smoke_test"> Run adapter smoke test
+                </label>
+                <div class="form-help">Compare base and adapter behavior after successful training and record the canary receipt.</div>
+              </div>
+              <div class="form-group">
+                <label for="sft-adapter-smoke-prompts">Adapter smoke prompts</label>
+                <textarea id="sft-adapter-smoke-prompts" name="adapter_smoke_prompts" rows="3" placeholder="One prompt per line"></textarea>
+                <div class="form-help">Optional request-local canaries used when the adapter smoke test is enabled.</div>
+              </div>
             </div>
           </div>
           <div class="form-help" id="sft-optimizer-support" role="status" aria-live="polite">Optimizer capability details are still loading. Training remains disabled.</div>
@@ -743,6 +754,23 @@
                   <input type="checkbox" id="grpo-detect-anomaly" name="detect_anomaly"> Detect gradient anomalies
                 </label>
                 <div class="form-help">Fail at the first backward operation that produces NaN or Inf. Adds synchronization-heavy checks.</div>
+              </div>
+              <div class="form-group">
+                <label for="grpo-adapter-smoke-test" style="display:flex; align-items:center; gap:var(--space-2); text-transform:none; font-weight:500;">
+                  <input type="checkbox" id="grpo-adapter-smoke-test" name="adapter_smoke_test"> Run adapter smoke test
+                </label>
+                <div class="form-help">Compare base and adapter behavior after successful training and record the canary receipt.</div>
+              </div>
+              <div class="form-group">
+                <label for="grpo-adapter-smoke-prompts">Adapter smoke prompts</label>
+                <textarea id="grpo-adapter-smoke-prompts" name="adapter_smoke_prompts" rows="3" placeholder="One prompt per line"></textarea>
+                <div class="form-help">Optional request-local canaries used when the adapter smoke test is enabled.</div>
+              </div>
+              <div class="form-group">
+                <label for="grpo-shared-prefix-reference" style="display:flex; align-items:center; gap:var(--space-2); text-transform:none; font-weight:500;">
+                  <input type="checkbox" id="grpo-shared-prefix-reference" name="shared_prefix_reference" checked> Share reference prompt state
+                </label>
+                <div class="form-help">Reuse qualified prompt-side reference state across completions. Disable for an explicit comparison.</div>
               </div>
             </div>
           </div>
@@ -1382,6 +1410,19 @@
                 <input type="checkbox" id="opd-detect-anomaly" name="detect_anomaly"> Detect gradient anomalies
               </label>
               <div class="form-help">Fail at the first backward operation that produces NaN or Inf. Adds synchronization-heavy checks.</div>
+            </div>
+            <div class="form-group">
+              <label for="opd-sampler-segments">Sampler layer segments</label>
+              <input type="number" id="opd-sampler-segments" name="sampler_segments" min="1" step="1" placeholder="18 (automatic)">
+              <div class="form-help">Memory-bounded student sampling only. Omit to use 18 capped at model depth.</div>
+            </div>
+            <div class="form-group">
+              <label for="opd-rollout-prompt-rendering">Rollout prompt rendering</label>
+              <select id="opd-rollout-prompt-rendering" name="rollout_prompt_rendering">
+                <option value="legacy_action_boundary" selected>Admitted action boundary</option>
+                <option value="chat_template">Chat template (experimental)</option>
+              </select>
+              <div class="form-help">The experimental chat-template path changes token identity and is not qualified for every structured-output workload.</div>
             </div>
           </div>
           <div class="train-data-status is-good" id="opd-resume-note" role="status" aria-live="polite" hidden></div>

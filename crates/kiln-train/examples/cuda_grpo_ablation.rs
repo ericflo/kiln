@@ -580,12 +580,6 @@ fn effective_config_record(
             "min_groups": args.min_groups,
             "on_empty_filter": args.on_empty_filter,
         },
-        "env": {
-            "KILN_ECHO_ENABLED": std::env::var("KILN_ECHO_ENABLED").ok(),
-            "KILN_ECHO_LAMBDA": std::env::var("KILN_ECHO_LAMBDA").ok(),
-            "KILN_ECHO_ENV_MASK_MODE": std::env::var("KILN_ECHO_ENV_MASK_MODE").ok(),
-            "KILN_ECHO_WARNING_FILTER": std::env::var("KILN_ECHO_WARNING_FILTER").ok(),
-        },
         "grpo_config": config,
     })
 }
@@ -726,12 +720,6 @@ fn main() -> Result<()> {
             ..kiln_train::EchoConfig::default()
         });
     }
-    // KILN_ECHO_* env-var overrides take precedence over CLI flags so
-    // operators can override caps from the shell without editing scripts.
-    // (CLI is for inline knob-tweaking during development; env vars are
-    // for ops/CI orchestration.)
-    config.loss.apply_kiln_echo_env_overrides();
-
     if args.no_policy_loss {
         config.loss.no_policy_loss = true;
     }

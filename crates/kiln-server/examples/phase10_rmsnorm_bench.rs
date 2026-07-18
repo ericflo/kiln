@@ -227,6 +227,7 @@ fn run_one(
         seed: None,
         optimizer: Default::default(),
         adapter_smoke_test: false,
+        adapter_smoke_prompts: None,
     };
     let adapter_dir = std::env::temp_dir().join("kiln-phase10-rmsnorm-bench");
     let _ = std::fs::create_dir_all(&adapter_dir);

@@ -728,7 +728,6 @@ const ADAPTER_SMOKE_TEST_PROMPTS: &[&str] = &[
     "Complete this sentence with a brief answer: The capital of France is",
     "Return a compact JSON tool call for a weather lookup in Paris:",
 ];
-const ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV: &str = "KILN_ADAPTER_SMOKE_PROMPT_FILE";
 const ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS: usize = 4;
 
 struct AdapterSmokeGeneration {
@@ -4357,6 +4356,7 @@ fn run_adapter_smoke_test_best_effort(
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
     params: &TrainableLoraParams,
+    configured_prompts: Option<&[String]>,
     streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> crate::train_receipt::AdapterSmokeTestReceipt {
     let receipt = run_adapter_smoke_test(
@@ -4365,6 +4365,7 @@ fn run_adapter_smoke_test_best_effort(
         model_config,
         tokenizer,
         params,
+        configured_prompts,
         streaming_prefill,
     )
     .unwrap_or_else(|err| {
@@ -4394,10 +4395,11 @@ fn run_adapter_smoke_test(
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
     params: &TrainableLoraParams,
+    configured_prompts: Option<&[String]>,
     streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<crate::train_receipt::AdapterSmokeTestReceipt> {
     let lora = lora_weights_detached(params);
-    let smoke_prompts = adapter_smoke_test_prompts()?;
+    let smoke_prompts = adapter_smoke_test_prompts(configured_prompts)?;
     let mut prompts = Vec::with_capacity(smoke_prompts.len());
 
     for prompt in &smoke_prompts {
@@ -4472,49 +4474,25 @@ fn run_adapter_smoke_test(
     ))
 }
 
-fn adapter_smoke_test_prompts() -> Result<Vec<String>> {
-    let Some(path) = std::env::var_os(ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV) else {
-        return Ok(ADAPTER_SMOKE_TEST_PROMPTS
+fn adapter_smoke_test_prompts(configured: Option<&[String]>) -> Result<Vec<String>> {
+    let prompts = match configured {
+        Some(prompts) => prompts.to_vec(),
+        None => ADAPTER_SMOKE_TEST_PROMPTS
             .iter()
             .map(|prompt| (*prompt).to_string())
-            .collect());
+            .collect(),
     };
-    let path = std::path::PathBuf::from(path);
-    let contents = std::fs::read_to_string(&path).with_context(|| {
-        format!(
-            "read adapter smoke prompt file from {}={}",
-            ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV,
-            path.display()
-        )
-    })?;
-    let trimmed = contents.trim();
     anyhow::ensure!(
-        !trimmed.is_empty(),
-        "{}={} did not contain a prompt",
-        ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV,
-        path.display()
+        !prompts.is_empty(),
+        "adapter_smoke_prompts must contain at least one prompt"
     );
-    if trimmed.starts_with('[') {
-        let prompts: Vec<String> = serde_json::from_str(trimmed).with_context(|| {
-            format!(
-                "parse {}={} as JSON prompt array",
-                ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV,
-                path.display()
-            )
-        })?;
+    for (index, prompt) in prompts.iter().enumerate() {
         anyhow::ensure!(
-            prompts.iter().any(|prompt| !prompt.trim().is_empty()),
-            "{}={} JSON prompt array did not contain a non-empty prompt",
-            ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV,
-            path.display()
+            !prompt.trim().is_empty(),
+            "adapter_smoke_prompts[{index}] must not be blank"
         );
-        Ok(prompts
-            .into_iter()
-            .filter(|prompt| !prompt.trim().is_empty())
-            .collect())
-    } else {
-        Ok(vec![contents])
     }
+    Ok(prompts)
 }
 
 fn adapter_smoke_linear_state(
@@ -6600,6 +6578,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
             model_config,
             tokenizer,
             &params,
+            config.adapter_smoke_prompts.as_deref(),
             streaming_prefill,
         ))
     } else {
@@ -7889,6 +7868,7 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
                     model_config,
                     tokenizer,
                     &params,
+                    config.adapter_smoke_prompts.as_deref(),
                     streaming_prefill,
                 ));
             }
@@ -10448,6 +10428,7 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
                     model_config,
                     tokenizer,
                     &params,
+                    config.adapter_smoke_prompts.as_deref(),
                     streaming_prefill,
                 ));
             }
@@ -11353,7 +11334,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // exact per-completion path until paged Vulkan reference parity is
         // independently qualified.
         && !matches!(device, Device::Vulkan(_))
-        && !kiln_core::env_flag::env_flag("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", false);
+        && config.shared_prefix_reference;
     let shared_prefix_log_probs: Option<Vec<Tensor>> = if use_shared_prefix {
         let started = Instant::now();
         tracing::info!(

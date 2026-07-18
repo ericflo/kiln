@@ -471,7 +471,7 @@ pi -p "Use the bash tool to run: pwd"</code></pre>
   --adapter support-bot \
   --checkpoint-interval 25
 kiln train sft --file corrections.jsonl --adapter support-bot --url http://gpu-box:8420</code></pre>
-          <p class="text-sm mt-4" style="color: var(--fg-mute);">Each JSONL line is one chat correction with a <code>messages</code> array. Native SFT uses the fixed <code>native_online_lora_v1</code> profile: one conversation per update, constant learning rate, and no accumulation, warmup, decay, or clipping. Add <code>--epochs</code>, <code>--lr</code>, or <code>--lora-rank</code> to override its bounded settings. Continue an interrupted run with the same file and options plus <code>--resume-checkpoint BASENAME</code>. Add <code>--detect-anomaly</code> only when localizing a NaN or Inf; it scans every backward operation and can substantially slow the job.</p>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Each JSONL line is one chat correction with a <code>messages</code> array. Native SFT uses the fixed <code>native_online_lora_v1</code> profile: one conversation per update, constant learning rate, and no accumulation, warmup, decay, or clipping. Add <code>--epochs</code>, <code>--lr</code>, or <code>--lora-rank</code> to override its bounded settings. Continue an interrupted run with the same file and options plus <code>--resume-checkpoint BASENAME</code>. <code>--adapter-smoke-test</code> runs post-training canaries; <code>--adapter-smoke-prompts-file</code> loads a JSON string array or one text prompt into request-local config. Add <code>--detect-anomaly</code> only when localizing a NaN or Inf; it scans every backward operation and can substantially slow the job.</p>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">GRPO rewards</h3>
@@ -485,7 +485,7 @@ kiln train grpo \
   --adapter support-bot \
   --checkpoint-interval 25 \
   --resume-checkpoint support-bot-checkpoint-step-00000025.kiln-checkpoint</code></pre>
-          <p class="text-sm mt-4" style="color: var(--fg-mute);">Use <code>/v1/completions/batch</code> or another generator to create prompts and candidate completions first, score them, then submit the scored <code>groups</code>. A <code>.jsonl</code> file selects the memory-bounded streamed route; JSON containing <code>groups</code> selects inline training. Exact resume requires the identical file, route, adapter, and options. <code>--detect-anomaly</code> enables the same request-local per-operation NaN/Inf diagnostic as SFT. See the <a href="grpo.html" class="link">GRPO Guide</a>.</p>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Use <code>/v1/completions/batch</code> or another generator to create prompts and candidate completions first, score them, then submit the scored <code>groups</code>. A <code>.jsonl</code> file selects the memory-bounded streamed route; JSON containing <code>groups</code> selects inline training. Exact resume requires the identical file, route, adapter, and options. Adapter canaries use the same <code>--adapter-smoke-test</code> and <code>--adapter-smoke-prompts-file</code> controls as SFT. <code>--no-shared-prefix-reference</code> selects the exact per-completion KL-reference fallback for a deliberate comparison. <code>--detect-anomaly</code> enables the same request-local per-operation NaN/Inf diagnostic as SFT. See the <a href="grpo.html" class="link">GRPO Guide</a>.</p>
         </div>
         <div class="card p-5 lg:col-span-2">
           <h3 class="font-semibold mb-2">Verified HF/TRL SFT and GRPO handoff</h3>
@@ -536,7 +536,7 @@ kiln train opd \
   --teacher qwen35@vllm \
   --checkpoint-interval 25 \
   --resume-checkpoint distilled-bot-checkpoint-step-00000025.kiln-checkpoint</code></pre>
-          <p class="text-sm mt-4" style="color: var(--fg-mute);">OPD defaults to an exact checkpoint every 25 committed optimizer steps. Exact resume requires the identical request data, effective configuration, output adapter, and currently registered teacher content revision; a same-name replacement is rejected. Job detail and the dashboard expose the candidate cursor and immutable basename. <code>--detect-anomaly</code> opts this job into per-operation NaN/Inf scans and is retained in exact resume state.</p>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">OPD defaults to an exact checkpoint every 25 committed optimizer steps. Exact resume requires the identical request data, effective configuration, output adapter, and currently registered teacher content revision; a same-name replacement is rejected. Job detail and the dashboard expose the candidate cursor and immutable basename. <code>--sampler-segments</code> configures the memory-bounded student sampler; <code>--rollout-prompt-rendering</code> selects the qualified admitted-token boundary or the experimental chat-template algorithm. <code>--detect-anomaly</code> opts this job into per-operation NaN/Inf scans and is retained in exact resume state.</p>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">Queue status</h3>

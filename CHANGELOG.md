@@ -2,6 +2,13 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
+- training configuration boundary: removed the remaining process-global ECHO,
+  adapter-smoke, GRPO shared-reference, and OPD sampler/rendering controls from
+  `kiln-train`. Their typed request-local replacements are carried through API
+  schemas, CLI, dashboard resume, receipts, and exact checkpoints. Custom
+  adapter smoke prompts are submitted as request data; OPD prompt rendering is
+  now an explicit algorithm enum; malformed or inert combinations fail before
+  GPU work.
 - workload and optimizer admission: SFT, GRPO, OPD, DistillRefresh, recipes,
   judge/self-improve, and OPD-backed distillation now run cheap static workload
   and optimizer-tuple guards after request/teacher-alias validation and metadata

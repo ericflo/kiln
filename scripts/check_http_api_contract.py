@@ -177,6 +177,7 @@ CONTROL_COMPONENT_TYPES = {name: name for name in CONTROL_ENTRYPOINTS}
 CONTROL_COMPONENT_TYPES["CorrectionRowInput"] = "CorrectionRow"
 CONTROL_COMPONENT_TYPES["Vec_TrainingStatus"] = "Vec<TrainingStatus>"
 EXPECTED_OBSERVABILITY_DEFINITION_COUNT = 153
+EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 118
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
     "complete": 133,
     "migration_pending": 0,
@@ -1514,8 +1515,11 @@ def validate_control_schema(
     if not isinstance(definitions, dict):
         errors.append("control-plane schema $defs must be an object")
         return errors
-    if len(definitions) != 117:
-        errors.append(f"control-plane schema must contain 117 definitions, got {len(definitions)}")
+    if len(definitions) != EXPECTED_CONTROL_PLANE_DEFINITION_COUNT:
+        errors.append(
+            "control-plane schema must contain "
+            f"{EXPECTED_CONTROL_PLANE_DEFINITION_COUNT} definitions, got {len(definitions)}"
+        )
     if list(definitions) != sorted(definitions):
         errors.append("control-plane schema definitions must be sorted")
 

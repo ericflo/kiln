@@ -393,6 +393,8 @@
               <li><code>auto_load</code> defaults to <code>true</code>.</li>
               <li><code>checkpoint_interval</code> publishes exact state every N committed optimizer groups.</li>
               <li><code>resume_checkpoint</code> continues from the immutable basename reported by job detail.</li>
+              <li><code>adapter_smoke_test</code> enables the post-training canary; <code>adapter_smoke_prompts</code> supplies request-local replacement prompts.</li>
+              <li><code>shared_prefix_reference</code> defaults true and reuses qualified prompt-side reference state. Disable it only for an explicit comparison.</li>
               <li><code>detect_anomaly</code> is an off-by-default, request-local backward diagnostic. It scans each operation's returned gradients and fails at the first NaN or Inf; use <code>kiln train grpo --detect-anomaly</code> to enable it.</li>
             </ul>
           </div>

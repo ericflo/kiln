@@ -699,7 +699,7 @@ GSPO, or CISPO. Token PPO and GSPO use `clip_epsilon` with optional
 See the [tuning reference](docs/GRPO_GUIDE.md#tuning-knobs) before changing
 these objective-level controls.
 
-For **multi-turn agentic** training (tool calls, command output, file contents) kiln ships **ECHO** (paper §3, MSR AI Frontiers 2026) on by default at λ=0.05. ECHO adds a length-normalized cross-entropy on environment-observation tokens with zero extra forward-pass cost; paper headline is ~2× pass@1 on TerminalBench-2.0. The canonical endpoint is `POST /v1/train/agentic` (alias of `/v1/train/grpo`); rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments. See [docs/ECHO_GUIDE.md](docs/ECHO_GUIDE.md) for CLI flags (`--echo-lambda`, `--no-echo`, `--no-policy-loss`), env-var overrides (`KILN_ECHO_*`), and the receipt-grade `env_ce_drop_pct` diagnostic.
+For **multi-turn agentic** training (tool calls, command output, file contents) kiln ships **ECHO** (paper §3, MSR AI Frontiers 2026) on by default at λ=0.05. ECHO adds a length-normalized cross-entropy on environment-observation tokens with zero extra forward-pass cost; paper headline is ~2× pass@1 on TerminalBench-2.0. The canonical endpoint is `POST /v1/train/agentic` (alias of `/v1/train/grpo`); rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments. See [docs/ECHO_GUIDE.md](docs/ECHO_GUIDE.md) for the typed `config.loss.echo` object, CLI flags (`--echo-lambda`, `--no-echo`, `--no-policy-loss`), and the receipt-grade `env_ce_drop_pct` diagnostic.
 
 ```bash
 curl -s http://localhost:8420/v1/completions/batch \

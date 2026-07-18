@@ -187,9 +187,22 @@ async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
     assert!(html.contains(r#"id="sft-detect-anomaly""#));
     assert!(html.contains(r#"id="grpo-detect-anomaly""#));
     assert!(html.contains(r#"id="opd-detect-anomaly""#));
+    assert!(html.contains(r#"id="sft-adapter-smoke-test""#));
+    assert!(html.contains(r#"id="sft-adapter-smoke-prompts""#));
+    assert!(html.contains(r#"id="grpo-adapter-smoke-test""#));
+    assert!(html.contains(r#"id="grpo-adapter-smoke-prompts""#));
+    assert!(html.contains(r#"id="grpo-shared-prefix-reference""#));
+    assert!(html.contains(r#"id="opd-sampler-segments""#));
+    assert!(html.contains(r#"id="opd-rollout-prompt-rendering""#));
     assert!(app_js.contains("invalid_row_policy: invalidRowPolicy"));
     assert!(app_js.contains("config.detect_anomaly = true"));
     assert!(app_js.contains("body.config.detect_anomaly = true"));
+    assert!(app_js.contains("config.adapter_smoke_prompts = smokePrompts"));
+    assert!(
+        app_js.contains("config.shared_prefix_reference = form.shared_prefix_reference.checked")
+    );
+    assert!(app_js.contains("body.config.sampler_segments = samplerSegments"));
+    assert!(app_js.contains("body.config.rollout_prompt_rendering"));
     assert!(app_js.contains("config.invalid_row_policy === 'skip'"));
     assert!(app_js.contains("kind === 'sft' || kind === 'grpo' || kind === 'opd'"));
     assert!(app_js.contains("checkpoint.teacher_identity_revision"));

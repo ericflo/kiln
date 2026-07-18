@@ -1722,6 +1722,11 @@ the fixed prompt, whether generated text differs, and a deterministic-greedy
 diagnosis/note when the offline LoRA delta proxy is measurable but text remains
 byte-identical.
 
+The later typed-configuration migration retired that process-global input.
+Current jobs use `config.adapter_smoke_prompts`, or CLI
+`--adapter-smoke-test --adapter-smoke-prompts-file PATH`; the historical run
+below retains the original launch spelling as evidence.
+
 **Validation evidence:**
 
 - Focused RunPod checks passed on RTX A6000 pod `qmfxie9izl6lc6`; sentinel

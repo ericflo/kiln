@@ -196,6 +196,22 @@ changed by process environment, cannot affect inference or another concurrent
 job, and is retained in the effective request, receipt, replay metadata, and
 exact checkpoint configuration. Resume must use the same value.
 
+### Adapter canaries
+
+Set `config.adapter_smoke_test=true` to compare base and trained-adapter logits
+and short greedy generations after a successful run. The complete result is
+written to `train_receipt.json`. Kiln uses its built-in canary set unless
+`config.adapter_smoke_prompts` supplies a non-empty array of non-blank strings.
+Custom prompts are request data, not a server-local path or process setting, so
+they remain isolated across jobs and are captured by effective config and exact
+resume identity.
+
+The CLI equivalent is `--adapter-smoke-test`; add
+`--adapter-smoke-prompts-file PATH` to load either a JSON string array or one
+single text prompt before submission. The browser exposes both controls under
+SFT Advanced. Supplying custom prompts without enabling the smoke test is
+rejected instead of being silently ignored.
+
 ### Frozen parameter ownership
 
 The native profile trains LoRA A/B tensors and no base-model parameters. The

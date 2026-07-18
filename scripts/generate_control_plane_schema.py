@@ -254,6 +254,7 @@ def build_shared_training_types() -> None:
         "seed": nullable(ref("NonNegativeInteger")),
         "optimizer": ref("Optimizer"),
         "adapter_smoke_test": ref("Boolean"),
+        "adapter_smoke_prompts": nullable(array(ref("NonEmptyString"), min_items=1)),
     }
     add_object("SftConfig", "kiln_train::SftConfig", sft_config_fields, "Complete native SFT configuration. Unknown fields fail admission.", optional=tuple(sft_config_fields), open_input=False)
     add_enum(
@@ -385,7 +386,9 @@ def build_grpo_types() -> None:
         "auto_load": ref("Boolean"), "checkpoint_interval": nullable(ref("PositiveInteger")), "resume_checkpoint": nullable(ref("String")),
         "grad_checkpoint_segments": nullable(ref("PositiveInteger")), "detect_anomaly": ref("Boolean"),
         "seed": nullable(ref("NonNegativeInteger")), "optimizer": ref("Optimizer"),
-        "adapter_smoke_test": ref("Boolean"), "loss": ref("LossConfig"),
+        "adapter_smoke_test": ref("Boolean"),
+        "adapter_smoke_prompts": nullable(array(ref("NonEmptyString"), min_items=1)),
+        "shared_prefix_reference": ref("Boolean"), "loss": ref("LossConfig"),
     }
     add_object("GrpoConfig", "kiln_train::GrpoConfig", grpo_fields, "Complete GRPO optimizer, policy, filtering, checkpoint, and composite-loss configuration.", optional=tuple(grpo_fields), open_input=True, extra={"x-kiln-input-aliases": {"reference_policy": "kl_reference_policy"}})
     add_object(
@@ -416,6 +419,7 @@ def build_opd_types() -> None:
     add_enum("OpdLossGranularity", "kiln_train::OpdLossGranularity", ["sampled_token", "teacher_top_k", "full_vocab"], "OPD teacher-support granularity; only teacher_top_k is server executable.")
     add_enum("OpdTrainingMode", "kiln_train::OpdTrainingMode", ["on_policy", "off_policy"], "Fresh-rollout versus teacher-authored replay mode.")
     add_enum("OpdObjective", "kiln_train::OpdObjective", ["reverse_kl", "cross_entropy"], "OPD objective; cross_entropy is a rejected compatibility value.")
+    add_enum("OpdRolloutPromptRendering", "kiln_train::OpdRolloutPromptRendering", ["legacy_action_boundary", "chat_template"], "Student rollout-prefix construction algorithm; chat_template is experimental.")
     add_definition(
         "StableOpdMode",
         "kiln_train::StableOpdMode",
@@ -439,7 +443,8 @@ def build_opd_types() -> None:
     opd_fields = {
         "training_mode": ref("OpdTrainingMode"), "objective": ref("OpdObjective"), "loss": ref("OpdLossGranularity"),
         "top_k": ref("PositiveInteger"), "samples_per_prompt": ref("PositiveInteger"), "temperature": ref("FiniteNumber"),
-        "top_p": ref("FiniteNumber"), "max_tokens": ref("PositiveInteger"), "stable_opd": ref("StableOpdMode"),
+        "top_p": ref("FiniteNumber"), "max_tokens": ref("PositiveInteger"), "sampler_segments": nullable(ref("PositiveInteger")),
+        "rollout_prompt_rendering": ref("OpdRolloutPromptRendering"), "stable_opd": ref("StableOpdMode"),
         "discount": ref("FiniteNumber"), "clip_epsilon": ref("FiniteNumber"), "learning_rate": nullable(ref("FiniteNumber")),
         "lora_rank": ref("PositiveInteger"), "lora_alpha": ref("FiniteNumber"), "allow_high_lora_scale": ref("Boolean"),
         "base_adapter": nullable(ref("String")), "output_name": nullable(ref("String")), "auto_load": ref("Boolean"),

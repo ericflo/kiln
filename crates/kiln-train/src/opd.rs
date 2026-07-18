@@ -714,6 +714,20 @@ pub struct OpdRequest {
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
 }
 
+/// How OPD constructs the student rollout prefix before sampling.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpdRolloutPromptRendering {
+    /// Preserve the admitted token sequence up to the first supervised action.
+    /// This is the qualified compatibility path and remains the default.
+    #[default]
+    LegacyActionBoundary,
+    /// Re-render the prompt with the model chat template and thinking disabled.
+    /// This is experimental because it changes the token sequence and has not
+    /// produced reliable adapters on every structured-output workload.
+    ChatTemplate,
+}
+
 /// §3.1 + §6 default config for the OPD trainer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpdConfig {
@@ -757,6 +771,17 @@ pub struct OpdConfig {
     /// longer).
     #[serde(default = "default_opd_max_tokens")]
     pub max_tokens: usize,
+
+    /// Number of layer segments used by the memory-bounded student sampler.
+    /// `None` selects the proven default of 18, capped at the model layer
+    /// count. This affects sampling only, not gradient checkpointing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampler_segments: Option<usize>,
+
+    /// Exact algorithm used to construct student rollout prefixes. Serialized
+    /// into effective config, checkpoints, and receipts for replay identity.
+    #[serde(default)]
+    pub rollout_prompt_rendering: OpdRolloutPromptRendering,
 
     /// Stable-OPD mode (§3.1, §3.9). Defaults to `Off`; other modes are
     /// rejected until their reference-KL and golden-SFT terms are wired.
@@ -917,6 +942,10 @@ impl OpdConfig {
             "OPD grad_checkpoint_segments must be greater than zero"
         );
         anyhow::ensure!(
+            self.sampler_segments != Some(0),
+            "OPD sampler_segments must be greater than zero"
+        );
+        anyhow::ensure!(
             self.max_cost_usd.is_none(),
             "OPD max_cost_usd is unavailable: the only wired remote provider is self-hosted vLLM and no metered billing source exists"
         );
@@ -939,6 +968,8 @@ impl Default for OpdConfig {
             temperature: default_opd_temperature(),
             top_p: default_opd_top_p(),
             max_tokens: default_opd_max_tokens(),
+            sampler_segments: None,
+            rollout_prompt_rendering: OpdRolloutPromptRendering::default(),
             stable_opd: StableOpdMode::default(),
             discount: 0.0,
             clip_epsilon: default_opd_clip_eps(),
@@ -2707,6 +2738,7 @@ fn sample_student_rollout(
     temperature: f32,
     top_p: f32,
     seed: Option<u64>,
+    sampler_segments: Option<usize>,
     streaming_prefill: kiln_model::forward::StreamingPrefillExecutionPolicy,
 ) -> Result<Vec<u32>> {
     use kiln_core::sampling::SamplingParams;
@@ -2740,14 +2772,9 @@ fn sample_student_rollout(
     // We chunk more aggressively here than the training path's 8
     // segments — sampling doesn't need to hold an autograd graph, so
     // every-2-layers is the safe default for memory headroom under
-    // long contexts (700+ tokens with a 27B teacher resident). The
-    // env override `KILN_OPD_SAMPLER_SEGMENTS` lets users dial it.
-    let default_segments = std::env::var("KILN_OPD_SAMPLER_SEGMENTS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(18);
-    let num_segments = default_segments.min(model_config.num_layers);
+    // long contexts (700+ tokens with a 27B teacher resident). The typed
+    // request config can select a different positive count when needed.
+    let num_segments = sampler_segments.unwrap_or(18).min(model_config.num_layers);
     let segments =
         crate::trainer::compute_segment_boundaries(model_config.num_layers, num_segments);
     // (#1082) kt-native: the segmented forward chain produces kt tensors
@@ -2926,11 +2953,11 @@ fn render_teacher_prompt_tokens(
         .collect()
 }
 
-fn use_chat_template_rollout_prefixes() -> bool {
-    std::env::var("KILN_OPD_USE_CHAT_TEMPLATE_RENDER")
-        .ok()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+fn use_chat_template_rollout_prefixes(config: &OpdConfig) -> bool {
+    matches!(
+        config.rollout_prompt_rendering,
+        OpdRolloutPromptRendering::ChatTemplate
+    )
 }
 
 /// Eagerly score every fixed off-policy action row and return an in-memory
@@ -2976,7 +3003,7 @@ pub fn materialize_verified_off_policy_teacher(
         })?;
     let top_k = resolve_opd_top_k(config.top_k, caps.max_top_k.min(caps.vocab_size))
         .context("materialize remote teacher: cannot resolve an executable top-K")?;
-    let use_rendered_prefix = use_chat_template_rollout_prefixes();
+    let use_rendered_prefix = use_chat_template_rollout_prefixes(config);
     let rollout_prefixes = if use_rendered_prefix {
         render_rollout_prompt_prefixes(prompts, tokenizer)?
     } else {
@@ -4270,13 +4297,14 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
     // Per-prompt pre-render of the rollout prefix. Drops the last
     // assistant message (if any), passes `enable_thinking=false`, lets
     // the template emit the proper marker tokens, encodes to ids.
-    // OPT-IN via env var. The chat-template render path is correct (verified
-    // via `examples/test_render`) but produces broken adapters end-to-end on
+    // Explicit opt-in through `rollout_prompt_rendering`. The chat-template
+    // render path is correct (verified via `examples/test_render`) but
+    // produces broken adapters end-to-end on
     // structured-list capabilities (see opd-cap.code-symbol-extraction/
     // failure_mode.md). Probably a kernel-vs-prompt-length interaction the
     // root cause isn't fully understood for. Default to legacy
     // orig_input_ids[..first_label] path until the kernel side is audited.
-    let use_chat_template_render = use_chat_template_rollout_prefixes();
+    let use_chat_template_render = use_chat_template_rollout_prefixes(config);
     let rollout_prompt_prefixes: Vec<Vec<u32>> = if !use_chat_template_render {
         // Empty → fallback path uses orig_input_ids[..first_label_mask_true]
         // per the legacy behavior. Same as pre-fix.
@@ -4564,6 +4592,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                                     config.temperature as f32,
                                     config.top_p as f32,
                                     step_seed,
+                                    config.sampler_segments,
                                     streaming_prefill_policy,
                                 )
                                 .with_context(|| {
@@ -6868,6 +6897,11 @@ mod tests {
         assert_eq!(cfg.temperature, 1.0);
         assert_eq!(cfg.top_p, 0.9);
         assert_eq!(cfg.max_tokens, 7168);
+        assert_eq!(cfg.sampler_segments, None);
+        assert_eq!(
+            cfg.rollout_prompt_rendering,
+            OpdRolloutPromptRendering::LegacyActionBoundary
+        );
         assert_eq!(cfg.discount, 0.0);
         assert_eq!(cfg.clip_epsilon, 0.0);
         assert!(matches!(cfg.stable_opd, StableOpdMode::Off));
@@ -6887,6 +6921,28 @@ mod tests {
             serde_json::to_value(config).unwrap()["detect_anomaly"],
             true
         );
+    }
+
+    #[test]
+    fn opd_sampler_policy_is_typed_validated_and_round_trips() {
+        let config: OpdConfig = serde_json::from_value(serde_json::json!({
+            "sampler_segments": 12,
+            "rollout_prompt_rendering": "chat_template",
+        }))
+        .unwrap();
+        assert_eq!(config.sampler_segments, Some(12));
+        assert_eq!(
+            config.rollout_prompt_rendering,
+            OpdRolloutPromptRendering::ChatTemplate
+        );
+        config.validate_runtime_contract().unwrap();
+        let json = serde_json::to_value(config).unwrap();
+        assert_eq!(json["sampler_segments"], 12);
+        assert_eq!(json["rollout_prompt_rendering"], "chat_template");
+
+        let mut invalid = OpdConfig::default();
+        invalid.sampler_segments = Some(0);
+        assert!(invalid.validate_runtime_contract().is_err());
     }
 
     #[test]
@@ -7196,9 +7252,6 @@ mod tests {
         model_config: kiln_core::config::ModelConfig,
         weights: kiln_model::forward::GpuWeights,
     ) -> Result<()> {
-        unsafe {
-            std::env::remove_var("KILN_OPD_USE_CHAT_TEMPLATE_RENDER");
-        }
         let tokenizer = off_policy_smoke_tokenizer()?;
         let prompts = exact_resume_opd_prompts();
         let top_k = 16;

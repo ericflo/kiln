@@ -2576,6 +2576,7 @@ fn bench_training(
         seed: None,
         optimizer: kiln_train::Optimizer::default(),
         adapter_smoke_test: false,
+        adapter_smoke_prompts: None,
     };
 
     let adapter_dir = std::env::temp_dir().join("kiln-bench-adapters");

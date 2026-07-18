@@ -95,6 +95,27 @@ When `trajectory` includes `kind: "observation"` segments and OPD config has
 `echo` enabled, kiln adds ECHO env-CE to the same OPD training step and records
 OPD action tokens and ECHO env tokens separately in `train_receipt.json`.
 
+## Student sampler and prompt identity
+
+`config.sampler_segments` selects the positive layer-segment count used only
+by the memory-bounded student sampler. Omit it for the proven default of 18,
+capped at the model layer count. This setting is distinct from
+`grad_checkpoint_segments`: changing one does not change the other. The CLI
+flag is `--sampler-segments N`; the browser control is under OPD Advanced.
+
+`config.rollout_prompt_rendering` is an explicit algorithm choice:
+
+- `legacy_action_boundary` (default) preserves the admitted token sequence up
+  to the first supervised action and is the qualified compatibility path.
+- `chat_template` re-renders the prompt through the model chat template with
+  thinking disabled. It is experimental because the changed token sequence
+  has produced unreliable adapters on some structured-output workloads.
+
+Use `--rollout-prompt-rendering VALUE` or the browser selector. Both fields are
+validated before GPU work and retained in effective config, checkpoints,
+teacher-fixture identity, and training receipts. No process environment value
+can alter them after admission.
+
 ## Backward anomaly diagnosis
 
 Set `config.detect_anomaly` to `true`, pass `--detect-anomaly` to

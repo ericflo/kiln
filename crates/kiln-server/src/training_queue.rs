@@ -2989,6 +2989,7 @@ fn run_distill_refresh(
         seed: req.config.seed,
         optimizer: req.config.optimizer,
         adapter_smoke_test: false,
+        adapter_smoke_prompts: None,
     };
     tracing::info!(job_id = %job_id, adapter = %midtrain_name, "phase 1 — SFT midtrain");
     let prepared_midtrain = kiln_train::prepare_sft_examples(
