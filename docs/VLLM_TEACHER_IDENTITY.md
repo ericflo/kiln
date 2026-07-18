@@ -610,6 +610,18 @@ output token/second result must not be cited as a serving-performance result.
 Use the subsequent paired multi-concurrency campaign for throughput, pause, and
 correctness claims.
 
+The first exact-source greedy pair is now retained under
+`benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.{kiln,vllm}.json`.
+Every request completed with identical prompt hashes and 166 prompt tokens, and
+vLLM scaled from 18.04 output tokens/second at concurrency 8 to 51.59 at 32,
+versus Kiln's 8.39 and 7.12. That result currently supports recommending vLLM
+for high-concurrency ROCm serving. It does not close correctness: all four
+greedy output-set hashes differed, so the vLLM receipt failed exact comparison.
+Both engines also recorded zero SLO-goodput because the conservative host guard
+inserted multi-second process stops. Preserve the pair as counterevidence;
+diagnose the first output divergence and continuous thermal policy before
+expanding the claim or treating the throughput rows as unpaced latency data.
+
 Do not copy this manifest to another machine and call it qualified. Recreate
 the isolated runtime there, emit a new manifest through the exact launch argv,
 require two byte-identical captures, and retain that platform's own manifest

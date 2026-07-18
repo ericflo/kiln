@@ -175,6 +175,37 @@ bounded timeout. The receipt retains TTFT, client-visible ITL, end-to-end
 latency, request throughput, output-token throughput, SLO goodput, dispatch
 spread, prompt/output hashes, DRM memory, failures, and Kiln batching deltas.
 
+### Current Strix Halo ROCm comparison
+
+The first exact-source pair uses commit `8f1e026b3`, Qwen3.5-4B, the fast
+58/50/93 C host guard, greedy decoding, 64 output tokens, one repeat, and the
+tracked launch inputs above. Both engines completed every request and every
+ownership, memory, identity, cooldown, and teardown gate. The compact receipts
+are:
+
+- `benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.kiln.json`
+- `benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.vllm.json`
+
+| Concurrency | Kiln output tok/s | vLLM output tok/s | vLLM / Kiln |
+|---:|---:|---:|---:|
+| 1 | 5.91 | 3.72 | 0.63x |
+| 8 | 8.39 | 18.04 | 2.15x |
+| 16 | 7.49 | 34.36 | 4.59x |
+| 32 | 7.12 | 51.59 | 7.25x |
+
+This pair is a retained counterexample, not an accepted competitiveness claim.
+The prompt bytes and 166-token input counts matched exactly, but every
+concurrency had a different greedy output-set hash, so the vLLM receipt fails
+the required exact-output comparison. In addition, the guard intentionally
+introduced multi-second process stops and both engines recorded zero
+SLO-goodput under the declared 5 s TTFT, 250 ms ITL, and 60 s end-to-end gates.
+The throughput values still show that vLLM is the recommended high-concurrency
+backend for this currently measured ROCm workload; they do not establish an
+unpaced latency region. Kiln's lifecycle peaked at 92.875 C, only 0.125 C below
+the hard limit, while vLLM peaked at 86.625 C. Diagnose the output divergence
+and establish a continuous thermally sustainable policy before promotion or a
+broader performance claim.
+
 ## Running One Profile
 
 ```bash
