@@ -419,6 +419,28 @@ GRAPH_LIVE_TELEMETRY_FIELDS = (
     "peak_transient_candidate_bytes",
 )
 
+LATENCY_PHASE_NAMES = (
+    "actor_queue",
+    "actor_admission",
+    "tokenization",
+    "prefill",
+    "decode",
+    "sampling",
+    "readback",
+    "response_delivery",
+    "handler_queue",
+    "client_delivery",
+    "gpu_lock_wait",
+    "graph_capture",
+    "graph_replay",
+    "synchronization",
+    "resize",
+    "trim",
+    "adapter",
+    "training",
+    "unexplained",
+)
+
 METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "attributed_itl_outlier_count": ("count", "sum", True),
     "batching_admission_call_count": ("count", "sum", False),
@@ -509,6 +531,22 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "unexplained_itl_outlier_count": ("count", "sum", True),
     "zero_token_response_count": ("count", "sum", True),
 }
+METRIC_DEFINITIONS["latency_phase_metadata_missing_count"] = (
+    "count",
+    "sum",
+    True,
+)
+for _phase_name in LATENCY_PHASE_NAMES:
+    METRIC_DEFINITIONS[f"latency_phase_{_phase_name}_ms_total"] = (
+        "ms",
+        "sum",
+        True,
+    )
+    METRIC_DEFINITIONS[f"latency_phase_{_phase_name}_request_count"] = (
+        "count",
+        "sum",
+        False,
+    )
 for _phase_name in GRAPH_PHASE_NAMES:
     METRIC_DEFINITIONS[f"graph_{_phase_name}_call_count"] = (
         "count",
@@ -851,12 +889,7 @@ LATENCY_DIAGNOSTIC_FIELDS = {
     "ttft_ms", "itl_ms_p50", "itl_ms_p99", "itl_ms_p999", "max_itl_ms",
     "stall_threshold_ms", "stall_count", "unexplained_stall_count", "stall_reasons", "phases",
 }
-LATENCY_PHASE_FIELDS = {
-    "actor_queue_ms", "actor_admission_ms", "tokenization_ms", "prefill_ms", "decode_ms",
-    "sampling_ms", "readback_ms", "response_delivery_ms", "handler_queue_ms",
-    "client_delivery_ms", "gpu_lock_wait_ms", "graph_capture_ms", "graph_replay_ms",
-    "synchronization_ms", "resize_ms", "trim_ms", "adapter_ms", "training_ms", "unexplained_ms",
-}
+LATENCY_PHASE_FIELDS = {f"{phase}_ms" for phase in LATENCY_PHASE_NAMES}
 LATENCY_REASON_FIELDS = {
     "actor_queue", "actor_admission", "actor_prefill", "actor_decode", "response_delivery",
     "handler_queue", "client_delivery", "unexplained",
@@ -945,7 +978,9 @@ def validate_request_latency(value: Any) -> None:
             raise QualificationError(f"request latency phase {field} is invalid")
 
 
-def parse_actor_performance(value: Any) -> tuple[float, float, float, bool] | None:
+def parse_actor_performance(
+    value: Any,
+) -> tuple[float, float, float, bool, dict[str, float | None]] | None:
     if not isinstance(value, dict):
         return None
     metadata = value.get("metadata")
@@ -994,7 +1029,29 @@ def parse_actor_performance(value: Any) -> tuple[float, float, float, bool] | No
         numbers["actor_admission_ms"],
         numbers["actor_prefill_wall_ms"],
         resident_prefill_used,
+        dict(performance["latency"]["phases"]),
     )
+
+
+def latency_phase_metric_values(
+    results: list[StreamResult],
+) -> dict[str, float | int]:
+    values: dict[str, float | int] = {
+        "latency_phase_metadata_missing_count": sum(
+            result.latency_phases is None for result in results
+        )
+    }
+    for phase in LATENCY_PHASE_NAMES:
+        field = f"{phase}_ms"
+        observations = [
+            float(result.latency_phases[field])
+            for result in results
+            if result.latency_phases is not None
+            and result.latency_phases[field] is not None
+        ]
+        values[f"latency_phase_{phase}_ms_total"] = sum(observations)
+        values[f"latency_phase_{phase}_request_count"] = len(observations)
+    return values
 
 
 def token_timing_matches_usage(
@@ -1074,6 +1131,7 @@ class StreamResult:
     actor_queue_ms: float | None = None
     actor_admission_ms: float | None = None
     actor_prefill_wall_ms: float | None = None
+    latency_phases: dict[str, float | None] | None = None
     semantic_deltas: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     loaded_adapter: str | None = None
     loaded_adapter_revision: str | None = None
@@ -1397,6 +1455,7 @@ def run_stream(
     actor_queue_ms: float | None = None
     actor_admission_ms: float | None = None
     actor_prefill_wall_ms: float | None = None
+    latency_phases: dict[str, float | None] | None = None
     resident_prefill_used: bool | None = None
     reasons: list[str] = []
     done = False
@@ -1473,6 +1532,7 @@ def run_stream(
                         actor_admission_ms,
                         actor_prefill_wall_ms,
                         resident_prefill_used,
+                        latency_phases,
                     ) = actor_performance
                 timing = parse_token_timing(
                     value,
@@ -1585,6 +1645,7 @@ def run_stream(
         actor_queue_ms=actor_queue_ms,
         actor_admission_ms=actor_admission_ms,
         actor_prefill_wall_ms=actor_prefill_wall_ms,
+        latency_phases=latency_phases,
         semantic_deltas=semantic_deltas,
         loaded_adapter=loaded_adapter,
         loaded_adapter_revision=loaded_adapter_revision,
@@ -3806,6 +3867,7 @@ def metric_values(
     }
     values.update(external_yield_sync)
     values.update(pressure_peer_timing_values(pressure_peer, pressure_window))
+    values.update(latency_phase_metric_values(successes))
     for phase_name in GRAPH_PHASE_NAMES:
         values[f"graph_{phase_name}_call_count"] = counter_delta(
             graph_start, graph_end, f"phase_{phase_name}_calls"
@@ -4259,6 +4321,11 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 )
         if values["request_failure_count"] != 0:
             status_failures.append(f"{values['request_failure_count']} measured requests failed")
+        if values["latency_phase_metadata_missing_count"] != 0:
+            status_failures.append(
+                f"{values['latency_phase_metadata_missing_count']} successful measured "
+                "requests omitted terminal latency-phase metadata"
+            )
         if values["zero_token_response_count"] != 0:
             status_failures.append(f"{values['zero_token_response_count']} responses had zero tokens")
         status_failures.extend(fixed_output_contract_failures(measured))

@@ -194,6 +194,16 @@ could make that attribution false. A diagnostic consumer must preserve the
 difference between `null` (not measured on this path) and `0` (measured with no
 material elapsed time).
 
+The mixed-load, development-soak, and endurance qualification clients preserve
+that distinction in compact receipts. For each fixed phase `P`, they emit
+`latency_phase_P_ms_total` and `latency_phase_P_request_count`; the total sums
+only non-null request observations, while the count identifies the population
+that contributed to it. `latency_phase_metadata_missing_count` counts
+successful measured requests that omitted the entire terminal phase object and
+is a hard qualification failure. These are source-bound measured-window
+aggregates, not values reconstructed from threshold-filtered logs. Older
+receipts created before this contract are not backfilled.
+
 Phase values are blocking candidates, not an additive critical-path
 decomposition. Work can overlap, especially response delivery with the next
 actor forward, and the broad `decode_ms` interval contains any measured backend

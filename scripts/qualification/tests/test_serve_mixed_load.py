@@ -1480,7 +1480,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         value = {"metadata": {"performance": performance}}
         self.assertEqual(
             serve.parse_actor_performance(value),
-            (12.0, 3.0, 20.0, True),
+            (12.0, 3.0, 20.0, True, performance["latency"]["phases"]),
         )
         self.assertIsNone(serve.parse_actor_performance({"choices": []}))
 
@@ -1505,6 +1505,31 @@ class ServeMixedLoadTests(unittest.TestCase):
         impossible["resident_prefill_used"] = 1
         with self.assertRaisesRegex(serve.QualificationError, "is not boolean"):
             serve.parse_actor_performance({"metadata": {"performance": impossible}})
+
+    def test_latency_phase_metrics_preserve_missing_and_zero_observations(self) -> None:
+        first = stream_result_with_text("000000")
+        first.latency_phases = {
+            f"{phase}_ms": None for phase in serve.LATENCY_PHASE_NAMES
+        }
+        first.latency_phases["decode_ms"] = 12.5
+        first.latency_phases["sampling_ms"] = 0.0
+        second = stream_result_with_text("000001")
+        second.latency_phases = {
+            f"{phase}_ms": None for phase in serve.LATENCY_PHASE_NAMES
+        }
+        second.latency_phases["decode_ms"] = 7.5
+
+        values = serve.latency_phase_metric_values(
+            [first, second, stream_result_with_text("000002")]
+        )
+
+        self.assertEqual(values["latency_phase_metadata_missing_count"], 1)
+        self.assertEqual(values["latency_phase_decode_ms_total"], 20.0)
+        self.assertEqual(values["latency_phase_decode_request_count"], 2)
+        self.assertEqual(values["latency_phase_sampling_ms_total"], 0.0)
+        self.assertEqual(values["latency_phase_sampling_request_count"], 1)
+        self.assertEqual(values["latency_phase_readback_ms_total"], 0)
+        self.assertEqual(values["latency_phase_readback_request_count"], 0)
 
     def test_percentile_uses_r7_linear_interpolation(self) -> None:
         self.assertEqual(serve.percentile_r7([], 0.99), 0.0)

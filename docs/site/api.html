@@ -1745,7 +1745,12 @@ kiln serve --config kiln.toml</code></pre>
           <code>gpu_lock_wait_ms</code> and <code>synchronization_ms</code> candidates. Sampling,
           readback, graph, resize/trim, adapter, and training phases remain <code>null</code> until
           their owning runtime returns request-correlated timings; process-global counter deltas
-          are never presented as per-request evidence. The complete phase, overlap, reason-set,
+          are never presented as per-request evidence. Mixed-load, development-soak, and endurance
+          qualification receipts retain each phase as a measured-window millisecond total plus an
+          observation count, so unsupported <code>null</code> remains distinct from a measured zero.
+          A successful measured request without terminal phase metadata fails qualification, and
+          broad actor and narrower backend totals must be ranked within their layer rather than
+          summed as a critical path. The complete phase, overlap, reason-set,
           nullability, rolling-statistics, and Prometheus contract is documented in
           <a href="https://github.com/ericflo/kiln/blob/main/docs/LATENCY_OBSERVABILITY.md">Latency Observability</a>.
         </p>

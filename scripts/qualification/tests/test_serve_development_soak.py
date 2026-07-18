@@ -213,6 +213,14 @@ class ServeRocmSoakTests(unittest.TestCase):
                 done=True,
                 cancelled=False,
                 error=error,
+                latency_phases={
+                    **{
+                        f"{phase}_ms": None
+                        for phase in soak.mixed.LATENCY_PHASE_NAMES
+                    },
+                    "decode_ms": 125.0,
+                    "sampling_ms": 0.0,
+                },
                 semantic_deltas=[
                     {"choices": [{"delta": {"content": "000000 000001 00"}}]}
                 ],
@@ -236,6 +244,11 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual([item.name for item in evidence.successes], ["complete"])
         self.assertEqual(evidence.attributed_itl_outliers, 0)
         self.assertEqual(evidence.unexplained_itl_outliers, 0)
+        self.assertEqual(evidence.values["latency_phase_metadata_missing_count"], 0)
+        self.assertEqual(evidence.values["latency_phase_decode_ms_total"], 125.0)
+        self.assertEqual(evidence.values["latency_phase_decode_request_count"], 1)
+        self.assertEqual(evidence.values["latency_phase_sampling_ms_total"], 0.0)
+        self.assertEqual(evidence.values["latency_phase_sampling_request_count"], 1)
         self.assertEqual(
             {
                 name: evidence.values[name]

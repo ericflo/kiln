@@ -1200,6 +1200,10 @@ Request-scoped opt-in performance metadata additionally partitions first-token
 wall time into actor queue, slot admission, and admitted-prefill phases, so a
 high TTFT can be attributed without inferring per-request behavior from process
 aggregates.
+Qualification retains the same closed phase object as per-phase measured-window
+time totals and observation counts. A successful request that omits terminal
+phase metadata fails the mixed-load, development-soak, and endurance gates;
+unsupported nullable backend phases remain distinguishable from measured zero.
 The same values appear in health and debug snapshots. A phase crossing 100 ms
 emits one structured `slow_batching_actor_phase` event with the bounded phase
 name and work size, which lets qualification correlate a token gap without

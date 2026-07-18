@@ -413,6 +413,22 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "wave_count": ("count", "sum", False),
     "zero_token_response_count": ("count", "sum", True),
 }
+METRIC_DEFINITIONS["latency_phase_metadata_missing_count"] = (
+    "count",
+    "sum",
+    True,
+)
+for _phase_name in mixed.LATENCY_PHASE_NAMES:
+    METRIC_DEFINITIONS[f"latency_phase_{_phase_name}_ms_total"] = (
+        "ms",
+        "sum",
+        True,
+    )
+    METRIC_DEFINITIONS[f"latency_phase_{_phase_name}_request_count"] = (
+        "count",
+        "sum",
+        False,
+    )
 HOST_SAFETY_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "host_mem_available_end_bytes": ("bytes", "exact", False),
     "host_mem_available_min_bytes": ("bytes", "min", False),
@@ -2827,6 +2843,7 @@ def measurement_result_evidence(
             result.completion_tokens == 0 for result in results
         ),
     }
+    values.update(mixed.latency_phase_metric_values(successes))
     return MeasurementResultEvidence(values, successes, attributed, unexplained)
 
 
@@ -4257,6 +4274,11 @@ def execute(
         if request_failures != 0 or zero_tokens != 0:
             failures.append(
                 f"soak had request_failures={request_failures}, zero_tokens={zero_tokens}"
+            )
+        if values["latency_phase_metadata_missing_count"] != 0:
+            failures.append(
+                f"{values['latency_phase_metadata_missing_count']} successful measured "
+                "requests omitted terminal latency-phase metadata"
             )
         if unexplained != 0:
             failures.append(

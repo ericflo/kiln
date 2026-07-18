@@ -617,6 +617,18 @@ performance metadata is enabled, and an escaped output excerpt capped at 256
 characters. This bound preserves actionable corruption evidence without
 allowing model output to exhaust the result-detail envelope.
 
+Measured mixed-load, development-soak, and endurance receipts also retain the
+complete validated request-phase population instead of discarding terminal
+performance metadata. Every fixed phase `P` has a
+`latency_phase_P_ms_total` and `latency_phase_P_request_count`; nullable phases
+contribute neither time nor count, while a measured zero contributes one count
+and zero time. `latency_phase_metadata_missing_count` must remain zero. Broad
+actor phases contain narrower backend candidates and delivery can overlap the
+next forward, so these totals rank candidates within their documented layer;
+they must not be summed into a synthetic critical path. This makes pre/post
+optimization receipts sufficient to decide whether sampling, readback,
+synchronization, queueing, or model execution actually moved.
+
 ### Vulkan serving baseline
 
 Run this only after the required ROCm receipts have passed on the same clean,
