@@ -64,10 +64,11 @@ model tree vLLM can load:
    inference identities from the staged paths.
 6. Verify the snapshot immediately before spawning vLLM. The vLLM argv points
    only at `ready-*/model` and, when present, `ready-*/adapter`.
-7. Start vLLM without a shell in a new session. Forward `SIGINT`, `SIGTERM`,
-   `SIGHUP`, and `SIGQUIT` once to that process group, terminate descendants
-   left after the leader exits, then remove the snapshot through the anchored
-   root descriptor without following links or crossing filesystems.
+7. Start vLLM without a shell. Standalone mode creates and supervises a new
+   session. Externally owned mode keeps vLLM in the launcher's already isolated
+   process group. Forward termination signals, terminate descendants left after
+   the leader exits, then remove the snapshot through the anchored root
+   descriptor without following links or crossing filesystems.
 
 Source files may change after a successful copy without affecting the running
 teacher. Mutation during copy or verification fails the launch. Reflinks are
@@ -121,6 +122,27 @@ extra file is still included in the full snapshot digest.
 
 The launcher prints the fingerprint and snapshot path immediately before
 spawn. Kiln must receive that exact fingerprint in every scoring response.
+
+## Process-group ownership
+
+Standalone launches use the default `--process-group-mode=detached`: the
+launcher creates a new vLLM session, forwards `SIGINT`, `SIGTERM`, `SIGHUP`, and
+`SIGQUIT`, drains descendants, and removes the immutable snapshot.
+
+An owned local serving benchmark must instead pass
+`--process-group-mode=inherited`. This mode is accepted only on Linux when the
+launcher PID is already the leader of an isolated process group. The benchmark
+driver creates that group before any snapshot or model work, so the launcher,
+vLLM, and ordinary worker descendants receive thermal `SIGSTOP`/`SIGCONT` and
+shutdown signals as one unit. The launcher drains every peer without signaling
+itself and still owns snapshot cleanup. A direct signal delivered only to the
+launcher is forwarded to the child; the external supervisor should signal the
+complete group.
+
+Do not use detached mode behind a process-group thermal guard. The guarded
+launcher would stop while the detached inference child continued running. The
+serving benchmark independently rejects that shape because readiness must come
+from a listener held by the launched process group.
 
 ## Static adapter teacher
 

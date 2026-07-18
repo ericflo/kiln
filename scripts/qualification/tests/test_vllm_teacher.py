@@ -8,6 +8,7 @@ import io
 import json
 import os
 import signal
+import subprocess
 import struct
 import sys
 import tempfile
@@ -1295,6 +1296,138 @@ class ProcessSupervisionTests(unittest.TestCase):
         self.assertTrue(kwargs["start_new_session"])
         self.assertEqual(kwargs["cwd"], os.path.abspath(os.sep))
 
+    def test_inherited_child_stays_in_preisolated_supervisor_group(self) -> None:
+        child = mock.Mock(pid=4243)
+        child.wait.return_value = 0
+        child.poll.return_value = 0
+        with mock.patch.object(
+            vllm_teacher, "_require_isolated_inherited_process_group", return_value=4242
+        ), mock.patch.object(
+            vllm_teacher.subprocess, "Popen", return_value=child
+        ) as popen, mock.patch.object(
+            vllm_teacher, "_drain_inherited_process_group"
+        ) as drain:
+            code = vllm_teacher.run_vllm_child(
+                ["python", "-m", "vllm"],
+                {"A": "B"},
+                process_group_mode=vllm_teacher.PROCESS_GROUP_MODE_INHERITED,
+            )
+        self.assertEqual(code, 0)
+        self.assertFalse(popen.call_args.kwargs["start_new_session"])
+        drain.assert_called_once_with(4242)
+
+    def test_inherited_mode_requires_launcher_to_lead_group(self) -> None:
+        with mock.patch.object(
+            vllm_teacher.os, "getpid", return_value=4242
+        ), mock.patch.object(
+            vllm_teacher.os, "getpgrp", return_value=4000
+        ), mock.patch.object(
+            vllm_teacher.subprocess, "Popen"
+        ) as popen:
+            with self.assertRaisesRegex(
+                vllm_teacher.TeacherLaunchError, "lead an isolated group"
+            ):
+                vllm_teacher.run_vllm_child(
+                    ["vllm"],
+                    {},
+                    process_group_mode=vllm_teacher.PROCESS_GROUP_MODE_INHERITED,
+                )
+        popen.assert_not_called()
+
+    def test_inherited_signal_reaches_child_without_group_signal(self) -> None:
+        handlers: dict[int, object] = {}
+        child = mock.Mock(pid=4243)
+
+        def wait(*, timeout: float | None = None) -> int:
+            self.assertIsNone(timeout)
+            handlers[signal.SIGINT](signal.SIGINT, None)
+            return 0
+
+        child.wait.side_effect = wait
+        child.poll.return_value = None
+
+        def install(signum: int, handler: object) -> None:
+            if callable(handler):
+                handlers[signum] = handler
+
+        with mock.patch.object(
+            vllm_teacher, "_require_isolated_inherited_process_group", return_value=4242
+        ), mock.patch.object(
+            vllm_teacher.subprocess, "Popen", return_value=child
+        ), mock.patch.object(
+            vllm_teacher.signal, "getsignal", return_value="previous"
+        ), mock.patch.object(
+            vllm_teacher.signal, "signal", side_effect=install
+        ), mock.patch.object(
+            vllm_teacher, "_drain_inherited_process_group"
+        ), mock.patch.object(vllm_teacher.os, "killpg") as killpg:
+            self.assertEqual(
+                vllm_teacher.run_vllm_child(
+                    ["vllm"],
+                    {},
+                    process_group_mode=vllm_teacher.PROCESS_GROUP_MODE_INHERITED,
+                ),
+                0,
+            )
+        child.send_signal.assert_called_once_with(signal.SIGINT)
+        killpg.assert_not_called()
+
+    def test_inherited_drain_signals_only_identity_revalidated_peers(self) -> None:
+        group_states = iter(({4243: 99}, {4243: 99}, {}))
+        with mock.patch.object(
+            vllm_teacher,
+            "_inherited_process_group_members",
+            side_effect=lambda _group: next(group_states),
+        ), mock.patch.object(
+            vllm_teacher, "_proc_process_identity", return_value=(4242, 99)
+        ), mock.patch.object(vllm_teacher.os, "kill") as kill:
+            vllm_teacher._drain_inherited_process_group(4242)
+        kill.assert_called_once_with(4243, signal.SIGTERM)
+
+    @unittest.skipUnless(Path("/proc/self/stat").is_file(), "Linux /proc required")
+    def test_real_inherited_child_observes_launcher_process_group(self) -> None:
+        module_path = os.fspath(MODULE_PATH)
+        child_code = (
+            "import json,os;"
+            "print(json.dumps({'role':'child','pid':os.getpid(),"
+            "'process_group':os.getpgrp()}),flush=True)"
+        )
+        supervisor_code = (
+            "import importlib.util,json,os,sys;"
+            f"p={module_path!r};"
+            "s=importlib.util.spec_from_file_location('_kiln_vllm_group_test',p);"
+            "m=importlib.util.module_from_spec(s);sys.modules[s.name]=m;"
+            "s.loader.exec_module(m);"
+            "print(json.dumps({'role':'supervisor','pid':os.getpid(),"
+            "'process_group':os.getpgrp()}),flush=True);"
+            f"c=m.run_vllm_child([sys.executable,'-c',{child_code!r}],{{}},"
+            "process_group_mode=m.PROCESS_GROUP_MODE_INHERITED);"
+            "print(json.dumps({'role':'exit','code':c}),flush=True)"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", supervisor_code],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=False,
+            start_new_session=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        records = [json.loads(line) for line in completed.stdout.splitlines()]
+        by_role = {record["role"]: record for record in records}
+        self.assertEqual(
+            by_role["supervisor"]["pid"],
+            by_role["supervisor"]["process_group"],
+        )
+        self.assertEqual(
+            by_role["child"]["process_group"],
+            by_role["supervisor"]["process_group"],
+        )
+        self.assertEqual(by_role["exit"]["code"], 0)
+
     def test_forwarded_signal_is_sent_once_to_detached_process_group(self) -> None:
         handlers: dict[int, object] = {}
         child = mock.Mock(pid=4242)
@@ -1384,6 +1517,23 @@ class MainTests(unittest.TestCase):
             str(self.manifest),
         ]
 
+    def test_process_group_mode_is_closed_and_defaults_to_detached(self) -> None:
+        parsed = vllm_teacher.parse_args(self._common() + ["--manifest-only"])
+        self.assertEqual(
+            parsed.process_group_mode, vllm_teacher.PROCESS_GROUP_MODE_DETACHED
+        )
+        inherited = vllm_teacher.parse_args(
+            [
+                *self._common(),
+                "--process-group-mode",
+                vllm_teacher.PROCESS_GROUP_MODE_INHERITED,
+                "--manifest-only",
+            ]
+        )
+        self.assertEqual(
+            inherited.process_group_mode, vllm_teacher.PROCESS_GROUP_MODE_INHERITED
+        )
+
     def test_manifest_only_is_dependency_free_json(self) -> None:
         stdout = io.StringIO()
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
@@ -1458,11 +1608,19 @@ class MainTests(unittest.TestCase):
                 "accelerator": ACCELERATOR,
             }
 
-        def fake_run(command: list[str], environment: dict[str, str]) -> int:
+        def fake_run(
+            command: list[str],
+            environment: dict[str, str],
+            *,
+            process_group_mode: str,
+        ) -> int:
             staged_model = called["staged_model"]
             self.assertTrue(staged_model.exists())
             self.assertIn(str(staged_model), command)
             self.assertTrue(called.get("runtime_verified"))
+            self.assertEqual(
+                process_group_mode, vllm_teacher.PROCESS_GROUP_MODE_DETACHED
+            )
             called.update(command=command, environment=environment)
             return 23
 

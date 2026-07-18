@@ -75,6 +75,9 @@ MAX_SNAPSHOT_MANIFEST_BYTES = 128 * 1024**2
 SNAPSHOT_HEADROOM_BYTES = 64 * 1024**2
 PROCESS_GROUP_TERM_SECONDS = 10.0
 PROCESS_GROUP_KILL_SECONDS = 2.0
+PROCESS_GROUP_MODE_DETACHED = "detached"
+PROCESS_GROUP_MODE_INHERITED = "inherited"
+PROCESS_GROUP_MODES = (PROCESS_GROUP_MODE_DETACHED, PROCESS_GROUP_MODE_INHERITED)
 RUNTIME_CONTENT_SCHEMA = "kiln.python-runtime-content.v1"
 RUNTIME_CONTENT_DOMAIN = b"kiln.python-runtime-content.v1\0"
 RUNTIME_PACKAGES = ("vllm", "torch", "transformers", "tokenizers")
@@ -3104,26 +3107,133 @@ def _drain_process_group(process_group: int) -> None:
         )
 
 
-def _terminate_supervised_child(child: Any) -> None:
-    if hasattr(os, "killpg"):
+def _proc_process_identity(pid: int) -> tuple[int, int] | None:
+    """Return (process group, start ticks) without trusting a reused PID."""
+
+    try:
+        payload = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
+    except (FileNotFoundError, PermissionError, OSError, UnicodeError):
+        return None
+    closing = payload.rfind(")")
+    if closing < 0:
+        return None
+    fields = payload[closing + 2 :].split()
+    if len(fields) < 20:
+        return None
+    try:
+        return int(fields[2]), int(fields[19])
+    except ValueError:
+        return None
+
+
+def _inherited_process_group_members(process_group: int) -> dict[int, int]:
+    members: dict[int, int] = {}
+    try:
+        entries = os.scandir("/proc")
+    except OSError as exc:
+        raise TeacherLaunchError(
+            f"cannot enumerate inherited process group {process_group}: {exc}"
+        ) from exc
+    with entries:
+        for entry in entries:
+            if not entry.name.isascii() or not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            if pid == os.getpid():
+                continue
+            identity = _proc_process_identity(pid)
+            if identity is not None and identity[0] == process_group:
+                members[pid] = identity[1]
+    return members
+
+
+def _signal_inherited_group_members(process_group: int, signum: int) -> None:
+    for pid, start_ticks in _inherited_process_group_members(process_group).items():
+        if _proc_process_identity(pid) != (process_group, start_ticks):
+            continue
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            pass
+
+
+def _wait_inherited_group_empty(process_group: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while _inherited_process_group_members(process_group):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _drain_inherited_process_group(process_group: int) -> None:
+    """Terminate every peer while leaving the external supervisor alive."""
+
+    if not _inherited_process_group_members(process_group):
+        return
+    _signal_inherited_group_members(process_group, signal.SIGTERM)
+    if _wait_inherited_group_empty(process_group, PROCESS_GROUP_TERM_SECONDS):
+        return
+    _signal_inherited_group_members(process_group, signal.SIGKILL)
+    if not _wait_inherited_group_empty(process_group, PROCESS_GROUP_KILL_SECONDS):
+        raise TeacherLaunchError(
+            f"inherited vLLM process group {process_group} retained peers after SIGKILL"
+        )
+
+
+def _require_isolated_inherited_process_group() -> int:
+    if not hasattr(os, "getpgrp") or not Path("/proc/self/stat").is_file():
+        raise TeacherLaunchError(
+            "inherited process-group mode requires Linux /proc and POSIX process groups"
+        )
+    process_group = os.getpgrp()
+    if process_group != os.getpid():
+        raise TeacherLaunchError(
+            "inherited process-group mode requires the launcher to lead an isolated group"
+        )
+    return process_group
+
+
+def _terminate_supervised_child(child: Any, process_group_mode: str) -> None:
+    if process_group_mode == PROCESS_GROUP_MODE_INHERITED:
+        process_group = os.getpgrp()
+        _signal_inherited_group_members(process_group, signal.SIGTERM)
+    elif hasattr(os, "killpg"):
         _signal_process_group(child.pid, signal.SIGTERM)
     elif child.poll() is None:
         child.terminate()
     try:
         child.wait(timeout=PROCESS_GROUP_TERM_SECONDS)
     except subprocess.TimeoutExpired:
-        if hasattr(os, "killpg"):
+        if process_group_mode == PROCESS_GROUP_MODE_INHERITED:
+            _signal_inherited_group_members(os.getpgrp(), signal.SIGKILL)
+        elif hasattr(os, "killpg"):
             _signal_process_group(child.pid, signal.SIGKILL)
         else:
             child.kill()
         child.wait()
-    if hasattr(os, "killpg"):
+    if process_group_mode == PROCESS_GROUP_MODE_INHERITED:
+        _drain_inherited_process_group(os.getpgrp())
+    elif hasattr(os, "killpg"):
         _drain_process_group(child.pid)
 
 
-def run_vllm_child(command: Sequence[str], environment: Mapping[str, str]) -> int:
+def run_vllm_child(
+    command: Sequence[str],
+    environment: Mapping[str, str],
+    process_group_mode: str = PROCESS_GROUP_MODE_DETACHED,
+) -> int:
     """Run vLLM without a shell while retaining snapshot cleanup ownership."""
 
+    if process_group_mode not in PROCESS_GROUP_MODES:
+        raise TeacherLaunchError(
+            f"unsupported process-group mode: {process_group_mode!r}"
+        )
+    inherited_process_group = (
+        _require_isolated_inherited_process_group()
+        if process_group_mode == PROCESS_GROUP_MODE_INHERITED
+        else None
+    )
     child: Any | None = None
     pending_signals: list[int] = []
     previous_handlers: dict[int, Any] = {}
@@ -3132,7 +3242,13 @@ def run_vllm_child(command: Sequence[str], environment: Mapping[str, str]) -> in
         if child is None:
             pending_signals.append(signum)
             return
-        if hasattr(os, "killpg"):
+        if process_group_mode == PROCESS_GROUP_MODE_INHERITED:
+            if child.poll() is None:
+                try:
+                    child.send_signal(signum)
+                except ProcessLookupError:
+                    pass
+        elif hasattr(os, "killpg"):
             _signal_process_group(child.pid, signum)
         elif child.poll() is None:
             child.send_signal(signum)
@@ -3164,19 +3280,21 @@ def run_vllm_child(command: Sequence[str], environment: Mapping[str, str]) -> in
                 env=dict(environment),
                 cwd=os.path.abspath(os.sep),
                 shell=False,
-                start_new_session=True,
+                start_new_session=process_group_mode == PROCESS_GROUP_MODE_DETACHED,
             )
         except OSError as exc:
             raise TeacherLaunchError(f"failed to start vLLM: {exc}") from exc
         for signum in pending_signals:
             forward_signal(signum, None)
         return_code = child.wait()
-        if hasattr(os, "killpg"):
+        if inherited_process_group is not None:
+            _drain_inherited_process_group(inherited_process_group)
+        elif hasattr(os, "killpg"):
             _drain_process_group(child.pid)
         return return_code if return_code >= 0 else 128 + (-return_code)
     except BaseException:
         if child is not None:
-            _terminate_supervised_child(child)
+            _terminate_supervised_child(child, process_group_mode)
         raise
     finally:
         for signum, handler in previous_handlers.items():
@@ -3195,6 +3313,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="identity-bound request and response model ID",
     )
     parser.add_argument("--adapter-path", type=Path, help="one immutable static LoRA adapter")
+    parser.add_argument(
+        "--process-group-mode",
+        choices=PROCESS_GROUP_MODES,
+        default=PROCESS_GROUP_MODE_DETACHED,
+        help=(
+            "detach vLLM into a launcher-owned group, or inherit an already isolated "
+            "external supervisor group"
+        ),
+    )
     parser.add_argument(
         "--snapshot-root",
         type=Path,
@@ -3440,7 +3567,11 @@ def _execute(args: argparse.Namespace) -> int:
             ),
             flush=True,
         )
-        return run_vllm_child(command, runtime_environment)
+        return run_vllm_child(
+            command,
+            runtime_environment,
+            process_group_mode=args.process_group_mode,
+        )
     finally:
         if snapshot is not None:
             snapshot.cleanup()

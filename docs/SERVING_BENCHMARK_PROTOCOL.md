@@ -61,7 +61,12 @@ The launch contract intentionally has no environment map and accepts no shell
 command string. Runtime behavior belongs in the server's typed configuration;
 secrets belong in the server's normal credential mechanism. For an owned Kiln
 run, `command[0]` must resolve to the exact `--runtime-artifact` file. For vLLM,
-the runtime artifact remains the immutable teacher/runtime manifest.
+the runtime artifact remains the immutable teacher/runtime manifest and the
+command must launch `scripts/vllm_teacher.py` with
+`--process-group-mode=inherited`. The teacher launcher fails unless the driver
+has already made it the leader of an isolated Linux process group. Detached
+vLLM children cannot satisfy listener ownership and are never thermally guarded
+by implication from their parent.
 
 Example local Kiln launch document:
 
