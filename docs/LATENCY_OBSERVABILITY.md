@@ -241,7 +241,12 @@ errors and trips, pacing counts, duration, maximum interval, and active-at-end
 state are receipt metrics. Cooling time remains inside request and workload wall
 clocks, so throughput and latency describe sustainable service on the named
 host rather than an unpaced burst. This external attribution does not change or
-populate any request-local backend phase.
+populate any request-local backend phase. At teardown, pacing is disabled and
+any active stop is released before `SIGTERM`, while hard-limit monitoring stays
+active through server exit. Post-exit cooldown is not an ITL category because no
+request remains: the runner separately requires eight consecutive 250 ms samples
+at or below 75 C within 180 seconds and retains its duration, sample count,
+stable count, peak, completion, timeout, and active-at-end evidence.
 
 Phase values are blocking candidates, not an additive critical-path
 decomposition. Work can overlap, especially response delivery with the next

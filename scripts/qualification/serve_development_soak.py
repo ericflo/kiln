@@ -67,13 +67,19 @@ STABILIZATION_RSS_DELTA_LIMIT_BYTES = 16 * 1024 * 1024
 VULKAN_ACTIVE_GPU_PEAK_GROWTH_LIMIT_BYTES = 1024 * 1024 * 1024
 SETUP_DEADLINE_SECONDS = 1200.0
 HOST_GUARD_POLL_INTERVAL_SECONDS = 0.25
-HOST_THERMAL_LIMIT_MILLICELSIUS = 97_000
-HOST_THERMAL_SENSOR_NAME = "k10temp"
-HOST_THERMAL_SENSOR_LABEL = "Tctl"
 HOST_MEMORY_AVAILABLE_FLOOR_BYTES = 8 * 1024 * 1024 * 1024
 HOST_SWAP_GROWTH_LIMIT_BYTES = 512 * 1024 * 1024
-HOST_THERMAL_PACING_START_MILLICELSIUS = 88_000
-HOST_THERMAL_PACING_RESUME_MILLICELSIUS = 80_000
+HOST_THERMAL_POLICY = thermal.HostThermalPolicy(
+    hwmon_name="k10temp",
+    label="Tctl",
+    limit_millicelsius=97_000,
+    poll_interval_ms=int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
+    pacing_start_millicelsius=88_000,
+    pacing_resume_millicelsius=80_000,
+    cooldown_target_millicelsius=75_000,
+    cooldown_stable_samples=8,
+    cooldown_timeout_seconds=180.0,
+)
 ACCELERATOR_TELEMETRY_ACTIVE_BUSY_FLOOR_PERCENT = 50
 AMD_GPU_VENDOR_ID = "0x1002"
 PROCESS_MEMORY_MAPPING_CATEGORIES = (
@@ -178,11 +184,7 @@ class SoakRuntime:
     setup_deadline_seconds: float
     host_mem_available_floor_bytes: int | None = None
     host_swap_growth_limit_bytes: int | None = None
-    host_thermal_limit_millicelsius: int | None = None
-    host_thermal_sensor_name: str | None = None
-    host_thermal_sensor_label: str | None = None
-    thermal_pacing_start_millicelsius: int | None = None
-    thermal_pacing_resume_millicelsius: int | None = None
+    host_thermal_policy: thermal.HostThermalPolicy | None = None
     accelerator_telemetry_required: bool = False
 
 
@@ -214,15 +216,7 @@ ROCM_RUNTIME = SoakRuntime(
     setup_deadline_seconds=SETUP_DEADLINE_SECONDS,
     host_mem_available_floor_bytes=HOST_MEMORY_AVAILABLE_FLOOR_BYTES,
     host_swap_growth_limit_bytes=HOST_SWAP_GROWTH_LIMIT_BYTES,
-    host_thermal_limit_millicelsius=HOST_THERMAL_LIMIT_MILLICELSIUS,
-    host_thermal_sensor_name=HOST_THERMAL_SENSOR_NAME,
-    host_thermal_sensor_label=HOST_THERMAL_SENSOR_LABEL,
-    thermal_pacing_start_millicelsius=(
-        HOST_THERMAL_PACING_START_MILLICELSIUS
-    ),
-    thermal_pacing_resume_millicelsius=(
-        HOST_THERMAL_PACING_RESUME_MILLICELSIUS
-    ),
+    host_thermal_policy=HOST_THERMAL_POLICY,
     accelerator_telemetry_required=True,
 )
 VULKAN_RUNTIME = SoakRuntime(
@@ -253,15 +247,7 @@ VULKAN_RUNTIME = SoakRuntime(
     setup_deadline_seconds=1800.0,
     host_mem_available_floor_bytes=HOST_MEMORY_AVAILABLE_FLOOR_BYTES,
     host_swap_growth_limit_bytes=HOST_SWAP_GROWTH_LIMIT_BYTES,
-    host_thermal_limit_millicelsius=HOST_THERMAL_LIMIT_MILLICELSIUS,
-    host_thermal_sensor_name=HOST_THERMAL_SENSOR_NAME,
-    host_thermal_sensor_label=HOST_THERMAL_SENSOR_LABEL,
-    thermal_pacing_start_millicelsius=(
-        HOST_THERMAL_PACING_START_MILLICELSIUS
-    ),
-    thermal_pacing_resume_millicelsius=(
-        HOST_THERMAL_PACING_RESUME_MILLICELSIUS
-    ),
+    host_thermal_policy=HOST_THERMAL_POLICY,
 )
 VULKAN_ENDURANCE_RUNTIME = dataclasses.replace(
     VULKAN_RUNTIME,
@@ -442,6 +428,13 @@ HOST_SAFETY_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "host_temperature_end_millicelsius": ("millicelsius", "exact", True),
     "host_temperature_peak_millicelsius": ("millicelsius", "max", True),
     "host_temperature_start_millicelsius": ("millicelsius", "exact", True),
+    "host_thermal_cooldown_active_end": ("bool", "exact", True),
+    "host_thermal_cooldown_completed_count": ("count", "sum", False),
+    "host_thermal_cooldown_peak_millicelsius": ("millicelsius", "max", True),
+    "host_thermal_cooldown_sample_count": ("count", "sum", False),
+    "host_thermal_cooldown_seconds": ("s", "sum", True),
+    "host_thermal_cooldown_stable_sample_count": ("count", "exact", False),
+    "host_thermal_cooldown_timeout_count": ("count", "sum", True),
     "host_thermal_guard_trip_count": ("count", "sum", True),
     "host_thermal_pacing_active_end": ("bool", "exact", True),
     "host_thermal_pacing_completed_event_count": ("count", "sum", False),
@@ -763,31 +756,10 @@ def effective_config(
         effective["soak"]["host_memory_poll_interval_ms"] = int(
             HOST_GUARD_POLL_INTERVAL_SECONDS * 1000
         )
-    if runtime.host_thermal_limit_millicelsius is not None:
-        if (
-            runtime.host_thermal_sensor_name is None
-            or runtime.host_thermal_sensor_label is None
-        ):
-            raise SoakError("thermal limit requires a complete hwmon sensor selector")
-        effective["soak"]["host_thermal_guard"] = {
-            "limit_millicelsius": runtime.host_thermal_limit_millicelsius,
-            "poll_interval_ms": int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
-            "sensor": {
-                "hwmon_name": runtime.host_thermal_sensor_name,
-                "label": runtime.host_thermal_sensor_label,
-            },
-        }
-        effective["soak"]["host_thermal_pacing"] = {
-            "start_millicelsius": runtime.thermal_pacing_start_millicelsius,
-            "resume_millicelsius": runtime.thermal_pacing_resume_millicelsius,
-            "poll_interval_ms": int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
-            "deadline_accounting": "included",
-            "mode": "continuous_process_group_stop",
-            "scope": "server_process_group",
-            "pause_signal": "SIGSTOP",
-            "resume_signal": "SIGCONT",
-            "itl_attribution": "host_thermal_pacing",
-        }
+    if runtime.host_thermal_policy is not None:
+        effective["soak"].update(
+            runtime.host_thermal_policy.effective_config(key_prefix="host_")
+        )
     if runtime.vulkan_allocation_growth_limit_count is not None:
         effective["soak"]["vulkan_allocation_growth_limit_count"] = (
             runtime.vulkan_allocation_growth_limit_count
@@ -1542,7 +1514,6 @@ class HostThermalGuard(thermal.HostThermalGuard):
     def __init__(self, process: subprocess.Popen[str], **kwargs: Any) -> None:
         super().__init__(
             process,
-            poll_interval_seconds=HOST_GUARD_POLL_INTERVAL_SECONDS,
             trace_callback=mixed.trace,
             error_type=SoakError,
             **kwargs,
@@ -2772,13 +2743,9 @@ def execute(
     thermal_guard = (
         HostThermalGuard(
             process,
-            hwmon_name=runtime.host_thermal_sensor_name or "",
-            label=runtime.host_thermal_sensor_label or "",
-            limit_millicelsius=runtime.host_thermal_limit_millicelsius,
-            pacing_start_millicelsius=runtime.thermal_pacing_start_millicelsius,
-            pacing_resume_millicelsius=runtime.thermal_pacing_resume_millicelsius,
+            **runtime.host_thermal_policy.guard_kwargs(),
         )
-        if runtime.host_thermal_limit_millicelsius is not None
+        if runtime.host_thermal_policy is not None
         else None
     )
     if thermal_guard is not None:
@@ -3705,8 +3672,6 @@ def execute(
         all_server_events = server_log.events_since(runtime_started)
         gpu_end = gpu_memory_bytes(port, process.pid, runtime)
         rss_end = process_memory_snapshot(process.pid).rss_bytes
-        if thermal_guard is not None:
-            thermal_guard.close()
         if host_guard is not None:
             host_guard.close()
         gpu_peak = max([gpu_start, gpu_end, *sampler.samples])
@@ -4073,11 +4038,15 @@ def execute(
     finally:
         sampler.close()
         accelerator_sampler.close()
-        if thermal_guard is not None:
-            thermal_guard.close()
         if host_guard is not None:
             host_guard.close()
-        shutdown = mixed.terminate_process(process)
+        if thermal_guard is not None:
+            thermal_guard.prepare_for_process_exit()
+        try:
+            shutdown = mixed.terminate_process(process)
+        finally:
+            if thermal_guard is not None:
+                thermal_guard.close()
         server_log.join()
         snapshot_residue = mixed.snapshot_payload_residue(snapshot_dir)
         shutil.rmtree(run_dir, ignore_errors=True)
@@ -4106,6 +4075,12 @@ def execute(
         observed_thermal = thermal_guard.metric_values()
         if observed_thermal["host_thermal_guard_trip_count"] != 0:
             failures.append("host thermal guard tripped during the soak")
+        if observed_thermal["host_thermal_cooldown_active_end"] != 0:
+            failures.append("host thermal cooldown remained active after teardown")
+        if observed_thermal["host_thermal_cooldown_completed_count"] != 1:
+            failures.append("host thermal cooldown did not complete after teardown")
+        if observed_thermal["host_thermal_cooldown_timeout_count"] != 0:
+            failures.append("host thermal cooldown timed out after teardown")
         observed_pacing = thermal_guard.pacing_metric_values()
         if observed_pacing["host_thermal_pacing_active_end"] != 0:
             failures.append("host thermal pacing remained active after teardown")
@@ -4361,6 +4336,9 @@ def execute(
                 values.update(
                     resident_recurrent_state_metric_values(resident_state_end)
                 )
+    if thermal_guard is not None:
+        values.update(thermal_guard.metric_values())
+        values.update(thermal_guard.pacing_metric_values())
     accelerator_values = accelerator_sampler.metric_values_since(
         measurement_started if measurement_started is not None else math.inf
     )

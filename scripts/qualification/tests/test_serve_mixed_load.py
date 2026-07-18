@@ -1114,11 +1114,20 @@ class ServeMixedLoadTests(unittest.TestCase):
                 "poll_interval_ms": 250,
                 "sensor": {"hwmon_name": "k10temp", "label": "Tctl"},
             },
+            "thermal_cooldown": {
+                "mode": "post_process_exit_consecutive_samples",
+                "poll_interval_ms": 250,
+                "scope": "host_package",
+                "stable_samples": 8,
+                "target_millicelsius": 75_000,
+                "timeout_seconds": 180.0,
+            },
             "thermal_pacing": {
                 "deadline_accounting": "included",
                 "itl_attribution": "host_thermal_pacing",
                 "mode": "continuous_process_group_stop",
                 "pause_signal": "SIGSTOP",
+                "poll_interval_ms": 250,
                 "resume_millicelsius": 80_000,
                 "resume_signal": "SIGCONT",
                 "scope": "server_process_group",
@@ -1217,6 +1226,9 @@ class ServeMixedLoadTests(unittest.TestCase):
         server_log = mock.Mock()
         guard = mock.Mock()
         lifecycle: list[str] = []
+        guard.prepare_for_process_exit.side_effect = lambda: lifecycle.append(
+            "guard.prepare_for_process_exit"
+        )
         guard.close.side_effect = lambda: lifecycle.append("guard.close")
         guard.trip_reason = "host k10temp/Tctl reached the safety limit"
         guard.errors = ["sensor read failed"]
@@ -1224,6 +1236,13 @@ class ServeMixedLoadTests(unittest.TestCase):
             "host_temperature_end_millicelsius": 97_000,
             "host_temperature_peak_millicelsius": 97_000,
             "host_temperature_start_millicelsius": 86_000,
+            "host_thermal_cooldown_active_end": 0,
+            "host_thermal_cooldown_completed_count": 1,
+            "host_thermal_cooldown_peak_millicelsius": 90_000,
+            "host_thermal_cooldown_sample_count": 8,
+            "host_thermal_cooldown_seconds": 2.0,
+            "host_thermal_cooldown_stable_sample_count": 8,
+            "host_thermal_cooldown_timeout_count": 0,
             "host_thermal_guard_trip_count": 1,
         }
         guard.pacing_metric_values.return_value = {
@@ -1286,7 +1305,14 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(values["host_thermal_pacing_event_count"], 1)
         self.assertIn("startup failed closed", details or "")
         self.assertIn("sensor read failed", details or "")
-        self.assertEqual(lifecycle, ["terminate_process", "guard.close"])
+        self.assertEqual(
+            lifecycle,
+            [
+                "guard.prepare_for_process_exit",
+                "terminate_process",
+                "guard.close",
+            ],
+        )
 
     def test_cargo_resolution_uses_rustup_home_when_path_omits_cargo(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

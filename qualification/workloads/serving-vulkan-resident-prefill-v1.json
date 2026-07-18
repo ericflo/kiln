@@ -91,7 +91,6 @@
           "expected_request_count": 8,
           "host_mem_available_floor_bytes": 8589934592,
           "host_swap_growth_limit_bytes": 536870912,
-          "host_thermal_limit_millicelsius": 97000,
           "ignore_eos": true,
           "overall_timeout_seconds": 1800,
           "request_timeout_seconds": 600,
@@ -104,6 +103,35 @@
         "model": {
           "vulkan_decode_weight_prewarm": true,
           "vulkan_decode_weight_prewarm_mib_per_second": 256
+        },
+        "host_safety": {
+          "thermal_guard": {
+            "limit_millicelsius": 97000,
+            "poll_interval_ms": 250,
+            "sensor": {
+              "hwmon_name": "k10temp",
+              "label": "Tctl"
+            }
+          },
+          "thermal_cooldown": {
+            "mode": "post_process_exit_consecutive_samples",
+            "poll_interval_ms": 250,
+            "scope": "host_package",
+            "stable_samples": 8,
+            "target_millicelsius": 75000,
+            "timeout_seconds": 180.0
+          },
+          "thermal_pacing": {
+            "deadline_accounting": "included",
+            "itl_attribution": "host_thermal_pacing",
+            "mode": "continuous_process_group_stop",
+            "pause_signal": "SIGSTOP",
+            "poll_interval_ms": 250,
+            "resume_millicelsius": 80000,
+            "resume_signal": "SIGCONT",
+            "scope": "server_process_group",
+            "start_millicelsius": 88000
+          }
         },
         "vulkan_buffer_pool_gb": 3.0
       },
@@ -178,7 +206,21 @@
               "host_temperature_end_millicelsius",
               "host_temperature_peak_millicelsius",
               "host_temperature_start_millicelsius",
+              "host_thermal_cooldown_active_end",
+              "host_thermal_cooldown_completed_count",
+              "host_thermal_cooldown_peak_millicelsius",
+              "host_thermal_cooldown_sample_count",
+              "host_thermal_cooldown_seconds",
+              "host_thermal_cooldown_stable_sample_count",
+              "host_thermal_cooldown_timeout_count",
+              "host_thermal_guard_error_count",
               "host_thermal_guard_trip_count",
+              "host_thermal_pacing_active_end",
+              "host_thermal_pacing_completed_event_count",
+              "host_thermal_pacing_event_count",
+              "host_thermal_pacing_max_seconds",
+              "host_thermal_pacing_max_start_millicelsius",
+              "host_thermal_pacing_seconds",
               "kv_blocks_used_end",
               "kv_unaccounted_blocks_end",
               "length_terminated_request_count",

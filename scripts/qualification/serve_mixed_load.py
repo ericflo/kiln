@@ -56,12 +56,17 @@ BUILD_CARGO_HOST_THERMAL_SENSOR_NAME = "k10temp"
 BUILD_CARGO_HOST_THERMAL_SENSOR_LABEL = "Tctl"
 BUILD_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS = 97_000
 BUILD_CARGO_HOST_THERMAL_POLL_MILLISECONDS = 250
-RUNTIME_HOST_THERMAL_SENSOR_NAME = "k10temp"
-RUNTIME_HOST_THERMAL_SENSOR_LABEL = "Tctl"
-RUNTIME_HOST_THERMAL_LIMIT_MILLICELSIUS = 97_000
-RUNTIME_HOST_THERMAL_PACING_START_MILLICELSIUS = 88_000
-RUNTIME_HOST_THERMAL_PACING_RESUME_MILLICELSIUS = 80_000
-RUNTIME_HOST_THERMAL_POLL_MILLISECONDS = 250
+RUNTIME_HOST_THERMAL_POLICY = thermal.HostThermalPolicy(
+    hwmon_name="k10temp",
+    label="Tctl",
+    limit_millicelsius=97_000,
+    poll_interval_ms=250,
+    pacing_start_millicelsius=88_000,
+    pacing_resume_millicelsius=80_000,
+    cooldown_target_millicelsius=75_000,
+    cooldown_stable_samples=8,
+    cooldown_timeout_seconds=180.0,
+)
 BUILD_TIMEOUT_SECONDS = 900.0
 STARTUP_TIMEOUT_SECONDS = 240.0
 REQUEST_TIMEOUT_SECONDS = 120.0
@@ -374,30 +379,7 @@ def _mixed_load_host_safety(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "build": config["build"],
         "runtime": config["runtime"],
-        "host_safety": {
-            "thermal_guard": {
-                "limit_millicelsius": RUNTIME_HOST_THERMAL_LIMIT_MILLICELSIUS,
-                "poll_interval_ms": RUNTIME_HOST_THERMAL_POLL_MILLISECONDS,
-                "sensor": {
-                    "hwmon_name": RUNTIME_HOST_THERMAL_SENSOR_NAME,
-                    "label": RUNTIME_HOST_THERMAL_SENSOR_LABEL,
-                },
-            },
-            "thermal_pacing": {
-                "deadline_accounting": "included",
-                "itl_attribution": "host_thermal_pacing",
-                "mode": "continuous_process_group_stop",
-                "pause_signal": "SIGSTOP",
-                "resume_millicelsius": (
-                    RUNTIME_HOST_THERMAL_PACING_RESUME_MILLICELSIUS
-                ),
-                "resume_signal": "SIGCONT",
-                "scope": "server_process_group",
-                "start_millicelsius": (
-                    RUNTIME_HOST_THERMAL_PACING_START_MILLICELSIUS
-                ),
-            },
-        },
+        "host_safety": RUNTIME_HOST_THERMAL_POLICY.effective_config(),
         "server": config["server"],
         "workload": config["workload"],
     }
@@ -592,6 +574,13 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "host_temperature_end_millicelsius": ("millicelsius", "exact", True),
     "host_temperature_peak_millicelsius": ("millicelsius", "max", True),
     "host_temperature_start_millicelsius": ("millicelsius", "exact", True),
+    "host_thermal_cooldown_active_end": ("bool", "exact", True),
+    "host_thermal_cooldown_completed_count": ("count", "sum", False),
+    "host_thermal_cooldown_peak_millicelsius": ("millicelsius", "max", True),
+    "host_thermal_cooldown_sample_count": ("count", "sum", False),
+    "host_thermal_cooldown_seconds": ("s", "sum", True),
+    "host_thermal_cooldown_stable_sample_count": ("count", "exact", False),
+    "host_thermal_cooldown_timeout_count": ("count", "sum", True),
     "host_thermal_guard_error_count": ("count", "sum", True),
     "host_thermal_guard_trip_count": ("count", "sum", True),
     "host_thermal_pacing_active_end": ("bool", "exact", True),
@@ -4552,16 +4541,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
     process, server_log = start_server(binary, config_path, variant)
     thermal_guard = thermal.HostThermalGuard(
         process,
-        hwmon_name=RUNTIME_HOST_THERMAL_SENSOR_NAME,
-        label=RUNTIME_HOST_THERMAL_SENSOR_LABEL,
-        limit_millicelsius=RUNTIME_HOST_THERMAL_LIMIT_MILLICELSIUS,
-        pacing_start_millicelsius=(
-            RUNTIME_HOST_THERMAL_PACING_START_MILLICELSIUS
-        ),
-        pacing_resume_millicelsius=(
-            RUNTIME_HOST_THERMAL_PACING_RESUME_MILLICELSIUS
-        ),
-        poll_interval_seconds=RUNTIME_HOST_THERMAL_POLL_MILLISECONDS / 1000,
+        **RUNTIME_HOST_THERMAL_POLICY.guard_kwargs(),
         trace_callback=trace,
         error_type=QualificationError,
     )
@@ -5067,7 +5047,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         if slow is not None:
             slow.close()
         sampler.close()
-        thermal_guard.set_phase("teardown")
+        thermal_guard.prepare_for_process_exit()
         try:
             shutdown_outcome = terminate_process(process)
         finally:
@@ -5110,6 +5090,12 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         )
     if final_thermal_values["host_thermal_guard_trip_count"] != 0:
         lifecycle_failures.append("host thermal guard tripped during mixed load")
+    if final_thermal_values["host_thermal_cooldown_active_end"] != 0:
+        lifecycle_failures.append("host thermal cooldown remained active after teardown")
+    if final_thermal_values["host_thermal_cooldown_completed_count"] != 1:
+        lifecycle_failures.append("host thermal cooldown did not complete after teardown")
+    if final_thermal_values["host_thermal_cooldown_timeout_count"] != 0:
+        lifecycle_failures.append("host thermal cooldown timed out after teardown")
     if final_thermal_values["host_thermal_pacing_active_end"] != 0:
         lifecycle_failures.append("host thermal pacing remained active after teardown")
     if (

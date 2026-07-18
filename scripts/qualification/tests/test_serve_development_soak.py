@@ -324,6 +324,17 @@ class ServeRocmSoakTests(unittest.TestCase):
             },
         )
         self.assertEqual(
+            rocm["soak"]["host_thermal_cooldown"],
+            {
+                "mode": "post_process_exit_consecutive_samples",
+                "poll_interval_ms": 250,
+                "scope": "host_package",
+                "stable_samples": 8,
+                "target_millicelsius": 75_000,
+                "timeout_seconds": 180.0,
+            },
+        )
+        self.assertEqual(
             rocm["soak"]["host_thermal_pacing"],
             {
                 "start_millicelsius": 88_000,
@@ -333,6 +344,7 @@ class ServeRocmSoakTests(unittest.TestCase):
                 "mode": "continuous_process_group_stop",
                 "scope": "server_process_group",
                 "pause_signal": "SIGSTOP",
+                "poll_interval_ms": 250,
                 "resume_signal": "SIGCONT",
                 "itl_attribution": "host_thermal_pacing",
             },
@@ -415,6 +427,10 @@ class ServeRocmSoakTests(unittest.TestCase):
             },
         )
         self.assertEqual(
+            vulkan["soak"]["host_thermal_cooldown"],
+            rocm["soak"]["host_thermal_cooldown"],
+        )
+        self.assertEqual(
             vulkan["soak"]["host_thermal_pacing"],
             {
                 "start_millicelsius": 88_000,
@@ -424,6 +440,7 @@ class ServeRocmSoakTests(unittest.TestCase):
                 "mode": "continuous_process_group_stop",
                 "scope": "server_process_group",
                 "pause_signal": "SIGSTOP",
+                "poll_interval_ms": 250,
                 "resume_signal": "SIGCONT",
                 "itl_attribution": "host_thermal_pacing",
             },
@@ -1861,6 +1878,7 @@ class ServeRocmSoakTests(unittest.TestCase):
                 limit_millicelsius=97_000,
                 hwmon_root=root,
             )
+            guard.trace_callback = mock.Mock()
             with mock.patch.object(soak.os, "killpg") as killpg:
                 guard._sample()
                 temperature.write_text("97000\n", encoding="utf-8")
@@ -2016,6 +2034,346 @@ class ServeRocmSoakTests(unittest.TestCase):
         )
         self.assertEqual(
             guard.pacing_metric_values()["host_thermal_pacing_active_end"], 0
+        )
+
+    def test_thermal_guard_teardown_release_completes_active_pacing(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sensor = root / "hwmon3"
+            sensor.mkdir()
+            (sensor / "name").write_text("k10temp\n", encoding="utf-8")
+            (sensor / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            (sensor / "temp1_input").write_text("89000\n", encoding="utf-8")
+            guard = soak.HostThermalGuard(
+                process,
+                hwmon_name="k10temp",
+                label="Tctl",
+                limit_millicelsius=97_000,
+                pacing_start_millicelsius=88_000,
+                pacing_resume_millicelsius=80_000,
+                hwmon_root=root,
+            )
+            trace = mock.Mock()
+            guard.trace_callback = trace
+            with (
+                mock.patch.object(soak.os, "killpg") as killpg,
+                mock.patch.object(soak.time, "monotonic", side_effect=[10.0, 12.0]),
+            ):
+                guard._sample()
+                guard.prepare_for_process_exit()
+                guard._sample()
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(4321, signal.SIGSTOP), mock.call(4321, signal.SIGCONT)],
+        )
+        self.assertEqual(
+            guard.pacing_metric_values()[
+                "host_thermal_pacing_completed_event_count"
+            ],
+            1,
+        )
+        self.assertIn(
+            "host_thermal_teardown_monitoring",
+            [call.args[0] for call in trace.call_args_list],
+        )
+
+    def test_thermal_guard_process_exit_completes_active_pacing(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sensor = root / "hwmon3"
+            sensor.mkdir()
+            (sensor / "name").write_text("k10temp\n", encoding="utf-8")
+            (sensor / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            (sensor / "temp1_input").write_text("89000\n", encoding="utf-8")
+            guard = soak.HostThermalGuard(
+                process,
+                hwmon_name="k10temp",
+                label="Tctl",
+                limit_millicelsius=97_000,
+                pacing_start_millicelsius=88_000,
+                pacing_resume_millicelsius=80_000,
+                hwmon_root=root,
+            )
+            trace = mock.Mock()
+            guard.trace_callback = trace
+            with (
+                mock.patch.object(soak.os, "killpg") as killpg,
+                mock.patch.object(soak.time, "monotonic", side_effect=[10.0, 12.0]),
+            ):
+                guard._sample()
+                process.poll.return_value = 0
+                guard.close()
+
+        killpg.assert_called_once_with(4321, signal.SIGSTOP)
+        self.assertEqual(
+            guard.pacing_metric_values()[
+                "host_thermal_pacing_completed_event_count"
+            ],
+            1,
+        )
+        completed = [
+            call
+            for call in trace.call_args_list
+            if call.args[0] == "host_thermal_pacing_completed"
+        ]
+        self.assertEqual(completed[0].kwargs["completion_reason"], "process_exited")
+
+    def test_thermal_guard_teardown_serializes_with_a_late_pause(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        pause_entered = threading.Event()
+        release_pause = threading.Event()
+        teardown_completed = threading.Event()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sensor = root / "hwmon3"
+            sensor.mkdir()
+            (sensor / "name").write_text("k10temp\n", encoding="utf-8")
+            (sensor / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            (sensor / "temp1_input").write_text("89000\n", encoding="utf-8")
+            guard = soak.HostThermalGuard(
+                process,
+                hwmon_name="k10temp",
+                label="Tctl",
+                limit_millicelsius=97_000,
+                pacing_start_millicelsius=88_000,
+                pacing_resume_millicelsius=80_000,
+                hwmon_root=root,
+            )
+            guard.trace_callback = mock.Mock()
+
+            def killpg(_pid: int, requested_signal: signal.Signals) -> None:
+                if requested_signal == signal.SIGSTOP:
+                    pause_entered.set()
+                    self.assertTrue(release_pause.wait(timeout=1.0))
+
+            pause_thread = threading.Thread(target=guard._sample)
+
+            def prepare() -> None:
+                guard.prepare_for_process_exit()
+                teardown_completed.set()
+
+            teardown_thread = threading.Thread(target=prepare)
+            with (
+                mock.patch.object(soak.os, "killpg", side_effect=killpg) as signals,
+                mock.patch.object(soak.time, "monotonic", side_effect=[10.0, 12.0]),
+            ):
+                pause_thread.start()
+                self.assertTrue(pause_entered.wait(timeout=1.0))
+                teardown_thread.start()
+                self.assertFalse(teardown_completed.wait(timeout=0.05))
+                release_pause.set()
+                pause_thread.join(timeout=1.0)
+                teardown_thread.join(timeout=1.0)
+                guard._sample()
+
+        self.assertFalse(pause_thread.is_alive())
+        self.assertFalse(teardown_thread.is_alive())
+        self.assertEqual(
+            signals.call_args_list,
+            [mock.call(4321, signal.SIGSTOP), mock.call(4321, signal.SIGCONT)],
+        )
+        self.assertEqual(
+            guard.pacing_metric_values()[
+                "host_thermal_pacing_completed_event_count"
+            ],
+            1,
+        )
+
+    def test_thermal_guard_waits_for_stable_post_exit_cooldown(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = 0
+        trace = mock.Mock()
+        guard = soak.thermal.HostThermalGuard(
+            process,
+            hwmon_name="k10temp",
+            label="Tctl",
+            limit_millicelsius=97_000,
+            cooldown_target_millicelsius=75_000,
+            cooldown_stable_samples=3,
+            cooldown_timeout_seconds=10.0,
+            trace_callback=trace,
+        )
+        with (
+            mock.patch.object(
+                soak.thermal,
+                "resolve_hwmon_temperature_input",
+                return_value=Path("/fixture/temp1_input"),
+            ),
+            mock.patch.object(
+                soak.thermal,
+                "read_hwmon_temperature_millicelsius",
+                side_effect=[90_000, 75_000, 74_000, 73_000],
+            ),
+            mock.patch.object(soak.thermal.time, "sleep"),
+        ):
+            guard.close()
+
+        values = guard.metric_values()
+        self.assertEqual(values["host_temperature_end_millicelsius"], 73_000)
+        self.assertEqual(values["host_thermal_cooldown_completed_count"], 1)
+        self.assertEqual(values["host_thermal_cooldown_peak_millicelsius"], 90_000)
+        self.assertEqual(values["host_thermal_cooldown_sample_count"], 4)
+        self.assertEqual(values["host_thermal_cooldown_stable_sample_count"], 3)
+        self.assertEqual(values["host_thermal_cooldown_timeout_count"], 0)
+        self.assertIn(
+            "host_thermal_cooldown_completed",
+            [call.args[0] for call in trace.call_args_list],
+        )
+
+    def test_thermal_guard_post_exit_cooldown_timeout_fails_closed(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = 0
+        guard = soak.thermal.HostThermalGuard(
+            process,
+            hwmon_name="k10temp",
+            label="Tctl",
+            limit_millicelsius=97_000,
+            cooldown_target_millicelsius=75_000,
+            cooldown_stable_samples=2,
+            cooldown_timeout_seconds=0.5,
+        )
+        with (
+            mock.patch.object(
+                soak.thermal,
+                "resolve_hwmon_temperature_input",
+                return_value=Path("/fixture/temp1_input"),
+            ),
+            mock.patch.object(
+                soak.thermal,
+                "read_hwmon_temperature_millicelsius",
+                return_value=90_000,
+            ),
+            mock.patch.object(
+                soak.thermal.time, "monotonic", side_effect=[10.0, 10.6]
+            ),
+        ):
+            guard.close()
+
+        self.assertIn("cooldown timed out", guard.trip_reason or "")
+        self.assertEqual(
+            guard.metric_values()["host_thermal_cooldown_timeout_count"], 1
+        )
+
+    def test_thermal_policy_rejects_unsafe_cooldown_contracts(self) -> None:
+        base = {
+            "hwmon_name": "k10temp",
+            "label": "Tctl",
+            "limit_millicelsius": 97_000,
+            "poll_interval_ms": 250,
+            "cooldown_target_millicelsius": 75_000,
+            "cooldown_stable_samples": 8,
+            "cooldown_timeout_seconds": 180.0,
+            "pacing_start_millicelsius": 88_000,
+            "pacing_resume_millicelsius": 80_000,
+            "error_type": soak.SoakError,
+        }
+        invalid = (
+            (
+                {"cooldown_target_millicelsius": 81_000},
+                "must not exceed the pacing resume temperature",
+            ),
+            (
+                {"cooldown_stable_samples": True},
+                "stable samples must be a positive integer",
+            ),
+            (
+                {"cooldown_timeout_seconds": 0.0},
+                "cooldown timeout must be positive",
+            ),
+            (
+                {"cooldown_timeout_seconds": math.nan},
+                "cooldown timeout must be positive and finite",
+            ),
+            (
+                {"poll_interval_ms": True},
+                "poll interval must be a positive integer",
+            ),
+        )
+        for overrides, message in invalid:
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(soak.SoakError, message):
+                    soak.thermal.HostThermalPolicy(**(base | overrides))
+
+    def test_thermal_guard_rejects_nonfinite_runtime_bounds(self) -> None:
+        process = mock.Mock(pid=4321)
+        invalid = (
+            ({"poll_interval_seconds": math.nan}, "poll interval"),
+            ({"cooldown_timeout_seconds": math.inf}, "cooldown timeout"),
+            ({"limit_millicelsius": True}, "limit must be a positive integer"),
+        )
+        for overrides, message in invalid:
+            with self.subTest(overrides=overrides):
+                arguments = {
+                    "hwmon_name": "k10temp",
+                    "label": "Tctl",
+                    "limit_millicelsius": 97_000,
+                }
+                with self.assertRaisesRegex(soak.SoakError, message):
+                    soak.thermal.HostThermalGuard(
+                        process,
+                        **(arguments | overrides),
+                        error_type=soak.SoakError,
+                    )
+
+    def test_thermal_cooldown_sensor_error_resets_stable_window(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = 0
+        guard = soak.thermal.HostThermalGuard(
+            process,
+            hwmon_name="k10temp",
+            label="Tctl",
+            limit_millicelsius=97_000,
+            cooldown_target_millicelsius=75_000,
+            cooldown_stable_samples=3,
+            cooldown_timeout_seconds=10.0,
+            error_type=soak.SoakError,
+        )
+        with (
+            mock.patch.object(
+                soak.thermal,
+                "resolve_hwmon_temperature_input",
+                return_value=Path("/fixture/temp1_input"),
+            ),
+            mock.patch.object(
+                soak.thermal,
+                "read_hwmon_temperature_millicelsius",
+                side_effect=[75_000, OSError("unreadable"), 75_000, 74_000, 73_000],
+            ),
+            mock.patch.object(soak.thermal.time, "sleep"),
+        ):
+            guard.close()
+
+        values = guard.metric_values()
+        self.assertEqual(values["host_thermal_cooldown_sample_count"], 5)
+        self.assertEqual(values["host_thermal_cooldown_stable_sample_count"], 3)
+        self.assertEqual(values["host_thermal_cooldown_completed_count"], 1)
+        self.assertIn("failed closed", guard.trip_reason or "")
+
+    def test_thermal_guard_cannot_enter_cooldown_before_process_exit(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        guard = soak.thermal.HostThermalGuard(
+            process,
+            hwmon_name="k10temp",
+            label="Tctl",
+            limit_millicelsius=97_000,
+            cooldown_target_millicelsius=75_000,
+            cooldown_stable_samples=8,
+            cooldown_timeout_seconds=180.0,
+        )
+        with mock.patch.object(soak.thermal.os, "killpg") as killpg:
+            guard.close()
+
+        killpg.assert_called_once_with(4321, signal.SIGTERM)
+        self.assertIn("requires the protected process to exit", guard.trip_reason or "")
+        self.assertEqual(
+            guard.metric_values()["host_thermal_cooldown_completed_count"], 0
         )
 
     def test_thermal_guard_rejects_invalid_pacing_hysteresis(self) -> None:

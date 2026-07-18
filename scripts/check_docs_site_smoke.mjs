@@ -1253,6 +1253,10 @@ function validateSftLossRouteDocumentationSourceContract() {
     '88,000/80,000 millicelsius',
     '97,000 millicelsius',
     'host_thermal_pacing',
+    'preserves hard-limit monitoring through process exit',
+    'eight consecutive 250 ms readings',
+    '75,000 millicelsius',
+    '180-second bound',
     'accelerator_sclk_active_min_hz',
     'accelerator_sclk_active_p50_hz',
     'accelerator_sclk_active_below_half_max_count',
@@ -1273,6 +1277,11 @@ function validateSftLossRouteDocumentationSourceContract() {
     'prior SFT v3 checkpoints fail closed',
     'GRPO and OPD',
     'kiln.training-checkpoint-planning.v3',
+    'hard limit stays active',
+    'eight consecutive 250 ms readings',
+    'bounded to 180 seconds',
+    'cooldown active/completed/timeout counts',
+    'a timeout or missing completion fails qualification',
   ]);
   if (missingApiTerms.length > 0) {
     fail(`docs/site/api.html: SFT v4 versus GRPO/OPD v3 checkpoint wording missing terms: ${missingApiTerms.join(', ')}`);

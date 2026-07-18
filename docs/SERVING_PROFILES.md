@@ -90,9 +90,13 @@ including during active inference, and sends
 guard remains active; if it trips while the server is stopped, termination is
 followed by a release signal so cleanup can execute. Cooling consumes the
 existing setup, measurement, and request deadlines, is included in measured
-throughput, and is explicitly attributed in latency evidence. Teardown must
-leave no active pause and every noninterrupted pause must have a matching
-completion. These signals and thresholds belong to the named-machine workload
+throughput, and is explicitly attributed in latency evidence. Teardown
+atomically disables further stops, releases a paced group, and preserves the
+hard-limit sampler until process exit. The runner then waits for eight
+consecutive 250 ms package samples at or below 75 C, bounded to 180 seconds;
+timeout or missing completion evidence fails qualification. Teardown must leave
+no active pause or cooldown, every pause must have a completed lifecycle reason,
+and exactly one post-exit cooldown must complete. These signals and thresholds belong to the named-machine workload
 contract, not to the portable `experimental` serving profile or its product
 configuration.
 

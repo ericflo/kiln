@@ -672,7 +672,8 @@ phase remains contained by the broad actor `decode_ms` interval.
 
 Every ROCm mixed-load arm applies the same independent host thermal policy from
 server launch through readiness, warmup, the isolated sampled wave, ordinary
-measurement, drain, and teardown. The typed `host_safety` object selects
+measurement, drain, server exit, and a bounded post-exit cooldown. The typed
+`host_safety` object selects
 exactly one Linux hwmon input by `name=k10temp` and `label=Tctl`, polls every
 250 ms, pauses the complete server process group with `SIGSTOP` at or above
 88,000 millicelsius, and resumes it with `SIGCONT` at or below 80,000. A
@@ -680,15 +681,32 @@ exactly one Linux hwmon input by `name=k10temp` and `label=Tctl`, polls every
 controller error, or signal error fails closed and terminates the server group.
 Cooling consumes existing wall-clock and request deadlines, so throughput
 includes the host's sustainable pacing cost rather than excluding it. Pacing
-intervals join ITL attribution as `host_thermal_pacing`.
+intervals join ITL attribution as `host_thermal_pacing`. Before sending the
+server its teardown signal, the controller atomically disables new pacing and
+releases any stopped process group while continuing to enforce the 97 C hard
+limit. This prevents a late `SIGSTOP` from delaying or stranding shutdown.
+
+After the server exits, the controller keeps sampling until eight consecutive
+250 ms observations are at or below 75,000 millicelsius. The first cool reading
+does not suffice: the consecutive-sample condition protects against the package
+temperature rebound observed after an earlier run returned control at 88.75 C.
+The cooldown is bounded to 180 seconds. A sensor failure, hard-limit reading, or
+timeout remains a failed qualification; the dead server cannot resume work, and
+the controller continues the bounded cooldown attempt rather than silently
+calling the host ready.
 
 The receipt retains start/peak/end package temperature, guard error and trip
 counts, pacing start/completion counts, total and maximum pacing seconds,
-hottest pacing start, and whether a pause remained active at teardown. A pass
-requires zero guard error or trip, no active final pause, and identical started
-and completed pacing counts. These checks apply to the short mixed-load gate as
-well as the longer development/endurance soaks; the source-build watchdog is a
-separate guard around the compiler/linker service.
+hottest pacing start, and whether a pause remained active at teardown. It also
+retains cooldown active/completed/timeout counts, duration, sample count,
+consecutive stable count, and post-exit peak. A pass requires zero guard error,
+trip, cooldown timeout, or active final controller; exactly one completed
+cooldown; and identical started and completed pacing counts. A pacing interval
+that ends because the protected process has exited is completed with an explicit
+`process_exited` reason rather than misreported as an interruption. These checks
+apply to the short mixed-load gate, the resident-prefill oracle, and the longer
+development/endurance soaks; the source-build watchdog is a separate guard
+around the compiler/linker service.
 
 ### Vulkan serving baseline
 
@@ -1538,7 +1556,11 @@ stop/start oscillation and does not depend on reaching a request boundary. The
 unchanged: a stopped group that reaches the limit receives `SIGTERM` followed by
 `SIGCONT`, allowing termination and cleanup to run rather than leaving a stopped
 process behind. Sensor ambiguity, read failure, controller-thread failure, and
-signal failure all remain fail-closed conditions.
+signal failure all remain fail-closed conditions. Teardown first disables new
+pacing under the same transition lock, releases any active stop, and leaves the
+hard-limit sampler running while the server exits. This closes the race in which
+a polling iteration could issue `SIGSTOP` after teardown had already checked for
+an active pause.
 
 Pacing does not suspend either phase deadline or a request deadline. Cooling
 therefore consumes the existing setup or measurement envelope and cannot extend
@@ -1549,10 +1571,22 @@ not silently reported as an unexplained inference stall. The receipt publishes
 `active_end`, completed and started event counts, total seconds, longest
 interval, and hottest starting reading under `host_thermal_pacing_*`. A clean
 result requires no active pause at teardown and requires every started event to
-have completed. Interrupted teardown still retains its elapsed interval and
-started-event count, but not a completed event. A measured throughput result
+have completed. A deliberate teardown release or observed process exit completes
+the interval with its reason; a controller close or safety trip remains an
+interruption. A measured throughput result
 includes the cooling time required to sustain this workload on the named host
 rather than reporting only its short-burst rate.
+
+Server exit is not the end of host containment. ROCm mixed-load, ROCm/Vulkan
+development and endurance soaks, and the Vulkan resident-prefill oracle wait for
+eight consecutive 250 ms `k10temp/Tctl` samples at or below 75,000
+millicelsius, with a 180-second bound. The receipt publishes
+`host_thermal_cooldown_active_end`, `completed_count`, `timeout_count`, seconds,
+sample count, stable-sample count, and post-exit peak. Qualification requires
+exactly one completed cooldown and no active or timed-out cooldown. The final
+`host_temperature_end_millicelsius` is therefore a post-cooldown observation,
+while `host_temperature_peak_millicelsius` includes any residual heat-soak
+spike after the process exits.
 
 When measurement starts but a later wave fails, the case result retains request,
 latency, cancellation, memory, allocator, cache, and resident-route evidence

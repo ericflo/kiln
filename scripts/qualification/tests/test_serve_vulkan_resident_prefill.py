@@ -114,7 +114,14 @@ class ServeVulkanResidentPrefillTests(unittest.TestCase):
         workload = oracle.EFFECTIVE_CONFIG["workload"]
         self.assertEqual(workload["host_mem_available_floor_bytes"], 8 << 30)
         self.assertEqual(workload["host_swap_growth_limit_bytes"], 512 << 20)
-        self.assertEqual(workload["host_thermal_limit_millicelsius"], 97_000)
+        host_safety = oracle.EFFECTIVE_CONFIG["host_safety"]
+        self.assertEqual(
+            host_safety["thermal_guard"]["limit_millicelsius"], 97_000
+        )
+        self.assertEqual(
+            host_safety["thermal_cooldown"],
+            oracle.soak.HOST_THERMAL_POLICY.effective_config()["thermal_cooldown"],
+        )
 
     def test_cohort_runner_delivers_slot_specific_completion_limits(self) -> None:
         limits = (8, 12, 16, 20)

@@ -49,11 +49,11 @@
           "kv_autoscale_enabled": false,
           "memory_reclaim_requested_mode": "off",
           "memory_reclaim_mode": "off",
+          "rocm_graphs_requested": false,
+          "rocm_graphs_enabled": false,
           "prefix_cache_requested_enabled": true,
           "prefix_cache_effective_enabled": false,
           "prefix_cache_effective_reason": "vulkan_correctness_quarantine",
-          "rocm_graphs_requested": false,
-          "rocm_graphs_enabled": false,
           "vulkan_buffer_pool_gb": 3.5
         },
         "server": {
@@ -70,13 +70,6 @@
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 128,
           "max_prefill_layers_per_cycle": 4
-        },
-        "batching": {
-          "prefill_admission_quantum": 2
-        },
-        "model": {
-          "vulkan_decode_weight_prewarm": true,
-          "vulkan_decode_weight_prewarm_mib_per_second": 256
         },
         "soak": {
           "cancellation_after_semantic_deltas": 4,
@@ -132,7 +125,6 @@
           "stabilization_rss_delta_limit_bytes": null,
           "stabilization_rss_growth_limit_bytes": 536870912,
           "steady_state_warmup_max_waves": 12,
-          "vulkan_allocation_growth_limit_count": 0,
           "vulkan_buffer_pool_gb": 3.5,
           "wave_concurrency": {
             "wave_0": 1,
@@ -149,17 +141,33 @@
               "label": "Tctl"
             }
           },
-          "host_thermal_pacing": {
-            "start_millicelsius": 88000,
-            "resume_millicelsius": 80000,
+          "host_thermal_cooldown": {
+            "mode": "post_process_exit_consecutive_samples",
             "poll_interval_ms": 250,
+            "scope": "host_package",
+            "stable_samples": 8,
+            "target_millicelsius": 75000,
+            "timeout_seconds": 180.0
+          },
+          "host_thermal_pacing": {
             "deadline_accounting": "included",
+            "itl_attribution": "host_thermal_pacing",
             "mode": "continuous_process_group_stop",
-            "scope": "server_process_group",
             "pause_signal": "SIGSTOP",
+            "poll_interval_ms": 250,
+            "resume_millicelsius": 80000,
             "resume_signal": "SIGCONT",
-            "itl_attribution": "host_thermal_pacing"
-          }
+            "scope": "server_process_group",
+            "start_millicelsius": 88000
+          },
+          "vulkan_allocation_growth_limit_count": 0
+        },
+        "batching": {
+          "prefill_admission_quantum": 2
+        },
+        "model": {
+          "vulkan_decode_weight_prewarm": true,
+          "vulkan_decode_weight_prewarm_mib_per_second": 256
         }
       },
       "cases": [
@@ -280,6 +288,13 @@
               "host_temperature_end_millicelsius",
               "host_temperature_peak_millicelsius",
               "host_temperature_start_millicelsius",
+              "host_thermal_cooldown_active_end",
+              "host_thermal_cooldown_completed_count",
+              "host_thermal_cooldown_peak_millicelsius",
+              "host_thermal_cooldown_sample_count",
+              "host_thermal_cooldown_seconds",
+              "host_thermal_cooldown_stable_sample_count",
+              "host_thermal_cooldown_timeout_count",
               "host_thermal_guard_trip_count",
               "host_thermal_pacing_active_end",
               "host_thermal_pacing_completed_event_count",
