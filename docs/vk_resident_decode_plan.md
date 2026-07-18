@@ -121,7 +121,7 @@ acceptance gate is verified and demonstrably correct.
 | (b) | `DecodeResidentPool` ring (3–4 slots, 1 % heap budget, transparent fallback) | `crates/kiln-vulkan-kernel/src/decode_resident_pool.rs` |
 | (c) | `Backend::supports_resident_decode()` + `decode_resident_pool_ready()` trait predicates; CPU/CUDA/Metal default `false` | `crates/kiln-model/src/backend/mod.rs` (+ vulkan impl) |
 | (d) | Integration parity test framework in `crates/kiln-model/tests/vk_resident_decode_parity.rs`; gated on `KILN_QUALIFICATION_MODEL_PATH` | same |
-| (e) framework | `vulkan_decode_microbench full_step_resident` mode chaining 5 resident dispatchers through pool slots. On RTX 6000 Ada at Qwen3.5-4B shapes, batch=1 lands at **604 µs for the full block** — ≈ 120 µs / kernel, well under the 200 µs / call target. Per-kernel legacy floor was 1.1–1.7 ms. | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
+| (e) framework | `vulkan_decode_microbench --only full_step_resident` mode chaining 5 resident dispatchers through pool slots. On RTX 6000 Ada at Qwen3.5-4B shapes, batch=1 lands at **604 µs for the full block** — ≈ 120 µs / kernel, well under the 200 µs / call target. Per-kernel legacy floor was 1.1–1.7 ms. | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
 
 ### Building-block kernels also landed (for the wire-up)
 
@@ -186,7 +186,7 @@ resolved slot. Validation:
 | `vk_paged_kv_cache_write_then_paged_attn_resident_roundtrip` | Write 6 tokens via resident slot-write across a non-trivial block table that crosses a block boundary; read with `paged_attn_decode_batch_paged_f32_resident`; compare against CPU softmax reference | passes (rel err ≤ 1e-4) |
 | `vk_paged_kv_cache_constructs_when_device_up` + 2 sibling tests | Cache geometry, try_new fallback, zero-dim rejection | pass |
 
-`vulkan_decode_microbench full_token_resident_paged` mode runs the
+`vulkan_decode_microbench --only full_token_resident_paged` mode runs the
 architecturally-realistic resident decode loop:
 16 dispatches × 32 layers = **512 dispatches per token** in one
 `CommandBatch` submit, using the real `VkPagedKvCache`, batched K/V

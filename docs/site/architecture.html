@@ -475,9 +475,11 @@ training request
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           Serving and product kernel paths no longer read residual <code>KILN_VK_*</code> tiling or CPU-fallback
-          controls. The separate <code>vulkan_decode_microbench</code> research executable retains its own
-          <code>KILN_VK_MICROBENCH_*</code> experiment inputs; those are not server configuration and cannot produce
-          a qualified product receipt. Phase 8.1 remains open for non-Vulkan runtime controls elsewhere.
+          controls. The separate <code>vulkan_decode_microbench</code> research executable also has no
+          <code>KILN_*</code> input: selection, timing, history, kernel crossovers, and A/B route choices are
+          typed command arguments, validated before device creation, and documented completely in the CLI
+          reference. They are not server configuration and cannot produce a qualified product receipt. Phase
+          8.1 remains open for non-Vulkan runtime controls elsewhere.
         </p>
 
         <h3 class="font-semibold mt-6 mb-3">Attention geometry cannot follow free-memory noise</h3>

@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **566 direct read call sites** and
+The scanner records **553 direct read call sites** and
 **222 process-mutation call sites**. It can
-statically name **102 distinct literal `KILN_*`
-read names** across **209 call sites**.
+statically name **94 distinct literal `KILN_*`
+read names** across **200 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 104 | 64 | 0 |
+| Experimental/debug migration | 91 | 55 | 0 |
 | Build time/provenance | 325 | 6 | 8 |
 | Test only | 128 | 37 | 214 |
 
@@ -59,10 +59,8 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-model/src/forward.rs` | 22 | 18 |
 | `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
 | `crates/kiln-model/src/backend/capability.rs` | 9 | 1 |
-| `crates/kiln-server/src/bench.rs` | 8 | 7 |
 | `crates/kiln-model/src/cuda_graph.rs` | 5 | 5 |
 | `crates/kiln-model/src/metal_graph.rs` | 5 | 3 |
-| `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` | 5 | 2 |
 | `crates/kiln-model/src/generate.rs` | 4 | 3 |
 | `crates/kiln-model/src/marlin_proj.rs` | 3 | 3 |
 | `crates/kiln-model/src/tape_forward.rs` | 3 | 3 |
@@ -96,9 +94,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | Name | Class | Read call sites | Owners |
 |---|---|---:|---|
 | `KILN_ARENA_FORCE_ZERO` | Experimental/debug migration | 2 | `crates/kiln-tensor/src/capture_alloc.rs`, `crates/kiln-tensor/src/rocm_capture_alloc.rs` |
-| `KILN_BENCH_FORCE_MTP` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
-| `KILN_BENCH_LOG_ITL` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
-| `KILN_BENCH_LOG_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
 | `KILN_CHECKPOINT_KILL_CHILD_ROOT` | Test only | 1 | `crates/kiln-train/src/checkpoint.rs` |
 | `KILN_CHECKPOINT_KILL_CHILD_STAGE` | Test only | 1 | `crates/kiln-train/src/checkpoint.rs` |
 | `KILN_COMMIT` | Build time/provenance | 2 | `crates/kiln-server/src/execution_provenance.rs`, `crates/kiln-train/src/replay.rs` |
@@ -161,8 +156,7 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_METAL_LORA_QKV_LINEAR_BENCH_ITERS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_QKV_LINEAR_BENCH_WARMUP` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_MTP_BYTE_EQ_MODEL` | Test only | 1 | `crates/kiln-model/tests/mtp_byte_eq.rs` |
-| `KILN_QUALIFICATION` | Experimental/debug migration, Test only | 28 | `crates/kiln-model/src/rocm_graph.rs`, `crates/kiln-model/tests/adamw_pytorch_oracle.rs`, `crates/kiln-model/tests/rocm_kv_physical_resize.rs`, `crates/kiln-model/tests/vk_resident_decode_parity.rs`, `crates/kiln-server/src/bench.rs`, `crates/kiln-server/tests/real_model_integration.rs`, `crates/kiln-tensor/src/ops/log_softmax.rs`, `crates/kiln-tensor/tests/log_softmax_backend_stability.rs`, `crates/kiln-tensor/tests/metal_ops_parity.rs`, `crates/kiln-tensor/tests/rocm_matmul_parity.rs`, `crates/kiln-tensor/tests/rocm_storage_smoke.rs`, `crates/kiln-train/src/grpo_tape_shim.rs`, `crates/kiln-train/src/opd.rs`, `crates/kiln-train/src/trainer.rs`, `crates/kiln-vulkan-kernel/tests/support/mod.rs`, `crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` |
-| `KILN_QUALIFICATION_CASE_RESULT` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
+| `KILN_QUALIFICATION` | Test only | 27 | `crates/kiln-model/src/rocm_graph.rs`, `crates/kiln-model/tests/adamw_pytorch_oracle.rs`, `crates/kiln-model/tests/rocm_kv_physical_resize.rs`, `crates/kiln-model/tests/vk_resident_decode_parity.rs`, `crates/kiln-server/tests/real_model_integration.rs`, `crates/kiln-tensor/src/ops/log_softmax.rs`, `crates/kiln-tensor/tests/log_softmax_backend_stability.rs`, `crates/kiln-tensor/tests/metal_ops_parity.rs`, `crates/kiln-tensor/tests/rocm_matmul_parity.rs`, `crates/kiln-tensor/tests/rocm_storage_smoke.rs`, `crates/kiln-train/src/grpo_tape_shim.rs`, `crates/kiln-train/src/opd.rs`, `crates/kiln-train/src/trainer.rs`, `crates/kiln-vulkan-kernel/tests/support/mod.rs`, `crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` |
 | `KILN_QUALIFICATION_HF_LOGITS_PATH` | Test only | 1 | `crates/kiln-model/tests/vk_resident_decode_parity.rs` |
 | `KILN_QUALIFICATION_MODEL_PATH` | Test only | 2 | `crates/kiln-model/tests/vk_resident_decode_parity.rs`, `crates/kiln-train/tests/qwen35_sft_oracle.rs` |
 | `KILN_QWEN_TOKENIZER_PATH` | Test only | 1 | `crates/kiln-train/src/trajectory_mask.rs` |
@@ -180,8 +174,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_SDPA_SPLIT` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/metal_kernels.rs` |
 | `KILN_SERVED_MODEL_ID` | Test only | 1 | `crates/kiln-server/src/config.rs` |
 | `KILN_SOURCE_TREE_HASH` | Build time/provenance | 1 | `crates/kiln-server/src/execution_provenance.rs` |
-| `KILN_SPEC_ENABLED` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
-| `KILN_SPEC_METHOD` | Experimental/debug migration | 1 | `crates/kiln-server/src/bench.rs` |
 | `KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS` | Experimental/debug migration | 1 | `crates/kiln-model/src/tape_forward.rs` |
 | `KILN_TAPE_OFFLOAD_MATMUL_A` | Experimental/debug migration | 1 | `crates/kiln-model/src/tape_forward.rs` |
@@ -193,8 +185,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_TEST_FLAG_FALSY` | Test only | 1 | `crates/kiln-core/src/env_flag.rs` |
 | `KILN_TEST_FLAG_GIBBERISH` | Test only | 2 | `crates/kiln-core/src/env_flag.rs` |
 | `KILN_TEST_FLAG_TRUTHY` | Test only | 1 | `crates/kiln-core/src/env_flag.rs` |
-| `KILN_VK_MICROBENCH_BATCHES` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
-| `KILN_VK_MICROBENCH_ONLY` | Experimental/debug migration | 1 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` |
 | `KILN_W4A16` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |
 | `KILN_W4A16_GDN_OUT_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |
 
@@ -296,7 +286,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-server/src/api/debug_model_state.rs` | `var` | `name` | Experimental/debug migration | 1 |
 | `crates/kiln-server/src/api/health.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/bench.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
-| `crates/kiln-server/src/bench.rs` | `var` | `name` | Experimental/debug migration | 1 |
 | `crates/kiln-server/src/cli.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/cli.rs` | `var` | `HOME` | Experimental/debug migration | 2 |
 | `crates/kiln-server/src/config.rs` | `var` | `& credential . api_key_env` | Public stable | 2 |
@@ -337,7 +326,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-vulkan-kernel/build.rs` | `var` | `OUT_DIR` | Build time/provenance | 1 |
 | `crates/kiln-vulkan-kernel/examples/dispatch_test.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 1 |
 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 20 |
-| `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` | `var` | `name` | Experimental/debug migration | 3 |
 | `crates/kiln-vulkan-kernel/src/cmd_batch.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 2 |
 | `crates/kiln-vulkan-kernel/src/kernels.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 103 |
 | `crates/kiln-vulkan-kernel/src/lib.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |

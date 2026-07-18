@@ -368,11 +368,89 @@ microbenchmark remains a separate executable surface and must not be treated as
 product configuration.
 
 The serving library and product kernel paths no longer read residual
-`KILN_VK_*` tiling or CPU-fallback switches. `vulkan_decode_microbench` retains
-its explicitly research-only `KILN_VK_MICROBENCH_*` inputs and local experiment
-parameters; it is a separate executable, not server configuration, and a run
-using those inputs is not a product qualification receipt. Phase 8.1 remains
-open for non-Vulkan runtime controls elsewhere in the repository.
+`KILN_VK_*` tiling or CPU-fallback switches. The separate
+`vulkan_decode_microbench` research executable also has no `KILN_*` input: its
+complete experiment policy is a typed, fail-fast command line documented
+below. It is not server configuration, and invoking it does not create a
+product qualification receipt. Phase 8.1 remains open for non-Vulkan runtime
+controls elsewhere in the repository.
+
+### Standalone benchmark configuration
+
+`kiln-bench` loads the same typed `KilnConfig` as the server. `--config` selects
+the TOML file; in its absence normal config discovery applies. In particular,
+the `[speculative]` section supplies the method, draft proposal count, and draft
+depth. The three `--spec-*` arguments are explicit per-invocation overrides for
+controlled A/B work. The executable has no direct `KILN_BENCH_*`,
+`KILN_SPEC_*`, or qualification environment reads.
+
+| Argument | Type and exact default | Validation and effect |
+|---|---|---|
+| `--config <path>` | path; normal discovery | Loads typed startup configuration before device selection. |
+| `--model-path <path>` | path; required | Local model and tokenizer directory. |
+| `--max-output-tokens <n>` | positive integer; `128` | Maximum generated tokens per request. |
+| `--prompt-tokens <n>` | positive integer; `512` | Approximate generated benchmark prompt length. |
+| `--training-steps <n>` | unsigned integer; `10` | SFT steps when training is not skipped. |
+| `--skip-training` | flag; false | Omits the SFT benchmark. |
+| `--paged` | flag; false | Uses the production paged-KV latency path. |
+| `--latency-only` | flag; false | Stops after latency and emits empty throughput/training results. |
+| `--latency-warmup-runs <n>` | unsigned integer; `0` | Runs unmeasured complete latency passes first. |
+| `--seed <u64>` | integer; `42` | Selects prompt and deterministic sampler trajectory. |
+| `--chat-template` | flag; false | Applies Qwen ChatML framing to the MTP arm. |
+| `--prompt-subset <name>` | `all`, `gsm8k`, `humaneval`, or `c4`; `all` | Selects the MTP prompt pool. Unknown values are fatal. |
+| `--temperature <f32>` | finite non-negative number; `0.0` | Sampling temperature for every benchmark arm. |
+| `--spec-method <method>` | `off`, `skip_layer`, or `mtp`; typed `[speculative]` effective method | Overrides only this benchmark invocation. Unknown values are fatal. |
+| `--spec-num-tokens <n>` | integer; typed `speculative.num_speculative_tokens` | Must pass the model speculative window validation, currently `1..=4`. |
+| `--spec-draft-layers <n>` | integer; typed `speculative.draft_layers` | Must be positive and less than model layer count. |
+| `--force-mtp` | flag; false | Bypasses benchmark shape routing; it does not enable serving. |
+| `--log-tokens` | flag; false | Emits generated token IDs for the paged non-speculative arm. |
+| `--log-itl` | flag; false | Emits each measured ITL for the paged non-speculative arm. |
+| `--allow-experimental-speculative` | flag; false | Required for a non-`off` method. Acknowledges unsupported research behavior; it does not make a run qualification evidence. |
+
+The speculative benchmark opt-in is deliberately not named `qualification`.
+Only a declared workload executed by `scripts/qualification/run.py` and a
+strictly checked retained receipt constitute qualification evidence. A direct
+benchmark command, including one using the experimental opt-in, does not.
+| `-v`, `--verbose`, `-vv` | count; `0` | Selects info or trace diagnostics. |
+| `-q`, `--quiet` | flag; false | Selects warning diagnostics and wins over verbosity. |
+
+`vulkan_decode_microbench` is an offline kernel research tool. It parses all
+arguments before opening a Vulkan device. Unknown arguments/cases, empty list
+items, malformed integers, and zero numeric values are fatal. Its complete base
+and geometry surface is:
+
+| Argument | Type and exact default | Effect |
+|---|---|---|
+| `--only <case,...>` | validated CSV; all 16 cases | Runs a subset of `full_attn_qkv`, `mlp_bf16_gu_f32_d`, `mlp_bf16w`, `linear_decode`, `causal_conv1d_update`, `gdn_gated_norm`, `qwen_rmsnorm`, `gdn_gates`, `gdn_in_proj`, `gdn_block_resident_batched`, `full_step_resident`, `full_step_resident_batched`, `full_token_resident_batched`, `full_token_resident_mixed_batched`, `full_token_resident_mixed_paged`, and `full_token_resident_paged`. |
+| `--batches <n,...>` | positive-integer CSV; `1,4,8,16,32,64` | Batch sweep. |
+| `--warmup-iters <n>` | positive integer; `10` | Untimed iterations per result. |
+| `--timed-iters <n>` | positive integer; `30` | Iterations in each timed block. |
+| `--repeats <n>` | positive integer; `5` | Timed blocks; the minimum block mean is reported. |
+| `--attention-history <n>` | positive integer; `256` | Contiguous attention history for the mixed resident case. |
+| `--paged-history <n>` | positive integer; `256` | Paged-attention history. |
+| `--paged-block-size <n>` | positive integer; `16` | Paged KV block size. |
+
+The microbenchmark kernel-policy arguments are explicit research A/B controls;
+they never modify product policy:
+
+| Argument | Exact default/effect |
+|---|---|
+| `--mlp-rows8-min-batch <n>` | `256` |
+| `--mlp-gate-up-rows4-min-batch <n>` | `8` |
+| `--mlp-down-rows4-min-batch <n>` | `16` |
+| `--linear-rows8-min-batch <n>` | `64` |
+| `--linear-rows4-min-batch <n>` | `16` |
+| `--gdn-in-proj-rows8-min-batch <n>` | `64` |
+| `--gdn-in-proj-rows4-min-batch <n>` | `16` |
+| `--full-attn-qkv-rows8-min-batch <n>` | `64` |
+| `--full-attn-qkv-rows4-min-batch <n>` | `2` |
+| `--disable-linear-rows4`, `--disable-linear-rows8` | Both routes default enabled. |
+| `--disable-mlp-rows8`, `--disable-mlp-gate-up-rows4`, `--disable-mlp-down-rows4` | All three routes default enabled. |
+| `--disable-full-attn-qkv-rows4`, `--disable-full-attn-qkv-rows8` | Both routes default enabled. |
+| `--disable-gdn-in-proj-pair-qkv-z`, `--disable-gdn-in-proj-row-pair`, `--disable-gdn-in-proj-row-quad` | All three routes default enabled. |
+| `--enable-gdn-in-proj-row-octet` | Eight-row grouping defaults disabled. |
+| `--enable-gdn-in-proj-conv-split-fusion` | Projection/conv fusion defaults disabled. |
+| `--disable-gdn-qk-norm-recurrent-fusion` | Q/K-normalization recurrence fusion defaults enabled. |
 
 ### ROCm synchronization semantics
 

@@ -12,11 +12,10 @@ for seed in 0 1 2 3 4 5 6 7 8 9; do
   LOG=$OUTDIR/seed-$seed.log
   echo "=== seed=$seed === $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a $OUTDIR/progress.log
   KILN_W4A16=1 \
-  KILN_SPEC_ENABLED=1 \
-  KILN_SPEC_METHOD=mtp \
   KILN_CUDA_GRAPHS=true \
     /workspace/kiln/target/release/kiln-bench \
       --model-path "$MODEL_PATH" \
+      --spec-method mtp --allow-experimental-speculative \
       --paged \
       --chat-template \
       --skip-training \

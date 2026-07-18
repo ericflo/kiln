@@ -89,10 +89,10 @@ if [[ "$NATIVE_CUDA" -eq 1 ]]; then
     echo "enabling KILN_CUDA_NATIVE_TRAINING=1 for native CUDA SFT smoke" >&2
 fi
 KILN_CUDA_ARCHS="$CUDA_ARCHS" \
-KILN_SPEC_METHOD=off \
 KILN_CUDA_NATIVE_TRAINING="$NATIVE_CUDA" \
 "$BENCH_BIN" \
     --model-path "$MODEL_PATH" \
+    --spec-method off \
     --prompt-tokens 8 \
     --max-output-tokens 1 \
     --training-steps 1 \

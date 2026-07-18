@@ -240,6 +240,7 @@
         <a href="#health" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Check health</a>
         <a href="#pi-setup" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Configure pi</a>
         <a href="#training" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Submit training</a>
+        <a href="#benchmarks" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Run benchmarks</a>
         <a href="#adapters" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Manage adapters</a>
       </div>
     </div>
@@ -552,6 +553,79 @@ kiln-replay show ./adapters/support-bot</code></pre>
           <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>kiln-replay</code> is a historical command name. It recomputes request-lineage hashes only; it does not load a model, execute training or inference, compare outputs, or prove reproducibility. Use a validated <code>.kiln-checkpoint</code> for exact continuation. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/REPLAY_INTEGRITY.md" class="link">integrity contract</a>.</p>
         </div>
       </div>
+    </div>
+  </section>
+
+  <section id="benchmarks" class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-12">
+      <p class="label mb-2">Offline tools</p>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Configure benchmark runs explicitly</h2>
+      <p class="mb-5 leading-relaxed" style="color: var(--fg-dim);">
+        <code>kiln-bench</code> loads the same typed <code>KilnConfig</code> as the server. The Vulkan
+        microbenchmark is a separate kernel-research executable. Neither binary reads private
+        <code>KILN_BENCH_*</code> or <code>KILN_VK_MICROBENCH_*</code> controls; every experiment-specific
+        choice is visible in the command. Invalid enums, lists, numeric values, and unknown flags fail before
+        accelerator work.
+      </p>
+      <pre class="text-sm"><code>kiln-bench --model-path ./Qwen3.5-4B --config kiln.toml \
+  --paged --latency-only --prompt-tokens 512 --max-output-tokens 128
+
+vulkan_decode_microbench --only full_step_resident,full_token_resident_paged \
+  --batches 1,4,8 --warmup-iters 10 --timed-iters 30 --repeats 5</code></pre>
+
+      <h3 class="font-semibold mt-8 mb-3">Complete <code>kiln-bench</code> arguments</h3>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm" style="color: var(--fg-dim);">
+          <thead><tr><th class="text-left p-2">Argument</th><th class="text-left p-2">Default</th><th class="text-left p-2">Contract</th></tr></thead>
+          <tbody>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--config &lt;path&gt;</code></td><td class="p-2">normal discovery</td><td class="p-2">Typed TOML loaded before device selection.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--model-path &lt;path&gt;</code></td><td class="p-2">required</td><td class="p-2">Local model/tokenizer directory.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--max-output-tokens &lt;n&gt;</code>, <code>--prompt-tokens &lt;n&gt;</code></td><td class="p-2">128, 512</td><td class="p-2">Both must be positive.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--training-steps &lt;n&gt;</code>, <code>--skip-training</code></td><td class="p-2">10, false</td><td class="p-2">Controls the SFT arm.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--paged</code>, <code>--latency-only</code>, <code>--latency-warmup-runs &lt;n&gt;</code></td><td class="p-2">false, false, 0</td><td class="p-2">Production paged path, phase selection, and whole-pass warmup.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--seed &lt;u64&gt;</code>, <code>--temperature &lt;f32&gt;</code></td><td class="p-2">42, 0.0</td><td class="p-2">Temperature must be finite and non-negative.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--chat-template</code>, <code>--prompt-subset &lt;name&gt;</code></td><td class="p-2">false, all</td><td class="p-2">Subset is <code>all|gsm8k|humaneval|c4</code>.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--spec-method &lt;method&gt;</code></td><td class="p-2"><code>[speculative]</code></td><td class="p-2"><code>off|skip_layer|mtp</code>; explicit per-run override.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--spec-num-tokens &lt;n&gt;</code>, <code>--spec-draft-layers &lt;n&gt;</code></td><td class="p-2"><code>[speculative]</code></td><td class="p-2">Validated against the model; draft window is currently 1&ndash;4.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--force-mtp</code>, <code>--log-tokens</code>, <code>--log-itl</code></td><td class="p-2">false</td><td class="p-2">Explicit research routing and paged-baseline diagnostics.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--allow-experimental-speculative</code></td><td class="p-2">false</td><td class="p-2">Required for non-off speculation. Acknowledges unsupported research behavior; it never makes a direct run qualification evidence.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>-v</code>, <code>--verbose</code>, <code>-vv</code>, <code>-q</code>, <code>--quiet</code></td><td class="p-2">warn</td><td class="p-2">Quiet wins over verbosity.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mt-5 text-sm leading-relaxed" style="color: var(--fg-mute);">
+        Only a declared workload executed by <code>scripts/qualification/run.py</code> and a strictly checked
+        retained receipt constitute qualification evidence. The experimental benchmark opt-in is only an
+        accident-prevention acknowledgment.
+      </p>
+
+      <h3 class="font-semibold mt-8 mb-3">Complete Vulkan microbenchmark arguments</h3>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm" style="color: var(--fg-dim);">
+          <thead><tr><th class="text-left p-2">Argument</th><th class="text-left p-2">Exact default/effect</th></tr></thead>
+          <tbody>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--only &lt;case,...&gt;</code></td><td class="p-2">All cases. Names: <code>full_attn_qkv</code>, <code>mlp_bf16_gu_f32_d</code>, <code>mlp_bf16w</code>, <code>linear_decode</code>, <code>causal_conv1d_update</code>, <code>gdn_gated_norm</code>, <code>qwen_rmsnorm</code>, <code>gdn_gates</code>, <code>gdn_in_proj</code>, <code>gdn_block_resident_batched</code>, <code>full_step_resident</code>, <code>full_step_resident_batched</code>, <code>full_token_resident_batched</code>, <code>full_token_resident_mixed_batched</code>, <code>full_token_resident_mixed_paged</code>, <code>full_token_resident_paged</code>.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--batches &lt;n,...&gt;</code></td><td class="p-2"><code>1,4,8,16,32,64</code>; positive integers only.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--warmup-iters</code>, <code>--timed-iters</code>, <code>--repeats</code></td><td class="p-2">10, 30, 5; each positive.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--attention-history</code>, <code>--paged-history</code>, <code>--paged-block-size</code></td><td class="p-2">256, 256, 16; each positive.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--mlp-rows8-min-batch</code>, <code>--mlp-gate-up-rows4-min-batch</code>, <code>--mlp-down-rows4-min-batch</code></td><td class="p-2">256, 8, 16.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--linear-rows8-min-batch</code>, <code>--linear-rows4-min-batch</code></td><td class="p-2">64, 16.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--gdn-in-proj-rows8-min-batch</code>, <code>--gdn-in-proj-rows4-min-batch</code></td><td class="p-2">64, 16.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--full-attn-qkv-rows8-min-batch</code>, <code>--full-attn-qkv-rows4-min-batch</code></td><td class="p-2">64, 2.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--disable-linear-rows4</code>, <code>--disable-linear-rows8</code></td><td class="p-2">Both routes default enabled.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--disable-mlp-rows8</code>, <code>--disable-mlp-gate-up-rows4</code>, <code>--disable-mlp-down-rows4</code></td><td class="p-2">All three routes default enabled.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--disable-full-attn-qkv-rows4</code>, <code>--disable-full-attn-qkv-rows8</code></td><td class="p-2">Both routes default enabled.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--disable-gdn-in-proj-pair-qkv-z</code>, <code>--disable-gdn-in-proj-row-pair</code>, <code>--disable-gdn-in-proj-row-quad</code></td><td class="p-2">All three routes default enabled.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--enable-gdn-in-proj-row-octet</code>, <code>--enable-gdn-in-proj-conv-split-fusion</code></td><td class="p-2">Both routes default disabled.</td></tr>
+            <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>--disable-gdn-qk-norm-recurrent-fusion</code></td><td class="p-2">Fusion defaults enabled.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mt-5 text-sm leading-relaxed" style="color: var(--fg-mute);">
+        These Vulkan switches affect only the offline research binary. Product dispatch remains the immutable
+        versioned Vulkan kernel policy documented in Architecture. A microbenchmark result is not a serving
+        qualification receipt.
+      </p>
     </div>
   </section>
 

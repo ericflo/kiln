@@ -7,9 +7,9 @@
 //! of `x` and host readback of the output, so the numbers reflect
 //! end-to-end per-call cost.
 //!
-//! Usage: `cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench`.
-//! Pass one case name as argv[1], or set `KILN_VK_MICROBENCH_ONLY` to one or
-//! more comma-separated case names, to run a focused subset.
+//! Usage: `vulkan_decode_microbench [--only <case,...>] [--batches <n,...>]`.
+//! Run `vulkan_decode_microbench --help` for the complete typed experiment
+//! surface. The executable never reads `KILN_*` process configuration.
 
 use std::time::Instant;
 
@@ -59,6 +59,300 @@ const DEFAULT_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
 const DEFAULT_LINEAR_DECODE_BF16W_ROWS4_MIN_BATCH: usize = 16;
 const DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
 
+const BENCH_NAMES: &[&str] = &[
+    "full_attn_qkv",
+    "mlp_bf16_gu_f32_d",
+    "mlp_bf16w",
+    "linear_decode",
+    "causal_conv1d_update",
+    "gdn_gated_norm",
+    "qwen_rmsnorm",
+    "gdn_gates",
+    "gdn_in_proj",
+    "gdn_block_resident_batched",
+    "full_step_resident",
+    "full_step_resident_batched",
+    "full_token_resident_batched",
+    "full_token_resident_mixed_batched",
+    "full_token_resident_mixed_paged",
+    "full_token_resident_paged",
+];
+
+#[derive(Debug, Clone, Copy)]
+struct TimingConfig {
+    warmup_iters: usize,
+    timed_iters: usize,
+    repeats: usize,
+}
+
+impl Default for TimingConfig {
+    fn default() -> Self {
+        Self {
+            warmup_iters: WARMUP_ITERS,
+            timed_iters: TIMED_ITERS,
+            repeats: REPEATS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KernelPolicy {
+    mlp_rows8_min_batch: usize,
+    mlp_gate_up_rows4_min_batch: usize,
+    mlp_down_rows4_min_batch: usize,
+    linear_rows8_min_batch: usize,
+    linear_rows4_min_batch: usize,
+    gdn_in_proj_rows4_min_batch: usize,
+    gdn_in_proj_rows8_min_batch: usize,
+    full_attn_qkv_rows8_min_batch: usize,
+    full_attn_qkv_rows4_min_batch: usize,
+    linear_rows4: bool,
+    linear_rows8: bool,
+    mlp_rows8: bool,
+    mlp_gate_up_rows4: bool,
+    mlp_down_rows4: bool,
+    full_attn_qkv_rows4: bool,
+    full_attn_qkv_rows8: bool,
+    gdn_in_proj_pair_qkv_z: bool,
+    gdn_in_proj_row_pair: bool,
+    gdn_in_proj_row_octet: bool,
+    gdn_in_proj_row_quad: bool,
+    gdn_in_proj_conv_split_fusion: bool,
+    gdn_qk_norm_recurrent_fusion: bool,
+}
+
+impl Default for KernelPolicy {
+    fn default() -> Self {
+        Self {
+            mlp_rows8_min_batch: DEFAULT_MLP_BF16_ROWS8_MIN_BATCH,
+            mlp_gate_up_rows4_min_batch: DEFAULT_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH,
+            mlp_down_rows4_min_batch: DEFAULT_MLP_BF16_DOWN_ROWS4_MIN_BATCH,
+            linear_rows8_min_batch: DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH,
+            linear_rows4_min_batch: DEFAULT_LINEAR_DECODE_BF16W_ROWS4_MIN_BATCH,
+            gdn_in_proj_rows4_min_batch: DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH,
+            gdn_in_proj_rows8_min_batch: DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH,
+            full_attn_qkv_rows8_min_batch: DEFAULT_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH,
+            full_attn_qkv_rows4_min_batch: DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH,
+            linear_rows4: true,
+            linear_rows8: true,
+            mlp_rows8: true,
+            mlp_gate_up_rows4: true,
+            mlp_down_rows4: true,
+            full_attn_qkv_rows4: true,
+            full_attn_qkv_rows8: true,
+            gdn_in_proj_pair_qkv_z: true,
+            gdn_in_proj_row_pair: true,
+            gdn_in_proj_row_octet: false,
+            gdn_in_proj_row_quad: true,
+            gdn_in_proj_conv_split_fusion: false,
+            gdn_qk_norm_recurrent_fusion: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MicrobenchArgs {
+    only: Option<Vec<String>>,
+    batches: Vec<usize>,
+    timing: TimingConfig,
+    attention_history: usize,
+    paged_history: usize,
+    paged_block_size: usize,
+    kernels: KernelPolicy,
+}
+
+impl Default for MicrobenchArgs {
+    fn default() -> Self {
+        Self {
+            only: None,
+            batches: DEFAULT_BATCHES.to_vec(),
+            timing: TimingConfig::default(),
+            attention_history: 256,
+            paged_history: 256,
+            paged_block_size: 16,
+            kernels: KernelPolicy::default(),
+        }
+    }
+}
+
+fn parse_positive(raw: &str, name: &str) -> Result<usize> {
+    let parsed = raw
+        .parse::<usize>()
+        .map_err(|error| anyhow::anyhow!("{name} has invalid value {raw:?}: {error}"))?;
+    anyhow::ensure!(parsed > 0, "{name} must be greater than zero");
+    Ok(parsed)
+}
+
+fn parse_csv<T>(raw: &str, name: &str, mut parse: impl FnMut(&str) -> Result<T>) -> Result<Vec<T>> {
+    anyhow::ensure!(!raw.trim().is_empty(), "{name} must not be empty");
+    raw.split(',')
+        .map(|part| {
+            let part = part.trim();
+            anyhow::ensure!(!part.is_empty(), "{name} contains an empty item");
+            parse(part)
+        })
+        .collect()
+}
+
+fn print_help() {
+    eprintln!("Usage: vulkan_decode_microbench [options]");
+    eprintln!("  --only <case,...>                     Run only named cases");
+    eprintln!("  --batches <n,...>                     Batch sweep (default: 1,4,8,16,32,64)");
+    eprintln!("  --warmup-iters <n>                    Warmup iterations (default: 10)");
+    eprintln!("  --timed-iters <n>                     Iterations per timed block (default: 30)");
+    eprintln!("  --repeats <n>                         Timed blocks (default: 5)");
+    eprintln!(
+        "  --attention-history <n>               Contiguous attention history (default: 256)"
+    );
+    eprintln!("  --paged-history <n>                   Paged attention history (default: 256)");
+    eprintln!("  --paged-block-size <n>                Paged KV block size (default: 16)");
+    eprintln!("  --mlp-rows8-min-batch <n>             Eight-row MLP crossover (default: 256)");
+    eprintln!(
+        "  --mlp-gate-up-rows4-min-batch <n>     Four-row MLP gate/up crossover (default: 8)"
+    );
+    eprintln!("  --mlp-down-rows4-min-batch <n>        Four-row MLP down crossover (default: 16)");
+    eprintln!("  --linear-rows8-min-batch <n>          Eight-row linear crossover (default: 64)");
+    eprintln!("  --linear-rows4-min-batch <n>          Four-row linear crossover (default: 16)");
+    eprintln!(
+        "  --gdn-in-proj-rows8-min-batch <n>     Eight-row GDN projection crossover (default: 64)"
+    );
+    eprintln!(
+        "  --gdn-in-proj-rows4-min-batch <n>     Four-row GDN projection crossover (default: 16)"
+    );
+    eprintln!("  --full-attn-qkv-rows8-min-batch <n>   Eight-row QKV crossover (default: 64)");
+    eprintln!("  --full-attn-qkv-rows4-min-batch <n>   Four-row QKV crossover (default: 2)");
+    eprintln!("  --disable-linear-rows4                Disable four-row linear kernels");
+    eprintln!("  --disable-linear-rows8                Disable eight-row linear kernels");
+    eprintln!("  --disable-mlp-rows8                   Disable eight-row MLP kernels");
+    eprintln!("  --disable-mlp-gate-up-rows4           Disable four-row MLP gate/up");
+    eprintln!("  --disable-mlp-down-rows4              Disable four-row MLP down");
+    eprintln!("  --disable-full-attn-qkv-rows4         Disable four-row QKV");
+    eprintln!("  --disable-full-attn-qkv-rows8         Disable eight-row QKV");
+    eprintln!("  --disable-gdn-in-proj-pair-qkv-z      Disable paired QKV/Z projection");
+    eprintln!("  --disable-gdn-in-proj-row-pair        Disable GDN row grouping");
+    eprintln!("  --enable-gdn-in-proj-row-octet        Enable the default-off eight-row route");
+    eprintln!("  --disable-gdn-in-proj-row-quad        Disable four-row GDN grouping");
+    eprintln!("  --enable-gdn-in-proj-conv-split-fusion Enable the default-off fusion route");
+    eprintln!("  --disable-gdn-qk-norm-recurrent-fusion Disable Q/K norm recurrence fusion");
+    eprintln!("Cases: {}", BENCH_NAMES.join(","));
+}
+
+fn parse_args_from(raw: &[String]) -> Result<MicrobenchArgs> {
+    fn value<'a>(args: &'a [String], index: &mut usize, name: &str) -> Result<&'a str> {
+        *index += 1;
+        args.get(*index)
+            .map(String::as_str)
+            .ok_or_else(|| anyhow::anyhow!("{name} requires a value"))
+    }
+
+    let mut args = MicrobenchArgs::default();
+    let mut index = 1;
+    while index < raw.len() {
+        let name = raw[index].as_str();
+        match name {
+            "--only" => {
+                let selected = parse_csv(value(&raw, &mut index, name)?, name, |case| {
+                    anyhow::ensure!(
+                        BENCH_NAMES.contains(&case),
+                        "unknown microbenchmark case {case:?}; expected one of {}",
+                        BENCH_NAMES.join(",")
+                    );
+                    Ok(case.to_owned())
+                })?;
+                args.only = Some(selected);
+            }
+            "--batches" => {
+                args.batches = parse_csv(value(&raw, &mut index, name)?, name, |part| {
+                    parse_positive(part, name)
+                })?;
+            }
+            "--warmup-iters" => {
+                args.timing.warmup_iters = parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--timed-iters" => {
+                args.timing.timed_iters = parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--repeats" => {
+                args.timing.repeats = parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--attention-history" => {
+                args.attention_history = parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--paged-history" => {
+                args.paged_history = parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--paged-block-size" => {
+                args.paged_block_size = parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--mlp-rows8-min-batch" => {
+                args.kernels.mlp_rows8_min_batch =
+                    parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--mlp-gate-up-rows4-min-batch" => {
+                args.kernels.mlp_gate_up_rows4_min_batch =
+                    parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--mlp-down-rows4-min-batch" => {
+                args.kernels.mlp_down_rows4_min_batch =
+                    parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--linear-rows8-min-batch" => {
+                args.kernels.linear_rows8_min_batch =
+                    parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--linear-rows4-min-batch" => {
+                args.kernels.linear_rows4_min_batch =
+                    parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--gdn-in-proj-rows4-min-batch" => {
+                args.kernels.gdn_in_proj_rows4_min_batch =
+                    parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--gdn-in-proj-rows8-min-batch" => {
+                args.kernels.gdn_in_proj_rows8_min_batch =
+                    parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--full-attn-qkv-rows8-min-batch" => {
+                args.kernels.full_attn_qkv_rows8_min_batch =
+                    parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--full-attn-qkv-rows4-min-batch" => {
+                args.kernels.full_attn_qkv_rows4_min_batch =
+                    parse_positive(value(&raw, &mut index, name)?, name)?;
+            }
+            "--disable-linear-rows4" => args.kernels.linear_rows4 = false,
+            "--disable-linear-rows8" => args.kernels.linear_rows8 = false,
+            "--disable-mlp-rows8" => args.kernels.mlp_rows8 = false,
+            "--disable-mlp-gate-up-rows4" => args.kernels.mlp_gate_up_rows4 = false,
+            "--disable-mlp-down-rows4" => args.kernels.mlp_down_rows4 = false,
+            "--disable-full-attn-qkv-rows4" => args.kernels.full_attn_qkv_rows4 = false,
+            "--disable-full-attn-qkv-rows8" => args.kernels.full_attn_qkv_rows8 = false,
+            "--disable-gdn-in-proj-pair-qkv-z" => args.kernels.gdn_in_proj_pair_qkv_z = false,
+            "--disable-gdn-in-proj-row-pair" => args.kernels.gdn_in_proj_row_pair = false,
+            "--enable-gdn-in-proj-row-octet" => args.kernels.gdn_in_proj_row_octet = true,
+            "--disable-gdn-in-proj-row-quad" => args.kernels.gdn_in_proj_row_quad = false,
+            "--enable-gdn-in-proj-conv-split-fusion" => {
+                args.kernels.gdn_in_proj_conv_split_fusion = true;
+            }
+            "--disable-gdn-qk-norm-recurrent-fusion" => {
+                args.kernels.gdn_qk_norm_recurrent_fusion = false;
+            }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            unknown => anyhow::bail!("unknown argument {unknown:?}; run with --help for usage"),
+        }
+        index += 1;
+    }
+    Ok(args)
+}
+
+fn parse_args() -> Result<MicrobenchArgs> {
+    let raw: Vec<String> = std::env::args().collect();
+    parse_args_from(&raw)
+}
+
 /// Deterministic flat `Vec<bf16>` weight data for byte/slice dispatch entries.
 fn make_bf16_weight_slice(rows: usize, cols: usize) -> Vec<bf16> {
     let n = rows * cols;
@@ -67,133 +361,14 @@ fn make_bf16_weight_slice(rows: usize, cols: usize) -> Vec<bf16> {
         .collect()
 }
 
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(default)
-}
-
-fn batch_sweep() -> Vec<usize> {
-    let Some(parsed) = std::env::var("KILN_VK_MICROBENCH_BATCHES")
-        .ok()
-        .map(|s| {
-            s.split(',')
-                .filter_map(|part| part.trim().parse::<usize>().ok())
-                .filter(|&n| n > 0)
-                .collect::<Vec<_>>()
-        })
-        .filter(|values| !values.is_empty())
-    else {
-        return DEFAULT_BATCHES.to_vec();
-    };
-    parsed
-}
-
-fn selected_benches() -> Option<Vec<String>> {
-    std::env::args()
-        .nth(1)
-        .or_else(|| std::env::var("KILN_VK_MICROBENCH_ONLY").ok())
-        .map(|s| {
-            s.split(',')
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .filter(|selected| !selected.is_empty())
-}
-
-fn enabled_unless_disabled(name: &str) -> bool {
-    std::env::var(name).is_err()
-}
-
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off" | "no"))
-        .unwrap_or(false)
-}
-
-fn linear_bf16w_rows4_enabled() -> bool {
-    enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4")
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4")
-}
-
-fn linear_bf16w_rows8_enabled() -> bool {
-    enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS8")
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS8")
-}
-
-fn mlp_bf16_rows8_min_batch() -> usize {
-    env_usize(
-        "KILN_VULKAN_MLP_BF16_ROWS8_MIN_BATCH",
-        DEFAULT_MLP_BF16_ROWS8_MIN_BATCH,
-    )
-}
-
-fn mlp_bf16_gate_up_rows4_min_batch() -> usize {
-    env_usize(
-        "KILN_VULKAN_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH",
-        DEFAULT_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH,
-    )
-}
-
-fn mlp_bf16_down_rows4_min_batch() -> usize {
-    env_usize(
-        "KILN_VULKAN_MLP_BF16_DOWN_ROWS4_MIN_BATCH",
-        DEFAULT_MLP_BF16_DOWN_ROWS4_MIN_BATCH,
-    )
-}
-
-fn linear_bf16w_rows8_min_batch() -> usize {
-    env_usize(
-        "KILN_VULKAN_LINEAR_BF16_ROWS8_MIN_BATCH",
-        DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH,
-    )
-}
-
-fn linear_bf16w_rows4_min_batch() -> usize {
-    env_usize(
-        "KILN_VULKAN_LINEAR_BF16_ROWS4_MIN_BATCH",
-        DEFAULT_LINEAR_DECODE_BF16W_ROWS4_MIN_BATCH,
-    )
-}
-
-fn gdn_in_proj_rows4_min_batch() -> usize {
-    env_usize(
-        "KILN_VULKAN_GDN_IN_PROJ_ROWS4_MIN_BATCH",
-        DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH,
-    )
-}
-
-fn gdn_in_proj_rows8_min_batch() -> usize {
-    env_usize(
-        "KILN_VULKAN_GDN_IN_PROJ_ROWS8_MIN_BATCH",
-        DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH,
-    )
-}
-
-fn full_attn_qkv_bf16_rows8_min_batch() -> usize {
-    env_usize(
-        "KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH",
-        DEFAULT_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH,
-    )
-}
-
-fn full_attn_qkv_bf16_rows4_min_batch() -> usize {
-    env_usize(
-        "KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH",
-        DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH,
-    )
-}
-
-fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
-    let rows8 = batch >= full_attn_qkv_bf16_rows8_min_batch()
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS8");
-    let rows4 = batch >= full_attn_qkv_bf16_rows4_min_batch()
-        && !rows8
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4");
+fn full_attn_qkv_gate_split_bf16w_plan(
+    policy: &KernelPolicy,
+    batch: usize,
+    total_out: usize,
+) -> (&'static str, u32) {
+    let rows8 = batch >= policy.full_attn_qkv_rows8_min_batch && policy.full_attn_qkv_rows8;
+    let rows4 =
+        batch >= policy.full_attn_qkv_rows4_min_batch && !rows8 && policy.full_attn_qkv_rows4;
     let row_groups = if rows8 {
         batch.div_ceil(8)
     } else if rows4 {
@@ -211,9 +386,13 @@ fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'sta
     (shader, (row_groups * total_out.div_ceil(16)) as u32)
 }
 
-fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows8 = batch >= linear_bf16w_rows8_min_batch() && linear_bf16w_rows8_enabled();
-    let rows4 = batch >= linear_bf16w_rows4_min_batch() && !rows8 && linear_bf16w_rows4_enabled();
+fn linear_bf16w_batched_plan(
+    policy: &KernelPolicy,
+    batch: usize,
+    out_dim: usize,
+) -> (&'static str, u32) {
+    let rows8 = batch >= policy.linear_rows8_min_batch && policy.linear_rows8;
+    let rows4 = batch >= policy.linear_rows4_min_batch && !rows8 && policy.linear_rows4;
     let row_groups = if rows8 {
         batch.div_ceil(8)
     } else if rows4 {
@@ -231,12 +410,13 @@ fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32
     (shader, (row_groups * out_dim.div_ceil(32)) as u32)
 }
 
-fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'static str, u32) {
-    let rows8 = batch >= mlp_bf16_rows8_min_batch()
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
-    let rows4 = batch >= mlp_bf16_gate_up_rows4_min_batch()
-        && !rows8
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4");
+fn mlp_gate_up_bf16w_batched_plan(
+    policy: &KernelPolicy,
+    batch: usize,
+    intermediate: usize,
+) -> (&'static str, u32) {
+    let rows8 = batch >= policy.mlp_rows8_min_batch && policy.mlp_rows8;
+    let rows4 = batch >= policy.mlp_gate_up_rows4_min_batch && !rows8 && policy.mlp_gate_up_rows4;
     if rows8 {
         (
             shaders::MLP_GATE_UP_DECODE_BATCHED_ROWS8_BF16W,
@@ -255,12 +435,13 @@ fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'stati
     }
 }
 
-fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows8 = batch >= mlp_bf16_rows8_min_batch()
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
-    let rows4 = batch >= mlp_bf16_down_rows4_min_batch()
-        && !rows8
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
+fn mlp_down_add_residual_bf16w_batched_plan(
+    policy: &KernelPolicy,
+    batch: usize,
+    out_dim: usize,
+) -> (&'static str, u32) {
+    let rows8 = batch >= policy.mlp_rows8_min_batch && policy.mlp_rows8;
+    let rows4 = batch >= policy.mlp_down_rows4_min_batch && !rows8 && policy.mlp_down_rows4;
     if rows8 {
         (
             shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS8,
@@ -281,6 +462,7 @@ fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'
 
 #[allow(clippy::too_many_arguments)]
 fn gdn_in_proj_bf16w_batched_plan(
+    policy: &KernelPolicy,
     batch: usize,
     qkv_dim: usize,
     z_dim: usize,
@@ -288,20 +470,16 @@ fn gdn_in_proj_bf16w_batched_plan(
     b_dim: usize,
     total_out: usize,
 ) -> (&'static str, u32) {
-    let pair_qkv_z =
-        batch > 1 && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z");
-    let row_grouping = pair_qkv_z
-        && batch >= 3
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR");
+    let pair_qkv_z = batch > 1 && policy.gdn_in_proj_pair_qkv_z;
+    let row_grouping = pair_qkv_z && batch >= 3 && policy.gdn_in_proj_row_pair;
     let row_group_size = if row_grouping
-        && batch >= gdn_in_proj_rows8_min_batch()
-        && env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET")
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET")
+        && batch >= policy.gdn_in_proj_rows8_min_batch
+        && policy.gdn_in_proj_row_octet
     {
         8usize
     } else if row_grouping
-        && batch >= gdn_in_proj_rows4_min_batch()
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD")
+        && batch >= policy.gdn_in_proj_rows4_min_batch
+        && policy.gdn_in_proj_row_quad
     {
         4usize
     } else if row_grouping {
@@ -329,34 +507,41 @@ fn gdn_in_proj_bf16w_batched_plan(
     (shader, (row_groups * dispatch_cols.div_ceil(80)) as u32)
 }
 
-fn gdn_in_proj_conv_split_fused(shader: &'static str) -> bool {
+fn gdn_in_proj_conv_split_fused(policy: &KernelPolicy, shader: &'static str) -> bool {
     shader == shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
-        && env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION")
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION")
+        && policy.gdn_in_proj_conv_split_fusion
 }
 
-fn gdn_qk_norm_recurrent_fused(batch: usize, gqa_ratio: usize, dk: usize, dv: usize) -> bool {
+fn gdn_qk_norm_recurrent_fused(
+    policy: &KernelPolicy,
+    batch: usize,
+    gqa_ratio: usize,
+    dk: usize,
+    dv: usize,
+) -> bool {
     (2..=16).contains(&batch)
         && gqa_ratio == 2
         && dk == dv
         && gqa_ratio * dv <= 256
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_QK_NORM_RECURRENT_FUSION")
+        && policy.gdn_qk_norm_recurrent_fusion
 }
 
-fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result<()> {
-    let warmup_iters = env_usize("KILN_VK_MICROBENCH_WARMUP", WARMUP_ITERS);
-    let timed_iters = env_usize("KILN_VK_MICROBENCH_TIMED", TIMED_ITERS);
-    let repeats = env_usize("KILN_VK_MICROBENCH_REPEATS", REPEATS);
-    for _ in 0..warmup_iters {
+fn time<F: FnMut() -> Result<()>>(
+    timing: TimingConfig,
+    label: &str,
+    batch: usize,
+    mut f: F,
+) -> Result<()> {
+    for _ in 0..timing.warmup_iters {
         f()?;
     }
     // Take the minimum per-iter time across REPEATS independent timed blocks.
     // The fastest block is the cleanest signal of steady-state kernel cost;
     // mean is dragged around by background load and GPU thermal swings.
     let mut best_ns = u128::MAX;
-    for _ in 0..repeats {
+    for _ in 0..timing.repeats {
         let start = Instant::now();
-        for _ in 0..timed_iters {
+        for _ in 0..timing.timed_iters {
             f()?;
         }
         let elapsed = start.elapsed().as_nanos();
@@ -364,8 +549,8 @@ fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result
             best_ns = elapsed;
         }
     }
-    let per_iter_us = (best_ns as f64 / timed_iters as f64) / 1_000.0;
-    let rows_per_sec = (batch as f64 * timed_iters as f64) / (best_ns as f64 / 1e9);
+    let per_iter_us = (best_ns as f64 / timing.timed_iters as f64) / 1_000.0;
+    let rows_per_sec = (batch as f64 * timing.timed_iters as f64) / (best_ns as f64 / 1e9);
     println!(
         "{label:<32} batch={batch:>3}  per_iter={per_iter_us:>8.1} us  rows/s={rows_per_sec:>10.0}"
     );
@@ -373,7 +558,7 @@ fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result
     Ok(())
 }
 
-fn run() -> Result<()> {
+fn run(args: &MicrobenchArgs) -> Result<()> {
     let device = VulkanDevice::new()?;
     println!(
         "device: {} ({})",
@@ -383,11 +568,8 @@ fn run() -> Result<()> {
     println!();
 
     // Allow callers to run focused subsets so sibling tests do not heat the GPU.
-    let only = selected_benches();
-    let want = |name: &str| {
-        only.as_ref()
-            .is_none_or(|selected| selected.iter().any(|s| s == name))
-    };
+    let only = args.only.as_ref();
+    let want = |name: &str| only.is_none_or(|selected| selected.iter().any(|s| s == name));
 
     // Pre-upload weights once.
     let q_w = make_bf16_weight_slice(HIDDEN, Q_GATE_DIM);
@@ -415,7 +597,7 @@ fn run() -> Result<()> {
     let a_buf = upload_bf16_packed_buffer_from_slice(&device, &a_w)?;
     let b_buf = upload_bf16_packed_buffer_from_slice(&device, &b_w)?;
 
-    let batches = batch_sweep();
+    let batches = &args.batches;
 
     if want("full_attn_qkv") {
         println!("== full_attn QKV+gate (fused, bf16w) ==");
@@ -423,7 +605,7 @@ fn run() -> Result<()> {
             // x = zeros [batch, 1, HIDDEN] f32. Bytes-typed dispatch
             // takes &[u8] directly, with no tensor-object staging.
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
-            time("full_attn_qkv_decode", batch, || {
+            time(args.timing, "full_attn_qkv_decode", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
                     &device, &x_bytes, &q_buf, &k_buf, &v_buf, batch, HIDDEN, Q_GATE_DIM, K_DIM,
                     V_DIM,
@@ -438,7 +620,7 @@ fn run() -> Result<()> {
         println!("== MLP gate_up + down (bf16 g/u, f32 down) ==");
         for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
-            time("mlp_decode_bf16_gu_f32_d", batch, || {
+            time(args.timing, "mlp_decode_bf16_gu_f32_d", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
                     &device,
                     &x_bytes,
@@ -460,7 +642,7 @@ fn run() -> Result<()> {
         println!("== MLP gate_up + down (full bf16) ==");
         for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
-            time("mlp_decode_bf16w", batch, || {
+            time(args.timing, "mlp_decode_bf16w", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights_bytes(
                     &device,
                     &x_bytes,
@@ -487,7 +669,7 @@ fn run() -> Result<()> {
         let q_out_buf = upload_bf16_packed_buffer_from_slice(&device, &q_out_weight)?;
         for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * Q_DIM * 4];
-            time("linear_decode_bf16w_qout", batch, || {
+            time(args.timing, "linear_decode_bf16w_qout", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
                     &device, &x_bytes, &q_out_buf, batch, Q_DIM, HIDDEN,
                     /*packed_bf16_weights=*/ true,
@@ -509,7 +691,7 @@ fn run() -> Result<()> {
         for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * channels * 1 * 4];
             let state_bytes = vec![0u8; batch * channels * (kernel_size - 1) * 4];
-            time("causal_conv1d_update", batch, || {
+            time(args.timing, "causal_conv1d_update", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_update_bytes(
                     &device,
                     &x_bytes,
@@ -534,7 +716,7 @@ fn run() -> Result<()> {
         for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
             let z_bytes = vec![0u8; batch * HIDDEN * 4];
-            time("gdn_gated_norm_cached", batch, || {
+            time(args.timing, "gdn_gated_norm_cached", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_gdn_gated_rms_norm_cached_bytes(
                     &device,
                     &x_bytes,
@@ -558,7 +740,7 @@ fn run() -> Result<()> {
         let weight_bytes: &[u8] = bytemuck::cast_slice(&weight_data);
         for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
-            time("qwen_rmsnorm_forward", batch, || {
+            time(args.timing, "qwen_rmsnorm_forward", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward_bytes(
                     &device,
                     &x_bytes,
@@ -584,7 +766,7 @@ fn run() -> Result<()> {
         for &batch in batches.as_slice() {
             let a_bytes = vec![0u8; batch * 1 * nv * 4];
             let b_bytes = vec![0u8; batch * 1 * nv * 4];
-            time("gdn_gates_cached", batch, || {
+            time(args.timing, "gdn_gates_cached", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached_bytes(
                     &device,
                     &a_bytes,
@@ -604,7 +786,7 @@ fn run() -> Result<()> {
         println!("== GDN in_proj (qkv|z|a|b fused, bf16w) ==");
         for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
-            time("gdn_in_proj_decode", batch, || {
+            time(args.timing, "gdn_in_proj_decode", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
                     &device, &x_bytes, batch, &qkv_buf, &z_buf, &a_buf, &b_buf, HIDDEN, QKV_DIM,
                     Z_DIM, A_DIM, B_DIM,
@@ -617,39 +799,39 @@ fn run() -> Result<()> {
 
     if want("gdn_block_resident_batched") {
         run_gdn_block_resident_batched(
-            &device, &qkv_buf, &z_buf, &a_buf, &b_buf, &gate_buf, &up_buf, &down_buf, &batches,
+            &device, &qkv_buf, &z_buf, &a_buf, &b_buf, &gate_buf, &up_buf, &down_buf, batches, args,
         )?;
     }
     if want("full_step_resident") {
         run_full_step_resident(
-            &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, &batches,
+            &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, batches, args,
         )?;
     }
     if want("full_step_resident_batched") {
         run_full_step_resident_batched(
-            &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, &batches,
+            &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, batches, args,
         )?;
     }
     if want("full_token_resident_batched") {
         run_full_token_resident_batched(
-            &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, &batches,
+            &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, batches, args,
         )?;
     }
     if want("full_token_resident_mixed_batched") {
         run_full_token_resident_mixed_batched(
             &device, &q_buf, &k_buf, &v_buf, &qkv_buf, &z_buf, &a_buf, &b_buf, &gate_buf, &up_buf,
-            &down_buf, &batches, false,
+            &down_buf, batches, false, args,
         )?;
     }
     if want("full_token_resident_mixed_paged") {
         run_full_token_resident_mixed_batched(
             &device, &q_buf, &k_buf, &v_buf, &qkv_buf, &z_buf, &a_buf, &b_buf, &gate_buf, &up_buf,
-            &down_buf, &batches, true,
+            &down_buf, batches, true, args,
         )?;
     }
     if want("full_token_resident_paged") {
         run_full_token_resident_paged(
-            &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, &batches,
+            &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, batches, args,
         )?;
     }
 
@@ -671,6 +853,7 @@ fn run_full_token_resident_mixed_batched(
     down_w: &VulkanBuffer,
     batches: &[usize],
     use_paged_attention: bool,
+    args: &MicrobenchArgs,
 ) -> Result<()> {
     use kiln_vulkan_kernel::CommandBatch;
     use kiln_vulkan_kernel::VkPagedKvCache;
@@ -694,15 +877,13 @@ fn run_full_token_resident_mixed_batched(
     let head_dim = 256usize;
     let rotary_dim = 64usize;
     let half_rot = rotary_dim / 2;
-    let history_env = if use_paged_attention {
-        "KILN_VK_PAGED_HISTORY"
+    let cur_seq_len = if use_paged_attention {
+        args.paged_history
     } else {
-        "KILN_VK_ATTENTION_HISTORY"
+        args.attention_history
     };
-    let cur_seq_len = env_usize(history_env, 256);
     let max_seqlen = cur_seq_len.max(1);
-    let block_size = env_usize("KILN_VK_PAGED_BLOCK_SIZE", 16);
-    anyhow::ensure!(block_size > 0, "KILN_VK_PAGED_BLOCK_SIZE must be > 0");
+    let block_size = args.paged_block_size;
     let blocks_per_seq = (cur_seq_len + 1).div_ceil(block_size).max(1);
     let softmax_scale = (head_dim as f32).sqrt().recip();
     if use_paged_attention {
@@ -893,7 +1074,7 @@ fn run_full_token_resident_mixed_batched(
         let gdn_gated_norm = mk((batch * GDN_V_DIM * 4) as u64)?;
         let gdn_out = mk(hidden_bytes)?;
 
-        time(label, batch, || {
+        time(args.timing, label, batch, || {
             let mut b = CommandBatch::new(device)?;
             for layer in 0..NUM_LAYERS {
                 if layer % 4 == 3 {
@@ -909,7 +1090,7 @@ fn run_full_token_resident_mixed_batched(
                     )?;
                     let total_out = FULL_ATTN_TOTAL_OUT;
                     let (qkv_shader, qkv_workgroups) =
-                        full_attn_qkv_gate_split_bf16w_plan(batch, total_out);
+                        full_attn_qkv_gate_split_bf16w_plan(&args.kernels, batch, total_out);
                     b.record_shader(
                         qkv_shader,
                         &[
@@ -1064,7 +1245,7 @@ fn run_full_token_resident_mixed_batched(
                         Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
                     )?;
                     let (attn_out_shader, attn_out_workgroups) =
-                        linear_bf16w_batched_plan(batch, HIDDEN);
+                        linear_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
                     b.record_shader(
                         attn_out_shader,
                         &[
@@ -1088,7 +1269,7 @@ fn run_full_token_resident_mixed_batched(
                         Workgroups::OneD(batch as u32),
                     )?;
                     let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
-                        mlp_gate_up_bf16w_batched_plan(batch, INTERMEDIATE);
+                        mlp_gate_up_bf16w_batched_plan(&args.kernels, batch, INTERMEDIATE);
                     b.record_shader(
                         mlp_gate_up_shader,
                         &[
@@ -1101,7 +1282,7 @@ fn run_full_token_resident_mixed_batched(
                         Workgroups::OneD(mlp_gate_up_workgroups),
                     )?;
                     let (mlp_down_shader, mlp_down_workgroups) =
-                        mlp_down_add_residual_bf16w_batched_plan(batch, HIDDEN);
+                        mlp_down_add_residual_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
                     b.record_shader(
                         mlp_down_shader,
                         &[
@@ -1121,6 +1302,7 @@ fn run_full_token_resident_mixed_batched(
                         Workgroups::OneD(batch as u32),
                     )?;
                     let (in_proj_shader, in_proj_workgroups) = gdn_in_proj_bf16w_batched_plan(
+                        &args.kernels,
                         batch,
                         QKV_DIM,
                         Z_DIM,
@@ -1128,7 +1310,7 @@ fn run_full_token_resident_mixed_batched(
                         B_DIM,
                         gdn_in_proj_total,
                     );
-                    if gdn_in_proj_conv_split_fused(in_proj_shader) {
+                    if gdn_in_proj_conv_split_fused(&args.kernels, in_proj_shader) {
                         b.record_shader(
                             shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W_CONV_SPLIT,
                             &[
@@ -1210,8 +1392,13 @@ fn run_full_token_resident_mixed_batched(
                     }
                     let l2_eps = 1e-6f32;
                     let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();
-                    if gdn_qk_norm_recurrent_fused(batch, gdn_gqa_ratio, GDN_HEAD_DIM, GDN_HEAD_DIM)
-                    {
+                    if gdn_qk_norm_recurrent_fused(
+                        &args.kernels,
+                        batch,
+                        gdn_gqa_ratio,
+                        GDN_HEAD_DIM,
+                        GDN_HEAD_DIM,
+                    ) {
                         b.record_shader(
                             shaders::GDN_DECODE_QK_NORM_GATES_RECURRENT_RMSNORM,
                             &[
@@ -1285,7 +1472,7 @@ fn run_full_token_resident_mixed_batched(
                         )?;
                     }
                     let (gdn_out_shader, gdn_out_workgroups) =
-                        linear_bf16w_batched_plan(batch, HIDDEN);
+                        linear_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
                     b.record_shader(
                         gdn_out_shader,
                         &[
@@ -1309,7 +1496,7 @@ fn run_full_token_resident_mixed_batched(
                         Workgroups::OneD(batch as u32),
                     )?;
                     let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
-                        mlp_gate_up_bf16w_batched_plan(batch, INTERMEDIATE);
+                        mlp_gate_up_bf16w_batched_plan(&args.kernels, batch, INTERMEDIATE);
                     b.record_shader(
                         mlp_gate_up_shader,
                         &[
@@ -1322,7 +1509,7 @@ fn run_full_token_resident_mixed_batched(
                         Workgroups::OneD(mlp_gate_up_workgroups),
                     )?;
                     let (mlp_down_shader, mlp_down_workgroups) =
-                        mlp_down_add_residual_bf16w_batched_plan(batch, HIDDEN);
+                        mlp_down_add_residual_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
                     b.record_shader(
                         mlp_down_shader,
                         &[
@@ -1355,6 +1542,7 @@ fn run_gdn_block_resident_batched(
     up_w: &VulkanBuffer,
     down_w: &VulkanBuffer,
     batches: &[usize],
+    args: &MicrobenchArgs,
 ) -> Result<()> {
     use kiln_vulkan_kernel::CommandBatch;
     use kiln_vulkan_kernel::Workgroups;
@@ -1420,7 +1608,7 @@ fn run_gdn_block_resident_batched(
         let normed_post = mk(hidden_bytes)?;
         let mlp_scratch = mk((batch * INTERMEDIATE * 4) as u64)?;
 
-        time("gdn_block_resident_batched", batch, || {
+        time(args.timing, "gdn_block_resident_batched", batch, || {
             let mut b = CommandBatch::new(device)?;
             b.record_shader(
                 shaders::QWEN_RMSNORM_FORWARD,
@@ -1428,9 +1616,16 @@ fn run_gdn_block_resident_batched(
                 &[batch as u32, HIDDEN as u32, eps.to_bits()],
                 Workgroups::OneD(batch as u32),
             )?;
-            let (in_proj_shader, in_proj_workgroups) =
-                gdn_in_proj_bf16w_batched_plan(batch, QKV_DIM, Z_DIM, A_DIM, B_DIM, in_proj_total);
-            if gdn_in_proj_conv_split_fused(in_proj_shader) {
+            let (in_proj_shader, in_proj_workgroups) = gdn_in_proj_bf16w_batched_plan(
+                &args.kernels,
+                batch,
+                QKV_DIM,
+                Z_DIM,
+                A_DIM,
+                B_DIM,
+                in_proj_total,
+            );
+            if gdn_in_proj_conv_split_fused(&args.kernels, in_proj_shader) {
                 b.record_shader(
                     shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W_CONV_SPLIT,
                     &[
@@ -1512,7 +1707,13 @@ fn run_gdn_block_resident_batched(
             }
             let l2_eps = 1e-6f32;
             let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();
-            if gdn_qk_norm_recurrent_fused(batch, gqa_ratio, GDN_HEAD_DIM, GDN_HEAD_DIM) {
+            if gdn_qk_norm_recurrent_fused(
+                &args.kernels,
+                batch,
+                gqa_ratio,
+                GDN_HEAD_DIM,
+                GDN_HEAD_DIM,
+            ) {
                 b.record_shader(
                     shaders::GDN_DECODE_QK_NORM_GATES_RECURRENT_RMSNORM,
                     &[
@@ -1585,7 +1786,8 @@ fn run_gdn_block_resident_batched(
                     Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
                 )?;
             }
-            let (gdn_out_shader, gdn_out_workgroups) = linear_bf16w_batched_plan(batch, HIDDEN);
+            let (gdn_out_shader, gdn_out_workgroups) =
+                linear_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
             b.record_shader(
                 gdn_out_shader,
                 &[gated_norm.handle(), out_w.handle(), gdn_out.handle()],
@@ -1605,7 +1807,7 @@ fn run_gdn_block_resident_batched(
                 Workgroups::OneD(batch as u32),
             )?;
             let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
-                mlp_gate_up_bf16w_batched_plan(batch, INTERMEDIATE);
+                mlp_gate_up_bf16w_batched_plan(&args.kernels, batch, INTERMEDIATE);
             b.record_shader(
                 mlp_gate_up_shader,
                 &[
@@ -1618,7 +1820,7 @@ fn run_gdn_block_resident_batched(
                 Workgroups::OneD(mlp_gate_up_workgroups),
             )?;
             let (mlp_down_shader, mlp_down_workgroups) =
-                mlp_down_add_residual_bf16w_batched_plan(batch, HIDDEN);
+                mlp_down_add_residual_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
             b.record_shader(
                 mlp_down_shader,
                 &[
@@ -1656,6 +1858,7 @@ fn run_full_step_resident(
     up_w: &VulkanBuffer,
     down_w: &VulkanBuffer,
     batches: &[usize],
+    args: &MicrobenchArgs,
 ) -> Result<()> {
     use kiln_vulkan_kernel::DecodeResidentPool;
     use kiln_vulkan_kernel::resident::{
@@ -1810,7 +2013,7 @@ fn run_full_step_resident(
             hidden_bytes,
         )?;
 
-        time("full_step_resident", batch, || {
+        time(args.timing, "full_step_resident", batch, || {
             pool.reset_cursor();
             // 1) Pre-attn rmsnorm into a pool slot
             let normed1 = pool.acquire();
@@ -1985,6 +2188,7 @@ fn run_full_step_resident_batched(
     up_w: &VulkanBuffer,
     down_w: &VulkanBuffer,
     batches: &[usize],
+    args: &MicrobenchArgs,
 ) -> Result<()> {
     use kiln_vulkan_kernel::CommandBatch;
     use kiln_vulkan_kernel::DecodeResidentPool;
@@ -2070,7 +2274,7 @@ fn run_full_step_resident_batched(
         let attn_out = mk(hidden_bytes)?;
         let attn_residual = mk(hidden_bytes)?;
 
-        time("full_step_resident_batched", batch, || {
+        time(args.timing, "full_step_resident_batched", batch, || {
             let mut b = CommandBatch::new(device)?;
 
             // 1) Pre-attn rmsnorm
@@ -2083,7 +2287,7 @@ fn run_full_step_resident_batched(
             // 2) QKV projection, writing q/gate/k/v outputs directly.
             let total_out = FULL_ATTN_TOTAL_OUT;
             let (qkv_shader, qkv_workgroups) =
-                full_attn_qkv_gate_split_bf16w_plan(batch, total_out);
+                full_attn_qkv_gate_split_bf16w_plan(&args.kernels, batch, total_out);
             b.record_shader(
                 qkv_shader,
                 &[
@@ -2176,7 +2380,8 @@ fn run_full_step_resident_batched(
                 Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
             )?;
             // 7) Attention out_proj
-            let (attn_out_shader, attn_out_workgroups) = linear_bf16w_batched_plan(batch, HIDDEN);
+            let (attn_out_shader, attn_out_workgroups) =
+                linear_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
             b.record_shader(
                 attn_out_shader,
                 &[attn_post_gate.handle(), out_w.handle(), attn_out.handle()],
@@ -2197,7 +2402,7 @@ fn run_full_step_resident_batched(
             )?;
             // 10) MLP gate_up
             let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
-                mlp_gate_up_bf16w_batched_plan(batch, INTERMEDIATE);
+                mlp_gate_up_bf16w_batched_plan(&args.kernels, batch, INTERMEDIATE);
             b.record_shader(
                 mlp_gate_up_shader,
                 &[
@@ -2210,7 +2415,7 @@ fn run_full_step_resident_batched(
                 Workgroups::OneD(mlp_gate_up_workgroups),
             )?;
             let (mlp_down_shader, mlp_down_workgroups) =
-                mlp_down_add_residual_bf16w_batched_plan(batch, HIDDEN);
+                mlp_down_add_residual_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
             b.record_shader(
                 mlp_down_shader,
                 &[
@@ -2247,6 +2452,7 @@ fn run_full_token_resident_batched(
     up_w: &VulkanBuffer,
     down_w: &VulkanBuffer,
     batches: &[usize],
+    args: &MicrobenchArgs,
 ) -> Result<()> {
     use kiln_vulkan_kernel::CommandBatch;
     use kiln_vulkan_kernel::Workgroups;
@@ -2327,7 +2533,7 @@ fn run_full_token_resident_batched(
         let attn_out = mk(hidden_bytes)?;
         let attn_residual = mk(hidden_bytes)?;
 
-        time("full_token_resident_batched", batch, || {
+        time(args.timing, "full_token_resident_batched", batch, || {
             let mut b = CommandBatch::new(device)?;
             for _layer in 0..NUM_LAYERS {
                 // 1) Pre-attn rmsnorm
@@ -2339,7 +2545,7 @@ fn run_full_token_resident_batched(
                 )?;
                 let total_out = FULL_ATTN_TOTAL_OUT;
                 let (qkv_shader, qkv_workgroups) =
-                    full_attn_qkv_gate_split_bf16w_plan(batch, total_out);
+                    full_attn_qkv_gate_split_bf16w_plan(&args.kernels, batch, total_out);
                 b.record_shader(
                     qkv_shader,
                     &[
@@ -2429,7 +2635,7 @@ fn run_full_token_resident_batched(
                     Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
                 )?;
                 let (attn_out_shader, attn_out_workgroups) =
-                    linear_bf16w_batched_plan(batch, HIDDEN);
+                    linear_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
                 b.record_shader(
                     attn_out_shader,
                     &[attn_post_gate.handle(), out_w.handle(), attn_out.handle()],
@@ -2449,7 +2655,7 @@ fn run_full_token_resident_batched(
                     Workgroups::OneD(batch as u32),
                 )?;
                 let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
-                    mlp_gate_up_bf16w_batched_plan(batch, INTERMEDIATE);
+                    mlp_gate_up_bf16w_batched_plan(&args.kernels, batch, INTERMEDIATE);
                 b.record_shader(
                     mlp_gate_up_shader,
                     &[
@@ -2462,7 +2668,7 @@ fn run_full_token_resident_batched(
                     Workgroups::OneD(mlp_gate_up_workgroups),
                 )?;
                 let (mlp_down_shader, mlp_down_workgroups) =
-                    mlp_down_add_residual_bf16w_batched_plan(batch, HIDDEN);
+                    mlp_down_add_residual_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
                 b.record_shader(
                     mlp_down_shader,
                     &[
@@ -2505,6 +2711,7 @@ fn run_full_token_resident_paged(
     up_w: &VulkanBuffer,
     down_w: &VulkanBuffer,
     batches: &[usize],
+    args: &MicrobenchArgs,
 ) -> Result<()> {
     use kiln_vulkan_kernel::CommandBatch;
     use kiln_vulkan_kernel::VkPagedKvCache;
@@ -2517,9 +2724,8 @@ fn run_full_token_resident_paged(
     let head_dim = 256usize;
     let rotary_dim = 64usize;
     let half_rot = rotary_dim / 2;
-    let cur_seq_len = env_usize("KILN_VK_PAGED_HISTORY", 256);
-    let block_size = env_usize("KILN_VK_PAGED_BLOCK_SIZE", 16);
-    anyhow::ensure!(block_size > 0, "KILN_VK_PAGED_BLOCK_SIZE must be > 0");
+    let cur_seq_len = args.paged_history;
+    let block_size = args.paged_block_size;
     let blocks_per_seq = (cur_seq_len + 1).div_ceil(block_size).max(1);
     let softmax_scale = (head_dim as f32).sqrt().recip();
     println!(
@@ -2625,7 +2831,7 @@ fn run_full_token_resident_paged(
         let attn_out = mk(hidden_bytes)?;
         let attn_residual = mk(hidden_bytes)?;
 
-        time("full_token_resident_paged", batch, || {
+        time(args.timing, "full_token_resident_paged", batch, || {
             let mut b = CommandBatch::new(device)?;
             for layer in 0..NUM_LAYERS {
                 let k_pool = cache.k_buffer(layer).expect("layer in range");
@@ -2641,7 +2847,7 @@ fn run_full_token_resident_paged(
                 // 2) QKV projection, writing q/gate/k/v outputs directly.
                 let total_out = FULL_ATTN_TOTAL_OUT;
                 let (qkv_shader, qkv_workgroups) =
-                    full_attn_qkv_gate_split_bf16w_plan(batch, total_out);
+                    full_attn_qkv_gate_split_bf16w_plan(&args.kernels, batch, total_out);
                 b.record_shader(
                     qkv_shader,
                     &[
@@ -2748,7 +2954,7 @@ fn run_full_token_resident_paged(
                 )?;
                 // 10) Output projection
                 let (attn_out_shader, attn_out_workgroups) =
-                    linear_bf16w_batched_plan(batch, HIDDEN);
+                    linear_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
                 b.record_shader(
                     attn_out_shader,
                     &[attn_post_gate.handle(), out_w.handle(), attn_out.handle()],
@@ -2769,7 +2975,7 @@ fn run_full_token_resident_paged(
                 )?;
                 // 13) MLP gate-up
                 let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
-                    mlp_gate_up_bf16w_batched_plan(batch, INTERMEDIATE);
+                    mlp_gate_up_bf16w_batched_plan(&args.kernels, batch, INTERMEDIATE);
                 b.record_shader(
                     mlp_gate_up_shader,
                     &[
@@ -2782,7 +2988,7 @@ fn run_full_token_resident_paged(
                     Workgroups::OneD(mlp_gate_up_workgroups),
                 )?;
                 let (mlp_down_shader, mlp_down_workgroups) =
-                    mlp_down_add_residual_bf16w_batched_plan(batch, HIDDEN);
+                    mlp_down_add_residual_bf16w_batched_plan(&args.kernels, batch, HIDDEN);
                 b.record_shader(
                     mlp_down_shader,
                     &[
@@ -2803,6 +3009,56 @@ fn run_full_token_resident_paged(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_cli_parses_selection_timing_history_and_policy() {
+        let raw = [
+            "vulkan_decode_microbench",
+            "--only",
+            "linear_decode,gdn_in_proj",
+            "--batches",
+            "2,8",
+            "--warmup-iters",
+            "3",
+            "--paged-history",
+            "512",
+            "--linear-rows4-min-batch",
+            "4",
+            "--disable-linear-rows8",
+            "--enable-gdn-in-proj-row-octet",
+        ]
+        .map(str::to_owned);
+        let parsed = parse_args_from(&raw).expect("typed Vulkan microbenchmark arguments");
+        assert_eq!(
+            parsed.only,
+            Some(vec!["linear_decode".to_owned(), "gdn_in_proj".to_owned()])
+        );
+        assert_eq!(parsed.batches, vec![2, 8]);
+        assert_eq!(parsed.timing.warmup_iters, 3);
+        assert_eq!(parsed.paged_history, 512);
+        assert_eq!(parsed.kernels.linear_rows4_min_batch, 4);
+        assert!(!parsed.kernels.linear_rows8);
+        assert!(parsed.kernels.gdn_in_proj_row_octet);
+    }
+
+    #[test]
+    fn typed_cli_rejects_malformed_or_unknown_values() {
+        for raw in [
+            vec!["vulkan_decode_microbench", "--batches", "1,nope"],
+            vec!["vulkan_decode_microbench", "--timed-iters", "0"],
+            vec!["vulkan_decode_microbench", "--only", "not-a-case"],
+            vec!["vulkan_decode_microbench", "--mystery"],
+        ] {
+            let raw: Vec<String> = raw.into_iter().map(str::to_owned).collect();
+            assert!(parse_args_from(&raw).is_err(), "accepted {raw:?}");
+        }
+    }
+}
+
 fn main() -> Result<()> {
-    run()
+    let args = parse_args()?;
+    run(&args)
 }

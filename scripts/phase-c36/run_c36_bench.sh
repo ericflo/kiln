@@ -4,8 +4,6 @@ set -euo pipefail
 cd /workspace/kiln
 mkdir -p /tmp/c36
 
-export KILN_SPEC_ENABLED=1
-export KILN_SPEC_METHOD=mtp
 export KILN_W4A16=1
 export KILN_CUDA_GRAPHS=true
 
@@ -18,6 +16,7 @@ for LEN in 128 256 512 1024; do
     echo "[$(date '+%H:%M:%S')] LEN=${LEN} SEED=${SEED} -> ${OUT}" | tee -a /tmp/c36.log
     ./target/release/kiln-bench \
       --model-path /workspace/Qwen3.5-4B \
+      --spec-method mtp --allow-experimental-speculative \
       --paged --chat-template \
       --prompt-tokens 512 --max-output-tokens "${LEN}" \
       --skip-training --seed "${SEED}" \

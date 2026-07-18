@@ -4332,110 +4332,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "name",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/bench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_BENCH_FORCE_MTP",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/bench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_BENCH_LOG_ITL",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/bench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_BENCH_LOG_TOKENS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/bench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_QUALIFICATION",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/bench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_SPEC_ENABLED",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/bench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_SPEC_METHOD",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/bench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var_os",
-      "argument": "KILN_QUALIFICATION_CASE_RESULT",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/bench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "CARGO_PKG_VERSION",
       "argument_kind": "literal",
@@ -5541,45 +5437,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "name",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 3,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_MICROBENCH_BATCHES",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_VK_MICROBENCH_ONLY",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "CARGO_MANIFEST_DIR",
       "argument_kind": "literal",
@@ -5736,11 +5593,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 209,
-    "literal_kiln_read_names": 102,
+    "literal_kiln_read_call_sites": 200,
+    "literal_kiln_read_names": 94,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
-      "experimental_debug": 64,
+      "experimental_debug": 55,
       "public_stable": 1,
       "test_only": 37
     },
@@ -5750,13 +5607,13 @@
       "test_only": 214
     },
     "process_mutation_entries": 134,
-    "read_call_sites": 566,
+    "read_call_sites": 553,
     "read_call_sites_by_classification": {
       "build_time": 325,
-      "experimental_debug": 104,
+      "experimental_debug": 91,
       "public_stable": 9,
       "test_only": 128
     },
-    "read_entries": 306
+    "read_entries": 295
   }
 }

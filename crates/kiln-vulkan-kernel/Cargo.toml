@@ -10,7 +10,7 @@ repository.workspace = true
 [[bin]]
 name = "vulkan_decode_microbench"
 path = "src/bin/vulkan_decode_microbench.rs"
-test = false
+test = true
 bench = false
 
 [dependencies]
