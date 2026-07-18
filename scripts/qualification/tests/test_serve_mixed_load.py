@@ -74,6 +74,7 @@ def health_fixture(
     rocm_graphs_requested: bool | None = None,
     memory_reclaim_requested_mode: str = "off",
     memory_reclaim_mode: str = "off",
+    prefix_cache_enabled: bool = True,
 ) -> dict:
     kv_autoscale_requested = (
         kv_autoscale
@@ -268,6 +269,24 @@ def health_fixture(
             "live": {"used_gb": 1.0, "source": "linux-drm-sysfs"},
         },
         "http": http_fixture(),
+        "prefix_cache": {
+            "enabled": prefix_cache_enabled,
+            "lookup_hits": 0,
+            "lookup_misses": 0,
+            "hit_tokens": 0,
+            "hit_blocks": 0,
+            "cached_blocks": 0,
+            "max_blocks": 64 if prefix_cache_enabled else 0,
+            "cached_entries": 0,
+            "max_entries": 12 if prefix_cache_enabled else 0,
+            "cached_state_bytes": 0,
+            "max_state_bytes": 1024 if prefix_cache_enabled else 0,
+            "active_leases": 0,
+            "pending_release_entries": 0,
+            "block_utilization": 0.0,
+            "entry_utilization": 0.0,
+            "state_utilization": 0.0,
+        },
         "decode_runtime": {
             "accelerator_runtime": accelerator_runtime,
             "rocm_graphs": graph,
@@ -304,7 +323,7 @@ def health_fixture(
                 "max_prefill_layers_per_cycle_source": "config_file",
                 "active_decode": 0,
                 "active_prefill": 0,
-                "prefix_cache_enabled": True,
+                "prefix_cache_enabled": prefix_cache_enabled,
                 "resident_prefill_enabled": False,
                 "active_resident_prefill": 0,
                 "active_staged_requests": 0,
@@ -580,6 +599,25 @@ class ServeMixedLoadTests(unittest.TestCase):
             serve.QualificationError, "prefix_cache_enabled must be boolean"
         ):
             serve.batching_snapshot(health)
+
+    def test_disabled_prefix_cache_attestation_requires_zero_activity(self) -> None:
+        variant = "both-off-prefix-cache-off"
+        health = health_fixture(
+            kv_autoscale=False,
+            rocm_graphs=False,
+            prefix_cache_enabled=False,
+        )
+        debug = debug_fixture(kv_autoscale=False, rocm_graphs=False)
+        self.assertEqual(serve.attest_runtime(variant, health, debug), [])
+        snapshot = serve.prefix_cache_snapshot(health)
+        self.assertEqual(serve.disabled_prefix_cache_failures(snapshot, phase="test"), [])
+
+        health["prefix_cache"]["lookup_misses"] = 1
+        failures = serve.attest_runtime(variant, health, debug)
+        self.assertIn(
+            "runtime attestation prefix-cache lookup_misses=1 while disabled",
+            failures,
+        )
 
     def test_response_oracle_accepts_plain_text_prefix_across_delta_splits(self) -> None:
         result = stream_result_with_text("000", "000 000", "001 00")
@@ -1215,9 +1253,10 @@ class ServeMixedLoadTests(unittest.TestCase):
                 for pair in pairs
             },
             {
-                ("default", variant_id)
-                for variant_id in serve.VARIANT_CONFIGS
-                if variant_id not in {"default", "stable"}
+                ("default", "autoscale-off"),
+                ("default", "both-off"),
+                ("default", "graphs-off"),
+                ("both-off", "both-off-prefix-cache-off"),
             },
         )
 
@@ -2173,6 +2212,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                         parsed["memory"]["kv_autoscale"],
                         expected["kv_autoscale_requested"],
                     )
+                    self.assertEqual(
+                        parsed["prefix_cache"]["enabled"],
+                        expected["prefix_cache_requested_enabled"],
+                    )
                     self.assertEqual(parsed["memory"]["kv_force_blocks"], 0)
                     self.assertEqual(
                         parsed["server"]["serving_profile"],
@@ -2443,6 +2486,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                             "memory_reclaim_requested_mode"
                         ],
                         memory_reclaim_mode=runtime["memory_reclaim_mode"],
+                        prefix_cache_enabled=runtime[
+                            "prefix_cache_effective_enabled"
+                        ],
                     ),
                     debug_fixture(
                         kv_autoscale=runtime["kv_autoscale_requested"],
@@ -2994,6 +3040,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             health_after_warmup=before,
             health_before_sampled_profile=before,
             health_after_sampled_profile=before,
+            health_final=end,
             health_measurement_start=measurement_start,
             health_end=end,
             events=[],

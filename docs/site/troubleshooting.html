@@ -657,6 +657,17 @@ kiln serve --config rocm-stream-ordered.toml</code></pre>
           progress. See <a href="architecture.html#rocm-execution-policy">ROCm execution policy</a> for the
           ordering contract.
         </p>
+        <h3 class="font-semibold mt-6 mb-3">Isolate prefix-cache state separately</h3>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          If deterministic output still differs after graphs and KV autoscaling are disabled, compare the
+          committed <code>both-off</code> arm directly with <code>both-off-prefix-cache-off</code>. The latter
+          writes <code>prefix_cache.enabled = false</code> in the generated typed launch file; do not inject an
+          environment override. It must report a false batching capability and zero cache capacity, lookup,
+          hit, lease, pending-release, retained-block, entry, and recurrent-state-byte evidence at every
+          attested boundary. Its receipt retains the enabled bit, baseline residency, lookup/hit deltas, and
+          final residency. A semantic pass with cache disabled localizes the defect to prefix/recurrent-state
+          reuse; another failure rules that axis out without changing graph or KV-resize policy.
+        </p>
 
         <h3 class="font-semibold mt-6 mb-3">Run graph lifecycle and byte-budget A/Bs separately</h3>
         <p class="mb-4 leading-relaxed" style="color: var(--fg-dim);">

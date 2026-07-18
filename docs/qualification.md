@@ -1108,8 +1108,9 @@ scheduler policy is changed.
 
 For the historical dynamic-runtime A/B, run each of `default`,
 `autoscale-off`, `graphs-off`, and `both-off` separately. These four arms now
-pin `KILN_SERVER_SERVING_PROFILE=experimental` so their requested graph/autoscale
-differences retain the semantics they had before stable became the default:
+pin `server.serving_profile = "experimental"` in the generated typed launch
+file so their requested graph/autoscale differences retain the semantics they
+had before stable became the default:
 
 ```bash
 PATH="$HOME/.cargo/bin:$PATH" ROCM_PATH=/opt/rocm \
@@ -1124,6 +1125,18 @@ python3 scripts/qualification/run.py \
 The variant named `default` preserves the graph-on/autoscale-on A/B baseline,
 not the production serving default. The manifest intentionally applies one
 shared qualification transport envelope to every arm.
+
+When deterministic output differs even with graphs and KV autoscaling disabled,
+run `both-off-prefix-cache-off` against `both-off`. The diagnostic arm also
+writes `prefix_cache.enabled = false`; no environment override is accepted. Its
+effective configuration differs only in requested/effective prefix-cache state
+and reason. Startup, post-measurement, post-sampled, and final-canary health
+attestation require the batching capability to remain false and every cache
+capacity, lookup, hit, lease, pending release, retained block, entry, and state
+byte counter to remain zero. The receipt retains the enabled bit, measurement
+baseline residency, lookup/hit deltas, and final residency. This arm isolates
+prefix/recurrent-state reuse; it does not silently redefine the historical
+four-arm performance matrix.
 
 ### ROCm Synchronization A/B
 

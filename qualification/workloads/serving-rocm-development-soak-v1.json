@@ -52,7 +52,10 @@
           "memory_reclaim_requested_mode": "off",
           "memory_reclaim_mode": "off",
           "rocm_graphs_requested": true,
-          "rocm_graphs_enabled": true
+          "rocm_graphs_enabled": true,
+          "prefix_cache_effective_enabled": true,
+          "prefix_cache_effective_reason": "active",
+          "prefix_cache_requested_enabled": true
         },
         "server": {
           "chat_performance_metadata_enabled": true,

@@ -422,6 +422,15 @@ VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
         rocm_graphs_requested=False,
         rocm_graphs_enabled=False,
     ),
+    "both-off-prefix-cache-off": _variant_config(
+        serving_profile="experimental",
+        kv_autoscale_requested=False,
+        kv_autoscale_enabled=False,
+        memory_reclaim_requested_mode="off",
+        memory_reclaim_mode="off",
+        rocm_graphs_requested=False,
+        rocm_graphs_enabled=False,
+    ),
     "stable": _variant_config(
         serving_profile="stable",
         kv_autoscale_requested=True,
@@ -432,6 +441,17 @@ VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
         rocm_graphs_enabled=False,
     ),
 }
+for variant_id, config in VARIANT_CONFIGS.items():
+    prefix_cache_enabled = variant_id != "both-off-prefix-cache-off"
+    config["runtime"].update(
+        {
+            "prefix_cache_effective_enabled": prefix_cache_enabled,
+            "prefix_cache_effective_reason": (
+                "active" if prefix_cache_enabled else "configuration"
+            ),
+            "prefix_cache_requested_enabled": prefix_cache_enabled,
+        }
+    )
 VARIANT_CONFIGS = {
     variant_id: _mixed_load_host_safety(config)
     for variant_id, config in VARIANT_CONFIGS.items()
@@ -604,6 +624,18 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "memory_reclaim_event_count": ("count", "sum", True),
     "output_token_throughput_per_second": ("tokens/s", "rate", False),
     "peak_gpu_memory_used_bytes": ("bytes", "max", True),
+    "prefix_cache_active_leases_end": ("leases", "exact", True),
+    "prefix_cache_baseline_cached_entries": ("entries", "exact", False),
+    "prefix_cache_baseline_state_bytes": ("bytes", "exact", True),
+    "prefix_cache_cached_blocks_end": ("blocks", "exact", False),
+    "prefix_cache_cached_entries_end": ("entries", "exact", False),
+    "prefix_cache_enabled": ("bool", "exact", False),
+    "prefix_cache_hit_blocks": ("blocks", "sum", False),
+    "prefix_cache_hit_tokens": ("tokens", "sum", False),
+    "prefix_cache_lookup_hit_count": ("count", "sum", False),
+    "prefix_cache_lookup_miss_count": ("count", "sum", True),
+    "prefix_cache_pending_release_entries_end": ("entries", "exact", True),
+    "prefix_cache_state_bytes_end": ("bytes", "exact", True),
     "pressure_peer_actor_admission_ms": ("ms", "exact", True),
     "pressure_peer_actor_prefill_wall_ms": ("ms", "exact", True),
     "pressure_peer_actor_queue_ms": ("ms", "exact", True),
@@ -2639,6 +2671,14 @@ def write_server_config(
         f"kv_force_blocks = {kv_force_blocks}",
         f"vulkan_buffer_pool_gb = {float(runtime.get('vulkan_buffer_pool_gb', 3.0))}",
         "",
+        "[prefix_cache]",
+        "enabled = "
+        + (
+            "true"
+            if runtime.get("prefix_cache_requested_enabled", True)
+            else "false"
+        ),
+        "",
         "[logging]",
         'format = "json"',
         "",
@@ -3022,6 +3062,22 @@ def attest_runtime(
     runtime = health.get("decode_runtime")
     if not isinstance(runtime, dict):
         return failures + ["health.decode_runtime is missing"]
+    try:
+        prefix_cache = prefix_cache_snapshot(health)
+    except QualificationError as exc:
+        failures.append(str(exc))
+    else:
+        expected_prefix_cache = expected.get("prefix_cache_effective_enabled", True)
+        if prefix_cache["enabled"] is not expected_prefix_cache:
+            failures.append(
+                "health prefix-cache enabled state does not match the effective policy"
+            )
+        if not expected_prefix_cache:
+            failures.extend(
+                disabled_prefix_cache_failures(
+                    prefix_cache, phase="runtime attestation"
+                )
+            )
     failures.extend(
         accelerator_policy_attestation_failures(
             runtime.get("accelerator_runtime"),
@@ -3211,6 +3267,13 @@ def attest_runtime(
     if not isinstance(batching, dict):
         failures.append("batching engine is not enabled")
     else:
+        if (
+            batching.get("prefix_cache_enabled")
+            is not expected.get("prefix_cache_effective_enabled", True)
+        ):
+            failures.append(
+                "health batching prefix-cache capability does not match the effective policy"
+            )
         expected_stall_grace = VARIANT_CONFIGS[variant]["server"][
             "stream_stall_grace_ms"
         ]
@@ -3337,6 +3400,62 @@ def attest_runtime(
     ):
         failures.append("prefill-layer ceiling compatibility environment flag is present")
     return failures
+
+
+PREFIX_CACHE_INTEGER_FIELDS = (
+    "lookup_hits",
+    "lookup_misses",
+    "hit_tokens",
+    "hit_blocks",
+    "cached_blocks",
+    "max_blocks",
+    "cached_entries",
+    "max_entries",
+    "cached_state_bytes",
+    "max_state_bytes",
+    "active_leases",
+    "pending_release_entries",
+)
+
+
+def prefix_cache_snapshot(health: dict[str, Any]) -> dict[str, int | bool]:
+    raw = health.get("prefix_cache")
+    if not isinstance(raw, dict):
+        raise QualificationError("health.prefix_cache is missing")
+    enabled = raw.get("enabled")
+    if not isinstance(enabled, bool):
+        raise QualificationError(
+            f"prefix-cache field enabled must be boolean, got {enabled!r}"
+        )
+    snapshot: dict[str, int | bool] = {"enabled": enabled}
+    for field in PREFIX_CACHE_INTEGER_FIELDS:
+        value = raw.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise QualificationError(
+                f"prefix-cache field {field} must be a nonnegative integer, got {value!r}"
+            )
+        snapshot[field] = value
+    for used, capacity in (
+        ("cached_blocks", "max_blocks"),
+        ("cached_entries", "max_entries"),
+        ("cached_state_bytes", "max_state_bytes"),
+    ):
+        if snapshot[used] > snapshot[capacity]:
+            raise QualificationError(
+                f"prefix-cache {used}={snapshot[used]} exceeds "
+                f"{capacity}={snapshot[capacity]}"
+            )
+    return snapshot
+
+
+def disabled_prefix_cache_failures(
+    snapshot: dict[str, int | bool], *, phase: str
+) -> list[str]:
+    return [
+        f"{phase} prefix-cache {field}={snapshot[field]} while disabled"
+        for field in PREFIX_CACHE_INTEGER_FIELDS
+        if snapshot[field] != 0
+    ]
 
 
 def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int | bool]:
@@ -4135,6 +4254,7 @@ def metric_values(
     health_after_warmup: dict[str, Any],
     health_before_sampled_profile: dict[str, Any],
     health_after_sampled_profile: dict[str, Any],
+    health_final: dict[str, Any],
     health_measurement_start: dict[str, Any],
     health_end: dict[str, Any],
     events: list[ObservedEvent],
@@ -4177,6 +4297,12 @@ def metric_values(
     attributed, unexplained = classify_itl_outliers(warmup.itl_ms, successes, events)
     batching_start = batching_snapshot(health_measurement_start)
     batching_end = batching_snapshot(health_end)
+    prefix_start = prefix_cache_snapshot(health_measurement_start)
+    prefix_end = prefix_cache_snapshot(health_final)
+    if prefix_start["enabled"] is not prefix_end["enabled"]:
+        raise QualificationError(
+            "prefix-cache effective capability changed during mixed load"
+        )
     graph_start = graph_snapshot(health_after_warmup)
     graph_end = graph_snapshot(health_end)
     external_yield_sync = external_yield_sync_metric_values(
@@ -4317,6 +4443,28 @@ def metric_values(
         "memory_reclaim_event_count": categories.count("memory_reclaim"),
         "output_token_throughput_per_second": completion_tokens / window,
         "peak_gpu_memory_used_bytes": peak_memory,
+        "prefix_cache_active_leases_end": prefix_end["active_leases"],
+        "prefix_cache_baseline_cached_entries": prefix_start["cached_entries"],
+        "prefix_cache_baseline_state_bytes": prefix_start["cached_state_bytes"],
+        "prefix_cache_cached_blocks_end": prefix_end["cached_blocks"],
+        "prefix_cache_cached_entries_end": prefix_end["cached_entries"],
+        "prefix_cache_enabled": int(prefix_end["enabled"]),
+        "prefix_cache_hit_blocks": counter_delta(
+            prefix_start, prefix_end, "hit_blocks"
+        ),
+        "prefix_cache_hit_tokens": counter_delta(
+            prefix_start, prefix_end, "hit_tokens"
+        ),
+        "prefix_cache_lookup_hit_count": counter_delta(
+            prefix_start, prefix_end, "lookup_hits"
+        ),
+        "prefix_cache_lookup_miss_count": counter_delta(
+            prefix_start, prefix_end, "lookup_misses"
+        ),
+        "prefix_cache_pending_release_entries_end": prefix_end[
+            "pending_release_entries"
+        ],
+        "prefix_cache_state_bytes_end": prefix_end["cached_state_bytes"],
         "prompt_token_count": prompt_tokens,
         "request_count": len(measured),
         "request_failure_count": failures,
@@ -4845,6 +4993,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             health_after_warmup=health_after_warmup,
             health_before_sampled_profile=health_before_sampled_profile,
             health_after_sampled_profile=health_after_sampled_profile,
+            health_final=health_after_post_sampled_canary,
             health_measurement_start=health_measurement_start,
             health_end=health_end,
             events=measurement_events,
@@ -4920,6 +5069,40 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 "measured load exercised no bounded short-prefill service opportunity"
             )
         status_failures.extend(batching_staging_contract_failures(values))
+        expected_prefix_cache_enabled = int(
+            VARIANT_CONFIGS[variant]["runtime"]["prefix_cache_effective_enabled"]
+        )
+        if values["prefix_cache_enabled"] != expected_prefix_cache_enabled:
+            status_failures.append(
+                "measured prefix-cache capability did not match the effective policy"
+            )
+        for name in (
+            "prefix_cache_active_leases_end",
+            "prefix_cache_pending_release_entries_end",
+        ):
+            if values[name] != 0:
+                status_failures.append(f"{name}={values[name]} after final drain")
+        if expected_prefix_cache_enabled:
+            if values["prefix_cache_lookup_hit_count"] < 1:
+                status_failures.append(
+                    "prefix-cache-enabled mixed load recorded no measured cache hit"
+                )
+        else:
+            for name in (
+                "prefix_cache_baseline_cached_entries",
+                "prefix_cache_baseline_state_bytes",
+                "prefix_cache_cached_blocks_end",
+                "prefix_cache_cached_entries_end",
+                "prefix_cache_hit_blocks",
+                "prefix_cache_hit_tokens",
+                "prefix_cache_lookup_hit_count",
+                "prefix_cache_lookup_miss_count",
+                "prefix_cache_state_bytes_end",
+            ):
+                if values[name] != 0:
+                    status_failures.append(
+                        f"{name}={values[name]} while prefix cache is disabled"
+                    )
         if values["external_yield_sync_call_count"] < 1:
             status_failures.append(
                 "measured load exercised no attributed backend synchronization boundary"

@@ -91,22 +91,38 @@ class ServeRocmGraphFailureContainmentTests(unittest.TestCase):
 
     def test_rocm_serving_manifests_share_the_precise_unavailable_pattern(self) -> None:
         found = 0
+        required_cases = 0
         for path in sorted((ROOT / "qualification/workloads").glob("*.json")):
             if not path.name.startswith("serving") or "rocm" not in path.name:
                 continue
             manifest = json.loads(path.read_text())
             for variant in manifest.get("variants", []):
+                if (
+                    variant.get("backend") != "rocm"
+                    or variant.get("device_requirement") != "required"
+                    or variant.get("skip_policy") != "fail"
+                ):
+                    continue
                 for case in variant.get("cases", []):
+                    required_cases += 1
+                    matching = []
                     for assertion in case.get("output_assertions", []):
                         pattern = assertion.get("pattern")
                         if isinstance(pattern, str) and "no rocm device" in pattern:
+                            matching.append(pattern)
                             found += 1
                             self.assertEqual(
                                 pattern,
                                 failure.ROCM_UNAVAILABLE_PATTERN.pattern,
                                 path.name,
                             )
-        self.assertEqual(found, 12)
+                    self.assertEqual(
+                        len(matching),
+                        1,
+                        f"{path.name}:{variant.get('id')}:{case.get('id')}",
+                    )
+        self.assertGreater(required_cases, 0)
+        self.assertEqual(found, required_cases)
 
     def test_metrics_distinguish_each_containment_claim(self) -> None:
         values = {
