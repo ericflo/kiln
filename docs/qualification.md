@@ -676,7 +676,7 @@ measurement, drain, server exit, and a bounded post-exit cooldown. The typed
 `host_safety` object selects
 exactly one Linux hwmon input by `name=k10temp` and `label=Tctl`, polls every
 250 ms, pauses the complete server process group with `SIGSTOP` at or above
-88,000 millicelsius, and resumes it with `SIGCONT` at or below 80,000. A
+88,000 millicelsius, and resumes it with `SIGCONT` at or below 86,000. A
 97,000-millicelsius reading, missing or ambiguous selector, malformed input,
 controller error, or signal error fails closed and terminates the server group.
 Cooling consumes existing wall-clock and request deadlines, so throughput
@@ -1563,7 +1563,8 @@ hysteretic pacing. At or above 88,000 millicelsius it sends `SIGSTOP` to the
 complete server process group, including an inference wave already in progress.
 The Python qualification controller is outside that process group, so sensor,
 host-memory, and deadline observation continue while the server is stopped. At
-or below 80,000 millicelsius the controller sends `SIGCONT`. This avoids rapid
+or below 86,000 millicelsius the controller sends `SIGCONT`. This bounds each
+stop more tightly while retaining a two-degree hysteresis against rapid
 stop/start oscillation and does not depend on reaching a request boundary. The
 97,000 millicelsius safety check is evaluated first on every sample and remains
 unchanged: a stopped group that reaches the limit receives `SIGTERM` followed by
@@ -2079,7 +2080,7 @@ on a development receipt. It deliberately retains the development soak's exact
 four-active-request service envelope, one/four-way prompt cohorts, periodic
 cancellation, semantic oracle, fixed KV and Vulkan recycler policy, resident
 route gates, 8 GiB host-memory floor, 512 MiB swap-growth cap, continuous
-88/80 C process-group pacing, and independent 97 C hard stop. The different
+88/86 C process-group pacing, and independent 97 C hard stop. The different
 deterministic seed and eight-hour duration exercise a longer request sequence
 without silently widening the already-qualified operating point.
 

@@ -1169,7 +1169,7 @@ class ServeMixedLoadTests(unittest.TestCase):
                 "mode": "continuous_process_group_stop",
                 "pause_signal": "SIGSTOP",
                 "poll_interval_ms": 250,
-                "resume_millicelsius": 80_000,
+                "resume_millicelsius": 86_000,
                 "resume_signal": "SIGCONT",
                 "scope": "server_process_group",
                 "start_millicelsius": 88_000,

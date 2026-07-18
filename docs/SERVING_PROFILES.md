@@ -86,7 +86,7 @@ The Strix Halo qualification harness applies host-specific thermal pacing to
 the ROCm mixed-load arms and this Vulkan candidate. Its external 250 ms
 controller sends `SIGSTOP` to the complete server process group at 88 C,
 including during active inference, and sends
-`SIGCONT` after the package cools to 80 C. The independent fail-closed 97 C
+`SIGCONT` after the package cools to 86 C. The independent fail-closed 97 C
 guard remains active; if it trips while the server is stopped, termination is
 followed by a release signal so cleanup can execute. Cooling consumes the
 existing setup, measurement, and request deadlines, is included in measured

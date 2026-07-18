@@ -234,7 +234,7 @@ different questions and must not be substituted for one another.
 
 The same mixed-load window retains host thermal pacing as an external causal
 interval. The Strix Halo controller samples `k10temp/Tctl` every 250 ms, stops
-the complete server process group at 88 C, resumes it at 80 C, and independently
+the complete server process group at 88 C, resumes it at 86 C, and independently
 fails closed at 97 C. A token gap overlapping a stop/resume interval is assigned
 the bounded `host_thermal_pacing` category. Start/peak/end temperature, guard
 errors and trips, pacing counts, duration, maximum interval, and active-at-end

@@ -338,7 +338,7 @@ class ServeRocmSoakTests(unittest.TestCase):
             rocm["soak"]["host_thermal_pacing"],
             {
                 "start_millicelsius": 88_000,
-                "resume_millicelsius": 80_000,
+                "resume_millicelsius": 86_000,
                 "poll_interval_ms": 250,
                 "deadline_accounting": "included",
                 "mode": "continuous_process_group_stop",
@@ -434,7 +434,7 @@ class ServeRocmSoakTests(unittest.TestCase):
             vulkan["soak"]["host_thermal_pacing"],
             {
                 "start_millicelsius": 88_000,
-                "resume_millicelsius": 80_000,
+                "resume_millicelsius": 86_000,
                 "poll_interval_ms": 250,
                 "deadline_accounting": "included",
                 "mode": "continuous_process_group_stop",

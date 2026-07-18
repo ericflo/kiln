@@ -1250,7 +1250,7 @@ function validateSftLossRouteDocumentationSourceContract() {
     'unused global headroom remains shared',
     '8 GiB MemAvailable',
     '512 MiB swap growth',
-    '88,000/80,000 millicelsius',
+    '88,000/86,000 millicelsius',
     '97,000 millicelsius',
     'host_thermal_pacing',
     'preserves hard-limit monitoring through process exit',
