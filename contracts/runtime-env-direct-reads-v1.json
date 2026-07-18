@@ -1795,58 +1795,6 @@
       "surface": "unit-test"
     },
     {
-      "api": "remove_var",
-      "argument": "self . key",
-      "argument_kind": "expression",
-      "classification": "test_only",
-      "classification_basis": "integration-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-tensor/tests/rocm_paged_attn_decode_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "self . key",
-      "argument_kind": "expression",
-      "classification": "test_only",
-      "classification_basis": "integration-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-tensor/tests/rocm_paged_attn_decode_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_DISABLE_ROCM_GQA_D256_PARALLEL",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-tensor/tests/rocm_paged_attn_decode_parity.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_DISABLE_ROCM_GQA_D256_PARALLEL",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-tensor/tests/rocm_paged_attn_decode_parity.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
       "api": "set_var",
       "argument": "KILN_MODEL_PATH",
       "argument_kind": "literal",
@@ -4372,19 +4320,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_ROCM_RMSNORM_ROW_TILE_ROWS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-rmsnorm-kernel/src/kt_api.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_RUN_LONG_ROCM_RMSNORM",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -5112,32 +5047,6 @@
       "surface": "build-script"
     },
     {
-      "api": "getenv",
-      "argument": "KILN_DISABLE_ROCM_GQA_D128_PARALLEL",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 2,
-      "language": "native",
-      "operation": "read",
-      "path": "crates/kiln-tensor/csrc/paged_decode_meta.cu",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "getenv",
-      "argument": "KILN_DISABLE_ROCM_GQA_D256_PARALLEL",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 2,
-      "language": "native",
-      "operation": "read",
-      "path": "crates/kiln-tensor/csrc/paged_decode_meta.cu",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "KILN_ARENA_FORCE_ZERO",
       "argument_kind": "literal",
@@ -5359,110 +5268,6 @@
       "surface": "source"
     },
     {
-      "api": "var",
-      "argument": "KILN_DISABLE_ROCM_CONCAT_SAFE_ROW_ASSEMBLY",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/rocm_ops/concat.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ROCM_CONCAT_AXIS0_ROW_COPY",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/rocm_ops/concat.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ROCM_IS_FINITE_HOST_SCAN_ELEMENTS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ROCM_IS_FINITE_LARGE_HOST_SCAN",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_ROCM_GQA_PAGED_ATTN",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_ROCM_SPLIT_PAGED_ATTN",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ROCM_PAGED_ATTN_MAX_SPLITS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_ROCM_PAGED_ATTN_SPLIT_TOKENS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "OUT_DIR",
       "argument_kind": "literal",
@@ -5537,19 +5342,6 @@
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-tensor/tests/rocm_matmul_parity.rs",
-      "phase": "runtime",
-      "surface": "integration-test"
-    },
-    {
-      "api": "var_os",
-      "argument": "key",
-      "argument_kind": "expression",
-      "classification": "test_only",
-      "classification_basis": "integration-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/tests/rocm_paged_attn_decode_parity.rs",
       "phase": "runtime",
       "surface": "integration-test"
     },
@@ -6113,27 +5905,27 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 225,
-    "literal_kiln_read_names": 116,
+    "literal_kiln_read_call_sites": 212,
+    "literal_kiln_read_names": 105,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 75,
+      "experimental_debug": 64,
       "public_stable": 1,
       "test_only": 37
     },
-    "process_mutation_call_sites": 236,
+    "process_mutation_call_sites": 232,
     "process_mutation_call_sites_by_classification": {
       "build_time": 8,
-      "test_only": 228
+      "test_only": 224
     },
-    "process_mutation_entries": 145,
-    "read_call_sites": 588,
+    "process_mutation_entries": 141,
+    "read_call_sites": 574,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 121,
+      "experimental_debug": 108,
       "public_stable": 9,
-      "test_only": 130
+      "test_only": 129
     },
-    "read_entries": 324
+    "read_entries": 312
   }
 }

@@ -180,7 +180,7 @@ disabled.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v9`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v10`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
 dashboard all report the same configured/effective/source values, plus the
 compiled Vulkan kernel-policy schema ID; lower model, tensor, and kernel paths
@@ -195,7 +195,7 @@ do not re-read these public environment names.
 | `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
 | `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | `KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL` and `KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
 | `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | `KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT` and `KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT` (deprecated compatibility) | `auto`, `native_bf16`, or `f32_then_cast`, case-insensitive. `auto` applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
-| `accelerator.rocm_kernel_profile` | string enum; `"qualified"` | `KILN_ACCELERATOR_ROCM_KERNEL_PROFILE` (implemented) | none | `qualified`, `portable_fallback`, or `experimental_multiblock`, case-insensitive. `qualified` installs all twenty-nine qualified accelerated model routes, the two bounded training safeguards, and their fixed 512/1024/512 geometry while leaving multi-block GDN prefill off. `portable_fallback` declines all thirty accelerated routes, including multi-block, while retaining those correctness safeguards. `experimental_multiblock` enables all thirty accelerated routes and requires `server.serving_profile = "experimental"`. The complete 35-leaf model policy is immutable after startup and governs backend dispatch, model loading, forward/tape execution, W8 decode, and ROCm training geometry. Retired per-kernel disable/enable variables are not aliases. Restart required. |
+| `accelerator.rocm_kernel_profile` | string enum; `"qualified"` | `KILN_ACCELERATOR_ROCM_KERNEL_PROFILE` (implemented) | none | `qualified`, `portable_fallback`, or `experimental_multiblock`, case-insensitive. `qualified` installs thirty-three of thirty-four accelerated model/tensor routes, leaving only multi-block GDN prefill off, and retains twelve fixed correctness/bounded-work leaves. `portable_fallback` declines all thirty-four accelerated routes while retaining the same safety behavior. `experimental_multiblock` enables all thirty-four accelerated routes and requires `server.serving_profile = "experimental"`. The complete 46-leaf policy is immutable after startup and governs backend/model dispatch, loading, forward/tape execution, W8 decode, training geometry, paged-attention specialization and splitting, concat assembly, finite checks, and RMSNorm row tiling through Rust and C++ kernel boundaries. Retired per-kernel variables are not aliases. Restart required. |
 | `accelerator.rocm_graph_mode` | string enum; `"profile"` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` (implemented) | `KILN_ROCM_GRAPHS` and `KILN_ROCM_GRAPH_CAPTURE` (deprecated compatibility) | `profile`, `disabled`, `warmup_then_eager`, or `lazy_capture_replay`, case-insensitive. `profile` resolves to `disabled` under stable/maintenance and `lazy_capture_replay` under experimental. The two explicit non-disabled modes require the experimental profile. Restart required. |
 | `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | `KILN_ROCM_GRAPH_CACHE_MAX` (deprecated compatibility) | `1..=64`. Bounds retained native graph entries in every product and embedding constructor. At saturation, admission reclaims idle owners first and then the minimum fair-LRU active entries while preserving one graph per active owner after the incoming candidate. Zero or unbounded capacities are rejected. Restart required. |
 | `accelerator.rocm_graph_cache_max_bytes` | unsigned integer bytes; `1073741824` (1 GiB) | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` (implemented) | none | `67108864..=17179869184` (64 MiB through 16 GiB). Independently bounds requested physical bytes retained by graph-owned stable tensors, capture arenas, private-stream hipBLASLt workspaces, and owner slot state. Opaque HIP graph/exec/stream/event overhead is counted as objects and remains subject to live driver-pressure policy. Restart required. |
@@ -221,9 +221,22 @@ derived canonical environment name instead.
 `KILN_DISABLE_ROCM_GQA_SDPA_F32`,
 `KILN_ROCM_TAPE_FLASH_MATERIALIZED`, `KILN_ROCM_W8A16`,
 `KILN_ROCM_W8A8`, `KILN_ROCM_W8A8_SAMPLED_LM_HEAD`, and
-`KILN_DISABLE_ROCM_W8_SWIGLU`. None is an alias. The two default-off
+`KILN_DISABLE_ROCM_W8_SWIGLU`, plus the lower-level tensor spellings
+`KILN_DISABLE_ROCM_SPLIT_PAGED_ATTN`,
+`KILN_ROCM_PAGED_ATTN_SPLIT_TOKENS`,
+`KILN_ROCM_PAGED_ATTN_MAX_SPLITS`,
+`KILN_DISABLE_ROCM_GQA_PAGED_ATTN`,
+`KILN_DISABLE_ROCM_GQA_D128_PARALLEL`,
+`KILN_DISABLE_ROCM_GQA_D256_PARALLEL`,
+`KILN_DISABLE_ROCM_CONCAT_SAFE_ROW_ASSEMBLY`,
+`KILN_ROCM_CONCAT_AXIS0_ROW_COPY`,
+`KILN_ROCM_IS_FINITE_LARGE_HOST_SCAN`,
+`KILN_ROCM_IS_FINITE_HOST_SCAN_ELEMENTS`, and
+`KILN_ROCM_RMSNORM_ROW_TILE_ROWS`. None is an alias. The two default-off
 investigation switches for streaming GDN and materialized tape flash have no
-profile leaf because no qualified product uses them. The generic
+profile leaf because no qualified product uses them. The default-off axis-zero
+concat experiment and its dead vectorized kernel were also deleted rather than
+promoted. The generic
 `KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING`,
 `KILN_GPU_TRAINING_MLP_CHUNK_TOKENS`, and
 `KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES` controls remain migration inputs for

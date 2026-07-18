@@ -382,14 +382,14 @@ training request
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
           runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
-          to produce <code>kiln.accelerator-runtime-policy.v9</code>. The same resolved object is installed in
+          to produce <code>kiln.accelerator-runtime-policy.v10</code>. The same resolved object is installed in
           the tensor context, projected into the model graph runner, stored in server state, and returned by
           product diagnostics. Tensor, model, and kernel code do not re-read the public graph,
           synchronization, or matmul-route environment names during inference.
         </p>
         <pre class="mt-5"><code>typed [server] + [accelerator] configuration
   -> strict parse, source attribution, and serving-profile gate
-  -> immutable accelerator runtime policy v9
+  -> immutable accelerator runtime policy v10
   -> Vulkan physical-device/validation policy installed before logical-device creation
   -> kiln-tensor adapter route set installed before model execution
   -> exact full-attention score geometry installed in model and ROCm flash planners
@@ -443,7 +443,7 @@ training request
           covered model-route and packed-weight selections, recurrence residency, batch thresholds, and
           split-K geometry cannot diverge or change between requests. A source change
           must version the policy and rerun Vulkan oracle, performance, development-soak, and endurance gates.
-          Accelerator policy v8 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
+          Accelerator policy v10 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
           health, trusted debug state, the CLI config check, and the dashboard.
         </p>
         <div class="overflow-x-auto mt-4">
@@ -491,24 +491,26 @@ training request
           tile size or route between layers or requests.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Policy v9 retains the deletion of eight permissive materialized-score, online-score, and tile environment controls
+          Policy v10 retains the deletion of eight permissive materialized-score, online-score, and tile environment controls
           rather than retaining aliases. The former planners could independently parse different values during
           execution and derive a materialized ceiling as high as 32 GiB from changing free memory. Real-device
           parity tests now force small multi-tile geometry with a scoped programmatic hook, so test coverage no
           longer mutates process-global configuration.
         </p>
 
-        <h3 class="font-semibold mt-6 mb-3">ROCm model kernels use one complete route profile</h3>
+        <h3 class="font-semibold mt-6 mb-3">ROCm kernels use one complete route profile</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.rocm_kernel_profile</code> replaces independent model-kernel environment gates with
-          one complete 35-leaf policy.
+          <code>accelerator.rocm_kernel_profile</code> replaces independent model and tensor-kernel environment gates with
+          one complete 46-leaf policy.
           <code>qualified</code> is the stable production profile: it enables the qualified full-attention QKV,
           GDN projection/gates/recurrent/normalization/decode, head-major prefill, fused convolution, and LoRA
-          decode routes, exact long-attention routes, W8 decode projections, and bounded training routes while
-          keeping the slower gfx1151 multi-block GDN prefill experiment off. <code>portable_fallback</code>
-          declines all thirty accelerated ROCm model routes and delegates to supported portable
+          decode routes, exact long-attention routes, W8 decode projections, bounded training routes, and all
+          four qualified tensor-level paged-attention accelerations while keeping the slower gfx1151
+          multi-block GDN prefill experiment off. <code>portable_fallback</code>
+          declines all thirty-four accelerated ROCm model/tensor routes and delegates to supported portable
           implementations, making reference comparison intentional and reproducible. It deliberately retains
-          the two correctness-oriented training safeguards and their three bounded geometry values.
+          twelve correctness and bounded-work leaves across training, paged attention, concat, finite checks,
+          and RMSNorm.
           <code>experimental_multiblock</code> is the qualified set plus that unqualified multi-block prefill
           kernel and therefore fails startup outside the experimental serving profile.
         </p>
@@ -551,22 +553,34 @@ training request
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_q_gate_training</code></td><td class="p-2">on</td><td class="p-2">on</td><td class="p-2">on</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_q_gate_output_chunk_features</code></td><td class="p-2">1024</td><td class="p-2">1024</td><td class="p-2">1024</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_q_gate_row_tile_tokens</code></td><td class="p-2">512</td><td class="p-2">512</td><td class="p-2">512</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_paged_attention</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_paged_attention_min_sequence</code></td><td class="p-2">2048</td><td class="p-2">2048</td><td class="p-2">2048</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>paged_attention_split_tokens</code></td><td class="p-2">128</td><td class="p-2">128</td><td class="p-2">128</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>paged_attention_max_splits</code></td><td class="p-2">256</td><td class="p-2">256</td><td class="p-2">256</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gqa_paged_attention</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gqa_d128_parallel</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gqa_d256_parallel</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>concat_safe_row_assembly</code></td><td class="p-2">on</td><td class="p-2">on</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>concat_safe_row_assembly_min_elements</code></td><td class="p-2">1,000,000</td><td class="p-2">1,000,000</td><td class="p-2">1,000,000</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>is_finite_host_scan_min_elements</code></td><td class="p-2">16,777,216</td><td class="p-2">16,777,216</td><td class="p-2">16,777,216</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rmsnorm_row_tile_rows</code></td><td class="p-2">4096</td><td class="p-2">4096</td><td class="p-2">4096</td></tr>
             </tbody>
           </table>
         </div>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The server maps the typed profile to a complete model policy before backend construction. Backend
-          dispatch, model loading, forward execution, and tape-forward execution all read that immutable
-          value. Dispatch does not consult process environment in hot paths. A same-value process install is
-          idempotent and a conflicting
-          install fails. The retired per-kernel ROCm spellings and CUDA-spelled fallbacks are deliberately
+          The server maps the typed profile to model policy and context-owned tensor policy before device
+          creation. Backend dispatch, model loading, forward/tape execution, Rust tensor operations, RMSNorm,
+          and C++ paged-attention launchers all read explicit immutable values. Dispatch does not consult
+          process environment in hot paths. A same-value process install is idempotent, a conflicting install
+          fails, and invalid zero or inconsistent tensor geometry fails before device probing. The retired
+          per-kernel ROCm spellings and CUDA-spelled fallbacks are deliberately
           unsupported as aliases, so an operator cannot create an unqualified mixture or change a route during
           inference. The default-off ROCm streaming-GDN and materialized tape-flash investigation switches were
-          removed rather than promoted. Generic GPU MLP and split-projection environment controls remain live
+          removed rather than promoted. The unused opt-in axis-zero concat kernel was deleted. Generic GPU MLP and split-projection environment controls remain live
           for CUDA/Vulkan until those hardware-host migrations, but ROCm no longer consumes them.
         </p>
         <details class="mt-4" open>
-          <summary class="font-medium">Retired model-layer ROCm variables</summary>
+          <summary class="font-medium">Retired model and tensor-layer ROCm variables</summary>
           <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
             The profile replaces <code>KILN_DISABLE_ROCM_ATTN_DECODE_QKV_PREP</code>,
             <code>KILN_ENABLE_ROCM_GDN_STREAMING_FASTPATHS</code>,
@@ -581,7 +595,18 @@ training request
             <code>KILN_DISABLE_ROCM_GQA_SDPA_F32</code>,
             <code>KILN_ROCM_TAPE_FLASH_MATERIALIZED</code>, <code>KILN_ROCM_W8A16</code>,
             <code>KILN_ROCM_W8A8</code>, <code>KILN_ROCM_W8A8_SAMPLED_LM_HEAD</code>, and
-            <code>KILN_DISABLE_ROCM_W8_SWIGLU</code>. None is accepted as an alias.
+            <code>KILN_DISABLE_ROCM_W8_SWIGLU</code>, plus
+            <code>KILN_DISABLE_ROCM_SPLIT_PAGED_ATTN</code>,
+            <code>KILN_ROCM_PAGED_ATTN_SPLIT_TOKENS</code>,
+            <code>KILN_ROCM_PAGED_ATTN_MAX_SPLITS</code>,
+            <code>KILN_DISABLE_ROCM_GQA_PAGED_ATTN</code>,
+            <code>KILN_DISABLE_ROCM_GQA_D128_PARALLEL</code>,
+            <code>KILN_DISABLE_ROCM_GQA_D256_PARALLEL</code>,
+            <code>KILN_DISABLE_ROCM_CONCAT_SAFE_ROW_ASSEMBLY</code>,
+            <code>KILN_ROCM_CONCAT_AXIS0_ROW_COPY</code>,
+            <code>KILN_ROCM_IS_FINITE_LARGE_HOST_SCAN</code>,
+            <code>KILN_ROCM_IS_FINITE_HOST_SCAN_ELEMENTS</code>, and
+            <code>KILN_ROCM_RMSNORM_ROW_TILE_ROWS</code>. None is accepted as an alias.
           </p>
         </details>
 

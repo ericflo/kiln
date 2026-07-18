@@ -15,22 +15,17 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-fn rocm_is_finite_host_scan_threshold() -> Option<usize> {
-    let disabled = std::env::var("KILN_ROCM_IS_FINITE_LARGE_HOST_SCAN")
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .is_some_and(|value| matches!(value.as_str(), "0" | "false" | "no" | "off"));
-    if disabled {
-        return None;
-    }
-
-    Some(
-        std::env::var("KILN_ROCM_IS_FINITE_HOST_SCAN_ELEMENTS")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|&value| value > 0)
-            .unwrap_or(16 * 1024 * 1024),
-    )
+fn rocm_is_finite_host_scan_threshold(src: &Tensor) -> Result<Option<usize>> {
+    let storage = src
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg("rocm_is_finite: source must be ROCm storage".to_string()))?;
+    Ok(storage
+        .context()
+        .execution_policy()
+        .tensor_kernels
+        .is_finite_host_scan_min_elements)
 }
 
 /// "Any non-finite?" tensor-wide reduction on a ROCm-resident tensor. Returns
@@ -78,7 +73,7 @@ pub fn rocm_is_finite(src: &Tensor) -> Result<bool> {
     // tensors from long-context training, the reducer path can perturb the
     // following confirmation readback on ROCm 7.2/gfx115x; a direct D2H scan is
     // slower but authoritative and only used when finite checking is enabled.
-    if rocm_is_finite_host_scan_threshold()
+    if rocm_is_finite_host_scan_threshold(src)?
         .is_some_and(|threshold| src.element_count() >= threshold)
     {
         let host = crate::rocm_to_host_copy(src)?;

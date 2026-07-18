@@ -162,6 +162,7 @@ pub use kiln_hip::{
     ROCM_SYNC_REASON_COUNT, RocmBf16MatmulOutputMode, RocmExecutionPolicy, RocmMatmulPolicy,
     RocmStreamId, RocmStreamSubmission, RocmStridedBatchedMatmulMode, RocmSyncReason,
     RocmSyncReasonStats, RocmSyncTelemetrySnapshot, RocmSynchronizationMode,
+    RocmTensorKernelPolicy,
 };
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;

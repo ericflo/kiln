@@ -125,8 +125,8 @@ pub const DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MIN: u64 = 64 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024 * 1024;
 /// Versioned schema identity shared by config, health, and debug diagnostics.
-pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v9";
-pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 9;
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v10";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 10;
 
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
@@ -7691,8 +7691,8 @@ mod tests {
             ConfigValueSource::Environment,
         )))
         .unwrap();
-        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v9");
-        assert_eq!(json["version"], 9);
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v10");
+        assert_eq!(json["version"], 10);
         assert_eq!(
             json["vulkan_kernel_policy_schema_id"],
             "kiln.vulkan-kernel-policy.v3"

@@ -127,6 +127,7 @@ unsafe extern "C" {
         page_block_size: i64,
         pool_rows: i64,
         scale: f32,
+        parallel_head_dim: i64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
@@ -150,6 +151,7 @@ unsafe extern "C" {
         pool_rows: i64,
         split_count: i64,
         scale: f32,
+        parallel_head_dim: i64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 }
@@ -161,23 +163,13 @@ fn rocm_storage<'a>(t: &'a Tensor, who: &str) -> Result<&'a RocmStorage> {
         .ok_or_else(|| Error::Msg(format!("{who}: tensor must be ROCm storage")))
 }
 
-fn paged_attn_split_count(max_seqlen_k: usize) -> usize {
-    if std::env::var("KILN_DISABLE_ROCM_SPLIT_PAGED_ATTN").is_ok() || max_seqlen_k < 2048 {
+fn paged_attn_split_count(max_seqlen_k: usize, policy: crate::RocmTensorKernelPolicy) -> usize {
+    if !policy.split_paged_attention || max_seqlen_k < policy.split_paged_attention_min_sequence {
         return 1;
     }
-    let target_tokens_per_split = std::env::var("KILN_ROCM_PAGED_ATTN_SPLIT_TOKENS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(128);
-    let max_splits = std::env::var("KILN_ROCM_PAGED_ATTN_MAX_SPLITS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        // Long-context decode on ROCm benefits from split parallelism. Qwen3.5-
-        // 4B on gfx1151 benchmarks best at 16k with 128-token chunks; the env
-        // override remains for smaller/older GPUs and future retuning.
-        .unwrap_or(256);
+    // Qwen3.5-4B on gfx1151 benchmarks best at 16k with 128-token chunks.
+    let target_tokens_per_split = policy.paged_attention_split_tokens.max(1);
+    let max_splits = policy.paged_attention_max_splits.max(2);
     max_seqlen_k
         .div_ceil(target_tokens_per_split)
         .clamp(2, max_splits)
@@ -737,6 +729,7 @@ pub fn rocm_paged_attn_decode_bf16(
         None => None,
     };
     let ctx = q_storage.context();
+    let kernel_policy = ctx.execution_policy().tensor_kernels;
     let device_index = match q_c.device() {
         Device::Rocm(i) => i,
         _ => {
@@ -768,10 +761,14 @@ pub fn rocm_paged_attn_decode_bf16(
         core::ptr::null()
     };
 
-    let split_count = paged_attn_split_count(max_seqlen_k);
+    let split_count = paged_attn_split_count(max_seqlen_k, kernel_policy);
     let group = h / hk;
-    let use_gqa4 =
-        (2..=4).contains(&group) && std::env::var("KILN_DISABLE_ROCM_GQA_PAGED_ATTN").is_err();
+    let use_gqa4 = kernel_policy.gqa_paged_attention && (2..=4).contains(&group);
+    let parallel_head_dim = match d {
+        128 if kernel_policy.gqa_d128_parallel => 128,
+        256 if kernel_policy.gqa_d256_parallel => 256,
+        _ => 0,
+    };
     let partial_buffers = if split_count > 1 {
         let partials = b * h * split_count;
         Some((
@@ -810,6 +807,7 @@ pub fn rocm_paged_attn_decode_bf16(
                     pool_rows as i64,
                     split_count as i64,
                     scale,
+                    parallel_head_dim,
                     raw_stream,
                 )
             }
@@ -857,6 +855,7 @@ pub fn rocm_paged_attn_decode_bf16(
                 page_block_size as i64,
                 pool_rows as i64,
                 scale,
+                parallel_head_dim,
                 raw_stream,
             )
         }
@@ -959,4 +958,23 @@ pub fn rocm_build_tail_mask(seqused_k: &Tensor, b: usize, h: usize, sk: usize) -
         TensorId::next(),
     )
     .map_err(|e| Error::Msg(format!("rocm_build_tail_mask: wrap: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::paged_attn_split_count;
+    use crate::RocmTensorKernelPolicy;
+
+    #[test]
+    fn paged_attention_split_geometry_is_profile_owned() {
+        let qualified = RocmTensorKernelPolicy::qualified();
+        assert_eq!(paged_attn_split_count(2047, qualified), 1);
+        assert_eq!(paged_attn_split_count(2048, qualified), 16);
+        assert_eq!(paged_attn_split_count(16_384, qualified), 128);
+        assert_eq!(paged_attn_split_count(1_000_000, qualified), 256);
+        assert_eq!(
+            paged_attn_split_count(16_384, RocmTensorKernelPolicy::portable_fallback()),
+            1
+        );
+    }
 }

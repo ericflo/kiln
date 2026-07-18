@@ -580,6 +580,96 @@ impl RocmMatmulPolicy {
     }
 }
 
+/// Immutable low-level ROCm tensor-kernel policy.
+///
+/// These values are fixed before the primary context is created. Tensor and
+/// kernel crates read the policy from the owning context instead of consulting
+/// process environment in operation paths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RocmTensorKernelPolicy {
+    pub split_paged_attention: bool,
+    pub split_paged_attention_min_sequence: usize,
+    pub paged_attention_split_tokens: usize,
+    pub paged_attention_max_splits: usize,
+    pub gqa_paged_attention: bool,
+    pub gqa_d128_parallel: bool,
+    pub gqa_d256_parallel: bool,
+    pub concat_safe_row_assembly: bool,
+    pub concat_safe_row_assembly_min_elements: usize,
+    pub is_finite_host_scan_min_elements: Option<usize>,
+    pub rmsnorm_row_tile_rows: usize,
+}
+
+impl RocmTensorKernelPolicy {
+    /// Qualified Strix Halo tensor-kernel policy.
+    pub const fn qualified() -> Self {
+        Self {
+            split_paged_attention: true,
+            split_paged_attention_min_sequence: 2048,
+            paged_attention_split_tokens: 128,
+            paged_attention_max_splits: 256,
+            gqa_paged_attention: true,
+            gqa_d128_parallel: true,
+            gqa_d256_parallel: true,
+            concat_safe_row_assembly: true,
+            concat_safe_row_assembly_min_elements: 1_000_000,
+            is_finite_host_scan_min_elements: Some(16 * 1024 * 1024),
+            rmsnorm_row_tile_rows: 4096,
+        }
+    }
+
+    /// Reference-oriented policy that declines accelerated tensor routes while
+    /// retaining the qualified correctness and bounded-work geometries.
+    pub const fn portable_fallback() -> Self {
+        Self {
+            split_paged_attention: false,
+            gqa_paged_attention: false,
+            gqa_d128_parallel: false,
+            gqa_d256_parallel: false,
+            ..Self::qualified()
+        }
+    }
+
+    /// The experimental model profile changes no low-level tensor route.
+    pub const fn experimental_multiblock() -> Self {
+        Self::qualified()
+    }
+
+    /// Return the first invalid invariant without touching the device.
+    pub const fn validation_error(self) -> Option<&'static str> {
+        if self.split_paged_attention_min_sequence == 0 {
+            return Some("split_paged_attention_min_sequence must be positive");
+        }
+        if self.paged_attention_split_tokens == 0 {
+            return Some("paged_attention_split_tokens must be positive");
+        }
+        if self.paged_attention_max_splits < 2 {
+            return Some("paged_attention_max_splits must be at least two");
+        }
+        if (self.gqa_d128_parallel || self.gqa_d256_parallel) && !self.gqa_paged_attention {
+            return Some("parallel GQA routes require gqa_paged_attention");
+        }
+        if self.concat_safe_row_assembly_min_elements == 0 {
+            return Some("concat_safe_row_assembly_min_elements must be positive");
+        }
+        if let Some(elements) = self.is_finite_host_scan_min_elements {
+            if elements == 0 {
+                return Some("is_finite_host_scan_min_elements must be positive when present");
+            }
+        }
+        if self.rmsnorm_row_tile_rows == 0 {
+            return Some("rmsnorm_row_tile_rows must be positive");
+        }
+        None
+    }
+}
+
+impl Default for RocmTensorKernelPolicy {
+    fn default() -> Self {
+        Self::qualified()
+    }
+}
+
 /// Immutable execution policy installed when a [`RocmContext`] is created.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RocmExecutionPolicy {
@@ -587,6 +677,8 @@ pub struct RocmExecutionPolicy {
     pub synchronization_mode: RocmSynchronizationMode,
     /// Matmul route policy fixed before the primary context is created.
     pub matmul: RocmMatmulPolicy,
+    /// Low-level tensor-kernel policy fixed before context creation.
+    pub tensor_kernels: RocmTensorKernelPolicy,
 }
 
 impl RocmExecutionPolicy {
@@ -598,12 +690,22 @@ impl RocmExecutionPolicy {
                 RocmStridedBatchedMatmulMode::Auto,
                 RocmBf16MatmulOutputMode::Auto,
             ),
+            tensor_kernels: RocmTensorKernelPolicy::qualified(),
         }
     }
 
     /// Attach an immutable matmul route policy before context creation.
     pub const fn with_matmul_policy(mut self, matmul: RocmMatmulPolicy) -> Self {
         self.matmul = matmul;
+        self
+    }
+
+    /// Attach the immutable tensor-kernel policy before context creation.
+    pub const fn with_tensor_kernel_policy(
+        mut self,
+        tensor_kernels: RocmTensorKernelPolicy,
+    ) -> Self {
+        self.tensor_kernels = tensor_kernels;
         self
     }
 }
@@ -919,6 +1021,13 @@ impl RocmContext {
         ordinal: usize,
         execution_policy: RocmExecutionPolicy,
     ) -> Result<Arc<Self>> {
+        if let Some(message) = execution_policy.tensor_kernels.validation_error() {
+            return Err(HipError {
+                code: -1,
+                api: "RocmContext::new",
+                message: format!("invalid ROCm tensor-kernel policy: {message}"),
+            });
+        }
         let ordinal = ordinal as c_int;
         let count = device_count()?;
         if ordinal < 0 || ordinal >= count {
@@ -2691,9 +2800,81 @@ mod tests {
 
     #[test]
     fn execution_policy_defaults_to_legacy_host_barriers() {
+        let policy = RocmExecutionPolicy::default();
         assert_eq!(
-            RocmExecutionPolicy::default().synchronization_mode,
+            policy.synchronization_mode,
             RocmSynchronizationMode::LegacyHostBarriers
+        );
+        assert_eq!(policy.tensor_kernels, RocmTensorKernelPolicy::qualified());
+    }
+
+    #[test]
+    fn tensor_kernel_profiles_preserve_safety_and_close_accelerated_routes() {
+        let qualified = RocmTensorKernelPolicy::qualified();
+        let fallback = RocmTensorKernelPolicy::portable_fallback();
+        let experimental = RocmTensorKernelPolicy::experimental_multiblock();
+
+        assert_eq!(
+            [
+                qualified.split_paged_attention,
+                qualified.gqa_paged_attention,
+                qualified.gqa_d128_parallel,
+                qualified.gqa_d256_parallel,
+            ],
+            [true; 4]
+        );
+        assert_eq!(
+            [
+                fallback.split_paged_attention,
+                fallback.gqa_paged_attention,
+                fallback.gqa_d128_parallel,
+                fallback.gqa_d256_parallel,
+            ],
+            [false; 4]
+        );
+        assert_eq!(experimental, qualified);
+
+        for policy in [qualified, fallback, experimental] {
+            assert_eq!(policy.validation_error(), None);
+            assert_eq!(policy.split_paged_attention_min_sequence, 2048);
+            assert_eq!(policy.paged_attention_split_tokens, 128);
+            assert_eq!(policy.paged_attention_max_splits, 256);
+            assert!(policy.concat_safe_row_assembly);
+            assert_eq!(policy.concat_safe_row_assembly_min_elements, 1_000_000);
+            assert_eq!(
+                policy.is_finite_host_scan_min_elements,
+                Some(16 * 1024 * 1024)
+            );
+            assert_eq!(policy.rmsnorm_row_tile_rows, 4096);
+        }
+
+        assert_eq!(
+            RocmTensorKernelPolicy {
+                rmsnorm_row_tile_rows: 0,
+                ..qualified
+            }
+            .validation_error(),
+            Some("rmsnorm_row_tile_rows must be positive")
+        );
+    }
+
+    #[test]
+    fn invalid_tensor_kernel_policy_fails_before_device_probe() {
+        let invalid = RocmTensorKernelPolicy {
+            rmsnorm_row_tile_rows: 0,
+            ..RocmTensorKernelPolicy::qualified()
+        };
+        let error = RocmContext::new_with_execution_policy(
+            usize::MAX,
+            RocmExecutionPolicy::default().with_tensor_kernel_policy(invalid),
+        )
+        .expect_err("invalid policy must fail before the impossible ordinal is probed");
+
+        assert_eq!(error.api, "RocmContext::new");
+        assert_eq!(error.code, -1);
+        assert_eq!(
+            error.message,
+            "invalid ROCm tensor-kernel policy: rmsnorm_row_tile_rows must be positive"
         );
     }
 

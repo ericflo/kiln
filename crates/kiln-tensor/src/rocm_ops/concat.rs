@@ -17,14 +17,6 @@ unsafe extern "C" {
         inner_bytes: i64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
-    fn kiln_concat_axis0_contiguous_async(
-        dst: *mut core::ffi::c_void,
-        src_ptrs: *const *const core::ffi::c_void,
-        t_axis_lens: *const i64,
-        n_inputs: i32,
-        inner_bytes: i64,
-        stream: *mut core::ffi::c_void,
-    ) -> i32;
 }
 
 /// ROCm-side `concat(inputs, axis)` — concatenate `inputs` along `axis` into a
@@ -123,6 +115,7 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         .downcast_ref::<RocmStorage>()
         .ok_or_else(|| Error::Msg("rocm_concat: input 0 must be ROCm storage".to_string()))?;
     let ctx = first_storage.context();
+    let kernel_policy = ctx.execution_policy().tensor_kernels;
     let device_index = match inputs[0].device() {
         Device::Rocm(i) => i,
         _ => unreachable!("rocm_concat: input 0 device must be Rocm"),
@@ -173,16 +166,10 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
     // through the same contiguous-copy primitive as `slice_set`; it is exact
     // and has been the stable path for long-context device-to-device row
     // copies.
-    let safe_row_assembly_enabled = std::env::var("KILN_DISABLE_ROCM_CONCAT_SAFE_ROW_ASSEMBLY")
-        .ok()
-        .map(|v| {
-            !matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(true);
-    if safe_row_assembly_enabled && outer == 1 && n_out_elements >= 1_000_000 {
+    if kernel_policy.concat_safe_row_assembly
+        && outer == 1
+        && n_out_elements >= kernel_policy.concat_safe_row_assembly_min_elements
+    {
         let out_rows = out
             .reshape(vec![axis_total, inner])
             .map_err(|e| Error::Msg(format!("rocm_concat: reshape dst rows: {e}")))?;
@@ -218,50 +205,6 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         .map_err(|e| {
             Error::Msg(format!(
                 "rocm_concat: synchronize after safe row assembly: {e:?}"
-            ))
-        })?;
-        return Ok(out);
-    }
-
-    // The specialized vectorized row-copy kernel is kept as an opt-in
-    // diagnostic path for benchmarking and triage.
-    let axis0_row_copy_enabled = std::env::var("KILN_ROCM_CONCAT_AXIS0_ROW_COPY")
-        .ok()
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false);
-    if axis0_row_copy_enabled && outer == 1 && n_out_elements >= 1_000_000 {
-        let stream_submission = first_storage.rocm_stream_submission()?;
-        let raw_stream = stream_submission.raw_stream();
-        let status = unsafe {
-            kiln_concat_axis0_contiguous_async(
-                dst_ptr,
-                src_ptrs.as_ptr(),
-                t_axis_lens.as_ptr(),
-                inputs.len() as i32,
-                inner_bytes,
-                raw_stream,
-            )
-        };
-        if status != 0 {
-            stream_submission.quarantine();
-            return Err(Error::Msg(format!(
-                "rocm_concat: axis0 contiguous FFI returned status {status}"
-            )));
-        }
-        stream_submission.complete();
-        crate::rocm_storage::rocm_synchronize_context_same_stream_dependency_with_inputs(
-            &ctx,
-            &input_storages,
-            crate::RocmSyncReason::ConcatOutput,
-        )
-        .map_err(|e| {
-            Error::Msg(format!(
-                "rocm_concat: synchronize after axis0 contiguous concat: {e:?}"
             ))
         })?;
         return Ok(out);

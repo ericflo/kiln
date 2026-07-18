@@ -973,9 +973,9 @@ mod tests {
         assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v9"
+            "kiln.accelerator-runtime-policy.v10"
         );
-        assert_eq!(json["accelerator_runtime"]["version"], 9);
+        assert_eq!(json["accelerator_runtime"]["version"], 10);
         assert_eq!(
             json["accelerator_runtime"]["vulkan_kernel_policy_schema_id"],
             "kiln.vulkan-kernel-policy.v3"

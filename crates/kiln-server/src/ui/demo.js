@@ -151,8 +151,8 @@
     '/v1/config': () => ({
       serving_profile: { profile: 'stable', source: 'default' },
       accelerator_runtime: {
-        schema_id: 'kiln.accelerator-runtime-policy.v9',
-        version: 9,
+        schema_id: 'kiln.accelerator-runtime-policy.v10',
+        version: 10,
         vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v3',
         vulkan_device_policy_schema_id: 'kiln.vulkan-device-policy.v1',
         serving_profile: 'stable',

@@ -16,7 +16,6 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cmath>
-#include <cstdlib>
 
 #include "kt_gpu_compat.cuh"
 
@@ -1370,6 +1369,7 @@ extern "C" int kiln_paged_attn_decode_bf16_gqa4_async(const void* q_bf16,
                                                       int64_t page_block_size,
                                                       int64_t pool_rows,
                                                       float scale,
+                                                      int64_t parallel_head_dim,
                                                       cudaStream_t stream) {
     if (b < 0 || h <= 0 || hk <= 0 || d <= 0 || max_seqlen_k < 0
         || max_blocks_per_seq < 0 || page_block_size <= 0 || pool_rows < 0) {
@@ -1383,13 +1383,12 @@ extern "C" int kiln_paged_attn_decode_bf16_gqa4_async(const void* q_bf16,
     int64_t total_group_rows = b * hk;
     if (total_group_rows == 0) return 0;
     if (total_group_rows > (int64_t)2147483647) return 6;
+    if (parallel_head_dim != 0 && parallel_head_dim != 128 && parallel_head_dim != 256) return 7;
 
     const bool use_d256_parallel =
-        std::getenv("KILN_DISABLE_ROCM_GQA_D256_PARALLEL") == nullptr
-        && group == 4 && d == 256;
+        parallel_head_dim == 256 && group == 4 && d == 256;
     const bool use_d128_parallel =
-        std::getenv("KILN_DISABLE_ROCM_GQA_D128_PARALLEL") == nullptr
-        && group == 4 && d == 128;
+        parallel_head_dim == 128 && group == 4 && d == 128;
     if (use_d256_parallel) {
         kiln_paged_attn_decode_bf16_gqa4_d256_kernel<<<static_cast<int>(total_group_rows), 1024, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(q_bf16),
@@ -1443,6 +1442,7 @@ extern "C" int kiln_paged_attn_decode_bf16_gqa4_split_async(const void* q_bf16,
                                                             int64_t pool_rows,
                                                             int64_t split_count,
                                                             float scale,
+                                                            int64_t parallel_head_dim,
                                                             cudaStream_t stream) {
     if (b < 0 || h <= 0 || hk <= 0 || d <= 0 || max_seqlen_k < 0
         || max_blocks_per_seq < 0 || page_block_size <= 0 || pool_rows < 0
@@ -1459,13 +1459,12 @@ extern "C" int kiln_paged_attn_decode_bf16_gqa4_split_async(const void* q_bf16,
     if (total_rows > (int64_t)2147483647) return 6;
     int64_t total_group_partials = b * hk * split_count;
     if (total_group_partials > (int64_t)2147483647) return 7;
+    if (parallel_head_dim != 0 && parallel_head_dim != 128 && parallel_head_dim != 256) return 8;
 
     const bool use_d256_parallel =
-        std::getenv("KILN_DISABLE_ROCM_GQA_D256_PARALLEL") == nullptr
-        && group == 4 && d == 256;
+        parallel_head_dim == 256 && group == 4 && d == 256;
     const bool use_d128_parallel =
-        std::getenv("KILN_DISABLE_ROCM_GQA_D128_PARALLEL") == nullptr
-        && group == 4 && d == 128;
+        parallel_head_dim == 128 && group == 4 && d == 128;
     if (use_d256_parallel) {
         kiln_paged_attn_decode_bf16_gqa4_d256_split_kernel<<<static_cast<int>(total_group_partials), BLOCK_SIZE, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(q_bf16),

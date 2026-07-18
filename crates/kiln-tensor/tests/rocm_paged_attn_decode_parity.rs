@@ -5,38 +5,6 @@
 
 use half::bf16;
 use kiln_tensor::{DType, Device, Tensor};
-use std::ffi::OsString;
-use std::sync::Mutex;
-
-const DISABLE_D256: &str = "KILN_DISABLE_ROCM_GQA_D256_PARALLEL";
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct EnvRestore {
-    key: &'static str,
-    value: Option<OsString>,
-}
-
-impl EnvRestore {
-    fn capture(key: &'static str) -> Self {
-        Self {
-            key,
-            value: std::env::var_os(key),
-        }
-    }
-}
-
-impl Drop for EnvRestore {
-    fn drop(&mut self) {
-        // SAFETY: this integration test holds ENV_LOCK while mutating the
-        // process environment, and restores the original value before exit.
-        unsafe {
-            match &self.value {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
 
 fn no_rocm() -> bool {
     if !kiln_tensor::rocm_is_available() {
@@ -67,6 +35,69 @@ fn read_bf16_to_f32(t: &Tensor) -> Vec<f32> {
         .collect()
 }
 
+fn bf16_rounded(data: &[f32]) -> Vec<f32> {
+    data.iter()
+        .map(|&value| bf16::from_f32(value).to_f32())
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cpu_paged_gqa_reference(
+    q: &[f32],
+    k_pool: &[f32],
+    v_pool: &[f32],
+    block_table: &[u32],
+    b: usize,
+    h: usize,
+    hk: usize,
+    d: usize,
+    max_seqlen_k: usize,
+    page_block_size: usize,
+    scale: f32,
+) -> Vec<f32> {
+    let max_blocks = max_seqlen_k.div_ceil(page_block_size);
+    let group = h / hk;
+    let mut output = vec![0.0f32; b * h * d];
+    let mut scores = vec![0.0f32; max_seqlen_k];
+
+    for batch in 0..b {
+        for head in 0..h {
+            let kv_head = head / group;
+            let q_row = &q[(batch * h + head) * d..(batch * h + head + 1) * d];
+            for (token, score) in scores.iter_mut().enumerate() {
+                let block = block_table[batch * max_blocks + token / page_block_size] as usize;
+                let physical_row = block * page_block_size + token % page_block_size;
+                let k_start = (physical_row * hk + kv_head) * d;
+                *score = q_row
+                    .iter()
+                    .zip(&k_pool[k_start..k_start + d])
+                    .map(|(&qv, &kv)| qv * kv)
+                    .sum::<f32>()
+                    * scale;
+            }
+            let score_max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let denominator = scores
+                .iter_mut()
+                .map(|score| {
+                    *score = (*score - score_max).exp();
+                    *score
+                })
+                .sum::<f32>();
+            for (token, &unnormalized) in scores.iter().enumerate() {
+                let block = block_table[batch * max_blocks + token / page_block_size] as usize;
+                let physical_row = block * page_block_size + token % page_block_size;
+                let v_start = (physical_row * hk + kv_head) * d;
+                let probability = unnormalized / denominator;
+                let out_start = (batch * h + head) * d;
+                for dim in 0..d {
+                    output[out_start + dim] += probability * v_pool[v_start + dim];
+                }
+            }
+        }
+    }
+    output
+}
+
 fn assert_close(got: &[f32], reference: &[f32]) {
     assert_eq!(got.len(), reference.len(), "length mismatch");
     let mut max_abs = 0.0f32;
@@ -92,12 +123,10 @@ fn assert_close(got: &[f32], reference: &[f32]) {
 }
 
 #[test]
-fn rocm_paged_attn_gqa4_d256_split_matches_fallback() {
+fn rocm_paged_attn_gqa4_d256_split_matches_cpu_reference() {
     if no_rocm() {
         return;
     }
-    let _env_lock = ENV_LOCK.lock().expect("env lock poisoned");
-    let _restore = EnvRestore::capture(DISABLE_D256);
 
     let b = 1usize;
     let h = 16usize;
@@ -108,53 +137,27 @@ fn rocm_paged_attn_gqa4_d256_split_matches_fallback() {
     let max_seqlen_k = page_block_size * max_blocks;
     let pool_rows = max_seqlen_k;
 
-    let q = bf16_on_rocm(
-        (0..b * h * d).map(|i| val(i, 17, 3)).collect(),
-        vec![b, 1, h, d],
-    );
-    let k_pool = bf16_on_rocm(
-        (0..pool_rows * hk * d).map(|i| val(i, 37, 11)).collect(),
-        vec![pool_rows, hk, d],
-    );
-    let v_pool = bf16_on_rocm(
-        (0..pool_rows * hk * d).map(|i| val(i, 53, 19)).collect(),
-        vec![pool_rows, hk, d],
-    );
+    let q_host: Vec<f32> = (0..b * h * d).map(|i| val(i, 17, 3)).collect();
+    let k_host: Vec<f32> = (0..pool_rows * hk * d).map(|i| val(i, 37, 11)).collect();
+    let v_host: Vec<f32> = (0..pool_rows * hk * d).map(|i| val(i, 53, 19)).collect();
+    let q = bf16_on_rocm(q_host.clone(), vec![b, 1, h, d]);
+    let k_pool = bf16_on_rocm(k_host.clone(), vec![pool_rows, hk, d]);
+    let v_pool = bf16_on_rocm(v_host.clone(), vec![pool_rows, hk, d]);
     let block_table: Vec<u32> = (0..max_blocks)
         .map(|block| ((block * 17 + 5) % max_blocks) as u32)
         .collect();
-    let block_table = Tensor::from_vec_on(Device::Rocm(0), block_table, vec![b, max_blocks])
-        .expect("block table");
+    let block_table_device =
+        Tensor::from_vec_on(Device::Rocm(0), block_table.clone(), vec![b, max_blocks])
+            .expect("block table");
     let seqused_k = Tensor::from_vec_on(Device::Rocm(0), vec![max_seqlen_k as u32], vec![b])
         .expect("seqused_k");
     let scale = 1.0f32 / (d as f32).sqrt();
 
-    // SAFETY: guarded by ENV_LOCK; the original value is restored by _restore.
-    unsafe {
-        std::env::set_var(DISABLE_D256, "1");
-    }
-    let fallback = kiln_tensor::rocm_paged_attn_decode_bf16(
-        &q,
-        &k_pool,
-        &v_pool,
-        &block_table,
-        Some(&seqused_k),
-        max_seqlen_k,
-        page_block_size,
-        scale,
-    )
-    .expect("fallback paged attention");
-    kiln_tensor::rocm_synchronize_default_stream(0).expect("sync fallback");
-
-    // SAFETY: guarded by ENV_LOCK; force the optimized D=256 path for compare.
-    unsafe {
-        std::env::remove_var(DISABLE_D256);
-    }
     let fused = kiln_tensor::rocm_paged_attn_decode_bf16(
         &q,
         &k_pool,
         &v_pool,
-        &block_table,
+        &block_table_device,
         Some(&seqused_k),
         max_seqlen_k,
         page_block_size,
@@ -163,5 +166,18 @@ fn rocm_paged_attn_gqa4_d256_split_matches_fallback() {
     .expect("fused paged attention");
     kiln_tensor::rocm_synchronize_default_stream(0).expect("sync fused");
 
-    assert_close(&read_bf16_to_f32(&fused), &read_bf16_to_f32(&fallback));
+    let reference = cpu_paged_gqa_reference(
+        &bf16_rounded(&q_host),
+        &bf16_rounded(&k_host),
+        &bf16_rounded(&v_host),
+        &block_table,
+        b,
+        h,
+        hk,
+        d,
+        max_seqlen_k,
+        page_block_size,
+        scale,
+    );
+    assert_close(&read_bf16_to_f32(&fused), &reference);
 }

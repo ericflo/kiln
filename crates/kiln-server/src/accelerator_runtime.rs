@@ -141,6 +141,21 @@ fn model_rocm_kernel_policy(
     }
 }
 
+#[cfg(feature = "rocm")]
+fn tensor_rocm_kernel_policy(
+    policy: ResolvedAcceleratorRuntimePolicy,
+) -> kiln_tensor::RocmTensorKernelPolicy {
+    match policy.rocm_kernel_profile.effective {
+        RocmKernelProfile::Qualified => kiln_tensor::RocmTensorKernelPolicy::qualified(),
+        RocmKernelProfile::PortableFallback => {
+            kiln_tensor::RocmTensorKernelPolicy::portable_fallback()
+        }
+        RocmKernelProfile::ExperimentalMultiblock => {
+            kiln_tensor::RocmTensorKernelPolicy::experimental_multiblock()
+        }
+    }
+}
+
 /// Install accelerator policy needed to select or create a primary device.
 ///
 /// This must run before device probing: Vulkan physical-device selection and
@@ -222,7 +237,8 @@ pub fn install_startup_policy(
             device_index,
             kiln_tensor::RocmExecutionPolicy::new(synchronization_mode).with_matmul_policy(
                 kiln_tensor::RocmMatmulPolicy::new(strided_batched_mode, bf16_output_mode),
-            ),
+            )
+            .with_tensor_kernel_policy(tensor_rocm_kernel_policy(policy)),
         )
         .with_context(|| {
             format!(
@@ -322,7 +338,7 @@ mod tests {
 
     #[cfg(feature = "rocm")]
     #[test]
-    fn rocm_kernel_profiles_map_exactly_to_complete_model_policies() {
+    fn rocm_kernel_profiles_map_exactly_to_complete_model_and_tensor_policies() {
         for configured in [
             RocmKernelProfile::Qualified,
             RocmKernelProfile::PortableFallback,
@@ -335,16 +351,22 @@ mod tests {
                 ServingProfile::Experimental,
                 ConfigValueSource::ConfigFile,
             ));
-            let expected = match configured {
-                RocmKernelProfile::Qualified => kiln_model::RocmKernelPolicy::qualified(),
-                RocmKernelProfile::PortableFallback => {
-                    kiln_model::RocmKernelPolicy::portable_fallback()
-                }
-                RocmKernelProfile::ExperimentalMultiblock => {
-                    kiln_model::RocmKernelPolicy::experimental_multiblock()
-                }
+            let (expected_model, expected_tensor) = match configured {
+                RocmKernelProfile::Qualified => (
+                    kiln_model::RocmKernelPolicy::qualified(),
+                    kiln_tensor::RocmTensorKernelPolicy::qualified(),
+                ),
+                RocmKernelProfile::PortableFallback => (
+                    kiln_model::RocmKernelPolicy::portable_fallback(),
+                    kiln_tensor::RocmTensorKernelPolicy::portable_fallback(),
+                ),
+                RocmKernelProfile::ExperimentalMultiblock => (
+                    kiln_model::RocmKernelPolicy::experimental_multiblock(),
+                    kiln_tensor::RocmTensorKernelPolicy::experimental_multiblock(),
+                ),
             };
-            assert_eq!(model_rocm_kernel_policy(policy), expected);
+            assert_eq!(model_rocm_kernel_policy(policy), expected_model);
+            assert_eq!(tensor_rocm_kernel_policy(policy), expected_tensor);
         }
     }
 

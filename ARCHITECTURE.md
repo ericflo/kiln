@@ -992,18 +992,22 @@ See
 validation, provenance, restart, and compatibility contract.
 
 Accelerator execution has the same single-authority boundary. Resolved schema
-`kiln.accelerator-runtime-policy.v9` includes
-`accelerator.rocm_kernel_profile`. The server installs one complete model
-policy before constructing a ROCm backend. `qualified` enables the production
+`kiln.accelerator-runtime-policy.v10` includes
+`accelerator.rocm_kernel_profile`. The server installs one complete 46-leaf
+model/tensor policy before constructing a ROCm context or backend. `qualified` enables the production
 full-attention QKV, GDN projection/gate/recurrent/normalization/decode,
 head-major prefill, fused convolution, and LoRA decode routes, excluding the
-slower gfx1151 multi-block GDN prefill experiment. `portable_fallback` declines
-all fifteen profile-governed ROCm model routes. `experimental_multiblock` adds that
-unqualified prefill route and requires the experimental serving profile. Each
-backend captures the policy at construction, so inference does not reread the
-environment or admit per-kernel mixtures. Retired route variables and their
-legacy CUDA-spelled fallbacks are not accepted as ROCm profile aliases; any
-remaining CUDA-only controls are a later CUDA-host migration.
+slower gfx1151 multi-block GDN prefill experiment, plus qualified tensor-level
+paged-attention splitting and GQA specializations. `portable_fallback` declines
+all thirty-four accelerated ROCm model/tensor routes while retaining twelve
+correctness and bounded-work leaves for training, paged attention, concat,
+finite checks, and RMSNorm. `experimental_multiblock` adds that unqualified
+prefill route and requires the experimental serving profile. Model dispatch
+reads process-lifetime policy and low-level operations read their owning
+context; the C++ paged-attention ABI receives explicit route values. No layer
+or kernel rereads environment or admits per-operation mixtures. Retired route
+variables and their legacy CUDA-spelled fallbacks are not accepted as ROCm
+profile aliases; remaining CUDA-only controls are a later CUDA-host migration.
 
 Streaming prefill follows the same authority boundary. After the backend is
 selected, startup resolves one immutable `StreamingPrefillRuntimeConfig` and

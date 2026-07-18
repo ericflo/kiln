@@ -46,12 +46,14 @@ fn kt_error(context: impl Into<String>, err: kiln_tensor::Error) -> RmsNormError
 }
 
 #[cfg(feature = "rocm")]
-fn rocm_fused_rmsnorm_row_tile_rows() -> usize {
-    std::env::var("KILN_ROCM_RMSNORM_ROW_TILE_ROWS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(4096)
+fn rocm_fused_rmsnorm_row_tile_rows(x: &KtTensor) -> Result<usize, RmsNormError> {
+    let (storage, _) =
+        kiln_kt_bridge::rocm_storage_and_byte_offset(x, x.dtype(), "rmsnorm_row_tile_policy")?;
+    Ok(storage
+        .context()
+        .execution_policy()
+        .tensor_kernels
+        .rmsnorm_row_tile_rows)
 }
 
 // Backend-neutral seam (Phase R.7). These bottom out in
@@ -178,7 +180,7 @@ pub fn fused_rmsnorm_kt(
 
     #[cfg(feature = "rocm")]
     if matches!(x.device(), KtDevice::Rocm(_)) {
-        let row_tile = rocm_fused_rmsnorm_row_tile_rows();
+        let row_tile = rocm_fused_rmsnorm_row_tile_rows(x)?;
         if rows > row_tile {
             return fused_rmsnorm_kt_rocm_row_tiled(
                 x, weight, eps, &x_shape, rows, hidden, row_tile,
