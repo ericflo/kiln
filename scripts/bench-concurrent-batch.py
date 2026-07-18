@@ -680,7 +680,20 @@ def launch_owned_server(config: ServerLaunchConfig, run_id: str) -> OwnedServer:
             close_fds=True,
         )
         try:
-            identity = AttachedProcessGroup.attach(process.pid)
+            attach_deadline = time.monotonic() + 2.0
+            while True:
+                if process.poll() is not None:
+                    raise BenchmarkError(
+                        f"owned server exited with status {process.returncode} "
+                        "before process identity could be bound"
+                    )
+                try:
+                    identity = AttachedProcessGroup.attach(process.pid)
+                    break
+                except BenchmarkError:
+                    if time.monotonic() >= attach_deadline:
+                        raise
+                    time.sleep(0.005)
         except Exception:
             try:
                 os.killpg(process.pid, signal.SIGTERM)

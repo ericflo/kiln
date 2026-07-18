@@ -901,7 +901,20 @@ class ServingBenchmarkTests(unittest.TestCase):
             )
             base_url = f"http://127.0.0.1:{port}"
             self.assertEqual(bench.require_owned_base_url_unbound(base_url), port)
-            server = bench.launch_owned_server(config, "fixture-run-v1")
+            original_attach = bench.AttachedProcessGroup.attach
+            attach_attempts = 0
+
+            def flaky_attach(pid: int) -> object:
+                nonlocal attach_attempts
+                attach_attempts += 1
+                if attach_attempts == 1:
+                    raise bench.BenchmarkError("injected pre-exec identity race")
+                return original_attach(pid)
+
+            with mock.patch.object(
+                bench.AttachedProcessGroup, "attach", side_effect=flaky_attach
+            ):
+                server = bench.launch_owned_server(config, "fixture-run-v1")
             try:
                 deadline = time.monotonic() + 5.0
                 while "ready" not in server.log_path.read_text():
@@ -917,6 +930,7 @@ class ServingBenchmarkTests(unittest.TestCase):
                     server.log_handle.close()
 
             self.assertEqual(server.identity.pid, server.identity.process_group_id)
+            self.assertGreaterEqual(attach_attempts, 2)
             self.assertFalse(shutdown["forced"])
             self.assertEqual(shutdown["returncode"], 0)
             self.assertFalse(shutdown["process_group_alive_end"])
