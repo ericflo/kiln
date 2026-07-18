@@ -983,6 +983,16 @@ training request
           </table>
         </div>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Config and trusted debug publish the full nonblocking snapshot as <code>rocm_graphs</code> with
+          <code>rocm_graphs_unavailable_reason</code>, and publish the independent current/completed phase channel
+          as <code>rocm_graph_telemetry</code> with <code>rocm_graph_telemetry_unavailable_reason</code>. Health
+          flattens both authorities under <code>decode_runtime.rocm_graphs</code>:
+          <code>phase_telemetry_available</code> and <code>phase_telemetry_unavailable_reason</code> govern the
+          phase/current/transient fields independently from the full statistics. Its state is busy only for lock
+          contention and unavailable for no-runner or poisoned-lock state; null never means an empty cache or
+          zero activity.
+        </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Both API reason fields and both Prometheus missing-data families use the same closed set:
           <code>backend_without_graph_runner</code>, <code>model_runner_busy</code>,
           <code>model_runner_lock_poisoned</code>, <code>graph_runner_busy</code>, and
