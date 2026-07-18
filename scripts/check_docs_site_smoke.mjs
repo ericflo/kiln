@@ -1285,6 +1285,10 @@ function validateSftLossRouteDocumentationSourceContract() {
     'bounded to 180 seconds',
     'cooldown active/completed/timeout counts',
     'a timeout or missing completion fails qualification',
+    'variant_invariant_fixed_output_v4',
+    'exactly 1,024 ascending six-digit integers',
+    'server truncation before the target is expected',
+    'response_oracle_target_integer_count = 1024',
   ]);
   if (missingApiTerms.length > 0) {
     fail(`docs/site/api.html: SFT v4 versus GRPO/OPD v3 checkpoint wording missing terms: ${missingApiTerms.join(', ')}`);

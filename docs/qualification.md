@@ -634,6 +634,18 @@ performance metadata is enabled, and an escaped output excerpt capped at 256
 characters. This bound preserves actionable corruption evidence without
 allowing model output to exhaust the result-detail envelope.
 
+The mixed-load prompt identity is
+`variant_invariant_fixed_output_v4`. It requests exactly 1,024 ascending
+six-digit integers but tells the model that server truncation before the target
+is expected. This target is long enough to exceed the 4,096-token slow-consumer
+response envelope without the refusal behavior observed when the contract asked
+for one million integers. The instruction requires immediate sequence output
+and forbids early stopping, end markers, explanation, refusal, summaries, or
+discussion of output limits. Prompt-length padding uses nonnumeric `itemNN`
+tokens and explicitly has no relationship to response length. Every arm records
+both the prompt identity and `response_oracle_target_integer_count = 1024`, so a
+wording or denominator change invalidates direct A/B configuration identity.
+
 Before the ordinary mixed-load measurement window, every ROCm arm also runs a
 separate fixed-seed sampled profile at concurrency eight: 32 tokens per request,
 temperature 0.7, top-p 0.9, top-k 40, and min-p 0.0. Those requests disable

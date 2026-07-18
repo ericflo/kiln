@@ -3294,10 +3294,12 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             serve.workload_marker(-1, "normal-00")
 
     def test_measured_prompts_and_results_require_a_fixed_output_denominator(self) -> None:
+        self.assertEqual(serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT, 1_024)
         prompt = serve.deterministic_prompt("marker", 3)
-        self.assertIn("ascending zero-padded integers", prompt)
+        self.assertIn("ascending zero-padded six-digit integers", prompt)
         self.assertIn(str(serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT), prompt)
-        self.assertIn("response-token limit will truncate", prompt)
+        self.assertIn("server may truncate the response", prompt)
+        self.assertIn("explain, refuse", prompt)
         self.assertIn("unrelated to the output length", prompt)
         self.assertIn("do not count", prompt)
         self.assertIn("item00 item01 item02", prompt)
@@ -3364,9 +3366,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         prompt = serve.slow_consumer_prompt("marker")
         self.assertIn("marker", prompt)
         self.assertIn(str(serve.RESPONSE_ORACLE_TARGET_INTEGER_COUNT), prompt)
-        self.assertIn("response-token limit will truncate", prompt)
-        self.assertIn("do not stop", prompt)
-        self.assertIn("add commentary", prompt)
+        self.assertIn("server may truncate the response", prompt)
+        self.assertIn("Do not stop early", prompt)
+        self.assertIn("explain, refuse", prompt)
 
     def test_background_helpers_can_close_before_start(self) -> None:
         slow = serve.SlowConsumer(1, "marker", 7)

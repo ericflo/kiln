@@ -115,11 +115,11 @@ MEASURED_EXPECTED_COMPLETION_TOKENS = (
     + LONG_PREFILL_MAX_TOKENS
     + PRESSURE_PEER_MAX_TOKENS
 )
-PROMPT_IDENTITY = "variant_invariant_fixed_output_v3"
+PROMPT_IDENTITY = "variant_invariant_fixed_output_v4"
 PROMPT_MARKER_FORMAT = "QUAL-{seed}-{role}"
 RESPONSE_ORACLE = "ascending_zero_padded_integers_prefix_v1"
 RESPONSE_ORACLE_INTEGER_WIDTH = 6
-RESPONSE_ORACLE_TARGET_INTEGER_COUNT = 1_000_000
+RESPONSE_ORACLE_TARGET_INTEGER_COUNT = 1_024
 RESPONSE_DIAGNOSTIC_MAX_CHARACTERS = 256
 TOKEN_ID_DIAGNOSTIC_MAX_COUNT = 256
 ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v11"
@@ -1567,9 +1567,11 @@ def deterministic_prompt(marker: str, words: int) -> str:
     payload = " ".join(f"item{index % 97:02d}" for index in range(words))
     return (
         f"{marker} Emit exactly {RESPONSE_ORACLE_TARGET_INTEGER_COUNT} ascending zero-padded "
-        "integers as one continuous plain-text sequence, starting at 000000 and separated only "
-        "by spaces. The server response-token limit will truncate the sequence long before it "
-        "is complete. Until then, do not stop, emit an end marker, add commentary, or summarize. "
+        "six-digit integers as one continuous plain-text sequence, starting at 000000 and "
+        "separated only by single spaces. Begin immediately and keep going. The server may "
+        f"truncate the response before all {RESPONSE_ORACLE_TARGET_INTEGER_COUNT} integers; "
+        "that is expected. Do not stop early, "
+        "emit an end marker, explain, refuse, summarize, or discuss output limits. "
         "Prompt-length padding follows. It is unrelated to the output length; do not count, "
         f"quote, or describe it: {payload}"
     )
@@ -1587,9 +1589,11 @@ def workload_marker(seed: int, role: str) -> str:
 def slow_consumer_prompt(marker: str) -> str:
     return (
         f"{marker} Emit exactly {RESPONSE_ORACLE_TARGET_INTEGER_COUNT} ascending zero-padded "
-        "integers as one continuous plain-text sequence, starting at 000000 and separated only "
-        "by spaces. The server response-token limit will truncate the sequence long before it "
-        "is complete. Until then, do not stop, emit an end marker, add commentary, or summarize."
+        "six-digit integers as one continuous plain-text sequence, starting at 000000 and "
+        "separated only by single spaces. Begin immediately and keep going. The server may "
+        f"truncate the response before all {RESPONSE_ORACLE_TARGET_INTEGER_COUNT} integers; "
+        "that is expected. Do not stop early, "
+        "emit an end marker, explain, refuse, summarize, or discuss output limits."
     )
 
 
