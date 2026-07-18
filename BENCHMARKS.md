@@ -36,6 +36,10 @@ New measurements use driver version 3. The driver:
   forward, phase time, and error deltas when its diagnostics are enabled;
 - samples one explicit DRM memory counter, fails any row above the declared
   absolute byte limit, and records both absolute peak and baseline delta;
+- attaches one hashed host-thermal policy to the local server process group,
+  includes pacing and boundary cooling in a separate sustainable-throughput
+  rate for every row, fails closed on sensor/process identity drift or a hard
+  trip, and requires a stable cool handoff while leaving the engine running;
 - writes an atomic, self-hashing receipt on success or on any recoverable
   post-preflight failure, preserving the exact ordered prefix of completed rows;
 - records structured warmup, measurement, sampler-stop, comparison, and
@@ -90,6 +94,30 @@ the two measured request bodies different.
 Run Kiln first from a clean checkout. Use an explicit DRM path on machines with
 more than one GPU. Choose the absolute memory limit before either engine starts
 and use the same value for both engines; do not derive it from an observed peak.
+
+The protected server PID must lead its own local process group. Start the engine
+through `setsid` or an equivalent supervisor scope, retain the leader PID, and
+pass the same typed thermal policy to Kiln and vLLM. The driver binds PID, PGID,
+Linux boot ID, process start ticks, executable path, and a hash of the command
+line before it can send traffic. It samples at both row boundaries, waits for
+an active pacing interval to settle, and holds a stopped process until the
+policy's consecutive-sample safe-handoff gate passes.
+
+On this Strix Halo, use
+`qualification/host-policies/strix-halo-serving-benchmark-v1.json`. It starts
+pacing at 78 C, resumes at 70 C, terminates the process group at 90 C, and
+requires eight 250 ms samples at or below 65 C before returning control. These
+are conservative candidate limits derived from the retained 98 C overshoot;
+they become performance-qualified only after a guarded campaign completes.
+`--unsafe-no-host-thermal-guard` exists only to retain diagnostic
+counterevidence: it forces the top-level receipt verdict to `failed` even when
+all request rows pass.
+
+`output_token_throughput_per_s` remains the engine-neutral request-window rate,
+including pacing that overlaps live requests. Each guarded row also records
+`host_thermal.thermally_sustainable_output_token_throughput_per_s`, whose
+denominator includes boundary sampling and any required pre/post-row cooling.
+Use the latter for sustained-capacity claims on a thermally constrained host.
 
 Use a checked-in or receipt-bound TOML policy for serving. For CUDA, ROCm, and
 Vulkan throughput qualification, start with true batched decode and preserve
@@ -155,6 +183,8 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --max-tokens 64 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 30000000000 \
+  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-v1.json \
+  --server-pid "$KILN_SERVER_PID" \
   --out-dir /tmp/kiln-serving-campaign
 ```
 
@@ -196,6 +226,8 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --max-tokens 64 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 30000000000 \
+  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-v1.json \
+  --server-pid "$VLLM_SERVER_PID" \
   --reference-dir /tmp/kiln-serving-campaign \
   --out-dir /tmp/vllm-serving-campaign
 ```

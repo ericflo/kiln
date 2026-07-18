@@ -19,6 +19,10 @@ class ThermalGuardError(RuntimeError):
 
 
 TraceCallback = Callable[..., None]
+COOLDOWN_MODES = {
+    "post_process_exit_consecutive_samples",
+    "live_process_safe_handoff",
+}
 
 
 def _is_strict_int(value: object) -> bool:
@@ -36,7 +40,7 @@ def _is_positive_finite_number(value: object) -> bool:
 
 @dataclasses.dataclass(frozen=True)
 class HostThermalPolicy:
-    """Closed runtime policy for host thermal pacing and post-exit cooldown."""
+    """Closed runtime policy for host thermal pacing and safe cooldown."""
 
     hwmon_name: str
     label: str
@@ -47,6 +51,7 @@ class HostThermalPolicy:
     cooldown_timeout_seconds: float
     pacing_start_millicelsius: int | None = None
     pacing_resume_millicelsius: int | None = None
+    cooldown_mode: str = "post_process_exit_consecutive_samples"
     error_type: type[Exception] = ThermalGuardError
 
     def __post_init__(self) -> None:
@@ -108,6 +113,11 @@ class HostThermalPolicy:
             raise self.error_type(
                 "host thermal cooldown timeout must be positive and finite"
             )
+        if self.cooldown_mode not in COOLDOWN_MODES:
+            raise self.error_type(
+                "host thermal cooldown mode must be "
+                + " or ".join(sorted(COOLDOWN_MODES))
+            )
 
     def effective_config(self, *, key_prefix: str = "") -> dict[str, Any]:
         if key_prefix not in {"", "host_"}:
@@ -124,9 +134,13 @@ class HostThermalPolicy:
                 },
             },
             f"{key_prefix}thermal_cooldown": {
-                "mode": "post_process_exit_consecutive_samples",
+                "mode": self.cooldown_mode,
                 "poll_interval_ms": self.poll_interval_ms,
-                "scope": "host_package",
+                "scope": (
+                    "host_package"
+                    if self.cooldown_mode == "post_process_exit_consecutive_samples"
+                    else "host_package_before_live_process_handoff"
+                ),
                 "stable_samples": self.cooldown_stable_samples,
                 "target_millicelsius": self.cooldown_target_millicelsius,
                 "timeout_seconds": self.cooldown_timeout_seconds,
@@ -157,6 +171,7 @@ class HostThermalPolicy:
             "cooldown_target_millicelsius": self.cooldown_target_millicelsius,
             "cooldown_stable_samples": self.cooldown_stable_samples,
             "cooldown_timeout_seconds": self.cooldown_timeout_seconds,
+            "cooldown_mode": self.cooldown_mode,
         }
 
 
@@ -306,6 +321,7 @@ class HostThermalGuard:
         cooldown_target_millicelsius: int | None = None,
         cooldown_stable_samples: int = 1,
         cooldown_timeout_seconds: float = 120.0,
+        cooldown_mode: str = "post_process_exit_consecutive_samples",
         hwmon_root: Path = Path("/sys/class/hwmon"),
         trace_callback: TraceCallback | None = None,
         error_type: type[Exception] = ThermalGuardError,
@@ -364,6 +380,18 @@ class HostThermalGuard:
             raise error_type(
                 "host thermal cooldown timeout must be positive and finite"
             )
+        if cooldown_mode not in COOLDOWN_MODES:
+            raise error_type(
+                "host thermal cooldown mode must be "
+                + " or ".join(sorted(COOLDOWN_MODES))
+            )
+        if (
+            cooldown_mode == "live_process_safe_handoff"
+            and cooldown_target_millicelsius is None
+        ):
+            raise error_type(
+                "live-process thermal handoff requires a cooldown target"
+            )
         self.process = process
         self.hwmon_name = hwmon_name
         self.label = label
@@ -375,6 +403,7 @@ class HostThermalGuard:
         self.cooldown_target_millicelsius = cooldown_target_millicelsius
         self.cooldown_stable_samples = cooldown_stable_samples
         self.cooldown_timeout_seconds = cooldown_timeout_seconds
+        self.cooldown_mode = cooldown_mode
         self.cooldown_evidence = ThermalCooldownEvidence()
         self.hwmon_root = hwmon_root
         self.trace_callback = trace_callback
@@ -383,6 +412,7 @@ class HostThermalGuard:
         self.stop = threading.Event()
         self.pacing_disabled = threading.Event()
         self.samples: list[int] = []
+        self.sample_observations: list[tuple[float, int]] = []
         self.errors: list[str] = []
         self.trip_reason: str | None = None
         self.thread = threading.Thread(
@@ -395,6 +425,7 @@ class HostThermalGuard:
         self._pacing_phase = "startup"
         self._pacing_events: list[ThermalPacingEvent] = []
         self._pacing_lock = threading.Lock()
+        self._sample_lock = threading.Lock()
         self._pacing_transition_lock = threading.RLock()
 
     def _trace(self, event: str, **fields: Any) -> None:
@@ -426,12 +457,16 @@ class HostThermalGuard:
         if self.cooldown_target_millicelsius is not None:
             self._trace(
                 "host_thermal_cooldown_armed",
-                mode="post_process_exit_consecutive_samples",
+                mode=self.cooldown_mode,
                 target_millicelsius=self.cooldown_target_millicelsius,
                 stable_samples=self.cooldown_stable_samples,
                 timeout_seconds=self.cooldown_timeout_seconds,
                 poll_interval_ms=int(self.poll_interval_seconds * 1000),
-                scope="host_package",
+                scope=(
+                    "host_package"
+                    if self.cooldown_mode == "post_process_exit_consecutive_samples"
+                    else "host_package_before_live_process_handoff"
+                ),
             )
         self.thread.start()
         self._started = True
@@ -440,14 +475,19 @@ class HostThermalGuard:
         if self._closed:
             return
         self._closed = True
-        self.stop.set()
-        if self._started:
-            self.thread.join(timeout=10.0)
-            if self.thread.is_alive():
-                message = "host-thermal-guard thread did not stop within 10 seconds"
-                if len(self.errors) < 8:
-                    self.errors.append(message)
-                self._trip(message)
+        self._stop_monitoring_thread()
+        if self.cooldown_mode == "live_process_safe_handoff":
+            self.pacing_disabled.set()
+            self._cool_down()
+            if self._pacing_started_at is not None:
+                self._resume_pacing(
+                    completion_reason=(
+                        "process_exited"
+                        if self.process.poll() is not None
+                        else "safe_handoff_release"
+                    )
+                )
+            return
         if self._pacing_started_at is not None:
             self._resume_pacing(
                 completion_reason=(
@@ -466,9 +506,83 @@ class HostThermalGuard:
                     self.errors.append(message)
                 self._trip(message)
             else:
-                self._cool_down_after_process_exit()
+                self._cool_down()
         elif self.trip_reason is None:
             self._sample(allow_pacing=False)
+
+    def _stop_monitoring_thread(self) -> None:
+        self.stop.set()
+        if self._started:
+            self.thread.join(timeout=10.0)
+            if self.thread.is_alive():
+                message = "host-thermal-guard thread did not stop within 10 seconds"
+                if len(self.errors) < 8:
+                    self.errors.append(message)
+                self._trip(message)
+
+    def wait_for_pacing_settlement(self, timeout_seconds: float) -> bool:
+        if not _is_positive_finite_number(timeout_seconds):
+            raise self.error_type(
+                "host thermal pacing settlement timeout must be positive and finite"
+            )
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            with self._pacing_lock:
+                active = self._pacing_started_at is not None
+            if not active:
+                return self.trip_reason is None and self.process.poll() is None
+            if self.trip_reason is not None or self.process.poll() is not None:
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                message = (
+                    "host thermal pacing did not settle within "
+                    f"{timeout_seconds:.3f} seconds"
+                )
+                if len(self.errors) < 8:
+                    self.errors.append(message)
+                self._trip(message)
+                return False
+            self.stop.wait(min(self.poll_interval_seconds, remaining))
+
+    def sample_now(self) -> int | None:
+        return self._sample()
+
+    def phase_metric_values(self, started: float) -> dict[str, float | int]:
+        with self._sample_lock:
+            temperatures = [
+                temperature
+                for observed, temperature in self.sample_observations
+                if observed >= started
+            ]
+        pacing_events = self.pacing_events_since(started)
+        completed = [
+            event
+            for event in pacing_events
+            if "duration_seconds" in event.fields
+        ]
+        return {
+            "host_temperature_end_millicelsius": (
+                temperatures[-1] if temperatures else 0
+            ),
+            "host_temperature_peak_millicelsius": (
+                max(temperatures) if temperatures else 0
+            ),
+            "host_temperature_sample_count": len(temperatures),
+            "host_temperature_start_millicelsius": (
+                temperatures[0] if temperatures else 0
+            ),
+            "host_thermal_guard_trip_count": int(self.trip_reason is not None),
+            "host_thermal_pacing_completed_event_count": len(completed),
+            "host_thermal_pacing_event_count": sum(
+                event.message == "host thermal pacing paused the server process group"
+                for event in pacing_events
+            ),
+            "host_thermal_pacing_seconds": sum(
+                float(event.fields.get("duration_seconds", 0.0))
+                for event in completed
+            ),
+        }
 
     def metric_values(self) -> dict[str, float | int]:
         if not self.samples:
@@ -560,13 +674,14 @@ class HostThermalGuard:
             self._trip(message)
             return
         started = time.monotonic()
+        observed = time.perf_counter()
         with self._pacing_lock:
             phase = self._pacing_phase
             self._pacing_started_at = started
             self._pacing_start_temperature = temperature
             self._pacing_events.append(
                 ThermalPacingEvent(
-                    started,
+                    observed,
                     "host_thermal_pacing",
                     "host thermal pacing paused the server process group",
                     {"phase": phase, "temperature_millicelsius": temperature},
@@ -588,6 +703,7 @@ class HostThermalGuard:
             if started is None:
                 return
             finished = time.monotonic()
+            observed = time.perf_counter()
             elapsed = finished - started
             phase = self._pacing_phase
             start_temperature = self._pacing_start_temperature
@@ -595,7 +711,7 @@ class HostThermalGuard:
             self._pacing_start_temperature = 0
             self._pacing_events.append(
                 ThermalPacingEvent(
-                    finished,
+                    observed,
                     "host_thermal_pacing",
                     (
                         "host thermal pacing ended after server process exit"
@@ -610,6 +726,7 @@ class HostThermalGuard:
                             "temperature_recovered",
                             "teardown_release",
                             "process_exited",
+                            "safe_handoff_release",
                         },
                         "phase": phase,
                     },
@@ -619,6 +736,7 @@ class HostThermalGuard:
             "temperature_recovered",
             "teardown_release",
             "process_exited",
+            "safe_handoff_release",
         }
         self.pacing_evidence.finish(elapsed, completed=completed)
         self._trace(
@@ -655,7 +773,7 @@ class HostThermalGuard:
                 return
         self._record_pacing_finish(completion_reason=completion_reason)
 
-    def _cool_down_after_process_exit(self) -> None:
+    def _cool_down(self) -> None:
         assert self.cooldown_target_millicelsius is not None
         started = time.monotonic()
         self.cooldown_evidence.active = True
@@ -734,7 +852,9 @@ class HostThermalGuard:
             temperature = read_hwmon_temperature_millicelsius(
                 self.input_path, error_type=self.error_type
             )
-            self.samples.append(temperature)
+            with self._sample_lock:
+                self.samples.append(temperature)
+                self.sample_observations.append((time.perf_counter(), temperature))
             if temperature >= self.limit_millicelsius:
                 self._trip(
                     f"host {self.hwmon_name}/{self.label} reached {temperature} "

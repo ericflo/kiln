@@ -22,6 +22,8 @@ SPEC.loader.exec_module(campaign)
 
 
 def required_args(directory: Path, engine: str = "kiln") -> list[str]:
+    thermal_policy = directory / "host-thermal-policy.json"
+    thermal_policy.write_text('{"fixture":true}\n')
     args = [
         "--engine",
         engine,
@@ -41,6 +43,10 @@ def required_args(directory: Path, engine: str = "kiln") -> list[str]:
         str(directory / "memory"),
         "--memory-limit-bytes",
         "4096",
+        "--host-thermal-policy",
+        str(thermal_policy),
+        "--server-pid",
+        "4321",
     ]
     if engine == "vllm":
         args.extend(("--reference-dir", str(directory / "kiln")))
@@ -68,6 +74,11 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             command[command.index("--reference-receipt") + 1],
             str(root / "kiln" / "mixed.kiln.json"),
         )
+        self.assertEqual(
+            command[command.index("--host-thermal-policy") + 1],
+            str(root / "host-thermal-policy.json"),
+        )
+        self.assertEqual(command[command.index("--server-pid") + 1], "4321")
 
     def test_campaign_runs_every_profile_and_self_hashes_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -91,6 +102,10 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
                 list(campaign.PROFILES),
             )
             self.assertEqual(summary["verdict"], "passed")
+            self.assertEqual(summary["server_pid"], 4321)
+            self.assertTrue(
+                summary["host_thermal_policy"]["sha256"].startswith("sha256:")
+            )
 
 
 if __name__ == "__main__":

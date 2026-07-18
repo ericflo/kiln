@@ -35,6 +35,7 @@ from typing import Any, Callable, Iterable
 
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
+HOST_THERMAL_POLICY_SCHEMA = "kiln.host-thermal-policy.v1"
 DRIVER_VERSION = "3"
 SUPPORTED_DRIVER_VERSIONS = {"2", DRIVER_VERSION}
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
@@ -44,6 +45,7 @@ QUALIFICATION_DIR = ROOT / "scripts" / "qualification"
 if str(QUALIFICATION_DIR) not in sys.path:
     sys.path.insert(0, str(QUALIFICATION_DIR))
 
+import host_thermal_guard as thermal  # noqa: E402
 from model_fingerprint import (  # noqa: E402
     ModelFingerprintError,
     fingerprint_model,
@@ -162,8 +164,9 @@ COMPLETION_CHECK_NAMES = (
     "runtime_artifact_unchanged",
     "runtime_manifest_unchanged",
     "execution_identity_unchanged",
+    "host_thermal_handoff",
 )
-COMPLETION_CHECK_STATUSES = {"passed", "failed", "not_applicable", "not_run"}
+COMPLETION_CHECK_STATUSES = {"passed", "failed", "not_applicable"}
 COMPLETION_FAILURE_PHASES = {
     "warmup",
     "measurement",
@@ -205,7 +208,7 @@ RUN_KEYS = {
     "gates",
     "verdict",
 }
-RUN_KEYS_V3 = RUN_KEYS | {"prompt_token_counts"}
+RUN_KEYS_V3 = RUN_KEYS | {"prompt_token_counts", "host_thermal"}
 MODEL_IDENTITY_KEYS = {
     "id",
     "path",
@@ -293,6 +296,199 @@ def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]
         value.st_mtime_ns,
         value.st_ctime_ns,
     )
+
+
+@dataclasses.dataclass(frozen=True)
+class AttachedProcessGroup:
+    pid: int
+    process_group_id: int
+    start_time_ticks: int
+    boot_id: str
+    executable: str
+    cmdline_sha256: str
+    proc_root: Path = dataclasses.field(default=Path("/proc"), repr=False)
+
+    @staticmethod
+    def _read_stat(pid: int, proc_root: Path) -> tuple[str, int, int]:
+        try:
+            raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        except OSError as exc:
+            raise BenchmarkError(
+                f"cannot read process identity for PID {pid}: {exc}"
+            ) from exc
+        close = raw.rfind(")")
+        if close < 0:
+            raise BenchmarkError(f"/proc/{pid}/stat has no command terminator")
+        fields = raw[close + 2 :].split()
+        if len(fields) < 20:
+            raise BenchmarkError(f"/proc/{pid}/stat is truncated")
+        try:
+            process_group_id = int(fields[2])
+            start_time_ticks = int(fields[19])
+        except ValueError as exc:
+            raise BenchmarkError(
+                f"/proc/{pid}/stat has invalid identity fields"
+            ) from exc
+        return fields[0], process_group_id, start_time_ticks
+
+    @classmethod
+    def attach(
+        cls,
+        pid: int,
+        *,
+        proc_root: Path = Path("/proc"),
+    ) -> "AttachedProcessGroup":
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+            raise BenchmarkError("server PID must be an integer greater than one")
+        state, process_group_id, start_time_ticks = cls._read_stat(pid, proc_root)
+        if state == "Z":
+            raise BenchmarkError(f"server PID {pid} is a zombie")
+        if process_group_id != pid:
+            raise BenchmarkError(
+                f"server PID {pid} must lead its process group; observed PGID "
+                f"{process_group_id}"
+            )
+        try:
+            boot_id = (proc_root / "sys/kernel/random/boot_id").read_text(
+                encoding="utf-8"
+            ).strip()
+            executable = os.readlink(proc_root / str(pid) / "exe")
+            cmdline = (proc_root / str(pid) / "cmdline").read_bytes()
+        except OSError as exc:
+            raise BenchmarkError(f"cannot bind server PID {pid}: {exc}") from exc
+        if not boot_id or not executable or not cmdline:
+            raise BenchmarkError(f"server PID {pid} has incomplete process identity")
+        return cls(
+            pid=pid,
+            process_group_id=process_group_id,
+            start_time_ticks=start_time_ticks,
+            boot_id=boot_id,
+            executable=executable,
+            cmdline_sha256="sha256:" + hashlib.sha256(cmdline).hexdigest(),
+            proc_root=proc_root,
+        )
+
+    def poll(self) -> int | None:
+        try:
+            state, process_group_id, start_time_ticks = self._read_stat(
+                self.pid, self.proc_root
+            )
+        except BenchmarkError:
+            return 0
+        if (
+            state == "Z"
+            or process_group_id != self.process_group_id
+            or start_time_ticks != self.start_time_ticks
+        ):
+            return 0
+        return None
+
+    def receipt_identity(self) -> dict[str, Any]:
+        return {
+            "pid": self.pid,
+            "process_group_id": self.process_group_id,
+            "start_time_ticks": self.start_time_ticks,
+            "boot_id": self.boot_id,
+            "executable": self.executable,
+            "cmdline_sha256": self.cmdline_sha256,
+        }
+
+
+HOST_THERMAL_POLICY_KEYS = {
+    "schema",
+    "id",
+    "sensor",
+    "limit_millicelsius",
+    "poll_interval_ms",
+    "pacing",
+    "safe_handoff",
+    "phase_settlement_timeout_seconds",
+}
+
+
+def validate_host_thermal_policy_value(
+    value: Any,
+    label: str,
+) -> tuple[dict[str, Any], thermal.HostThermalPolicy, float]:
+    value = _object(value, label)
+    has_content_hash = "content_sha256" in value
+    _exact_keys(
+        value,
+        HOST_THERMAL_POLICY_KEYS
+        | ({"content_sha256"} if has_content_hash else set()),
+        label,
+    )
+    raw = dict(value)
+    recorded_hash = raw.pop("content_sha256", None)
+    if raw["schema"] != HOST_THERMAL_POLICY_SCHEMA:
+        raise BenchmarkError(
+            f"host thermal policy must use schema {HOST_THERMAL_POLICY_SCHEMA}"
+        )
+    if not isinstance(raw["id"], str) or re.fullmatch(
+        r"[a-z0-9][a-z0-9._-]{2,127}", raw["id"]
+    ) is None:
+        raise BenchmarkError("host thermal policy id must be a portable identifier")
+    sensor = _object(raw["sensor"], f"{label}.sensor")
+    _exact_keys(sensor, {"hwmon_name", "label"}, f"{label}.sensor")
+    for name in ("hwmon_name", "label"):
+        if not isinstance(sensor[name], str) or not sensor[name]:
+            raise BenchmarkError(f"{label}.sensor.{name} must be non-empty")
+    pacing = _object(raw["pacing"], f"{label}.pacing")
+    _exact_keys(
+        pacing,
+        {"start_millicelsius", "resume_millicelsius"},
+        f"{label}.pacing",
+    )
+    handoff = _object(raw["safe_handoff"], f"{label}.safe_handoff")
+    _exact_keys(
+        handoff,
+        {"target_millicelsius", "stable_samples", "timeout_seconds"},
+        f"{label}.safe_handoff",
+    )
+    settlement_timeout = _nonnegative_number(
+        raw["phase_settlement_timeout_seconds"],
+        f"{label}.phase_settlement_timeout_seconds",
+    )
+    if settlement_timeout <= 0:
+        raise BenchmarkError(
+            "host thermal policy phase settlement timeout must be positive"
+        )
+    policy = thermal.HostThermalPolicy(
+        hwmon_name=sensor.get("hwmon_name"),
+        label=sensor.get("label"),
+        limit_millicelsius=raw["limit_millicelsius"],
+        poll_interval_ms=raw["poll_interval_ms"],
+        pacing_start_millicelsius=pacing["start_millicelsius"],
+        pacing_resume_millicelsius=pacing["resume_millicelsius"],
+        cooldown_target_millicelsius=handoff["target_millicelsius"],
+        cooldown_stable_samples=handoff["stable_samples"],
+        cooldown_timeout_seconds=handoff["timeout_seconds"],
+        cooldown_mode="live_process_safe_handoff",
+        error_type=BenchmarkError,
+    )
+    content_hash = canonical_sha256(raw)
+    if recorded_hash is not None and _sha256(
+        recorded_hash, f"{label}.content_sha256"
+    ) != content_hash:
+        raise BenchmarkError(f"{label}.content_sha256 does not match policy content")
+    normalized = dict(raw)
+    normalized["content_sha256"] = content_hash
+    return normalized, policy, settlement_timeout
+
+
+def load_host_thermal_policy(
+    path: Path,
+) -> tuple[dict[str, Any], thermal.HostThermalPolicy, float]:
+    if path.is_symlink() or not path.is_file():
+        raise BenchmarkError(f"host thermal policy is not a regular file: {path}")
+    data = path.read_bytes()
+    if len(data) > 64 * 1024:
+        raise BenchmarkError("host thermal policy exceeds 64 KiB")
+    try:
+        raw = strict_json_loads(data)
+    except Exception as exc:
+        raise BenchmarkError(f"cannot load host thermal policy {path}: {exc}") from exc
+    return validate_host_thermal_policy_value(raw, "host thermal policy")
 
 
 def model_content(value: dict[str, Any]) -> dict[str, Any]:
@@ -444,6 +640,87 @@ def load_vllm_runtime_manifest(path: Path) -> dict[str, Any]:
     return validate_vllm_runtime_manifest(value, "vLLM runtime manifest")
 
 
+RUN_HOST_THERMAL_KEYS = {
+    "phase",
+    "phase_wall_seconds",
+    "thermally_sustainable_output_token_throughput_per_s",
+    "host_temperature_start_millicelsius",
+    "host_temperature_end_millicelsius",
+    "host_temperature_peak_millicelsius",
+    "host_temperature_sample_count",
+    "host_thermal_guard_trip_count",
+    "host_thermal_pacing_event_count",
+    "host_thermal_pacing_completed_event_count",
+    "host_thermal_pacing_seconds",
+}
+
+
+def validate_run_host_thermal(
+    value: Any,
+    *,
+    label: str,
+    phase: str,
+    completion_tokens: int,
+) -> None:
+    if value is None:
+        return
+    evidence = _object(value, label)
+    _exact_keys(evidence, RUN_HOST_THERMAL_KEYS, label)
+    if evidence["phase"] != phase:
+        raise BenchmarkError(f"{label}.phase disagrees with its run")
+    wall_seconds = _nonnegative_number(
+        evidence["phase_wall_seconds"], f"{label}.phase_wall_seconds"
+    )
+    if wall_seconds <= 0:
+        raise BenchmarkError(f"{label}.phase_wall_seconds must be positive")
+    throughput = _nonnegative_number(
+        evidence["thermally_sustainable_output_token_throughput_per_s"],
+        f"{label}.thermally_sustainable_output_token_throughput_per_s",
+    )
+    if not math.isclose(
+        throughput,
+        completion_tokens / wall_seconds,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise BenchmarkError(f"{label} has inconsistent sustainable throughput")
+    for name in (
+        "host_temperature_start_millicelsius",
+        "host_temperature_end_millicelsius",
+        "host_temperature_peak_millicelsius",
+    ):
+        temperature = evidence[name]
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, int)
+            or not -100_000 <= temperature <= 250_000
+        ):
+            raise BenchmarkError(f"{label}.{name} is not a plausible temperature")
+    sample_count = _positive_int(
+        evidence["host_temperature_sample_count"],
+        f"{label}.host_temperature_sample_count",
+    )
+    if sample_count < 2:
+        raise BenchmarkError(f"{label} requires boundary temperature samples")
+    for name in (
+        "host_thermal_guard_trip_count",
+        "host_thermal_pacing_event_count",
+        "host_thermal_pacing_completed_event_count",
+    ):
+        _nonnegative_int(evidence[name], f"{label}.{name}")
+    if evidence["host_thermal_guard_trip_count"] not in {0, 1}:
+        raise BenchmarkError(f"{label}.host_thermal_guard_trip_count must be zero or one")
+    if (
+        evidence["host_thermal_pacing_completed_event_count"]
+        > evidence["host_thermal_pacing_event_count"]
+    ):
+        raise BenchmarkError(f"{label} completed more pacing events than it started")
+    _nonnegative_number(
+        evidence["host_thermal_pacing_seconds"],
+        f"{label}.host_thermal_pacing_seconds",
+    )
+
+
 def validate_benchmark_run(
     value: Any,
     *,
@@ -480,6 +757,18 @@ def validate_benchmark_run(
         "dispatch_spread_ms",
     ):
         _nonnegative_number(row[name], f"{label}.{name}")
+    if driver_version == "3":
+        phase = (
+            f"warmup-c{concurrency:03d}"
+            if repeat == -1
+            else f"measure-c{concurrency:03d}-r{repeat:03d}"
+        )
+        validate_run_host_thermal(
+            row["host_thermal"],
+            label=f"{label}.host_thermal",
+            phase=phase,
+            completion_tokens=row["completion_tokens"],
+        )
     for name in (
         "ttft_ms_p50",
         "ttft_ms_p99",
@@ -622,12 +911,205 @@ def validate_benchmark_run(
         raise BenchmarkError(f"{label}.verdict is inconsistent with its requests and gates")
 
 
+HOST_THERMAL_EVIDENCE_KEYS = {
+    "host_temperature_start_millicelsius",
+    "host_temperature_end_millicelsius",
+    "host_temperature_peak_millicelsius",
+    "host_temperature_sample_count",
+    "host_thermal_guard_trip_count",
+    "host_thermal_pacing_active_end",
+    "host_thermal_pacing_completed_event_count",
+    "host_thermal_pacing_event_count",
+    "host_thermal_pacing_max_seconds",
+    "host_thermal_pacing_max_start_millicelsius",
+    "host_thermal_pacing_seconds",
+    "host_thermal_cooldown_active_end",
+    "host_thermal_cooldown_completed_count",
+    "host_thermal_cooldown_peak_millicelsius",
+    "host_thermal_cooldown_sample_count",
+    "host_thermal_cooldown_seconds",
+    "host_thermal_cooldown_stable_sample_count",
+    "host_thermal_cooldown_timeout_count",
+    "sensor_path",
+    "trip_reason",
+    "errors",
+    "process_alive_at_handoff",
+}
+
+
+def validate_host_thermal_receipt(value: Any) -> tuple[str, bool]:
+    host_thermal = _object(value, "receipt.host_thermal")
+    _exact_keys(
+        host_thermal,
+        {
+            "mode",
+            "unsafe_no_guard_acknowledged",
+            "policy",
+            "process_group",
+            "evidence",
+        },
+        "receipt.host_thermal",
+    )
+    if not isinstance(host_thermal["unsafe_no_guard_acknowledged"], bool):
+        raise BenchmarkError(
+            "receipt.host_thermal.unsafe_no_guard_acknowledged must be boolean"
+        )
+    mode = host_thermal["mode"]
+    if mode == "not_configured":
+        if host_thermal["unsafe_no_guard_acknowledged"] is not True or any(
+            host_thermal[name] is not None
+            for name in ("policy", "process_group", "evidence")
+        ):
+            raise BenchmarkError(
+                "unconfigured host thermal evidence requires an explicit unsafe acknowledgment"
+            )
+        return mode, False
+    if mode != "attached_process_group":
+        raise BenchmarkError("receipt.host_thermal.mode is unsupported")
+    if host_thermal["unsafe_no_guard_acknowledged"] is not False:
+        raise BenchmarkError("attached host thermal evidence cannot be marked unsafe")
+    policy_record, _policy, _settlement_timeout = (
+        validate_host_thermal_policy_value(
+            host_thermal["policy"], "receipt.host_thermal.policy"
+        )
+    )
+    process = _object(
+        host_thermal["process_group"], "receipt.host_thermal.process_group"
+    )
+    _exact_keys(
+        process,
+        {
+            "pid",
+            "process_group_id",
+            "start_time_ticks",
+            "boot_id",
+            "executable",
+            "cmdline_sha256",
+        },
+        "receipt.host_thermal.process_group",
+    )
+    pid = _positive_int(process["pid"], "receipt.host_thermal.process_group.pid")
+    if pid <= 1 or process["process_group_id"] != pid:
+        raise BenchmarkError("receipt host thermal process must be its group leader")
+    _positive_int(
+        process["start_time_ticks"],
+        "receipt.host_thermal.process_group.start_time_ticks",
+    )
+    for name in ("boot_id", "executable"):
+        if not isinstance(process[name], str) or not process[name]:
+            raise BenchmarkError(
+                f"receipt.host_thermal.process_group.{name} must be non-empty"
+            )
+    _sha256(
+        process["cmdline_sha256"],
+        "receipt.host_thermal.process_group.cmdline_sha256",
+    )
+    evidence = _object(host_thermal["evidence"], "receipt.host_thermal.evidence")
+    _exact_keys(
+        evidence,
+        HOST_THERMAL_EVIDENCE_KEYS,
+        "receipt.host_thermal.evidence",
+    )
+    for name in (
+        "host_temperature_start_millicelsius",
+        "host_temperature_end_millicelsius",
+        "host_temperature_peak_millicelsius",
+        "host_thermal_pacing_max_start_millicelsius",
+        "host_thermal_cooldown_peak_millicelsius",
+    ):
+        value = evidence[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not -100_000 <= value <= 250_000
+        ):
+            raise BenchmarkError(f"receipt.host_thermal.evidence.{name} is invalid")
+    for name in (
+        "host_temperature_sample_count",
+        "host_thermal_guard_trip_count",
+        "host_thermal_pacing_active_end",
+        "host_thermal_pacing_completed_event_count",
+        "host_thermal_pacing_event_count",
+        "host_thermal_cooldown_active_end",
+        "host_thermal_cooldown_completed_count",
+        "host_thermal_cooldown_sample_count",
+        "host_thermal_cooldown_stable_sample_count",
+        "host_thermal_cooldown_timeout_count",
+    ):
+        _nonnegative_int(evidence[name], f"receipt.host_thermal.evidence.{name}")
+    if evidence["host_temperature_sample_count"] <= 0:
+        raise BenchmarkError("receipt host thermal evidence has no samples")
+    for name in (
+        "host_thermal_guard_trip_count",
+        "host_thermal_pacing_active_end",
+        "host_thermal_cooldown_active_end",
+        "host_thermal_cooldown_completed_count",
+        "host_thermal_cooldown_timeout_count",
+    ):
+        if evidence[name] not in {0, 1}:
+            raise BenchmarkError(f"receipt.host_thermal.evidence.{name} must be zero or one")
+    for name in (
+        "host_thermal_pacing_max_seconds",
+        "host_thermal_pacing_seconds",
+        "host_thermal_cooldown_seconds",
+    ):
+        _nonnegative_number(evidence[name], f"receipt.host_thermal.evidence.{name}")
+    if (
+        evidence["host_thermal_pacing_completed_event_count"]
+        > evidence["host_thermal_pacing_event_count"]
+    ):
+        raise BenchmarkError("receipt completed more thermal pacing events than it began")
+    if evidence["host_temperature_peak_millicelsius"] < max(
+        evidence["host_temperature_start_millicelsius"],
+        evidence["host_temperature_end_millicelsius"],
+    ):
+        raise BenchmarkError("receipt host thermal peak is below a boundary sample")
+    if not isinstance(evidence["sensor_path"], str) or not evidence["sensor_path"]:
+        raise BenchmarkError("receipt host thermal sensor path must be non-empty")
+    if evidence["trip_reason"] is not None and (
+        not isinstance(evidence["trip_reason"], str) or not evidence["trip_reason"]
+    ):
+        raise BenchmarkError("receipt host thermal trip reason must be null or non-empty")
+    errors = evidence["errors"]
+    if (
+        not isinstance(errors, list)
+        or len(errors) > 8
+        or any(not isinstance(error, str) or not error for error in errors)
+    ):
+        raise BenchmarkError("receipt host thermal errors must be bounded strings")
+    if not isinstance(evidence["process_alive_at_handoff"], bool):
+        raise BenchmarkError("receipt host thermal process handoff state must be boolean")
+    tripped = evidence["trip_reason"] is not None
+    if evidence["host_thermal_guard_trip_count"] != int(tripped):
+        raise BenchmarkError("receipt host thermal trip fields disagree")
+    policy_limit = policy_record["limit_millicelsius"]
+    if not tripped and evidence["host_temperature_peak_millicelsius"] >= policy_limit:
+        raise BenchmarkError("receipt host thermal peak reached the limit without a trip")
+    safe_handoff = policy_record["safe_handoff"]
+    operationally_passed = (
+        not tripped
+        and not errors
+        and evidence["process_alive_at_handoff"]
+        and evidence["host_thermal_pacing_active_end"] == 0
+        and evidence["host_thermal_pacing_completed_event_count"]
+        == evidence["host_thermal_pacing_event_count"]
+        and evidence["host_thermal_cooldown_active_end"] == 0
+        and evidence["host_thermal_cooldown_completed_count"] == 1
+        and evidence["host_thermal_cooldown_timeout_count"] == 0
+        and evidence["host_thermal_cooldown_stable_sample_count"]
+        >= safe_handoff["stable_samples"]
+        and evidence["host_temperature_end_millicelsius"]
+        <= safe_handoff["target_millicelsius"]
+    )
+    return mode, operationally_passed
+
+
 def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     receipt = _object(value, "receipt")
     driver_version = receipt.get("driver_version")
     required_receipt_keys = set(RECEIPT_KEYS)
     if driver_version == "3":
-        required_receipt_keys.add("completion")
+        required_receipt_keys.update({"completion", "host_thermal"})
     _exact_keys(receipt, required_receipt_keys, "receipt", {"comparison"})
     if receipt["schema"] != SCHEMA or driver_version not in SUPPORTED_DRIVER_VERSIONS:
         supported = ", ".join(sorted(SUPPORTED_DRIVER_VERSIONS))
@@ -906,6 +1388,12 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     _exact_keys(diagnostics, {"url", "timed_request_path_affected"}, "receipt.diagnostics")
     if diagnostics["timed_request_path_affected"] is not False:
         raise BenchmarkError("receipt diagnostics must remain outside the timed request path")
+    if driver_version == "3":
+        host_thermal_mode, host_thermal_passed = validate_host_thermal_receipt(
+            receipt["host_thermal"]
+        )
+    else:
+        host_thermal_mode, host_thermal_passed = "legacy", True
 
     if warmup_requests:
         if receipt["warmup"] is None:
@@ -942,6 +1430,18 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 driver_version=driver_version,
                 memory_limit_bytes=memory_limit_bytes,
                 workload_profile=workload.get("profile"),
+            )
+    if driver_version == "3":
+        thermal_rows = list(runs)
+        if receipt["warmup"] is not None:
+            thermal_rows.insert(0, receipt["warmup"])
+        expect_thermal_rows = host_thermal_mode == "attached_process_group"
+        if any(
+            (row["host_thermal"] is not None) != expect_thermal_rows
+            for row in thermal_rows
+        ):
+            raise BenchmarkError(
+                "receipt run thermal evidence disagrees with the top-level mode"
             )
     completion_failures: list[dict[str, str]] = []
     completion_checks: dict[str, str] | None = None
@@ -1022,6 +1522,23 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 f"receipt.completion.finalization_checks.{inapplicable_check} "
                 "must be not_applicable"
             )
+        if host_thermal_mode == "attached_process_group":
+            if completion_checks["host_thermal_handoff"] == "not_applicable":
+                raise BenchmarkError(
+                    "receipt.completion.finalization_checks.host_thermal_handoff "
+                    "is required"
+                )
+            if (
+                completion_checks["host_thermal_handoff"] == "passed"
+            ) != host_thermal_passed:
+                raise BenchmarkError(
+                    "receipt host thermal handoff check disagrees with its evidence"
+                )
+        elif completion_checks["host_thermal_handoff"] != "not_applicable":
+            raise BenchmarkError(
+                "receipt.completion.finalization_checks.host_thermal_handoff "
+                "must be not_applicable without a guard"
+            )
         failure_phases = {failure["phase"] for failure in completion_failures}
         for name in COMPLETION_CHECK_NAMES:
             if (completion_checks[name] == "failed") != (name in failure_phases):
@@ -1072,6 +1589,8 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     passed = (
         not repository["dirty"]
         and not completion_failures
+        and host_thermal_mode in {"legacy", "attached_process_group"}
+        and host_thermal_passed
         and (
             completion_checks is None
             or all(
@@ -1884,6 +2403,12 @@ def compare_reference(receipt: dict[str, Any], reference_path: Path) -> dict[str
     reference_model = reference.get("engine", {}).get("model_identity", {})
     if current_model.get("content_sha256") != reference_model.get("content_sha256"):
         raise BenchmarkError("reference receipt has different model content")
+    current_thermal = receipt.get("host_thermal", {}).get("policy", {})
+    reference_thermal = reference.get("host_thermal", {}).get("policy", {})
+    if current_thermal.get("content_sha256") != reference_thermal.get(
+        "content_sha256"
+    ):
+        raise BenchmarkError("reference receipt has a different host thermal policy")
     comparison_mode = receipt["workload"]["comparison_mode"]
     current_rows = {
         (row["concurrency"], row["repeat"]): row for row in receipt.get("runs", [])
@@ -2101,6 +2626,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--memory-sample-ms", type=int, default=50)
     parser.add_argument("--require-memory", action="store_true")
     parser.add_argument("--memory-limit-bytes", type=int)
+    host_safety = parser.add_mutually_exclusive_group()
+    host_safety.add_argument(
+        "--host-thermal-policy",
+        type=Path,
+        help="typed host thermal policy for the attached local server process group",
+    )
+    host_safety.add_argument(
+        "--unsafe-no-host-thermal-guard",
+        action="store_true",
+        help="run without host thermal containment and force a diagnostic-only verdict",
+    )
+    parser.add_argument(
+        "--server-pid",
+        type=int,
+        help="local process-group leader protected by --host-thermal-policy",
+    )
     authentication = parser.add_mutually_exclusive_group()
     authentication.add_argument(
         "--api-key",
@@ -2178,16 +2719,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    thermal_guard: thermal.HostThermalGuard | None = None
     try:
         if args.validate_receipt is not None:
-            if args.out is not None or args.reference_receipt is not None:
+            if (
+                args.out is not None
+                or args.reference_receipt is not None
+                or args.host_thermal_policy is not None
+                or args.server_pid is not None
+                or args.unsafe_no_host_thermal_guard
+            ):
                 raise BenchmarkError(
-                    "--validate-receipt cannot be combined with --out or --reference-receipt"
+                    "--validate-receipt cannot be combined with output, reference, "
+                    "or thermal runtime arguments"
                 )
             for path in args.validate_receipt:
                 validate_benchmark_receipt_path(path)
                 print(f"OK {path}")
             return 0
+        if args.host_thermal_policy is None and not args.unsafe_no_host_thermal_guard:
+            raise BenchmarkError(
+                "measured runs require --host-thermal-policy and --server-pid; "
+                "use --unsafe-no-host-thermal-guard only for diagnostic counterevidence"
+            )
+        if (args.host_thermal_policy is None) != (args.server_pid is None):
+            raise BenchmarkError(
+                "--host-thermal-policy and --server-pid must be provided together"
+            )
         if args.model_path is None:
             raise BenchmarkError("--model-path is required for a measured run")
         if args.runtime_artifact is None:
@@ -2268,6 +2826,45 @@ def main(argv: list[str] | None = None) -> int:
         if memory_path is None:
             raise BenchmarkError("a DRM device-memory counter is required for a measured run")
         workload = workload_contract(args, sizes)
+        thermal_policy_record: dict[str, Any] | None = None
+        thermal_policy: thermal.HostThermalPolicy | None = None
+        thermal_settlement_timeout = 0.0
+        attached_process: AttachedProcessGroup | None = None
+        if args.host_thermal_policy is not None:
+            thermal_policy_record, thermal_policy, thermal_settlement_timeout = (
+                load_host_thermal_policy(args.host_thermal_policy)
+            )
+            assert args.server_pid is not None
+            attached_process = AttachedProcessGroup.attach(args.server_pid)
+
+            def trace_host_thermal(event: str, **fields: Any) -> None:
+                print(
+                    json.dumps(
+                        {"event": event, **fields},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+            thermal_guard = thermal.HostThermalGuard(
+                attached_process,
+                **thermal_policy.guard_kwargs(),
+                trace_callback=trace_host_thermal,
+                error_type=BenchmarkError,
+            )
+            thermal_guard.set_phase("startup")
+            thermal_guard.start()
+            if thermal_guard.trip_reason is not None:
+                raise BenchmarkError(thermal_guard.trip_reason)
+            if not thermal_guard.wait_for_pacing_settlement(
+                thermal_settlement_timeout
+            ):
+                raise BenchmarkError(
+                    thermal_guard.trip_reason
+                    or "host thermal pacing failed to settle before warmup"
+                )
         sampler = MemorySampler(memory_path, args.memory_sample_ms)
         warmup: dict[str, Any] | None = None
         runs: list[dict[str, Any]] = []
@@ -2291,11 +2888,58 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 finalization_checks[name] = "passed"
 
+        def run_guarded(
+            *,
+            phase: str,
+            **run_kwargs: Any,
+        ) -> tuple[dict[str, Any], BenchmarkError | None]:
+            if thermal_guard is None:
+                row = run_once(phase=phase, **run_kwargs)
+                row["host_thermal"] = None
+                return row, None
+
+            thermal_guard.set_phase(phase)
+            phase_started = time.perf_counter()
+            thermal_guard.sample_now()
+            pre_run_settled = thermal_guard.wait_for_pacing_settlement(
+                thermal_settlement_timeout
+            )
+            thermal_guard.sample_now()
+            if not pre_run_settled:
+                raise BenchmarkError(
+                    thermal_guard.trip_reason
+                    or f"host thermal pacing failed before {phase}"
+                )
+            row = run_once(phase=phase, **run_kwargs)
+            thermal_guard.sample_now()
+            post_run_settled = thermal_guard.wait_for_pacing_settlement(
+                thermal_settlement_timeout
+            )
+            thermal_guard.sample_now()
+            phase_wall_seconds = time.perf_counter() - phase_started
+            phase_metrics = thermal_guard.phase_metric_values(phase_started)
+            phase_metrics.update(
+                {
+                    "phase": phase,
+                    "phase_wall_seconds": phase_wall_seconds,
+                    "thermally_sustainable_output_token_throughput_per_s": (
+                        row["completion_tokens"] / phase_wall_seconds
+                    ),
+                }
+            )
+            row["host_thermal"] = phase_metrics
+            if not post_run_settled or thermal_guard.trip_reason is not None:
+                return row, BenchmarkError(
+                    thermal_guard.trip_reason
+                    or f"host thermal pacing failed after {phase}"
+                )
+            return row, None
+
         sampler.start()
         try:
             try:
                 if args.warmup_requests:
-                    warmup = run_once(
+                    warmup, thermal_error = run_guarded(
                         args=args,
                         concurrency=args.warmup_requests,
                         repeat=-1,
@@ -2309,11 +2953,13 @@ def main(argv: list[str] | None = None) -> int:
                         f"[warmup] {warmup['verdict']} "
                         f"ok={warmup['success_count']}/{warmup['request_count']}"
                     )
+                    if thermal_error is not None:
+                        raise thermal_error
 
                 if warmup is None or warmup["verdict"] == "passed":
                     for concurrency in sizes:
                         for repeat in range(args.repeats):
-                            row = run_once(
+                            row, thermal_error = run_guarded(
                                 args=args,
                                 concurrency=concurrency,
                                 repeat=repeat,
@@ -2325,6 +2971,8 @@ def main(argv: list[str] | None = None) -> int:
                             )
                             runs.append(row)
                             print_run(row)
+                            if thermal_error is not None:
+                                raise thermal_error
                 elif warmup is not None:
                     record_completion_failure("warmup", "warmup verdict failed")
             except Exception as exc:
@@ -2378,6 +3026,71 @@ def main(argv: list[str] | None = None) -> int:
         else:
             finalization_checks["execution_identity_unchanged"] = "not_applicable"
 
+        if thermal_guard is not None:
+            assert attached_process is not None
+            assert thermal_policy_record is not None
+
+            def verify_host_thermal_handoff() -> None:
+                thermal_guard.set_phase("safe-handoff")
+                thermal_guard.close()
+                metrics = thermal_guard.metric_values()
+                pacing = thermal_guard.pacing_metric_values()
+                if thermal_guard.trip_reason is not None:
+                    raise BenchmarkError(thermal_guard.trip_reason)
+                if thermal_guard.errors:
+                    raise BenchmarkError(
+                        "host thermal guard errors: " + "; ".join(thermal_guard.errors)
+                    )
+                if attached_process.poll() is not None:
+                    raise BenchmarkError(
+                        "protected server process group exited before safe handoff"
+                    )
+                if metrics["host_thermal_cooldown_completed_count"] != 1:
+                    raise BenchmarkError("host thermal safe handoff did not complete")
+                if metrics["host_thermal_cooldown_timeout_count"] != 0:
+                    raise BenchmarkError("host thermal safe handoff timed out")
+                if pacing["host_thermal_pacing_active_end"] != 0:
+                    raise BenchmarkError("host thermal pacing remained active at handoff")
+                if (
+                    pacing["host_thermal_pacing_completed_event_count"]
+                    != pacing["host_thermal_pacing_event_count"]
+                ):
+                    raise BenchmarkError(
+                        "host thermal pacing events did not all complete"
+                    )
+
+            run_finalization_check(
+                "host_thermal_handoff", verify_host_thermal_handoff
+            )
+            host_thermal_record = {
+                "mode": "attached_process_group",
+                "unsafe_no_guard_acknowledged": False,
+                "policy": thermal_policy_record,
+                "process_group": attached_process.receipt_identity(),
+                "evidence": {
+                    **thermal_guard.metric_values(),
+                    **thermal_guard.pacing_metric_values(),
+                    "host_temperature_sample_count": len(thermal_guard.samples),
+                    "sensor_path": (
+                        str(thermal_guard.input_path)
+                        if thermal_guard.input_path is not None
+                        else None
+                    ),
+                    "trip_reason": thermal_guard.trip_reason,
+                    "errors": list(thermal_guard.errors),
+                    "process_alive_at_handoff": attached_process.poll() is None,
+                },
+            }
+        else:
+            finalization_checks["host_thermal_handoff"] = "not_applicable"
+            host_thermal_record = {
+                "mode": "not_configured",
+                "unsafe_no_guard_acknowledged": True,
+                "policy": None,
+                "process_group": None,
+                "evidence": None,
+            }
+
         receipt: dict[str, Any] = {
             "schema": SCHEMA,
             "driver_version": DRIVER_VERSION,
@@ -2414,6 +3127,7 @@ def main(argv: list[str] | None = None) -> int:
                 "url": diagnostics_url,
                 "timed_request_path_affected": False,
             },
+            "host_thermal": host_thermal_record,
             "warmup": warmup,
             "runs": runs,
             "completion": {
@@ -2426,6 +3140,7 @@ def main(argv: list[str] | None = None) -> int:
         if (
             args.reference_receipt is not None
             and not completion_failures
+            and host_thermal_record["mode"] == "attached_process_group"
             and len(runs) == len(sizes) * args.repeats
         ):
             try:
@@ -2437,6 +3152,7 @@ def main(argv: list[str] | None = None) -> int:
         passed = (
             not repo["dirty"]
             and not completion_failures
+            and host_thermal_record["mode"] == "attached_process_group"
             and all(
                 status in {"passed", "not_applicable"}
                 for status in finalization_checks.values()
@@ -2457,6 +3173,9 @@ def main(argv: list[str] | None = None) -> int:
     except BenchmarkError as exc:
         print(f"benchmark error: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if thermal_guard is not None:
+            thermal_guard.close()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/schemas/host-thermal-policy-v1.schema.json",
+  "title": "Kiln Host Thermal Policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "id",
+    "sensor",
+    "limit_millicelsius",
+    "poll_interval_ms",
+    "pacing",
+    "safe_handoff",
+    "phase_settlement_timeout_seconds"
+  ],
+  "properties": {
+    "schema": {
+      "const": "kiln.host-thermal-policy.v1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+    },
+    "sensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hwmon_name", "label"],
+      "properties": {
+        "hwmon_name": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 }
+      }
+    },
+    "limit_millicelsius": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "poll_interval_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "pacing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_millicelsius", "resume_millicelsius"],
+      "properties": {
+        "start_millicelsius": { "type": "integer", "minimum": 1 },
+        "resume_millicelsius": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "safe_handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_millicelsius",
+        "stable_samples",
+        "timeout_seconds"
+      ],
+      "properties": {
+        "target_millicelsius": { "type": "integer", "minimum": 1 },
+        "stable_samples": { "type": "integer", "minimum": 1 },
+        "timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "phase_settlement_timeout_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  }
+}

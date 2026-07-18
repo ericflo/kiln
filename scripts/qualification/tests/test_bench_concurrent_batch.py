@@ -47,6 +47,105 @@ def valid_vllm_manifest(model: str = "test-model") -> dict:
     }
 
 
+def valid_host_thermal_policy() -> dict:
+    return {
+        "schema": bench.HOST_THERMAL_POLICY_SCHEMA,
+        "id": "test-host-policy-v1",
+        "sensor": {"hwmon_name": "fixture", "label": "package"},
+        "limit_millicelsius": 90_000,
+        "poll_interval_ms": 250,
+        "pacing": {
+            "start_millicelsius": 78_000,
+            "resume_millicelsius": 70_000,
+        },
+        "safe_handoff": {
+            "target_millicelsius": 65_000,
+            "stable_samples": 2,
+            "timeout_seconds": 30.0,
+        },
+        "phase_settlement_timeout_seconds": 30.0,
+    }
+
+
+class FakeAttachedProcessGroup:
+    pid = 4321
+
+    def poll(self) -> None:
+        return None
+
+    def receipt_identity(self) -> dict:
+        return {
+            "pid": self.pid,
+            "process_group_id": self.pid,
+            "start_time_ticks": 123456,
+            "boot_id": "fixture-boot-id",
+            "executable": "/fixture/kiln-server",
+            "cmdline_sha256": "sha256:" + "a" * 64,
+        }
+
+
+class FakeThermalGuard:
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        self.trip_reason = None
+        self.errors: list[str] = []
+        self.samples = [50_000]
+        self.input_path = Path("/fixture/temp1_input")
+        self.phase = "startup"
+
+    def set_phase(self, phase: str) -> None:
+        self.phase = phase
+
+    def start(self) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+    def wait_for_pacing_settlement(self, _timeout_seconds: float) -> bool:
+        return True
+
+    def sample_now(self) -> int:
+        self.samples.append(50_000)
+        return 50_000
+
+    def phase_metric_values(self, _started: float) -> dict:
+        return {
+            "host_temperature_start_millicelsius": 50_000,
+            "host_temperature_end_millicelsius": 50_000,
+            "host_temperature_peak_millicelsius": 50_000,
+            "host_temperature_sample_count": 4,
+            "host_thermal_guard_trip_count": 0,
+            "host_thermal_pacing_event_count": 0,
+            "host_thermal_pacing_completed_event_count": 0,
+            "host_thermal_pacing_seconds": 0.0,
+        }
+
+    def metric_values(self) -> dict:
+        return {
+            "host_temperature_end_millicelsius": 50_000,
+            "host_temperature_peak_millicelsius": 50_000,
+            "host_temperature_start_millicelsius": 50_000,
+            "host_thermal_guard_trip_count": 0,
+            "host_thermal_cooldown_active_end": 0,
+            "host_thermal_cooldown_completed_count": 1,
+            "host_thermal_cooldown_peak_millicelsius": 50_000,
+            "host_thermal_cooldown_sample_count": 2,
+            "host_thermal_cooldown_seconds": 0.25,
+            "host_thermal_cooldown_stable_sample_count": 2,
+            "host_thermal_cooldown_timeout_count": 0,
+        }
+
+    def pacing_metric_values(self) -> dict:
+        return {
+            "host_thermal_pacing_active_end": 0,
+            "host_thermal_pacing_completed_event_count": 0,
+            "host_thermal_pacing_event_count": 0,
+            "host_thermal_pacing_max_seconds": 0.0,
+            "host_thermal_pacing_max_start_millicelsius": 0,
+            "host_thermal_pacing_seconds": 0.0,
+        }
+
+
 class FakeState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -200,6 +299,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         directory: str,
         *,
         fetch_json: object | None = None,
+        guarded: bool = True,
     ) -> tuple[int, Path]:
         output = Path(directory) / "receipt.json"
         runtime_artifact = Path(directory) / "kiln-server"
@@ -209,6 +309,8 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         memory_counter = Path(directory) / "vram-used"
         memory_counter.write_text("1024")
+        thermal_policy = Path(directory) / "host-thermal-policy.json"
+        thermal_policy.write_text(json.dumps(valid_host_thermal_policy()))
         model_path = Path(directory) / "model"
         model_fingerprint = {
             "id": "test-model",
@@ -244,6 +346,30 @@ class ServingBenchmarkTests(unittest.TestCase):
                 stack.enter_context(
                     mock.patch.object(bench, "fetch_json", side_effect=fetch_json)
                 )
+            stack.enter_context(
+                mock.patch.object(
+                    bench.AttachedProcessGroup,
+                    "attach",
+                    return_value=FakeAttachedProcessGroup(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    bench.thermal,
+                    "HostThermalGuard",
+                    side_effect=FakeThermalGuard,
+                )
+            )
+            thermal_args = (
+                [
+                    "--host-thermal-policy",
+                    str(thermal_policy),
+                    "--server-pid",
+                    "4321",
+                ]
+                if guarded
+                else ["--unsafe-no-host-thermal-guard"]
+            )
             return_code = bench.main(
                 [
                     "--base-url",
@@ -270,6 +396,7 @@ class ServingBenchmarkTests(unittest.TestCase):
                     "2048",
                     "--out",
                     str(output),
+                    *thermal_args,
                 ]
             )
         return return_code, output
@@ -523,6 +650,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             summary["errors"],
             [{"index": 0, "error": "RuntimeError: injected request failure"}],
         )
+        summary["host_thermal"] = None
         bench.validate_benchmark_run(
             summary,
             label="counterexample",
@@ -550,6 +678,9 @@ class ServingBenchmarkTests(unittest.TestCase):
             "workload_fingerprint": "sha256:workload",
             "workload": {"comparison_mode": "exact_output"},
             "engine": {"model_identity": {"content_sha256": "sha256:model"}},
+            "host_thermal": {
+                "policy": {"content_sha256": "sha256:thermal-policy"}
+            },
             "runs": [
                 {
                     "concurrency": 1,
@@ -589,6 +720,15 @@ class ServingBenchmarkTests(unittest.TestCase):
                     "prompt_token_mismatch",
                 )
 
+                reference["host_thermal"]["policy"]["content_sha256"] = (
+                    "sha256:different-thermal-policy"
+                )
+                path.write_text(json.dumps(reference))
+                with self.assertRaisesRegex(
+                    bench.BenchmarkError, "different host thermal policy"
+                ):
+                    bench.compare_reference(current, path)
+
                 path.write_text('{"schema":"first","schema":"second"}')
                 with self.assertRaisesRegex(
                     bench.BenchmarkError, "duplicate JSON object key"
@@ -611,6 +751,56 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(snapshot["peak_bytes"], 175)
         self.assertEqual(snapshot["peak_delta_bytes"], 75)
         self.assertGreaterEqual(snapshot["samples"], 2)
+
+    def test_host_thermal_policy_is_closed_hashed_and_hysteresis_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            value = valid_host_thermal_policy()
+            path.write_text(json.dumps(value))
+            record, policy, settlement_timeout = bench.load_host_thermal_policy(path)
+
+            self.assertEqual(record["content_sha256"], bench.canonical_sha256(value))
+            self.assertEqual(policy.cooldown_mode, "live_process_safe_handoff")
+            self.assertEqual(settlement_timeout, 30.0)
+            bench.validate_host_thermal_policy_value(record, "fixture")
+
+            tampered = json.loads(json.dumps(record))
+            tampered["pacing"]["start_millicelsius"] = 79_000
+            with self.assertRaisesRegex(bench.BenchmarkError, "content_sha256"):
+                bench.validate_host_thermal_policy_value(tampered, "fixture")
+
+            value["pacing"]["resume_millicelsius"] = 80_000
+            path.write_text(json.dumps(value))
+            with self.assertRaisesRegex(bench.BenchmarkError, "resume < start"):
+                bench.load_host_thermal_policy(path)
+
+    def test_attached_process_group_binds_proc_identity_and_detects_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            process = root / "4321"
+            process.mkdir()
+            boot = root / "sys/kernel/random"
+            boot.mkdir(parents=True)
+            (boot / "boot_id").write_text("fixture-boot-id\n")
+            (process / "cmdline").write_bytes(b"kiln\0serve\0")
+            (process / "exe").symlink_to("/fixture/kiln-server")
+
+            def write_stat(process_group: int, start_time: int) -> None:
+                fields = ["S", "1", str(process_group), *(["0"] * 16), str(start_time)]
+                (process / "stat").write_text(
+                    f"4321 (server with spaces) {' '.join(fields)}\n"
+                )
+
+            write_stat(4321, 123456)
+            attached = bench.AttachedProcessGroup.attach(4321, proc_root=root)
+            self.assertIsNone(attached.poll())
+            self.assertEqual(attached.receipt_identity()["process_group_id"], 4321)
+
+            write_stat(4321, 999999)
+            self.assertEqual(attached.poll(), 0)
+            write_stat(4000, 123456)
+            with self.assertRaisesRegex(bench.BenchmarkError, "lead its process group"):
+                bench.AttachedProcessGroup.attach(4321, proc_root=root)
 
     def test_cli_writes_a_self_hashing_passed_receipt(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
@@ -699,6 +889,28 @@ class ServingBenchmarkTests(unittest.TestCase):
                     "detail": "BenchmarkError: injected final health failure",
                 }
             ],
+        )
+
+    def test_unsafe_cli_writes_a_valid_failed_diagnostic_receipt(self) -> None:
+        with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
+            return_code, output = self._run_cli_fixture(
+                fake, directory, guarded=False
+            )
+            receipt = bench.strict_json_loads(output.read_bytes())
+            bench.validate_benchmark_receipt(receipt)
+
+        self.assertEqual(return_code, 2)
+        self.assertEqual(receipt["verdict"], "failed")
+        self.assertEqual(receipt["runs"][0]["verdict"], "passed")
+        self.assertEqual(
+            receipt["host_thermal"],
+            {
+                "mode": "not_configured",
+                "unsafe_no_guard_acknowledged": True,
+                "policy": None,
+                "process_group": None,
+                "evidence": None,
+            },
         )
 
     def test_receipt_writer_refuses_overwrite(self) -> None:

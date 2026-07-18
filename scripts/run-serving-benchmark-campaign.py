@@ -88,6 +88,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--memory-path", type=Path, required=True)
     parser.add_argument("--memory-limit-bytes", type=int, required=True)
     parser.add_argument("--memory-sample-ms", type=int, default=50)
+    parser.add_argument("--host-thermal-policy", type=Path, required=True)
+    parser.add_argument("--server-pid", type=int, required=True)
     parser.add_argument("--slo-ttft-ms", type=float, default=5_000.0)
     parser.add_argument("--slo-itl-ms", type=float, default=250.0)
     parser.add_argument("--slo-e2e-ms", type=float, default=60_000.0)
@@ -100,6 +102,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--reference-dir is required for a vLLM campaign")
     if args.engine == "kiln" and args.reference_dir is not None:
         parser.error("--reference-dir is only valid for a vLLM campaign")
+    if args.server_pid <= 1:
+        parser.error("--server-pid must be greater than one")
+    if args.host_thermal_policy.is_symlink() or not args.host_thermal_policy.is_file():
+        parser.error("--host-thermal-policy must name a regular file")
     return args
 
 
@@ -143,6 +149,10 @@ def benchmark_command(
         str(args.memory_limit_bytes),
         "--memory-sample-ms",
         str(args.memory_sample_ms),
+        "--host-thermal-policy",
+        str(args.host_thermal_policy),
+        "--server-pid",
+        str(args.server_pid),
         "--slo-ttft-ms",
         str(args.slo_ttft_ms),
         "--slo-itl-ms",
@@ -197,6 +207,11 @@ def main(argv: list[str] | None = None) -> int:
             "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "campaign_id": args.campaign_id,
             "engine": args.engine,
+            "host_thermal_policy": {
+                "path": str(args.host_thermal_policy.resolve()),
+                "sha256": file_sha256(args.host_thermal_policy),
+            },
+            "server_pid": args.server_pid,
             "profiles": rows,
             "verdict": (
                 "passed"

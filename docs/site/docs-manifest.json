@@ -123,6 +123,14 @@
       "description": "Serving acceptance methodology, reproducibility requirements, and measured results."
     },
     {
+      "source": "qualification/schema/host-thermal-policy-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "host-thermal-policy-schema",
+      "title": "Host Thermal Policy Schema",
+      "section": "serving",
+      "description": "Typed host sensor, pacing, hard-limit, per-phase settlement, and safe live-process handoff contract for local serving benchmarks."
+    },
+    {
       "source": "docs/SERVING_PROFILES.md",
       "slug": "serving-profiles",
       "title": "Serving Profiles",

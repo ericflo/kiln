@@ -2226,6 +2226,63 @@ class ServeRocmSoakTests(unittest.TestCase):
             [call.args[0] for call in trace.call_args_list],
         )
 
+    def test_thermal_guard_holds_pause_until_safe_live_process_handoff(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        trace = mock.Mock()
+        guard = soak.thermal.HostThermalGuard(
+            process,
+            hwmon_name="k10temp",
+            label="Tctl",
+            limit_millicelsius=97_000,
+            pacing_start_millicelsius=88_000,
+            pacing_resume_millicelsius=80_000,
+            cooldown_target_millicelsius=75_000,
+            cooldown_stable_samples=3,
+            cooldown_timeout_seconds=10.0,
+            cooldown_mode="live_process_safe_handoff",
+            trace_callback=trace,
+        )
+        with (
+            mock.patch.object(
+                soak.thermal,
+                "resolve_hwmon_temperature_input",
+                return_value=Path("/fixture/temp1_input"),
+            ),
+            mock.patch.object(
+                soak.thermal,
+                "read_hwmon_temperature_millicelsius",
+                side_effect=[89_000, 75_000, 74_000, 73_000],
+            ),
+            mock.patch.object(soak.thermal.os, "killpg") as killpg,
+            mock.patch.object(soak.thermal.time, "sleep"),
+        ):
+            guard._sample()
+            guard.close()
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(4321, signal.SIGSTOP), mock.call(4321, signal.SIGCONT)],
+        )
+        self.assertIsNone(guard.trip_reason)
+        self.assertEqual(
+            guard.pacing_metric_values()[
+                "host_thermal_pacing_completed_event_count"
+            ],
+            1,
+        )
+        self.assertEqual(
+            guard.metric_values()["host_thermal_cooldown_completed_count"], 1
+        )
+        completed = [
+            call
+            for call in trace.call_args_list
+            if call.args[0] == "host_thermal_pacing_completed"
+        ]
+        self.assertEqual(
+            completed[0].kwargs["completion_reason"], "safe_handoff_release"
+        )
+
     def test_thermal_guard_post_exit_cooldown_timeout_fails_closed(self) -> None:
         process = mock.Mock(pid=4321)
         process.poll.return_value = 0
@@ -2293,6 +2350,10 @@ class ServeRocmSoakTests(unittest.TestCase):
             (
                 {"poll_interval_ms": True},
                 "poll interval must be a positive integer",
+            ),
+            (
+                {"cooldown_mode": "unknown"},
+                "cooldown mode must be",
             ),
         )
         for overrides, message in invalid:
