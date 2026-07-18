@@ -114,7 +114,6 @@ KILN_AGENT_RUNS_ACCESS,4,crates/kiln-server/src/config.rs:6746,no,no,kiln-server
 KILN_CHAT_CONFIG_HASH_METADATA,4,crates/kiln-server/src/config.rs:5454,no,no,kiln-server
 KILN_CHAT_PERFORMANCE_METADATA,4,crates/kiln-server/src/config.rs:5449,no,no,kiln-server
 KILN_CHECKPOINT_INTERVAL,4,crates/kiln-server/src/config.rs:5571,no,no,kiln-server
-KILN_DEBUG_SFT_FINITE,4,crates/kiln-train/src/trainer.rs:13696,yes,no,kiln-model;kiln-train
 KILN_DECODE_HOT_PATH_DEBUG_FALLBACK,4,crates/kiln-model/src/generate.rs:11304,yes,no,kiln-model
 KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER,4,crates/kiln-model/src/forward.rs:25023,no,yes,kiln-model
 KILN_DISABLE_FUSED_GDN_GATES,4,crates/kiln-model/src/backend/metal_config.rs:9,no,yes,kiln-model
@@ -219,7 +218,6 @@ KILN_AGENT_RUN_TIMEOUT_SECS,2,crates/kiln-server/src/config.rs:6747,no,no,kiln-s
 KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS,2,crates/kiln-server/src/config.rs:6748,no,no,kiln-server
 KILN_ARENA_FORCE_ZERO,2,crates/kiln-tensor/src/capture_alloc.rs:157,no,yes,kiln-tensor
 KILN_COMMIT,2,crates/kiln-server/src/execution_provenance.rs:169,no,yes,kiln-server;kiln-train
-KILN_DEBUG_SFT_STATS_LABEL,2,crates/kiln-train/src/trainer.rs:13704,no,yes,kiln-model;kiln-train
 KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ,2,crates/kiln-model/src/backend/cuda.rs:54,no,yes,kiln-model
 KILN_DISABLE_CUDA_GDN_AB_IN_PROJ,2,crates/kiln-model/src/backend/cuda.rs:61,no,yes,kiln-model
 KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ,2,crates/kiln-model/src/backend/cuda.rs:66,no,yes,kiln-model
@@ -315,17 +313,8 @@ KILN_CUDA_GRAPH_STABLE_PAGED_METADATA,1,crates/kiln-model/src/cuda_graph.rs:180,
 KILN_CUDA_NATIVE_TRAINING,1,crates/kiln-model/src/backend/capability.rs:2001,no,no,kiln-model
 KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS,1,crates/kiln-model/src/forward.rs:8897,no,yes,kiln-model
 KILN_DEBUG_BATCHED_HIDDEN,1,crates/kiln-model/src/cuda_graph.rs:2729,no,yes,kiln-model
-KILN_DEBUG_FLCE_STATS,1,crates/kiln-flce-kernel/src/kt_api.rs:924,no,yes,kiln-flce-kernel
-KILN_DEBUG_FLCE_STATS_LABEL,1,crates/kiln-flce-kernel/src/kt_api.rs:934,no,yes,kiln-flce-kernel
-KILN_DEBUG_FULL_ATTN_FINITE,1,crates/kiln-model/src/forward.rs:5266,yes,no,kiln-model
-KILN_DEBUG_FULL_ATTN_STATS_LABEL,1,crates/kiln-model/src/forward.rs:5271,no,yes,kiln-model
 KILN_DEBUG_GDN_STATE,1,crates/kiln-model/src/cuda_graph.rs:2690,no,yes,kiln-model
 KILN_DEBUG_LAYER_NORMS,1,crates/kiln-model/src/forward.rs:10069,no,yes,kiln-model
-KILN_DEBUG_ROCM_FLASH_FINITE,1,crates/kiln-flash-attn/src/rocm_sdpa.rs:151,no,no,kiln-flash-attn
-KILN_DEBUG_ROCM_FLASH_STATS_LABEL,1,crates/kiln-flash-attn/src/rocm_sdpa.rs:156,no,yes,kiln-flash-attn
-KILN_DEBUG_SFT_ACTIVE_ROWS,1,crates/kiln-train/src/trainer.rs:13700,yes,no,kiln-train
-KILN_DEBUG_SFT_REVERSE_SEGMENT_IDX,1,crates/kiln-train/src/trainer.rs:13959,no,yes,kiln-train
-KILN_DEBUG_TAPE_LINEAR_FINITE,1,crates/kiln-model/src/tape_forward.rs:45,yes,no,kiln-model
 KILN_DEFAULT_THINKING_BUDGET_MS,1,crates/kiln-server/src/config.rs:98,no,no,kiln-server
 KILN_DEFAULT_THINKING_BUDGET_TOKENS,1,crates/kiln-server/src/config.rs:96,no,no,kiln-server
 KILN_DETECT_ANOMALY,1,crates/kiln-autograd/src/anomaly.rs:78,no,no,kiln-autograd

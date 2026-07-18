@@ -2734,19 +2734,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_DEBUG_ROCM_FLASH_STATS_LABEL",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-flash-attn/src/rocm_sdpa.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "k",
       "argument_kind": "expression",
       "classification": "test_only",
@@ -2840,32 +2827,6 @@
       "api": "var",
       "argument": "name",
       "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-flce-kernel/src/kt_api.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DEBUG_FLCE_STATS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-flce-kernel/src/kt_api.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DEBUG_FLCE_STATS_LABEL",
-      "argument_kind": "literal",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
       "count": 1,
@@ -3631,32 +3592,6 @@
     },
     {
       "api": "env_flag",
-      "argument": "KILN_DEBUG_FULL_ATTN_FINITE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_DEBUG_SFT_FINITE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
       "argument": "KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL",
       "argument_kind": "literal",
       "classification": "experimental_debug",
@@ -3697,32 +3632,6 @@
     {
       "api": "var",
       "argument": "KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DEBUG_FULL_ATTN_STATS_LABEL",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DEBUG_SFT_STATS_LABEL",
       "argument_kind": "literal",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
@@ -4406,32 +4315,6 @@
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-model/src/rocm_w8_proj.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_DEBUG_SFT_FINITE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_DEBUG_TAPE_LINEAR_FINITE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
       "phase": "runtime",
       "surface": "source"
     },
@@ -6621,32 +6504,6 @@
     },
     {
       "api": "env_flag",
-      "argument": "KILN_DEBUG_SFT_ACTIVE_ROWS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_DEBUG_SFT_FINITE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
       "argument": "KILN_DISABLE_GRPO_SHARED_PREFIX_REF",
       "argument_kind": "literal",
       "classification": "experimental_debug",
@@ -6661,32 +6518,6 @@
     {
       "api": "var",
       "argument": "KILN_CP4_DEBUG",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DEBUG_SFT_REVERSE_SEGMENT_IDX",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DEBUG_SFT_STATS_LABEL",
       "argument_kind": "literal",
       "classification": "experimental_debug",
       "classification_basis": "runtime access outside the typed startup configuration boundary",
@@ -7036,11 +6867,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 280,
-    "literal_kiln_read_names": 152,
+    "literal_kiln_read_call_sites": 266,
+    "literal_kiln_read_names": 142,
     "literal_kiln_read_names_by_classification": {
       "build_time": 9,
-      "experimental_debug": 111,
+      "experimental_debug": 101,
       "public_stable": 1,
       "test_only": 41
     },
@@ -7050,13 +6881,13 @@
       "test_only": 247
     },
     "process_mutation_entries": 160,
-    "read_call_sites": 646,
+    "read_call_sites": 632,
     "read_call_sites_by_classification": {
       "build_time": 328,
-      "experimental_debug": 174,
+      "experimental_debug": 160,
       "public_stable": 9,
       "test_only": 135
     },
-    "read_entries": 380
+    "read_entries": 367
   }
 }

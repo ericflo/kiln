@@ -41,129 +41,10 @@ use crate::forward::{
 };
 use crate::lora_loader::LoraProjectionWeights;
 
-fn debug_tape_linear_finite_checks() -> bool {
-    kiln_core::env_flag::env_flag("KILN_DEBUG_TAPE_LINEAR_FINITE", false)
-        || kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_FINITE", false)
-}
-
-fn ensure_tape_linear_finite(
-    enabled: bool,
-    label: impl AsRef<str>,
-    tensor: &kiln_tensor::Tensor,
-) -> Result<()> {
-    if !enabled {
-        return Ok(());
-    }
-    let label = label.as_ref();
-    let finite = tensor
-        .all_finite()
-        .with_context(|| format!("tape linear finite check failed to scan {label}"))?;
-    anyhow::ensure!(
-        finite,
-        "tape linear non-finite tensor at {label}: dtype={} shape={:?} device={} contiguous={} start_offset={} strides={:?}",
-        tensor.dtype(),
-        tensor.shape(),
-        tensor.device(),
-        tensor.is_contiguous(),
-        tensor.layout().start_offset(),
-        tensor.strides(),
-    );
-    Ok(())
-}
-
 // The canonical scope machinery lives in `kiln-autograd` so model, kernel, and
 // training crates share one thread-local authority. Re-export it here for the
 // model forward call sites and integration tests.
 pub use kiln_autograd::{tape_scope_active, with_active_tape, with_thread_local_tape};
-
-fn tape_debug_sft_finite_checks() -> bool {
-    kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_FINITE", false)
-}
-
-fn ensure_tape_debug_finite(label: &str, tensor: &kiln_tensor::Tensor) -> Result<()> {
-    if !tape_debug_sft_finite_checks() {
-        return Ok(());
-    }
-    let finite = tensor
-        .all_finite()
-        .with_context(|| format!("tape finite check failed to scan {label}"))?;
-    if finite {
-        return Ok(());
-    }
-
-    let summary =
-        summarize_tape_debug_values(tensor).unwrap_or_else(|e| format!("stats_error={e}"));
-    anyhow::bail!(
-        "tape non-finite tensor at {label}: dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {}",
-        tensor.dtype(),
-        tensor.shape(),
-        tensor.device(),
-        tensor.is_contiguous(),
-        tensor.layout().start_offset(),
-        tensor.strides(),
-        summary,
-    );
-}
-
-fn summarize_tape_debug_values(tensor: &kiln_tensor::Tensor) -> Result<String> {
-    let host = tensor
-        .to_device(kiln_tensor::Device::Cpu)
-        .context("tape debug to cpu")?
-        .to_dtype(kiln_tensor::DType::F32)
-        .context("tape debug to f32")?
-        .contiguous()
-        .context("tape debug contiguous")?;
-    let values = host.to_vec::<f32>().context("tape debug to_vec")?;
-    let mut finite_count = 0usize;
-    let mut first_bad: Option<(usize, f32)> = None;
-    let mut max_abs = 0.0f32;
-    let mut max_abs_idx = 0usize;
-    for (idx, value) in values.iter().copied().enumerate() {
-        if value.is_finite() {
-            finite_count += 1;
-            let abs = value.abs();
-            if abs > max_abs {
-                max_abs = abs;
-                max_abs_idx = idx;
-            }
-        } else if first_bad.is_none() {
-            first_bad = Some((idx, value));
-        }
-    }
-
-    let shape = tensor.shape();
-    let coord = |mut idx: usize| -> Vec<usize> {
-        let mut out = vec![0usize; shape.len()];
-        for axis in (0..shape.len()).rev() {
-            let dim = shape[axis].max(1);
-            out[axis] = idx % dim;
-            idx /= dim;
-        }
-        out
-    };
-    let max_abs_coord = if values.is_empty() {
-        Vec::new()
-    } else {
-        coord(max_abs_idx)
-    };
-    let first_bad_summary = first_bad
-        .map(|(idx, value)| {
-            format!(
-                " first_bad_idx={idx} first_bad_coord={:?} first_bad={value}",
-                coord(idx)
-            )
-        })
-        .unwrap_or_default();
-    Ok(format!(
-        "finite_count={}/{} max_abs={:.8e} max_abs_idx={} max_abs_coord={:?}{}",
-        finite_count,
-        values.len(),
-        max_abs,
-        max_abs_idx,
-        max_abs_coord,
-        first_bad_summary
-    ))
-}
 
 fn tape_forward_device_supported(device: kiln_tensor::Device) -> bool {
     // Inference shares these forward helpers but never installs a tape. Check
@@ -1319,7 +1200,6 @@ pub fn try_tape_lora_add_kt(
         let base_2d = base_c
             .reshape(vec![rows, out_features])
             .map_err(|e| anyhow::anyhow!("kt base reshape -> 2d: {e}"))?;
-        ensure_tape_debug_finite("lora_add base_2d", &base_2d)?;
         tape.record(
             &base_2d,
             &[base],
@@ -1336,7 +1216,6 @@ pub fn try_tape_lora_add_kt(
         let x_2d = x_c
             .reshape(vec![rows, in_features])
             .map_err(|e| anyhow::anyhow!("kt x reshape -> 2d: {e}"))?;
-        ensure_tape_debug_finite("lora_add x_2d", &x_2d)?;
         tape.record(
             &x_2d,
             &[x],
@@ -1346,16 +1225,12 @@ pub fn try_tape_lora_add_kt(
         );
         let h_kt = kiln_tensor::ops::matmul_rhs_transposed(&x_2d, &a_kt)
             .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed x@a_t: {e}"))?;
-        ensure_tape_debug_finite("lora_add x_a_hidden", &h_kt)?;
         let d_kt = kiln_tensor::ops::matmul_rhs_transposed(&h_kt, &b_kt)
             .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed h@b_t: {e}"))?;
-        ensure_tape_debug_finite("lora_add h_b_delta_unscaled", &d_kt)?;
         let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
             .map_err(|e| anyhow::anyhow!("kt mul_scalar(scale): {e}"))?;
-        ensure_tape_debug_finite("lora_add delta_scaled", &delta_kt)?;
         let out_2d = kiln_tensor::ops::add(&base_2d, &delta_kt)
             .map_err(|e| anyhow::anyhow!("kt add(base, delta): {e}"))?;
-        ensure_tape_debug_finite("lora_add out_2d", &out_2d)?;
         tape.record(
             &out_2d,
             &[&base_2d, &x_2d, &a_kt, &b_kt],
@@ -1617,7 +1492,6 @@ fn try_tape_lora_linear_impl_kt(
         None => (None, None, None),
     };
     let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
-        let debug_finite = debug_tape_linear_finite_checks();
         let x_c = if x.is_contiguous() {
             x.clone()
         } else {
@@ -1676,7 +1550,6 @@ fn try_tape_lora_linear_impl_kt(
         } else {
             let base2d = kiln_tensor::ops::matmul(&x2d, weight_t)
                 .map_err(|e| anyhow::anyhow!("kt matmul x2d@w: {e}"))?;
-            ensure_tape_linear_finite(debug_finite, "base2d x2d@w", &base2d)?;
             tape.record(
                 &base2d,
                 &[&x2d],
@@ -1695,16 +1568,12 @@ fn try_tape_lora_linear_impl_kt(
             (Some(_proj), Some(a_kt), Some(b_input_kt), Some(b_forward_kt)) => {
                 let h_kt = kiln_tensor::ops::matmul_rhs_transposed(&x2d, a_kt)
                     .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed x@a_t: {e}"))?;
-                ensure_tape_linear_finite(debug_finite, "lora h x@a_t", &h_kt)?;
                 let d_kt = kiln_tensor::ops::matmul_rhs_transposed(&h_kt, b_forward_kt)
                     .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed h@b_t: {e}"))?;
-                ensure_tape_linear_finite(debug_finite, "lora d h@b_t", &d_kt)?;
                 let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
                     .map_err(|e| anyhow::anyhow!("kt mul_scalar(scale): {e}"))?;
-                ensure_tape_linear_finite(debug_finite, "lora delta scaled", &delta_kt)?;
                 let out2d = kiln_tensor::ops::add(&base2d, &delta_kt)
                     .map_err(|e| anyhow::anyhow!("kt add(base, delta): {e}"))?;
-                ensure_tape_linear_finite(debug_finite, "lora out2d base+delta", &out2d)?;
                 let backward = LoraDeltaAddBackward {
                     x: maybe_offload_matmul_a_saved_tensor(&x2d)
                         .context("try_tape_lora_linear_kt: save lora input")?,
@@ -1737,7 +1606,6 @@ fn try_tape_lora_linear_impl_kt(
         let out_kt = out2d_c
             .reshape(out_shape)
             .map_err(|e| anyhow::anyhow!("kt out reshape -> nd: {e}"))?;
-        ensure_tape_linear_finite(debug_finite, "linear out reshape", &out_kt)?;
         tape.record(
             &out_kt,
             &[&out2d],
@@ -1842,13 +1710,6 @@ impl BackwardOp for FlashAttnBackward {
                 "FlashAttnBackward: flash_attn_bwd_collapsed_gqa_kt: {e:?}"
             ))
         })?;
-        ensure_tape_debug_finite("flash_attn_bwd dq raw", &dq)
-            .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
-        ensure_tape_debug_finite("flash_attn_bwd dk collapsed", &dk)
-            .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
-        ensure_tape_debug_finite("flash_attn_bwd dv collapsed", &dv)
-            .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
-
         Ok(vec![Some(dq), Some(dk), Some(dv)])
     }
 }

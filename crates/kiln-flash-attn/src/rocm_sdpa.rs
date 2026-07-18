@@ -147,128 +147,6 @@ fn env_bool(name: &str) -> Option<bool> {
         })
 }
 
-fn debug_rocm_flash_finite_checks() -> bool {
-    env_bool("KILN_DEBUG_ROCM_FLASH_FINITE").unwrap_or(false)
-        || debug_rocm_flash_stats_labels().is_some()
-}
-
-fn debug_rocm_flash_stats_labels() -> Option<Vec<String>> {
-    let labels: Vec<String> = std::env::var("KILN_DEBUG_ROCM_FLASH_STATS_LABEL")
-        .ok()?
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-        .collect();
-    (!labels.is_empty()).then_some(labels)
-}
-
-fn debug_rocm_flash_label_matches(label: &str, filters: Option<&[String]>) -> bool {
-    filters
-        .map(|filters| filters.iter().any(|filter| label.contains(filter)))
-        .unwrap_or(true)
-}
-
-fn ensure_debug_finite(
-    enabled: bool,
-    label: impl AsRef<str>,
-    tensor: &KtTensor,
-) -> Result<(), FlashAttnError> {
-    if !enabled {
-        return Ok(());
-    }
-    let label = label.as_ref();
-    let stats_filters = debug_rocm_flash_stats_labels();
-    if !debug_rocm_flash_label_matches(label, stats_filters.as_deref()) {
-        return Ok(());
-    }
-    let (finite, value_summary) = if stats_filters.is_some() {
-        summarize_debug_values(tensor)
-            .map_err(|e| FlashAttnError::Msg(format!("rocm online sdpa scan {label}: {e}")))?
-    } else {
-        let finite = map_kt(tensor.all_finite())
-            .map_err(|e| FlashAttnError::Msg(format!("rocm online sdpa scan {label}: {e}")))?;
-        let value_summary = if finite {
-            String::new()
-        } else {
-            summarize_debug_values(tensor)
-                .map(|(_, summary)| summary)
-                .unwrap_or_else(|e| format!("stats_error={e}"))
-        };
-        (finite, value_summary)
-    };
-    if stats_filters.is_some() {
-        eprintln!(
-            "kiln_rocm_online_stats label={label} dtype={} shape={:?} device={} contiguous={} start_offset={} strides={:?} {value_summary}",
-            tensor.dtype(),
-            tensor.shape(),
-            tensor.device(),
-            tensor.is_contiguous(),
-            tensor.layout().start_offset(),
-            tensor.strides(),
-        );
-    }
-    if finite {
-        return Ok(());
-    }
-    Err(FlashAttnError::Msg(format!(
-        "rocm online sdpa non-finite at {label}: dtype={} shape={:?} device={} contiguous={} start_offset={} strides={:?} {value_summary}",
-        tensor.dtype(),
-        tensor.shape(),
-        tensor.device(),
-        tensor.is_contiguous(),
-        tensor.layout().start_offset(),
-        tensor.strides(),
-    )))
-}
-
-fn summarize_debug_values(tensor: &KtTensor) -> Result<(bool, String), kiln_tensor::Error> {
-    let host = tensor
-        .to_device(KtDevice::Cpu)?
-        .to_dtype(KtDType::F32)?
-        .contiguous()?;
-    let values = host.to_vec::<f32>()?;
-    let mut first_bad: Option<(usize, f32)> = None;
-    let mut max_abs = 0.0f32;
-    let mut max_abs_idx = 0usize;
-    for (idx, value) in values.iter().copied().enumerate() {
-        if value.is_finite() {
-            let abs = value.abs();
-            if abs > max_abs {
-                max_abs = abs;
-                max_abs_idx = idx;
-            }
-        } else if first_bad.is_none() {
-            first_bad = Some((idx, value));
-        }
-    }
-    let shape = tensor.shape();
-    let coord = |mut idx: usize| -> Vec<usize> {
-        let mut out = vec![0usize; shape.len()];
-        for axis in (0..shape.len()).rev() {
-            let dim = shape[axis].max(1);
-            out[axis] = idx % dim;
-            idx /= dim;
-        }
-        out
-    };
-    let (bad_idx, bad_value) = first_bad.unwrap_or((usize::MAX, f32::NAN));
-    let summary = format!(
-        "first_bad_flat={} first_bad_coord={:?} first_bad_value={} max_finite_abs={} max_finite_abs_flat={} max_finite_abs_coord={:?}",
-        bad_idx,
-        if bad_idx == usize::MAX {
-            Vec::new()
-        } else {
-            coord(bad_idx)
-        },
-        bad_value,
-        max_abs,
-        max_abs_idx,
-        coord(max_abs_idx)
-    );
-    Ok((first_bad.is_none(), summary))
-}
-
 fn rocm_sync_device(device: KtDevice) -> Result<(), FlashAttnError> {
     if kiln_tensor::rocm_capture_arena_active() {
         return Ok(());
@@ -310,7 +188,6 @@ fn rocm_matmul_split_inner_f32(
     lhs: &KtTensor,
     rhs: &KtTensor,
     device: KtDevice,
-    debug_finite: bool,
     label: &str,
 ) -> Result<KtTensor, FlashAttnError> {
     let lhs_shape = lhs.shape();
@@ -346,23 +223,8 @@ fn rocm_matmul_split_inner_f32(
         let lhs_block = rocm_contig(&map_kt(lhs.narrow(2, start, len))?)?;
         let rhs_block = rocm_contig(&map_kt(rhs.narrow(1, start, len))?)?;
         rocm_sync_device(device)?;
-        ensure_debug_finite(
-            debug_finite,
-            format!("{label} lhs inner [{start}, {})", start + len),
-            &lhs_block,
-        )?;
-        ensure_debug_finite(
-            debug_finite,
-            format!("{label} rhs inner [{start}, {})", start + len),
-            &rhs_block,
-        )?;
         let partial = rocm_matmul_f32_batch_grouped(&lhs_block, &rhs_block, device, label)?;
         rocm_sync_device(device)?;
-        ensure_debug_finite(
-            debug_finite,
-            format!("{label} partial inner [{start}, {})", start + len),
-            &partial,
-        )?;
         acc = Some(match acc.take() {
             Some(prev) => {
                 let sum = map_kt(prev.add(&partial))?;
@@ -377,7 +239,6 @@ fn rocm_matmul_split_inner_f32(
     }
 
     let out = acc.ok_or_else(|| FlashAttnError::Msg(format!("{label}: empty inner dimension")))?;
-    ensure_debug_finite(debug_finite, label, &out)?;
     Ok(out)
 }
 
@@ -1452,7 +1313,6 @@ fn sdpa_forward_online_tiled(
         return sdpa_forward(q, k, v, b, sq, sk, h, hk, d, scale, causal);
     }
 
-    let debug_finite = debug_rocm_flash_finite_checks();
     let device = q.device();
     let bh = b
         .checked_mul(h)
@@ -1491,14 +1351,6 @@ fn sdpa_forward_online_tiled(
     let k3 = map_kt(k_bhsd.reshape(vec![bh, sk, d]))?;
     let v3 = map_kt(v_bhsd.reshape(vec![bh, sk, d]))?;
     let v3f = rocm_cast_to(&v3, KtDType::F32)?;
-    ensure_debug_finite(debug_finite, "online q3", &q3)?;
-    ensure_debug_finite(debug_finite, "online k3", &k3)?;
-    ensure_debug_finite(debug_finite, "online v3f", &v3f)?;
-    if debug_finite {
-        eprintln!(
-            "kiln_rocm_online_sdpa b={b} sq={sq} sk={sk} h={h} hk={hk} d={d} causal={causal} causal_offset={causal_offset}",
-        );
-    }
 
     let mut out_tiles = Vec::new();
     let mut lse_tiles = Vec::new();
@@ -1517,23 +1369,12 @@ fn sdpa_forward_online_tiled(
 
         let q_tile = rocm_contig(&map_kt(q3.narrow(1, q_start, q_len))?)?;
         rocm_sync_device(device)?;
-        let q_sentinel = if debug_finite && q_start == 0 && q_len < sq {
-            Some((q_len, (sq - q_len).min(q_tile_cap).max(1)))
-        } else {
-            None
-        };
         let row_m_zero = map_kt(KtTensor::zeros(vec![rows], KtDType::F32, device))?;
         let row_m = map_kt(kiln_tensor::ops::full_like(&row_m_zero, f32::NEG_INFINITY))?;
         let row_l = map_kt(KtTensor::zeros(vec![rows], KtDType::F32, device))?;
         let alpha = map_kt(KtTensor::zeros(vec![rows], KtDType::F32, device))?;
         let beta = map_kt(KtTensor::zeros(vec![rows], KtDType::F32, device))?;
         let acc = map_kt(KtTensor::zeros(vec![bh, q_len, d], KtDType::F32, device))?;
-        ensure_debug_finite(
-            debug_finite,
-            format!("online q_tile q_start={q_start} q_len={q_len}"),
-            &q_tile,
-        )?;
-        ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "after_q_tile_copy")?;
 
         let block_limit = if causal {
             causal_block_limit(sk, q_start, q_len, causal_offset)
@@ -1546,17 +1387,6 @@ fn sdpa_forward_online_tiled(
             let k_block = rocm_contig(&map_kt(k3.narrow(1, k_start, k_len))?)?;
             let v_block = rocm_contig(&map_kt(v3f.narrow(1, k_start, k_len))?)?;
             rocm_sync_device(device)?;
-            ensure_debug_finite(
-                debug_finite,
-                format!("online k_block q_start={q_start} k_start={k_start} k_len={k_len}"),
-                &k_block,
-            )?;
-            ensure_debug_finite(
-                debug_finite,
-                format!("online v_block q_start={q_start} k_start={k_start} k_len={k_len}"),
-                &v_block,
-            )?;
-            ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "after_kv_block_copy")?;
 
             let scores = rocm_matmul_rhs_transposed_to_dtype_batch_grouped(
                 &q_tile,
@@ -1566,12 +1396,6 @@ fn sdpa_forward_online_tiled(
                 &format!("online qk q_start={q_start} k_start={k_start}"),
             )?;
             rocm_sync_device(device)?;
-            ensure_debug_finite(
-                debug_finite,
-                format!("online qk q_start={q_start} k_start={k_start}"),
-                &scores,
-            )?;
-            ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "after_qk_matmul")?;
             let scores = scale_mask_scores_f32(
                 scores,
                 bh,
@@ -1584,20 +1408,8 @@ fn sdpa_forward_online_tiled(
                 causal,
             )?;
             rocm_sync_device(device)?;
-            ensure_debug_finite(
-                debug_finite,
-                format!("online scaled_scores q_start={q_start} k_start={k_start}"),
-                &scores,
-            )?;
-            ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "after_scale_mask")?;
             let block_m = map_kt(kiln_tensor::rocm_max_axis(&scores, 2))?;
             rocm_sync_device(device)?;
-            ensure_debug_finite(
-                debug_finite,
-                format!("online block_m q_start={q_start} k_start={k_start}"),
-                &block_m,
-            )?;
-            ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "after_block_m")?;
             let probs = exp_mask_scores_f32(
                 scores,
                 &block_m,
@@ -1610,32 +1422,14 @@ fn sdpa_forward_online_tiled(
                 causal,
             )?;
             rocm_sync_device(device)?;
-            ensure_debug_finite(
-                debug_finite,
-                format!("online probs q_start={q_start} k_start={k_start}"),
-                &probs,
-            )?;
-            ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "after_exp_mask")?;
             let block_l = map_kt(kiln_tensor::rocm_sum_axis(&probs, 2))?;
             let block_out = rocm_matmul_split_inner_f32(
                 &probs,
                 &v_block,
                 device,
-                debug_finite,
                 &format!("online block_out q_start={q_start} k_start={k_start}"),
             )?;
             rocm_sync_device(device)?;
-            ensure_debug_finite(
-                debug_finite,
-                format!("online block_l q_start={q_start} k_start={k_start}"),
-                &block_l,
-            )?;
-            ensure_debug_finite(
-                debug_finite,
-                format!("online block_out q_start={q_start} k_start={k_start}"),
-                &block_out,
-            )?;
-            ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "after_block_out")?;
             let block_m_flat = map_kt(block_m.reshape(vec![rows]))?;
             let block_l_flat = map_kt(block_l.reshape(vec![rows]))?;
 
@@ -1656,20 +1450,8 @@ fn sdpa_forward_online_tiled(
                 rows,
             )?;
             rocm_sync_device(device)?;
-            ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "after_update_state")?;
             online_update_acc_f32(&acc, &block_out, &alpha, &beta, rows, d)?;
             rocm_sync_device(device)?;
-            ensure_debug_finite(
-                debug_finite,
-                format!("online row_l q_start={q_start} k_start={k_start}"),
-                &row_l,
-            )?;
-            ensure_debug_finite(
-                debug_finite,
-                format!("online acc q_start={q_start} k_start={k_start}"),
-                &acc,
-            )?;
-            ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "after_update_acc")?;
 
             k_start += k_len;
             rocm_attention_cooperative_yield(device)?;
@@ -1683,31 +1465,10 @@ fn sdpa_forward_online_tiled(
         // Keep the online state tensors alive and ordered until final output
         // materialization has consumed them.
         rocm_sync_device(device)?;
-        ensure_debug_finite(
-            debug_finite,
-            format!("online out3 q_start={q_start} q_len={q_len}"),
-            &out3,
-        )?;
-        ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "after_finalize")?;
         let out_tile = bhsd3_to_bshd_bf16(&out3, b, h, q_len, d)?;
         rocm_sync_device(device)?;
-        ensure_debug_finite(
-            debug_finite,
-            format!("online out_tile q_start={q_start} q_len={q_len}"),
-            &out_tile,
-        )?;
-        ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "after_out_transpose_cast")?;
         out_tiles.push(out_tile);
         lse_tiles.push(map_kt(lse2.reshape(vec![b, h, q_len]))?);
-
-        if debug_finite {
-            ensure_debug_finite(
-                true,
-                format!("online q_tile source post q_start={q_start} q_len={q_len}"),
-                &q_tile,
-            )?;
-            ensure_online_q_sentinel(debug_finite, &q3, q_sentinel, "post_tile")?;
-        }
 
         q_start += q_len;
     }
@@ -1717,29 +1478,7 @@ fn sdpa_forward_online_tiled(
     let out = map_kt(KtTensor::cat(&out_refs, 1))?;
     let lse = map_kt(KtTensor::cat(&lse_refs, 2))?;
     rocm_sync_device(device)?;
-    ensure_debug_finite(debug_finite, "online out_cat", &out)?;
-    ensure_debug_finite(debug_finite, "online lse_cat", &lse)?;
     Ok((out, lse))
-}
-
-fn ensure_online_q_sentinel(
-    debug_finite: bool,
-    q3: &KtTensor,
-    sentinel: Option<(usize, usize)>,
-    label: &str,
-) -> Result<(), FlashAttnError> {
-    if !debug_finite {
-        return Ok(());
-    }
-    let Some((q_start, q_len)) = sentinel else {
-        return Ok(());
-    };
-    let q_tile = rocm_contig(&map_kt(q3.narrow(1, q_start, q_len))?)?;
-    ensure_debug_finite(
-        true,
-        format!("online q_sentinel {label} q_start={q_start} q_len={q_len}"),
-        &q_tile,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1896,7 +1635,6 @@ pub fn sdpa_forward(
     scale: f32,
     causal: bool,
 ) -> Result<(KtTensor, KtTensor), FlashAttnError> {
-    let debug_finite = debug_rocm_flash_finite_checks();
     let device = q.device();
     // Reservation ownership lives at the score allocator, not at a route or
     // tile planner. Query tiling therefore acquires exactly once per live tile,
@@ -1928,9 +1666,7 @@ pub fn sdpa_forward(
     // 3. scores = (q @ k^T) * scale  -> [b*h, sq, sk]
     let kt3 = rocm_contig(&map_kt(k3.transpose(1, 2))?)?; // [b*h, d, sk]
     let qk = map_kt(kiln_tensor::rocm_matmul_to_dtype(&q3, &kt3, KtDType::F32))?; // [b*h, sq, sk] f32
-    ensure_debug_finite(debug_finite, "materialized qk", &qk)?;
     let scaled_scores = map_kt(kiln_tensor::rocm_scalar_op(&qk, SCALAR_MUL, scale))?;
-    ensure_debug_finite(debug_finite, "materialized scaled_scores", &scaled_scores)?;
 
     // 4. causal mask (additive via masked_fill with -inf above the diagonal).
     //    For sq == 1 (decode) the single query attends ALL keys 0..sk, so the
@@ -1947,22 +1683,15 @@ pub fn sdpa_forward(
     } else {
         scaled_scores.clone()
     };
-    ensure_debug_finite(debug_finite, "materialized masked_scores", &masked_scores)?;
-
     // 5. p = softmax(scores) over last axis -> [b*h, sq, sk]; lse from scores+p.
     let p = map_kt(kiln_tensor::rocm_softmax_last_axis(&masked_scores))?; // [b*h, sq, sk] f32
-    ensure_debug_finite(debug_finite, "materialized softmax", &p)?;
     let lse = compute_lse(&masked_scores, &p, b, h, sq, device)?; // [b, h, sq] f32
-    ensure_debug_finite(debug_finite, "materialized lse", &lse)?;
 
     // 6. out = p @ v -> [b*h, sq, d]; reshape/transpose back to [b, sq, h, d].
-    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, device, debug_finite, "materialized out3")?; // [b*h, sq, d] f32
-    ensure_debug_finite(debug_finite, "materialized out3", &out3)?;
+    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, device, "materialized out3")?; // [b*h, sq, d] f32
     let out_bhsd = map_kt(out3.reshape(vec![b, h, sq, d]))?; // [b, h, sq, d]
     let out_bshd = rocm_contig(&map_kt(out_bhsd.transpose(1, 2))?)?; // [b, sq, h, d]
-    ensure_debug_finite(debug_finite, "materialized out_bshd", &out_bshd)?;
     let out_bf16 = rocm_cast_to(&out_bshd, KtDType::BF16)?; // [b, sq, h, d] bf16
-    ensure_debug_finite(debug_finite, "materialized out_bf16", &out_bf16)?;
 
     // The composite path is a chain of async ROCm kernels over large temporary
     // score/probability tensors. Synchronize before returning so those
@@ -1994,7 +1723,6 @@ pub fn sdpa_forward_head_major(
     scale: f32,
     causal: bool,
 ) -> Result<(KtTensor, KtTensor), FlashAttnError> {
-    let debug_finite = debug_rocm_flash_finite_checks();
     let device = q.device();
     let _score_scratch_reservation = reserve_materialized_score_scratch(
         device,
@@ -2036,7 +1764,7 @@ pub fn sdpa_forward_head_major(
     let p = map_kt(kiln_tensor::rocm_softmax_last_axis(&masked_scores))?;
     let lse = compute_lse(&masked_scores, &p, b, h, sq, device)?;
 
-    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, device, debug_finite, "head-major out3")?;
+    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, device, "head-major out3")?;
     let out_bhsd = map_kt(out3.reshape(vec![b, h, sq, d]))?;
     let out_bf16 = rocm_cast_to(&out_bhsd, KtDType::BF16)?;
 
@@ -3459,8 +3187,7 @@ fn sdpa_forward_dyn_tail(
     let scores = map_kt(kiln_tensor::rocm_masked_fill(&scores, &mask_t, NEG_FILL))?;
 
     let p = map_kt(kiln_tensor::rocm_softmax_last_axis(&scores))?;
-    let debug_finite = debug_rocm_flash_finite_checks();
-    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, device, debug_finite, "dyn-tail out3")?; // [b*h, 1, d]
+    let out3 = rocm_matmul_split_inner_f32(&p, &v3f, device, "dyn-tail out3")?; // [b*h, 1, d]
     let out_bhsd = map_kt(out3.reshape(vec![b, h, sq, d]))?;
     let out_bshd = rocm_contig(&map_kt(out_bhsd.transpose(1, 2))?)?; // [b, 1, h, d]
     rocm_cast_to(&out_bshd, KtDType::BF16)
@@ -3931,7 +3658,6 @@ fn materialized_bwd_composite_rocm_impl(
     let memory_plan = validate_full_materialized_bwd_admission(available_bytes, b, h, sq, sk, d)?;
     let _memory_reservation =
         reserve_published_rocm_bytes(memory_plan.peak_bytes, "full materialized backward")?;
-    let debug_finite = debug_rocm_flash_finite_checks();
     let bh = b.checked_mul(h).ok_or_else(|| {
         FlashAttnError::Msg("ROCm full materialized backward batch/head overflow".into())
     })?;
@@ -3983,7 +3709,7 @@ fn materialized_bwd_composite_rocm_impl(
     // dv = p^T @ dout   -> [b*h, sk, d]
     let dv3 = {
         let pt = rocm_contig(&map_kt(p.transpose(1, 2))?)?; // [b*h, sk, sq]
-        let dv3 = rocm_matmul_split_inner_f32(&pt, &do3, device, debug_finite, "bwd dv3")?; // [b*h, sk, d]
+        let dv3 = rocm_matmul_split_inner_f32(&pt, &do3, device, "bwd dv3")?; // [b*h, sk, d]
         drop(pt);
         dv3
     };
@@ -4014,13 +3740,13 @@ fn materialized_bwd_composite_rocm_impl(
     };
 
     // dq = ds @ k * scale   -> [b*h, sq, d]
-    let dq3 = rocm_matmul_split_inner_f32(&ds, &k3, device, debug_finite, "bwd dq3")?; // [b*h, sq, d]
+    let dq3 = rocm_matmul_split_inner_f32(&ds, &k3, device, "bwd dq3")?; // [b*h, sq, d]
     let dq3 = map_kt(kiln_tensor::rocm_scalar_op(&dq3, SCALAR_MUL, softmax_scale))?;
 
     // dk = ds^T @ q * scale -> [b*h, sk, d]
     let dst = rocm_contig(&map_kt(ds.transpose(1, 2))?)?; // [b*h, sk, sq]
     drop(ds);
-    let dk3 = rocm_matmul_split_inner_f32(&dst, &q3, device, debug_finite, "bwd dk3")?; // [b*h, sk, d]
+    let dk3 = rocm_matmul_split_inner_f32(&dst, &q3, device, "bwd dk3")?; // [b*h, sk, d]
     drop(dst);
     let dk3 = map_kt(kiln_tensor::rocm_scalar_op(&dk3, SCALAR_MUL, softmax_scale))?;
 
@@ -4085,7 +3811,6 @@ fn materialized_bwd_query_tiled_rocm(
     let _memory_reservation =
         reserve_published_rocm_bytes(operation_peak_bytes, "materialized query-tiled backward")?;
     let planned_tile = memory_plan.query_tile;
-    let debug_finite = debug_rocm_flash_finite_checks();
     let bh = b.checked_mul(h).ok_or_else(|| {
         FlashAttnError::Msg("ROCm materialized backward batch/head overflow".into())
     })?;
@@ -4143,8 +3868,7 @@ fn materialized_bwd_query_tiled_rocm(
 
         let dv_tile = {
             let pt = rocm_contig(&map_kt(p.transpose(1, 2))?)?; // [b*h, sk, tile_len]
-            let dv =
-                rocm_matmul_split_inner_f32(&pt, &do_tile, device, debug_finite, "bwd tiled dv")?; // [b*h, sk, d]
+            let dv = rocm_matmul_split_inner_f32(&pt, &do_tile, device, "bwd tiled dv")?; // [b*h, sk, d]
             drop(pt);
             dv
         };
@@ -4164,7 +3888,7 @@ fn materialized_bwd_query_tiled_rocm(
         drop(p);
         drop(dp_minus);
 
-        let dq_tile = rocm_matmul_split_inner_f32(&ds, &k3, device, debug_finite, "bwd tiled dq")?; // [b*h, tile_len, d]
+        let dq_tile = rocm_matmul_split_inner_f32(&ds, &k3, device, "bwd tiled dq")?; // [b*h, tile_len, d]
         let dq_tile = map_kt(kiln_tensor::rocm_scalar_op(
             &dq_tile,
             SCALAR_MUL,
@@ -4174,8 +3898,7 @@ fn materialized_bwd_query_tiled_rocm(
 
         let dk_tile = {
             let dst = rocm_contig(&map_kt(ds.transpose(1, 2))?)?; // [b*h, sk, tile_len]
-            let dk =
-                rocm_matmul_split_inner_f32(&dst, &q_tile, device, debug_finite, "bwd tiled dk")?; // [b*h, sk, d]
+            let dk = rocm_matmul_split_inner_f32(&dst, &q_tile, device, "bwd tiled dk")?; // [b*h, sk, d]
             drop(dst);
             map_kt(kiln_tensor::rocm_scalar_op(&dk, SCALAR_MUL, softmax_scale))?
         };

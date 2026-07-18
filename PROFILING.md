@@ -54,8 +54,8 @@
 > `KILN_TRACE_FULL_ATTN_STAGE_TIMINGS` added unconditional host clocks and
 > optional per-tile stderr branches to chunked prefill. Current source retains
 > the structured tile-plan event, exact flash eligibility and fallback logic,
-> finite-value checks, and handoff synchronization, but no longer recognizes
-> these investigation controls. Historical trace output remains evidence only.
+> and handoff synchronization, but no longer recognizes these investigation
+> controls. Historical trace output remains evidence only.
 
 > **Synchronized GDN, full-attention, and MLP stage profilers were retired on
 > 2026-07-17.** `KILN_PROFILE_GDN_STAGES`,
@@ -64,8 +64,8 @@
 > accelerator queue drains, and stderr output. They were intrusive
 > target-selection probes rather than product observability and have no typed
 > replacements. Current source retains the same tensor operations, route
-> decisions, MLP/GDN finite-value diagnostics, tensor-handoff boundaries, and
-> NVTX ranges without the synchronized wrappers. Historical audit commands and
+> decisions, tensor-handoff boundaries, and NVTX ranges without the synchronized
+> wrappers. Historical audit commands and
 > measurements using these names remain evidence only; current source no longer
 > recognizes the controls.
 
@@ -92,9 +92,26 @@
 > the compute stream at 22 timing boundaries, perturbing the work they measured.
 > Current source retains the same LoRA gradients, decode routes, state assembly
 > and scatter, Metal graph operations, ROCm memory admission, attention math,
-> finite-value diagnostics, structured product counters, and NVTX ranges without
-> those investigation branches. Historical commands and measurements remain
+> structured product counters, and NVTX ranges without those investigation
+> branches. Historical commands and measurements remain
 > evidence only; current source no longer recognizes the controls.
+
+> **Intrusive tensor-scan debug controls were retired on 2026-07-17.**
+> `KILN_DEBUG_FLCE_STATS`, `KILN_DEBUG_FLCE_STATS_LABEL`,
+> `KILN_DEBUG_FULL_ATTN_FINITE`, `KILN_DEBUG_FULL_ATTN_STATS_LABEL`,
+> `KILN_DEBUG_ROCM_FLASH_FINITE`, `KILN_DEBUG_ROCM_FLASH_STATS_LABEL`,
+> `KILN_DEBUG_SFT_ACTIVE_ROWS`, `KILN_DEBUG_SFT_FINITE`,
+> `KILN_DEBUG_SFT_REVERSE_SEGMENT_IDX`, `KILN_DEBUG_SFT_STATS_LABEL`, and
+> `KILN_DEBUG_TAPE_LINEAR_FINITE` were investigation backdoors rather than
+> product configuration. Depending on the selected label, they scanned full
+> activations, copied device tensors to the host, synchronized accelerator work,
+> printed tensor statistics to stderr, gathered extra SFT rows, or replaced a
+> training step with an early-return synthetic reverse pass. They have no typed
+> replacement. Current source retains required producer/consumer
+> synchronization, scalar SFT loss validation, gradient-contract validation and
+> failure summaries, normal route errors, structured product observability, and
+> NVTX ranges. Historical reports remain evidence only; current source no longer
+> recognizes these controls.
 
 > **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger

@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **646 direct read call sites** and
+The scanner records **632 direct read call sites** and
 **255 process-mutation call sites**. It can
-statically name **152 distinct literal `KILN_*`
-read names** across **280 call sites**.
+statically name **142 distinct literal `KILN_*`
+read names** across **266 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 174 | 111 | 0 |
+| Experimental/debug migration | 160 | 101 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
 | Test only | 135 | 41 | 247 |
 
@@ -56,27 +56,26 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/forward.rs` | 32 | 27 |
+| `crates/kiln-model/src/forward.rs` | 28 | 23 |
 | `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
 | `crates/kiln-model/src/backend/rocm.rs` | 11 | 9 |
 | `crates/kiln-model/src/backend/capability.rs` | 9 | 1 |
 | `crates/kiln-server/src/bench.rs` | 9 | 8 |
-| `crates/kiln-model/src/tape_forward.rs` | 8 | 7 |
-| `crates/kiln-train/src/trainer.rs` | 7 | 7 |
 | `crates/kiln-model/src/cuda_graph.rs` | 5 | 5 |
 | `crates/kiln-model/src/metal_graph.rs` | 5 | 3 |
+| `crates/kiln-model/src/tape_forward.rs` | 5 | 5 |
 | `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs` | 5 | 2 |
 | `crates/kiln-model/src/generate.rs` | 4 | 3 |
 | `crates/kiln-model/src/rocm_w8_proj.rs` | 4 | 4 |
 | `crates/kiln-tensor/csrc/paged_decode_meta.cu` | 4 | 2 |
 | `crates/kiln-tensor/src/rocm_ops/paged_decode_meta.rs` | 4 | 4 |
 | `crates/kiln-train/src/lib.rs` | 4 | 4 |
-| `crates/kiln-flash-attn/src/rocm_sdpa.rs` | 3 | 1 |
-| `crates/kiln-flce-kernel/src/kt_api.rs` | 3 | 2 |
 | `crates/kiln-model/src/marlin_proj.rs` | 3 | 3 |
 | `crates/kiln-train/src/opd.rs` | 3 | 3 |
+| `crates/kiln-train/src/trainer.rs` | 3 | 3 |
 | `crates/kiln-core/src/env_flag.rs` | 2 | 0 |
 | `crates/kiln-flash-attn/csrc/rocm_flash_api.cpp` | 2 | 0 |
+| `crates/kiln-flash-attn/src/rocm_sdpa.rs` | 2 | 0 |
 | `crates/kiln-model/src/backend/metal_config.rs` | 2 | 0 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | 2 | 0 |
 | `crates/kiln-server/src/cli.rs` | 2 | 0 |
@@ -90,6 +89,7 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-core/src/config_hashes.rs` | 1 | 0 |
 | `crates/kiln-eval/src/scorers/python_doctest.rs` | 1 | 1 |
 | `crates/kiln-flash-attn/src/kt_api.rs` | 1 | 1 |
+| `crates/kiln-flce-kernel/src/kt_api.rs` | 1 | 0 |
 | `crates/kiln-memory/src/vram.rs` | 1 | 0 |
 | `crates/kiln-model/src/backend/metal_attention.rs` | 1 | 0 |
 | `crates/kiln-model/src/c1_attr.rs` | 1 | 1 |
@@ -130,16 +130,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_CUDA_GRAPH_CACHE_MAX` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
 | `KILN_CUDA_GRAPH_STABLE_PAGED_METADATA` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
 | `KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DEBUG_FLCE_STATS` | Experimental/debug migration | 1 | `crates/kiln-flce-kernel/src/kt_api.rs` |
-| `KILN_DEBUG_FLCE_STATS_LABEL` | Experimental/debug migration | 1 | `crates/kiln-flce-kernel/src/kt_api.rs` |
-| `KILN_DEBUG_FULL_ATTN_FINITE` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DEBUG_FULL_ATTN_STATS_LABEL` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DEBUG_ROCM_FLASH_STATS_LABEL` | Experimental/debug migration | 1 | `crates/kiln-flash-attn/src/rocm_sdpa.rs` |
-| `KILN_DEBUG_SFT_ACTIVE_ROWS` | Experimental/debug migration | 1 | `crates/kiln-train/src/trainer.rs` |
-| `KILN_DEBUG_SFT_FINITE` | Experimental/debug migration | 4 | `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/tape_forward.rs`, `crates/kiln-train/src/trainer.rs` |
-| `KILN_DEBUG_SFT_REVERSE_SEGMENT_IDX` | Experimental/debug migration | 1 | `crates/kiln-train/src/trainer.rs` |
-| `KILN_DEBUG_SFT_STATS_LABEL` | Experimental/debug migration | 2 | `crates/kiln-model/src/forward.rs`, `crates/kiln-train/src/trainer.rs` |
-| `KILN_DEBUG_TAPE_LINEAR_FINITE` | Experimental/debug migration | 1 | `crates/kiln-model/src/tape_forward.rs` |
 | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/capability.rs` |
 | `KILN_DETECT_ANOMALY` | Experimental/debug migration | 1 | `crates/kiln-autograd/src/anomaly.rs` |
 | `KILN_DETERMINISTIC` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/determinism.rs` |

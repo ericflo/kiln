@@ -1377,11 +1377,8 @@ fn attention_output_gate_decode_if(
         }
     }
 
-    let debug_finite = debug_full_attn_finite_checks();
     let sigmoid_gate = cuda_sigmoid(gate)?;
-    ensure_full_attn_debug_finite(debug_finite, "attention output gate sigmoid", &sigmoid_gate)?;
     let gated_output = (attn_output * sigmoid_gate)?;
-    ensure_full_attn_debug_finite(debug_finite, "attention output gate output", &gated_output)?;
     Ok(gated_output)
 }
 
@@ -4989,274 +4986,6 @@ pub fn tape_streaming_tile_tokens_for(device: &Device) -> usize {
     StreamingPrefillExecutionPolicy::for_device(*device).tape_tile_tokens()
 }
 
-fn debug_full_attn_finite_checks() -> bool {
-    kiln_core::env_flag::env_flag("KILN_DEBUG_FULL_ATTN_FINITE", false)
-        || kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_FINITE", false)
-}
-
-fn debug_full_attn_stats_label() -> Option<String> {
-    std::env::var("KILN_DEBUG_FULL_ATTN_STATS_LABEL")
-        .or_else(|_| std::env::var("KILN_DEBUG_SFT_STATS_LABEL"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn debug_full_attn_label_matches(label: &str, filter: Option<&String>) -> bool {
-    filter
-        .map(|filter| {
-            filter
-                .split(',')
-                .map(str::trim)
-                .filter(|needle| !needle.is_empty())
-                .any(|needle| match needle.strip_prefix('=') {
-                    Some(exact) => label == exact,
-                    None => label.contains(needle),
-                })
-        })
-        .unwrap_or(true)
-}
-
-fn ensure_full_attn_debug_finite(
-    enabled: bool,
-    label: impl AsRef<str>,
-    tensor: &Tensor,
-) -> Result<()> {
-    if !enabled {
-        return Ok(());
-    }
-    let label = label.as_ref();
-    let stats_filter = debug_full_attn_stats_label();
-    let (finite, value_summary) = if debug_full_attn_label_matches(label, stats_filter.as_ref()) {
-        let (finite, value_summary) = if stats_filter.is_some() {
-            summarize_full_attn_debug_values(tensor)
-                .with_context(|| format!("full-attention finite check failed to scan {label}"))?
-        } else {
-            let finite = tensor
-                .all_finite()
-                .with_context(|| format!("full-attention finite check failed to scan {label}"))?;
-            let value_summary = if finite {
-                String::new()
-            } else {
-                describe_full_attn_debug_values(tensor)
-                    .unwrap_or_else(|e| format!("stats_error={e}"))
-            };
-            (finite, value_summary)
-        };
-        if stats_filter.is_some() {
-            eprintln!(
-                "kiln_full_attn_stats label={label} dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {value_summary}",
-                tensor.dtype(),
-                tensor.shape(),
-                tensor.device(),
-                tensor.is_contiguous(),
-                tensor.layout().start_offset(),
-                tensor.strides(),
-            );
-        }
-        (finite, value_summary)
-    } else {
-        return Ok(());
-    };
-    anyhow::ensure!(
-        finite,
-        "full-attention non-finite tensor at {label}: dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {}",
-        tensor.dtype(),
-        tensor.shape(),
-        tensor.device(),
-        tensor.is_contiguous(),
-        tensor.layout().start_offset(),
-        tensor.strides(),
-        value_summary,
-    );
-    Ok(())
-}
-
-fn ensure_full_attn_debug_no_nan(
-    enabled: bool,
-    label: impl AsRef<str>,
-    tensor: &Tensor,
-) -> Result<()> {
-    if !enabled {
-        return Ok(());
-    }
-    let label = label.as_ref();
-    let stats_filter = debug_full_attn_stats_label();
-    if !debug_full_attn_label_matches(label, stats_filter.as_ref()) {
-        return Ok(());
-    }
-
-    let host = tensor
-        .to_device(Device::Cpu)
-        .context("copy tensor to CPU")?
-        .to_dtype(DType::F32)
-        .context("cast tensor to f32")?
-        .contiguous()
-        .context("contiguous CPU tensor")?;
-    let values = host.to_vec::<f32>().context("read CPU tensor values")?;
-    let shape = tensor.shape();
-    let coord = |mut idx: usize| -> Vec<usize> {
-        let mut out = vec![0usize; shape.len()];
-        for axis in (0..shape.len()).rev() {
-            let dim = shape[axis].max(1);
-            out[axis] = idx % dim;
-            idx /= dim;
-        }
-        out
-    };
-    let mut first_nan = usize::MAX;
-    let mut pos_inf_count = 0usize;
-    let mut neg_inf_count = 0usize;
-    let mut max_abs = 0.0f32;
-    let mut max_abs_idx = 0usize;
-    for (idx, value) in values.iter().copied().enumerate() {
-        if value.is_nan() {
-            first_nan = idx;
-            break;
-        }
-        if value == f32::INFINITY {
-            pos_inf_count += 1;
-        } else if value == f32::NEG_INFINITY {
-            neg_inf_count += 1;
-        } else if value.is_finite() {
-            let abs = value.abs();
-            if abs > max_abs {
-                max_abs = abs;
-                max_abs_idx = idx;
-            }
-        }
-    }
-    let summary = format!(
-        "first_nan_flat={} first_nan_coord={:?} pos_inf_count={} neg_inf_count={} max_finite_abs={} max_finite_abs_flat={} max_finite_abs_coord={:?}",
-        first_nan,
-        if first_nan == usize::MAX {
-            Vec::new()
-        } else {
-            coord(first_nan)
-        },
-        pos_inf_count,
-        neg_inf_count,
-        max_abs,
-        max_abs_idx,
-        coord(max_abs_idx)
-    );
-    if stats_filter.is_some() {
-        eprintln!(
-            "kiln_full_attn_stats label={label} dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {summary}",
-            tensor.dtype(),
-            tensor.shape(),
-            tensor.device(),
-            tensor.is_contiguous(),
-            tensor.layout().start_offset(),
-            tensor.strides(),
-        );
-    }
-    anyhow::ensure!(
-        first_nan == usize::MAX,
-        "full-attention NaN tensor at {label}: dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {}",
-        tensor.dtype(),
-        tensor.shape(),
-        tensor.device(),
-        tensor.is_contiguous(),
-        tensor.layout().start_offset(),
-        tensor.strides(),
-        summary,
-    );
-    Ok(())
-}
-
-fn ensure_gdn_debug_finite(
-    enabled: bool,
-    diagnostic_context: Option<(usize, usize)>,
-    stage: &'static str,
-    tensor: &Tensor,
-) -> Result<()> {
-    let label = match diagnostic_context {
-        Some((layer, start_pos)) => format!("gdn layer {layer} start {start_pos} {stage}"),
-        None => format!("gdn {stage}"),
-    };
-    ensure_full_attn_debug_finite(enabled, label, tensor)
-}
-
-fn ensure_mlp_debug_finite(
-    enabled: bool,
-    diagnostic_context: Option<(usize, usize)>,
-    stage: &'static str,
-    tensor: &Tensor,
-) -> Result<()> {
-    let label = match diagnostic_context {
-        Some((layer, start_pos)) => format!("mlp layer {layer} start {start_pos} {stage}"),
-        None => format!("mlp {stage}"),
-    };
-    ensure_full_attn_debug_finite(enabled, label, tensor)
-}
-
-fn describe_full_attn_debug_values(tensor: &Tensor) -> Result<String> {
-    Ok(summarize_full_attn_debug_values(tensor)?.1)
-}
-
-fn summarize_full_attn_debug_values(tensor: &Tensor) -> Result<(bool, String)> {
-    let host = tensor
-        .to_device(Device::Cpu)
-        .context("copy tensor to CPU")?
-        .to_dtype(DType::F32)
-        .context("cast tensor to f32")?
-        .contiguous()
-        .context("contiguous CPU tensor")?;
-    let values = host.to_vec::<f32>().context("read CPU tensor values")?;
-    let mut first_bad: Option<(usize, f32)> = None;
-    let mut max_abs = 0.0f32;
-    let mut max_abs_idx = 0usize;
-    let mut min_finite = f32::INFINITY;
-    let mut max_finite = f32::NEG_INFINITY;
-    for (idx, value) in values.iter().copied().enumerate() {
-        if value.is_finite() {
-            min_finite = min_finite.min(value);
-            max_finite = max_finite.max(value);
-            let abs = value.abs();
-            if abs > max_abs {
-                max_abs = abs;
-                max_abs_idx = idx;
-            }
-        } else if first_bad.is_none() {
-            first_bad = Some((idx, value));
-        }
-    }
-    let shape = tensor.shape();
-    let coord = |mut idx: usize| -> Vec<usize> {
-        let mut out = vec![0usize; shape.len()];
-        for axis in (0..shape.len()).rev() {
-            let dim = shape[axis].max(1);
-            out[axis] = idx % dim;
-            idx /= dim;
-        }
-        out
-    };
-    let (bad_idx, bad_value) = first_bad.unwrap_or((usize::MAX, f32::NAN));
-    if min_finite == f32::INFINITY {
-        min_finite = f32::NAN;
-    }
-    if max_finite == f32::NEG_INFINITY {
-        max_finite = f32::NAN;
-    }
-    let summary = format!(
-        "first_bad_flat={} first_bad_coord={:?} first_bad_value={} min_finite={} max_finite={} max_finite_abs={} max_finite_abs_flat={} max_finite_abs_coord={:?}",
-        bad_idx,
-        if bad_idx == usize::MAX {
-            Vec::new()
-        } else {
-            coord(bad_idx)
-        },
-        bad_value,
-        min_finite,
-        max_finite,
-        max_abs,
-        max_abs_idx,
-        coord(max_abs_idx)
-    );
-    Ok((first_bad.is_none(), summary))
-}
-
 /// Compatibility default for streaming LM-head execution.
 ///
 /// In streaming mode only the final token's logits are needed for sampling, so
@@ -6881,7 +6610,6 @@ pub fn rotary_embedding(
 
     // Outer product: [seq_len, half_rotary]
     let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
-    ensure_full_attn_debug_finite(debug_full_attn_finite_checks(), "rotary freqs", &freqs)?;
 
     #[cfg(feature = "cuda")]
     let cos = match try_kt_cos(&freqs)? {
@@ -6890,7 +6618,6 @@ pub fn rotary_embedding(
     };
     #[cfg(not(feature = "cuda"))]
     let cos = freqs.cos()?; // [seq_len, half_rotary]
-    ensure_full_attn_debug_finite(debug_full_attn_finite_checks(), "rotary cos", &cos)?;
     #[cfg(feature = "cuda")]
     let sin = match try_kt_sin(&freqs)? {
         Some(t) => t,
@@ -6898,7 +6625,6 @@ pub fn rotary_embedding(
     };
     #[cfg(not(feature = "cuda"))]
     let sin = freqs.sin()?; // [seq_len, half_rotary]
-    ensure_full_attn_debug_finite(debug_full_attn_finite_checks(), "rotary sin", &sin)?;
 
     let rotated_q = apply_rope(q, &cos, &sin, head_dim, rotary_dim)?;
     let rotated_k = apply_rope(k, &cos, &sin, head_dim, rotary_dim)?;
@@ -6936,11 +6662,6 @@ pub fn rotary_embedding_from_tensor(
     let pos = positions_tensor.unsqueeze(1)?;
 
     let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
-    ensure_full_attn_debug_finite(
-        debug_full_attn_finite_checks(),
-        "rotary tensor freqs",
-        &freqs,
-    )?;
 
     #[cfg(feature = "cuda")]
     let cos = match try_kt_cos(&freqs)? {
@@ -6949,7 +6670,6 @@ pub fn rotary_embedding_from_tensor(
     };
     #[cfg(not(feature = "cuda"))]
     let cos = freqs.cos()?;
-    ensure_full_attn_debug_finite(debug_full_attn_finite_checks(), "rotary tensor cos", &cos)?;
     #[cfg(feature = "cuda")]
     let sin = match try_kt_sin(&freqs)? {
         Some(t) => t,
@@ -6957,7 +6677,6 @@ pub fn rotary_embedding_from_tensor(
     };
     #[cfg(not(feature = "cuda"))]
     let sin = freqs.sin()?;
-    ensure_full_attn_debug_finite(debug_full_attn_finite_checks(), "rotary tensor sin", &sin)?;
 
     #[cfg(feature = "cuda")]
     {
@@ -7017,11 +6736,6 @@ pub(crate) fn rotary_tables_from_tensor(
 ) -> Result<(Tensor, Tensor)> {
     let pos = positions_tensor.unsqueeze(1)?;
     let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
-    ensure_full_attn_debug_finite(
-        debug_full_attn_finite_checks(),
-        "rotary table freqs",
-        &freqs,
-    )?;
     #[cfg(feature = "cuda")]
     let cos = match try_kt_cos(&freqs)? {
         Some(t) => t,
@@ -7029,7 +6743,6 @@ pub(crate) fn rotary_tables_from_tensor(
     };
     #[cfg(not(feature = "cuda"))]
     let cos = freqs.cos()?;
-    ensure_full_attn_debug_finite(debug_full_attn_finite_checks(), "rotary table cos", &cos)?;
     #[cfg(feature = "cuda")]
     let sin = match try_kt_sin(&freqs)? {
         Some(t) => t,
@@ -7037,7 +6750,6 @@ pub(crate) fn rotary_tables_from_tensor(
     };
     #[cfg(not(feature = "cuda"))]
     let sin = freqs.sin()?;
-    ensure_full_attn_debug_finite(debug_full_attn_finite_checks(), "rotary table sin", &sin)?;
     Ok((cos, sin))
 }
 
@@ -7994,7 +7706,7 @@ pub fn swiglu_ffn(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(None, x, mlp, lora, false, None)
+    swiglu_ffn_impl(None, x, mlp, lora, false)
 }
 
 /// SwiGLU gate/up half used by exact training-time split backprop.
@@ -8138,7 +7850,7 @@ fn swiglu_ffn_metal_decode(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(None, x, mlp, lora, true, None)
+    swiglu_ffn_impl(None, x, mlp, lora, true)
 }
 
 fn swiglu_ffn_backend_profiled(
@@ -8147,16 +7859,8 @@ fn swiglu_ffn_backend_profiled(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
     use_metal_decode_gemv: bool,
-    diagnostic_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(
-        Some(backend),
-        x,
-        mlp,
-        lora,
-        use_metal_decode_gemv,
-        diagnostic_context,
-    )
+    swiglu_ffn_impl(Some(backend), x, mlp, lora, use_metal_decode_gemv)
 }
 
 fn swiglu_ffn_impl(
@@ -8165,7 +7869,6 @@ fn swiglu_ffn_impl(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
     use_metal_decode_gemv: bool,
-    diagnostic_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     let (_, seq_len, _) = x.dims3()?;
@@ -8184,20 +7887,12 @@ fn swiglu_ffn_impl(
                 mlp,
                 lora,
                 use_metal_decode_gemv,
-                diagnostic_context,
                 chunk_tokens,
             );
         }
     }
 
-    swiglu_ffn_impl_no_chunk(
-        backend,
-        x,
-        mlp,
-        lora,
-        use_metal_decode_gemv,
-        diagnostic_context,
-    )
+    swiglu_ffn_impl_no_chunk(backend, x, mlp, lora, use_metal_decode_gemv)
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -8272,7 +7967,6 @@ fn swiglu_ffn_impl_chunked(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
     use_metal_decode_gemv: bool,
-    diagnostic_context: Option<(usize, usize)>,
     chunk_tokens: usize,
 ) -> Result<Tensor> {
     let (_, seq_len, _) = x.dims3()?;
@@ -8286,15 +7980,10 @@ fn swiglu_ffn_impl_chunked(
                 start + len
             )
         })?;
-        let out = swiglu_ffn_impl_no_chunk(
-            backend,
-            &x_chunk,
-            mlp,
-            lora,
-            use_metal_decode_gemv,
-            diagnostic_context,
-        )
-        .with_context(|| format!("chunked CUDA training MLP tile [{start}, {})", start + len))?;
+        let out = swiglu_ffn_impl_no_chunk(backend, &x_chunk, mlp, lora, use_metal_decode_gemv)
+            .with_context(|| {
+                format!("chunked CUDA training MLP tile [{start}, {})", start + len)
+            })?;
         synchronize_tensor_ready_for_model_handoff(
             &format!("chunked GPU training MLP tile [{start}, {})", start + len),
             &out,
@@ -8316,12 +8005,6 @@ fn swiglu_ffn_impl_chunked(
     #[cfg(not(feature = "cuda"))]
     let out = Tensor::cat(&output_refs, 1).context("chunked GPU training MLP cat")?;
     synchronize_tensor_ready_for_model_handoff("chunked GPU training MLP cat", &out)?;
-    ensure_mlp_debug_finite(
-        debug_full_attn_finite_checks(),
-        diagnostic_context,
-        "chunked_cat",
-        &out,
-    )?;
     Ok(out)
 }
 
@@ -8338,7 +8021,6 @@ fn swiglu_ffn_split_gate_up(
     lora_layer: Option<&LoraLayerWeights>,
     lora_scale: f32,
     use_metal_decode_gemv: bool,
-    diagnostic_context: Option<(usize, usize)>,
 ) -> Result<(Tensor, Tensor)> {
     // x @ gate_proj_t -> [batch, seq_len, intermediate_size]
     let gate = {
@@ -8368,9 +8050,6 @@ fn swiglu_ffn_split_gate_up(
     };
     synchronize_tensor_ready_for_model_handoff("mlp gate projection", &gate)?;
     synchronize_tensor_ready_for_model_handoff("mlp up projection", &up)?;
-    let debug_finite = debug_full_attn_finite_checks();
-    ensure_mlp_debug_finite(debug_finite, diagnostic_context, "gate_proj", &gate)?;
-    ensure_mlp_debug_finite(debug_finite, diagnostic_context, "up_proj", &up)?;
     Ok((gate, up))
 }
 
@@ -8568,7 +8247,6 @@ fn swiglu_ffn_impl_no_chunk(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
     use_metal_decode_gemv: bool,
-    diagnostic_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
     let (_, _seq_len, _) = x.dims3()?;
     #[cfg(any(
@@ -8823,7 +8501,6 @@ fn swiglu_ffn_impl_no_chunk(
         lora_layer,
         lora_scale,
         use_metal_decode_gemv,
-        diagnostic_context,
     )?;
     let hidden = {
         #[cfg(feature = "metal")]
@@ -8947,12 +8624,6 @@ fn swiglu_ffn_impl_no_chunk(
         }
     };
     synchronize_tensor_ready_for_model_handoff("mlp hidden", &hidden)?;
-    ensure_mlp_debug_finite(
-        debug_full_attn_finite_checks(),
-        diagnostic_context,
-        "hidden",
-        &hidden,
-    )?;
     // hidden @ down_proj_t -> [batch, seq_len, hidden_size]
     let out = {
         kiln_nvtx::range!(c"kiln/mlp/down");
@@ -8967,12 +8638,6 @@ fn swiglu_ffn_impl_no_chunk(
         )?
     };
     synchronize_tensor_ready_for_model_handoff("mlp down_proj", &out)?;
-    ensure_mlp_debug_finite(
-        debug_full_attn_finite_checks(),
-        diagnostic_context,
-        "down_proj",
-        &out,
-    )?;
     Ok(out)
 }
 
@@ -10736,10 +10401,6 @@ fn compute_w_chunk(
         synchronize_tensor_ready_for_model_handoff("gdn forward-substitution a_strict", a_strict)?;
         synchronize_tensor_ready_for_model_handoff("gdn forward-substitution v_prime", v_prime)?;
         synchronize_tensor_ready_for_model_handoff("gdn forward-substitution beta", beta_c)?;
-        let debug_finite = debug_full_attn_finite_checks();
-        ensure_full_attn_debug_finite(debug_finite, "gdn forward-substitution a_strict", a_strict)?;
-        ensure_full_attn_debug_finite(debug_finite, "gdn forward-substitution v_prime", v_prime)?;
-        ensure_full_attn_debug_finite(debug_finite, "gdn forward-substitution beta", beta_c)?;
         // #1082 DoD-101/102: `gdn_forward_substitution` is now kt-typed —
         // pass the kt tensors directly, no candle bridge.
         if let Some(out) =
@@ -10748,7 +10409,6 @@ fn compute_w_chunk(
             // The caller immediately feeds `out` into regular kt matmul /
             // elementwise ops; synchronize the FFI output before that handoff.
             synchronize_tensor_ready_for_model_handoff("gdn forward-substitution w", &out)?;
-            ensure_full_attn_debug_finite(debug_finite, "gdn forward-substitution w", &out)?;
             return Ok(out);
         }
     }
@@ -11673,7 +11333,6 @@ pub fn gated_deltanet_forward(
         conv_state,
         true,
         false,
-        None,
         true,
         true,
         lora,
@@ -13229,7 +12888,6 @@ pub fn gated_deltanet_forward_streaming(
     recurrent_state: &mut Tensor,
     conv_state: &mut Tensor,
     tile_size: usize,
-    diagnostic_context: Option<(usize, usize)>,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
@@ -13254,7 +12912,6 @@ pub fn gated_deltanet_forward_streaming(
             conv_state,
             true,
             false,
-            diagnostic_context,
             true,
             true,
             lora,
@@ -13271,8 +12928,6 @@ pub fn gated_deltanet_forward_streaming(
         let allow_forward_only_fastpaths =
             streaming_gdn_forward_only_fastpaths_allowed(&tile_device);
         let allow_prefill_recurrent_kernel = allow_forward_only_fastpaths;
-        let tile_diagnostic_context =
-            diagnostic_context.map(|(layer_idx, start_pos)| (layer_idx, start_pos + cursor));
         let mut run_tile = || -> Result<Tensor> {
             let tile_in = x.narrow(1, cursor, len)?;
             gated_deltanet_forward_decode_if(
@@ -13284,7 +12939,6 @@ pub fn gated_deltanet_forward_streaming(
                 conv_state,
                 true,
                 false,
-                tile_diagnostic_context,
                 allow_forward_only_fastpaths,
                 allow_prefill_recurrent_kernel,
                 lora,
@@ -13338,17 +12992,6 @@ pub fn gated_deltanet_forward_streaming(
                 &*conv_state,
             )?;
         }
-        if debug_full_attn_finite_checks() {
-            let label = match diagnostic_context {
-                Some((layer_idx, start_pos)) => format!(
-                    "streaming GDN layer {layer_idx} tile [{}, {}) output before cat",
-                    start_pos + cursor,
-                    start_pos + end
-                ),
-                None => format!("streaming GDN tile [{cursor}, {end}) output before cat"),
-            };
-            ensure_full_attn_debug_finite(true, label, &tile_out)?;
-        }
         tile_outs.push(tile_out);
         cursor = end;
     }
@@ -13376,15 +13019,6 @@ pub fn gated_deltanet_forward_streaming(
             Tensor::cat(&tile_refs, 1).context("streaming GDN cat tile outputs along T axis")?
         }
     };
-    if debug_full_attn_finite_checks() {
-        let label = match diagnostic_context {
-            Some((layer_idx, start_pos)) => {
-                format!("streaming GDN layer {layer_idx} start {start_pos} cat output")
-            }
-            None => "streaming GDN cat output".to_string(),
-        };
-        ensure_full_attn_debug_finite(true, label, &out)?;
-    }
     #[cfg(any(
         feature = "cuda",
         feature = "metal",
@@ -13458,7 +13092,6 @@ fn gated_deltanet_forward_decode_if(
     conv_state: &mut Tensor,
     use_fused_gdn_gates: bool,
     use_metal_decode_gemv: bool,
-    diagnostic_context: Option<(usize, usize)>,
     allow_forward_only_fastpaths: bool,
     allow_prefill_recurrent_kernel: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
@@ -13474,7 +13107,6 @@ fn gated_deltanet_forward_decode_if(
         conv_state,
         use_fused_gdn_gates,
         use_metal_decode_gemv,
-        diagnostic_context,
         allow_forward_only_fastpaths,
         allow_prefill_recurrent_kernel,
         lora,
@@ -13560,14 +13192,12 @@ fn gated_deltanet_forward_decode_if_inner(
     conv_state: &mut Tensor,
     use_fused_gdn_gates: bool,
     use_metal_decode_gemv: bool,
-    diagnostic_context: Option<(usize, usize)>,
     allow_forward_only_fastpaths: bool,
     allow_prefill_recurrent_kernel: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     let input_dtype = x.dtype();
-    let debug_gdn_finite = debug_full_attn_finite_checks();
     let nk = config.linear_num_key_heads;
     let dk = config.linear_key_head_dim;
     let nv = config.linear_num_value_heads;
@@ -14239,9 +13869,6 @@ fn gated_deltanet_forward_decode_if_inner(
             };
             (q, k, v, z_reshaped)
         };
-        ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "qkv_split_q", &q)?;
-        ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "qkv_split_k", &k)?;
-        ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "qkv_split_v", &v)?;
 
         // --- Step 4/5: GQA head repeat (nk → nv), L2 normalize Q/K, scale Q ---
         //
@@ -14496,8 +14123,6 @@ fn gated_deltanet_forward_decode_if_inner(
                 }
             }
         };
-        ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "qk_norm_q", &q)?;
-        ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "qk_norm_k", &k)?;
         (
             q,
             k,
@@ -15051,31 +14676,6 @@ fn gated_deltanet_forward_decode_if_inner(
                 let g = transpose12(&g)?; // [B, nv, T]
                 (q, k, v, beta, g)
             };
-            #[cfg(any(
-                feature = "cuda",
-                feature = "metal",
-                feature = "vulkan",
-                feature = "rocm"
-            ))]
-            {
-                ensure_gdn_debug_finite(
-                    debug_gdn_finite,
-                    diagnostic_context,
-                    "recurrent_entry_state",
-                    &gdn_entry_state,
-                )?;
-            }
-            ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "recurrent_q", &q)?;
-            ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "recurrent_k", &k)?;
-            ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "recurrent_v", &v)?;
-            ensure_gdn_debug_finite(
-                debug_gdn_finite,
-                diagnostic_context,
-                "recurrent_beta",
-                &beta,
-            )?;
-            ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "recurrent_g", &g)?;
-
             let recurrent_result = if allow_prefill_recurrent_kernel
                 && let Some(attn_out) = gdn_recurrent_prefill_head_last(
                     backend,
@@ -15115,12 +14715,6 @@ fn gated_deltanet_forward_decode_if_inner(
                     ), // [B, nv, T, dv]
                 }
             };
-            ensure_gdn_debug_finite(
-                debug_gdn_finite,
-                diagnostic_context,
-                "recurrent_state_after",
-                recurrent_state,
-            )?;
 
             // Record a `GdnRecurrentBackward` node for the recurrence output
             // the dispatch above just produced, using the head-FIRST
@@ -15164,12 +14758,6 @@ fn gated_deltanet_forward_decode_if_inner(
 
             recurrent_result
         };
-        ensure_gdn_debug_finite(
-            debug_gdn_finite,
-            diagnostic_context,
-            "recurrent",
-            &recurrent_result.0,
-        )?;
         recurrent_result
     };
 
@@ -15228,12 +14816,6 @@ fn gated_deltanet_forward_decode_if_inner(
             }
         }
     };
-    ensure_gdn_debug_finite(
-        debug_gdn_finite,
-        diagnostic_context,
-        "post_transpose",
-        &attn_out,
-    )?;
 
     // Phase B11b tap: `gdn_recur_out`. Captured post-transpose (shape
     // [B, T, nv, dv]) so the layout matches the input HF passes to its
@@ -15338,12 +14920,6 @@ fn gated_deltanet_forward_decode_if_inner(
         };
         casted
     };
-    ensure_gdn_debug_finite(
-        debug_gdn_finite,
-        diagnostic_context,
-        "gated_norm",
-        &attn_out,
-    )?;
 
     // Phase B11b tap: `gdn_gated_norm`. Output of the GatedRMSNorm /
     // `norm(attn_out) * silu(z)` block, reshaped and cast back to input
@@ -15366,7 +14942,6 @@ fn gated_deltanet_forward_decode_if_inner(
             lora_scale,
         )?
     };
-    ensure_gdn_debug_finite(debug_gdn_finite, diagnostic_context, "out_proj", &out)?;
 
     // Phase B11b tap: `gdn_out_proj`. Output of the final `out_proj` linear
     // (shape [B, T, hidden]) — this is what the caller adds to the residual
@@ -15578,12 +15153,6 @@ fn rocm_q_gate_projection_slice_bf16_via_f32(
         chunk_len,
         "rocm split q/gate f32-output projection",
     )?;
-    let debug_finite = debug_full_attn_finite_checks();
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("split q/gate weight chunk start={chunk_start} len={chunk_len}"),
-        &weight_t,
-    )?;
     let x_contig = if x.is_contiguous() {
         x.clone()
     } else {
@@ -15614,14 +15183,6 @@ fn rocm_q_gate_projection_slice_bf16_via_f32(
                         row_start + row_len
                     )
                 })?;
-            ensure_full_attn_debug_finite(
-                debug_finite,
-                format!(
-                    "split q/gate x row tile [{row_start}, {})",
-                    row_start + row_len
-                ),
-                &x_tile,
-            )?;
             let out_tile = kiln_tensor::rocm_bf16_matmul_bf16_out(&x_tile, &weight_t)
                 .with_context(|| {
                     format!(
@@ -15629,21 +15190,12 @@ fn rocm_q_gate_projection_slice_bf16_via_f32(
                         row_start + row_len
                     )
                 })?;
-            ensure_full_attn_debug_finite(
-                debug_finite,
-                format!(
-                    "split q/gate out row tile [{row_start}, {}) chunk_start={chunk_start} len={chunk_len}",
-                    row_start + row_len
-                ),
-                &out_tile,
-            )?;
             pieces.push(out_tile);
             row_start += row_len;
         }
         let piece_refs: Vec<&Tensor> = pieces.iter().collect();
         Tensor::cat(&piece_refs, 0).context("rocm split q/gate f32-output row tile cat")?
     } else {
-        ensure_full_attn_debug_finite(debug_finite, "split q/gate x2d", &x2d)?;
         kiln_tensor::rocm_bf16_matmul_bf16_out(&x2d, &weight_t)
             .context("rocm split q/gate bf16 fallback matmul")?
     };
@@ -15704,18 +15256,7 @@ fn linear_with_lora_t_backend_decode_output_slice(
     if let Some(base) =
         rocm_q_gate_projection_slice_bf16_via_f32(x, full_weight_t, chunk_start, chunk_len)?
     {
-        let debug_finite = debug_full_attn_finite_checks();
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("split q/gate base chunk start={chunk_start} len={chunk_len}"),
-            &base,
-        )?;
         let out = add_lora_delta_to_base(Some(backend), base, x, lora_slice.as_ref(), lora_scale)?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("split q/gate output chunk start={chunk_start} len={chunk_len}"),
-            &out,
-        )?;
         return Ok(out);
     }
 
@@ -15726,18 +15267,7 @@ fn linear_with_lora_t_backend_decode_output_slice(
         chunk_start,
         chunk_len,
     )? {
-        let debug_finite = debug_full_attn_finite_checks();
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("split q/gate base chunk start={chunk_start} len={chunk_len}"),
-            &base,
-        )?;
         let out = add_lora_delta_to_base(Some(backend), base, x, lora_slice.as_ref(), lora_scale)?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("split q/gate output chunk start={chunk_start} len={chunk_len}"),
-            &out,
-        )?;
         return Ok(out);
     }
 
@@ -15769,14 +15299,6 @@ fn linear_with_lora_t_backend_decode_output_range_chunked(
     range_start: usize,
     range_len: usize,
 ) -> Result<Tensor> {
-    let debug_finite = debug_full_attn_finite_checks();
-    if debug_finite {
-        ensure_full_attn_debug_finite(
-            true,
-            format!("split q/gate input range_start={range_start} range_len={range_len}"),
-            x,
-        )?;
-    }
     let chunk_features = split_q_gate_output_chunk_features_for_device(&x.device(), range_len);
     if chunk_features >= range_len {
         let out = linear_with_lora_t_backend_decode_output_slice(
@@ -15789,13 +15311,6 @@ fn linear_with_lora_t_backend_decode_output_range_chunked(
             range_start,
             range_len,
         )?;
-        if debug_finite {
-            ensure_full_attn_debug_finite(
-                true,
-                format!("split q/gate chunk start={range_start} len={range_len}"),
-                &out,
-            )?;
-        }
         return Ok(out);
     }
 
@@ -15814,13 +15329,6 @@ fn linear_with_lora_t_backend_decode_output_range_chunked(
             chunk_start,
             cur_len,
         )?;
-        if debug_finite {
-            ensure_full_attn_debug_finite(
-                true,
-                format!("split q/gate chunk start={chunk_start} len={cur_len}"),
-                &chunk,
-            )?;
-        }
         chunks.push(chunk);
         offset += cur_len;
     }
@@ -15893,7 +15401,6 @@ fn split_q_gate_training_bf16(
         0,
         q_dim,
     )?;
-    ensure_full_attn_debug_finite(debug_full_attn_finite_checks(), "split q flat", &q_flat)?;
     let gate = linear_with_lora_t_backend_decode_output_range_chunked(
         backend,
         use_metal_decode_gemv,
@@ -15904,7 +15411,6 @@ fn split_q_gate_training_bf16(
         q_dim,
         q_dim,
     )?;
-    ensure_full_attn_debug_finite(debug_full_attn_finite_checks(), "split gate flat", &gate)?;
     let q = tape_reshape_full_attn(
         &q_flat,
         &[
@@ -15949,7 +15455,7 @@ pub fn gqa_attention_q_gate_prefill(
         !crate::tape_forward::tape_scope_active(),
         "gqa_attention_q_gate_prefill is inference-only until every reshape and narrow is tape-recorded"
     );
-    let (batch, seq_len, _hidden) = x.dims3()?;
+    let (_batch, seq_len, _hidden) = x.dims3()?;
     let use_metal_decode_gemv = false;
     let (lora_layer, lora_scale) = match lora {
         Some((l, s)) => (Some(l), s),
@@ -16289,7 +15795,6 @@ fn try_rocm_gqa_sdpa_f32_materialized(
     seq_len: usize,
     kv_len: usize,
     scale: f64,
-    debug_finite: bool,
 ) -> Result<Option<Tensor>> {
     if env_truthy("KILN_DISABLE_ROCM_GQA_SDPA_F32") {
         return Ok(None);
@@ -16356,18 +15861,9 @@ fn try_rocm_gqa_sdpa_f32_materialized(
                 "gqa rocm f32 sdpa score matmul",
                 &attn_scores,
             )?;
-            let raw_scores_label =
-                format!("gqa rocm f32 sdpa raw scores q={seq_len} kv={kv_len} b={b} h={h}");
-            ensure_full_attn_debug_finite(debug_finite, &raw_scores_label, &attn_scores)?;
             let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
-            let scaled_scores_label =
-                format!("gqa rocm f32 sdpa scaled scores q={seq_len} kv={kv_len} b={b} h={h}");
-            ensure_full_attn_debug_finite(debug_finite, &scaled_scores_label, &attn_scores)?;
             let attn_scores =
                 apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, kv_len - seq_len)?;
-            let masked_scores_label =
-                format!("gqa rocm f32 sdpa masked scores q={seq_len} kv={kv_len} b={b} h={h}");
-            ensure_full_attn_debug_no_nan(debug_finite, &masked_scores_label, &attn_scores)?;
             let attn_scores = fresh_contig_full_attn(
                 &attn_scores,
                 &format!("gqa rocm f32 sdpa masked scores contiguous b={b} h={h}"),
@@ -16377,9 +15873,6 @@ fn try_rocm_gqa_sdpa_f32_materialized(
                 "gqa rocm f32 sdpa softmax",
                 &attn_weights_softmax,
             )?;
-            let softmax_label =
-                format!("gqa rocm f32 sdpa softmax q={seq_len} kv={kv_len} b={b} h={h}");
-            ensure_full_attn_debug_finite(debug_finite, &softmax_label, &attn_weights_softmax)?;
             let attn_weights_softmax = fresh_contig_full_attn(
                 &attn_weights_softmax,
                 &format!("gqa rocm f32 sdpa softmax contiguous b={b} h={h}"),
@@ -16390,30 +15883,23 @@ fn try_rocm_gqa_sdpa_f32_materialized(
                 "gqa rocm f32 sdpa value matmul f32",
                 &out_bh,
             )?;
-            let value_label =
-                format!("gqa rocm f32 sdpa value matmul f32 q={seq_len} kv={kv_len} b={b} h={h}");
-            ensure_full_attn_debug_finite(debug_finite, &value_label, &out_bh)?;
             head_outputs.push(out_bh);
         }
         let head_refs: Vec<&Tensor> = head_outputs.iter().collect();
         let heads_out = Tensor::cat(&head_refs, 1)?;
         let heads_out =
             fresh_contig_full_attn(&heads_out, &format!("gqa rocm f32 sdpa head concat b={b}"))?;
-        let heads_label = format!("gqa rocm f32 sdpa head concat b={b}");
-        ensure_full_attn_debug_finite(debug_finite, &heads_label, &heads_out)?;
         batch_outputs.push(heads_out);
     }
     let batch_refs: Vec<&Tensor> = batch_outputs.iter().collect();
     let out_f32 = Tensor::cat(&batch_refs, 0)?;
     let out_f32 = fresh_contig_full_attn(&out_f32, "gqa rocm f32 sdpa batch concat f32")?;
     synchronize_tensor_ready_for_full_attn_handoff("gqa rocm f32 sdpa concat f32", &out_f32)?;
-    ensure_full_attn_debug_finite(debug_finite, "gqa rocm f32 sdpa batch concat f32", &out_f32)?;
     let out = if dtype == DType::F32 {
         out_f32
     } else {
         out_f32.to_dtype(dtype)?
     };
-    ensure_full_attn_debug_finite(debug_finite, "gqa rocm f32 sdpa value matmul", &out)?;
     synchronize_tensor_ready_for_full_attn_handoff("gqa rocm f32 sdpa value matmul", &out)?;
     Ok(Some(out))
 }
@@ -16460,20 +15946,14 @@ fn gqa_sdpa_materialized_default(
     seq_len: usize,
     kv_len: usize,
     scale: f64,
-    debug_finite: bool,
 ) -> Result<Tensor> {
     let (k, v) = align_gqa_kv_to_query(q, k, v)?;
     let attn_scores = kiln_tensor::ops::matmul_rhs_transposed(q, &k)?;
-    ensure_full_attn_debug_finite(debug_finite, "gqa sdpa raw scores", &attn_scores)?;
     let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
-    ensure_full_attn_debug_finite(debug_finite, "gqa sdpa scaled scores", &attn_scores)?;
     let attn_scores =
         apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, kv_len - seq_len)?;
-    ensure_full_attn_debug_no_nan(debug_finite, "gqa sdpa masked scores", &attn_scores)?;
     let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
-    ensure_full_attn_debug_finite(debug_finite, "gqa sdpa softmax", &attn_weights_softmax)?;
     let out = attn_weights_softmax.broadcast_matmul(&v)?; // [B, nq, T, hd]
-    ensure_full_attn_debug_finite(debug_finite, "gqa sdpa value matmul", &out)?;
     synchronize_tensor_ready_for_full_attn_handoff("gqa sdpa fallback value matmul", &out)?;
     Ok(out)
 }
@@ -16519,17 +15999,14 @@ fn gqa_sdpa_materialized_exact(
     seq_len: usize,
     kv_len: usize,
     scale: f64,
-    debug_finite: bool,
 ) -> Result<Tensor> {
     #[cfg(feature = "rocm")]
-    if let Some(out) =
-        try_rocm_gqa_sdpa_f32_materialized(q, k, v, seq_len, kv_len, scale, debug_finite)?
-    {
+    if let Some(out) = try_rocm_gqa_sdpa_f32_materialized(q, k, v, seq_len, kv_len, scale)? {
         return Ok(out);
     }
 
     let _materialized_scratch_reservation = reserve_gqa_materialized_scratch(q, k)?;
-    gqa_sdpa_materialized_default(q, k, v, seq_len, kv_len, scale, debug_finite)
+    gqa_sdpa_materialized_default(q, k, v, seq_len, kv_len, scale)
 }
 
 pub fn gqa_attention_core_prefill(
@@ -16651,11 +16128,6 @@ pub fn gqa_attention_core_prefill(
     } else {
         (k_he.contiguous()?, v_he.contiguous()?)
     };
-    let debug_finite = debug_full_attn_finite_checks();
-    ensure_full_attn_debug_finite(debug_finite, "gqa sdpa q head-first", &q)?;
-    ensure_full_attn_debug_finite(debug_finite, "gqa sdpa k expanded", &k)?;
-    ensure_full_attn_debug_finite(debug_finite, "gqa sdpa v expanded", &v)?;
-
     let scale = (head_dim as f64).sqrt();
     // #1082 region 3: consolidate the fallback's two cublasLt matmuls
     // (`q @ kᵀ` and `softmax @ v`) into the kt substrate, keeping the
@@ -16676,14 +16148,12 @@ pub fn gqa_attention_core_prefill(
                     _cuda_fast_scratch_reservation = reservation;
                     out
                 }
-                None => {
-                    gqa_sdpa_materialized_exact(&q, &k, &v, seq_len, kv_len, scale, debug_finite)?
-                }
+                None => gqa_sdpa_materialized_exact(&q, &k, &v, seq_len, kv_len, scale)?,
             }
         }
         #[cfg(not(feature = "cuda"))]
         {
-            gqa_sdpa_materialized_exact(&q, &k, &v, seq_len, kv_len, scale, debug_finite)?
+            gqa_sdpa_materialized_exact(&q, &k, &v, seq_len, kv_len, scale)?
         }
     };
 
@@ -17163,7 +16633,6 @@ pub fn gqa_attention_pre_o(
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
-    let debug_finite = debug_full_attn_finite_checks();
     let use_metal_decode_gemv = seq_len == 1
         && kv_cache.is_some()
         && !crate::mtp_runtime::single_token_self_attention_active();
@@ -17225,24 +16694,6 @@ pub fn gqa_attention_pre_o(
         };
         out
     };
-    if let Some(q_raw) = q_raw.as_ref() {
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} pre_o q_raw"),
-            q_raw,
-        )?;
-    }
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} pre_o k_proj"),
-        &k,
-    )?;
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} pre_o v_proj"),
-        &v,
-    )?;
-
     // Split Q and gate if output gate is enabled
     let (q, gate) = if let Some((q, gate)) = split_q_gate {
         (q, Some(gate))
@@ -17341,16 +16792,6 @@ pub fn gqa_attention_pre_o(
         );
         out
     };
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} pre_o q_norm"),
-        &q,
-    )?;
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} pre_o k_norm"),
-        &k,
-    )?;
 
     // Apply RoPE (positions are absolute, so cached tokens get correct embeddings)
     // Only rotate first rotary_dim dimensions; the rest pass through unchanged.
@@ -17358,16 +16799,6 @@ pub fn gqa_attention_pre_o(
         let out = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
         out
     };
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} pre_o q_rope"),
-        &q,
-    )?;
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} pre_o k_rope"),
-        &k,
-    )?;
 
     // Fused-attention path for prefill (seq_len > 1, no KV cache).
     // Takes [batch, seq_len, num_heads, head_dim] — the layout we already
@@ -17382,21 +16813,6 @@ pub fn gqa_attention_pre_o(
         let q = tape_contig_full_attn(&q, "full-attention flash q")?;
         let k = tape_contig_full_attn(&k, "full-attention flash k")?;
         let v = tape_contig_full_attn(&v, "full-attention flash v")?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} pre_o flash_q"),
-            &q,
-        )?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} pre_o flash_k"),
-            &k,
-        )?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} pre_o flash_v"),
-            &v,
-        )?;
         // kt-Tape flash path (see gqa_attention_core_prefill). No-op without an
         // active tape scope. NOTE:
         // when an attention output gate is present, the gate multiply is not
@@ -17422,11 +16838,6 @@ pub fn gqa_attention_pre_o(
                     "full-attention flash output reshape",
                 )?;
                 let attn_kt = attention_output_gate_decode_if(false, attn_kt, gate.as_ref())?;
-                ensure_full_attn_debug_finite(
-                    debug_finite,
-                    format!("layer {full_attn_layer_idx} pre_o tape_flash_output"),
-                    &attn_kt,
-                )?;
                 return Ok(attn_kt);
             }
         }
@@ -17461,18 +16872,8 @@ pub fn gqa_attention_pre_o(
             if let Some(attn_output) =
                 flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
             {
-                ensure_full_attn_debug_finite(
-                    debug_finite,
-                    format!("layer {full_attn_layer_idx} pre_o flash_output"),
-                    &attn_output,
-                )?;
                 let attn_output =
                     attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
-                ensure_full_attn_debug_finite(
-                    debug_finite,
-                    format!("layer {full_attn_layer_idx} pre_o flash_gated_output"),
-                    &attn_output,
-                )?;
                 return Ok(attn_output);
             }
         }
@@ -17696,7 +17097,6 @@ pub fn gqa_attention(
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
-    let debug_finite = debug_full_attn_finite_checks();
     let use_metal_decode_gemv = seq_len == 1
         && kv_cache.is_some()
         && !crate::mtp_runtime::single_token_self_attention_active();
@@ -17716,22 +17116,12 @@ pub fn gqa_attention(
         attn_output_gate,
         lora,
     )?;
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} pre_o output"),
-        &attn_output,
-    )?;
     let projected = gqa_attention_output_projection(
         backend,
         &attn_output,
         attn_weights,
         use_metal_decode_gemv,
         lora,
-    )?;
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} output_projection"),
-        &projected,
     )?;
     Ok(projected)
 }
@@ -20445,12 +19835,6 @@ pub fn transformer_block_with_policy(
         kiln_nvtx::range!(c"kiln/norm/pre_attn");
         rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
     };
-    let debug_finite = debug_full_attn_finite_checks();
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} pre_attn_norm"),
-        &normed,
-    )?;
 
     // Self-attention
     let attn_out = gqa_attention(
@@ -20469,11 +19853,6 @@ pub fn transformer_block_with_policy(
         config.attn_output_gate,
         lora,
     )?;
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} attention_o_proj"),
-        &attn_out,
-    )?;
 
     // Residual connection
     //
@@ -20486,11 +19865,6 @@ pub fn transformer_block_with_policy(
         kiln_nvtx::range!(c"kiln/residual");
         residual_add(x.clone(), attn_out)?
     };
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} attention_residual"),
-        &x,
-    )?;
     synchronize_tensor_ready_for_model_handoff(
         &format!("layer {full_attn_layer_idx} attention_residual"),
         &x,
@@ -20501,11 +19875,6 @@ pub fn transformer_block_with_policy(
         kiln_nvtx::range!(c"kiln/norm/pre_mlp");
         rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?
     };
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} post_attn_norm"),
-        &normed,
-    )?;
 
     // Feed-forward network. Inference must thread the active backend through
     // every base projection: Vulkan's F32 activations and BF16 resident weights
@@ -20530,20 +19899,8 @@ pub fn transformer_block_with_policy(
     } else if tape_scope_active {
         swiglu_ffn(&normed, &layer.mlp, lora)?
     } else {
-        swiglu_ffn_backend_profiled(
-            backend,
-            &normed,
-            &layer.mlp,
-            lora,
-            use_metal_decode_ffn,
-            None,
-        )?
+        swiglu_ffn_backend_profiled(backend, &normed, &layer.mlp, lora, use_metal_decode_ffn)?
     };
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} mlp"),
-        &ffn_out,
-    )?;
 
     // Residual connection
     //
@@ -20556,11 +19913,6 @@ pub fn transformer_block_with_policy(
         kiln_nvtx::range!(c"kiln/residual");
         residual_add(x, ffn_out)?
     };
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} output"),
-        &out,
-    )?;
     synchronize_tensor_ready_for_model_handoff(
         &format!("layer {full_attn_layer_idx} output"),
         &out,
@@ -20630,7 +19982,6 @@ fn transformer_block_detached_prefill_chunked(
     let GpuAttentionWeights::Full(attn_weights) = &layer.attention else {
         return Ok(None);
     };
-    let debug_finite = debug_full_attn_finite_checks();
     let materialized_score_budget_mb = full_attn_materialized_score_budget_mib();
     let materialized_scratch_buffers =
         mode.materialized_scratch_buffers_for_tile_plan(backend, &x.device(), x.dtype(), head_dim);
@@ -20688,20 +20039,10 @@ fn transformer_block_detached_prefill_chunked(
         "detached full-attention prefill chunked"
     );
 
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} chunked pre_attn_input"),
-        x,
-    )?;
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_attn_chunked");
         rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
     };
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} chunked pre_attn_norm"),
-        &normed,
-    )?;
     synchronize_tensor_ready_for_full_attn_handoff(
         &format!("layer {full_attn_layer_idx} chunked full-attention pre_attn_norm"),
         &normed,
@@ -20719,11 +20060,6 @@ fn transformer_block_detached_prefill_chunked(
         lora_scale,
     )
     .context("chunked full-attention k projection")?;
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} chunked k_flat"),
-        &k_flat,
-    )?;
     let k = tape_reshape_full_attn(
         &k_flat,
         &[
@@ -20747,11 +20083,6 @@ fn transformer_block_detached_prefill_chunked(
         lora_scale,
     )
     .context("chunked full-attention v projection")?;
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} chunked v_flat"),
-        &v_flat,
-    )?;
     let v = tape_reshape_full_attn(
         &v_flat,
         &[
@@ -20768,22 +20099,12 @@ fn transformer_block_detached_prefill_chunked(
     )?;
     let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)
         .context("chunked full-attention k norm")?;
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} chunked k_norm"),
-        &k,
-    )?;
     synchronize_tensor_ready_for_full_attn_handoff(
         &format!("layer {full_attn_layer_idx} chunked full-attention k_norm"),
         &k,
     )?;
     let (k, _) = rotary_embedding(&k, &k, positions, head_dim, rotary_dim, inv_freq)
         .context("chunked full-attention k rotary")?;
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} chunked k_rotary"),
-        &k,
-    )?;
     synchronize_tensor_ready_for_full_attn_handoff(
         &format!("layer {full_attn_layer_idx} chunked full-attention k_rotary"),
         &k,
@@ -20812,11 +20133,6 @@ fn transformer_block_detached_prefill_chunked(
             &format!("chunked full-attention normed tile [{tile_start}, {tile_end})"),
             true,
         )?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) normed_tile"),
-            &normed_tile,
-        )?;
         synchronize_tensor_ready_for_full_attn_handoff(
             &format!(
                 "layer {full_attn_layer_idx} chunked full-attention normed tile [{tile_start}, {tile_end})"
@@ -20842,16 +20158,6 @@ fn transformer_block_detached_prefill_chunked(
             None
         };
         let (q_tile, gate_tile) = if let Some((q, gate)) = split_q_gate {
-            ensure_full_attn_debug_finite(
-                debug_finite,
-                format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) q_split"),
-                &q,
-            )?;
-            ensure_full_attn_debug_finite(
-                debug_finite,
-                format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) gate_split"),
-                &gate,
-            )?;
             (q, Some(gate))
         } else {
             let q_raw = q_proj_forward_decode_if(
@@ -20865,11 +20171,6 @@ fn transformer_block_detached_prefill_chunked(
             .with_context(|| {
                 format!("chunked full-attention q projection [{tile_start}, {tile_end})")
             })?;
-            ensure_full_attn_debug_finite(
-                debug_finite,
-                format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) q_raw"),
-                &q_raw,
-            )?;
             if config.attn_output_gate {
                 let q_raw = tape_reshape_full_attn(
                     &q_raw,
@@ -20949,11 +20250,6 @@ fn transformer_block_detached_prefill_chunked(
                 gate,
             )?;
         }
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) q_norm"),
-            &q_tile,
-        )?;
         let tile_positions = &positions[tile_start..tile_end];
         let (q_tile, _) = rotary_embedding(
             &q_tile,
@@ -20964,11 +20260,6 @@ fn transformer_block_detached_prefill_chunked(
             inv_freq,
         )
         .with_context(|| format!("chunked full-attention q rotary [{tile_start}, {tile_end})"))?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) q_rotary"),
-            &q_tile,
-        )?;
         synchronize_tensor_ready_for_full_attn_handoff(
             &format!(
                 "layer {full_attn_layer_idx} chunked full-attention q_rotary tile [{tile_start}, {tile_end})"
@@ -21172,11 +20463,6 @@ fn transformer_block_detached_prefill_chunked(
                 format!("chunked full-attention core tile [{tile_start}, {tile_end})")
             })?
         };
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) attn_core"),
-            &attn_core,
-        )?;
         synchronize_tensor_ready_for_full_attn_handoff(
             &format!(
                 "layer {full_attn_layer_idx} chunked full-attention attn_core tile [{tile_start}, {tile_end})"
@@ -21187,11 +20473,6 @@ fn transformer_block_detached_prefill_chunked(
             .with_context(|| {
                 format!("chunked full-attention gate tile [{tile_start}, {tile_end})")
             })?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) attn_output"),
-            &attn_output,
-        )?;
         synchronize_tensor_ready_for_full_attn_handoff(
             &format!(
                 "layer {full_attn_layer_idx} chunked full-attention attn_output tile [{tile_start}, {tile_end})"
@@ -21203,11 +20484,6 @@ fn transformer_block_detached_prefill_chunked(
                 .with_context(|| {
                     format!("chunked full-attention o-proj tile [{tile_start}, {tile_end})")
                 })?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) o_proj"),
-            &attn_out,
-        )?;
         synchronize_tensor_ready_for_full_attn_handoff(
             &format!(
                 "layer {full_attn_layer_idx} chunked full-attention o_proj tile [{tile_start}, {tile_end})"
@@ -21225,13 +20501,6 @@ fn transformer_block_detached_prefill_chunked(
         let residual = residual_add(x_tile, attn_out).with_context(|| {
             format!("chunked full-attention attention residual tile [{tile_start}, {tile_end})")
         })?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!(
-                "layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) attention_residual"
-            ),
-            &residual,
-        )?;
         synchronize_tensor_ready_for_full_attn_handoff(
             &format!(
                 "layer {full_attn_layer_idx} chunked full-attention attention_residual tile [{tile_start}, {tile_end})"
@@ -21242,11 +20511,6 @@ fn transformer_block_detached_prefill_chunked(
             .with_context(|| {
                 format!("chunked full-attention post norm tile [{tile_start}, {tile_end})")
             })?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) post_norm"),
-            &normed_post,
-        )?;
         synchronize_tensor_ready_for_full_attn_handoff(
             &format!(
                 "layer {full_attn_layer_idx} chunked full-attention post_norm tile [{tile_start}, {tile_end})"
@@ -21256,11 +20520,6 @@ fn transformer_block_detached_prefill_chunked(
         let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, lora).with_context(|| {
             format!("chunked full-attention MLP tile [{tile_start}, {tile_end})")
         })?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) mlp"),
-            &ffn_out,
-        )?;
         synchronize_tensor_ready_for_full_attn_handoff(
             &format!(
                 "layer {full_attn_layer_idx} chunked full-attention mlp tile [{tile_start}, {tile_end})"
@@ -21270,11 +20529,6 @@ fn transformer_block_detached_prefill_chunked(
         let out_tile = residual_add(residual, ffn_out).with_context(|| {
             format!("chunked full-attention output tile [{tile_start}, {tile_end})")
         })?;
-        ensure_full_attn_debug_finite(
-            debug_finite,
-            format!("layer {full_attn_layer_idx} tile [{tile_start}, {tile_end}) output"),
-            &out_tile,
-        )?;
         synchronize_tensor_ready_for_full_attn_handoff(
             &format!(
                 "layer {full_attn_layer_idx} chunked full-attention output tile [{tile_start}, {tile_end})"
@@ -21303,11 +20557,6 @@ fn transformer_block_detached_prefill_chunked(
 
     let output_refs: Vec<&Tensor> = output_tiles.iter().collect();
     let output = Tensor::cat(&output_refs, 1).context("chunked full-attention output cat")?;
-    ensure_full_attn_debug_finite(
-        debug_finite,
-        format!("layer {full_attn_layer_idx} chunked output_cat"),
-        &output,
-    )?;
     synchronize_tensor_ready_for_full_attn_handoff(
         &format!("layer {full_attn_layer_idx} chunked full-attention output cat"),
         &output,
@@ -21393,7 +20642,6 @@ pub fn transformer_block_paged(
         lora,
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
-        None,
         // Phase 7 #1082: no kt twin plumbed through this wrapper yet —
         // the cache-owning struct migration that allocates one is a
         // follow-up commit. Default `None` keeps this path on the
@@ -21425,7 +20673,6 @@ fn transformer_block_paged_with_rope_tables(
     #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<
         &PagedDecodeGraphInputs<'_>,
     >,
-    profile_mlp_context: Option<(usize, usize)>,
     // Phase 7 #1082: kt twin of `paged_cache`, plumbed through to the
     // GQA paged-attention call below so the kt cache can mirror the
     // CUDA-graph paged-KV write. `None` keeps the path on the candle
@@ -21524,23 +20771,9 @@ fn transformer_block_paged_with_rope_tables(
         rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?
     };
     let ffn_out = if use_metal_decode_ffn {
-        swiglu_ffn_backend_profiled(
-            backend,
-            &normed,
-            &layer.mlp,
-            lora,
-            true,
-            profile_mlp_context,
-        )?
+        swiglu_ffn_backend_profiled(backend, &normed, &layer.mlp, lora, true)?
     } else {
-        swiglu_ffn_backend_profiled(
-            backend,
-            &normed,
-            &layer.mlp,
-            lora,
-            false,
-            profile_mlp_context,
-        )?
+        swiglu_ffn_backend_profiled(backend, &normed, &layer.mlp, lora, false)?
     };
 
     // Residual connection
@@ -21573,7 +20806,6 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     block_tables: &[&BlockTable],
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
-    mlp_diagnostic_context: Option<(usize, usize)>,
     cached_meta: Option<&CachedPagedDecodeMeta>,
     // CUDA-graph-stable `(attn_out, softmax_lse)` scratch for the bs>1
     // captured forward path. Forwarded as-is to
@@ -21652,14 +20884,8 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         kiln_nvtx::range!(c"kiln/norm/pre_mlp_batch_decode");
         rms_norm(&x, &layer.post_attention_layernorm, config.rms_norm_eps)?
     };
-    let ffn_out = swiglu_ffn_backend_profiled(
-        backend,
-        &normed,
-        &layer.mlp,
-        lora,
-        use_metal_decode_ffn,
-        mlp_diagnostic_context,
-    )?;
+    let ffn_out =
+        swiglu_ffn_backend_profiled(backend, &normed, &layer.mlp, lora, use_metal_decode_ffn)?;
     let out = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
         (x + ffn_out)?
@@ -22218,7 +21444,6 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     block_tables,
                     full_attn_idx,
                     layer_lora,
-                    None,
                     cached_paged_meta_ref,
                     layer_graph_outputs,
                     layer_rope_tables,
@@ -22250,7 +21475,6 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     &mut state.conv_states[linear_attn_idx],
                     use_metal_decode_ffn,
                     use_metal_decode_ffn,
-                    None,
                     true,
                     true,
                     layer_lora,
@@ -22276,7 +21500,6 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     &layer.mlp,
                     layer_lora,
                     use_metal_decode_ffn,
-                    None,
                 )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -22981,7 +22204,6 @@ pub fn model_forward_kt_with_policy(
                     &mut state.conv_states[linear_attn_idx],
                     /* use_fused_gdn_gates = */ true,
                     use_metal_decode_ffn,
-                    None,
                     true,
                     true,
                     layer_lora,
@@ -23165,7 +22387,6 @@ pub fn model_forward_segment_with_policy(
         0
     };
     let stream_active = streaming && stream_tile > 0 && seq_len > stream_tile;
-    let debug_segment_finite = debug_full_attn_finite_checks();
 
     for i in start_layer..end_layer {
         let layer = &weights.layers[i];
@@ -23199,25 +22420,14 @@ pub fn model_forward_segment_with_policy(
                 let state = linear_state.as_mut().ok_or_else(|| {
                     anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
                 })?;
-                ensure_full_attn_debug_finite(
-                    debug_segment_finite,
-                    format!("layer {i} gdn pre_attn_input"),
-                    &hidden,
-                )?;
                 let normed = {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
                 };
-                ensure_full_attn_debug_finite(
-                    debug_segment_finite,
-                    format!("layer {i} gdn pre_attn_norm"),
-                    &normed,
-                )?;
                 synchronize_tensor_ready_for_model_handoff(
                     &format!("layer {i} gdn pre_attn_norm"),
                     &normed,
                 )?;
-                let gdn_diagnostic_context = None;
                 let attn_out = if stream_active {
                     gated_deltanet_forward_streaming(
                         backend,
@@ -23227,7 +22437,6 @@ pub fn model_forward_segment_with_policy(
                         &mut state.recurrent_states[linear_attn_idx],
                         &mut state.conv_states[linear_attn_idx],
                         stream_tile,
-                        gdn_diagnostic_context,
                         layer_lora,
                     )
                     .with_context(|| format!("segment streaming gated deltanet layer {i}"))?
@@ -23241,18 +22450,12 @@ pub fn model_forward_segment_with_policy(
                         &mut state.conv_states[linear_attn_idx],
                         /* use_fused_gdn_gates = */ true,
                         /* use_metal_decode_gemv = */ false,
-                        gdn_diagnostic_context,
                         /* allow_forward_only_fastpaths = */ true,
                         /* allow_prefill_recurrent_kernel = */ true,
                         layer_lora,
                     )
                     .with_context(|| format!("segment gated deltanet layer {i}"))?
                 };
-                ensure_full_attn_debug_finite(
-                    debug_segment_finite,
-                    format!("layer {i} gdn attention"),
-                    &attn_out,
-                )?;
                 synchronize_tensor_ready_for_model_handoff(
                     &format!("layer {i} gdn attention"),
                     &attn_out,
@@ -23261,11 +22464,6 @@ pub fn model_forward_segment_with_policy(
                     kiln_nvtx::range!(c"kiln/residual");
                     residual_add(hidden, attn_out)?
                 };
-                ensure_full_attn_debug_finite(
-                    debug_segment_finite,
-                    format!("layer {i} gdn attention_residual"),
-                    &hidden,
-                )?;
                 synchronize_tensor_ready_for_model_handoff(
                     &format!("layer {i} gdn attention_residual"),
                     &hidden,
@@ -23278,11 +22476,6 @@ pub fn model_forward_segment_with_policy(
                         config.rms_norm_eps,
                     )?
                 };
-                ensure_full_attn_debug_finite(
-                    debug_segment_finite,
-                    format!("layer {i} gdn post_attn_norm"),
-                    &normed_post,
-                )?;
                 synchronize_tensor_ready_for_model_handoff(
                     &format!("layer {i} gdn post_attn_norm"),
                     &normed_post,
@@ -23293,12 +22486,6 @@ pub fn model_forward_segment_with_policy(
                     &layer.mlp,
                     layer_lora,
                     false,
-                    None,
-                )?;
-                ensure_full_attn_debug_finite(
-                    debug_segment_finite,
-                    format!("layer {i} gdn mlp"),
-                    &ffn_out,
                 )?;
                 synchronize_tensor_ready_for_model_handoff(
                     &format!("layer {i} gdn mlp"),
@@ -23308,11 +22495,6 @@ pub fn model_forward_segment_with_policy(
                     kiln_nvtx::range!(c"kiln/residual");
                     residual_add(hidden, ffn_out)?
                 };
-                ensure_full_attn_debug_finite(
-                    debug_segment_finite,
-                    format!("layer {i} gdn output"),
-                    &hidden,
-                )?;
                 synchronize_tensor_ready_for_model_handoff(
                     &format!("layer {i} gdn output"),
                     &hidden,
@@ -24911,7 +24093,6 @@ pub fn model_forward_paged_batched_decode_hidden(
                     &mut conv_state,
                     true,
                     false,
-                    None,
                     true,
                     true,
                     layer_lora,
@@ -24951,7 +24132,6 @@ pub fn model_forward_paged_batched_decode_hidden(
                     &layer.mlp,
                     layer_lora,
                     use_metal_decode_ffn,
-                    None,
                 )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/batched_decode/residual/mlp");
@@ -24975,7 +24155,6 @@ pub fn model_forward_paged_batched_decode_hidden(
                     &block_table_refs,
                     full_attn_idx,
                     layer_lora,
-                    None,
                     None,
                     None,
                     None,
@@ -25587,7 +24766,6 @@ fn model_forward_paged_inner_bounded(
                     layer_lora,
                     #[cfg(any(feature = "cuda", feature = "rocm"))]
                     graph_inputs,
-                    None,
                     // Phase 7 #1082: forward the inner-fn kt twin
                     // parameter down to the per-layer block call so the
                     // kt cache mirrors the candle CUDA-graph paged-KV
@@ -25658,7 +24836,6 @@ fn model_forward_paged_inner_bounded(
                         &mut state.conv_states[linear_attn_idx],
                         true,
                         use_metal_decode_ffn,
-                        None,
                         true,
                         true,
                         layer_lora,
@@ -25685,7 +24862,6 @@ fn model_forward_paged_inner_bounded(
                     &layer.mlp,
                     layer_lora,
                     use_metal_decode_ffn,
-                    None,
                 )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
@@ -27222,14 +26398,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = swiglu_ffn_impl(
-            Some(&backend),
-            &x,
-            &mlp,
-            Some((&lora_layer, 1.0)),
-            false,
-            None,
-        )?;
+        let out = swiglu_ffn_impl(Some(&backend), &x, &mlp, Some((&lora_layer, 1.0)), false)?;
 
         assert_eq!(
             backend
@@ -27292,14 +26461,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = swiglu_ffn_impl(
-            Some(&backend),
-            &x,
-            &mlp,
-            Some((&lora_layer, 1.0)),
-            false,
-            None,
-        )?;
+        let out = swiglu_ffn_impl(Some(&backend), &x, &mlp, Some((&lora_layer, 1.0)), false)?;
 
         assert_eq!(
             backend
@@ -29276,7 +28438,6 @@ mod tests {
             &mut batch_cache,
             &block_tables,
             0,
-            None,
             None,
             None,
             None,
@@ -34733,7 +33894,6 @@ mod tests {
             &mut stream_state.recurrent_states[0],
             &mut stream_state.conv_states[0],
             tile,
-            None,
             None,
         )?;
 

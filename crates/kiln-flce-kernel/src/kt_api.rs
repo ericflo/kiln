@@ -259,7 +259,6 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
     };
     let num_active = active_metadata.active_labels.len();
     let active_labels = active_metadata.active_labels.as_slice();
-    debug_flce_metadata(seq_len, vocab_size, chunk_size, num_active, active_labels);
 
     // Build `active_hidden` of shape `[num_active, hidden_size]` in F32.
     //
@@ -273,7 +272,6 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
         .map_err(FlceError::Kt)?
         .contiguous()
         .map_err(FlceError::Kt)?;
-    debug_flce_tensor("flce_shift_hidden", &shift_hidden)?;
     // Derive the destination device from the input `hidden`'s storage so
     // every index/accumulator tensor lands on the same backend. `dispatch2`
     // rejects mixed-device inputs (CPU index + CUDA logits would error), so
@@ -286,9 +284,7 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
     let device: KtDevice = hidden.device();
     let active_hidden =
         index_select(&shift_hidden, 0, &active_metadata.active_idx).map_err(FlceError::Kt)?;
-    debug_flce_tensor("flce_active_hidden_raw", &active_hidden)?;
     let active_hidden_f32 = to_f32(&active_hidden).map_err(FlceError::Kt)?;
-    debug_flce_tensor("flce_active_hidden_f32", &active_hidden_f32)?;
     synchronize_flce_reduction_tensor("flce_active_hidden_f32_ready", &active_hidden_f32)?;
     let head_t_f32 = to_f32(head_t).map_err(FlceError::Kt)?;
     synchronize_flce_reduction_tensor("flce_head_t_f32_ready", &head_t_f32)?;
@@ -330,9 +326,6 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
     synchronize_flce_reduction_tensor("flce_running_max", &running_max_1d)?;
     synchronize_flce_reduction_tensor("flce_running_sumexp", &running_sumexp_1d)?;
     synchronize_flce_reduction_tensor("flce_correct_logit", &correct_logit_1d)?;
-    debug_flce_tensor("flce_running_max", &running_max_1d)?;
-    debug_flce_tensor("flce_running_sumexp", &running_sumexp_1d)?;
-    debug_flce_tensor("flce_correct_logit", &correct_logit_1d)?;
 
     let loss = if flce_gpu_host_scalar_mean_enabled(&device) {
         mean_flce_loss_from_metadata_host_scalar(
@@ -346,20 +339,16 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
         // [num_active] F32.
         let log_sumexp = ln(&running_sumexp_1d).map_err(FlceError::Kt)?;
         synchronize_flce_reduction_tensor("flce_log_sumexp", &log_sumexp)?;
-        debug_flce_tensor("flce_log_sumexp", &log_sumexp)?;
         let log_sum_exp =
             kiln_tensor::ops::add(&running_max_1d, &log_sumexp).map_err(FlceError::Kt)?;
         synchronize_flce_reduction_tensor("flce_log_sum_exp", &log_sum_exp)?;
-        debug_flce_tensor("flce_log_sum_exp", &log_sum_exp)?;
 
         // Per-token loss = log_sum_exp - correct_logit. Mean over active rows.
         let per_token_loss = sub(&log_sum_exp, &correct_logit_1d).map_err(FlceError::Kt)?;
         synchronize_flce_reduction_tensor("flce_per_token_loss", &per_token_loss)?;
-        debug_flce_tensor("flce_per_token_loss", &per_token_loss)?;
         mean_all(&per_token_loss).map_err(FlceError::Kt)?
     };
     synchronize_flce_reduction_tensor("flce_loss", &loss)?;
-    debug_flce_tensor("flce_loss", &loss)?;
     active_metadata.running_max = Some(running_max_1d);
     active_metadata.running_sumexp = Some(running_sumexp_1d);
     Ok((loss, Some(active_metadata)))
@@ -515,16 +504,10 @@ fn flce_forward_full_active_stats(
             .map_err(FlceError::Kt)?
             .contiguous()
             .map_err(FlceError::Kt)?;
-        if chunk_start == 0 {
-            debug_flce_tensor("flce_head_chunk0", &head_chunk)?;
-        }
         synchronize_flce_reduction_tensor("flce_head_chunk_ready", &head_chunk)?;
 
         let logits_chunk =
             flce_matmul_active_rows(active_hidden_f32, &head_chunk, "flce_logits_chunk")?;
-        if chunk_start == 0 {
-            debug_flce_tensor("flce_logits_chunk0", &logits_chunk)?;
-        }
         synchronize_flce_reduction_tensor("flce_logits_chunk_ready", &logits_chunk)?;
 
         let chunk_max_1d = max_axis(&logits_chunk, 1).map_err(FlceError::Kt)?;
@@ -532,10 +515,6 @@ fn flce_forward_full_active_stats(
         // log-sum-exp update below. Treat arbitrary-axis reductions as an
         // async producer boundary before broadcasting/reusing their output.
         synchronize_flce_reduction_tensor("flce_chunk_max_ready", &chunk_max_1d)?;
-        debug_flce_tensor(
-            &format!("flce_chunk_max_start_{chunk_start}"),
-            &chunk_max_1d,
-        )?;
         let (new_max_1d, new_sumexp_1d) = flce_update_running_stats_for_chunk(
             running_max.as_ref(),
             running_sumexp.as_ref(),
@@ -918,162 +897,6 @@ fn flce_host_f32_values(label: &str, tensor: &KtTensor) -> Result<Vec<f32>, Flce
         .map_err(FlceError::Kt)?
         .to_vec::<f32>()
         .map_err(FlceError::Kt)
-}
-
-fn debug_flce_stats_enabled() -> bool {
-    std::env::var("KILN_DEBUG_FLCE_STATS")
-        .ok()
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            !matches!(value.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false)
-}
-
-fn debug_flce_stats_labels() -> Option<Vec<String>> {
-    std::env::var("KILN_DEBUG_FLCE_STATS_LABEL")
-        .ok()
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .filter(|labels| !labels.is_empty())
-}
-
-fn debug_flce_label_matches(label: &str, filters: Option<&[String]>) -> bool {
-    filters
-        .map(|filters| filters.iter().any(|filter| label.contains(filter)))
-        .unwrap_or(true)
-}
-
-fn debug_flce_metadata(
-    seq_len: usize,
-    vocab_size: usize,
-    chunk_size: usize,
-    num_active: usize,
-    active_labels: &[u32],
-) {
-    if !debug_flce_stats_enabled() {
-        return;
-    }
-    let min_label = active_labels.iter().copied().min().unwrap_or(0);
-    let max_label = active_labels.iter().copied().max().unwrap_or(0);
-    eprintln!(
-        "kiln_flce_stats label=flce_metadata seq_len={seq_len} vocab_size={vocab_size} chunk_size={chunk_size} num_active={num_active} min_label={min_label} max_label={max_label}"
-    );
-}
-
-fn debug_flce_tensor(label: &str, tensor: &KtTensor) -> Result<(), FlceError> {
-    let filters = debug_flce_stats_labels();
-    if !debug_flce_stats_enabled() && filters.is_none() {
-        return Ok(());
-    }
-    if !debug_flce_label_matches(label, filters.as_deref()) {
-        return Ok(());
-    }
-
-    let (finite, summary) = summarize_flce_debug_values(tensor)
-        .map_err(|e| FlceError::msg(format!("kt-flce debug scan failed for {label}: {e}")))?;
-    eprintln!(
-        "kiln_flce_stats label={label} dtype={} shape={:?} device={} contiguous={} start_offset={} strides={:?} {summary}",
-        tensor.dtype(),
-        tensor.shape(),
-        tensor.device(),
-        tensor.is_contiguous(),
-        tensor.layout().start_offset(),
-        tensor.strides(),
-    );
-    if finite {
-        Ok(())
-    } else {
-        Err(FlceError::msg(format!(
-            "kt-flce non-finite tensor at {label}: dtype={} shape={:?} device={} contiguous={} start_offset={} strides={:?} {summary}",
-            tensor.dtype(),
-            tensor.shape(),
-            tensor.device(),
-            tensor.is_contiguous(),
-            tensor.layout().start_offset(),
-            tensor.strides(),
-        )))
-    }
-}
-
-fn summarize_flce_debug_values(tensor: &KtTensor) -> Result<(bool, String), KtError> {
-    let host = tensor
-        .to_device(KtDevice::Cpu)?
-        .to_dtype(KtDType::F32)?
-        .contiguous()?;
-    let values = host.to_vec::<f32>()?;
-    let mut finite_count = 0usize;
-    let mut first_bad: Option<(usize, f32)> = None;
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    let mut max_abs = 0.0f32;
-    let mut max_abs_idx = 0usize;
-    let mut finite_sum = 0.0f64;
-    for (idx, value) in values.iter().copied().enumerate() {
-        if value.is_finite() {
-            finite_count += 1;
-            finite_sum += value as f64;
-            if value < min {
-                min = value;
-            }
-            if value > max {
-                max = value;
-            }
-            let abs = value.abs();
-            if abs > max_abs {
-                max_abs = abs;
-                max_abs_idx = idx;
-            }
-        } else if first_bad.is_none() {
-            first_bad = Some((idx, value));
-        }
-    }
-
-    let shape = tensor.shape();
-    let coord = |mut idx: usize| -> Vec<usize> {
-        let mut out = vec![0usize; shape.len()];
-        for axis in (0..shape.len()).rev() {
-            let dim = shape[axis].max(1);
-            out[axis] = idx % dim;
-            idx /= dim;
-        }
-        out
-    };
-
-    let total = values.len();
-    let mean = if finite_count == 0 {
-        f64::NAN
-    } else {
-        finite_sum / finite_count as f64
-    };
-    let min = if finite_count == 0 { f32::NAN } else { min };
-    let max = if finite_count == 0 { f32::NAN } else { max };
-    let finite = first_bad.is_none();
-    let first_bad_summary = first_bad
-        .map(|(idx, value)| {
-            format!(
-                " first_bad_idx={idx} first_bad_coord={:?} first_bad={value}",
-                coord(idx)
-            )
-        })
-        .unwrap_or_default();
-    let max_abs_coord = if total == 0 {
-        Vec::new()
-    } else {
-        coord(max_abs_idx)
-    };
-    Ok((
-        finite,
-        format!(
-            "finite={finite} finite_count={finite_count}/{total} min={min:.8e} max={max:.8e} mean={mean:.8e} max_abs={max_abs:.8e} max_abs_idx={max_abs_idx} max_abs_coord={max_abs_coord:?}{first_bad_summary}"
-        ),
-    ))
 }
 
 /// kt-typed FLCE Phase B backward — compute `dhidden` from `grad_loss`.

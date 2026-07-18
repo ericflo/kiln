@@ -13688,191 +13688,6 @@ pub(crate) fn rms_norm_backward_pre_final_norm(
     Ok((u.broadcast_mul(&rms_inv)? - correction)?.detach())
 }
 
-fn debug_sft_finite_checks() -> bool {
-    kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_FINITE", false)
-}
-
-fn debug_sft_active_rows() -> bool {
-    kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_ACTIVE_ROWS", false)
-}
-
-fn debug_sft_stats_label() -> Option<String> {
-    std::env::var("KILN_DEBUG_SFT_STATS_LABEL")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn debug_sft_label_matches(label: &str, filter: Option<&String>) -> bool {
-    filter
-        .map(|filter| {
-            filter
-                .split(',')
-                .map(str::trim)
-                .filter(|needle| !needle.is_empty())
-                .any(|needle| label.contains(needle))
-        })
-        .unwrap_or(true)
-}
-
-fn ensure_sft_debug_finite(enabled: bool, label: impl AsRef<str>, tensor: &Tensor) -> Result<()> {
-    if !enabled {
-        return Ok(());
-    }
-    let label = label.as_ref();
-    let stats_filter = debug_sft_stats_label();
-    if !debug_sft_label_matches(label, stats_filter.as_ref()) {
-        return Ok(());
-    }
-
-    let (finite, value_summary) = if stats_filter.is_some() {
-        summarize_sft_debug_values(tensor)
-            .with_context(|| format!("SFT finite check failed to scan {label}"))?
-    } else {
-        let finite = tensor
-            .all_finite()
-            .with_context(|| format!("SFT finite check failed to scan {label}"))?;
-        let value_summary = if finite {
-            String::new()
-        } else {
-            summarize_sft_debug_values(tensor)
-                .map(|(_, summary)| summary)
-                .unwrap_or_else(|e| format!("stats_error={e}"))
-        };
-        (finite, value_summary)
-    };
-    if stats_filter.is_some() {
-        eprintln!(
-            "kiln_sft_stats label={label} dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {value_summary}",
-            tensor.dtype(),
-            tensor.shape(),
-            tensor.device(),
-            tensor.is_contiguous(),
-            tensor.layout().start_offset(),
-            tensor.strides(),
-        );
-    }
-    anyhow::ensure!(
-        finite,
-        "SFT non-finite tensor at {label}: dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {}",
-        tensor.dtype(),
-        tensor.shape(),
-        tensor.device(),
-        tensor.is_contiguous(),
-        tensor.layout().start_offset(),
-        tensor.strides(),
-        value_summary,
-    );
-    Ok(())
-}
-
-fn sft_active_shift_indices(label_mask: &[bool], device: &Device) -> Result<Option<Tensor>> {
-    let active_positions: Vec<u32> = label_mask
-        .get(1..)
-        .unwrap_or(&[])
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &active)| active.then_some(idx as u32))
-        .collect();
-    if active_positions.is_empty() {
-        return Ok(None);
-    }
-    let len = active_positions.len();
-    Tensor::from_vec_on(device.clone(), active_positions, vec![len])
-        .map(Some)
-        .context("build SFT active shifted row indices")
-}
-
-fn ensure_sft_active_rows_finite(
-    enabled: bool,
-    label: impl AsRef<str>,
-    tensor: &Tensor,
-    active_shift_indices: Option<&Tensor>,
-) -> Result<()> {
-    if !enabled {
-        return Ok(());
-    }
-    let Some(active_shift_indices) = active_shift_indices else {
-        return Ok(());
-    };
-    let label = label.as_ref();
-    let rank = tensor.rank();
-    let rows = match rank {
-        3 if tensor.shape()[0] == 1 => tensor
-            .squeeze(0)
-            .with_context(|| format!("{label}: squeeze batch dim for active-row check"))?,
-        2 => tensor.clone(),
-        _ => {
-            anyhow::bail!(
-                "{label}: active-row finite check expected rank-2 or [1,T,H], got shape {:?}",
-                tensor.shape()
-            );
-        }
-    };
-    let index_summary = summarize_sft_active_indices(active_shift_indices)
-        .with_context(|| format!("{label}: summarize active shifted row indices"))?;
-    let rows = rows
-        .contiguous()
-        .with_context(|| format!("{label}: make active-row source contiguous"))?;
-    let active_rows = kiln_tensor::ops::index_select(&rows, 0, active_shift_indices)
-        .with_context(|| format!("{label}: gather active shifted rows"))?;
-    synchronize_training_tensor_ready(label, &active_rows)?;
-    let (finite, value_summary) = summarize_sft_debug_values(&active_rows)
-        .with_context(|| format!("{label}: summarize active shifted rows"))?;
-    eprintln!(
-        "kiln_sft_active_rows label={label} dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {index_summary} {value_summary}",
-        active_rows.dtype(),
-        active_rows.shape(),
-        active_rows.device(),
-        active_rows.is_contiguous(),
-        active_rows.layout().start_offset(),
-        active_rows.strides(),
-    );
-    anyhow::ensure!(
-        finite,
-        "SFT active shifted rows non-finite at {label}: dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {}",
-        active_rows.dtype(),
-        active_rows.shape(),
-        active_rows.device(),
-        active_rows.is_contiguous(),
-        active_rows.layout().start_offset(),
-        active_rows.strides(),
-        format!("{index_summary} {value_summary}"),
-    );
-    Ok(())
-}
-
-fn summarize_sft_active_indices(indices: &Tensor) -> Result<String> {
-    let host = indices
-        .to_device(Device::Cpu)
-        .context("copy SFT active indices to CPU")?
-        .contiguous()
-        .context("make SFT active indices CPU tensor contiguous")?;
-    let values = host
-        .to_vec::<u32>()
-        .context("read SFT active indices as u32")?;
-    let Some((&first, rest)) = values.split_first() else {
-        return Ok("active_indices=0".to_string());
-    };
-    let mut min = first;
-    let mut max = first;
-    for &value in rest {
-        min = min.min(value);
-        max = max.max(value);
-    }
-    let head: Vec<u32> = values.iter().take(8).copied().collect();
-    let tail_start = values.len().saturating_sub(8);
-    let tail: Vec<u32> = values.iter().skip(tail_start).copied().collect();
-    Ok(format!(
-        "active_indices={} min={} max={} head={:?} tail={:?}",
-        values.len(),
-        min,
-        max,
-        head,
-        tail,
-    ))
-}
-
 fn synchronize_training_tensor_ready(label: &str, tensor: &Tensor) -> Result<()> {
     match tensor.device() {
         Device::Cpu => Ok(()),
@@ -13949,12 +13764,6 @@ fn summarize_sft_debug_values(tensor: &Tensor) -> Result<(bool, String)> {
         coord(max_abs_idx)
     );
     Ok((first_bad.is_none(), summary))
-}
-
-fn debug_sft_reverse_segment_idx(num_segments: usize) -> Option<usize> {
-    let raw = std::env::var("KILN_DEBUG_SFT_REVERSE_SEGMENT_IDX").ok()?;
-    let idx = raw.trim().parse::<usize>().ok()?;
-    (idx < num_segments).then_some(idx)
 }
 
 fn dtype_size_bytes(dtype: DType) -> usize {
@@ -15850,9 +15659,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     ensure_tape_forward_backward_supported("checkpointed SFT", weights, backend)?;
     ensure_sft_loss_route_supports_checkpointing(sft_loss_route, true)?;
 
-    let debug_finite = debug_sft_finite_checks();
-    let debug_active_rows = debug_sft_active_rows();
-    let active_shift_indices = sft_active_shift_indices(label_mask, device)?;
     let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
     let lora_detached = lora_weights_detached(params);
     let lora_weights = params.as_lora_weights();
@@ -15884,13 +15690,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let mut boundary_dtypes: Vec<DType> = Vec::with_capacity(num_segments + 1);
     let mut current = embed_hidden.detach();
     synchronize_training_tensor_ready("embed_hidden", &current)?;
-    ensure_sft_debug_finite(debug_finite, "embed_hidden", &current)?;
-    ensure_sft_active_rows_finite(
-        debug_active_rows,
-        "embed_hidden",
-        &current,
-        active_shift_indices.as_ref(),
-    )?;
     boundary_dtypes.push(current.dtype());
     if let Some(spool) = spool_boundaries.as_ref() {
         spool.save(0, &current)?;
@@ -15916,13 +15715,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             .detach();
             let boundary_label = format!("boundary_segment[{seg_idx}] layers {start}..{end}");
             synchronize_training_tensor_ready(&boundary_label, &current)?;
-            ensure_sft_debug_finite(debug_finite, &boundary_label, &current)?;
-            ensure_sft_active_rows_finite(
-                debug_active_rows,
-                &boundary_label,
-                &current,
-                active_shift_indices.as_ref(),
-            )?;
             boundary_dtypes.push(current.dtype());
             if let Some(spool) = spool_boundaries.as_ref() {
                 spool.save(seg_idx + 1, &current)?;
@@ -15931,75 +15723,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 boundaries.push(Some(current.clone()));
             }
         }
-    }
-    if let Some(debug_seg_idx) = debug_sft_reverse_segment_idx(num_segments) {
-        let (start, end) = segments[debug_seg_idx];
-        let seg_input = if let Some(spool) = spool_boundaries.as_ref() {
-            load_or_recompute_checkpoint_boundary(
-                spool,
-                debug_seg_idx,
-                backend,
-                weights,
-                model_config,
-                &positions,
-                segments,
-                &lora_detached,
-                device,
-                streaming_prefill,
-            )?
-        } else {
-            boundaries[debug_seg_idx]
-                .as_ref()
-                .context("ckpt-kt debug reverse: missing input boundary")?
-                .clone()
-        };
-        let seg_output = if let Some(spool) = spool_boundaries.as_ref() {
-            load_or_recompute_checkpoint_boundary(
-                spool,
-                debug_seg_idx + 1,
-                backend,
-                weights,
-                model_config,
-                &positions,
-                segments,
-                &lora_detached,
-                device,
-                streaming_prefill,
-            )?
-        } else {
-            boundaries[debug_seg_idx + 1]
-                .as_ref()
-                .context("ckpt-kt debug reverse: missing output boundary")?
-                .clone()
-        };
-        let seed = seg_output
-            .ones_like()
-            .context("ckpt-kt debug reverse: synthetic seed")?
-            .to_dtype(boundary_dtypes[debug_seg_idx + 1])
-            .context("ckpt-kt debug reverse: seed dtype")?;
-        drop(seg_output);
-
-        let positions_ref = &positions;
-        let lora_ref = &lora_weights;
-        let _ = kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
-            let mut seg_ls = LinearAttentionState::new(model_config, device)
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-            model_forward_segment_with_policy(
-                backend,
-                seg_input,
-                weights,
-                model_config,
-                positions_ref,
-                start,
-                end,
-                Some(&mut seg_ls),
-                Some(lora_ref),
-                streaming_prefill,
-            )
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
-        })
-        .map_err(|e| anyhow::anyhow!("ckpt-kt debug reverse segment {debug_seg_idx}: {e}"))?;
-        return Ok((0.0, kiln_autograd::GradStore::new()));
     }
     let final_hidden_kt = current.clone();
 
@@ -16028,22 +15751,8 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             // The candle FLCE provider opt-in (`KILN_CUDA_FLCE`) was removed in the
             // candle drop — this is now the sole FLCE path.
             synchronize_training_tensor_ready("tail_pre_final_norm_hidden", &final_hidden_kt)?;
-            ensure_sft_debug_finite(debug_finite, "tail_pre_final_norm_hidden", &final_hidden_kt)?;
-            ensure_sft_active_rows_finite(
-                debug_active_rows,
-                "tail_pre_final_norm_hidden",
-                &final_hidden_kt,
-                active_shift_indices.as_ref(),
-            )?;
             let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
             synchronize_training_tensor_ready("tail_final_norm", &normed)?;
-            ensure_sft_debug_finite(debug_finite, "tail_final_norm", &normed)?;
-            ensure_sft_active_rows_finite(
-                debug_active_rows,
-                "tail_final_norm",
-                &normed,
-                active_shift_indices.as_ref(),
-            )?;
             let (loss_kt, active_metadata) =
                 kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_with_metadata_kt(
                     &normed,
@@ -16057,7 +15766,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                         "ckpt-kt kt-native fused linear cross-entropy (final boundary): {e}"
                     )
                 })?;
-            ensure_sft_debug_finite(debug_finite, "tail_flce_loss_scalar", &loss_kt)?;
             synchronize_training_tensor_ready("tail_flce_loss_scalar", &loss_kt)?;
             let loss_val = loss_kt.to_scalar::<f32>()? as f64;
             flce_active_metadata_for_tail = active_metadata;
@@ -16067,26 +15775,8 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         SftFlceLossRoute::VulkanActiveRows => {
             #[cfg(feature = "vulkan")]
             {
-                ensure_sft_debug_finite(
-                    debug_finite,
-                    "tail_pre_final_norm_hidden",
-                    &final_hidden_kt,
-                )?;
-                ensure_sft_active_rows_finite(
-                    debug_active_rows,
-                    "tail_pre_final_norm_hidden",
-                    &final_hidden_kt,
-                    active_shift_indices.as_ref(),
-                )?;
                 synchronize_training_tensor_ready("tail_pre_final_norm_hidden", &final_hidden_kt)?;
                 let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
-                ensure_sft_debug_finite(debug_finite, "tail_final_norm", &normed)?;
-                ensure_sft_active_rows_finite(
-                    debug_active_rows,
-                    "tail_final_norm",
-                    &normed,
-                    active_shift_indices.as_ref(),
-                )?;
                 synchronize_training_tensor_ready("tail_final_norm", &normed)?;
                 let (loss_kt, grad_normed) =
                     crate::sft_tape_shim::vulkan_sft_flce_loss_and_grad_kt(
@@ -16096,9 +15786,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                         label_mask,
                     )
                     .map_err(|e| anyhow::anyhow!("ckpt-kt Vulkan fused SFT FLCE tail: {e}"))?;
-                ensure_sft_debug_finite(debug_finite, "tail_vulkan_flce_loss_scalar", &loss_kt)?;
                 synchronize_training_tensor_ready("tail_vulkan_flce_loss_scalar", &loss_kt)?;
-                ensure_sft_debug_finite(debug_finite, "tail_vulkan_grad_normed", &grad_normed)?;
                 let loss_val = loss_kt.to_scalar::<f32>()? as f64;
                 tail_grad_override = Some(
                     rms_norm_backward_pre_final_norm(
@@ -16162,7 +15850,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let mut upstream_grad = tail_grad
         .context("ckpt-kt FLCE/RMSNorm SFT tail gradient")?
         .detach();
-    ensure_sft_debug_finite(debug_finite, "tail_upstream_grad", &upstream_grad)?;
     drop(final_hidden_kt);
     drop(current);
     // Step 3: reverse pass over segments via the kt tape. Each segment is
@@ -16199,11 +15886,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         let seed = upstream_grad
             .to_dtype(seg_output_dtype)
             .map_err(|e| anyhow::anyhow!("ckpt-kt: seed dtype cast (segment {seg_idx}): {e}"))?;
-        ensure_sft_debug_finite(
-            debug_finite,
-            format!("reverse_seed[{seg_idx}] layers {start}..{end}"),
-            &seed,
-        )?;
         let positions_ref = &positions;
         let lora_ref = &lora_weights;
         let (kt_grads, candle_grads) =
@@ -16258,11 +15940,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                     "ckpt-kt: tape backward produced no input gradient for segment {seg_idx}"
                 )
             })?;
-            ensure_sft_debug_finite(
-                debug_finite,
-                format!("reverse_upstream_grad[{seg_idx}] layers {start}..{end}"),
-                &upstream_grad,
-            )?;
         }
     }
 
