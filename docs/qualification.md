@@ -2109,7 +2109,13 @@ prompt, stable-profile, or cross-machine claim.
 
 Never edit a receipt to make it pass. A failed receipt is useful evidence: keep
 it when it identifies a reproducible product defect, fix the defect in a new
-commit, and run a new receipt with a new ID.
+commit, and run a new receipt with a new ID. When a structurally valid command
+result reports an effective configuration that differs from the selected
+variant, the runner fails the case and clears the receipt-level
+`effective_config` attestation, but retains the command's metrics, tolerances,
+and details as counterexample evidence. Those measurements are diagnostic only;
+they cannot support an accepted performance comparison because their effective
+configuration was not verified.
 
 ## Validate The Result
 

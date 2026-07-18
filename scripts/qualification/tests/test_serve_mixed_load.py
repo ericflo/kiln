@@ -1073,10 +1073,19 @@ class ServeMixedLoadTests(unittest.TestCase):
             },
         }
         expected_metrics = sorted(serve.METRIC_DEFINITIONS)
+
+        def canonical_json(value: object) -> str:
+            return json.dumps(
+                value, sort_keys=True, separators=(",", ":"), allow_nan=False
+            )
+
         for variant_id, driver_config in serve.VARIANT_CONFIGS.items():
             with self.subTest(variant=variant_id):
                 declared = variants[variant_id]
-                self.assertEqual(declared["effective_config"], driver_config)
+                self.assertEqual(
+                    canonical_json(declared["effective_config"]),
+                    canonical_json(driver_config),
+                )
                 self.assertEqual(declared["effective_config"]["build"], expected_build)
                 self.assertEqual(
                     declared["effective_config"]["host_safety"], expected_host_safety

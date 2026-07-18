@@ -1,0 +1,145 @@
+{
+  "artifacts": [
+    {
+      "bytes": 18222,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260718t072556209363z-rocm-strix-halo-serving-mixed-rocm-v1-184c082f9e-v1/environment.json",
+      "sha256": "sha256:667f4b2f694f1d3ac4fb1fc9e6b36c835f851f8ea39577512cf71d8f2e6ae4b7"
+    },
+    {
+      "bytes": 64925,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260718t072556209363z-rocm-strix-halo-serving-mixed-rocm-v1-184c082f9e-v1/cases/001-mixed-load-r001/stdout.log",
+      "sha256": "sha256:c5c89ad460c62b4815ffa1fafe7978da2d1f0f3c2e186b4f82c7358ee53953f3"
+    },
+    {
+      "bytes": 211508,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260718t072556209363z-rocm-strix-halo-serving-mixed-rocm-v1-184c082f9e-v1/cases/001-mixed-load-r001/stderr.log",
+      "sha256": "sha256:370fa2d7da8f0af0f48228cf808587092587f065b605d7f73af420034253b0da"
+    },
+    {
+      "bytes": 292,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260718t072556209363z-rocm-strix-halo-serving-mixed-rocm-v1-184c082f9e-v1/cases/001-mixed-load-r001/case-result.json",
+      "sha256": "sha256:d138c00291b402cc9443889065acf9db009d16726881f1d6e529132fa978e470"
+    },
+    {
+      "bytes": 25880,
+      "kind": "command_case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260718t072556209363z-rocm-strix-halo-serving-mixed-rocm-v1-184c082f9e-v1/cases/001-mixed-load-r001/command-result.json",
+      "sha256": "sha256:0f4212cbec8d3228bc70ed089b2292f62b00bce440fae8d4a83e908105e07288"
+    },
+    {
+      "bytes": 13297,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260718t072556209363z-rocm-strix-halo-serving-mixed-rocm-v1-184c082f9e-v1/run-config.json",
+      "sha256": "sha256:21137cf07f5da19cfdd098c75b67354d16e90eca75de416bb7dedbcafbc9827c"
+    }
+  ],
+  "created_at_utc": "2026-07-18T07:40:14.671Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    },
+    "device": {
+      "architecture": "gfx1151",
+      "driver": "amdgpu kernel 7.0.14-arch1-1",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "execution_environment_sha256": "sha256:fe2030650c08216163d368eb7de48a516c5cb9a049e885f749284d107ef1c505",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "hsa": "1.18",
+      "rocm": "7.2.4"
+    }
+  },
+  "metrics": [],
+  "model": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "id": "Qwen3.5-4B",
+    "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "notes": [],
+  "qualification": {
+    "backend": "rocm",
+    "command": [
+      "/usr/sbin/python3",
+      "scripts/qualification/run.py",
+      "--variant",
+      "autoscale-off",
+      "--host-id",
+      "strix-halo",
+      "--model",
+      "/home/ericflo/Development/kiln/Qwen3.5-4B",
+      "--model-id",
+      "Qwen3.5-4B",
+      "qualification/workloads/serving-mixed-rocm-v1.json"
+    ],
+    "duration_seconds": 858.4625625390327,
+    "finished_at_utc": "2026-07-18T07:40:14.671Z",
+    "kind": "performance",
+    "profile": "serving-mixed-rocm-v1",
+    "started_at_utc": "2026-07-18T07:25:56.209Z",
+    "verdict": "failed"
+  },
+  "receipt_id": "20260718t072556209363z-rocm-strix-halo-serving-mixed-rocm-v1-184c082f9e-v1",
+  "results": [
+    {
+      "details": "exit code 1 not in [0]; case result effective_config does not exactly match the selected variant; required policy metric 'prompt_token_count' is missing from result 'mixed-load'; required policy metric 'long_prefill_prompt_tokens' is missing from result 'mixed-load'; required policy metric 'completion_token_count' is missing from result 'mixed-load'; required policy metric 'length_terminated_request_count' is missing from result 'mixed-load'; required policy metric 'request_count' is missing from result 'mixed-load'; required policy metric 'request_failure_count' is missing from result 'mixed-load'",
+      "duration_seconds": 845.4279928610194,
+      "id": "mixed-load",
+      "metrics": [],
+      "required": true,
+      "status": "failed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "4560f5cf0dcfb4b5064d6c92279e96ea3f64d267",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:2bc0bb0930b62c544cf6bb1b921ed501a246ba6636a781e55e29a3bb65eb706e",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "serving-mixed-rocm-v1",
+    "parameters": {
+      "variant_id": "autoscale-off"
+    },
+    "seed": 20260709,
+    "sha256": "sha256:9a64a64d6c02399c500ff1f674d30a9b950717812542ccd1c823dedbc337d032"
+  }
+}

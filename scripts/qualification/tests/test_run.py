@@ -1106,7 +1106,30 @@ class RunnerTests(unittest.TestCase):
         outcome = self.execute(repository)
         self.assertEqual(outcome.exit_code, 1)
         self.assertEqual(outcome.receipt["effective_config"], {})
-        self.assertIn("does not exactly match", outcome.receipt["results"][0]["details"])
+        result = outcome.receipt["results"][0]
+        self.assertIn("does not exactly match", result["details"])
+        self.assertEqual(
+            result["metrics"],
+            [
+                {
+                    "aggregation": "exact",
+                    "lower_is_better": False,
+                    "name": "sample_value",
+                    "unit": "items",
+                    "value": 3.0,
+                }
+            ],
+        )
+        normalized_artifact = next(
+            artifact
+            for artifact in outcome.receipt["artifacts"]
+            if artifact["kind"] == "case_result"
+        )
+        normalized = json.loads(
+            (repository.root / normalized_artifact["path"]).read_text()
+        )
+        self.assertEqual(normalized["effective_config"], observed)
+        self.assertEqual(normalized["status"], "failed")
         self.assert_valid(outcome, repository.root)
 
     def test_command_metric_definition_must_match_committed_policy(self) -> None:
@@ -1786,7 +1809,6 @@ class RunnerTests(unittest.TestCase):
                             path,
                             expected_case_id="smoke-case",
                             declared_metrics={"sample_value"},
-                            expected_effective_config={},
                         )
 
     def test_case_result_schema_matches_closed_runner_contract(self) -> None:

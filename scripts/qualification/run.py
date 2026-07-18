@@ -783,7 +783,6 @@ def load_case_result(
     *,
     expected_case_id: str,
     declared_metrics: set[str],
-    expected_effective_config: dict[str, Any],
     max_bytes: int = CASE_RESULT_LIMIT_BYTES,
 ) -> dict[str, Any]:
     if max_bytes <= 0:
@@ -845,7 +844,6 @@ def load_case_result(
         value,
         expected_case_id=expected_case_id,
         declared_metrics=declared_metrics,
-        expected_effective_config=expected_effective_config,
     )
 
 
@@ -1707,9 +1705,17 @@ def _run_qualification_impl(
                             command_result_path,
                             expected_case_id=case["id"],
                             declared_metrics=declared_metrics,
-                            expected_effective_config=variant_effective_config,
                             max_bytes=per_case_result_limit,
                         )
+                        if not _json_equal(
+                            command_result["effective_config"],
+                            variant_effective_config,
+                        ):
+                            contract_failures.append(
+                                "case result effective_config does not exactly match "
+                                "the selected variant"
+                            )
+                            effective_config_verified = False
                     except CaseResultTooLargeError as exc:
                         contract_failures.append(str(exc))
                         command_result_oversized = True
