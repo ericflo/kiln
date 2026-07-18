@@ -554,8 +554,11 @@ the user-global vLLM cache and is also rejected. The v3 launch keeps the same
 semantic runtime manifest and inference fingerprint while explicitly selecting
 `.qualification/vllm-runtime-caches` as the parent of a new empty cache. A
 non-semantic cache-isolation change must not fabricate a second model identity.
-This is a qualification input, not a portable claim that another ROCm host has
-the same runtime and not evidence that vLLM has passed startup or performance.
+The retained v3 smoke proves this exact host/runtime can cold-compile, become
+ready, serve the strict streaming protocol, and drain cleanly with an isolated
+cache. It is not a portable claim that another ROCm host has the same runtime,
+and its one-token thermally paced request is not performance or numerical-parity
+evidence.
 
 The ignored local environment is rooted at
 `.qualification/vllm-rocm-venv`. Its `bin/python-kiln` must be a regular copied
@@ -591,6 +594,21 @@ permission-mutated. The typed private-cache lifecycle above removes global
 compile and metadata caches from subsequent launch inputs. A later v3 manifest
 and guarded receipt, not the repaired host-global path, are required to accept
 startup.
+
+The clean pushed-source v3 run is retained at
+`benchmarks/receipts/rocm/strix-halo/20260718t220209-rocm-strix-halo-vllm-triton-text-private-cache-v3-smoke.json`.
+It recomputed the exact v2 semantic manifest, loaded 7.99 GiB of model state,
+compiled into a new private cache, became ready, and served one strict warmup
+plus one measured streaming request with exact one-token usage and length
+termination. The driver exited the owned process group with status zero, did
+not force shutdown, cooled the package to 43.625 C, and left no listener,
+process, model snapshot, or runtime-cache child. The host guard recorded 274
+pacing intervals over 692.307 seconds, a 90.25 C lifecycle peak below the 93 C
+hard limit, and no guard trip. That cold-start cost is real lifecycle evidence,
+but the measured request spent 2.559 of 2.630 seconds thermally paced; its 0.38
+output token/second result must not be cited as a serving-performance result.
+Use the subsequent paired multi-concurrency campaign for throughput, pause, and
+correctness claims.
 
 Do not copy this manifest to another machine and call it qualified. Recreate
 the isolated runtime there, emit a new manifest through the exact launch argv,
