@@ -146,6 +146,19 @@ class FakeThermalGuard:
         }
 
 
+class FakeStartupTrippedThermalGuard(FakeThermalGuard):
+    def start(self) -> None:
+        self.trip_reason = "injected startup thermal trip"
+
+    def wait_for_pacing_settlement(self, _timeout_seconds: float) -> bool:
+        return False
+
+    def metric_values(self) -> dict:
+        values = super().metric_values()
+        values["host_thermal_guard_trip_count"] = 1
+        return values
+
+
 class FakeState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -300,6 +313,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         *,
         fetch_json: object | None = None,
         guarded: bool = True,
+        thermal_guard_factory: object = FakeThermalGuard,
     ) -> tuple[int, Path]:
         output = Path(directory) / "receipt.json"
         runtime_artifact = Path(directory) / "kiln-server"
@@ -357,7 +371,7 @@ class ServingBenchmarkTests(unittest.TestCase):
                 mock.patch.object(
                     bench.thermal,
                     "HostThermalGuard",
-                    side_effect=FakeThermalGuard,
+                    side_effect=thermal_guard_factory,
                 )
             )
             thermal_args = (
@@ -911,6 +925,38 @@ class ServingBenchmarkTests(unittest.TestCase):
                 "process_group": None,
                 "evidence": None,
             },
+        )
+
+    def test_startup_thermal_trip_writes_a_valid_failed_receipt(self) -> None:
+        with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
+            return_code, output = self._run_cli_fixture(
+                fake,
+                directory,
+                thermal_guard_factory=FakeStartupTrippedThermalGuard,
+            )
+            receipt = bench.strict_json_loads(output.read_bytes())
+            bench.validate_benchmark_receipt(receipt)
+
+        self.assertEqual(return_code, 2)
+        self.assertEqual(receipt["verdict"], "failed")
+        self.assertIsNone(receipt["warmup"])
+        self.assertEqual(receipt["runs"], [])
+        self.assertEqual(
+            receipt["completion"]["failures"],
+            [
+                {
+                    "phase": "host_thermal_startup",
+                    "detail": "BenchmarkError: injected startup thermal trip",
+                },
+                {
+                    "phase": "host_thermal_handoff",
+                    "detail": "BenchmarkError: injected startup thermal trip",
+                },
+            ],
+        )
+        self.assertEqual(
+            receipt["completion"]["finalization_checks"]["host_thermal_handoff"],
+            "failed",
         )
 
     def test_receipt_writer_refuses_overwrite(self) -> None:

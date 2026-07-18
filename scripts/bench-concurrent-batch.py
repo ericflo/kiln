@@ -168,6 +168,7 @@ COMPLETION_CHECK_NAMES = (
 )
 COMPLETION_CHECK_STATUSES = {"passed", "failed", "not_applicable"}
 COMPLETION_FAILURE_PHASES = {
+    "host_thermal_startup",
     "warmup",
     "measurement",
     "memory_sampler_stop",
@@ -1395,19 +1396,24 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     else:
         host_thermal_mode, host_thermal_passed = "legacy", True
 
+    missing_declared_warmup = False
     if warmup_requests:
         if receipt["warmup"] is None:
-            raise BenchmarkError("receipt omits its declared warmup")
-        validate_benchmark_run(
-            receipt["warmup"],
-            label="receipt.warmup",
-            concurrency=warmup_requests,
-            repeat=-1,
-            max_tokens=min(16, max_tokens),
-            driver_version=driver_version,
-            memory_limit_bytes=memory_limit_bytes,
-            workload_profile=workload.get("profile"),
-        )
+            if driver_version == "3":
+                missing_declared_warmup = True
+            else:
+                raise BenchmarkError("receipt omits its declared warmup")
+        else:
+            validate_benchmark_run(
+                receipt["warmup"],
+                label="receipt.warmup",
+                concurrency=warmup_requests,
+                repeat=-1,
+                max_tokens=min(16, max_tokens),
+                driver_version=driver_version,
+                memory_limit_bytes=memory_limit_bytes,
+                workload_profile=workload.get("profile"),
+            )
     elif receipt["warmup"] is not None:
         raise BenchmarkError("receipt has an undeclared warmup")
 
@@ -1552,6 +1558,10 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         if not completion_failures and actual_pairs != expected_pairs:
             raise BenchmarkError(
                 "receipt.runs may be incomplete only with a structured completion failure"
+            )
+        if missing_declared_warmup and not completion_failures:
+            raise BenchmarkError(
+                "receipt may omit its declared warmup only with a structured failure"
             )
     elif actual_pairs != expected_pairs:
         raise BenchmarkError("receipt.runs do not exactly match declared concurrency and repeats")
@@ -2826,6 +2836,7 @@ def main(argv: list[str] | None = None) -> int:
         if memory_path is None:
             raise BenchmarkError("a DRM device-memory counter is required for a measured run")
         workload = workload_contract(args, sizes)
+        thermal_startup_error: BenchmarkError | None = None
         thermal_policy_record: dict[str, Any] | None = None
         thermal_policy: thermal.HostThermalPolicy | None = None
         thermal_settlement_timeout = 0.0
@@ -2857,11 +2868,11 @@ def main(argv: list[str] | None = None) -> int:
             thermal_guard.set_phase("startup")
             thermal_guard.start()
             if thermal_guard.trip_reason is not None:
-                raise BenchmarkError(thermal_guard.trip_reason)
-            if not thermal_guard.wait_for_pacing_settlement(
+                thermal_startup_error = BenchmarkError(thermal_guard.trip_reason)
+            elif not thermal_guard.wait_for_pacing_settlement(
                 thermal_settlement_timeout
             ):
-                raise BenchmarkError(
+                thermal_startup_error = BenchmarkError(
                     thermal_guard.trip_reason
                     or "host thermal pacing failed to settle before warmup"
                 )
@@ -2935,53 +2946,56 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return row, None
 
-        sampler.start()
-        try:
+        if thermal_startup_error is not None:
+            record_completion_failure("host_thermal_startup", thermal_startup_error)
+        else:
+            sampler.start()
             try:
-                if args.warmup_requests:
-                    warmup, thermal_error = run_guarded(
-                        args=args,
-                        concurrency=args.warmup_requests,
-                        repeat=-1,
-                        max_tokens=min(16, args.max_tokens),
-                        phase=f"warmup-c{args.warmup_requests:03d}",
-                        headers=headers,
-                        sampler=sampler,
-                        diagnostics_url=diagnostics_url,
-                    )
-                    print(
-                        f"[warmup] {warmup['verdict']} "
-                        f"ok={warmup['success_count']}/{warmup['request_count']}"
-                    )
-                    if thermal_error is not None:
-                        raise thermal_error
+                try:
+                    if args.warmup_requests:
+                        warmup, thermal_error = run_guarded(
+                            args=args,
+                            concurrency=args.warmup_requests,
+                            repeat=-1,
+                            max_tokens=min(16, args.max_tokens),
+                            phase=f"warmup-c{args.warmup_requests:03d}",
+                            headers=headers,
+                            sampler=sampler,
+                            diagnostics_url=diagnostics_url,
+                        )
+                        print(
+                            f"[warmup] {warmup['verdict']} "
+                            f"ok={warmup['success_count']}/{warmup['request_count']}"
+                        )
+                        if thermal_error is not None:
+                            raise thermal_error
 
-                if warmup is None or warmup["verdict"] == "passed":
-                    for concurrency in sizes:
-                        for repeat in range(args.repeats):
-                            row, thermal_error = run_guarded(
-                                args=args,
-                                concurrency=concurrency,
-                                repeat=repeat,
-                                max_tokens=args.max_tokens,
-                                phase=f"measure-c{concurrency:03d}-r{repeat:03d}",
-                                headers=headers,
-                                sampler=sampler,
-                                diagnostics_url=diagnostics_url,
-                            )
-                            runs.append(row)
-                            print_run(row)
-                            if thermal_error is not None:
-                                raise thermal_error
-                elif warmup is not None:
-                    record_completion_failure("warmup", "warmup verdict failed")
-            except Exception as exc:
-                record_completion_failure("measurement", exc)
-        finally:
-            try:
-                sampler.stop()
-            except Exception as exc:
-                record_completion_failure("memory_sampler_stop", exc)
+                    if warmup is None or warmup["verdict"] == "passed":
+                        for concurrency in sizes:
+                            for repeat in range(args.repeats):
+                                row, thermal_error = run_guarded(
+                                    args=args,
+                                    concurrency=concurrency,
+                                    repeat=repeat,
+                                    max_tokens=args.max_tokens,
+                                    phase=f"measure-c{concurrency:03d}-r{repeat:03d}",
+                                    headers=headers,
+                                    sampler=sampler,
+                                    diagnostics_url=diagnostics_url,
+                                )
+                                runs.append(row)
+                                print_run(row)
+                                if thermal_error is not None:
+                                    raise thermal_error
+                    elif warmup is not None:
+                        record_completion_failure("warmup", "warmup verdict failed")
+                except Exception as exc:
+                    record_completion_failure("measurement", exc)
+            finally:
+                try:
+                    sampler.stop()
+                except Exception as exc:
+                    record_completion_failure("memory_sampler_stop", exc)
 
         run_finalization_check(
             "repository_unchanged",
