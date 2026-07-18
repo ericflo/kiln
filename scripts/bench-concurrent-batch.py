@@ -30,7 +30,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 SCHEMA = "kiln.serving-benchmark.v1"
@@ -156,6 +156,21 @@ RECEIPT_KEYS = {
     "verdict",
     "receipt_sha256",
 }
+COMPLETION_CHECK_NAMES = (
+    "repository_unchanged",
+    "model_identity_unchanged",
+    "runtime_artifact_unchanged",
+    "runtime_manifest_unchanged",
+    "execution_identity_unchanged",
+)
+COMPLETION_CHECK_STATUSES = {"passed", "failed", "not_applicable", "not_run"}
+COMPLETION_FAILURE_PHASES = {
+    "warmup",
+    "measurement",
+    "memory_sampler_stop",
+    "reference_comparison",
+    *COMPLETION_CHECK_NAMES,
+}
 RUN_KEYS = {
     "concurrency",
     "repeat",
@@ -260,6 +275,12 @@ def _nonnegative_number(value: Any, label: str) -> float:
 def _positive_int(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise BenchmarkError(f"{label} must be a positive integer")
+    return value
+
+
+def _nonnegative_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise BenchmarkError(f"{label} must be a non-negative integer")
     return value
 
 
@@ -603,8 +624,11 @@ def validate_benchmark_run(
 
 def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     receipt = _object(value, "receipt")
-    _exact_keys(receipt, RECEIPT_KEYS, "receipt", {"comparison"})
-    driver_version = receipt["driver_version"]
+    driver_version = receipt.get("driver_version")
+    required_receipt_keys = set(RECEIPT_KEYS)
+    if driver_version == "3":
+        required_receipt_keys.add("completion")
+    _exact_keys(receipt, required_receipt_keys, "receipt", {"comparison"})
     if receipt["schema"] != SCHEMA or driver_version not in SUPPORTED_DRIVER_VERSIONS:
         supported = ", ".join(sorted(SUPPORTED_DRIVER_VERSIONS))
         raise BenchmarkError(f"receipt must use {SCHEMA} driver version in {{{supported}}}")
@@ -919,7 +943,100 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 memory_limit_bytes=memory_limit_bytes,
                 workload_profile=workload.get("profile"),
             )
-    if actual_pairs != expected_pairs:
+    completion_failures: list[dict[str, str]] = []
+    completion_checks: dict[str, str] | None = None
+    if driver_version == "3":
+        completion = _object(receipt["completion"], "receipt.completion")
+        _exact_keys(
+            completion,
+            {
+                "expected_run_count",
+                "completed_run_count",
+                "failures",
+                "finalization_checks",
+            },
+            "receipt.completion",
+        )
+        expected_run_count = _nonnegative_int(
+            completion["expected_run_count"],
+            "receipt.completion.expected_run_count",
+        )
+        completed_run_count = _nonnegative_int(
+            completion["completed_run_count"],
+            "receipt.completion.completed_run_count",
+        )
+        if expected_run_count != len(expected_pairs):
+            raise BenchmarkError("receipt.completion.expected_run_count disagrees with workload")
+        if completed_run_count != len(runs):
+            raise BenchmarkError("receipt.completion.completed_run_count disagrees with runs")
+        raw_failures = completion["failures"]
+        if not isinstance(raw_failures, list):
+            raise BenchmarkError("receipt.completion.failures must be an array")
+        for index, raw_failure in enumerate(raw_failures):
+            failure = _object(raw_failure, f"receipt.completion.failures[{index}]")
+            _exact_keys(
+                failure,
+                {"phase", "detail"},
+                f"receipt.completion.failures[{index}]",
+            )
+            if (
+                not isinstance(failure["phase"], str)
+                or failure["phase"] not in COMPLETION_FAILURE_PHASES
+                or not isinstance(failure["detail"], str)
+                or not failure["detail"]
+                or len(failure["detail"]) > 4096
+            ):
+                raise BenchmarkError(
+                    f"receipt.completion.failures[{index}] has an invalid phase or detail"
+                )
+            completion_failures.append(failure)
+        completion_checks = _object(
+            completion["finalization_checks"],
+            "receipt.completion.finalization_checks",
+        )
+        _exact_keys(
+            completion_checks,
+            set(COMPLETION_CHECK_NAMES),
+            "receipt.completion.finalization_checks",
+        )
+        for name, status in completion_checks.items():
+            if status not in COMPLETION_CHECK_STATUSES:
+                raise BenchmarkError(
+                    f"receipt.completion.finalization_checks.{name} has invalid status"
+                )
+        always_applicable = set(COMPLETION_CHECK_NAMES[:3])
+        if any(completion_checks[name] == "not_applicable" for name in always_applicable):
+            raise BenchmarkError("common finalization checks cannot be not_applicable")
+        if engine["name"] == "kiln":
+            applicable_check = "execution_identity_unchanged"
+            inapplicable_check = "runtime_manifest_unchanged"
+        else:
+            applicable_check = "runtime_manifest_unchanged"
+            inapplicable_check = "execution_identity_unchanged"
+        if completion_checks[applicable_check] == "not_applicable":
+            raise BenchmarkError(
+                f"receipt.completion.finalization_checks.{applicable_check} is required"
+            )
+        if completion_checks[inapplicable_check] != "not_applicable":
+            raise BenchmarkError(
+                f"receipt.completion.finalization_checks.{inapplicable_check} "
+                "must be not_applicable"
+            )
+        failure_phases = {failure["phase"] for failure in completion_failures}
+        for name in COMPLETION_CHECK_NAMES:
+            if (completion_checks[name] == "failed") != (name in failure_phases):
+                raise BenchmarkError(
+                    f"receipt.completion.finalization_checks.{name} disagrees with failures"
+                )
+        if actual_pairs != expected_pairs[: len(actual_pairs)]:
+            raise BenchmarkError(
+                "receipt.runs must be the exact ordered prefix of declared concurrency and repeats"
+            )
+        if not completion_failures and actual_pairs != expected_pairs:
+            raise BenchmarkError(
+                "receipt.runs may be incomplete only with a structured completion failure"
+            )
+    elif actual_pairs != expected_pairs:
         raise BenchmarkError("receipt.runs do not exactly match declared concurrency and repeats")
 
     comparison_passed = True
@@ -954,6 +1071,15 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         comparison_passed = comparison["matched"]
     passed = (
         not repository["dirty"]
+        and not completion_failures
+        and (
+            completion_checks is None
+            or all(
+                status in {"passed", "not_applicable"}
+                for status in completion_checks.values()
+            )
+        )
+        and actual_pairs == expected_pairs
         and (receipt["warmup"] is None or receipt["warmup"]["verdict"] == "passed")
         and all(row["verdict"] == "passed" for row in runs)
         and comparison_passed
@@ -2141,63 +2267,117 @@ def main(argv: list[str] | None = None) -> int:
         memory_path = resolve_memory_path(args.memory_path)
         if memory_path is None:
             raise BenchmarkError("a DRM device-memory counter is required for a measured run")
+        workload = workload_contract(args, sizes)
         sampler = MemorySampler(memory_path, args.memory_sample_ms)
+        warmup: dict[str, Any] | None = None
+        runs: list[dict[str, Any]] = []
+        completion_failures: list[dict[str, str]] = []
+        finalization_checks = {
+            name: "not_run" for name in COMPLETION_CHECK_NAMES
+        }
+
+        def record_completion_failure(phase: str, exc: Exception | str) -> None:
+            detail = str(exc) if isinstance(exc, str) else f"{type(exc).__name__}: {exc}"
+            completion_failures.append(
+                {"phase": phase, "detail": detail[:4096] or "unspecified failure"}
+            )
+
+        def run_finalization_check(name: str, operation: Callable[[], None]) -> None:
+            try:
+                operation()
+            except Exception as exc:
+                finalization_checks[name] = "failed"
+                record_completion_failure(name, exc)
+            else:
+                finalization_checks[name] = "passed"
+
         sampler.start()
         try:
-            warmup: dict[str, Any] | None = None
-            if args.warmup_requests:
-                warmup = run_once(
-                    args=args,
-                    concurrency=args.warmup_requests,
-                    repeat=-1,
-                    max_tokens=min(16, args.max_tokens),
-                    phase=f"warmup-c{args.warmup_requests:03d}",
-                    headers=headers,
-                    sampler=sampler,
-                    diagnostics_url=diagnostics_url,
-                )
-                print(
-                    f"[warmup] {warmup['verdict']} "
-                    f"ok={warmup['success_count']}/{warmup['request_count']}"
-                )
+            try:
+                if args.warmup_requests:
+                    warmup = run_once(
+                        args=args,
+                        concurrency=args.warmup_requests,
+                        repeat=-1,
+                        max_tokens=min(16, args.max_tokens),
+                        phase=f"warmup-c{args.warmup_requests:03d}",
+                        headers=headers,
+                        sampler=sampler,
+                        diagnostics_url=diagnostics_url,
+                    )
+                    print(
+                        f"[warmup] {warmup['verdict']} "
+                        f"ok={warmup['success_count']}/{warmup['request_count']}"
+                    )
 
-            runs: list[dict[str, Any]] = []
-            if warmup is None or warmup["verdict"] == "passed":
-                for concurrency in sizes:
-                    for repeat in range(args.repeats):
-                        row = run_once(
-                            args=args,
-                            concurrency=concurrency,
-                            repeat=repeat,
-                            max_tokens=args.max_tokens,
-                            phase=f"measure-c{concurrency:03d}-r{repeat:03d}",
-                            headers=headers,
-                            sampler=sampler,
-                            diagnostics_url=diagnostics_url,
-                        )
-                        runs.append(row)
-                        print_run(row)
+                if warmup is None or warmup["verdict"] == "passed":
+                    for concurrency in sizes:
+                        for repeat in range(args.repeats):
+                            row = run_once(
+                                args=args,
+                                concurrency=concurrency,
+                                repeat=repeat,
+                                max_tokens=args.max_tokens,
+                                phase=f"measure-c{concurrency:03d}-r{repeat:03d}",
+                                headers=headers,
+                                sampler=sampler,
+                                diagnostics_url=diagnostics_url,
+                            )
+                            runs.append(row)
+                            print_run(row)
+                elif warmup is not None:
+                    record_completion_failure("warmup", "warmup verdict failed")
+            except Exception as exc:
+                record_completion_failure("measurement", exc)
         finally:
-            sampler.stop()
+            try:
+                sampler.stop()
+            except Exception as exc:
+                record_completion_failure("memory_sampler_stop", exc)
 
-        require_repository_unchanged(repo)
-        try:
-            model_after = bind_model_identity(fingerprint_model(args.model_path, args.model))
-        except ModelFingerprintError as exc:
-            raise BenchmarkError(f"model fingerprint recheck failed: {exc}") from exc
-        if model_after != model_identity:
-            raise BenchmarkError("model identity changed during measurement; discard the run")
-        if fingerprint_runtime_artifact(args.runtime_artifact) != runtime_artifact:
-            raise BenchmarkError("runtime artifact changed during measurement; discard the run")
-        if args.engine == "vllm" and load_vllm_runtime_manifest(
-            args.runtime_artifact
-        ) != runtime_manifest:
-            raise BenchmarkError("vLLM runtime manifest changed during measurement")
-        workload = workload_contract(args, sizes)
+        run_finalization_check(
+            "repository_unchanged",
+            lambda: require_repository_unchanged(repo),
+        )
+
+        def verify_model_identity() -> None:
+            try:
+                model_after = bind_model_identity(
+                    fingerprint_model(args.model_path, args.model)
+                )
+            except ModelFingerprintError as exc:
+                raise BenchmarkError(f"model fingerprint recheck failed: {exc}") from exc
+            if model_after != model_identity:
+                raise BenchmarkError("model identity changed during measurement")
+
+        run_finalization_check("model_identity_unchanged", verify_model_identity)
+
+        def verify_runtime_artifact() -> None:
+            if fingerprint_runtime_artifact(args.runtime_artifact) != runtime_artifact:
+                raise BenchmarkError("runtime artifact changed during measurement")
+
+        run_finalization_check("runtime_artifact_unchanged", verify_runtime_artifact)
+        if args.engine == "vllm":
+            def verify_runtime_manifest() -> None:
+                if load_vllm_runtime_manifest(args.runtime_artifact) != runtime_manifest:
+                    raise BenchmarkError("vLLM runtime manifest changed during measurement")
+
+            run_finalization_check("runtime_manifest_unchanged", verify_runtime_manifest)
+        else:
+            finalization_checks["runtime_manifest_unchanged"] = "not_applicable"
+
         if args.engine == "kiln":
-            health_after = fetch_json(f"{args.base_url}/health", headers, args.timeout_secs)
-            if health_after.get("execution_identity") != runtime_execution_identity:
-                raise BenchmarkError("Kiln execution identity changed during measurement")
+            def verify_execution_identity() -> None:
+                health_after = fetch_json(
+                    f"{args.base_url}/health", headers, args.timeout_secs
+                )
+                if health_after.get("execution_identity") != runtime_execution_identity:
+                    raise BenchmarkError("Kiln execution identity changed during measurement")
+
+            run_finalization_check("execution_identity_unchanged", verify_execution_identity)
+        else:
+            finalization_checks["execution_identity_unchanged"] = "not_applicable"
+
         receipt: dict[str, Any] = {
             "schema": SCHEMA,
             "driver_version": DRIVER_VERSION,
@@ -2236,13 +2416,32 @@ def main(argv: list[str] | None = None) -> int:
             },
             "warmup": warmup,
             "runs": runs,
+            "completion": {
+                "expected_run_count": len(sizes) * args.repeats,
+                "completed_run_count": len(runs),
+                "failures": completion_failures,
+                "finalization_checks": finalization_checks,
+            },
         }
-        if args.reference_receipt is not None:
-            receipt["comparison"] = compare_reference(receipt, args.reference_receipt)
+        if (
+            args.reference_receipt is not None
+            and not completion_failures
+            and len(runs) == len(sizes) * args.repeats
+        ):
+            try:
+                receipt["comparison"] = compare_reference(
+                    receipt, args.reference_receipt
+                )
+            except Exception as exc:
+                record_completion_failure("reference_comparison", exc)
         passed = (
             not repo["dirty"]
-            and
-            (warmup is None or warmup["verdict"] == "passed")
+            and not completion_failures
+            and all(
+                status in {"passed", "not_applicable"}
+                for status in finalization_checks.values()
+            )
+            and (warmup is None or warmup["verdict"] == "passed")
             and len(runs) == len(sizes) * args.repeats
             and all(row["verdict"] == "passed" for row in runs)
             and receipt.get("comparison", {}).get("matched", True)

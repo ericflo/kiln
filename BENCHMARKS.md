@@ -36,8 +36,23 @@ New measurements use driver version 3. The driver:
   forward, phase time, and error deltas when its diagnostics are enabled;
 - samples one explicit DRM memory counter, fails any row above the declared
   absolute byte limit, and records both absolute peak and baseline delta;
-- writes an atomic, self-hashing receipt and requires a current v3 reference
-  receipt with identical workload and model content for cross-engine runs.
+- writes an atomic, self-hashing receipt on success or on any recoverable
+  post-preflight failure, preserving the exact ordered prefix of completed rows;
+- records structured warmup, measurement, sampler-stop, comparison, and
+  finalization failures, while independently rechecking repository, model,
+  runtime artifact, and engine-specific live-runtime identity after traffic;
+- requires a current v3 reference receipt with identical workload and model
+  content for cross-engine runs.
+
+A partial v3 receipt is diagnostic counterevidence, never performance
+acceptance. Its top-level verdict is `failed`, `completion.completed_run_count`
+names the retained prefix, `completion.expected_run_count` names the complete
+declared matrix, and `completion.failures` explains why execution stopped. Kiln
+receipts must complete the live execution-identity check and mark the vLLM
+manifest check not applicable; vLLM receipts do the inverse. The common source,
+model, and runtime-artifact checks are never optional. A process crash or host
+loss can still prevent any file from being written, so raw logs remain required
+for catastrophic failures.
 
 Driver version 2 remains accepted only so the historical checked-in receipts
 continue to validate. It cannot produce new receipts and does not satisfy the
@@ -239,7 +254,10 @@ self-hash. It also rejects a run if the repository identity changes while
 measurement is in progress. New v3 receipts additionally reject altered model
 content identities, runtime-artifact mismatches, missing Kiln executable
 provenance, profile/sampling drift, prompt-token summary drift, and an
-inconsistent absolute-memory gate. Historical v2 validation is compatibility,
+inconsistent absolute-memory gate. They also reject a non-prefix partial run,
+unstructured completion failures, invalid engine-specific finalization
+applicability, and any passed verdict without the complete declared matrix and
+all applicable provenance rechecks. Historical v2 validation is compatibility,
 not current performance evidence.
 
 ## Historical CUDA setup

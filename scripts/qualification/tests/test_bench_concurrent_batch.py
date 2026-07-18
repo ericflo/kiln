@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import ExitStack, redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -194,6 +194,86 @@ class FakeServer:
 
 
 class ServingBenchmarkTests(unittest.TestCase):
+    def _run_cli_fixture(
+        self,
+        fake: FakeServer,
+        directory: str,
+        *,
+        fetch_json: object | None = None,
+    ) -> tuple[int, Path]:
+        output = Path(directory) / "receipt.json"
+        runtime_artifact = Path(directory) / "kiln-server"
+        runtime_artifact.write_bytes(b"test runtime")
+        fake.state.execution_identity["executable_sha256"] = (
+            "sha256:" + hashlib.sha256(b"test runtime").hexdigest()
+        )
+        memory_counter = Path(directory) / "vram-used"
+        memory_counter.write_text("1024")
+        model_path = Path(directory) / "model"
+        model_fingerprint = {
+            "id": "test-model",
+            "path": str(model_path),
+            "weight_files": [
+                {
+                    "path": "model.safetensors",
+                    "bytes": 8,
+                    "sha256": "sha256:" + "c" * 64,
+                }
+            ],
+            "config_hash": "sha256:" + "d" * 64,
+            "tokenizer_hash": "sha256:" + "e" * 64,
+            "chat_template_hash": "sha256:" + "f" * 64,
+        }
+        clean_repository = {
+            "commit": "a" * 40,
+            "dirty": False,
+            "source_tree_sha256": "sha256:" + "b" * 64,
+        }
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    bench, "repository_identity", return_value=clean_repository
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    bench, "fingerprint_model", return_value=model_fingerprint
+                )
+            )
+            if fetch_json is not None:
+                stack.enter_context(
+                    mock.patch.object(bench, "fetch_json", side_effect=fetch_json)
+                )
+            return_code = bench.main(
+                [
+                    "--base-url",
+                    fake.base_url,
+                    "--model",
+                    "test-model",
+                    "--runtime-identity",
+                    "test-runtime",
+                    "--runtime-artifact",
+                    str(runtime_artifact),
+                    "--model-path",
+                    str(model_path),
+                    "--run-id",
+                    "cli-fixture-v1",
+                    "--sizes",
+                    "1",
+                    "--max-tokens",
+                    "3",
+                    "--warmup-requests",
+                    "0",
+                    "--memory-path",
+                    str(memory_counter),
+                    "--memory-limit-bytes",
+                    "2048",
+                    "--out",
+                    str(output),
+                ]
+            )
+        return return_code, output
+
     def test_prompts_are_unique_per_row_and_preserve_the_marker_multiset(self) -> None:
         prompts = [
             bench.deterministic_prompt("shared", "measure-c008-r000", i)
@@ -534,67 +614,7 @@ class ServingBenchmarkTests(unittest.TestCase):
 
     def test_cli_writes_a_self_hashing_passed_receipt(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "receipt.json"
-            runtime_artifact = Path(directory) / "kiln-server"
-            runtime_artifact.write_bytes(b"test runtime")
-            fake.state.execution_identity["executable_sha256"] = (
-                "sha256:" + hashlib.sha256(b"test runtime").hexdigest()
-            )
-            memory_counter = Path(directory) / "vram-used"
-            memory_counter.write_text("1024")
-            model_path = Path(directory) / "model"
-            model_fingerprint = {
-                "id": "test-model",
-                "path": str(model_path),
-                "weight_files": [
-                    {
-                        "path": "model.safetensors",
-                        "bytes": 8,
-                        "sha256": "sha256:" + "c" * 64,
-                    }
-                ],
-                "config_hash": "sha256:" + "d" * 64,
-                "tokenizer_hash": "sha256:" + "e" * 64,
-                "chat_template_hash": "sha256:" + "f" * 64,
-            }
-            clean_repository = {
-                "commit": "a" * 40,
-                "dirty": False,
-                "source_tree_sha256": "sha256:" + "b" * 64,
-            }
-            with mock.patch.object(
-                bench, "repository_identity", return_value=clean_repository
-            ), mock.patch.object(
-                bench, "fingerprint_model", return_value=model_fingerprint
-            ):
-                return_code = bench.main(
-                    [
-                        "--base-url",
-                        fake.base_url,
-                        "--model",
-                        "test-model",
-                        "--runtime-identity",
-                        "test-runtime",
-                        "--runtime-artifact",
-                        str(runtime_artifact),
-                        "--model-path",
-                        str(model_path),
-                        "--run-id",
-                        "cli-fixture-v1",
-                        "--sizes",
-                        "1",
-                        "--max-tokens",
-                        "3",
-                        "--warmup-requests",
-                        "0",
-                        "--memory-path",
-                        str(memory_counter),
-                        "--memory-limit-bytes",
-                        "2048",
-                        "--out",
-                        str(output),
-                    ]
-                )
+            return_code, output = self._run_cli_fixture(fake, directory)
             receipt = bench.strict_json_loads(output.read_bytes())
             self.assertEqual(bench.main(["--validate-receipt", str(output)]), 0)
 
@@ -618,6 +638,12 @@ class ServingBenchmarkTests(unittest.TestCase):
             vllm_receipt["engine"]["name"] = "vllm"
             vllm_receipt["engine"]["runtime_execution_identity"] = None
             vllm_receipt["engine"]["runtime_manifest"] = valid_vllm_manifest()
+            vllm_receipt["completion"]["finalization_checks"][
+                "runtime_manifest_unchanged"
+            ] = "passed"
+            vllm_receipt["completion"]["finalization_checks"][
+                "execution_identity_unchanged"
+            ] = "not_applicable"
             vllm_receipt.pop("receipt_sha256")
             vllm_receipt["receipt_sha256"] = bench.canonical_sha256(vllm_receipt)
             bench.validate_benchmark_receipt(vllm_receipt)
@@ -631,6 +657,49 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(receipt["runs"][0]["success_count"], 1)
         recorded_hash = receipt.pop("receipt_sha256")
         self.assertEqual(recorded_hash, bench.canonical_sha256(receipt))
+
+    def test_cli_preserves_completed_rows_when_final_health_probe_fails(self) -> None:
+        with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
+            original_fetch_json = bench.fetch_json
+            health_calls = 0
+
+            def fail_final_health(
+                url: str, headers: dict[str, str], timeout_secs: float
+            ) -> dict:
+                nonlocal health_calls
+                if url.endswith("/health"):
+                    health_calls += 1
+                    if health_calls == 4:
+                        raise bench.BenchmarkError("injected final health failure")
+                return original_fetch_json(url, headers, timeout_secs)
+
+            return_code, output = self._run_cli_fixture(
+                fake, directory, fetch_json=fail_final_health
+            )
+            receipt = bench.strict_json_loads(output.read_bytes())
+            bench.validate_benchmark_receipt(receipt)
+
+        self.assertEqual(return_code, 2)
+        self.assertEqual(receipt["verdict"], "failed")
+        self.assertEqual(len(receipt["runs"]), 1)
+        self.assertEqual(receipt["runs"][0]["verdict"], "passed")
+        self.assertEqual(receipt["completion"]["expected_run_count"], 1)
+        self.assertEqual(receipt["completion"]["completed_run_count"], 1)
+        self.assertEqual(
+            receipt["completion"]["finalization_checks"][
+                "execution_identity_unchanged"
+            ],
+            "failed",
+        )
+        self.assertEqual(
+            receipt["completion"]["failures"],
+            [
+                {
+                    "phase": "execution_identity_unchanged",
+                    "detail": "BenchmarkError: injected final health failure",
+                }
+            ],
+        )
 
     def test_receipt_writer_refuses_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
