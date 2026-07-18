@@ -14,6 +14,7 @@ use super::{
     TrainingLossBackend, TrainingPrecisionPolicy, matmul_request_support_rank,
     matmul_support_from_native, requested_matmul_layout,
 };
+use crate::cuda_policy::{CudaKernelPolicy, current_cuda_kernel_policy};
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
 static CUDA_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
@@ -49,29 +50,7 @@ pub fn reset_linear_prefill_success_counts() {
     CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
-fn cuda_full_attn_qkv_in_proj_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ").is_err())
-}
-
 const CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS: usize = 128;
-
-fn cuda_gdn_ab_in_proj_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_GDN_AB_IN_PROJ").is_err())
-}
-
-fn cuda_gdn_prefill_ab_in_proj_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ").is_err())
-}
-
-fn cuda_gdn_ab_in_proj_seq_enabled(seq_len: usize) -> bool {
-    cuda_gdn_ab_in_proj_enabled()
-        && (seq_len == 1
-            || (seq_len <= CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS
-                && cuda_gdn_prefill_ab_in_proj_enabled()))
-}
 
 pub fn flash_attn_tracked_decline_count() -> u64 {
     CUDA_FLASH_ATTN_TRACKED_DECLINES.load(Ordering::Relaxed)
@@ -83,7 +62,7 @@ pub fn reset_flash_attn_tracked_decline_count() {
 
 /// `(multiblock_path_successes, single_block_path_successes)` for
 /// `gdn_full_chunk_forward`. Used by tests and bench tooling to confirm which
-/// kernel actually ran under a given env-var configuration.
+/// kernel actually ran under a given typed policy.
 pub fn gdn_full_chunk_forward_dispatch_counts() -> (u64, u64) {
     (
         CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.load(Ordering::Relaxed),
@@ -123,14 +102,15 @@ pub struct CudaBackend {
     /// zero reads; `new` now takes a `kiln_tensor::Device` directly.)
     device_kt: kiln_tensor::Device,
     resident_tensor_ids: super::cuda_rocm_common::ResidentTensorIdRegistry,
-    /// Cached at construction: reading env vars per decode step × 24 GDN layers
-    /// shows up in decode NVTX captures. Env vars don't change at runtime.
+    full_attn_qkv_in_proj_enabled: bool,
+    gdn_ab_in_proj_enabled: bool,
+    gdn_prefill_ab_in_proj_enabled: bool,
+    gdn_prefill_gates_enabled: bool,
+    /// Cached from immutable startup policy before any dispatch.
     gdn_enabled: bool,
-    /// Same pattern: cache the env-var read. The fused gates kernel is
-    /// gated behind its own kill switch so it can be disabled independently.
+    /// Fused gates authority from the same immutable policy.
     gdn_gates_enabled: bool,
-    /// Kill switch for the fused GDN gated RMSNorm kernel (decode/prefill
-    /// kiln/gdn/gated_norm region).
+    /// Typed route for fused GDN gated RMSNorm in decode and prefill.
     gdn_gated_rms_norm_enabled: bool,
     /// Experimental fused native-MTP decode GDN gates + recurrent update.
     /// Opt-in only until output parity is proven.
@@ -144,27 +124,20 @@ pub struct CudaBackend {
     /// Fuses GDN decode Q/K L2-normalization, gates, recurrent update, and
     /// gated RMSNorm into one single-token CUDA launch.
     gdn_decode_qk_norm_recurrent_rmsnorm_enabled: bool,
-    /// Kill switch for the fused causal_conv1d_update kernel (decode
-    /// kiln/gdn/conv region). When off, forward.rs falls back to the
-    /// candle to_f32/cat/sum/narrow chain.
+    /// Typed route for fused causal convolution. When off, `forward.rs` uses
+    /// the portable reference chain.
     fused_conv1d_enabled: bool,
     // Phase 7 (#1082): the cuda_use_kt_api_conv1d gate was removed once
     // the kt-typed surface (causal_conv1d_{update,prefill}_kt +
-    // supports{,_prefill}_kt) became the only path. The escape hatch
-    // for the conv kernel as a whole is still `fused_conv1d_enabled`
-    // (KILN_DISABLE_FUSED_CONV1D), which falls back to forward.rs's
-    // candle to_f32/cat/sum/narrow chain — the kt-typed path is bit-
-    // exact with the previous kt-API code (same FFI symbol).
+    // supports{,_prefill}_kt) became the only path. The complete startup
+    // profile now owns fallback for the convolution family.
     // Phase 7 (#1082): the cuda_use_kt_api_gdn gate was removed once
     // all 10 GDN dispatch wires (forward_substitution, recurrent_step,
     // chunk_prep, chunk_scan, full_chunk_forward[_multiblock],
     // gates, gated_rms_norm, plus the 4 decode_* wires:
     // gates_recurrent, qk_norm_gates_recurrent,
-    // qk_norm_gates_recurrent_rmsnorm) became kt-only. The whole-
-    // kernel kill switch `KILN_DISABLE_GDN_KERNEL=1` plus the per-
-    // wire decode-fused kill switches (KILN_DISABLE_FUSED_GDN_DECODE,
-    // KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT[_RMSNORM]) still
-    // fall back to forward.rs's candle reference paths. The kt-typed
+    // qk_norm_gates_recurrent_rmsnorm) became kt-only. The startup profile
+    // selects the complete GDN family and its portable fallbacks. The kt-typed
     // path is bit-exact with the previous kt-API code (same FFI
     // symbol). All 11 GDN dispatch wires (including the formerly
     // candle-typed single-block `gdn_full_chunk_forward` fall-through
@@ -182,38 +155,37 @@ pub struct CudaBackend {
     /// Forward-only CUDA LoRA delta/add for decode. Training declines because
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
-    /// Multi-block dv-tiled `gdn_full_chunk_forward`. Default ON because the
+    /// Multi-block dv-tiled `gdn_full_chunk_forward`. The native default keeps
+    /// it on because the
     /// single-block kernel only launches `B*H = 32` blocks for Qwen3.5-4B at
     /// batch=1, leaving ~58% of a 76-SM RTX 4090 Laptop idle. The multi-block
     /// path is bit-exact with the legacy kernel (same per-output-cell FMA
-    /// chain, same bf16 rounding). Set
-    /// `KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK=1` to fall back.
+    /// chain, same bf16 rounding). Portable fallback declines it.
     gdn_full_chunk_forward_multiblock_enabled: bool,
 }
 
 impl CudaBackend {
     pub fn new(device: kiln_tensor::Device) -> Self {
+        Self::new_with_kernel_policy(device, current_cuda_kernel_policy())
+    }
+
+    fn new_with_kernel_policy(device: kiln_tensor::Device, policy: CudaKernelPolicy) -> Self {
         debug_assert!(
             matches!(device, kiln_tensor::Device::Cuda(_)),
             "CudaBackend created on non-CUDA device"
         );
-        let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
-        let gdn_gates_enabled =
-            gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
-        let gdn_gated_rms_norm_enabled =
-            gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
-        let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
+        let gdn_enabled = policy.gdn;
+        let gdn_gates_enabled = gdn_enabled && policy.gdn_gates;
+        let gdn_gated_rms_norm_enabled = gdn_enabled && policy.gdn_gated_rms_norm;
+        let fused_conv1d_enabled = policy.fused_conv1d;
         // #1082: the dedicated per-operation KT disable gate was
         // removed once the kt-typed conv1d surface became the only
-        // path in `causal_conv1d_{update,prefill}`. The whole-kernel
-        // kill switch `KILN_DISABLE_FUSED_CONV1D=1` still falls back
-        // to forward.rs's candle to_f32/cat/sum/narrow chain.
+        // path in `causal_conv1d_{update,prefill}`. Profile selection now owns
+        // the complete native-versus-portable choice.
         // #1082: the dedicated per-operation KT disable gate was
         // removed once the kt-typed GDN surface became the only path
-        // across all 10 dispatch wires. The whole-kernel kill switch
-        // `KILN_DISABLE_GDN_KERNEL=1` (plus the per-wire decode-fused
-        // kill switches) still falls back to forward.rs's candle
-        // reference paths.
+        // across all 10 dispatch wires. Profile selection now owns the GDN
+        // family and its portable reference paths.
         // #1082: flipped default ON. The kt path is bit-exact by
         // construction — all 4 wired flash_attn dispatch sites bottom
         // out in the same FFI symbols as the candle shim, with only
@@ -223,22 +195,24 @@ impl CudaBackend {
         // The per-operation KT disable gate was removed alongside the
         // 3 sites where the kt-typed path is the only path. The
         // 4th site checks `graph_outputs.is_none()` directly.
-        let gdn_decode_fused_enabled = gdn_gates_enabled
-            && gdn_gated_rms_norm_enabled
-            && std::env::var("KILN_DISABLE_FUSED_GDN_DECODE").is_err();
-        let gdn_decode_unexpanded_qk_enabled = gdn_decode_fused_enabled
-            && std::env::var("KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK").is_err();
-        let gdn_decode_qk_norm_recurrent_enabled = gdn_decode_unexpanded_qk_enabled
-            && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT").is_err();
-        let gdn_decode_qk_norm_recurrent_rmsnorm_enabled = gdn_decode_qk_norm_recurrent_enabled
-            && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM").is_err();
-        let lora_decode_add_enabled = std::env::var("KILN_DISABLE_CUDA_LORA_DECODE_ADD").is_err();
+        let gdn_decode_fused_enabled =
+            gdn_gates_enabled && gdn_gated_rms_norm_enabled && policy.gdn_decode_fused;
+        let gdn_decode_unexpanded_qk_enabled =
+            gdn_decode_fused_enabled && policy.gdn_decode_unexpanded_qk;
+        let gdn_decode_qk_norm_recurrent_enabled =
+            gdn_decode_unexpanded_qk_enabled && policy.gdn_decode_qk_norm_recurrent;
+        let gdn_decode_qk_norm_recurrent_rmsnorm_enabled =
+            gdn_decode_qk_norm_recurrent_enabled && policy.gdn_decode_qk_norm_recurrent_rmsnorm;
         let gdn_full_chunk_forward_multiblock_enabled =
-            gdn_enabled && std::env::var("KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK").is_err();
+            gdn_enabled && policy.gdn_full_chunk_forward_multiblock;
         let device_kt = device;
         Self {
             device_kt,
             resident_tensor_ids: super::cuda_rocm_common::new_resident_tensor_id_registry(),
+            full_attn_qkv_in_proj_enabled: policy.full_attn_qkv_in_proj,
+            gdn_ab_in_proj_enabled: gdn_enabled && policy.gdn_ab_in_proj,
+            gdn_prefill_ab_in_proj_enabled: gdn_enabled && policy.gdn_prefill_ab_in_proj,
+            gdn_prefill_gates_enabled: gdn_gates_enabled && policy.gdn_prefill_gates,
             gdn_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
@@ -247,7 +221,7 @@ impl CudaBackend {
             gdn_decode_qk_norm_recurrent_enabled,
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled,
             fused_conv1d_enabled,
-            lora_decode_add_enabled,
+            lora_decode_add_enabled: policy.lora_decode_add,
             gdn_full_chunk_forward_multiblock_enabled,
         }
     }
@@ -1515,7 +1489,10 @@ impl GdnBackend for CudaBackend {
         let Some(ab_dim) = nv.checked_mul(2) else {
             return Ok(None);
         };
-        if !cuda_gdn_ab_in_proj_seq_enabled(seq_len)
+        if !self.gdn_ab_in_proj_enabled
+            || (seq_len != 1
+                && (seq_len > CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS
+                    || !self.gdn_prefill_ab_in_proj_enabled))
             || actual_seq_len != seq_len
             || seq_len == 0
             || x.dtype() != kiln_tensor::DType::BF16
@@ -1549,7 +1526,7 @@ impl GdnBackend for CudaBackend {
     ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
         let dims = a.dims();
         let is_t1_decode = dims.len() >= 2 && dims[dims.len() - 2] == 1;
-        if !is_t1_decode && std::env::var("KILN_DISABLE_CUDA_GDN_PREFILL_GATES").is_ok() {
+        if !is_t1_decode && !self.gdn_prefill_gates_enabled {
             tracing::debug!(
                 a_shape = ?a.shape(),
                 a_log_dtype = ?a_log.dtype(),
@@ -2111,7 +2088,7 @@ impl LinearBackend for CudaBackend {
             kiln_tensor::Tensor,
         )>,
     > {
-        if !cuda_full_attn_qkv_in_proj_enabled()
+        if !self.full_attn_qkv_in_proj_enabled
             || x.track_op()
             || x.dtype() != kiln_tensor::DType::BF16
         {
@@ -2256,6 +2233,10 @@ mod tests {
             device_kt: kiln_tensor::Device::Cpu,
             resident_tensor_ids: crate::backend::cuda_rocm_common::new_resident_tensor_id_registry(
             ),
+            full_attn_qkv_in_proj_enabled: false,
+            gdn_ab_in_proj_enabled: false,
+            gdn_prefill_ab_in_proj_enabled: false,
+            gdn_prefill_gates_enabled: false,
             gdn_enabled: false,
             gdn_gates_enabled: false,
             gdn_gated_rms_norm_enabled: false,
@@ -2267,6 +2248,39 @@ mod tests {
             lora_decode_add_enabled: false,
             gdn_full_chunk_forward_multiblock_enabled: false,
         }
+    }
+
+    #[test]
+    fn kernel_profiles_are_complete_backend_local_policies() {
+        let routes = |backend: &CudaBackend| {
+            [
+                backend.full_attn_qkv_in_proj_enabled,
+                backend.gdn_ab_in_proj_enabled,
+                backend.gdn_prefill_ab_in_proj_enabled,
+                backend.gdn_prefill_gates_enabled,
+                backend.gdn_enabled,
+                backend.gdn_gates_enabled,
+                backend.gdn_gated_rms_norm_enabled,
+                backend.gdn_decode_fused_enabled,
+                backend.gdn_decode_unexpanded_qk_enabled,
+                backend.gdn_decode_qk_norm_recurrent_enabled,
+                backend.gdn_decode_qk_norm_recurrent_rmsnorm_enabled,
+                backend.fused_conv1d_enabled,
+                backend.lora_decode_add_enabled,
+                backend.gdn_full_chunk_forward_multiblock_enabled,
+            ]
+        };
+        let native_default = CudaBackend::new_with_kernel_policy(
+            kiln_tensor::Device::Cuda(0),
+            CudaKernelPolicy::native_default(),
+        );
+        assert_eq!(routes(&native_default), [true; 14]);
+
+        let fallback = CudaBackend::new_with_kernel_policy(
+            kiln_tensor::Device::Cuda(0),
+            CudaKernelPolicy::portable_fallback(),
+        );
+        assert_eq!(routes(&fallback), [false; 14]);
     }
 
     #[test]

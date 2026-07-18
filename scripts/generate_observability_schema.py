@@ -166,6 +166,12 @@ def build_definitions() -> None:
         "The process-lifetime kiln-tensor adapter route selection.",
     )
     add_enum(
+        "CudaKernelProfile",
+        "CudaKernelProfile",
+        ["native_default", "portable_fallback"],
+        "The process-lifetime CUDA backend-kernel route set.",
+    )
+    add_enum(
         "RocmSynchronizationMode",
         "RocmSynchronizationMode",
         ["legacy_host_barriers", "stream_ordered"],
@@ -417,6 +423,11 @@ def build_definitions() -> None:
     )
     for name, rust_value, value_schema in (
         ("ResolvedKtApiMode", "KtApiMode", ref("KtApiMode")),
+        (
+            "ResolvedCudaKernelProfile",
+            "CudaKernelProfile",
+            ref("CudaKernelProfile"),
+        ),
         ("ResolvedRocmSynchronizationMode", "RocmSynchronizationMode", ref("RocmSynchronizationMode")),
         (
             "ResolvedRocmStridedBatchedMatmulMode",
@@ -462,6 +473,7 @@ def build_definitions() -> None:
             "full_attention_score_budget_mib": ref("ResolvedAcceleratorInteger"),
             "vulkan_device_index": ref("ResolvedAcceleratorOptionalInteger"),
             "vulkan_validation": ref("ResolvedAcceleratorBoolean"),
+            "cuda_kernel_profile": ref("ResolvedCudaKernelProfile"),
             "rocm_synchronization_mode": ref("ResolvedRocmSynchronizationMode"),
             "rocm_strided_batched_matmul_mode": ref(
                 "ResolvedRocmStridedBatchedMatmulMode"

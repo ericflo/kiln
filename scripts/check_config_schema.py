@@ -282,6 +282,21 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
             "portable ROCm fallback profile",
         ),
         (
+            {"accelerator": {"cuda_kernel_profile": "native_default"}},
+            True,
+            "native-default CUDA backend profile",
+        ),
+        (
+            {"accelerator": {"cuda_kernel_profile": "portable_fallback"}},
+            True,
+            "portable CUDA backend fallback profile",
+        ),
+        (
+            {"accelerator": {"cuda_kernel_profile": "individual_switches"}},
+            False,
+            "invalid CUDA backend profile",
+        ),
+        (
             {
                 "server": {"serving_profile": "maintenance"},
                 "memory": {"kv_force_blocks": 8, "kv_autoscale": True},

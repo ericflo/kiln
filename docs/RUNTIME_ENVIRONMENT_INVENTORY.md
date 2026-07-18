@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **553 direct read call sites** and
+The scanner records **539 direct read call sites** and
 **222 process-mutation call sites**. It can
-statically name **94 distinct literal `KILN_*`
-read names** across **200 call sites**.
+statically name **80 distinct literal `KILN_*`
+read names** across **186 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 91 | 55 | 0 |
+| Experimental/debug migration | 77 | 41 | 0 |
 | Build time/provenance | 325 | 6 | 8 |
 | Test only | 128 | 37 | 214 |
 
@@ -57,7 +57,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
 | `crates/kiln-model/src/forward.rs` | 22 | 18 |
-| `crates/kiln-model/src/backend/cuda.rs` | 14 | 14 |
 | `crates/kiln-model/src/backend/capability.rs` | 9 | 1 |
 | `crates/kiln-model/src/cuda_graph.rs` | 5 | 5 |
 | `crates/kiln-model/src/metal_graph.rs` | 5 | 3 |
@@ -109,30 +108,16 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/capability.rs` |
 | `KILN_DETERMINISTIC` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/determinism.rs` |
 | `KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
-| `KILN_DISABLE_CUDA_GDN_AB_IN_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
 | `KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP` | Experimental/debug migration | 1 | `crates/kiln-model/src/generate.rs` |
-| `KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
-| `KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
-| `KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
-| `KILN_DISABLE_CUDA_GDN_PREFILL_GATES` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
-| `KILN_DISABLE_CUDA_LORA_DECODE_ADD` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
 | `KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER` | Experimental/debug migration | 4 | `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/generate.rs` |
-| `KILN_DISABLE_FUSED_CONV1D` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
 | `KILN_DISABLE_FUSED_CUDA_ATTN_SIGMOID_MUL` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_FUSED_CUDA_ROTARY_QK` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_FUSED_GDN_DECODE` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
-| `KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
-| `KILN_DISABLE_FUSED_GDN_GATES` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
 | `KILN_DISABLE_FUSED_L2_QK_NORM` | Experimental/debug migration | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_FUSED_PAGED_DECODE` | Experimental/debug migration, Test only | 9 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
-| `KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
-| `KILN_DISABLE_GDN_KERNEL` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
 | `KILN_DISABLE_MARLIN_BF16_DROP` | Experimental/debug migration, Test only | 3 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR` | Test only | 2 | `crates/kiln-model/src/forward.rs` |

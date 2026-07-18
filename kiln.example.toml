@@ -136,6 +136,12 @@ vulkan_validation = false             # Enable VK_LAYER_KHRONOS_validation at in
                                       # True requires server.serving_profile="experimental".
                                       # Override with KILN_ACCELERATOR_VULKAN_VALIDATION;
                                       # KILN_VULKAN_VALIDATION is a deprecated startup alias.
+cuda_kernel_profile = "native_default" # native_default | portable_fallback. One immutable
+                                      # fourteen-route CUDA backend policy replaces retired
+                                      # per-kernel environment switches. Native default preserves
+                                      # existing accelerated dispatch without claiming hardware
+                                      # qualification. Override mechanically with
+                                      # KILN_ACCELERATOR_CUDA_KERNEL_PROFILE.
 rocm_synchronization_mode = "legacy_host_barriers" # Qualified default. `stream_ordered` removes
                                       # only proven same-stream host barriers and uses a primary-
                                       # stream external-yield wait; it requires

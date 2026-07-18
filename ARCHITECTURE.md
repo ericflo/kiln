@@ -992,8 +992,17 @@ See
 validation, provenance, restart, and compatibility contract.
 
 Accelerator execution has the same single-authority boundary. Resolved schema
-`kiln.accelerator-runtime-policy.v11` includes
-`accelerator.rocm_kernel_profile`. The server installs one complete 75-leaf
+`kiln.accelerator-runtime-policy.v12` includes
+`accelerator.cuda_kernel_profile` and `accelerator.rocm_kernel_profile`.
+Before constructing a CUDA backend, the server installs one immutable
+fourteen-route CUDA policy. `native_default` preserves the prior default-on
+full-attention QKV, GDN projection/prefill/gates/recurrent/normalization/decode,
+fused convolution, decode LoRA add, and multi-block GDN routes without claiming
+current hardware qualification. `portable_fallback` declines all fourteen.
+CUDA backend dispatch no longer reads its former per-kernel environment
+switches; a same-value policy reinstall is idempotent and a conflict fails.
+
+The server also installs one complete 75-leaf
 model/tensor policy before constructing a ROCm context or backend. `qualified` enables the production
 full-attention QKV, GDN projection/gate/recurrent/normalization/decode,
 head-major prefill, fused convolution, and LoRA decode routes, excluding the
@@ -1007,7 +1016,8 @@ reads process-lifetime policy and low-level operations read their owning
 context; the C++ paged-attention ABI receives explicit route values. No layer
 or kernel rereads environment or admits per-operation mixtures. Retired route
 variables and their legacy CUDA-spelled fallbacks are not accepted as ROCm
-profile aliases; remaining CUDA-only controls are a later CUDA-host migration.
+profile aliases. CUDA controls outside the fourteen backend-owned routes remain
+separate migration work and are not represented by this profile.
 
 Streaming prefill follows the same authority boundary. After the backend is
 selected, startup resolves one immutable `StreamingPrefillRuntimeConfig` and

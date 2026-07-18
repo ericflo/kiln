@@ -29,7 +29,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 | Backend | Source Modules | Override Count | Support Methods | Native Env Gates | Legacy Env Aliases |
 |---|---|---:|---:|---:|---:|
-| `cuda` | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 16 | 7 | 0 |
+| `cuda` | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 16 | 0 | 0 |
 | `rocm` | `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 17 | 0 | 0 |
 | `metal` | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_attention.rs`, `crates/kiln-model/src/backend/metal_config.rs`, `crates/kiln-model/src/backend/metal_conv1d.rs`, `crates/kiln-model/src/backend/metal_core.rs`, `crates/kiln-model/src/backend/metal_dense.rs`, `crates/kiln-model/src/backend/metal_gdn.rs`, `crates/kiln-model/src/backend/metal_icb.rs`, `crates/kiln-model/src/backend/metal_lm_head.rs`, `crates/kiln-model/src/backend/metal_msl.rs`, `crates/kiln-model/src/backend/metal_norm.rs`, `crates/kiln-model/src/backend/metal_paged.rs`, `crates/kiln-model/src/backend/metal_pipeline.rs`, `crates/kiln-model/src/backend/metal_precompile.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_runtime.rs`, `crates/kiln-model/src/backend/metal_training.rs` | 0 | 20 | 47 | 0 |
 | `vulkan` | `crates/kiln-model/src/backend/vulkan.rs`, `crates/kiln-model/src/backend/vulkan_attention.rs`, `crates/kiln-model/src/backend/vulkan_config.rs`, `crates/kiln-model/src/backend/vulkan_conv1d.rs`, `crates/kiln-model/src/backend/vulkan_decode_state.rs`, `crates/kiln-model/src/backend/vulkan_dense.rs`, `crates/kiln-model/src/backend/vulkan_device.rs`, `crates/kiln-model/src/backend/vulkan_gdn.rs`, `crates/kiln-model/src/backend/vulkan_linear.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/src/backend/vulkan_resources.rs`, `crates/kiln-model/src/backend/vulkan_tensor_bridge.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/src/backend/vulkan_weights.rs` | 0 | 21 | 0 | 0 |
@@ -293,13 +293,7 @@ No literal-true support predicate currently pairs with an always-declining metho
 ## Backend Env Gates
 
 ### CUDA
-- `KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ`
-- `KILN_DISABLE_CUDA_GDN_AB_IN_PROJ`
-- `KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT`
-- `KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM`
-- `KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ`
-- `KILN_DISABLE_CUDA_GDN_PREFILL_GATES`
-- `KILN_DISABLE_CUDA_LORA_DECODE_ADD`
+- none detected
 
 ### ROCM
 - none detected

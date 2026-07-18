@@ -973,9 +973,9 @@ mod tests {
         assert_eq!(json["serving_profile"]["request_overrides_allowed"], false);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v11"
+            "kiln.accelerator-runtime-policy.v12"
         );
-        assert_eq!(json["accelerator_runtime"]["version"], 11);
+        assert_eq!(json["accelerator_runtime"]["version"], 12);
         assert_eq!(
             json["accelerator_runtime"]["vulkan_kernel_policy_schema_id"],
             "kiln.vulkan-kernel-policy.v3"
@@ -996,6 +996,10 @@ mod tests {
         assert_eq!(
             json["accelerator_runtime"]["vulkan_validation"]["effective"],
             false
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["cuda_kernel_profile"]["effective"],
+            "native_default"
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_graph_cache_max_bytes"]["effective"],

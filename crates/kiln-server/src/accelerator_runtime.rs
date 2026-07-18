@@ -3,6 +3,8 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+#[cfg(feature = "cuda")]
+use crate::config::CudaKernelProfile;
 use crate::config::{KtApiMode, ResolvedAcceleratorRuntimePolicy, RocmGraphMode};
 #[cfg(feature = "rocm")]
 use crate::config::{RocmKernelProfile, RocmSynchronizationMode};
@@ -128,6 +130,16 @@ fn model_kt_api_mode(policy: ResolvedAcceleratorRuntimePolicy) -> kiln_model::Kt
     }
 }
 
+#[cfg(feature = "cuda")]
+fn model_cuda_kernel_policy(
+    policy: ResolvedAcceleratorRuntimePolicy,
+) -> kiln_model::CudaKernelPolicy {
+    match policy.cuda_kernel_profile.effective {
+        CudaKernelProfile::NativeDefault => kiln_model::CudaKernelPolicy::native_default(),
+        CudaKernelProfile::PortableFallback => kiln_model::CudaKernelPolicy::portable_fallback(),
+    }
+}
+
 #[cfg(feature = "rocm")]
 fn model_rocm_kernel_policy(
     policy: ResolvedAcceleratorRuntimePolicy,
@@ -193,6 +205,18 @@ pub fn install_startup_policy(
     ) {
         kiln_model::install_kt_api_mode(model_kt_api_mode(policy))
             .context("failed to install kiln-tensor API route policy")?;
+    }
+
+    if matches!(device, kiln_tensor::Device::Cuda(_)) {
+        #[cfg(feature = "cuda")]
+        {
+            kiln_model::install_cuda_kernel_policy(model_cuda_kernel_policy(policy))
+                .context("failed to install immutable CUDA backend-kernel policy")?;
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "cuda"))]
+        anyhow::bail!("cannot install a CUDA policy in a build without the `cuda` feature");
     }
 
     let kiln_tensor::Device::Rocm(device_index) = device else {
@@ -316,6 +340,8 @@ mod tests {
         AcceleratorRuntimeConfig, ConfigValueSource, KtApiModeSetting, ServingProfile,
         ServingProfileSetting,
     };
+    #[cfg(feature = "cuda")]
+    use crate::config::{CudaKernelProfile, CudaKernelProfileSetting};
     #[cfg(feature = "rocm")]
     use crate::config::{RocmKernelProfile, RocmKernelProfileSetting};
 
@@ -333,6 +359,30 @@ mod tests {
                 ConfigValueSource::ConfigFile,
             ));
             assert_eq!(model_kt_api_mode(policy), expected);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_kernel_profiles_map_exactly_to_the_model_policy() {
+        for configured in [
+            CudaKernelProfile::NativeDefault,
+            CudaKernelProfile::PortableFallback,
+        ] {
+            let mut config = AcceleratorRuntimeConfig::default();
+            config.cuda_kernel_profile =
+                CudaKernelProfileSetting::new(configured, ConfigValueSource::ConfigFile);
+            let policy = config.resolved_policy(ServingProfileSetting::new(
+                ServingProfile::Stable,
+                ConfigValueSource::Default,
+            ));
+            let expected = match configured {
+                CudaKernelProfile::NativeDefault => kiln_model::CudaKernelPolicy::native_default(),
+                CudaKernelProfile::PortableFallback => {
+                    kiln_model::CudaKernelPolicy::portable_fallback()
+                }
+            };
+            assert_eq!(model_cuda_kernel_policy(policy), expected);
         }
     }
 

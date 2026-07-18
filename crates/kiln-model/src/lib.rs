@@ -2,6 +2,7 @@ pub mod adapter_merge;
 pub mod backend;
 pub mod cancel;
 pub mod cuda_graph;
+mod cuda_policy;
 // (#1082 Wave F2) `cuda_train` deleted — the hand-rolled candle-autograd
 // CUDA training engine (`CudaTrainTensor`/`CudaBackwardOp`/`cuda_backward`)
 // is gone; the kt tape is the sole gradient producer.
@@ -83,6 +84,8 @@ pub use backend::{
 // with the candle-parity opt-in feature; production uses `for_device_kt`.
 pub use backend::{DecodeWeightPrewarmCancelled, DecodeWeightPrewarmPolicy};
 pub use cancel::CancelHandle;
+#[cfg(feature = "cuda")]
+pub use cuda_policy::{CudaKernelPolicy, install_cuda_kernel_policy};
 pub use engine::Engine;
 pub use forward::{LinearAttentionState, StreamingPrefillExecutionPolicy, StreamingPrefillMode};
 pub use full_attention_policy::{

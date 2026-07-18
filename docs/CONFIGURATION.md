@@ -119,18 +119,18 @@ dump.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 109 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 110 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 109 fixed fields:
+credential. Of the 110 fixed fields:
 
-- 104 implement the canonical mechanical environment name;
+- 105 implement the canonical mechanical environment name;
 - 71 also retain one or more deprecated compatibility spellings (76 aliases
   total);
 - 5 are config-file-only and have no environment override;
 - the 76 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 109 fixed fields and both dynamic credential fields.
+The tables below cover all 110 fixed fields and both dynamic credential fields.
 The schema additionally records the accepted deprecated TOML-only
 `streaming_prefill.enabled` compatibility field so validators match the loader.
 
@@ -180,7 +180,7 @@ disabled.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v11`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v12`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
 dashboard all report the same configured/effective/source values, plus the
 compiled Vulkan kernel-policy schema ID; lower model, tensor, and kernel paths
@@ -192,6 +192,7 @@ do not re-read these public environment names.
 | `accelerator.full_attention_score_budget_mib` | unsigned integer MiB; `2048` | `KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB` (implemented) | none | `64..=2048`. Immutable ceiling for exact full-attention materialized score and scratch geometry across CPU, CUDA, ROCm, Metal, and Vulkan model routes. ROCm online attention derives `min(value, 1024)` MiB while retaining fixed qualified 2048-query/4096-key tiles. Runtime memory observations remain fail-closed admission and reservation checks; they never resize the geometry or switch to smaller tiles during a request. Restart required. |
 | `accelerator.vulkan_device_index` | `"auto"` or unsigned integer; `"auto"` | `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX` (implemented) | `KILN_VULKAN_DEVICE` (deprecated compatibility) | `auto` preserves automatic discrete-GPU preference and otherwise chooses the first enumerated Vulkan physical device. An integer strictly selects that zero-based Vulkan enumeration index. An unavailable index fails logical-device startup; it is never ignored or replaced with another device. The immutable selection is installed before Vulkan device creation and reported with source attribution. Restart required. |
 | `accelerator.vulkan_validation` | boolean; `false` | `KILN_ACCELERATOR_VULKAN_VALIDATION` (implemented) | `KILN_VULKAN_VALIDATION` (deprecated compatibility) | `true` requires `server.serving_profile = "experimental"` and enables `VK_LAYER_KHRONOS_validation` when the Vulkan instance is created. Startup fails if the layer is not installed. This is not mutable per request or dispatch. Restart required. |
+| `accelerator.cuda_kernel_profile` | string enum; `"native_default"` | `KILN_ACCELERATOR_CUDA_KERNEL_PROFILE` (implemented) | none | `native_default` or `portable_fallback`, case-insensitive. `native_default` preserves the fourteen CUDA backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. `portable_fallback` declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required. |
 | `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
 | `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | `KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL` and `KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
 | `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | `KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT` and `KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT` (deprecated compatibility) | `auto`, `native_bf16`, or `f32_then_cast`, case-insensitive. `auto` applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
@@ -206,6 +207,38 @@ Those per-operation names are not compatibility aliases: they created
 order-dependent route combinations that could not be represented, validated,
 or reported as one startup policy. Use the typed field or its mechanically
 derived canonical environment name instead.
+
+`accelerator.cuda_kernel_profile` owns these fourteen CUDA backend decisions:
+
+| Policy leaf | `native_default` | `portable_fallback` |
+|---|---:|---:|
+| `full_attn_qkv_in_proj` | on | off |
+| `gdn_ab_in_proj` | on | off |
+| `gdn_prefill_ab_in_proj` | on | off |
+| `gdn_prefill_gates` | on | off |
+| `gdn` | on | off |
+| `gdn_gates` | on | off |
+| `gdn_gated_rms_norm` | on | off |
+| `gdn_decode_fused` | on | off |
+| `gdn_decode_unexpanded_qk` | on | off |
+| `gdn_decode_qk_norm_recurrent` | on | off |
+| `gdn_decode_qk_norm_recurrent_rmsnorm` | on | off |
+| `fused_conv1d` | on | off |
+| `lora_decode_add` | on | off |
+| `gdn_full_chunk_forward_multiblock` | on | off |
+
+The CUDA-specific variables `KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ`,
+`KILN_DISABLE_CUDA_GDN_AB_IN_PROJ`,
+`KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ`,
+`KILN_DISABLE_CUDA_GDN_PREFILL_GATES`,
+`KILN_DISABLE_FUSED_GDN_DECODE`,
+`KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK`,
+`KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT`,
+`KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM`,
+`KILN_DISABLE_CUDA_LORA_DECODE_ADD`, and
+`KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK` no longer control CUDA and
+are not aliases. The generic GDN/convolution spellings are also no longer read
+by the CUDA backend, but remain documented only for backends not yet migrated.
 
 `accelerator.rocm_kernel_profile` replaces the model-layer ROCm controls
 `KILN_DISABLE_ROCM_ATTN_DECODE_QKV_PREP`,
@@ -310,7 +343,7 @@ profile instead.
 aliases. Previously, model and ROCm flash paths parsed different permissive
 values during execution and recomputed score budgets from changing free-memory
 snapshots, permitting route geometry to change between layers or requests.
-Policy v11 fixes one bounded ceiling before execution; the ROCm allocator
+Policy v12 fixes one bounded ceiling before execution; the ROCm allocator
 governor may still reject a planned operation when its exact working set is no
 longer admissible, but it cannot silently shrink or expand that plan.
 

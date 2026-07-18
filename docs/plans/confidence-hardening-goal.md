@@ -1765,6 +1765,34 @@ rule, and qualification limitation. This closes the two executable owners, not
 the repository-wide typed-configuration, debug-namespace, or test-fixture
 checkboxes, and makes no new hardware performance claim.
 
+CUDA backend-kernel configuration checkpoint (completed 2026-07-18): the
+fourteen product route decisions formerly read directly by
+`backend/cuda.rs` now come from one process-lifetime
+`kiln.cuda-kernel-policy.v1` object installed before CUDA backend creation.
+Typed `accelerator.cuda_kernel_profile` is the sole public authority and has
+one mechanically derived canonical environment spelling. `native_default`
+preserves the fourteen previously default-on routes without claiming that the
+current source is hardware-qualified; `portable_fallback` declines them all.
+Dependent GDN routes remain fail-closed when their parent route is disabled,
+and conflicting attempts to reinstall the immutable policy fail startup.
+
+Accelerator runtime policy advances to v12. The strict TOML loader, generated
+110-field schema, CLI effective-config output, config/health/debug APIs,
+dashboard, qualification fixtures, architecture/configuration/operator
+references, and permanent website expose the same source-tracked enum. The
+CUDA backend contains no process-environment reads. Its exact fourteen-route
+mapping, defaults, parsing, provenance, serialization, invalid-value behavior,
+and API surfaces pass focused tests, while a toolkit-free CUDA-feature build
+proves compilation on this ROCm host. A CUDA-feature runtime test cannot link
+here because the NVIDIA driver/toolkit libraries are absent; route execution,
+parity, and performance remain explicit NVIDIA handoff work.
+
+The generated ratchet falls from 553 to 539 direct reads and from 91 to 77
+runtime-migration reads, with 222 process mutations unchanged and 80 literal
+`KILN_*` names remaining. This closes one coherent CUDA owner, not the broad
+Phase 8.1 checkboxes: CUDA graph, Marlin, forward-path, training, Metal, and
+other experimental controls remain in the generated migration queue.
+
 ### 8.2 One scheduling model
 
 - [ ] Map ownership and production/test use of batching engine, legacy decode
@@ -2618,6 +2646,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-18 | Current-source ROCm development soak acceptance | `sha256:74e043b2baa4c05bd6f9266e6a74ea9d130bc8f2daffa46a564022d1e8ca3f7c` | `547466e87a40d389a620d78be182756f7dc9cb45` | Strix Halo ROCm/gfx1151 exact clean pushed-source `autoscale-off` development soak | retained and strict current-source/local-artifact/known-commit validated passed receipt `qualification/receipts/rocm/strix-halo/20260718t134344841618z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json` (`sha256:c76132f7235d455123f457ef24a80f69e157f7d8d304b272aa99e1e14586cedc`); case result `sha256:a57bc397bf412d41b15e5facb324bcd1ce41d05c4cac2fe02eaf4476d660cdf8`; command result `sha256:d5c308cab78ec796f9fd26c2a4f18279cc2c57a59c654aab90a15393bde09a53`; stdout `sha256:0c41830b6343ac58be0ea2bc6816b065ed27becea2919ee89f63dc66fdcfcbde`; stderr `sha256:88cef72b5f40b87494756c3aa9e699d50d17344020d55afc77eb16488a258beb`; clean cooldown and zero process residue | 30-minute sustained ROCm correctness, graphs, cache, cancellation, memory, telemetry, thermal, and teardown gate passed | After four stabilization cycles and two stable boundaries, the workload completed 103 measured waves, 746 requests, and 23,872 output tokens over 1,809.362 seconds: a derived 13.194 output tokens/second and 0.412 requests/second. All requests completed 32 tokens with zero failure, zero-token response, non-finite response, batching error, or worker residue; 20 measured cancellations were confirmed. Concurrency reached nine active requests and batch width seven. TTFT p50/p99/p99.9 were 7.067/23.198/25.907 seconds; ITL p50/p99/p99.9 were 217.701/821.505/979.087 ms. All 518 ITL outliers were attributed and none was unexplained. Graph execution recorded 81 successful captures and 4,921 successful replays with zero capture failure, replay failure, or fallback; retained graph ownership remained 12, end slots were idle, and 302 slot reuses completed. Prefix caching produced 746 hits, 693,120 hit tokens, zero active lease/pending release at end, and stable 39-entry residency. GPU memory grew 6,038,704 bytes end-to-end and peaked 34,402,304 bytes above the 36,702,117,888-byte baseline; RSS grew 19,386,368 bytes. Host available memory never fell below 22,908,448,768 bytes, and swap growth was zero. Required accelerator telemetry had 7,197 samples and zero error: active median/peak busy were 43/77 percent, edge temperature 60/72 C, power 61.044/76.036 W, and SCLK 2.507 GHz median with no active sample below half of the 2.9 GHz advertised maximum. There was no device fault, host memory trip, sync failure/slow sync, graph error, or snapshot residue. The named-host controller completed 1,525/1,525 pacing events totaling 666.690 seconds with a 0.754-second maximum and held package peak to 90.125 C without guard trip; shutdown was graceful, cooldown completed in 3.003 seconds after an 88.625 C post-exit peak, and handoff was 61.875 C. This accepts the current development soak, not the final 24-hour ROCm endurance gate after source freeze. |
 
 | 2026-07-18 | Typed standalone benchmark configuration | this source | this checkpoint | portable benchmark, configuration, qualification-tooling, and website contracts; no accelerator workload | 17 `kiln-bench` unit tests; two Vulkan microbenchmark parser/policy tests; 547 qualification-tooling tests; generated environment contract; fresh help and invalid-input executable probes; shell syntax; 10 documentation-builder tests; 48-document/5-asset assembled-site smoke; formatting and diff hygiene | passed explicit-configuration checkpoint; no hardware or qualification claim | Both standalone tools now have zero direct runtime `KILN_*` reads. `kiln-bench` derives defaults from typed `KilnConfig`; the Vulkan microbenchmark has immutable typed arguments for every case, timing, geometry, crossover, and route A/B. Malformed inputs fail before device work. The environment ratchet falls from 566 to 553 reads and from 104 to 91 runtime-migration reads. The speculative safety switch is explicitly an unsupported-research acknowledgment and cannot claim qualification; only a declared runner workload and checked retained receipt can. |
+| 2026-07-18 | Immutable typed CUDA backend-kernel profile | this source | this checkpoint | portable CUDA policy/configuration/API/qualification/website contracts plus toolkit-free CUDA-feature compilation on the Strix Halo ROCm host; no CUDA runtime | one exact fourteen-leaf portable policy test; 143 configuration-filtered server tests plus exact health/debug surfaces; CUDA-only backend and server mapping tests compiled; bounded default and CUDA-feature server checks; 78 focused and 547 complete qualification-tooling tests; 110-field/105-canonical-environment/76-alias configuration schema; 157-definition observability schema; generated 539-read/77-migration-read/222-mutation environment contract; reproducible backend capability report; 10 documentation-builder tests; 48-document/5-asset assembled-site static smoke; formatting and diff hygiene | passed immutable-policy and product-integration checkpoint; NVIDIA runtime, parity, and performance pending | Accelerator runtime policy v12 installs a source-tracked `native_default` or `portable_fallback` CUDA policy before backend construction. The former preserves all fourteen previously default-on backend routes without making a qualification claim; the latter declines all fourteen. `backend/cuda.rs` now has zero direct process-environment reads, and the complete config, schema, CLI/API, dashboard, qualification, architecture, troubleshooting, and permanent website surfaces agree. The CUDA-only mapping tests cannot link on this ROCm-only host because NVIDIA driver/toolkit libraries are absent; the toolkit-free CUDA-feature compile passes, and executable CUDA behavior remains an explicit NVIDIA handoff gate rather than an inferred result. |
 
 ## Known Starting Defects
 

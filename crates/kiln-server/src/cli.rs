@@ -1749,6 +1749,12 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             );
             println!(
                 "  {} {} (source: {})",
+                style("CUDA kernel profile:").dim(),
+                accelerator_runtime.cuda_kernel_profile.effective,
+                accelerator_runtime.cuda_kernel_profile.source,
+            );
+            println!(
+                "  {} {} (source: {})",
                 style("ROCm synchronization:").dim(),
                 accelerator_runtime.rocm_synchronization_mode.effective,
                 accelerator_runtime.rocm_synchronization_mode.source,
