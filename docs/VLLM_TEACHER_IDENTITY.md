@@ -484,3 +484,48 @@ Then qualify each ROCm, CUDA, and other intended machine locally:
 7. Measure numerical parity, latency pauses, VRAM behavior, and throughput at
    intended batch sizes. Identity qualification proves provenance and limits;
    it does not prove numerical parity or performance.
+
+### Retained Strix Halo ROCm baseline
+
+The repository retains the current machine-specific inputs for the local
+Strix Halo comparison:
+
+- `qualification/runtime/vllm/rocm/strix-halo/vllm-rocm723-qwen35-4b-triton-v1.json`
+  is the launcher-produced runtime manifest;
+- `qualification/server-launch/vllm-rocm-strix-halo-triton-v1.json` is the
+  atomic owned-launch document; and
+- `qualification/host-policies/strix-halo-serving-benchmark-fast-guard-v1.json`
+  is the thermal policy used by the first guarded startup and comparison runs.
+
+The manifest binds vLLM
+`0.23.1rc1.dev1261+gc71a583aa.rocm723`, PyTorch
+`2.11.0+gitd0c8b1f`, HIP `7.2.53211`, Transformers `5.14.1`, tokenizers
+`0.22.2`, the complete installed runtime content, the gfx1151 accelerator,
+the local Qwen3.5-4B model/tokenizer content, and every inference-affecting
+argument. The launch selects BF16 `TRITON_ATTN`, a 32,768-token context and
+batch-token limit, 64 sequence slots, 40 percent device-memory utilization,
+fixed seed zero, FCFS scheduling, prefix caching, and 16-token cache blocks.
+This is a qualification input, not a portable claim that another ROCm host has
+the same runtime and not evidence that vLLM has passed startup or performance.
+
+The ignored local environment is rooted at
+`.qualification/vllm-rocm-venv`. Its `bin/python-kiln` must be a regular copied
+interpreter inside the venv, not its ordinary symlink: the serving driver
+canonicalizes `command[0]`, and resolving a venv symlink to the base interpreter
+would bypass venv package discovery. The snapshot and log roots are private
+mode-0700 directories beneath `.qualification`. On this host the wheel does
+not require the shell's `ROCM_PATH`, and the local model does not require an HF
+credential. Manifest generation and the benchmark driver therefore run with
+those ambient inputs removed and bytecode writes disabled:
+
+```bash
+env -u ROCM_PATH -u HF_TOKEN PYTHONDONTWRITEBYTECODE=1 \
+  python3 scripts/bench-concurrent-batch.py ...
+```
+
+Do not copy this manifest to another machine and call it qualified. Recreate
+the isolated runtime there, emit a new manifest through the exact launch argv,
+require two byte-identical captures, and retain that platform's own manifest
+and receipts. Any package, native-library, interpreter, model, tokenizer,
+accelerator, or inference-option change must produce a new manifest and
+invalidate comparison against the old fingerprint.
