@@ -246,12 +246,17 @@ class IdentityTests(unittest.TestCase):
             ({"max_prompt_logprob_candidates": 5}, "one maximum-K row"),
             ({"max_prompt_logprob_candidates": 24_577}, "one maximum-K row"),
             ({"max_prompt_logprob_candidates": 1_000_001}, "one maximum-K row"),
-            ({"implementation": "vllm:0.24.9"}, "0.25.0 or newer"),
+            ({"implementation": "vllm:0.20.0"}, "0.20.1rc0 or newer"),
         )
         for update, message in cases:
             with self.subTest(update=update):
                 with self.assertRaisesRegex(vllm_teacher.TeacherLaunchError, message):
                     vllm_teacher.build_identity(**{**base, **update})
+
+        accepted = vllm_teacher.build_identity(
+            **{**base, "implementation": "vllm:0.20.1rc0"}
+        )
+        self.assertEqual(accepted["implementation"], "vllm:0.20.1rc0")
 
 
 class FilesystemFingerprintTests(unittest.TestCase):

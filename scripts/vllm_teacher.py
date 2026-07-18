@@ -46,7 +46,11 @@ FINGERPRINT_PREFIX = "kiln-teacher-v1"
 TOKENIZER_VOCAB_DOMAIN = b"kiln.tokenizer-vocab.v1\0"
 BASE_MODEL_DOMAIN = b"kiln.base-model-content.v1\0"
 ADAPTER_WEIGHTS_DOMAIN = b"kiln.adapter-weights.v1\0"
-MIN_VLLM_VERSION = (0, 25, 0)
+# Custom OpenAI response fingerprints shipped in upstream vLLM v0.20.1rc0.
+# Treat prerelease suffixes as part of the corresponding three-component build;
+# the required behavior is revalidated in the fresh child before every launch.
+MIN_VLLM_VERSION = (0, 20, 1)
+MIN_VLLM_VERSION_TEXT = "0.20.1rc0"
 MAX_IDENTITY_JSON_BYTES = 4 * 1024
 MAX_FINGERPRINT_BYTES = 6 * 1024
 MAX_INPUT_MANIFEST_BYTES = 64 * 1024
@@ -2124,7 +2128,10 @@ def _validate_implementation(value: Any) -> str:
     if len(value.encode("utf-8")) > MAX_IMPLEMENTATION_BYTES:
         raise TeacherLaunchError("implementation exceeds the 256-byte identity limit")
     if _version_tuple(version) < MIN_VLLM_VERSION:
-        raise TeacherLaunchError("immutable custom fingerprints require vLLM 0.25.0 or newer")
+        raise TeacherLaunchError(
+            "immutable custom fingerprints require "
+            f"vLLM {MIN_VLLM_VERSION_TEXT} or newer"
+        )
     return value
 
 

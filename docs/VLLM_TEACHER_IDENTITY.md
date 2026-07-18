@@ -1,7 +1,7 @@
 # Immutable vLLM teachers
 
 Kiln accepts remote prompt logprobs only when each response carries an
-authoritative `TeacherIdentityV1`. Launch vLLM 0.25 or newer through
+authoritative `TeacherIdentityV1`. Launch vLLM 0.20.1rc0 or newer through
 [`scripts/vllm_teacher.py`](../scripts/vllm_teacher.py). The launcher stages a
 private content-verified snapshot, fingerprints only that snapshot, binds the
 runtime and accelerator into the identity, disables mutable model surfaces,
@@ -15,8 +15,12 @@ remote teachers.
 
 ## Requirements
 
-- vLLM 0.25.0 or newer, PyTorch, Transformers, and tokenizers installed in the
+- vLLM 0.20.1rc0 or newer, PyTorch, Transformers, and tokenizers installed in the
   Python environment used to run the launcher.
+- This minimum is the upstream release candidate in which custom OpenAI
+  response fingerprints shipped. Every real launch also probes the installed
+  runtime in a fresh child, so satisfying the version floor alone is not
+  sufficient.
 - A local Hugging Face model directory with safetensors base weights. Hub IDs,
   revisions, `trust_remote_code`, alternate tokenizers, and alternate base
   model inputs are not accepted.
