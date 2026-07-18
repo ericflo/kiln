@@ -78,17 +78,27 @@ become shell or JSON environment overrides. Every campaign profile therefore
 starts without compiled-code, model-info, or autotuning cache state from a
 different arm; warmup remains inside that profile's live server lifecycle.
 
-Example local Kiln launch document:
+The tracked Strix Halo ROCm comparison inputs are
+`qualification/server-config/kiln-rocm-strix-halo-serving-comparison-v1.toml`
+and
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v1.json`.
+They pin the qualified ROCm kernel policy, graph bounds, fixed KV behavior,
+batching limits, model path/served ID, debug evidence surface, and private
+snapshot roots used by the retained comparison receipts. Other machines must
+create their own source-bound inputs rather than treating these absolute paths
+or host policy as portable.
+
+Equivalent local Kiln launch document structure:
 
 ```json
 {
   "schema": "kiln.serving-benchmark-server-launch.v1",
-  "id": "strix-halo-rocm-qualified-v1",
+  "id": "kiln-rocm-strix-halo-serving-comparison-v1",
   "command": [
     "./target/release/kiln",
     "serve",
     "--config",
-    ".qualification/serving/rocm-qualified.toml"
+    "qualification/server-config/kiln-rocm-strix-halo-serving-comparison-v1.toml"
   ],
   "working_directory": "../..",
   "log_directory": "../../.qualification/serving/logs",
@@ -182,7 +192,7 @@ python3 scripts/bench-concurrent-batch.py \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
   --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-c32-v1.json \
-  --server-launch-config .qualification/serving/rocm-launch.json \
+  --server-launch-config qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v1.json \
   --out .qualification/serving/greedy-short.kiln.json
 ```
 
@@ -223,7 +233,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
   --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-c32-v1.json \
-  --server-launch-config .qualification/serving/rocm-launch.json
+  --server-launch-config qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v1.json
 ```
 
 For a vLLM campaign, add `--reference-dir` pointing at the matching Kiln
