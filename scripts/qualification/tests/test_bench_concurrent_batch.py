@@ -832,6 +832,31 @@ class ServingBenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(bench.BenchmarkError, "lead its process group"):
                 bench.AttachedProcessGroup.attach(4321, proc_root=root)
 
+    def test_host_guard_starts_before_the_first_server_probe(self) -> None:
+        events: list[str] = []
+
+        class OrderedGuard(FakeThermalGuard):
+            def start(self) -> None:
+                events.append("guard_started")
+
+        original_fetch_json = bench.fetch_json
+
+        def ordered_fetch_json(*args: object, **kwargs: object) -> dict:
+            events.append("server_probe")
+            return original_fetch_json(*args, **kwargs)
+
+        with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
+            return_code, _output = self._run_cli_fixture(
+                fake,
+                directory,
+                fetch_json=ordered_fetch_json,
+                thermal_guard_factory=OrderedGuard,
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(events[0], "guard_started")
+        self.assertIn("server_probe", events[1:])
+
     def test_cli_writes_a_self_hashing_passed_receipt(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
             return_code, output = self._run_cli_fixture(fake, directory)

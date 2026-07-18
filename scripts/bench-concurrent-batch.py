@@ -2804,43 +2804,6 @@ def main(argv: list[str] | None = None) -> int:
         ):
             raise BenchmarkError("vLLM runtime manifest model disagrees with --model")
 
-        headers = {
-            "Accept": "text/event-stream",
-            "Content-Type": "application/json",
-            "User-Agent": f"kiln-serving-benchmark/{DRIVER_VERSION}",
-        }
-        if args.api_key:
-            headers["Authorization"] = f"Bearer {args.api_key}"
-        models = probe_models(args.base_url, headers, args.timeout_secs)
-        if args.model not in models:
-            raise BenchmarkError(
-                f"requested model {args.model!r} is absent from /v1/models: {models}"
-            )
-        health_version = None
-        runtime_execution_identity: dict[str, Any] | None = None
-        if args.engine == "kiln":
-            health = fetch_json(f"{args.base_url}/health", headers, args.timeout_secs)
-            health_version = health.get("version")
-            runtime_execution_identity = _object(
-                health.get("execution_identity"), "Kiln health.execution_identity"
-            )
-            if runtime_execution_identity.get("executable_sha256") != runtime_artifact["sha256"]:
-                raise BenchmarkError(
-                    "Kiln health execution identity does not match --runtime-artifact"
-                )
-
-        diagnostics_url: str | None
-        if args.diagnostics_url == "none":
-            diagnostics_url = None
-        elif args.diagnostics_url == "auto":
-            diagnostics_url = f"{args.base_url}/health" if args.engine == "kiln" else None
-        else:
-            diagnostics_url = args.diagnostics_url
-
-        memory_path = resolve_memory_path(args.memory_path)
-        if memory_path is None:
-            raise BenchmarkError("a DRM device-memory counter is required for a measured run")
-        workload = workload_contract(args, sizes)
         thermal_startup_error: BenchmarkError | None = None
         thermal_policy_record: dict[str, Any] | None = None
         thermal_policy: thermal.HostThermalPolicy | None = None
@@ -2879,8 +2842,46 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 thermal_startup_error = BenchmarkError(
                     thermal_guard.trip_reason
-                    or "host thermal pacing failed to settle before warmup"
+                    or "host thermal pacing failed to settle before server probes"
                 )
+
+        headers = {
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+            "User-Agent": f"kiln-serving-benchmark/{DRIVER_VERSION}",
+        }
+        if args.api_key:
+            headers["Authorization"] = f"Bearer {args.api_key}"
+        models = probe_models(args.base_url, headers, args.timeout_secs)
+        if args.model not in models:
+            raise BenchmarkError(
+                f"requested model {args.model!r} is absent from /v1/models: {models}"
+            )
+        health_version = None
+        runtime_execution_identity: dict[str, Any] | None = None
+        if args.engine == "kiln":
+            health = fetch_json(f"{args.base_url}/health", headers, args.timeout_secs)
+            health_version = health.get("version")
+            runtime_execution_identity = _object(
+                health.get("execution_identity"), "Kiln health.execution_identity"
+            )
+            if runtime_execution_identity.get("executable_sha256") != runtime_artifact["sha256"]:
+                raise BenchmarkError(
+                    "Kiln health execution identity does not match --runtime-artifact"
+                )
+
+        diagnostics_url: str | None
+        if args.diagnostics_url == "none":
+            diagnostics_url = None
+        elif args.diagnostics_url == "auto":
+            diagnostics_url = f"{args.base_url}/health" if args.engine == "kiln" else None
+        else:
+            diagnostics_url = args.diagnostics_url
+
+        memory_path = resolve_memory_path(args.memory_path)
+        if memory_path is None:
+            raise BenchmarkError("a DRM device-memory counter is required for a measured run")
+        workload = workload_contract(args, sizes)
         sampler = MemorySampler(memory_path, args.memory_sample_ms)
         warmup: dict[str, Any] | None = None
         runs: list[dict[str, Any]] = []
