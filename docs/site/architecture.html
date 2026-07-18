@@ -504,8 +504,9 @@ training request
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           <code>accelerator.cuda_kernel_profile</code> replaces fourteen CUDA backend hot-path
           environment decisions with one process-lifetime policy installed before backend construction.
-          <code>native_default</code> preserves the routes that were previously enabled by default; the
-          name deliberately does not claim qualification on the current source tree or hardware.
+          <code>native_default</code> preserves the fourteen established backend routes that were
+          previously enabled by default; the name deliberately does not claim qualification on the
+          current source tree or hardware.
           <code>portable_fallback</code> declines every owned accelerated route for explicit reference
           comparison. Reinstalling the same policy is idempotent; attempting to install a different policy
           after one has been observed fails instead of changing live dispatch.
