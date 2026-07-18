@@ -97,6 +97,7 @@ python3 scripts/vllm_teacher.py \
   --host=127.0.0.1 \
   --port=8000 \
   --dtype=bfloat16 \
+  --attention-backend=TRITON_ATTN \
   --api-key=replace-with-a-random-secret
 ```
 
@@ -283,6 +284,14 @@ accepted. Unknown vLLM options fail closed. Options containing file, path,
 directory, or template inputs are rejected because a path string does not bind
 the referenced bytes. Add and test a new option in the launcher before relying
 on it.
+
+`--attention-backend` is additionally constrained by value because vLLM can
+interpret its value as an importable class path. The only currently reviewed
+explicit value is `TRITON_ATTN`; omit the option to retain vLLM's automatic
+selection. Other built-in names and custom class paths fail before any model
+snapshot or server process is created. Qualifying another backend requires
+adding its exact name to the closed launcher set, testing the rejection
+boundary, and capturing backend-specific correctness and performance evidence.
 
 `PYTHONPATH`, `PYTHONHOME`, Python safe/user-site overrides, `LD_PRELOAD`, and
 `LD_LIBRARY_PATH` are rejected for real launches so the child cannot resolve

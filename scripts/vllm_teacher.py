@@ -204,6 +204,7 @@ VALUELESS_OPTIONS = {
 # the identity contract.
 VETTED_INFERENCE_OPTIONS = {
     "--all2all-backend",
+    "--attention-backend",
     "--block-size",
     "--cpu-offload-gb",
     "--cudagraph-capture-sizes",
@@ -226,6 +227,11 @@ VETTED_INFERENCE_OPTIONS = {
     "--swap-space",
     "--tensor-parallel-size",
 }
+
+# vLLM also accepts importable class paths for attention backends. Keep this a
+# closed value set so adding the option cannot introduce unbound executable
+# code beneath an otherwise unchanged runtime identity.
+REVIEWED_ATTENTION_BACKENDS = frozenset({"TRITON_ATTN"})
 
 # Transport changes do not alter teacher logits and therefore do not invalidate
 # a logit cache. They remain in the command but are excluded from this digest.
@@ -2587,6 +2593,11 @@ def validate_extra_vllm_args(args: Sequence[str]) -> list[str]:
             raise TeacherLaunchError(f"vLLM option must use --key=value form: {option}")
         if separator and not value:
             raise TeacherLaunchError(f"vLLM option value must not be empty: {option}")
+        if option == "--attention-backend" and value not in REVIEWED_ATTENTION_BACKENDS:
+            reviewed = ", ".join(sorted(REVIEWED_ATTENTION_BACKENDS))
+            raise TeacherLaunchError(
+                f"unsupported attention backend {value!r}; reviewed values: {reviewed}"
+            )
         result.append(raw)
     return result
 

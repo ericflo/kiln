@@ -1059,9 +1059,19 @@ class ArgumentAndCommandTests(unittest.TestCase):
     def test_extra_args_are_unambiguous_unique_and_launcher_owned(self) -> None:
         self.assertEqual(
             vllm_teacher.validate_extra_vllm_args(
-                ["--dtype=bfloat16", "--enforce-eager", "--api-key=$(touch /tmp/nope)"]
+                [
+                    "--dtype=bfloat16",
+                    "--attention-backend=TRITON_ATTN",
+                    "--enforce-eager",
+                    "--api-key=$(touch /tmp/nope)",
+                ]
             ),
-            ["--dtype=bfloat16", "--enforce-eager", "--api-key=$(touch /tmp/nope)"],
+            [
+                "--dtype=bfloat16",
+                "--attention-backend=TRITON_ATTN",
+                "--enforce-eager",
+                "--api-key=$(touch /tmp/nope)",
+            ],
         )
         cases = (
             (["--dtype", "bfloat16"], "key=value"),
@@ -1075,7 +1085,8 @@ class ArgumentAndCommandTests(unittest.TestCase):
             (["--quantization-param-path=/tmp/q.json"], "unbound file or path"),
             (["--speculative-model=/tmp/draft"], "not been identity-reviewed"),
             (["--compilation-config={\"cache_dir\":\"/tmp/cache\"}"], "not been identity-reviewed"),
-            (["--attention-backend=package.CustomBackend"], "not been identity-reviewed"),
+            (["--attention-backend=package.CustomBackend"], "unsupported attention backend"),
+            (["--attention-backend=ROCM_ATTN"], "unsupported attention backend"),
             (["--brand-new-option=value"], "not been identity-reviewed"),
         )
         for args, message in cases:
