@@ -178,6 +178,24 @@ memory, latency, cancellation, and stability claims still require the named
 hardware workload and a committed passing receipt for CUDA, ROCm, Metal, or
 Vulkan.
 
+### Per-operation anomaly diagnosis
+
+Every native training step already rejects a non-finite loss and performs one
+mandatory finite reduction over the exact gradient set before optimizer state
+can change. For locating the operation that first produced corruption, set
+`config.detect_anomaly` to `true`, pass `--detect-anomaly` to `kiln train sft`,
+or enable **Detect gradient anomalies** in the browser's advanced SFT controls.
+The trainer captures this request-local value in each full or checkpointed tape
+and scans every backward operation's returned gradients. The first NaN or Inf
+fails the job with its operation name and tape position.
+
+The default is `false`. Per-operation scans add a finite reduction and may add
+a device synchronization for every produced gradient, so they are intended for
+bounded diagnosis rather than routine throughput runs. The setting cannot be
+changed by process environment, cannot affect inference or another concurrent
+job, and is retained in the effective request, receipt, replay metadata, and
+exact checkpoint configuration. Resume must use the same value.
+
 ### Frozen parameter ownership
 
 The native profile trains LoRA A/B tensors and no base-model parameters. The

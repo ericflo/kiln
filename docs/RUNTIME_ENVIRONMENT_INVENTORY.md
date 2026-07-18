@@ -16,19 +16,19 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **625 direct read call sites** and
-**252 process-mutation call sites**. It can
-statically name **138 distinct literal `KILN_*`
-read names** across **259 call sites**.
+The scanner records **623 direct read call sites** and
+**248 process-mutation call sites**. It can
+statically name **137 distinct literal `KILN_*`
+read names** across **258 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 153 | 97 | 0 |
+| Experimental/debug migration | 152 | 96 | 0 |
 | Build time/provenance | 328 | 9 | 8 |
-| Test only | 135 | 41 | 244 |
+| Test only | 134 | 41 | 240 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -82,7 +82,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-tensor/src/rocm_ops/is_finite_reduce.rs` | 2 | 2 |
 | `crates/kiln-train/src/opd.rs` | 2 | 2 |
 | `crates/kiln-train/src/trainer.rs` | 2 | 2 |
-| `crates/kiln-autograd/src/anomaly.rs` | 1 | 1 |
 | `crates/kiln-blas/src/algo_cache.rs` | 1 | 0 |
 | `crates/kiln-core/src/config_hashes.rs` | 1 | 0 |
 | `crates/kiln-eval/src/scorers/python_doctest.rs` | 1 | 1 |
@@ -126,7 +125,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_CUDA_GRAPH_STABLE_PAGED_METADATA` | Experimental/debug migration | 1 | `crates/kiln-model/src/cuda_graph.rs` |
 | `KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/capability.rs` |
-| `KILN_DETECT_ANOMALY` | Experimental/debug migration | 1 | `crates/kiln-autograd/src/anomaly.rs` |
 | `KILN_DETERMINISTIC` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/determinism.rs` |
 | `KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP` | Experimental/debug migration | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/backend/cuda.rs` |
@@ -256,7 +254,6 @@ dynamic helper cannot conceal source growth.
 
 | Owner | API | Argument | Class | Call sites |
 |---|---|---|---|---:|
-| `crates/kiln-autograd/src/tape.rs` | `var_os` | `key` | Test only | 1 |
 | `crates/kiln-blas/build.rs` | `var` | `var` | Build time/provenance | 1 |
 | `crates/kiln-blas/build.rs` | `var` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
 | `crates/kiln-blas/build.rs` | `var_os` | `CARGO_FEATURE_CUBLASLT` | Build time/provenance | 1 |

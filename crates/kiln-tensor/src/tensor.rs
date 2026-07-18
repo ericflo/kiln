@@ -871,7 +871,7 @@ impl Tensor {
     }
 
     // ------------------------------------------------------------------
-    // Finite-element check (KILN_DETECT_ANOMALY substrate)
+    // Finite-element check for tape diagnostics and optimizer guardrails
     // ------------------------------------------------------------------
 
     /// Returns `Ok(true)` iff every element of this tensor is finite
@@ -886,12 +886,10 @@ impl Tensor {
     /// same stride-aware CPU scan; this is a correctness fallback until a
     /// native Metal finite reducer lands.
     ///
-    /// This is the kt-tensor side of the
-    /// `kiln_autograd::anomaly_detection_enabled()` /
-    /// `anomaly_panic()` pair (#1082 Phase 9): when
-    /// `KILN_DETECT_ANOMALY=1`, `Tape::backward` scans each backward
-    /// op's gradient outputs via this method and panics at the
-    /// op-tape-position of the first non-finite value.
+    /// When a tape is created with
+    /// `kiln_autograd::TapeOptions { detect_anomaly: true }`,
+    /// `Tape::backward` scans each backward op's gradient outputs via this
+    /// method and panics at the first producing tape position.
     ///
     /// Cost: O(numel) per call on CPU. Off-by-default in production;
     /// CI training-parity tests opt in.
@@ -915,7 +913,7 @@ impl Tensor {
         // The kernel atomicOr's a single u32 device flag and we read
         // back only 4 bytes — vs the previous D2H-bridge path that
         // copied the entire tensor through `cuda_to_host_copy`.
-        // Net cost on the `KILN_DETECT_ANOMALY=1` scan-per-backward-op
+        // Net cost on the explicit scan-per-backward-op diagnostic
         // path: O(numel) bytes of D2H per node → 4 bytes per node.
         if !self.device().is_cpu() {
             #[cfg(feature = "cuda")]

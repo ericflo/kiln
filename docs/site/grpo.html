@@ -393,6 +393,7 @@
               <li><code>auto_load</code> defaults to <code>true</code>.</li>
               <li><code>checkpoint_interval</code> publishes exact state every N committed optimizer groups.</li>
               <li><code>resume_checkpoint</code> continues from the immutable basename reported by job detail.</li>
+              <li><code>detect_anomaly</code> is an off-by-default, request-local backward diagnostic. It scans each operation's returned gradients and fails at the first NaN or Inf; use <code>kiln train grpo --detect-anomaly</code> to enable it.</li>
             </ul>
           </div>
           <div class="endpoint">

@@ -332,6 +332,7 @@ async fn main() -> Result<()> {
                 lora_rank,
                 invalid_row_policy,
                 adapter_smoke_test,
+                detect_anomaly,
                 checkpoint_interval,
                 resume_checkpoint,
                 url,
@@ -345,6 +346,7 @@ async fn main() -> Result<()> {
                     *lora_rank,
                     invalid_row_policy,
                     *adapter_smoke_test,
+                    *detect_anomaly,
                     checkpoint_interval.map(std::num::NonZeroUsize::get),
                     resume_checkpoint.as_deref(),
                 )
@@ -355,6 +357,7 @@ async fn main() -> Result<()> {
                 adapter,
                 lora_rank,
                 adapter_smoke_test,
+                detect_anomaly,
                 checkpoint_interval,
                 resume_checkpoint,
                 url,
@@ -365,6 +368,7 @@ async fn main() -> Result<()> {
                     adapter,
                     *lora_rank,
                     *adapter_smoke_test,
+                    *detect_anomaly,
                     checkpoint_interval.map(std::num::NonZeroUsize::get),
                     resume_checkpoint.as_deref(),
                 )
@@ -375,6 +379,7 @@ async fn main() -> Result<()> {
                 adapter,
                 teacher,
                 lora_rank,
+                detect_anomaly,
                 checkpoint_interval,
                 resume_checkpoint,
                 url,
@@ -385,6 +390,7 @@ async fn main() -> Result<()> {
                     adapter,
                     teacher.as_deref(),
                     *lora_rank,
+                    *detect_anomaly,
                     checkpoint_interval.map(std::num::NonZeroUsize::get),
                     resume_checkpoint.as_deref(),
                 )

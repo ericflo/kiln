@@ -822,6 +822,12 @@ pub struct OpdConfig {
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub grad_checkpoint_segments: Option<usize>,
 
+    /// Scan every tape backward gradient for NaN or Inf and fail at the
+    /// producing operation. This request-local diagnostic is disabled by
+    /// default because each check may synchronize the training device.
+    #[serde(default)]
+    pub detect_anomaly: bool,
+
     /// Deterministic seed. If `None`, the trainer picks one and records
     /// it in the replay log.
     #[serde(default)]
@@ -946,6 +952,7 @@ impl Default for OpdConfig {
             checkpoint_interval: default_opd_checkpoint_interval(),
             resume_checkpoint: None,
             grad_checkpoint_segments: None,
+            detect_anomaly: false,
             seed: None,
             optimizer: Optimizer::default(),
             echo: None,
@@ -4751,6 +4758,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                                             teacher_tokens_opt,
                                             teacher_active_opt,
                                             echo_spec.as_ref(),
+                                            config.detect_anomaly,
                                             segs,
                                             streaming_prefill_policy,
                                         )?
@@ -4770,6 +4778,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                                             teacher_tokens_opt,
                                             teacher_active_opt,
                                             echo_spec.as_ref(),
+                                            config.detect_anomaly,
                                             streaming_prefill_policy,
                                         )?
                                     };
@@ -5086,6 +5095,7 @@ fn opd_step_forward_backward_tape_authoritative(
     teacher_tokens: Option<&[u32]>,
     teacher_active_positions: Option<&[usize]>,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
+    detect_anomaly: bool,
     streaming_prefill: kiln_model::forward::StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, usize, kiln_autograd::GradStore, Option<f64>)> {
     use kiln_model::forward::model_forward_no_head_with_policy;
@@ -5110,7 +5120,9 @@ fn opd_step_forward_backward_tape_authoritative(
     let lora_weights = params.as_lora_weights();
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
-        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(
+            kiln_autograd::TapeOptions { detect_anomaly },
+            || {
             // Single full forward (embed -> layers -> final RMSNorm). The
             // LoRA adapters inside record onto the active tape; the final
             // RMSNorm retains its kt output so the OPD loss adapter can
@@ -5231,7 +5243,8 @@ fn opd_step_forward_backward_tape_authoritative(
                 kiln_kt_bridge::BridgeError::new(format!("opd tape: loss.to_scalar: {e}"))
             })? as f64;
             Ok((loss_val, loss))
-        })
+            },
+        )
         .map_err(|e| anyhow!("opd tape-authoritative backward: {e}"))?;
 
     // (#1082 high-perf) Build a kt-native `kiln_autograd::GradStore` DIRECTLY
@@ -5291,6 +5304,7 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
     teacher_tokens: Option<&[u32]>,
     teacher_active_positions: Option<&[usize]>,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
+    detect_anomaly: bool,
     segments: &[(usize, usize)],
     streaming_prefill: kiln_model::forward::StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, usize, kiln_autograd::GradStore, Option<f64>)> {
@@ -5547,23 +5561,27 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
         let positions_ref = &positions;
         let lora_ref = &lora_weights;
         let (kt_grads, candle_grads) =
-            kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
-                let mut seg_ls = LinearAttentionState::new(model_config, device)
-                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                model_forward_segment_with_policy(
-                    backend_rt,
-                    seg_input,
-                    weights,
-                    model_config,
-                    positions_ref,
-                    start,
-                    end,
-                    Some(&mut seg_ls),
-                    Some(lora_ref),
-                    streaming_prefill,
-                )
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
-            })
+            kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(
+                kiln_autograd::TapeOptions { detect_anomaly },
+                seed,
+                || {
+                    let mut seg_ls = LinearAttentionState::new(model_config, device)
+                        .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                    model_forward_segment_with_policy(
+                        backend_rt,
+                        seg_input,
+                        weights,
+                        model_config,
+                        positions_ref,
+                        start,
+                        end,
+                        Some(&mut seg_ls),
+                        Some(lora_ref),
+                        streaming_prefill,
+                    )
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
+                },
+            )
             .map_err(|e| anyhow!("checkpointed OPD: segment {seg_idx} tape backward: {e}"))?;
 
         let mut segment_grads = kiln_autograd::GradStore::new();
@@ -6856,7 +6874,19 @@ mod tests {
         assert!(matches!(cfg.loss, OpdLossGranularity::TeacherTopK));
         assert_eq!(cfg.checkpoint_interval, Some(25));
         assert!(cfg.resume_checkpoint.is_none());
+        assert!(!cfg.detect_anomaly);
         cfg.validate_runtime_contract().unwrap();
+    }
+
+    #[test]
+    fn opd_tape_anomaly_diagnostics_are_explicit_and_round_trip() {
+        let config: OpdConfig =
+            serde_json::from_value(serde_json::json!({"detect_anomaly": true})).unwrap();
+        assert!(config.detect_anomaly);
+        assert_eq!(
+            serde_json::to_value(config).unwrap()["detect_anomaly"],
+            true
+        );
     }
 
     #[test]
@@ -7946,6 +7976,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
                 kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("tape-authoritative OPD step");
@@ -8072,6 +8103,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
                 &segments,
                 kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(device),
             )
@@ -8178,6 +8210,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
                 kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("opd_step_forward_backward_tape_authoritative (F32 Vulkan OPD)");
@@ -8309,6 +8342,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
                 kiln_model::forward::StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("opd_step_forward_backward_tape_authoritative (BF16 Vulkan OPD)");

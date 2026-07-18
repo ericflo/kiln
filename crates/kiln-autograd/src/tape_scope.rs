@@ -58,7 +58,7 @@
 
 use std::cell::RefCell;
 
-use crate::Tape;
+use crate::{Tape, TapeOptions};
 
 thread_local! {
     /// Thread-local active `Tape`. Wrapped in `RefCell` so the
@@ -107,13 +107,22 @@ impl Drop for TapeScopeGuard {
 /// shadowing because shadowing would route some ops onto a parent
 /// tape and others onto the child.
 pub fn with_thread_local_tape<R>(f: impl FnOnce() -> R) -> (R, Tape) {
+    with_thread_local_tape_options(TapeOptions::default(), f)
+}
+
+/// Run `f` with a fresh thread-local tape carrying `options`.
+///
+/// The options are captured before `f` starts and cannot change during the
+/// scope. This is the request-safe entry point for training APIs that expose
+/// tape diagnostics in typed job configuration.
+pub fn with_thread_local_tape_options<R>(options: TapeOptions, f: impl FnOnce() -> R) -> (R, Tape) {
     ACTIVE_TAPE.with(|cell| {
         assert!(
             cell.borrow().is_none(),
             "kiln-autograd::tape_scope: nested tape scopes are not supported \
              (a Tape is already active on this thread)"
         );
-        *cell.borrow_mut() = Some(Tape::new());
+        *cell.borrow_mut() = Some(Tape::with_options(options));
     });
     let guard = TapeScopeGuard;
 
@@ -147,6 +156,7 @@ pub fn with_active_tape<R>(f: impl FnOnce(&mut Tape) -> R) -> Option<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn tape_scope_authority_tracks_scope() {
@@ -155,6 +165,38 @@ mod tests {
         assert_eq!(result, 42);
         assert!(tape.is_empty());
         assert!(!tape_scope_active());
+    }
+
+    #[test]
+    fn tape_scope_captures_explicit_options() {
+        let options = TapeOptions {
+            detect_anomaly: true,
+        };
+        let (_, tape) = with_thread_local_tape_options(options, || ());
+        assert_eq!(tape.options(), options);
+    }
+
+    #[test]
+    fn concurrent_tape_scopes_keep_options_request_local() {
+        let barrier = Arc::new(Barrier::new(2));
+        let spawn = |options| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let (_, tape) = with_thread_local_tape_options(options, || {
+                    barrier.wait();
+                    assert!(tape_scope_active());
+                });
+                tape.options()
+            })
+        };
+
+        let disabled = spawn(TapeOptions::default());
+        let enabled = spawn(TapeOptions {
+            detect_anomaly: true,
+        });
+
+        assert_eq!(disabled.join().unwrap(), TapeOptions::default());
+        assert!(enabled.join().unwrap().detect_anomaly);
     }
 
     #[test]

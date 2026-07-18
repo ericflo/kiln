@@ -250,6 +250,7 @@ def build_shared_training_types() -> None:
         "checkpoint_interval": nullable(ref("PositiveInteger")),
         "resume_checkpoint": nullable(ref("String")),
         "grad_checkpoint_segments": nullable(ref("PositiveInteger")),
+        "detect_anomaly": ref("Boolean"),
         "seed": nullable(ref("NonNegativeInteger")),
         "optimizer": ref("Optimizer"),
         "adapter_smoke_test": ref("Boolean"),
@@ -382,7 +383,8 @@ def build_grpo_types() -> None:
         "lora_rank": ref("PositiveInteger"), "lora_alpha": ref("FiniteNumber"), "base_adapter": nullable(ref("String")),
         "allow_adapter_shape_conversion": ref("Boolean"), "allow_high_lora_scale": ref("Boolean"), "output_name": nullable(ref("String")),
         "auto_load": ref("Boolean"), "checkpoint_interval": nullable(ref("PositiveInteger")), "resume_checkpoint": nullable(ref("String")),
-        "grad_checkpoint_segments": nullable(ref("PositiveInteger")), "seed": nullable(ref("NonNegativeInteger")), "optimizer": ref("Optimizer"),
+        "grad_checkpoint_segments": nullable(ref("PositiveInteger")), "detect_anomaly": ref("Boolean"),
+        "seed": nullable(ref("NonNegativeInteger")), "optimizer": ref("Optimizer"),
         "adapter_smoke_test": ref("Boolean"), "loss": ref("LossConfig"),
     }
     add_object("GrpoConfig", "kiln_train::GrpoConfig", grpo_fields, "Complete GRPO optimizer, policy, filtering, checkpoint, and composite-loss configuration.", optional=tuple(grpo_fields), open_input=True, extra={"x-kiln-input-aliases": {"reference_policy": "kl_reference_policy"}})
@@ -442,7 +444,8 @@ def build_opd_types() -> None:
         "lora_rank": ref("PositiveInteger"), "lora_alpha": ref("FiniteNumber"), "allow_high_lora_scale": ref("Boolean"),
         "base_adapter": nullable(ref("String")), "output_name": nullable(ref("String")), "auto_load": ref("Boolean"),
         "checkpoint_interval": nullable(ref("PositiveInteger")), "resume_checkpoint": nullable(ref("String")),
-        "grad_checkpoint_segments": ref("PositiveInteger"), "seed": nullable(ref("NonNegativeInteger")), "optimizer": ref("Optimizer"),
+        "grad_checkpoint_segments": ref("PositiveInteger"), "detect_anomaly": ref("Boolean"),
+        "seed": nullable(ref("NonNegativeInteger")), "optimizer": ref("Optimizer"),
         "echo": nullable(ref("EchoConfig")), "epochs": ref("PositiveInteger"), "max_cost_usd": nullable(ref("FiniteNumber")),
     }
     add_object(

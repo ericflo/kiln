@@ -1,9 +1,8 @@
 // Phase 9 substrate kernel: "any non-finite?" tensor-wide reduction.
 //
-// Used by `Tensor::all_finite()` (kt-tensor side of the
-// `kiln_autograd::anomaly_detection_enabled()` / `anomaly_panic()`
-// pair, #1082 Phase 9) to scan CUDA-resident gradient tensors without
-// the D2H bridge through `cuda_to_host_copy`.
+// Used by `Tensor::all_finite()` for explicit tape anomaly diagnostics and
+// optimizer guardrails, scanning CUDA-resident gradients without the D2H
+// bridge through `cuda_to_host_copy`.
 //
 // # Contract
 //

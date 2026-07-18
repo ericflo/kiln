@@ -35,7 +35,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use kiln_autograd::{Tape, with_thread_local_tape};
+use kiln_autograd::{Tape, TapeOptions, with_thread_local_tape_options};
 use kiln_tensor::TensorId as KtTensorId;
 
 use crate::BridgeError;
@@ -248,6 +248,7 @@ pub fn with_io_mapping_scope<R>(f: impl FnOnce() -> R) -> R {
 /// recorded in this scope (e.g. the kt cross_entropy / GRPO / OPD scalar-loss
 /// adapter recorded it). The tape walk seeds `dL/dL = 1` at the loss node.
 pub fn with_tape_authoritative_scope_kt<T, F>(
+    tape_options: TapeOptions,
     forward: F,
 ) -> Result<(T, kiln_tensor::Tensor, HashMap<usize, kiln_tensor::Tensor>), BridgeError>
 where
@@ -255,7 +256,7 @@ where
 {
     with_io_mapping_scope(|| {
         let (forward_res, tape): (Result<(T, kiln_tensor::Tensor), BridgeError>, Tape) =
-            with_thread_local_tape(forward);
+            with_thread_local_tape_options(tape_options, forward);
         let (payload, loss_kt) = forward_res?;
 
         // The kt loss IS the tape root — seed dL/dL = 1 directly (no candle
@@ -319,6 +320,7 @@ where
 /// * `forward()` errors (propagated).
 /// * Tape walk errors.
 pub fn with_tape_segment_backward_scope<F>(
+    tape_options: TapeOptions,
     upstream_grad: kiln_tensor::Tensor,
     forward: F,
 ) -> Result<
@@ -333,7 +335,7 @@ where
 {
     with_io_mapping_scope(|| {
         let (forward_res, tape): (Result<kiln_tensor::Tensor, BridgeError>, Tape) =
-            with_thread_local_tape(forward);
+            with_thread_local_tape_options(tape_options, forward);
         let seg_output = forward_res?;
 
         // Seed the upstream grad at the segment output id and walk the tape.

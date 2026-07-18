@@ -184,7 +184,12 @@ async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
     assert!(app_js.contains("body.config.checkpoint_interval = checkpointInterval"));
     assert!(app_js.contains("body.config.resume_checkpoint = resumeCheckpoint"));
     assert!(html.contains(r#"id="sft-invalid-row-policy""#));
+    assert!(html.contains(r#"id="sft-detect-anomaly""#));
+    assert!(html.contains(r#"id="grpo-detect-anomaly""#));
+    assert!(html.contains(r#"id="opd-detect-anomaly""#));
     assert!(app_js.contains("invalid_row_policy: invalidRowPolicy"));
+    assert!(app_js.contains("config.detect_anomaly = true"));
+    assert!(app_js.contains("body.config.detect_anomaly = true"));
     assert!(app_js.contains("config.invalid_row_policy === 'skip'"));
     assert!(app_js.contains("kind === 'sft' || kind === 'grpo' || kind === 'opd'"));
     assert!(app_js.contains("checkpoint.teacher_identity_revision"));

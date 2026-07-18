@@ -504,6 +504,13 @@ server-side default, so omit anything you don't want to override:
   via `/v1/adapters` (e.g., for A/B testing). If `output_name` is already
   physically loaded, Kiln must reload that same name at its revision barrier
   even when this is `false`; use a new versioned name for a truly idle output.
+- **`detect_anomaly`** — defaults `false`. When enabled, every full or
+  checkpoint-segment tape scans each backward operation's returned gradients
+  and fails at the first NaN or Inf with the operation name and tape position.
+  This is a request-local diagnostic and cannot affect inference or another
+  job. It adds synchronization-heavy reductions, so use it to localize a
+  failing run rather than for throughput measurement. The equivalent CLI flag
+  is `--detect-anomaly`; the browser control is under GRPO Advanced.
 
 For full schema details, see
 [QUICKSTART.md §9.4](../QUICKSTART.md#94-grpo-rollout-generation).

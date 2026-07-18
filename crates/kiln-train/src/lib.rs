@@ -1166,6 +1166,12 @@ pub struct SftConfig {
     /// None means the trainer should auto-tune from the workload shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grad_checkpoint_segments: Option<usize>,
+    /// Scan every tape backward gradient for NaN or Inf and fail at the
+    /// producing operation. This request-local diagnostic is disabled by
+    /// default because it adds a finite reduction, and potentially a device
+    /// synchronization, for every gradient produced during backward.
+    #[serde(default)]
+    pub detect_anomaly: bool,
     /// Seed selected for LoRA initialization and RNG-dependent steps. If
     /// `None`, the trainer generates one and records the concrete value in
     /// `replay.jsonl` for audit. The seed alone is not a replay guarantee.
@@ -1260,6 +1266,7 @@ impl Default for SftConfig {
             checkpoint_interval: None,
             resume_checkpoint: None,
             grad_checkpoint_segments: None,
+            detect_anomaly: false,
             seed: None,
             optimizer: Optimizer::default(),
             adapter_smoke_test: false,
@@ -1644,6 +1651,11 @@ pub struct GrpoConfig {
     /// None means the trainer should auto-tune from the workload shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grad_checkpoint_segments: Option<usize>,
+    /// Scan every tape backward gradient for NaN or Inf and fail at the
+    /// producing operation. The policy is captured per job and is disabled by
+    /// default because it adds synchronization-heavy diagnostic reductions.
+    #[serde(default)]
+    pub detect_anomaly: bool,
     /// Seed selected for LoRA initialization and RNG-dependent steps. If
     /// `None`, the trainer generates one and records the concrete value in
     /// `replay.jsonl` for audit. The seed alone is not a replay guarantee.
@@ -2055,6 +2067,7 @@ impl Default for GrpoConfig {
             checkpoint_interval: None,
             resume_checkpoint: None,
             grad_checkpoint_segments: None,
+            detect_anomaly: false,
             seed: None,
             optimizer: Optimizer::default(),
             adapter_smoke_test: false,
@@ -2717,6 +2730,21 @@ mod tests {
         assert_eq!(sft.learning_rate, None);
         let grpo: GrpoConfig = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(grpo.learning_rate, None);
+    }
+
+    #[test]
+    fn tape_anomaly_diagnostics_are_explicit_and_default_off() {
+        let sft: SftConfig = serde_json::from_str(r#"{}"#).unwrap();
+        let grpo: GrpoConfig = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(!sft.detect_anomaly);
+        assert!(!grpo.detect_anomaly);
+
+        let sft: SftConfig = serde_json::from_str(r#"{"detect_anomaly":true}"#).unwrap();
+        let grpo: GrpoConfig = serde_json::from_str(r#"{"detect_anomaly":true}"#).unwrap();
+        assert!(sft.detect_anomaly);
+        assert!(grpo.detect_anomaly);
+        assert_eq!(serde_json::to_value(sft).unwrap()["detect_anomaly"], true);
+        assert_eq!(serde_json::to_value(grpo).unwrap()["detect_anomaly"], true);
     }
 
     #[test]

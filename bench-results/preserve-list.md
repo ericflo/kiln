@@ -2,8 +2,8 @@
 
 Sources of truth:
 
-- `bench-results/preserve-list-nvtx.csv` (245 call sites, 155 distinct range names)
-- `bench-results/preserve-list-env.csv` (1659 call sites, 624 distinct `KILN_*` vars; 39 go through `env_flag` / `env_tristate`)
+- `bench-results/preserve-list-nvtx.csv` (242 call sites, 155 distinct range names)
+- `bench-results/preserve-list-env.csv` (1329 call sites, 470 distinct `KILN_*` vars; 17 go through `env_flag` / `env_tristate`)
 - `bench-results/preserve-list-backend-runtime.csv` (0 trait methods whose signature still mentions a candle type)
 
 Regenerate: `scripts/audit-preserve-list.sh`.
@@ -25,7 +25,7 @@ Grouped by `kiln/<prefix>/...`; counts are total call sites.
 | cluster | call sites |
 |---|---:|
 | `gdn` | 38 |
-| `mlp` | 23 |
+| `mlp` | 20 |
 | `attn` | 20 |
 | `norm` | 17 |
 | `proj` | 16 |
@@ -112,11 +112,8 @@ Grouped by `kiln/<prefix>/...`; counts are total call sites.
 |---|---:|---:|---|
 | `KILN_QUALIFICATION` | 28 | no | kiln-model;kiln-server;kiln-tensor;kiln-train;kiln-vulkan-kernel |
 | `KILN_TENSOR_VULKAN_TEST` | 25 | no | kiln-model;kiln-tensor;kiln-train |
-| `KILN_MTP_DUMP_B12_GQA_TAPS` | 16 | no | kiln-model |
-| `KILN_MTP_DUMP_PATH` | 16 | no | kiln-model |
 | `KILN_FORCE_EAGER_DECODE` | 12 | no | kiln-model |
 | `KILN_KEEP_PROJECTION_ORIGINALS` | 11 | no | kiln-model |
-| `KILN_MTP_DUMP_SPLICE` | 11 | no | kiln-model |
 | `KILN_MODEL_PATH` | 10 | no | kiln-server;kiln-train |
 | `KILN_STREAMING_PREFILL` | 10 | no | kiln-server |
 | `KILN_STREAMING_TILE_TOKENS` | 10 | no | kiln-server |
@@ -129,7 +126,10 @@ Grouped by `kiln/<prefix>/...`; counts are total call sites.
 | `KILN_EVAL_MODE` | 9 | no | kiln-server |
 | `KILN_METAL_GRAPHS` | 9 | no | kiln-model |
 | `KILN_METAL_GRAPH_STABLE_PAGED_METADATA` | 9 | no | kiln-model |
-| `KILN_MTP_DUMP_HIDDEN_STATES` | 9 | no | kiln-model |
+| `KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES` | 9 | no | kiln-server |
+| `KILN_SPEC_ENABLED` | 9 | no | kiln-server |
+| `KILN_STREAMING_LAST_TOKEN_LM_HEAD` | 9 | no | kiln-server |
+| `KILN_STREAMING_PREFILL_MODE` | 9 | no | kiln-server |
 
 ## `BackendRuntime` candle-typed methods
 

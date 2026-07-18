@@ -1248,16 +1248,17 @@ several tolerance-bounded backward implementations do not route through the
 selector. Those require explicit backend controls and local hardware evidence;
 the `Determinism` metadata is the audit inventory, not proof of implementation.
 
-**`KILN_DETECT_ANOMALY=1`** — a NaN/Inf trap on the autograd tape
-(`crates/kiln-autograd/src/anomaly.rs`, `anomaly_detection_enabled()`).
-`Tape::backward` (`tape.rs`) scans each `BackwardOp::apply` output for
-non-finite elements before propagating the gradient; the first violation
-panics with the offending op's `name()` (matches the NVTX range +
-`parity-tolerance.csv` key), its tape position (`node_index`), and the
-first violating element (`NaN` / `+Inf` / `-Inf`). Cost is ~5% per step,
-so it is off by default and on under the CI training-parity tests. It
-composes with the in-place tape-version invariant (anti-pattern 16) —
-both are tape-position-aware safety nets.
+**`config.detect_anomaly = true`** is a request-local NaN/Inf trap for native
+SFT, GRPO, and OPD. The trainer captures the value in immutable
+`TapeOptions` when it opens each full or checkpoint-segment tape; there is no
+process-global environment reader. `Tape::backward` scans every
+`BackwardOp::apply` gradient before propagation, and the first violation
+panics with the offending op name and tape position. This is more precise than
+the mandatory optimizer-boundary finite check, but it adds a reduction and
+potential device synchronization per produced gradient, so the default is
+`false`. The CLI exposes `--detect-anomaly` and the browser exposes the same
+opt-in under each training form's advanced controls. The effective job config
+and exact checkpoint retain the selection.
 
 ### What's NOT yet ported (subsequent PRs)
 

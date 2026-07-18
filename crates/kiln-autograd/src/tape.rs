@@ -5,10 +5,10 @@
 //!
 //! # Threading model
 //!
-//! The Tape is **not thread-local** in this scaffold — callers pass it
-//! explicitly through the forward path. Phase 6a.x adds a
-//! thread-local tape handle for parity with PyTorch's `torch.autograd`
-//! ergonomics if the explicit-pass turns out clumsy in practice.
+//! A tape can be passed explicitly or installed for one forward scope through
+//! [`crate::with_thread_local_tape_options`]. The latter is thread-local and
+//! rejects nesting, so concurrent jobs cannot share recording or diagnostic
+//! state.
 //!
 //! # Per-node version tracking (anti-pattern 16 hook) — wired in Phase 1.32
 //!
@@ -51,12 +51,38 @@ pub struct TapeNode {
 #[derive(Debug, Default)]
 pub struct Tape {
     nodes: Vec<TapeNode>,
+    options: TapeOptions,
+}
+
+/// Immutable diagnostics policy captured when a [`Tape`] is created.
+///
+/// Keeping this policy on the tape makes concurrent training jobs independent
+/// and lets receipts identify the exact behavior used for a backward pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TapeOptions {
+    /// Scan every backward-op gradient for NaN or Inf and panic at the first
+    /// producing tape node. Disabled by default because it adds a finite
+    /// reduction (and potentially a device synchronization) per gradient.
+    pub detect_anomaly: bool,
 }
 
 impl Tape {
-    /// Empty tape.
+    /// Empty tape with default diagnostics disabled.
     pub fn new() -> Self {
-        Tape { nodes: Vec::new() }
+        Self::default()
+    }
+
+    /// Empty tape with an explicit immutable diagnostics policy.
+    pub fn with_options(options: TapeOptions) -> Self {
+        Self {
+            nodes: Vec::new(),
+            options,
+        }
+    }
+
+    /// Diagnostics policy captured for this tape.
+    pub fn options(&self) -> TapeOptions {
+        self.options
     }
 
     /// Number of recorded ops. Useful for sanity checks + debug.
@@ -169,16 +195,6 @@ impl Tape {
         // Per-output-id accumulated gradient map.
         let mut grads: std::collections::HashMap<TensorId, Tensor> = seeds;
 
-        // Read KILN_DETECT_ANOMALY once up-front so the per-node loop
-        // doesn't pay the env-var lookup cost per iteration. When
-        // set, each backward op's gradient outputs are scanned for
-        // NaN/Inf via `Tensor::all_finite()`; the first violation
-        // panics with `anomaly_panic` so corruption surfaces at the
-        // op that produced the non-finite value, not 100 steps
-        // later when loss diverges. Off-by-default (~5% per-step
-        // cost when on); CI training-parity tests opt in.
-        let anomaly = crate::anomaly::anomaly_detection_enabled();
-
         // Walk nodes in reverse insertion order. (Insertion order is
         // already topo-sorted producer-before-consumer because each
         // forward op records before its consumers.)
@@ -217,14 +233,13 @@ impl Tape {
                 )));
             }
 
-            // 3b. KILN_DETECT_ANOMALY: scan each gradient output for
-            //     NaN/Inf and panic at the producing op's tape
-            //     position on the first violation. CPU tensors use
-            //     the strided walker; CUDA tensors bridge through a
-            //     D2H copy until the per-backend is_finite reduction
-            //     kernels land. Unsupported devices are skipped so the
-            //     debug trap stays opt-in instead of breaking backward.
-            if anomaly {
+            // 3b. When requested by this tape's policy, scan each gradient
+            //     output for NaN/Inf and panic at the producing op's tape
+            //     position on the first violation. CPU tensors use the
+            //     strided walker; accelerator tensors use their backend
+            //     reduction or documented correctness fallback. An enabled
+            //     diagnostic fails closed if the scan itself cannot run.
+            if self.options.detect_anomaly {
                 for (i, maybe_grad) in per_input.iter().enumerate() {
                     let Some(g) = maybe_grad.as_ref() else {
                         continue;
@@ -243,9 +258,12 @@ impl Tape {
                                 ),
                             );
                         }
-                        Err(_) => {
-                            // Unsupported storage/backend — the dedicated
-                            // is_finite kernels are follow-up work.
+                        Err(error) => {
+                            return Err(Error::Msg(format!(
+                                "kiln_autograd: anomaly scan failed at tape position {node_index} \
+                                 (op `{}`) for input #{i} gradient: {error}",
+                                node.op.name()
+                            )));
                         }
                     }
                 }
@@ -311,44 +329,8 @@ mod tests {
     use super::*;
     use crate::BackwardOp;
     use kiln_tensor::{DType, Tensor};
-    use std::ffi::OsString;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: Option<&str>) -> Self {
-            let previous = std::env::var_os(key);
-            // SAFETY: Rust 2024 marks env mutation unsafe because it is
-            // process-global. Tests that call this helper hold ENV_LOCK.
-            unsafe {
-                match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            // SAFETY: see `EnvVarGuard::set`; the guard is dropped
-            // before ENV_LOCK is released.
-            unsafe {
-                match self.previous.as_ref() {
-                    Some(v) => std::env::set_var(self.key, v),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
 
     /// Test-only `BackwardOp` that records how many times its `apply`
     /// was called and returns a fixed gradient per input.
@@ -611,11 +593,10 @@ mod tests {
 
     #[test]
     fn backward_detects_non_finite_grad_when_anomaly_enabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvVarGuard::set(crate::ENV_DETECT_ANOMALY, Some("1"));
-
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let mut tape = Tape::new();
+            let mut tape = Tape::with_options(TapeOptions {
+                detect_anomaly: true,
+            });
             let out = cpu_tensor();
             let inp = cpu_tensor();
             tape.record(
@@ -652,9 +633,6 @@ mod tests {
 
     #[test]
     fn backward_allows_non_finite_grad_when_anomaly_disabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvVarGuard::set(crate::ENV_DETECT_ANOMALY, None);
-
         let mut tape = Tape::new();
         let out = cpu_tensor();
         let inp = cpu_tensor();

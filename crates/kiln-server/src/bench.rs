@@ -2572,6 +2572,7 @@ fn bench_training(
         checkpoint_interval: None,
         resume_checkpoint: None,
         grad_checkpoint_segments: None,
+        detect_anomaly: false,
         seed: None,
         optimizer: kiln_train::Optimizer::default(),
         adapter_smoke_test: false,

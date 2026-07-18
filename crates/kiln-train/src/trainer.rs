@@ -5049,89 +5049,100 @@ fn run_mtp_alignment_phase(
         let shifted_ids: Vec<u32> = input_ids[1..].to_vec();
         let shifted_mask: Vec<bool> = label_mask[1..].to_vec();
         let positions: Vec<u32> = (0..seq_len as u32 - 1).collect();
-        let result = kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
-            let to_err = |e: anyhow::Error| kiln_kt_bridge::BridgeError::new(format!("{e:#}"));
-            // emb rows for tok_{1..T} — frozen embedding, plain index_select.
-            let idx_t =
-                kiln_tensor::Tensor::from_vec_on(*device, shifted_ids.clone(), vec![seq_len - 1])
-                    .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: idx tensor: {e}")))?;
-            let emb = weights
-                .embed_tokens
-                .index_select(&idx_t, 0)
-                .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: emb select: {e}")))?;
-            let norm_e = kiln_model::forward::rms_norm(
-                &emb.unsqueeze(0)
-                    .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: emb unsqueeze: {e}")))?,
-                &mtp.pre_fc_norm_embedding,
-                model_config.rms_norm_eps,
-            )
-            .map_err(to_err)?;
-            let h_rows = hidden
-                .narrow(1, 0, seq_len - 1)
-                .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: hidden narrow: {e}")))?;
-            let norm_h = kiln_model::forward::rms_norm(
-                &h_rows,
-                &mtp.pre_fc_norm_hidden,
-                model_config.rms_norm_eps,
-            )
-            .map_err(to_err)?;
-            let concat = kiln_tensor::ops::concat(&[&norm_e, &norm_h], 2)
-                .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: concat: {e}")))?;
-            let fc_t = mtp
-                .fc_t
-                .to_dtype(concat.dtype())
-                .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: fc cast: {e}")))?;
-            let fused = concat
-                .squeeze(0)
-                .and_then(|c2| c2.matmul(&fc_t))
-                .and_then(|f2| f2.unsqueeze(0))
-                .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: fc matmul: {e}")))?;
-            let block_out = kiln_model::forward::transformer_block_with_policy(
-                backend,
-                &fused,
-                &mtp.layer,
-                model_config,
-                &positions,
-                model_config.num_attention_heads,
-                model_config.num_kv_heads,
-                model_config.head_dim,
-                model_config.rotary_dim(),
-                &weights.rotary_inv_freq,
-                model_config.rms_norm_eps,
-                None,
-                0,
-                Some((&mtp_lora_view, lora_scale)),
-                streaming_prefill,
-            )
-            .map_err(to_err)?;
-            let normed = kiln_model::forward::rms_norm(
-                &block_out,
-                &mtp.final_layernorm,
-                model_config.rms_norm_eps,
-            )
-            .map_err(to_err)?;
-            let loss = kiln_autograd::with_active_tape(|tape| {
-                kiln_flce_kernel::fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
-                    &normed,
-                    &weights.embed_tokens_t,
-                    &shifted_ids,
-                    &shifted_mask,
-                    DEFAULT_CHUNK_SIZE,
-                    tape,
+        let result = kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(
+            kiln_autograd::TapeOptions {
+                detect_anomaly: config.detect_anomaly,
+            },
+            || {
+                let to_err = |e: anyhow::Error| kiln_kt_bridge::BridgeError::new(format!("{e:#}"));
+                // emb rows for tok_{1..T} — frozen embedding, plain index_select.
+                let idx_t = kiln_tensor::Tensor::from_vec_on(
+                    *device,
+                    shifted_ids.clone(),
+                    vec![seq_len - 1],
                 )
-            })
-            .ok_or_else(|| {
-                kiln_kt_bridge::BridgeError::new("mtp alignment: no active kt tape".to_string())
-            })?
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("mtp alignment FLCE: {e}")))?;
-            let loss_val = loss
-                .to_dtype(kiln_tensor::DType::F32)
-                .and_then(|t| t.to_scalar::<f32>())
+                .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: idx tensor: {e}")))?;
+                let emb = weights
+                    .embed_tokens
+                    .index_select(&idx_t, 0)
+                    .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: emb select: {e}")))?;
+                let norm_e = kiln_model::forward::rms_norm(
+                    &emb.unsqueeze(0).map_err(|e| {
+                        to_err(anyhow::anyhow!("mtp alignment: emb unsqueeze: {e}"))
+                    })?,
+                    &mtp.pre_fc_norm_embedding,
+                    model_config.rms_norm_eps,
+                )
+                .map_err(to_err)?;
+                let h_rows = hidden
+                    .narrow(1, 0, seq_len - 1)
+                    .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: hidden narrow: {e}")))?;
+                let norm_h = kiln_model::forward::rms_norm(
+                    &h_rows,
+                    &mtp.pre_fc_norm_hidden,
+                    model_config.rms_norm_eps,
+                )
+                .map_err(to_err)?;
+                let concat = kiln_tensor::ops::concat(&[&norm_e, &norm_h], 2)
+                    .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: concat: {e}")))?;
+                let fc_t = mtp
+                    .fc_t
+                    .to_dtype(concat.dtype())
+                    .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: fc cast: {e}")))?;
+                let fused = concat
+                    .squeeze(0)
+                    .and_then(|c2| c2.matmul(&fc_t))
+                    .and_then(|f2| f2.unsqueeze(0))
+                    .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: fc matmul: {e}")))?;
+                let block_out = kiln_model::forward::transformer_block_with_policy(
+                    backend,
+                    &fused,
+                    &mtp.layer,
+                    model_config,
+                    &positions,
+                    model_config.num_attention_heads,
+                    model_config.num_kv_heads,
+                    model_config.head_dim,
+                    model_config.rotary_dim(),
+                    &weights.rotary_inv_freq,
+                    model_config.rms_norm_eps,
+                    None,
+                    0,
+                    Some((&mtp_lora_view, lora_scale)),
+                    streaming_prefill,
+                )
+                .map_err(to_err)?;
+                let normed = kiln_model::forward::rms_norm(
+                    &block_out,
+                    &mtp.final_layernorm,
+                    model_config.rms_norm_eps,
+                )
+                .map_err(to_err)?;
+                let loss = kiln_autograd::with_active_tape(|tape| {
+                    kiln_flce_kernel::fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
+                        &normed,
+                        &weights.embed_tokens_t,
+                        &shifted_ids,
+                        &shifted_mask,
+                        DEFAULT_CHUNK_SIZE,
+                        tape,
+                    )
+                })
+                .ok_or_else(|| {
+                    kiln_kt_bridge::BridgeError::new("mtp alignment: no active kt tape".to_string())
+                })?
                 .map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!("mtp alignment loss read: {e}"))
-                })? as f64;
-            Ok((loss_val, loss))
-        });
+                    kiln_kt_bridge::BridgeError::new(format!("mtp alignment FLCE: {e}"))
+                })?;
+                let loss_val = loss
+                    .to_dtype(kiln_tensor::DType::F32)
+                    .and_then(|t| t.to_scalar::<f32>())
+                    .map_err(|e| {
+                        kiln_kt_bridge::BridgeError::new(format!("mtp alignment loss read: {e}"))
+                    })? as f64;
+                Ok((loss_val, loss))
+            },
+        );
         let (loss_val, _loss_kt, grads_by_candle_raw) = match result {
             Ok(triple) => triple,
             Err(e) => anyhow::bail!("mtp alignment step failed: {e}"),
@@ -6258,6 +6269,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                             &label_mask,
                             segs,
                             &device,
+                            config.detect_anomaly,
                             checkpoint_boundary_policy,
                             streaming_prefill,
                         )?;
@@ -6294,6 +6306,7 @@ fn sft_train_prepared_to_with_checkpoint_root(
                         &params,
                         &label_mask,
                         &device,
+                        config.detect_anomaly,
                         streaming_prefill,
                     )?;
                     loss_val = lv;
@@ -11552,6 +11565,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         device,
                         echo_env_spec.as_ref(),
                         config.loss.no_policy_loss,
+                        config.detect_anomaly,
                         streaming_prefill_policy,
                     )?;
                     let step_elapsed = step_started.elapsed();
@@ -11591,6 +11605,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         timings.as_deref_mut(),
                         echo_env_spec.as_ref(),
                         config.loss.no_policy_loss,
+                        config.detect_anomaly,
                         streaming_prefill_policy,
                     )?
                 };
@@ -15446,6 +15461,7 @@ fn standard_forward_backward_tape_authoritative_kt(
     params: &TrainableLoraParams,
     label_mask: &[bool],
     device: &Device,
+    detect_anomaly: bool,
     streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let lora_weights = params.as_lora_weights();
@@ -15453,7 +15469,9 @@ fn standard_forward_backward_tape_authoritative_kt(
     ensure_sft_loss_route_supports_checkpointing(sft_loss_route, false)?;
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
-        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(
+            kiln_autograd::TapeOptions { detect_anomaly },
+            || {
             let loss_kt = match sft_loss_route {
                 SftFlceLossRoute::KtTapeFlce => {
                     let normed = model_forward_no_head_with_policy(
@@ -15566,7 +15584,8 @@ fn standard_forward_backward_tape_authoritative_kt(
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("loss_kt.to_scalar: {e}")))?
                 as f64;
             Ok((loss_val, loss_kt))
-        })
+            },
+        )
         .map_err(|e| anyhow::anyhow!("tape-authoritative(kt) backward: {e}"))?;
 
     // (#1082) Build a kt-native GradStore from the tape grads, keyed by each
@@ -15638,6 +15657,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     label_mask: &[bool],
     segments: &[(usize, usize)],
     device: &Device,
+    detect_anomaly: bool,
     checkpoint_boundary_policy: crate::CheckpointBoundaryPolicy,
     streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
@@ -15889,25 +15909,29 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         let positions_ref = &positions;
         let lora_ref = &lora_weights;
         let (kt_grads, candle_grads) =
-            kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
-                // Fresh recurrence state per segment (GDN recurrence is internal
-                // to each layer's full-sequence pass — see Step 1 note).
-                let mut seg_ls = LinearAttentionState::new(model_config, device)
-                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                model_forward_segment_with_policy(
-                    backend,
-                    seg_input,
-                    weights,
-                    model_config,
-                    positions_ref,
-                    start,
-                    end,
-                    Some(&mut seg_ls),
-                    Some(lora_ref),
-                    streaming_prefill,
-                )
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
-            })
+            kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(
+                kiln_autograd::TapeOptions { detect_anomaly },
+                seed,
+                || {
+                    // Fresh recurrence state per segment (GDN recurrence is internal
+                    // to each layer's full-sequence pass — see Step 1 note).
+                    let mut seg_ls = LinearAttentionState::new(model_config, device)
+                        .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                    model_forward_segment_with_policy(
+                        backend,
+                        seg_input,
+                        weights,
+                        model_config,
+                        positions_ref,
+                        start,
+                        end,
+                        Some(&mut seg_ls),
+                        Some(lora_ref),
+                        streaming_prefill,
+                    )
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
+                },
+            )
             .map_err(|e| anyhow::anyhow!("ckpt-kt: segment {seg_idx} tape backward: {e}"))?;
 
         // Decode every tagged parameter deposit into a segment-local store.
@@ -15988,6 +16012,7 @@ pub fn standard_forward_backward_with_policy(
         params,
         label_mask,
         device,
+        false,
         streaming_prefill,
     )
 }
@@ -16002,6 +16027,7 @@ fn standard_forward_backward_with_policy_and_loss_route(
     params: &TrainableLoraParams,
     label_mask: &[bool],
     device: &Device,
+    detect_anomaly: bool,
     streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(f64, GradSource)> {
     // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
@@ -16028,6 +16054,7 @@ fn standard_forward_backward_with_policy_and_loss_route(
             params,
             label_mask,
             device,
+            detect_anomaly,
             streaming_prefill,
         )?;
         Ok((loss_val, GradSource::Kt(kt_grads)))
@@ -16048,6 +16075,7 @@ fn standard_forward_backward_with_policy_and_loss_route(
             params,
             label_mask,
             device,
+            detect_anomaly,
             streaming_prefill,
         );
         anyhow::bail!(
@@ -16105,6 +16133,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     mut timings: Option<&mut GrpoBenchmarkTimings>,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
     no_pg: bool,
+    detect_anomaly: bool,
     streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(
     f64,
@@ -16117,78 +16146,81 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     let step_started = Instant::now();
 
     let ((loss_val, env_ce, policy_log_probs), _loss_kt, grads_by_candle_raw) =
-        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
-            // Single policy forward through final RMSNorm, without materializing
-            // `[1, T, V]` logits. The GRPO loss root chunks the frozen tied head
-            // internally and records `dL/d(normed_hidden)` directly.
-            let policy_hidden = model_forward_no_head_with_policy(
-                backend,
-                input_ids,
-                weights,
-                model_config,
-                Some(&mut linear_state),
-                Some(&lora_weights),
-                streaming_prefill,
-            )
-            .context("GRPO tape-authoritative(kt) no-head policy forward")
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(
+            kiln_autograd::TapeOptions { detect_anomaly },
+            || {
+                // Single policy forward through final RMSNorm, without materializing
+                // `[1, T, V]` logits. The GRPO loss root chunks the frozen tied head
+                // internally and records `dL/d(normed_hidden)` directly.
+                let policy_hidden = model_forward_no_head_with_policy(
+                    backend,
+                    input_ids,
+                    weights,
+                    model_config,
+                    Some(&mut linear_state),
+                    Some(&lora_weights),
+                    streaming_prefill,
+                )
+                .context("GRPO tape-authoritative(kt) no-head policy forward")
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
 
-            // The Vulkan fused active-rows root carries no env rows — an
-            // ECHO-active step takes the KtComposite root below instead.
-            #[cfg(feature = "vulkan")]
-            let mut loss_opt = match TrainingLossBackend::runtime_grpo_loss_route(backend) {
-                GrpoLossRoute::VulkanActiveRows if echo_env.is_none() => {
-                    crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
+                // The Vulkan fused active-rows root carries no env rows — an
+                // ECHO-active step takes the KtComposite root below instead.
+                #[cfg(feature = "vulkan")]
+                let mut loss_opt = match TrainingLossBackend::runtime_grpo_loss_route(backend) {
+                    GrpoLossRoute::VulkanActiveRows if echo_env.is_none() => {
+                        crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
+                            &policy_hidden,
+                            &weights.embed_tokens,
+                            input_ids,
+                            action_mask,
+                            behavior_log_probs,
+                            kl_reference_log_probs,
+                            loss_params,
+                        )
+                        .context("GRPO tape-authoritative(kt) Vulkan fused scalar loss")
+                        .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+                        .map(|(loss, policy_log_probs)| (loss, None, policy_log_probs))
+                    }
+                    _ => None,
+                };
+                #[cfg(not(feature = "vulkan"))]
+                let mut loss_opt = None;
+                if loss_opt.is_none() {
+                    loss_opt = crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_kt(
                         &policy_hidden,
-                        &weights.embed_tokens,
+                        &weights.embed_tokens_t,
                         input_ids,
                         action_mask,
                         behavior_log_probs,
                         kl_reference_log_probs,
                         loss_params,
+                        grpo_kl_auxiliary_route_for_backend(backend),
+                        device,
+                        DEFAULT_CHUNK_SIZE,
+                        echo_env,
+                        no_pg,
                     )
-                    .context("GRPO tape-authoritative(kt) Vulkan fused scalar loss")
-                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
-                    .map(|(loss, policy_log_probs)| (loss, None, policy_log_probs))
+                    .context("GRPO tape-authoritative(kt) scalar loss")
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
                 }
-                _ => None,
-            };
-            #[cfg(not(feature = "vulkan"))]
-            let mut loss_opt = None;
-            if loss_opt.is_none() {
-                loss_opt = crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_kt(
-                    &policy_hidden,
-                    &weights.embed_tokens_t,
-                    input_ids,
-                    action_mask,
-                    behavior_log_probs,
-                    kl_reference_log_probs,
-                    loss_params,
-                    grpo_kl_auxiliary_route_for_backend(backend),
-                    device,
-                    DEFAULT_CHUNK_SIZE,
-                    echo_env,
-                    no_pg,
-                )
-                .context("GRPO tape-authoritative(kt) scalar loss")
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-            }
 
-            let (loss, env_ce, policy_log_probs) = match loss_opt {
-                Some(values) => values,
-                None => {
-                    return Err(kiln_kt_bridge::BridgeError::new(
-                        "GRPO tape-authoritative(kt): the selected loss route did not record a \
+                let (loss, env_ce, policy_log_probs) = match loss_opt {
+                    Some(values) => values,
+                    None => {
+                        return Err(kiln_kt_bridge::BridgeError::new(
+                            "GRPO tape-authoritative(kt): the selected loss route did not record a \
                          scalar root (an active tape scope is mandatory; the active set may be \
                          empty or the hidden/head tensors may be outside the route envelope)",
-                    ));
-                }
-            };
-            let loss_val = loss.to_scalar::<f32>().map_err(|e| {
-                kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) loss.to_scalar: {e}"))
-            })? as f64;
-            Ok(((loss_val, env_ce, policy_log_probs), loss))
-        })
+                        ));
+                    }
+                };
+                let loss_val = loss.to_scalar::<f32>().map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) loss.to_scalar: {e}"))
+                })? as f64;
+                Ok(((loss_val, env_ce, policy_log_probs), loss))
+            },
+        )
         .map_err(|e| anyhow::anyhow!("GRPO tape-authoritative(kt) backward: {e}"))?;
 
     // Build a kt-native GradStore DIRECTLY from the tape grads. No
@@ -16252,6 +16284,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     device: &Device,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
     no_pg: bool,
+    detect_anomaly: bool,
     streaming_prefill: StreamingPrefillExecutionPolicy,
 ) -> Result<(
     f64,
@@ -16376,23 +16409,27 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
         let positions_ref = &positions;
         let lora_ref = &lora_weights;
         let (kt_grads, candle_grads) =
-            kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
-                let mut seg_ls = LinearAttentionState::new(model_config, device)
-                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                model_forward_segment_with_policy(
-                    backend,
-                    seg_input,
-                    weights,
-                    model_config,
-                    positions_ref,
-                    start,
-                    end,
-                    Some(&mut seg_ls),
-                    Some(lora_ref),
-                    streaming_prefill,
-                )
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
-            })
+            kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(
+                kiln_autograd::TapeOptions { detect_anomaly },
+                seed,
+                || {
+                    let mut seg_ls = LinearAttentionState::new(model_config, device)
+                        .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                    model_forward_segment_with_policy(
+                        backend,
+                        seg_input,
+                        weights,
+                        model_config,
+                        positions_ref,
+                        start,
+                        end,
+                        Some(&mut seg_ls),
+                        Some(lora_ref),
+                        streaming_prefill,
+                    )
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
+                },
+            )
             .map_err(|e| {
                 anyhow::anyhow!("checkpointed GRPO: segment {seg_idx} tape backward: {e}")
             })?;
@@ -20133,6 +20170,7 @@ pub(crate) mod tests {
             &params,
             &label_mask,
             &device,
+            false,
             StreamingPrefillExecutionPolicy::for_device(device),
         )
         .expect("tape-authoritative(kt) step");
@@ -20228,6 +20266,7 @@ pub(crate) mod tests {
                 p,
                 &label_mask,
                 &device,
+                false,
                 StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("fd loss-value forward");
@@ -20662,6 +20701,7 @@ pub(crate) mod tests {
                 &params,
                 &label_mask,
                 &device,
+                false,
                 StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("tape-authoritative forward/backward");
@@ -24018,6 +24058,7 @@ pub(crate) mod tests {
                 &device,
                 None,
                 false,
+                false,
                 StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("checkpointed GRPO tape-authoritative step");
@@ -24301,6 +24342,7 @@ pub(crate) mod tests {
                 None,       // timings
                 None,       // echo_env
                 false,      // no_pg
+                false,      // detect_anomaly
                 StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("grpo_step_forward_backward_tape_authoritative_kt (F32 Vulkan GRPO)");
@@ -24811,6 +24853,7 @@ pub(crate) mod tests {
                 None,
                 None,  // echo_env
                 false, // no_pg
+                false, // detect_anomaly
                 StreamingPrefillExecutionPolicy::for_device(device),
             )
             .expect("grpo_step_forward_backward_tape_authoritative_kt (BF16 Vulkan GRPO)");

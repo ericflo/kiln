@@ -2349,6 +2349,9 @@
             }
           ]
         },
+        "detect_anomaly": {
+          "$ref": "#/$defs/Boolean"
+        },
         "seed": {
           "anyOf": [
             {
@@ -3158,6 +3161,9 @@
         },
         "grad_checkpoint_segments": {
           "$ref": "#/$defs/PositiveInteger"
+        },
+        "detect_anomaly": {
+          "$ref": "#/$defs/Boolean"
         },
         "seed": {
           "anyOf": [
@@ -4313,6 +4319,9 @@
               "type": "null"
             }
           ]
+        },
+        "detect_anomaly": {
+          "$ref": "#/$defs/Boolean"
         },
         "seed": {
           "anyOf": [

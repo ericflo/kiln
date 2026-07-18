@@ -58,7 +58,7 @@ mod tape;
 // import the flat names. (#1082)
 pub mod tape_scope;
 
-pub use anomaly::{ENV_DETECT_ANOMALY, anomaly_detection_enabled, anomaly_panic};
+pub use anomaly::anomaly_panic;
 pub use backward_op::{BackwardOp, BoxedBackwardOp};
 pub use backwards::activation::{
     GeluBackward, ReluBackward, SigmoidBackward, SiluBackward, SoftmaxLastDimBackward, TanhBackward,
@@ -102,5 +102,7 @@ pub use backwards::unary_arith::{AbsBackward, ExpBackward, LnBackward, NegBackwa
 pub use backwards::unsqueeze::UnsqueezeBackward;
 pub use backwards::where_select::WhereSelectBackward;
 pub use grad_store::GradStore;
-pub use tape::{Tape, TapeNode};
-pub use tape_scope::{tape_scope_active, with_active_tape, with_thread_local_tape};
+pub use tape::{Tape, TapeNode, TapeOptions};
+pub use tape_scope::{
+    tape_scope_active, with_active_tape, with_thread_local_tape, with_thread_local_tape_options,
+};

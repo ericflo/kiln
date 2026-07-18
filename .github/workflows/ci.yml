@@ -153,15 +153,10 @@ jobs:
         run: cargo test --locked -p kiln-optim -p kiln-param -p kiln-autograd
 
       - name: Validate anomaly trap + deterministic envelope (#1082)
-        # `KILN_DETECT_ANOMALY` (autograd NaN/Inf trap probe, kiln-autograd)
-        # and `KILN_DETERMINISTIC` (deterministic-variant selector,
-        # kiln-tensor) live in candle-free crates, so they validate here
-        # WITHOUT the mid-migration default build that the earlier
-        # training-path approach (PR #1435) depended on and that cannot
-        # compile kiln-model yet. Single-threaded: these tests drive
-        # process-global env vars and must not race each other.
+        # Anomaly policy is explicit tape state; determinism remains a legacy
+        # process-global selector until its typed migration lands.
         run: |
-          KILN_DETECT_ANOMALY=1 cargo test --locked -p kiln-autograd anomaly -- --test-threads=1
+          cargo test --locked -p kiln-autograd backward_detects_non_finite_grad_when_anomaly_enabled
           KILN_DETERMINISTIC=1 cargo test --locked -p kiln-tensor determinism -- --test-threads=1
 
       - name: Assert no candle in the --features cuda runtime dep tree

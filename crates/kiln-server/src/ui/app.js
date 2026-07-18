@@ -5187,6 +5187,7 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
     if (learningRate !== null) config.learning_rate = learningRate;
     if (checkpointInterval !== null) config.checkpoint_interval = checkpointInterval;
     if (resumeCheckpoint !== null) config.resume_checkpoint = resumeCheckpoint;
+    if (form.detect_anomaly.checked) config.detect_anomaly = true;
     const held = trainingData.sft;
     let body;
     if (held && held.datasetName) {
@@ -5243,6 +5244,7 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
     if (learningRate !== null) config.learning_rate = learningRate;
     if (checkpointInterval !== null) config.checkpoint_interval = checkpointInterval;
     if (resumeCheckpoint !== null) config.resume_checkpoint = resumeCheckpoint;
+    if (form.detect_anomaly.checked) config.detect_anomaly = true;
     const held = trainingData.grpo;
     let body;
     if (held && held.datasetName) {
@@ -10594,6 +10596,8 @@ async function prepareTrainingResume(j, checkpoint) {
     setTrainingFormValue('opd-resume-checkpoint', checkpoint.resume_checkpoint);
     const autoLoad = document.getElementById('opd-auto-load');
     if (autoLoad && typeof config.auto_load === 'boolean') autoLoad.checked = config.auto_load;
+    const detectAnomaly = document.getElementById('opd-detect-anomaly');
+    if (detectAnomaly) detectAnomaly.checked = config.detect_anomaly === true;
     setTrainingFormValue('opd-prompts', '');
 
     let teachers = [];
@@ -10678,6 +10682,8 @@ async function prepareTrainingResume(j, checkpoint) {
   }
   const autoLoad = document.getElementById(kind + '-auto-load');
   if (autoLoad && typeof config.auto_load === 'boolean') autoLoad.checked = config.auto_load;
+  const detectAnomaly = document.getElementById(kind + '-detect-anomaly');
+  if (detectAnomaly) detectAnomaly.checked = config.detect_anomaly === true;
 
   const advanced = document.getElementById(kind + '-advanced');
   const advancedToggle = document.getElementById(kind + '-adv-toggle');
@@ -11851,6 +11857,7 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
     if (opdLearningRate !== null) body.config.learning_rate = opdLearningRate;
     if (checkpointInterval !== null) body.config.checkpoint_interval = checkpointInterval;
     if (resumeCheckpoint !== null) body.config.resume_checkpoint = resumeCheckpoint;
+    if (form.detect_anomaly.checked) body.config.detect_anomaly = true;
     setTrainingSubmitBusy(form, true, 'Submitting OPD…');
     const res = await api('/v1/train/opd', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toastTrainingSubmission(res, 'Distillation job queued');

@@ -2985,6 +2985,7 @@ fn run_distill_refresh(
         checkpoint_interval: None,
         resume_checkpoint: None,
         grad_checkpoint_segments: req.config.grad_checkpoint_segments,
+        detect_anomaly: req.config.detect_anomaly,
         seed: req.config.seed,
         optimizer: req.config.optimizer,
         adapter_smoke_test: false,

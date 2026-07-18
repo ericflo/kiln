@@ -63,8 +63,7 @@ pub enum StepError {
         policy_dtype: kiln_tensor::DType,
     },
 
-    /// Numerical anomaly (NaN / Inf) detected in grad. Raised under
-    /// `KILN_DETECT_ANOMALY=1` (Phase 9 deliverable).
+    /// Numerical anomaly (NaN / Inf) detected in a gradient.
     #[error("OptimStep: non-finite values in grad at parameter {tensor_id:?}")]
     NonFiniteGrad { tensor_id: kiln_tensor::TensorId },
 

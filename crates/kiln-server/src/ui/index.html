@@ -634,6 +634,12 @@
                 <input type="text" id="sft-resume-checkpoint" name="resume_checkpoint" value="" placeholder="adapter-checkpoint-step-….kiln-checkpoint" autocomplete="off" spellcheck="false">
                 <div class="form-help">Direct <code>.kiln-checkpoint</code> basename. Use the same adapter, data, and settings.</div>
               </div>
+              <div class="form-group">
+                <label for="sft-detect-anomaly" style="display:flex; align-items:center; gap:var(--space-2); text-transform:none; font-weight:500;">
+                  <input type="checkbox" id="sft-detect-anomaly" name="detect_anomaly"> Detect gradient anomalies
+                </label>
+                <div class="form-help">Fail at the first backward operation that produces NaN or Inf. Adds synchronization-heavy checks.</div>
+              </div>
             </div>
           </div>
           <div class="form-help" id="sft-optimizer-support" role="status" aria-live="polite">Optimizer capability details are still loading. Training remains disabled.</div>
@@ -731,6 +737,12 @@
                 <label for="grpo-resume-checkpoint">Resume checkpoint</label>
                 <input type="text" id="grpo-resume-checkpoint" name="resume_checkpoint" value="" placeholder="adapter-checkpoint-step-….kiln-checkpoint" autocomplete="off" spellcheck="false">
                 <div class="form-help">Direct <code>.kiln-checkpoint</code> basename. Use the same adapter, data, and settings.</div>
+              </div>
+              <div class="form-group">
+                <label for="grpo-detect-anomaly" style="display:flex; align-items:center; gap:var(--space-2); text-transform:none; font-weight:500;">
+                  <input type="checkbox" id="grpo-detect-anomaly" name="detect_anomaly"> Detect gradient anomalies
+                </label>
+                <div class="form-help">Fail at the first backward operation that produces NaN or Inf. Adds synchronization-heavy checks.</div>
               </div>
             </div>
           </div>
@@ -1364,6 +1376,12 @@
               <label for="opd-resume-checkpoint">Resume checkpoint</label>
               <input type="text" id="opd-resume-checkpoint" name="resume_checkpoint" value="" placeholder="adapter-checkpoint-step-….kiln-checkpoint" autocomplete="off" spellcheck="false">
               <div class="form-help">Direct <code>.kiln-checkpoint</code> basename from job detail. Teacher, prompts, and settings must match.</div>
+            </div>
+            <div class="form-group">
+              <label for="opd-detect-anomaly" style="display:flex; align-items:center; gap:var(--space-2); text-transform:none; font-weight:500;">
+                <input type="checkbox" id="opd-detect-anomaly" name="detect_anomaly"> Detect gradient anomalies
+              </label>
+              <div class="form-help">Fail at the first backward operation that produces NaN or Inf. Adds synchronization-heavy checks.</div>
             </div>
           </div>
           <div class="train-data-status is-good" id="opd-resume-note" role="status" aria-live="polite" hidden></div>

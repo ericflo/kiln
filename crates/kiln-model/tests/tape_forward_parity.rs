@@ -2223,38 +2223,55 @@ fn tape_split_lora_accumulates_original_b_and_omits_frozen_weights() {
     .unwrap();
 
     let ((split_grads, split_deposits), full_result) = (
-        kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed.clone(), || {
-            let y0 = kiln_model::tape_forward::try_tape_lora_linear_output_slice_kt(
-                &x,
-                &weight0,
-                Some(&proj),
-                scale,
-                0,
-            )
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?
-            .ok_or_else(|| kiln_kt_bridge::BridgeError::new("first split recorder declined"))?;
-            let y1 = kiln_model::tape_forward::try_tape_lora_linear_output_slice_kt(
-                &x,
-                &weight1,
-                Some(&proj),
-                scale,
-                2,
-            )
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?
-            .ok_or_else(|| kiln_kt_bridge::BridgeError::new("second split recorder declined"))?;
-            let pieces = [&y0, &y1];
-            let joined = Tensor::cat(&pieces, 1)
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?;
-            kiln_model::tape_forward::try_tape_concat_kt(&pieces, 1, &joined)
+        kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(
+            kiln_autograd::TapeOptions::default(),
+            seed.clone(),
+            || {
+                let y0 = kiln_model::tape_forward::try_tape_lora_linear_output_slice_kt(
+                    &x,
+                    &weight0,
+                    Some(&proj),
+                    scale,
+                    0,
+                )
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?
-                .ok_or_else(|| kiln_kt_bridge::BridgeError::new("split concat recorder declined"))
-        })
+                .ok_or_else(|| kiln_kt_bridge::BridgeError::new("first split recorder declined"))?;
+                let y1 = kiln_model::tape_forward::try_tape_lora_linear_output_slice_kt(
+                    &x,
+                    &weight1,
+                    Some(&proj),
+                    scale,
+                    2,
+                )
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?
+                .ok_or_else(|| {
+                    kiln_kt_bridge::BridgeError::new("second split recorder declined")
+                })?;
+                let pieces = [&y0, &y1];
+                let joined = Tensor::cat(&pieces, 1)
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?;
+                kiln_model::tape_forward::try_tape_concat_kt(&pieces, 1, &joined)
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?
+                    .ok_or_else(|| {
+                        kiln_kt_bridge::BridgeError::new("split concat recorder declined")
+                    })
+            },
+        )
         .expect("split LoRA segment backward"),
-        kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
-            kiln_model::tape_forward::try_tape_lora_linear_kt(&x, &full_weight, Some(&proj), scale)
+        kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(
+            kiln_autograd::TapeOptions::default(),
+            seed,
+            || {
+                kiln_model::tape_forward::try_tape_lora_linear_kt(
+                    &x,
+                    &full_weight,
+                    Some(&proj),
+                    scale,
+                )
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(e.to_string()))?
                 .ok_or_else(|| kiln_kt_bridge::BridgeError::new("full LoRA recorder declined"))
-        })
+            },
+        )
         .expect("full LoRA segment backward"),
     );
     let (full_grads, full_deposits) = full_result;

@@ -799,6 +799,10 @@ pub enum TrainCommands {
         #[arg(long)]
         adapter_smoke_test: bool,
 
+        /// Scan every backward gradient for NaN/Inf and fail at its producer
+        #[arg(long)]
+        detect_anomaly: bool,
+
         /// Emit an exact resumable checkpoint every N optimizer steps
         #[arg(long)]
         checkpoint_interval: Option<std::num::NonZeroUsize>,
@@ -830,6 +834,10 @@ pub enum TrainCommands {
         #[arg(long)]
         adapter_smoke_test: bool,
 
+        /// Scan every backward gradient for NaN/Inf and fail at its producer
+        #[arg(long)]
+        detect_anomaly: bool,
+
         /// Emit an exact resumable checkpoint every N optimizer groups
         #[arg(long)]
         checkpoint_interval: Option<std::num::NonZeroUsize>,
@@ -860,6 +868,10 @@ pub enum TrainCommands {
         /// LoRA rank for the trained adapter
         #[arg(long)]
         lora_rank: Option<usize>,
+
+        /// Scan every backward gradient for NaN/Inf and fail at its producer
+        #[arg(long)]
+        detect_anomaly: bool,
 
         /// Emit an exact resumable checkpoint every N committed optimizer steps
         #[arg(long)]
@@ -2569,6 +2581,7 @@ pub async fn run_train_sft(
     lora_rank: Option<usize>,
     invalid_row_policy: &str,
     adapter_smoke_test: bool,
+    detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -2589,6 +2602,7 @@ pub async fn run_train_sft(
             lora_rank,
             invalid_row_policy,
             adapter_smoke_test,
+            detect_anomaly,
             checkpoint_interval,
             resume_checkpoint,
         )?
@@ -2622,6 +2636,7 @@ pub async fn run_train_sft(
             lora_rank,
             invalid_row_policy,
             adapter_smoke_test,
+            detect_anomaly,
             checkpoint_interval,
             resume_checkpoint,
         )
@@ -2637,6 +2652,7 @@ pub async fn run_train_grpo(
     adapter: &str,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -2646,6 +2662,7 @@ pub async fn run_train_grpo(
             adapter,
             lora_rank,
             adapter_smoke_test,
+            detect_anomaly,
             checkpoint_interval,
             resume_checkpoint,
         )?
@@ -2661,6 +2678,7 @@ pub async fn run_train_grpo(
             adapter,
             lora_rank,
             adapter_smoke_test,
+            detect_anomaly,
             checkpoint_interval,
             resume_checkpoint,
         )?
@@ -2682,6 +2700,7 @@ pub async fn run_train_opd(
     adapter: &str,
     teacher: Option<&str>,
     lora_rank: Option<usize>,
+    detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -2694,6 +2713,7 @@ pub async fn run_train_opd(
         adapter,
         teacher,
         lora_rank,
+        detect_anomaly,
         checkpoint_interval,
         resume_checkpoint,
     )?;
@@ -2786,6 +2806,7 @@ fn build_sft_jsonl_training_payload(
     lora_rank: Option<usize>,
     invalid_row_policy: &str,
     adapter_smoke_test: bool,
+    detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
@@ -2810,6 +2831,9 @@ fn build_sft_jsonl_training_payload(
     if adapter_smoke_test {
         config["adapter_smoke_test"] = serde_json::json!(true);
     }
+    if detect_anomaly {
+        config["detect_anomaly"] = serde_json::json!(true);
+    }
     if let Some(interval) = checkpoint_interval {
         config["checkpoint_interval"] = serde_json::json!(interval);
     }
@@ -2827,6 +2851,7 @@ fn build_grpo_jsonl_training_payload(
     adapter: &str,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
@@ -2844,6 +2869,9 @@ fn build_grpo_jsonl_training_payload(
     }
     if adapter_smoke_test {
         config["adapter_smoke_test"] = serde_json::json!(true);
+    }
+    if detect_anomaly {
+        config["detect_anomaly"] = serde_json::json!(true);
     }
     if let Some(interval) = checkpoint_interval {
         config["checkpoint_interval"] = serde_json::json!(interval);
@@ -2865,6 +2893,7 @@ fn build_sft_training_payload(
     lora_rank: Option<usize>,
     invalid_row_policy: &str,
     adapter_smoke_test: bool,
+    detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> serde_json::Value {
@@ -2884,6 +2913,9 @@ fn build_sft_training_payload(
     if adapter_smoke_test {
         config["adapter_smoke_test"] = serde_json::json!(true);
     }
+    if detect_anomaly {
+        config["detect_anomaly"] = serde_json::json!(true);
+    }
     if let Some(interval) = checkpoint_interval {
         config["checkpoint_interval"] = serde_json::json!(interval);
     }
@@ -2902,6 +2934,7 @@ fn build_grpo_training_payload(
     adapter: &str,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
+    detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
@@ -2923,6 +2956,9 @@ fn build_grpo_training_payload(
     if adapter_smoke_test {
         config_obj.insert("adapter_smoke_test".into(), serde_json::json!(true));
     }
+    if detect_anomaly {
+        config_obj.insert("detect_anomaly".into(), serde_json::json!(true));
+    }
     if let Some(interval) = checkpoint_interval {
         config_obj.insert("checkpoint_interval".into(), serde_json::json!(interval));
     }
@@ -2938,6 +2974,7 @@ fn build_opd_training_payload(
     adapter: &str,
     teacher_override: Option<&str>,
     lora_rank: Option<usize>,
+    detect_anomaly: bool,
     checkpoint_interval: Option<usize>,
     resume_checkpoint: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
@@ -2986,6 +3023,9 @@ fn build_opd_training_payload(
     config.insert("output_name".into(), serde_json::json!(adapter));
     if let Some(rank) = lora_rank {
         config.insert("lora_rank".into(), serde_json::json!(rank));
+    }
+    if detect_anomaly {
+        config.insert("detect_anomaly".into(), serde_json::json!(true));
     }
     if let Some(interval) = checkpoint_interval {
         config.insert("checkpoint_interval".into(), serde_json::json!(interval));
@@ -4374,6 +4414,7 @@ checkpoint_boundary_cache_gb = 2.5
             Some(8),
             "fail",
             false,
+            false,
             None,
             None,
         );
@@ -4397,6 +4438,7 @@ checkpoint_boundary_cache_gb = 2.5
             None,
             "fail",
             false,
+            false,
             None,
             None,
         );
@@ -4419,6 +4461,7 @@ checkpoint_boundary_cache_gb = 2.5
             None,
             "fail",
             false,
+            false,
             None,
             None,
         );
@@ -4437,11 +4480,13 @@ checkpoint_boundary_cache_gb = 2.5
             None,
             "fail",
             true,
+            true,
             None,
             None,
         );
 
         assert_eq!(body["config"]["adapter_smoke_test"], true);
+        assert_eq!(body["config"]["detect_anomaly"], true);
     }
 
     #[test]
@@ -4453,6 +4498,7 @@ checkpoint_boundary_cache_gb = 2.5
             2,
             None,
             "skip",
+            false,
             false,
             Some(25),
             Some("sft-adapter-checkpoint-step-00000025.kiln-checkpoint"),
@@ -4488,6 +4534,7 @@ checkpoint_boundary_cache_gb = 2.5
             "grpo-adapter",
             Some(16),
             true,
+            true,
             Some(25),
             Some("grpo-adapter-checkpoint-step-00000025.kiln-checkpoint"),
         )
@@ -4497,6 +4544,7 @@ checkpoint_boundary_cache_gb = 2.5
         assert_eq!(body["config"]["learning_rate"], 5e-5);
         assert_eq!(body["config"]["lora_rank"], 16);
         assert_eq!(body["config"]["adapter_smoke_test"], true);
+        assert_eq!(body["config"]["detect_anomaly"], true);
         assert_eq!(body["config"]["checkpoint_interval"], 25);
         assert_eq!(
             body["config"]["resume_checkpoint"],
@@ -4517,7 +4565,8 @@ checkpoint_boundary_cache_gb = 2.5
         });
 
         let body =
-            build_grpo_training_payload(body, "grpo-adapter", None, false, None, None).unwrap();
+            build_grpo_training_payload(body, "grpo-adapter", None, false, false, None, None)
+                .unwrap();
 
         assert_eq!(body["config"]["output_name"], "grpo-adapter");
         assert!(body["config"].get("lora_rank").is_none());
@@ -4540,6 +4589,7 @@ checkpoint_boundary_cache_gb = 2.5
             "grpo-jsonl",
             Some(12),
             true,
+            false,
             Some(2),
             Some("grpo-jsonl-checkpoint-step-00000002.kiln-checkpoint"),
         )
@@ -4575,6 +4625,7 @@ checkpoint_boundary_cache_gb = 2.5
             Some(8),
             "fail",
             false,
+            false,
             None,
             None,
         )
@@ -4598,6 +4649,7 @@ checkpoint_boundary_cache_gb = 2.5
             "opd-adapter",
             Some("teacher-v2"),
             Some(24),
+            true,
             Some(25),
             Some("opd-adapter-checkpoint-step-00000025.kiln-checkpoint"),
         )
@@ -4606,6 +4658,7 @@ checkpoint_boundary_cache_gb = 2.5
         assert_eq!(body["teacher"], "teacher-v2");
         assert_eq!(body["config"]["output_name"], "opd-adapter");
         assert_eq!(body["config"]["lora_rank"], 24);
+        assert_eq!(body["config"]["detect_anomaly"], true);
         assert_eq!(body["config"]["top_k"], 16);
         assert_eq!(body["config"]["seed"], 73);
         assert_eq!(body["config"]["checkpoint_interval"], 25);
@@ -4626,6 +4679,7 @@ checkpoint_boundary_cache_gb = 2.5
             "opd-adapter",
             Some("teacher-v1"),
             None,
+            false,
             None,
             None,
         )
@@ -4643,6 +4697,7 @@ checkpoint_boundary_cache_gb = 2.5
             "opd-adapter",
             None,
             None,
+            false,
             None,
             None,
         )
@@ -4656,6 +4711,7 @@ checkpoint_boundary_cache_gb = 2.5
             "opd-adapter",
             None,
             None,
+            false,
             None,
             None,
         )
@@ -4671,6 +4727,7 @@ checkpoint_boundary_cache_gb = 2.5
             "opd-adapter",
             None,
             None,
+            false,
             None,
             None,
         )
@@ -4683,9 +4740,16 @@ checkpoint_boundary_cache_gb = 2.5
         let prompts = json!([{
             "messages": [{"role": "user", "content": "hello"}]
         }]);
-        let missing =
-            build_opd_training_payload(prompts.clone(), "opd-adapter", None, None, None, None)
-                .unwrap_err();
+        let missing = build_opd_training_payload(
+            prompts.clone(),
+            "opd-adapter",
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(missing.to_string().contains("--teacher"));
 
         let invalid = build_opd_training_payload(
@@ -4697,6 +4761,7 @@ checkpoint_boundary_cache_gb = 2.5
             "opd-adapter",
             None,
             None,
+            false,
             None,
             None,
         )
@@ -4948,12 +5013,18 @@ checkpoint_boundary_cache_gb = 2.5
             "rows.jsonl",
             "--invalid-row-policy",
             "skip",
+            "--detect-anomaly",
         ])
         .unwrap();
         match cli.command {
             Some(Commands::Train(TrainCommands::Sft {
-                invalid_row_policy, ..
-            })) => assert_eq!(invalid_row_policy, "skip"),
+                invalid_row_policy,
+                detect_anomaly,
+                ..
+            })) => {
+                assert_eq!(invalid_row_policy, "skip");
+                assert!(detect_anomaly);
+            }
             other => panic!("expected Train(Sft), got {:?}", other.is_some()),
         }
         assert!(
@@ -5204,6 +5275,7 @@ checkpoint_boundary_cache_gb = 2.5
             "demo",
             "--checkpoint-interval",
             "25",
+            "--detect-anomaly",
             "--resume-checkpoint",
             "demo-checkpoint-step-00000025.kiln-checkpoint",
         ])
@@ -5212,6 +5284,7 @@ checkpoint_boundary_cache_gb = 2.5
             Some(Commands::Train(TrainCommands::Grpo {
                 checkpoint_interval,
                 resume_checkpoint,
+                detect_anomaly,
                 ..
             })) => {
                 assert_eq!(
@@ -5222,6 +5295,7 @@ checkpoint_boundary_cache_gb = 2.5
                     resume_checkpoint.as_deref(),
                     Some("demo-checkpoint-step-00000025.kiln-checkpoint")
                 );
+                assert!(detect_anomaly);
             }
             other => panic!("expected Train(Grpo), got {:?}", other.is_some()),
         }
@@ -5259,6 +5333,7 @@ checkpoint_boundary_cache_gb = 2.5
             "24",
             "--checkpoint-interval",
             "25",
+            "--detect-anomaly",
             "--resume-checkpoint",
             "demo-checkpoint-step-00000025.kiln-checkpoint",
         ])
@@ -5269,6 +5344,7 @@ checkpoint_boundary_cache_gb = 2.5
                 adapter,
                 teacher,
                 lora_rank,
+                detect_anomaly,
                 checkpoint_interval,
                 resume_checkpoint,
                 url,
@@ -5277,6 +5353,7 @@ checkpoint_boundary_cache_gb = 2.5
                 assert_eq!(adapter, "demo");
                 assert_eq!(teacher.as_deref(), Some("teacher-v1"));
                 assert_eq!(lora_rank, Some(24));
+                assert!(detect_anomaly);
                 assert_eq!(
                     checkpoint_interval.map(std::num::NonZeroUsize::get),
                     Some(25)

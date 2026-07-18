@@ -223,6 +223,7 @@ fn run_one(
         checkpoint_interval: None,
         resume_checkpoint: None,
         grad_checkpoint_segments: None,
+        detect_anomaly: false,
         seed: None,
         optimizer: Default::default(),
         adapter_smoke_test: false,

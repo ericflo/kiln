@@ -95,6 +95,21 @@ When `trajectory` includes `kind: "observation"` segments and OPD config has
 `echo` enabled, kiln adds ECHO env-CE to the same OPD training step and records
 OPD action tokens and ECHO env tokens separately in `train_receipt.json`.
 
+## Backward anomaly diagnosis
+
+Set `config.detect_anomaly` to `true`, pass `--detect-anomaly` to
+`kiln train opd`, or enable **Detect gradient anomalies** in the browser OPD
+form to scan every backward operation's returned gradients. The first NaN or
+Inf fails with the producing operation name and tape position. The policy is
+captured per full or checkpoint-segment tape and cannot be changed by process
+environment or leak into inference and other jobs.
+
+The default is `false` because each scan adds a finite reduction and may
+synchronize the device. Ordinary OPD still performs mandatory loss and
+optimizer-boundary finite checks; enable this deeper scan only to localize a
+corrupting operation. The effective config and exact checkpoint retain the
+selection, so resume requires the same value.
+
 ## Exact checkpoint and resume
 
 Set `config.checkpoint_interval` to a positive number of committed optimizer

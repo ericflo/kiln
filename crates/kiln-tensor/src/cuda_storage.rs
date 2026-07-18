@@ -2830,7 +2830,7 @@ pub fn cuda_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
 /// | N            | N               | 4               |
 ///
 /// For a typical hidden-state gradient (`[1, 1024, 2560]` BF16 ≈ 5 MB)
-/// scanned once per backward op when `KILN_DETECT_ANOMALY=1`, the
+/// scanned once per backward op when tape anomaly detection is enabled, the
 /// bridge paid ~5 MB of D2H per node; the kernel pays 4 bytes.
 ///
 /// Non-contiguous inputs are contiguified into the kernel input via
