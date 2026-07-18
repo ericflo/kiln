@@ -1,0 +1,690 @@
+{
+  "completion": {
+    "completed_run_count": 3,
+    "expected_run_count": 3,
+    "failures": [],
+    "finalization_checks": {
+      "execution_identity_unchanged": "passed",
+      "host_thermal_handoff": "passed",
+      "model_identity_unchanged": "passed",
+      "repository_unchanged": "passed",
+      "runtime_artifact_unchanged": "passed",
+      "runtime_manifest_unchanged": "not_applicable"
+    }
+  },
+  "created_at": "2026-07-18T18:35:02.262289+00:00",
+  "diagnostics": {
+    "timed_request_path_affected": false,
+    "url": "http://127.0.0.1:8420/health"
+  },
+  "driver_environment": {
+    "hostname": "llmbox",
+    "machine": "x86_64",
+    "platform": "Linux-7.0.14-arch1-1-x86_64-with-glibc2.43",
+    "python": "3.14.6",
+    "repository": {
+      "commit": "a334ef7551dcf2d3a787ab03528148cc9aff6211",
+      "dirty": false,
+      "source_tree_sha256": "sha256:747649226e7088c5c92d29bae0998d0020c6a027407e56f22874cb48101ee5f2"
+    }
+  },
+  "driver_version": "3",
+  "engine": {
+    "authentication_configured": false,
+    "authentication_source": "none",
+    "available_models": [
+      "Qwen3.5-4B"
+    ],
+    "base_url": "http://127.0.0.1:8420",
+    "model": "Qwen3.5-4B",
+    "model_identity": {
+      "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+      "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+      "content_sha256": "sha256:b1f2cce5baf9e662fc4c2c421b79fccc8787521e6e85810eebffbb4aa43b309f",
+      "id": "Qwen3.5-4B",
+      "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+      "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+      "weight_files": [
+        {
+          "bytes": 5329398688,
+          "path": "model.safetensors-00001-of-00002.safetensors",
+          "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+        },
+        {
+          "bytes": 3990429408,
+          "path": "model.safetensors-00002-of-00002.safetensors",
+          "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+        }
+      ]
+    },
+    "name": "kiln",
+    "reported_version": "0.4.1",
+    "runtime_artifact": {
+      "bytes": 57769360,
+      "path": "/home/ericflo/Development/kiln/target/release/kiln",
+      "sha256": "sha256:69ee07c16bfaddba40b3fd1f96233350ff890a860a42cbbcdc9611d518acdf82"
+    },
+    "runtime_execution_identity": {
+      "backend": "rocm",
+      "device": "rocm:0",
+      "effective_environment_sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "effective_server_config_sha256": "sha256:cf930170e7ca70d404ad81f01ef01d53f2dfbb3e0ea0c938e68f0f57299fb135",
+      "executable_sha256": "sha256:69ee07c16bfaddba40b3fd1f96233350ff890a860a42cbbcdc9611d518acdf82",
+      "inference_dtype": "bf16",
+      "kernel_contract_sha256": "sha256:ddeee9c21f9d21c26c28dea7337e2e6b73c386fdb811d802d1ea4de5d4a7e11d",
+      "numerical_runtime_sha256": "sha256:606a95cde3acc3ea478ceff66da3d789d712ee5cb1b905aea0ca225e74d6cbc5",
+      "provenance_sha256": "sha256:8b1952d1a50263408b771b5f24ad52482f84e32ed82e1e42d76c2dd07b5e6a5b",
+      "provenance_type": "kiln.execution-provenance.v1",
+      "training_policy": "rocm_native_float"
+    },
+    "runtime_identity": "kiln-0.4.1-rocm-gfx1151-qualified",
+    "runtime_manifest": null
+  },
+  "host_thermal": {
+    "evidence": {
+      "errors": [],
+      "host_temperature_end_millicelsius": 44375,
+      "host_temperature_peak_millicelsius": 92500,
+      "host_temperature_sample_count": 789,
+      "host_temperature_start_millicelsius": 87750,
+      "host_thermal_cooldown_active_end": 0,
+      "host_thermal_cooldown_completed_count": 1,
+      "host_thermal_cooldown_peak_millicelsius": 47500,
+      "host_thermal_cooldown_sample_count": 8,
+      "host_thermal_cooldown_seconds": 1.7535265729529783,
+      "host_thermal_cooldown_stable_sample_count": 8,
+      "host_thermal_cooldown_timeout_count": 0,
+      "host_thermal_guard_trip_count": 0,
+      "host_thermal_pacing_active_end": 0,
+      "host_thermal_pacing_completed_event_count": 35,
+      "host_thermal_pacing_event_count": 35,
+      "host_thermal_pacing_max_seconds": 12.262639354972634,
+      "host_thermal_pacing_max_start_millicelsius": 87750,
+      "host_thermal_pacing_seconds": 142.66990785324015,
+      "process_alive_at_handoff": true,
+      "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+      "trip_reason": null
+    },
+    "mode": "attached_process_group",
+    "policy": {
+      "content_sha256": "sha256:0cb4e4ca2f689b7bd2d2da3f32e43949408c1ae14de001cc05c9dc3223e8cf49",
+      "id": "strix-halo-serving-benchmark-v1",
+      "limit_millicelsius": 93000,
+      "pacing": {
+        "resume_millicelsius": 55000,
+        "resume_stable_samples": 8,
+        "start_millicelsius": 68000
+      },
+      "phase_settlement_timeout_seconds": 180.0,
+      "poll_interval_ms": 250,
+      "safe_handoff": {
+        "stable_samples": 8,
+        "target_millicelsius": 55000,
+        "timeout_seconds": 180.0
+      },
+      "schema": "kiln.host-thermal-policy.v1",
+      "sensor": {
+        "hwmon_name": "k10temp",
+        "label": "Tctl"
+      }
+    },
+    "process_group": {
+      "boot_id": "bcc09655-13db-403b-8dda-b814222c1313",
+      "cmdline_sha256": "sha256:25c7754b05ef74c07097d1c1547b255df60f92f41f2fe03163e1fb7296d142c4",
+      "executable": "/home/ericflo/Development/kiln/target/release/kiln",
+      "pid": 1890306,
+      "process_group_id": 1890306,
+      "start_time_ticks": 34567148
+    },
+    "unsafe_no_guard_acknowledged": false
+  },
+  "memory_sampler": {
+    "interval_ms": 50,
+    "path": "/sys/devices/pci0000:00/0000:00:08.1/0000:c6:00.0/mem_info_vram_used",
+    "source": "drm_vram_used"
+  },
+  "receipt_sha256": "sha256:04738fb434d449bce2aed7b4987739eca27f92304c588af6af1ba2a98541a6fa",
+  "runs": [
+    {
+      "client_visible_itl_ms_p50": 31.59626602428034,
+      "client_visible_itl_ms_p99": 3774.762912465958,
+      "client_visible_itl_ms_p999": 3781.401069082669,
+      "client_visible_stream_event_count": 64,
+      "completion_tokens": 64,
+      "concurrency": 1,
+      "dispatch_spread_ms": 0.0,
+      "e2e_ms_p50": 9856.802663998678,
+      "e2e_ms_p99": 9856.802663998678,
+      "e2e_ms_p999": 9856.802663998678,
+      "elapsed_s": 9.856983718986157,
+      "error_count": 0,
+      "errors": [],
+      "gates": [
+        {
+          "detail": "1/1 requests succeeded",
+          "name": "all_requests_succeeded",
+          "passed": true
+        },
+        {
+          "detail": "every measured request must contribute positive completion usage",
+          "name": "positive_completion_usage",
+          "passed": true
+        },
+        {
+          "detail": "0.000 ms <= 250.000 ms",
+          "name": "dispatch_spread",
+          "passed": true
+        },
+        {
+          "detail": "not requested or parsed successfully",
+          "name": "diagnostics_readable",
+          "passed": true
+        },
+        {
+          "detail": "every request must finish by length with exactly 64 tokens",
+          "name": "fixed_output_length",
+          "passed": true
+        },
+        {
+          "detail": "observed prompt-token counts: [145]",
+          "name": "uniform_prompt_tokens",
+          "passed": true
+        },
+        {
+          "detail": "a local device-memory counter must be sampled during the run",
+          "name": "memory_measured",
+          "passed": true
+        },
+        {
+          "detail": "35395715072 bytes <= 50000000000 bytes",
+          "name": "absolute_memory_limit",
+          "passed": true
+        },
+        {
+          "detail": "batching-engine error delta: 0",
+          "name": "server_reported_no_errors",
+          "passed": true
+        }
+      ],
+      "host_thermal": {
+        "host_temperature_end_millicelsius": 61750,
+        "host_temperature_peak_millicelsius": 72625,
+        "host_temperature_sample_count": 43,
+        "host_temperature_start_millicelsius": 56875,
+        "host_thermal_guard_trip_count": 0,
+        "host_thermal_pacing_completed_event_count": 2,
+        "host_thermal_pacing_event_count": 2,
+        "host_thermal_pacing_seconds": 7.510375898040365,
+        "phase": "measure-c001-r000",
+        "phase_wall_seconds": 9.861281345947646,
+        "thermally_sustainable_output_token_throughput_per_s": 6.490028806073958
+      },
+      "memory": {
+        "baseline_bytes": 35360542720,
+        "peak_bytes": 35395715072,
+        "peak_delta_bytes": 35172352,
+        "samples": 197
+      },
+      "output_set_sha256": "sha256:16f3743492b72f1cb1b29a5711f03d525822da507c0cb2e8fc62029f103daf83",
+      "output_token_throughput_per_s": 6.492858446821371,
+      "prompt_set_sha256": "sha256:a255ac87d57ac7dd44afda0178b17853ce3800b377fd392feff597cca2ba33c3",
+      "prompt_token_counts": [
+        145
+      ],
+      "prompt_tokens_max": 145,
+      "prompt_tokens_min": 145,
+      "repeat": 0,
+      "request_count": 1,
+      "request_throughput_per_s": 0.10145091323158392,
+      "server": {
+        "batched_decode_forward_fraction": 0.0,
+        "effective_max_decode_batch": 8,
+        "mean_decode_rows_per_forward": 1.0,
+        "process_max_observed_batch": 1,
+        "total_admission_calls": 1,
+        "total_admission_ms": 0.9631019999999999,
+        "total_batched_decode_forwards": 0,
+        "total_decode_forward_ms": 9496.232438,
+        "total_decode_forwards": 63,
+        "total_decode_rows": 63,
+        "total_decode_tokens": 64,
+        "total_errors": 0,
+        "total_prefill_forward_ms": 333.3422470000001,
+        "total_prefill_forwards": 24,
+        "total_prefill_layer_yields": 21,
+        "total_prefill_layers": 96,
+        "total_prefill_tokens": 145
+      },
+      "slo_good_request_count": 0,
+      "slo_goodput_requests_per_s": 0.0,
+      "slo_goodput_tokens_per_s": 0.0,
+      "success_count": 1,
+      "ttft_ms_p50": 337.48130802996457,
+      "ttft_ms_p99": 337.48130802996457,
+      "ttft_ms_p999": 337.48130802996457,
+      "verdict": "passed"
+    },
+    {
+      "client_visible_itl_ms_p50": 148.3658394718077,
+      "client_visible_itl_ms_p99": 4177.53068120277,
+      "client_visible_itl_ms_p999": 4181.630297230149,
+      "client_visible_stream_event_count": 512,
+      "completion_tokens": 512,
+      "concurrency": 8,
+      "dispatch_spread_ms": 1.2921129819005728,
+      "e2e_ms_p50": 49483.47299854504,
+      "e2e_ms_p99": 49766.82983052102,
+      "e2e_ms_p999": 49768.90828645404,
+      "elapsed_s": 49.76967288099695,
+      "error_count": 0,
+      "errors": [],
+      "gates": [
+        {
+          "detail": "8/8 requests succeeded",
+          "name": "all_requests_succeeded",
+          "passed": true
+        },
+        {
+          "detail": "every measured request must contribute positive completion usage",
+          "name": "positive_completion_usage",
+          "passed": true
+        },
+        {
+          "detail": "1.292 ms <= 250.000 ms",
+          "name": "dispatch_spread",
+          "passed": true
+        },
+        {
+          "detail": "not requested or parsed successfully",
+          "name": "diagnostics_readable",
+          "passed": true
+        },
+        {
+          "detail": "every request must finish by length with exactly 64 tokens",
+          "name": "fixed_output_length",
+          "passed": true
+        },
+        {
+          "detail": "observed prompt-token counts: [145]",
+          "name": "uniform_prompt_tokens",
+          "passed": true
+        },
+        {
+          "detail": "a local device-memory counter must be sampled during the run",
+          "name": "memory_measured",
+          "passed": true
+        },
+        {
+          "detail": "35833753600 bytes <= 50000000000 bytes",
+          "name": "absolute_memory_limit",
+          "passed": true
+        },
+        {
+          "detail": "batching-engine error delta: 0",
+          "name": "server_reported_no_errors",
+          "passed": true
+        }
+      ],
+      "host_thermal": {
+        "host_temperature_end_millicelsius": 53750,
+        "host_temperature_peak_millicelsius": 72125,
+        "host_temperature_sample_count": 203,
+        "host_temperature_start_millicelsius": 61750,
+        "host_thermal_guard_trip_count": 0,
+        "host_thermal_pacing_completed_event_count": 10,
+        "host_thermal_pacing_event_count": 10,
+        "host_thermal_pacing_seconds": 37.059707344160415,
+        "phase": "measure-c008-r000",
+        "phase_wall_seconds": 49.77528080996126,
+        "thermally_sustainable_output_token_throughput_per_s": 10.286230266681613
+      },
+      "memory": {
+        "baseline_bytes": 35395715072,
+        "peak_bytes": 35833753600,
+        "peak_delta_bytes": 438038528,
+        "samples": 993
+      },
+      "output_set_sha256": "sha256:093547b884d45f7ce9e7432dee4e7501179479caf0c55bf94cfdb3bd26c3f090",
+      "output_token_throughput_per_s": 10.287389294766529,
+      "prompt_set_sha256": "sha256:3dd479a34ff4fb132f293cb3e09fe730ae0616ba196c55d7366d58dfbefc6e47",
+      "prompt_token_counts": [
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145
+      ],
+      "prompt_tokens_max": 145,
+      "prompt_tokens_min": 145,
+      "repeat": 0,
+      "request_count": 8,
+      "request_throughput_per_s": 0.160740457730727,
+      "server": {
+        "batched_decode_forward_fraction": 0.5075757575757576,
+        "effective_max_decode_batch": 8,
+        "mean_decode_rows_per_forward": 3.8181818181818183,
+        "process_max_observed_batch": 7,
+        "total_admission_calls": 8,
+        "total_admission_ms": 2.423568999999999,
+        "total_batched_decode_forwards": 67,
+        "total_decode_forward_ms": 43505.55419999997,
+        "total_decode_forwards": 132,
+        "total_decode_rows": 504,
+        "total_decode_tokens": 512,
+        "total_errors": 0,
+        "total_prefill_forward_ms": 6249.400589999997,
+        "total_prefill_forwards": 192,
+        "total_prefill_layer_yields": 168,
+        "total_prefill_layers": 768,
+        "total_prefill_tokens": 1160
+      },
+      "slo_good_request_count": 0,
+      "slo_goodput_requests_per_s": 0.0,
+      "slo_goodput_tokens_per_s": 0.0,
+      "success_count": 8,
+      "ttft_ms_p50": 6342.339739523595,
+      "ttft_ms_p99": 10588.613085253164,
+      "ttft_ms_p999": 10598.856543916278,
+      "verdict": "passed"
+    },
+    {
+      "client_visible_itl_ms_p50": 157.3535899806302,
+      "client_visible_itl_ms_p99": 4419.059261296061,
+      "client_visible_itl_ms_p999": 4423.8521616582875,
+      "client_visible_stream_event_count": 1024,
+      "completion_tokens": 1024,
+      "concurrency": 16,
+      "dispatch_spread_ms": 2.838368993252516,
+      "e2e_ms_p50": 84195.53715302027,
+      "e2e_ms_p99": 108439.36940353306,
+      "e2e_ms_p999": 108443.91664943629,
+      "elapsed_s": 108.44471590098692,
+      "error_count": 0,
+      "errors": [],
+      "gates": [
+        {
+          "detail": "16/16 requests succeeded",
+          "name": "all_requests_succeeded",
+          "passed": true
+        },
+        {
+          "detail": "every measured request must contribute positive completion usage",
+          "name": "positive_completion_usage",
+          "passed": true
+        },
+        {
+          "detail": "2.838 ms <= 250.000 ms",
+          "name": "dispatch_spread",
+          "passed": true
+        },
+        {
+          "detail": "not requested or parsed successfully",
+          "name": "diagnostics_readable",
+          "passed": true
+        },
+        {
+          "detail": "every request must finish by length with exactly 64 tokens",
+          "name": "fixed_output_length",
+          "passed": true
+        },
+        {
+          "detail": "observed prompt-token counts: [145]",
+          "name": "uniform_prompt_tokens",
+          "passed": true
+        },
+        {
+          "detail": "a local device-memory counter must be sampled during the run",
+          "name": "memory_measured",
+          "passed": true
+        },
+        {
+          "detail": "36774330368 bytes <= 50000000000 bytes",
+          "name": "absolute_memory_limit",
+          "passed": true
+        },
+        {
+          "detail": "batching-engine error delta: 0",
+          "name": "server_reported_no_errors",
+          "passed": true
+        }
+      ],
+      "host_thermal": {
+        "host_temperature_end_millicelsius": 47750,
+        "host_temperature_peak_millicelsius": 73750,
+        "host_temperature_sample_count": 454,
+        "host_temperature_start_millicelsius": 53750,
+        "host_thermal_guard_trip_count": 0,
+        "host_thermal_pacing_completed_event_count": 21,
+        "host_thermal_pacing_event_count": 21,
+        "host_thermal_pacing_seconds": 81.57944502908504,
+        "phase": "measure-c016-r000",
+        "phase_wall_seconds": 112.45580498903291,
+        "thermally_sustainable_output_token_throughput_per_s": 9.105799385810844
+      },
+      "memory": {
+        "baseline_bytes": 35793154048,
+        "peak_bytes": 36774330368,
+        "peak_delta_bytes": 981176320,
+        "samples": 2244
+      },
+      "output_set_sha256": "sha256:eee30f3a3c2ecb0a85d2ce598f4b3c1f3d0d97e18a1038869bc37e38b3834661",
+      "output_token_throughput_per_s": 9.442599314243589,
+      "prompt_set_sha256": "sha256:5876869576f63084d6dfd17d0236c50f89ce062ba189c05ec7bb9b9647c45915",
+      "prompt_token_counts": [
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145
+      ],
+      "prompt_tokens_max": 145,
+      "prompt_tokens_min": 145,
+      "repeat": 0,
+      "request_count": 16,
+      "request_throughput_per_s": 0.14754061428505608,
+      "server": {
+        "batched_decode_forward_fraction": 0.7303370786516854,
+        "effective_max_decode_batch": 8,
+        "mean_decode_rows_per_forward": 3.7752808988764044,
+        "process_max_observed_batch": 7,
+        "total_admission_calls": 16,
+        "total_admission_ms": 11.210999999999999,
+        "total_batched_decode_forwards": 195,
+        "total_decode_forward_ms": 89415.64793600005,
+        "total_decode_forwards": 267,
+        "total_decode_rows": 1008,
+        "total_decode_tokens": 1024,
+        "total_errors": 0,
+        "total_prefill_forward_ms": 18995.905945999988,
+        "total_prefill_forwards": 384,
+        "total_prefill_layer_yields": 336,
+        "total_prefill_layers": 1536,
+        "total_prefill_tokens": 2320
+      },
+      "slo_good_request_count": 0,
+      "slo_goodput_requests_per_s": 0.0,
+      "slo_goodput_tokens_per_s": 0.0,
+      "success_count": 16,
+      "ttft_ms_p50": 47718.87694601901,
+      "ttft_ms_p99": 66163.37469817081,
+      "ttft_ms_p999": 66189.29388439021,
+      "verdict": "passed"
+    }
+  ],
+  "schema": "kiln.serving-benchmark.v1",
+  "verdict": "passed",
+  "warmup": {
+    "client_visible_itl_ms_p50": 31.385942013002932,
+    "client_visible_itl_ms_p99": 68.30169829307121,
+    "client_visible_itl_ms_p999": 73.64051334280524,
+    "client_visible_stream_event_count": 16,
+    "completion_tokens": 16,
+    "concurrency": 1,
+    "dispatch_spread_ms": 0.0,
+    "e2e_ms_p50": 865.330324973911,
+    "e2e_ms_p99": 865.330324973911,
+    "e2e_ms_p999": 865.330324973911,
+    "elapsed_s": 0.8655185700044967,
+    "error_count": 0,
+    "errors": [],
+    "gates": [
+      {
+        "detail": "1/1 requests succeeded",
+        "name": "all_requests_succeeded",
+        "passed": true
+      },
+      {
+        "detail": "every measured request must contribute positive completion usage",
+        "name": "positive_completion_usage",
+        "passed": true
+      },
+      {
+        "detail": "0.000 ms <= 250.000 ms",
+        "name": "dispatch_spread",
+        "passed": true
+      },
+      {
+        "detail": "not requested or parsed successfully",
+        "name": "diagnostics_readable",
+        "passed": true
+      },
+      {
+        "detail": "every request must finish by length with exactly 16 tokens",
+        "name": "fixed_output_length",
+        "passed": true
+      },
+      {
+        "detail": "observed prompt-token counts: [142]",
+        "name": "uniform_prompt_tokens",
+        "passed": true
+      },
+      {
+        "detail": "a local device-memory counter must be sampled during the run",
+        "name": "memory_measured",
+        "passed": true
+      },
+      {
+        "detail": "35361591296 bytes <= 50000000000 bytes",
+        "name": "absolute_memory_limit",
+        "passed": true
+      },
+      {
+        "detail": "batching-engine error delta: 0",
+        "name": "server_reported_no_errors",
+        "passed": true
+      }
+    ],
+    "host_thermal": {
+      "host_temperature_end_millicelsius": 56875,
+      "host_temperature_peak_millicelsius": 56875,
+      "host_temperature_sample_count": 7,
+      "host_temperature_start_millicelsius": 44750,
+      "host_thermal_guard_trip_count": 0,
+      "host_thermal_pacing_completed_event_count": 0,
+      "host_thermal_pacing_event_count": 0,
+      "host_thermal_pacing_seconds": 0,
+      "phase": "warmup-c001",
+      "phase_wall_seconds": 0.8708897259784862,
+      "thermally_sustainable_output_token_throughput_per_s": 18.372016023065648
+    },
+    "memory": {
+      "baseline_bytes": 35312082944,
+      "peak_bytes": 35361591296,
+      "peak_delta_bytes": 49508352,
+      "samples": 19
+    },
+    "output_set_sha256": "sha256:31a53264926c2c9e24d66595af3b5543d1dd08ad9ea2dd480af010674488dd6f",
+    "output_token_throughput_per_s": 18.486027399639585,
+    "prompt_set_sha256": "sha256:5d6560ee4c5e2b5360d6a322dcc82c6570c5f5118907a2a6e3b84f4a9b3095f0",
+    "prompt_token_counts": [
+      142
+    ],
+    "prompt_tokens_max": 142,
+    "prompt_tokens_min": 142,
+    "repeat": -1,
+    "request_count": 1,
+    "request_throughput_per_s": 1.155376712477474,
+    "server": {
+      "batched_decode_forward_fraction": 0.0,
+      "effective_max_decode_batch": 8,
+      "mean_decode_rows_per_forward": 1.0,
+      "process_max_observed_batch": 1,
+      "total_admission_calls": 1,
+      "total_admission_ms": 1.100099,
+      "total_batched_decode_forwards": 0,
+      "total_decode_forward_ms": 506.03273299999995,
+      "total_decode_forwards": 15,
+      "total_decode_rows": 15,
+      "total_decode_tokens": 16,
+      "total_errors": 0,
+      "total_prefill_forward_ms": 348.393805,
+      "total_prefill_forwards": 24,
+      "total_prefill_layer_yields": 21,
+      "total_prefill_layers": 96,
+      "total_prefill_tokens": 142
+    },
+    "slo_good_request_count": 1,
+    "slo_goodput_requests_per_s": 1.155376712477474,
+    "slo_goodput_tokens_per_s": 18.486027399639585,
+    "success_count": 1,
+    "ttft_ms_p50": 352.4781279847957,
+    "ttft_ms_p99": 352.4781279847957,
+    "ttft_ms_p999": 352.4781279847957,
+    "verdict": "passed"
+  },
+  "workload": {
+    "arrival_pattern": "thread_barrier_all_at_once",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "comparison_mode": "exact_output",
+    "concurrency": [
+      1,
+      8,
+      16
+    ],
+    "endpoint": "/v1/chat/completions",
+    "max_dispatch_spread_ms": 250.0,
+    "max_tokens": 64,
+    "memory_limit_bytes": 50000000000,
+    "model": "Qwen3.5-4B",
+    "profile": "greedy-short",
+    "prompt_template_version": "fixed-serving-profiles-v1",
+    "repeats": 1,
+    "require_max_tokens": true,
+    "require_uniform_prompt_tokens": true,
+    "run_id": "rocm-strix-halo-stable-resume-calibration-v1",
+    "sampling": {
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.0,
+      "seed": 17,
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "schema": "kiln.serving-benchmark-workload.v1",
+    "slo": {
+      "client_visible_itl_ms": 250.0,
+      "e2e_ms": 60000.0,
+      "ttft_ms": 5000.0
+    },
+    "stream": true,
+    "stream_include_usage": true,
+    "warmup_requests": 1
+  },
+  "workload_fingerprint": "sha256:9aabcb57db29adfde729744c23306316ace470fdcbe32ee0040af6c8ffa39ddc"
+}
