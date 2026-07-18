@@ -96,8 +96,8 @@ pub use generate::{
     GenerationOutput, InferenceMemoryRuntime, ModelRunner, ModelRunnerRuntimeOptions,
     MtpGenerationOutput, PagedBatchedDecodeState, PagedBatchedPrefillProgress,
     PagedBatchedPrefillStart, PagedBatchedPrefillState, PagedPrefixNextToken,
-    PagedPrefixRegistration, PagedPrefixReuse, PrefixCachedGenerationOutput, StreamDone,
-    StreamEvent, StreamToken, ThreadedStreamingOutput,
+    PagedPrefixRegistration, PagedPrefixReuse, PrefixCachedGenerationOutput,
+    ProfiledPagedDecodeStep, StreamDone, StreamEvent, StreamToken, ThreadedStreamingOutput,
 };
 pub use kt_api_policy::{KtApiMode, install_kt_api_mode};
 pub use kv_cache::KvCache;

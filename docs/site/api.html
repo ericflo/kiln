@@ -1742,9 +1742,15 @@ kiln serve --config kiln.toml</code></pre>
           Direct streams retain the same request summary while leaving actor-only phases
           <code>null</code> and classifying otherwise unpartitioned gaps as
           <code>unexplained</code>. Batching-engine streams also propagate exact, invocation-owned
-          <code>gpu_lock_wait_ms</code> and <code>synchronization_ms</code> candidates. Sampling,
-          readback, graph, resize/trim, adapter, and training phases remain <code>null</code> until
-          their owning runtime returns request-correlated timings; process-global counter deltas
+          <code>gpu_lock_wait_ms</code> and <code>synchronization_ms</code> candidates. ROCm sampled
+          paged decode also reports its distinct post-transformer final-norm, LM-head, filtering,
+          selection, and token-return tail as <code>sampling_ms</code>; behavior-logprob capture
+          reports the same boundary across backends. <code>readback_ms</code> stays <code>null</code>
+          because transfer is still nested inside that call and splitting it would add a second
+          synchronization. Greedy or native fused-forward routes leave sampling <code>null</code>
+          when no independent boundary exists. Graph, resize/trim, adapter, and training phases
+          remain <code>null</code> until their owning runtime returns request-correlated timings;
+          process-global counter deltas
           are never presented as per-request evidence. Mixed-load, development-soak, and endurance
           qualification receipts retain each phase as a measured-window millisecond total plus an
           observation count, so unsupported <code>null</code> remains distinct from a measured zero.

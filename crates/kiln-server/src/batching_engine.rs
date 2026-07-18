@@ -1364,25 +1364,32 @@ impl DecodeForward for RealDecodeForward {
                     for (row, params) in ordinary_rows.iter_mut().zip(ordinary_params.iter()) {
                         let mut single_row: [&mut PagedBatchedDecodeState; 1] = [&mut **row];
                         let single_params = std::slice::from_ref(params);
-                        let mut next = runner_guard.paged_batched_decode_step(
+                        let mut next = runner_guard.paged_batched_decode_step_profiled(
                             &mut single_row,
                             single_params,
                             self.paged_cache.as_ref(),
                         )?;
+                        if let Some(duration) = next.sampling_duration {
+                            backend_phases.observe_sampling(duration);
+                        }
                         anyhow::ensure!(
-                            next.len() == 1,
+                            next.tokens.len() == 1,
                             "rowwise decode returned {} tokens for a 1-row step",
-                            next.len()
+                            next.tokens.len()
                         );
-                        tokens.push(next.remove(0));
+                        tokens.push(next.tokens.remove(0));
                     }
                     tokens
                 } else {
-                    runner_guard.paged_batched_decode_step(
+                    let step = runner_guard.paged_batched_decode_step_profiled(
                         &mut ordinary_rows,
                         &ordinary_params,
                         self.paged_cache.as_ref(),
-                    )?
+                    )?;
+                    if let Some(duration) = step.sampling_duration {
+                        backend_phases.observe_sampling(duration);
+                    }
+                    step.tokens
                 };
                 for ((output_idx, row), token) in ordinary_output_indices
                     .iter()
@@ -1402,25 +1409,33 @@ impl DecodeForward for RealDecodeForward {
                         let mut single_row: [&mut PagedBatchedDecodeState; 1] = [&mut **row];
                         let single_params = std::slice::from_ref(params);
                         let mut next = runner_guard
-                            .paged_batched_decode_step_with_behavior_logprobs(
+                            .paged_batched_decode_step_with_behavior_logprobs_profiled(
                                 &mut single_row,
                                 single_params,
                                 self.paged_cache.as_ref(),
                             )?;
+                        if let Some(duration) = next.sampling_duration {
+                            backend_phases.observe_sampling(duration);
+                        }
                         anyhow::ensure!(
-                            next.len() == 1,
+                            next.tokens.len() == 1,
                             "rowwise behavior-logprob decode returned {} tokens for a 1-row step",
-                            next.len()
+                            next.tokens.len()
                         );
-                        tokens.push(next.remove(0));
+                        tokens.push(next.tokens.remove(0));
                     }
                     tokens
                 } else {
-                    runner_guard.paged_batched_decode_step_with_behavior_logprobs(
-                        &mut traced_rows,
-                        &traced_params,
-                        self.paged_cache.as_ref(),
-                    )?
+                    let step = runner_guard
+                        .paged_batched_decode_step_with_behavior_logprobs_profiled(
+                            &mut traced_rows,
+                            &traced_params,
+                            self.paged_cache.as_ref(),
+                        )?;
+                    if let Some(duration) = step.sampling_duration {
+                        backend_phases.observe_sampling(duration);
+                    }
+                    step.tokens
                 };
                 for ((output_idx, row), sampled) in traced_output_indices
                     .iter()

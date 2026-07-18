@@ -145,6 +145,7 @@ The currently measured batching path exposes:
 | `tokenization_ms` | Prompt token encoding in the request handler |
 | `prefill_ms` | Actor prefill wall time accumulated while the request is active |
 | `decode_ms` | Actor decode wall time accumulated while the request is active |
+| `sampling_ms` | Post-transformer final norm, LM head, penalties/filters, selection, and token return when that tail has a distinct boundary |
 | `gpu_lock_wait_ms` | Time waiting to acquire the shared inference GPU-coordination guard for a decode step |
 | `synchronization_ms` | Time spent settling the decode step at the backend's external-yield boundary |
 | `response_delivery_ms` | Producer-ready to bounded-channel enqueue or bridge receipt |
@@ -185,8 +186,17 @@ enqueue `client_delivery_ms`, and request-local `unexplained_ms`. Its
 subphase fields also remain `null` until the direct model path returns the same
 invocation-owned timing envelope.
 
-Sampling, device readback, graph capture/replay, resize, trim, adapter, and
-training remain explicit nullable fields. Their aggregate subsystems have
+ROCm sampled paged decode reports `sampling_ms` for the distinct
+post-transformer tail, including the final token transfer that completes the
+call. Behavior-logprob capture reports the same boundary on every backend.
+`readback_ms` remains `null` because the current backend interface cannot split
+transfer time from the sampling call without adding a second synchronization;
+the broad sampling candidate must not be added to a future nested readback
+candidate. Greedy and native fused-forward routes leave sampling `null` when
+the transformer/sampler boundary is not independently observable.
+
+Device readback, graph capture/replay, resize, trim, adapter, and training
+remain explicit nullable fields. Their aggregate subsystems have
 separate operational telemetry, but they are not yet joined to each
 request-token timeline. In particular, Kiln does not infer a request's graph
 time from process-global before/after counters because concurrent inference

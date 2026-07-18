@@ -12,7 +12,7 @@ use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
     mpsc,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
@@ -1031,6 +1031,20 @@ pub struct PagedBatchedDecodeState {
     /// cache key would lose its hits on every such shift; this stable id
     /// survives them.
     pub id: u64,
+}
+
+/// Tokens and request-correlatable backend work from one paged decode step.
+///
+/// A phase remains `None` when its boundary is fused with the transformer
+/// forward or otherwise cannot be measured without inventing attribution.
+#[derive(Debug)]
+pub struct ProfiledPagedDecodeStep<T> {
+    pub tokens: Vec<T>,
+    pub sampling_duration: Option<Duration>,
+}
+
+fn add_profiled_duration(total: &mut Option<Duration>, duration: Duration) {
+    *total = Some(total.unwrap_or(Duration::ZERO).saturating_add(duration));
 }
 
 fn capture_authoritative_prefix_snapshot(
@@ -5398,6 +5412,16 @@ impl ModelRunner {
         params: &[SamplingParams],
         paged_cache: &PagedKvCache,
     ) -> Result<Vec<TokenId>> {
+        self.paged_batched_decode_step_profiled(states, params, paged_cache)
+            .map(|step| step.tokens)
+    }
+
+    pub fn paged_batched_decode_step_profiled(
+        &self,
+        states: &mut [&mut PagedBatchedDecodeState],
+        params: &[SamplingParams],
+        paged_cache: &PagedKvCache,
+    ) -> Result<ProfiledPagedDecodeStep<TokenId>> {
         anyhow::ensure!(
             states.len() == params.len(),
             "decode state length {} != params length {}",
@@ -5517,6 +5541,7 @@ impl ModelRunner {
         let try_contiguous_batched = greedy_route == GreedyBatchRoute::Contiguous;
 
         let mut sampled: Option<Vec<TokenId>> = None;
+        let mut sampling_duration = None;
         // Multi-batch CUDA graph fast path.
         if row_count > 1 && try_contiguous_batched && has_linear_layers {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
@@ -5938,18 +5963,19 @@ impl ModelRunner {
                 )
             };
             let hidden = hidden_result.context("ROCm sampled batched hidden decode failed")?;
-            sampled = Some(
-                run_lm_head_sample_batch_with_contexts(
-                    &*self.backend,
-                    &hidden,
-                    &self.weights,
-                    &self.config,
-                    params,
-                    step_seeds,
-                    generated_tokens,
-                )
-                .context("sample ROCm hidden batch")?,
-            );
+            let sampling_started = Instant::now();
+            let sampled_result = run_lm_head_sample_batch_with_contexts(
+                &*self.backend,
+                &hidden,
+                &self.weights,
+                &self.config,
+                params,
+                step_seeds,
+                generated_tokens,
+            )
+            .context("sample ROCm hidden batch");
+            add_profiled_duration(&mut sampling_duration, sampling_started.elapsed());
+            sampled = Some(sampled_result?);
         }
 
         // R.9: ROCm HIP-graph single-row decode for the batched/batching-engine
@@ -5999,29 +6025,34 @@ impl ModelRunner {
                         row_ids[0],
                     )
                     .context("batched decode ROCm graph hidden row failed")?;
-                let token = if let Some(token) = lm_head_sample_backend_decode_if(
-                    Some(&*self.backend),
-                    &hidden,
-                    &self.weights,
-                    &self.config,
-                    &params[0],
-                    step_seeds[0],
-                    &generated_tokens[0],
-                )
-                .context("fused ROCm graph linear_decode_sample failed")?
-                {
-                    token
-                } else {
-                    run_lm_head_sample_batch_with_contexts(
-                        &*self.backend,
+                let sampling_started = Instant::now();
+                let token_result = (|| -> Result<TokenId> {
+                    if let Some(token) = lm_head_sample_backend_decode_if(
+                        Some(&*self.backend),
                         &hidden,
                         &self.weights,
                         &self.config,
-                        params,
-                        step_seeds,
-                        generated_tokens,
-                    )?[0]
-                };
+                        &params[0],
+                        step_seeds[0],
+                        &generated_tokens[0],
+                    )
+                    .context("fused ROCm graph linear_decode_sample failed")?
+                    {
+                        Ok(token)
+                    } else {
+                        Ok(run_lm_head_sample_batch_with_contexts(
+                            &*self.backend,
+                            &hidden,
+                            &self.weights,
+                            &self.config,
+                            params,
+                            step_seeds,
+                            generated_tokens,
+                        )?[0])
+                    }
+                })();
+                add_profiled_duration(&mut sampling_duration, sampling_started.elapsed());
+                let token = token_result?;
                 sampled = Some(vec![token]);
             }
         }
@@ -6147,7 +6178,10 @@ impl ModelRunner {
             decode_duration,
         );
 
-        Ok(sampled)
+        Ok(ProfiledPagedDecodeStep {
+            tokens: sampled,
+            sampling_duration,
+        })
     }
 
     /// Decode one step while retaining each selected token's exact effective
@@ -6160,6 +6194,16 @@ impl ModelRunner {
         params: &[SamplingParams],
         paged_cache: &PagedKvCache,
     ) -> Result<Vec<SampledToken>> {
+        self.paged_batched_decode_step_with_behavior_logprobs_profiled(states, params, paged_cache)
+            .map(|step| step.tokens)
+    }
+
+    pub fn paged_batched_decode_step_with_behavior_logprobs_profiled(
+        &self,
+        states: &mut [&mut PagedBatchedDecodeState],
+        params: &[SamplingParams],
+        paged_cache: &PagedKvCache,
+    ) -> Result<ProfiledPagedDecodeStep<SampledToken>> {
         anyhow::ensure!(
             states.len() == params.len(),
             "decode state length {} != params length {}",
@@ -6238,25 +6282,31 @@ impl ModelRunner {
             .context("behavior-logprob batched decode forward pass failed")?
         };
         drop(linear_states);
-        let logits = crate::forward::model_forward_head_backend_decode_if(
-            Some(&*self.backend),
-            &hidden,
-            &self.weights,
-            &self.config,
-        )
-        .context("behavior-logprob batched decode lm head")?;
-        let mut sampled = Vec::with_capacity(row_count);
-        for (idx, param) in params.iter().enumerate() {
-            let row = logits
-                .narrow(0, idx, 1)
-                .with_context(|| format!("behavior-logprob batched decode lm head row {idx}"))?;
-            sampled.push(sample_step_with_logprob(
-                &row,
-                param,
-                step_seeds[idx],
-                &generated_tokens[idx],
-            )?);
-        }
+        let sampling_started = Instant::now();
+        let sampling_result = (|| -> Result<Vec<SampledToken>> {
+            let logits = crate::forward::model_forward_head_backend_decode_if(
+                Some(&*self.backend),
+                &hidden,
+                &self.weights,
+                &self.config,
+            )
+            .context("behavior-logprob batched decode lm head")?;
+            let mut sampled = Vec::with_capacity(row_count);
+            for (idx, param) in params.iter().enumerate() {
+                let row = logits.narrow(0, idx, 1).with_context(|| {
+                    format!("behavior-logprob batched decode lm head row {idx}")
+                })?;
+                sampled.push(sample_step_with_logprob(
+                    &row,
+                    param,
+                    step_seeds[idx],
+                    &generated_tokens[idx],
+                )?);
+            }
+            Ok(sampled)
+        })();
+        let sampling_duration = sampling_started.elapsed();
+        let sampled = sampling_result?;
 
         let decode_duration = started.elapsed();
         complete_paged_batched_decode_step(
@@ -6267,7 +6317,10 @@ impl ModelRunner {
             states,
             decode_duration,
         );
-        Ok(sampled)
+        Ok(ProfiledPagedDecodeStep {
+            tokens: sampled,
+            sampling_duration: Some(sampling_duration),
+        })
     }
 
     pub fn finish_paged_batched_decode(
@@ -11155,6 +11208,15 @@ mod tests {
         "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
         "KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK",
     ];
+
+    #[test]
+    fn profiled_decode_duration_preserves_unavailable_and_accumulates_observations() {
+        let mut duration = None;
+        assert_eq!(duration, None);
+        add_profiled_duration(&mut duration, Duration::from_millis(7));
+        add_profiled_duration(&mut duration, Duration::from_millis(11));
+        assert_eq!(duration, Some(Duration::from_millis(18)));
+    }
 
     #[test]
     fn model_runner_runtime_options_default_to_eager_rocm_execution() {
