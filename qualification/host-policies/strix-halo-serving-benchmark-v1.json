@@ -8,11 +8,12 @@
   "limit_millicelsius": 93000,
   "poll_interval_ms": 250,
   "pacing": {
-    "start_millicelsius": 78000,
-    "resume_millicelsius": 70000
+    "start_millicelsius": 68000,
+    "resume_millicelsius": 55000,
+    "resume_stable_samples": 8
   },
   "safe_handoff": {
-    "target_millicelsius": 65000,
+    "target_millicelsius": 55000,
     "stable_samples": 8,
     "timeout_seconds": 180.0
   },

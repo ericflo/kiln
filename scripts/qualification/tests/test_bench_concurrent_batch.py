@@ -57,6 +57,7 @@ def valid_host_thermal_policy() -> dict:
         "pacing": {
             "start_millicelsius": 78_000,
             "resume_millicelsius": 70_000,
+            "resume_stable_samples": 2,
         },
         "safe_handoff": {
             "target_millicelsius": 65_000,
@@ -775,8 +776,23 @@ class ServingBenchmarkTests(unittest.TestCase):
 
             self.assertEqual(record["content_sha256"], bench.canonical_sha256(value))
             self.assertEqual(policy.cooldown_mode, "live_process_safe_handoff")
+            self.assertEqual(policy.pacing_resume_stable_samples, 2)
             self.assertEqual(settlement_timeout, 30.0)
             bench.validate_host_thermal_policy_value(record, "fixture")
+
+            legacy_record = json.loads(json.dumps(record))
+            legacy_record["pacing"].pop("resume_stable_samples")
+            legacy_record.pop("content_sha256")
+            legacy_record["content_sha256"] = bench.canonical_sha256(legacy_record)
+            _legacy, legacy_policy, _timeout = (
+                bench.validate_host_thermal_policy_value(legacy_record, "legacy")
+            )
+            self.assertEqual(legacy_policy.pacing_resume_stable_samples, 1)
+
+            legacy_input = json.loads(json.dumps(value))
+            legacy_input["pacing"].pop("resume_stable_samples")
+            with self.assertRaisesRegex(bench.BenchmarkError, "missing keys"):
+                bench.validate_host_thermal_policy_value(legacy_input, "input")
 
             tampered = json.loads(json.dumps(record))
             tampered["pacing"]["start_millicelsius"] = 79_000

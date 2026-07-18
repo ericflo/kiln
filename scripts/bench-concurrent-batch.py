@@ -435,9 +435,13 @@ def validate_host_thermal_policy_value(
         if not isinstance(sensor[name], str) or not sensor[name]:
             raise BenchmarkError(f"{label}.sensor.{name} must be non-empty")
     pacing = _object(raw["pacing"], f"{label}.pacing")
+    legacy_hashed_pacing = (
+        has_content_hash and "resume_stable_samples" not in pacing
+    )
     _exact_keys(
         pacing,
-        {"start_millicelsius", "resume_millicelsius"},
+        {"start_millicelsius", "resume_millicelsius"}
+        | (set() if legacy_hashed_pacing else {"resume_stable_samples"}),
         f"{label}.pacing",
     )
     handoff = _object(raw["safe_handoff"], f"{label}.safe_handoff")
@@ -461,6 +465,7 @@ def validate_host_thermal_policy_value(
         poll_interval_ms=raw["poll_interval_ms"],
         pacing_start_millicelsius=pacing["start_millicelsius"],
         pacing_resume_millicelsius=pacing["resume_millicelsius"],
+        pacing_resume_stable_samples=pacing.get("resume_stable_samples", 1),
         cooldown_target_millicelsius=handoff["target_millicelsius"],
         cooldown_stable_samples=handoff["stable_samples"],
         cooldown_timeout_seconds=handoff["timeout_seconds"],

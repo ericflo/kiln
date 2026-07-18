@@ -1944,6 +1944,51 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual({event.category for event in events}, {"host_thermal_pacing"})
         self.assertEqual(events[0].fields["phase"], "fixture-wave")
 
+    def test_thermal_pacing_requires_consecutive_stable_resume_samples(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sensor = root / "hwmon3"
+            sensor.mkdir()
+            (sensor / "name").write_text("k10temp\n", encoding="utf-8")
+            (sensor / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            temperature = sensor / "temp1_input"
+            temperature.write_text("89000\n", encoding="utf-8")
+            guard = soak.HostThermalGuard(
+                process,
+                hwmon_name="k10temp",
+                label="Tctl",
+                limit_millicelsius=97_000,
+                pacing_start_millicelsius=88_000,
+                pacing_resume_millicelsius=80_000,
+                pacing_resume_stable_samples=3,
+                hwmon_root=root,
+            )
+            with (
+                mock.patch.object(soak.os, "killpg") as killpg,
+                mock.patch.object(soak.time, "monotonic", side_effect=[10.0, 14.0]),
+                mock.patch.object(soak.mixed, "trace"),
+            ):
+                guard._sample()
+                for value in (80_000, 81_000, 80_000, 79_000):
+                    temperature.write_text(f"{value}\n", encoding="utf-8")
+                    guard._sample()
+                    killpg.assert_called_once_with(4321, signal.SIGSTOP)
+                temperature.write_text("78000\n", encoding="utf-8")
+                guard._sample()
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(4321, signal.SIGSTOP), mock.call(4321, signal.SIGCONT)],
+        )
+        self.assertEqual(
+            guard.pacing_metric_values()[
+                "host_thermal_pacing_completed_event_count"
+            ],
+            1,
+        )
+
     def test_thermal_guard_terminates_and_releases_a_stopped_process(self) -> None:
         process = mock.Mock(pid=4321)
         process.poll.return_value = None
@@ -2350,6 +2395,10 @@ class ServeRocmSoakTests(unittest.TestCase):
             (
                 {"poll_interval_ms": True},
                 "poll interval must be a positive integer",
+            ),
+            (
+                {"pacing_resume_stable_samples": 0},
+                "resume stable samples must be a positive integer",
             ),
             (
                 {"cooldown_mode": "unknown"},

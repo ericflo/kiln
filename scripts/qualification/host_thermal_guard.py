@@ -51,6 +51,7 @@ class HostThermalPolicy:
     cooldown_timeout_seconds: float
     pacing_start_millicelsius: int | None = None
     pacing_resume_millicelsius: int | None = None
+    pacing_resume_stable_samples: int = 1
     cooldown_mode: str = "post_process_exit_consecutive_samples"
     error_type: type[Exception] = ThermalGuardError
 
@@ -86,6 +87,21 @@ class HostThermalPolicy:
         ):
             raise self.error_type(
                 "host thermal pacing requires 0 < resume < start < safety limit"
+            )
+        if (
+            isinstance(self.pacing_resume_stable_samples, bool)
+            or not isinstance(self.pacing_resume_stable_samples, int)
+            or self.pacing_resume_stable_samples <= 0
+        ):
+            raise self.error_type(
+                "host thermal pacing resume stable samples must be a positive integer"
+            )
+        if (
+            self.pacing_start_millicelsius is None
+            and self.pacing_resume_stable_samples != 1
+        ):
+            raise self.error_type(
+                "host thermal pacing resume stable samples require pacing"
             )
         if not _is_strict_int(self.cooldown_target_millicelsius) or not (
             0 < self.cooldown_target_millicelsius < self.limit_millicelsius
@@ -147,7 +163,7 @@ class HostThermalPolicy:
             },
         }
         if self.pacing_start_millicelsius is not None:
-            config[f"{key_prefix}thermal_pacing"] = {
+            pacing_config: dict[str, Any] = {
                 "deadline_accounting": "included",
                 "itl_attribution": "host_thermal_pacing",
                 "mode": "continuous_process_group_stop",
@@ -158,6 +174,11 @@ class HostThermalPolicy:
                 "scope": "server_process_group",
                 "start_millicelsius": self.pacing_start_millicelsius,
             }
+            if self.pacing_resume_stable_samples != 1:
+                pacing_config["resume_stable_samples"] = (
+                    self.pacing_resume_stable_samples
+                )
+            config[f"{key_prefix}thermal_pacing"] = pacing_config
         return config
 
     def guard_kwargs(self) -> dict[str, Any]:
@@ -167,6 +188,7 @@ class HostThermalPolicy:
             "limit_millicelsius": self.limit_millicelsius,
             "pacing_start_millicelsius": self.pacing_start_millicelsius,
             "pacing_resume_millicelsius": self.pacing_resume_millicelsius,
+            "pacing_resume_stable_samples": self.pacing_resume_stable_samples,
             "poll_interval_seconds": self.poll_interval_ms / 1000.0,
             "cooldown_target_millicelsius": self.cooldown_target_millicelsius,
             "cooldown_stable_samples": self.cooldown_stable_samples,
@@ -317,6 +339,7 @@ class HostThermalGuard:
         limit_millicelsius: int,
         pacing_start_millicelsius: int | None = None,
         pacing_resume_millicelsius: int | None = None,
+        pacing_resume_stable_samples: int = 1,
         poll_interval_seconds: float = 0.25,
         cooldown_target_millicelsius: int | None = None,
         cooldown_stable_samples: int = 1,
@@ -353,6 +376,18 @@ class HostThermalGuard:
         ):
             raise error_type(
                 "host thermal pacing requires 0 < resume < start < safety limit"
+            )
+        if (
+            isinstance(pacing_resume_stable_samples, bool)
+            or not isinstance(pacing_resume_stable_samples, int)
+            or pacing_resume_stable_samples <= 0
+        ):
+            raise error_type(
+                "host thermal pacing resume stable samples must be a positive integer"
+            )
+        if pacing_start_millicelsius is None and pacing_resume_stable_samples != 1:
+            raise error_type(
+                "host thermal pacing resume stable samples require pacing"
             )
         if cooldown_target_millicelsius is not None:
             if not _is_strict_int(cooldown_target_millicelsius) or not (
@@ -398,6 +433,7 @@ class HostThermalGuard:
         self.limit_millicelsius = limit_millicelsius
         self.pacing_start_millicelsius = pacing_start_millicelsius
         self.pacing_resume_millicelsius = pacing_resume_millicelsius
+        self.pacing_resume_stable_samples = pacing_resume_stable_samples
         self.poll_interval_seconds = poll_interval_seconds
         self.pacing_evidence = ThermalPacingEvidence(error_type=error_type)
         self.cooldown_target_millicelsius = cooldown_target_millicelsius
@@ -422,6 +458,7 @@ class HostThermalGuard:
         self._closed = False
         self._pacing_started_at: float | None = None
         self._pacing_start_temperature = 0
+        self._pacing_resume_consecutive_samples = 0
         self._pacing_phase = "startup"
         self._pacing_events: list[ThermalPacingEvent] = []
         self._pacing_lock = threading.Lock()
@@ -451,6 +488,7 @@ class HostThermalGuard:
                 mode="continuous_process_group_stop",
                 start_millicelsius=self.pacing_start_millicelsius,
                 resume_millicelsius=self.pacing_resume_millicelsius,
+                resume_stable_samples=self.pacing_resume_stable_samples,
                 pause_signal="SIGSTOP",
                 resume_signal="SIGCONT",
             )
@@ -679,6 +717,7 @@ class HostThermalGuard:
             phase = self._pacing_phase
             self._pacing_started_at = started
             self._pacing_start_temperature = temperature
+            self._pacing_resume_consecutive_samples = 0
             self._pacing_events.append(
                 ThermalPacingEvent(
                     observed,
@@ -694,6 +733,7 @@ class HostThermalGuard:
             temperature_millicelsius=temperature,
             start_millicelsius=self.pacing_start_millicelsius,
             resume_millicelsius=self.pacing_resume_millicelsius,
+            resume_stable_samples=self.pacing_resume_stable_samples,
             scope="server_process_group",
         )
 
@@ -709,6 +749,7 @@ class HostThermalGuard:
             start_temperature = self._pacing_start_temperature
             self._pacing_started_at = None
             self._pacing_start_temperature = 0
+            self._pacing_resume_consecutive_samples = 0
             self._pacing_events.append(
                 ThermalPacingEvent(
                     observed,
@@ -869,11 +910,21 @@ class HostThermalGuard:
             ):
                 return temperature
             assert self.pacing_resume_millicelsius is not None
-            if self._pacing_started_at is None:
-                if temperature >= self.pacing_start_millicelsius:
-                    self._pause_pacing(temperature)
-            elif temperature <= self.pacing_resume_millicelsius:
-                self._resume_pacing()
+            with self._pacing_transition_lock:
+                if self._pacing_started_at is None:
+                    if temperature >= self.pacing_start_millicelsius:
+                        self._pause_pacing_locked(temperature)
+                elif temperature <= self.pacing_resume_millicelsius:
+                    self._pacing_resume_consecutive_samples += 1
+                    if (
+                        self._pacing_resume_consecutive_samples
+                        >= self.pacing_resume_stable_samples
+                    ):
+                        self._resume_pacing_locked(
+                            completion_reason="temperature_recovered"
+                        )
+                else:
+                    self._pacing_resume_consecutive_samples = 0
             return temperature
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"

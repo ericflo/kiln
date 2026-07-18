@@ -42,10 +42,15 @@
     "pacing": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["start_millicelsius", "resume_millicelsius"],
+      "required": [
+        "start_millicelsius",
+        "resume_millicelsius",
+        "resume_stable_samples"
+      ],
       "properties": {
         "start_millicelsius": { "type": "integer", "minimum": 1 },
-        "resume_millicelsius": { "type": "integer", "minimum": 1 }
+        "resume_millicelsius": { "type": "integer", "minimum": 1 },
+        "resume_stable_samples": { "type": "integer", "minimum": 1 }
       }
     },
     "safe_handoff": {

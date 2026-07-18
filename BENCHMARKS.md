@@ -105,13 +105,14 @@ policy's consecutive-sample safe-handoff gate passes.
 
 On this Strix Halo, use
 `qualification/host-policies/strix-halo-serving-benchmark-v1.json`. It starts
-pacing at 78 C, resumes at 70 C, terminates the process group at 93 C, and
-requires eight 250 ms samples at or below 65 C before returning control. These
-are conservative candidate limits derived from the retained 98 C overshoot and
-the 90.5 C one-request prewarm counterexample. The 93 C emergency stop remains
-4 C below the old limit while the 78 C pacing threshold leaves 15 C for thermal
-inertia; the limits become performance-qualified only after a guarded campaign
-completes.
+pacing at 68 C, resumes only after eight consecutive 250 ms samples at or below
+55 C, terminates the process group at 93 C, and requires the same stable 55 C
+window before returning control. These conservative candidate limits derive
+from the retained 98 C overshoot, the 90.5 C one-request prewarm counterexample,
+and a measured 17.6 C post-stop rise under the rejected single-sample 78/70 C
+policy. The 93 C emergency stop remains 4 C below the old limit while pacing
+starts 25 C earlier; the limits become performance-qualified only after a
+guarded campaign completes.
 `--unsafe-no-host-thermal-guard` exists only to retain diagnostic
 counterevidence: it forces the top-level receipt verdict to `failed` even when
 all request rows pass.
