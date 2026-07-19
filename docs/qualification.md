@@ -1207,6 +1207,28 @@ it never starts Kiln or installs a ROCm kernel profile, so rerunning it cannot
 requalify the repaired production composition. Exact multi-token public serving
 parity is the next correctness gate.
 
+That next gate failed on exact clean pushed source
+`b392a74dced1b0969c0b2e12cd50bcd2348963a3`. The retained driver-v7 receipt is
+`benchmarks/receipts/rocm/strix-halo/20260719t052911-rocm-strix-halo-greedy-c1-rmsnorm-repair-failed-v1.kiln.json`.
+Its complete 64-token request passed the request, fixed-length, memory, and
+server-error gates, but an offline invocation of the driver's source-paired
+exact-output comparator against the retained vLLM arm reports a mismatch at
+UTF-8 byte 15. Kiln begins `To establish a baseline` while vLLM begins
+`To establish a foundation`; disabling fused RMSNorm therefore repairs the
+pinned 166-token boundary but does not establish multi-token parity.
+
+The same attempt failed closed at the independent host-safety boundary. The
+measured window reported 4.259 output tokens/second and 4.258 thermally
+sustainable output tokens/second, but the process-group guard recorded one
+hard trip at 93.125 C and a 93.25 C peak from post-measurement thermal inertia.
+It terminated the server, completed cooldown at 43.375 C, removed the private model
+snapshot, and left no process or listener residue. Model fingerprinting before
+server creation also peaked at 92.875 C, outside continuous guard ownership.
+These values are counterevidence, not performance results. Further ROCm serving
+execution is gated on containing provenance hashing and thermal overshoot,
+preserving reference comparison on otherwise complete failed runs, and
+localizing the new first-token divergence with the guarded layer oracle.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for

@@ -264,6 +264,17 @@ host pacing. The vLLM lifecycle spent 162.63 active seconds in
 thermally paused. These diagnostic throughput values must not replace the
 source-paired c1-32 table above.
 
+A repaired-profile rerun is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t052911-rocm-strix-halo-greedy-c1-rmsnorm-repair-failed-v1.kiln.json`.
+It binds clean source `b392a74dc`, the current ROCm release binary, the same
+model and workload fingerprints, and the same vLLM reference arm. The request
+completed 64 tokens, but an offline exact comparison still differs at UTF-8
+byte 15: Kiln emits `baseline` where vLLM emits `foundation`. The receipt is
+also failed because post-measurement thermal inertia crossed the 93 C hard
+limit and the guard terminated the owned server. Its 4.26 output tokens/second
+is diagnostic-only. A complete request does not override either an output
+mismatch or a failed thermal lifecycle.
+
 ## Running One Profile
 
 ```bash
