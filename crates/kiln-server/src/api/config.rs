@@ -1300,6 +1300,22 @@ mod tests {
             4
         );
         assert_eq!(
+            json["batching"]["configuration"]["actor_cycle_idle"]["milliseconds"],
+            0
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["actor_cycle_idle"]["source"],
+            "default"
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["actor_cycle_idle"]["enabled"],
+            false
+        );
+        assert_eq!(
+            json["batching"]["configuration"]["actor_cycle_idle"]["command_poll_milliseconds"],
+            5
+        );
+        assert_eq!(
             json["batching"]["configuration"]["direct_decode_rendezvous"]["mode"]["configured"],
             "auto"
         );

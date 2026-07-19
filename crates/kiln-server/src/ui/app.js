@@ -1998,6 +1998,7 @@ function renderRuntimeConfigBody(cfg) {
   const rowwiseDecode = batchingConfiguration.rowwise_decode || {};
   const prefixAwareAdmission = batchingConfiguration.prefix_aware_admission || {};
   const prefillAdmissionQuantum = batchingConfiguration.prefill_admission_quantum || {};
+  const actorCycleIdle = batchingConfiguration.actor_cycle_idle || {};
   const directRendezvousConfiguration = batchingConfiguration.direct_decode_rendezvous || {};
   const directRendezvousMode = directRendezvousConfiguration.mode || {};
   const directRendezvousMaxBatch = directRendezvousConfiguration.max_batch || {};
@@ -2332,6 +2333,7 @@ function renderRuntimeConfigBody(cfg) {
         ${runtimeConfigRow('Prefill configured', `<strong>${configuredPrefillQuantum}</strong>${srcChip(prefillAdmissionQuantum.configured_source)}`, 'Configured prompt-admission quantum; auto delegates to backend policy.')}
         ${runtimeConfigRow('Prefill policy', `<strong>${num(prefillAdmissionQuantum.backend_policy)}</strong>`, 'Backend-selected prompt-admission quantum before an explicit value or decode-width bound is applied.')}
         ${runtimeConfigRow('Prefill effective', `<strong>${num(prefillAdmissionQuantum.effective)}</strong>${srcChip(prefillAdmissionQuantum.effective_source)}`, 'Prompt-admission quantum used by the batching actor.')}
+        ${runtimeConfigRow('Cycle idle', `<strong>${num(actorCycleIdle.milliseconds)}${Number.isFinite(actorCycleIdle.milliseconds) ? ' ms' : ''}</strong>${srcChip(actorCycleIdle.source)}${actorCycleIdle.enabled === true ? flagChip(`poll ${num(actorCycleIdle.command_poll_milliseconds)} ms`, 'Maximum control-command polling interval during the cooperative wait.') : ''}`, 'Intentional safe-boundary idle after actor cycles that advanced prefill or decode. Zero disables pacing; nonzero values trade throughput and latency for lower sustained accelerator duty cycle.')}
         ${runtimeConfigRow('Burst prefill', `<strong>${enabledState(batchingConfiguration.burst_prefill_admission)}</strong>`, 'Whether the backend admits a burst of prefill work between decode steps.')}
         ${runtimeConfigRow('Tile alignment', `<strong>${enabledState(batchingConfiguration.actor_prefill_tile_alignment_required)}</strong>`, 'Whether startup requires actor prompt chunks to match the direct streaming-prefill numerical tile. ROCm enables this correctness contract.')}
         <div class="rc-group-title" title="Compatibility rendezvous for direct streaming effectively-greedy decode when the primary batching actor is inactive. This is not primary actor batching.">Direct-stream greedy fallback</div>

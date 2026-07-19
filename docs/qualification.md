@@ -1644,6 +1644,20 @@ This rejects width four as the thermal correction. Do not retry it unchanged or
 run the mixed/longer matrix; the next source-bound arm must further reduce or
 cooperatively bound concurrent decode work without weakening the 93 C ceiling.
 
+The next one-field discriminator is
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-decode-batch-4-actor-cycle-idle-100ms-v1.json`.
+It retains the rejected width-four profile and changes only
+`batching.actor_cycle_idle_ms = 100`. This fixed safe-boundary delay starts only
+after an actor cycle advanced model work and synchronous accelerator execution
+returned. It is not sensor feedback and does not weaken or replace the unchanged
+93 C hard-limit guard. The candidate is acceptable only if all eight responses,
+the exact output oracle, lifecycle, memory, graph, and route gates pass while
+driver v13 proves explicit config-file provenance, positive wait count and
+elapsed time, a positive process maximum, and an inactive end boundary. Its
+throughput and ITL cost remain part of the result rather than being normalized
+away. A guard trip or failed accounting gate rejects this arm without an
+unchanged retry or escalation to the mixed matrix.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package

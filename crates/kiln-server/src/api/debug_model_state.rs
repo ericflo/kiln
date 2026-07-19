@@ -129,6 +129,12 @@ struct BatchingEngineSnapshotDebug {
     snapshot_age_ms: u64,
     stream_stall_grace_ms: u64,
     stream_stall_grace_source: ConfigValueSource,
+    actor_cycle_idle_ms: u64,
+    actor_cycle_idle_source: ConfigValueSource,
+    actor_cycle_idle_active: bool,
+    actor_cycle_idle_count: u64,
+    total_actor_cycle_idle_ms: f64,
+    max_actor_cycle_idle_ms: f64,
     accepting: bool,
     queue_depth: usize,
     active_decode: usize,
@@ -638,6 +644,12 @@ impl From<BatchingEngineSnapshot> for BatchingEngineSnapshotDebug {
             snapshot_age_ms: snapshot.snapshot_age_ms,
             stream_stall_grace_ms: snapshot.stream_stall_grace_ms,
             stream_stall_grace_source: snapshot.stream_stall_grace_source,
+            actor_cycle_idle_ms: snapshot.actor_cycle_idle_ms,
+            actor_cycle_idle_source: snapshot.actor_cycle_idle_source,
+            actor_cycle_idle_active: snapshot.actor_cycle_idle_active,
+            actor_cycle_idle_count: snapshot.actor_cycle_idle_count,
+            total_actor_cycle_idle_ms: snapshot.total_actor_cycle_idle_ms,
+            max_actor_cycle_idle_ms: snapshot.max_actor_cycle_idle_ms,
             accepting: snapshot.accepting,
             queue_depth: snapshot.queue_depth,
             active_decode: snapshot.active_decode,
@@ -964,6 +976,18 @@ mod tests {
             json["batching_engine"]["configuration"]["prefix_aware_admission"]["enabled"],
             true
         );
+        assert_eq!(
+            json["batching_engine"]["configuration"]["actor_cycle_idle"]["milliseconds"],
+            0
+        );
+        assert_eq!(
+            json["batching_engine"]["configuration"]["actor_cycle_idle"]["source"],
+            "default"
+        );
+        assert_eq!(
+            json["batching_engine"]["configuration"]["actor_cycle_idle"]["command_poll_milliseconds"],
+            5
+        );
         assert!(json["env_flags"]["KILN_ROCM_GRAPHS"].is_null());
         assert!(json["env_flags"]["KILN_KV_AUTOSCALE"].is_null());
         assert!(json["env_flags"]["KILN_MEMORY_RECLAIM_MODE"].is_object());
@@ -1114,6 +1138,12 @@ mod tests {
         let debug = BatchingEngineSnapshotDebug::from(BatchingEngineSnapshot {
             stream_stall_grace_ms: 500,
             stream_stall_grace_source: ConfigValueSource::ConfigFile,
+            actor_cycle_idle_ms: 50,
+            actor_cycle_idle_source: ConfigValueSource::Environment,
+            actor_cycle_idle_active: false,
+            actor_cycle_idle_count: 6,
+            total_actor_cycle_idle_ms: 302.0,
+            max_actor_cycle_idle_ms: 52.0,
             active_prefill: 3,
             prefix_cache_enabled: true,
             resident_prefill_enabled: true,
@@ -1165,6 +1195,12 @@ mod tests {
 
         assert_eq!(json["stream_stall_grace_ms"], 500);
         assert_eq!(json["stream_stall_grace_source"], "config_file");
+        assert_eq!(json["actor_cycle_idle_ms"], 50);
+        assert_eq!(json["actor_cycle_idle_source"], "environment");
+        assert_eq!(json["actor_cycle_idle_active"], false);
+        assert_eq!(json["actor_cycle_idle_count"], 6);
+        assert_eq!(json["total_actor_cycle_idle_ms"], 302.0);
+        assert_eq!(json["max_actor_cycle_idle_ms"], 52.0);
         assert_eq!(json["active_prefill"], 3);
         assert_eq!(json["prefix_cache_enabled"], true);
         assert_eq!(json["resident_prefill_enabled"], true);

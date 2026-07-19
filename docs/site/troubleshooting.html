@@ -794,6 +794,16 @@ kiln serve --config rocm-graph-eager.toml
           lifecycles. This protects provenance hashing only; it does not pace model upload or inference.
         </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Driver v13 adds closed accounting for an explicit cooperative actor duty cycle.
+          <code>batching.actor_cycle_idle_ms</code> accepts 0 through 60,000; zero is unpaced.
+          A nonzero delay begins only after an actor cycle advanced model work and synchronous
+          accelerator execution returned, polls control commands within 5 ms, and does not read a
+          temperature sensor. Receipts record the configured source, measured-window wait count and
+          elapsed seconds, process maximum, and final active state. The
+          <code>actor_cycle_idle_accounted</code> gate fails contradictory or silently inactive pacing,
+          while the independent thermal hard limit remains unchanged.
+        </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           The first clean 256-token route-invariant development soak passed correctness and lifecycle gates but is
           retained as a performance counterexample: output throughput fell from 13.194 to 7.108 tokens/second
           versus the immediately prior accepted run. This is not explained by cooling; measured thermal pacing fell

@@ -299,6 +299,12 @@
               "effective": 0,
               "effective_source": "default"
             },
+            "actor_cycle_idle": {
+              "milliseconds": 0,
+              "source": "default",
+              "enabled": false,
+              "command_poll_milliseconds": 1
+            },
             "direct_decode_rendezvous": {
               "mode": {
                 "configured": "auto",
@@ -1003,6 +1009,12 @@
               "effective": 0,
               "effective_source": "default"
             },
+            "actor_cycle_idle": {
+              "milliseconds": 0,
+              "source": "default",
+              "enabled": false,
+              "command_poll_milliseconds": 1
+            },
             "direct_decode_rendezvous": {
               "mode": {
                 "configured": "auto",
@@ -1214,6 +1226,8 @@
           "batching_engine": {
             "snapshot_age_ms": 0,
             "stream_stall_grace_ms": 0,
+            "actor_cycle_idle_ms": 0,
+            "actor_cycle_idle_count": 0,
             "queue_depth": 0,
             "active_decode": 0,
             "active_prefill": 0,
@@ -1277,7 +1291,11 @@
             "last_admission_ms": 0,
             "max_admission_ms": 0,
             "total_admission_ms": 0,
+            "total_actor_cycle_idle_ms": 0,
+            "max_actor_cycle_idle_ms": 0,
             "stream_stall_grace_source": "default",
+            "actor_cycle_idle_source": "default",
+            "actor_cycle_idle_active": false,
             "accepting": false,
             "max_batch_tokens_source": "default",
             "max_prefill_tokens_per_cycle_source": "default",
@@ -1853,6 +1871,12 @@
               "effective": 0,
               "effective_source": "default"
             },
+            "actor_cycle_idle": {
+              "milliseconds": 0,
+              "source": "default",
+              "enabled": false,
+              "command_poll_milliseconds": 1
+            },
             "direct_decode_rendezvous": {
               "mode": {
                 "configured": "auto",
@@ -1896,6 +1920,8 @@
           "snapshot": {
             "snapshot_age_ms": 0,
             "stream_stall_grace_ms": 0,
+            "actor_cycle_idle_ms": 0,
+            "actor_cycle_idle_count": 0,
             "queue_depth": 0,
             "active_decode": 0,
             "active_prefill": 0,
@@ -1959,7 +1985,11 @@
             "last_admission_ms": 0,
             "max_admission_ms": 0,
             "total_admission_ms": 0,
+            "total_actor_cycle_idle_ms": 0,
+            "max_actor_cycle_idle_ms": 0,
             "stream_stall_grace_source": "default",
+            "actor_cycle_idle_source": "default",
+            "actor_cycle_idle_active": false,
             "accepting": false,
             "max_batch_tokens_source": "default",
             "max_prefill_tokens_per_cycle_source": "default",
@@ -2447,6 +2477,33 @@
       "x-kiln-rust-type": "ActiveJobInfo",
       "x-kiln-field-schema-status": "complete"
     },
+    "ActorCycleIdleDiagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "milliseconds",
+        "source",
+        "enabled",
+        "command_poll_milliseconds"
+      ],
+      "properties": {
+        "milliseconds": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        },
+        "enabled": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "command_poll_milliseconds": {
+          "$ref": "#/$defs/PositiveInteger"
+        }
+      },
+      "description": "Configured cooperative safe-boundary actor idle and control-command polling contract.",
+      "x-kiln-rust-type": "ActorCycleIdleDiagnostics",
+      "x-kiln-field-schema-status": "complete"
+    },
     "AdapterDebugState": {
       "type": "object",
       "additionalProperties": false,
@@ -2854,6 +2911,8 @@
       "required": [
         "snapshot_age_ms",
         "stream_stall_grace_ms",
+        "actor_cycle_idle_ms",
+        "actor_cycle_idle_count",
         "queue_depth",
         "active_decode",
         "active_prefill",
@@ -2917,7 +2976,11 @@
         "last_admission_ms",
         "max_admission_ms",
         "total_admission_ms",
+        "total_actor_cycle_idle_ms",
+        "max_actor_cycle_idle_ms",
         "stream_stall_grace_source",
+        "actor_cycle_idle_source",
+        "actor_cycle_idle_active",
         "accepting",
         "max_batch_tokens_source",
         "max_prefill_tokens_per_cycle_source",
@@ -2928,6 +2991,12 @@
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "stream_stall_grace_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "actor_cycle_idle_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "actor_cycle_idle_count": {
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "queue_depth": {
@@ -3119,8 +3188,20 @@
         "total_admission_ms": {
           "$ref": "#/$defs/NonNegativeNumber"
         },
+        "total_actor_cycle_idle_ms": {
+          "$ref": "#/$defs/NonNegativeNumber"
+        },
+        "max_actor_cycle_idle_ms": {
+          "$ref": "#/$defs/NonNegativeNumber"
+        },
         "stream_stall_grace_source": {
           "$ref": "#/$defs/ConfigValueSource"
+        },
+        "actor_cycle_idle_source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        },
+        "actor_cycle_idle_active": {
+          "$ref": "#/$defs/Boolean"
         },
         "accepting": {
           "$ref": "#/$defs/Boolean"
@@ -3189,6 +3270,7 @@
         "rowwise_decode",
         "prefix_aware_admission",
         "prefill_admission_quantum",
+        "actor_cycle_idle",
         "direct_decode_rendezvous",
         "burst_prefill_admission",
         "actor_prefill_tile_alignment_required"
@@ -3205,6 +3287,9 @@
         },
         "prefill_admission_quantum": {
           "$ref": "#/$defs/PrefillAdmissionQuantumDiagnostics"
+        },
+        "actor_cycle_idle": {
+          "$ref": "#/$defs/ActorCycleIdleDiagnostics"
         },
         "direct_decode_rendezvous": {
           "$ref": "#/$defs/DirectDecodeRendezvousDiagnostics"

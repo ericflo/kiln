@@ -339,6 +339,17 @@ def build_definitions() -> None:
         },
         "Configured, backend, and effective prefill admission quantum.",
     )
+    add_object(
+        "ActorCycleIdleDiagnostics",
+        "ActorCycleIdleDiagnostics",
+        {
+            "milliseconds": ref("NonNegativeInteger"),
+            "source": ref("ConfigValueSource"),
+            "enabled": ref("Boolean"),
+            "command_poll_milliseconds": ref("PositiveInteger"),
+        },
+        "Configured cooperative safe-boundary actor idle and control-command polling contract.",
+    )
     for suffix, rust_value, value_schema in (
         ("Integer", "usize | u64", ref("NonNegativeInteger")),
         ("Boolean", "bool", ref("Boolean")),
@@ -374,6 +385,7 @@ def build_definitions() -> None:
             "rowwise_decode": ref("BatchingToggleDiagnostics"),
             "prefix_aware_admission": ref("BatchingToggleDiagnostics"),
             "prefill_admission_quantum": ref("PrefillAdmissionQuantumDiagnostics"),
+            "actor_cycle_idle": ref("ActorCycleIdleDiagnostics"),
             "direct_decode_rendezvous": ref("DirectDecodeRendezvousDiagnostics"),
             "burst_prefill_admission": ref("Boolean"),
             "actor_prefill_tile_alignment_required": ref("Boolean"),
@@ -914,7 +926,8 @@ def build_definitions() -> None:
         "Configured CUDA graph request, live runner state, bounded cache, and fixed safety invariants.",
     )
     batch_snapshot_integer_fields = [
-        "snapshot_age_ms", "stream_stall_grace_ms", "queue_depth", "active_decode", "active_prefill",
+        "snapshot_age_ms", "stream_stall_grace_ms", "actor_cycle_idle_ms", "actor_cycle_idle_count",
+        "queue_depth", "active_decode", "active_prefill",
         "active_resident_prefill",
         "max_batch_tokens", "max_prefill_tokens_per_cycle", "max_prefill_layers_per_cycle",
         "max_prefill_admission_quantum", "max_prefill_staging_slots", "max_active_requests",
@@ -937,11 +950,13 @@ def build_definitions() -> None:
     batch_snapshot_number_fields = [
         "last_forward_ms", "max_decode_forward_ms", "total_decode_forward_ms", "last_prefill_ms",
         "max_prefill_forward_ms", "total_prefill_forward_ms", "last_admission_ms", "max_admission_ms",
-        "total_admission_ms",
+        "total_admission_ms", "total_actor_cycle_idle_ms", "max_actor_cycle_idle_ms",
     ]
     batch_snapshot_fields = {field: ref("NonNegativeInteger") for field in batch_snapshot_integer_fields}
     batch_snapshot_fields.update({field: ref("NonNegativeNumber") for field in batch_snapshot_number_fields})
     batch_snapshot_fields["stream_stall_grace_source"] = ref("ConfigValueSource")
+    batch_snapshot_fields["actor_cycle_idle_source"] = ref("ConfigValueSource")
+    batch_snapshot_fields["actor_cycle_idle_active"] = ref("Boolean")
     batch_snapshot_fields["accepting"] = ref("Boolean")
     batch_snapshot_fields["max_batch_tokens_source"] = ref("ConfigValueSource")
     batch_snapshot_fields["max_prefill_tokens_per_cycle_source"] = ref("ConfigValueSource")

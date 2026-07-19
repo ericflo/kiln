@@ -246,7 +246,7 @@ latency, request throughput, output-token throughput, SLO goodput, dispatch
 spread, prompt/output hashes, DRM memory, failures, and Kiln server-route
 diagnostics.
 
-Driver v7 through v12 retain one ordered `output_evidence` row for every successful
+Driver v7 through v13 retain one ordered `output_evidence` row for every successful
 request. Hash-only evidence is the default and includes the combined semantic
 output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
 tokens, and finish reason. The validator requires these rows to cover exactly
@@ -367,6 +367,32 @@ capture remains enabled, at least one capture or replay succeeds, graph failures
 are zero, and the complete eager-fallback delta is zero. This prevents a
 nominally graph-enabled performance row from passing after executing only the
 eager path. Graph failures also participate in `server_reported_no_errors`.
+
+### Cooperative actor-cycle idle evidence
+
+Driver v13 advances the route record to
+`kiln.serving-benchmark-server-diagnostics.v4`. It adds six closed fields to a
+present batching-engine record: immutable `actor_cycle_idle_ms` and
+`actor_cycle_idle_source`, measured-window `actor_cycle_idle_count` and
+`actor_cycle_idle_seconds`, end-boundary `actor_cycle_idle_active_end`, and the
+process-lifetime `process_max_actor_cycle_idle_ms`. Driver-v10 through v12 `v3`
+records remain strict-valid under their original receipt versions.
+
+Before and after each request window, v13 polls the health snapshot to a
+cooperative-idle boundary. This polling is outside request timing and is bounded
+by the configured delay plus one second and the request timeout. The measured
+delta therefore covers waits caused by the declared request wave without
+mistaking an in-progress final wait for missing accounting.
+
+The `actor_cycle_idle_accounted` gate passes an absent actor as not applicable.
+For a present actor, it requires the end boundary to be inactive. A zero policy
+must have zero wait count, elapsed time, and process maximum. A nonzero policy
+must have explicit `config_file` or `environment` provenance plus positive
+count, elapsed time, and maximum. This makes a fixed duty-cycle comparison
+auditable and prevents either a silently inactive pacing knob or unexplained
+actor sleep from being accepted as measured throughput. The field is not a
+thermal controller; the independent host guard and all thermal gates remain
+unchanged.
 
 ### Output divergence diagnostics
 
@@ -878,17 +904,19 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v12 is the current contract. It adds a bounded, receipt-recorded model
-fingerprint read rate without changing the double-read integrity contract,
-request workload, or output contract. Driver v11 added typed idle-boundary
+Driver v13 is the current contract. It adds closed cooperative actor-cycle idle
+policy and measured-window accounting without changing the request workload,
+output contract, or thermal limits. Driver v12 added a bounded,
+receipt-recorded model-fingerprint read rate without changing the double-read
+integrity contract. Driver v11 added typed idle-boundary
 cooldown evidence to v10. Driver v10 added closed ROCm graph execution evidence;
 v9 added route-aware
 batching-actor and direct-rendezvous diagnostics; and v8 added mandatory initial
-and final guarded model-fingerprint lifecycles. A v12 exact-output run may use a
-strict-valid v7 through v12 reference because the model, thermal-policy,
+and final guarded model-fingerprint lifecycles. A v13 exact-output run may use a
+strict-valid v7 through v13 reference because the model, thermal-policy,
 prompt, and output contracts remain comparison-compatible; the current arm
-must still satisfy v12 fingerprint pacing, v11 idle cooling, v10 graph
-accounting, v9 routing, and v8 containment. Driver v7 added mandatory ordered
+must still satisfy v13 actor-cycle idle accounting, v12 fingerprint pacing, v11
+idle cooling, v10 graph accounting, v9 routing, and v8 containment. Driver v7 added mandatory ordered
 per-request output evidence and
 structured mismatch localization to the v6 lifecycle contract.
 
@@ -900,6 +928,6 @@ identity semantics. Owned evidence contains the content-hashed launch document,
 absolute server-log fingerprint, shutdown signal/status/timing,
 forced-shutdown flag, and process-group liveness. Attached and explicitly
 unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
-from missing fields. Historical driver v2 through v11 receipts remain valid
-under their original contracts, but do not satisfy current v12 performance
+from missing fields. Historical driver v2 through v12 receipts remain valid
+under their original contracts, but do not satisfy current v13 performance
 acceptance.

@@ -549,6 +549,18 @@
           "x-kiln-environment": "KILN_BATCH_PREFILL_ADMISSION_QUANTUM (deprecated compatibility)",
           "x-kiln-validation": "An integer must be 1..=65536 and caps how many queued prompts the actor admits in one cycle before returning to decode. auto is case-insensitive and uses the backend policy below. The selected value is then clamped to 1..=effective max_decode_batch; the diagnostics name effective_decode_width as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. The Strix Halo Vulkan development-soak candidate sets 2, admitting an equal pair while retaining a four-request active ceiling. Restart required."
         },
+        "actor_cycle_idle_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60000,
+          "default": 0,
+          "description": "0..=60000. Zero preserves the unpaced actor. A nonzero value inserts one intentional cooperative wait after an actor cycle that advanced prefill or decode, only after synchronous accelerator work has returned. The actor polls control commands at intervals no longer than 5 ms, so shutdown remains responsive, and the independent response-delivery worker and HTTP process remain live. This deliberately trades request throughput and inter-token latency for a lower sustained accelerator duty cycle; it is not a temperature controller and never changes itself from a live sensor. Config, health, debug, Prometheus, and serving-benchmark receipts expose the policy and observed waits. Restart required.",
+          "x-kiln-path": "batching.actor_cycle_idle_ms",
+          "x-kiln-type-and-default": "unsigned integer milliseconds; 0",
+          "x-kiln-canonical-env": "KILN_BATCHING_ACTOR_CYCLE_IDLE_MS (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "0..=60000. Zero preserves the unpaced actor. A nonzero value inserts one intentional cooperative wait after an actor cycle that advanced prefill or decode, only after synchronous accelerator work has returned. The actor polls control commands at intervals no longer than 5 ms, so shutdown remains responsive, and the independent response-delivery worker and HTTP process remain live. This deliberately trades request throughput and inter-token latency for a lower sustained accelerator duty cycle; it is not a temperature controller and never changes itself from a live sensor. Config, health, debug, Prometheus, and serving-benchmark receipts expose the policy and observed waits. Restart required."
+        },
         "direct_decode_rendezvous_mode": {
           "type": "string",
           "enum": [
@@ -1924,9 +1936,9 @@
       }
     }
   ],
-  "x-kiln-field-count": 113,
+  "x-kiln-field-count": 114,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 108,
+  "x-kiln-canonical-environment-count": 109,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 71,
   "x-kiln-compatibility-alias-count": 76,

@@ -1725,6 +1725,11 @@ fn format_actor_prefill_config(config: &crate::config::KilnConfig) -> String {
             config.server.max_decode_batch.source(),
         ),
         (
+            "Actor cycle idle:",
+            format!("{} ms", config.batching.actor_cycle_idle_ms.millis()),
+            config.batching.actor_cycle_idle_ms.source(),
+        ),
+        (
             "Streaming prefill mode:",
             config.streaming_prefill.mode.mode().to_string(),
             config.streaming_prefill.mode.source(),
@@ -4297,6 +4302,7 @@ checkpoint_boundary_cache_gb = 2.5
             "Actor prefill token ceiling: 256 tokens (source: default)",
             "Actor prefill layer ceiling: 4 layers (source: default)",
             "Decode width ceiling: auto (source: default)",
+            "Actor cycle idle: 0 ms (source: default)",
             "Streaming prefill mode: auto (source: default)",
             "Streaming prefill threshold: auto (source: default)",
             "Streaming base tile: auto (source: default)",
@@ -4318,6 +4324,9 @@ max_prefill_tokens_per_cycle = 256
 max_prefill_layers_per_cycle = 8
 max_decode_batch = 16
 
+[batching]
+actor_cycle_idle_ms = 75
+
 [streaming_prefill]
 mode = "enabled"
 threshold_tokens = 256
@@ -4333,6 +4342,7 @@ detached_full_attn_tile_tokens = 8192
             "Actor prefill token ceiling: 256 tokens (source: config_file)",
             "Actor prefill layer ceiling: 8 layers (source: config_file)",
             "Decode width ceiling: 16 (source: config_file)",
+            "Actor cycle idle: 75 ms (source: config_file)",
             "Streaming prefill mode: enabled (source: config_file)",
             "Streaming prefill threshold: 256 tokens (source: config_file)",
             "Streaming base tile: 256 tokens (source: config_file)",

@@ -274,6 +274,12 @@ class FakeState:
             field: 0
             for field in (*bench.ROCM_GRAPH_FALLBACK_COUNTER_FIELDS, "max_duration_micros")
         }
+        self.actor_cycle_idle_ms = 0
+        self.actor_cycle_idle_source = "default"
+        self.actor_cycle_idle_active = False
+        self.actor_cycle_idle_count = 0
+        self.total_actor_cycle_idle_ms = 0.0
+        self.max_actor_cycle_idle_ms = 0.0
         self.execution_identity = {
             "provenance_type": "kiln.execution-provenance.v1",
             "backend": "test",
@@ -293,6 +299,12 @@ class FakeState:
             batching_snapshot = {
                 "max_decode_batch": 8,
                 "max_observed_batch_size": self.max_active,
+                "actor_cycle_idle_ms": self.actor_cycle_idle_ms,
+                "actor_cycle_idle_source": self.actor_cycle_idle_source,
+                "actor_cycle_idle_active": self.actor_cycle_idle_active,
+                "actor_cycle_idle_count": self.actor_cycle_idle_count,
+                "total_actor_cycle_idle_ms": self.total_actor_cycle_idle_ms,
+                "max_actor_cycle_idle_ms": self.max_actor_cycle_idle_ms,
                 **self.counters,
             }
             request_snapshot = {
@@ -674,6 +686,41 @@ class ServingBenchmarkTests(unittest.TestCase):
             "../../.qualification/kiln-serving/logs/decode-batch-4-v1",
         )
 
+    def test_rocm_actor_cycle_idle_discriminator_changes_one_typed_field(self) -> None:
+        config_root = ROOT / "qualification" / "server-config"
+        launch_root = ROOT / "qualification" / "server-launch"
+        parent_name = "kiln-rocm-strix-halo-serving-comparison-decode-batch-4-v1"
+        candidate_name = (
+            "kiln-rocm-strix-halo-serving-comparison-decode-batch-4-"
+            "actor-cycle-idle-100ms-v1"
+        )
+        parent = self._parse_server_config(config_root / f"{parent_name}.toml")
+        candidate = self._parse_server_config(
+            config_root / f"{candidate_name}.toml"
+        )
+        self.assertNotIn("actor_cycle_idle_ms", parent["batching"])
+        self.assertEqual(candidate["batching"]["actor_cycle_idle_ms"], 100)
+        candidate["batching"].pop("actor_cycle_idle_ms")
+        self.assertEqual(candidate, parent)
+
+        launch_path = launch_root / f"{candidate_name}.json"
+        parsed = bench.validate_server_launch_config_value(
+            bench.strict_json_loads(launch_path.read_bytes()),
+            config_directory=launch_path.parent,
+            label=candidate_name,
+            require_local_paths=False,
+        )
+        self.assertEqual(parsed.record["id"], candidate_name)
+        self.assertEqual(
+            parsed.record["command"][-1],
+            f"qualification/server-config/{candidate_name}.toml",
+        )
+        self.assertEqual(
+            parsed.record["log_directory"],
+            "../../.qualification/kiln-serving/logs/"
+            "decode-batch-4-actor-cycle-idle-100ms-v1",
+        )
+
     def test_model_fingerprint_read_rate_is_bounded(self) -> None:
         for value in (64, 256, 16_384):
             with self.subTest(value=value):
@@ -1046,7 +1093,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(bench.server_diagnostics_has_no_errors(server))
         self.assertTrue(bench.server_request_accounting_matches(server, 1))
-        bench.validate_server_diagnostics_v3(server, "direct fixture")
+        bench.validate_server_diagnostics_v4(server, "direct fixture")
 
     def test_driver_v9_server_diagnostics_remain_strict_valid(self) -> None:
         state = FakeState()
@@ -1056,8 +1103,43 @@ class ServingBenchmarkTests(unittest.TestCase):
         server = bench.server_diagnostics_delta(before, after)
         legacy = {key: value for key, value in server.items() if key != "rocm_graphs"}
         legacy["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V2
+        legacy["batching_engine"] = {
+            key: value
+            for key, value in legacy["batching_engine"].items()
+            if key
+            not in {
+                "actor_cycle_idle_ms",
+                "actor_cycle_idle_source",
+                "actor_cycle_idle_active_end",
+                "actor_cycle_idle_count",
+                "actor_cycle_idle_seconds",
+                "process_max_actor_cycle_idle_ms",
+            }
+        }
 
         bench.validate_server_diagnostics_v2(legacy, "driver-v9 fixture")
+
+    def test_driver_v13_actor_cycle_idle_is_strictly_accounted(self) -> None:
+        state = FakeState()
+        state.actor_cycle_idle_ms = 100
+        state.actor_cycle_idle_source = "config_file"
+        before = bench.server_diagnostics_snapshot(state.health())
+        state.request_counters["ok"] = 1
+        state.actor_cycle_idle_count = 4
+        state.total_actor_cycle_idle_ms = 401.5
+        state.max_actor_cycle_idle_ms = 101.25
+        after = bench.server_diagnostics_snapshot(state.health())
+        server = bench.server_diagnostics_delta(before, after)
+
+        batching = server["batching_engine"]
+        self.assertEqual(batching["actor_cycle_idle_ms"], 100)
+        self.assertEqual(batching["actor_cycle_idle_source"], "config_file")
+        self.assertFalse(batching["actor_cycle_idle_active_end"])
+        self.assertEqual(batching["actor_cycle_idle_count"], 4)
+        self.assertAlmostEqual(batching["actor_cycle_idle_seconds"], 0.4015)
+        self.assertEqual(batching["process_max_actor_cycle_idle_ms"], 101.25)
+        self.assertTrue(bench.server_actor_cycle_idle_accounted(server))
+        bench.validate_server_diagnostics_v4(server, "driver-v13 fixture")
 
     def test_rocm_graph_diagnostics_reject_regressed_counters(self) -> None:
         state = FakeState()
@@ -1081,7 +1163,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         after = bench.server_diagnostics_snapshot(state.health())
         server = bench.server_diagnostics_delta(before, after)
 
-        bench.validate_server_diagnostics_v3(server, "fallback fixture")
+        bench.validate_server_diagnostics_v4(server, "fallback fixture")
         self.assertFalse(bench.server_rocm_graph_execution_accounted(server))
 
     def test_backend_without_rocm_graph_runner_is_explicitly_unavailable(self) -> None:
@@ -1104,13 +1186,13 @@ class ServingBenchmarkTests(unittest.TestCase):
         before = bench.server_diagnostics_snapshot(health)
         server = bench.server_diagnostics_delta(before, before)
 
-        bench.validate_server_diagnostics_v3(server, "unavailable fixture")
+        bench.validate_server_diagnostics_v4(server, "unavailable fixture")
         self.assertTrue(bench.server_rocm_graph_execution_accounted(server))
         self.assertIsNone(server["rocm_graphs"]["replay_successes"])
 
         server["rocm_graphs"]["state"] = "busy"
         server["rocm_graphs"]["unavailable_reason"] = "graph_runner_busy"
-        bench.validate_server_diagnostics_v3(server, "busy fixture")
+        bench.validate_server_diagnostics_v4(server, "busy fixture")
         self.assertFalse(bench.server_rocm_graph_execution_accounted(server))
 
     def test_zero_token_success_is_rejected(self) -> None:
@@ -1970,7 +2052,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             return_code, output = self._run_cli_fixture(fake, directory)
             receipt = bench.strict_json_loads(output.read_bytes())
             self.assertEqual(bench.main(["--validate-receipt", str(output)]), 0)
-            self.assertEqual(receipt["driver_version"], "12")
+            self.assertEqual(receipt["driver_version"], "13")
             self.assertEqual(
                 receipt["host_thermal"]["model_fingerprint"]["schema"],
                 bench.MODEL_FINGERPRINT_THERMAL_SCHEMA,
@@ -1987,6 +2069,24 @@ class ServingBenchmarkTests(unittest.TestCase):
             legacy_fingerprint = legacy["host_thermal"]["model_fingerprint"]
             legacy_fingerprint["schema"] = bench.MODEL_FINGERPRINT_THERMAL_SCHEMA_V1
             legacy_fingerprint.pop("read_mib_per_second")
+            for row in [legacy["warmup"], *legacy["runs"]]:
+                if row is None:
+                    continue
+                server = row.get("server")
+                if server is None:
+                    continue
+                server["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V3
+                batching = server.get("batching_engine")
+                if batching is not None:
+                    for field in (
+                        "actor_cycle_idle_ms",
+                        "actor_cycle_idle_source",
+                        "actor_cycle_idle_active_end",
+                        "actor_cycle_idle_count",
+                        "actor_cycle_idle_seconds",
+                        "process_max_actor_cycle_idle_ms",
+                    ):
+                        batching.pop(field)
             legacy.pop("receipt_sha256")
             legacy["receipt_sha256"] = bench.canonical_sha256(legacy)
             bench.validate_benchmark_receipt(legacy)

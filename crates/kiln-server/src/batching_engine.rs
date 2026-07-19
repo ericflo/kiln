@@ -24,8 +24,9 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::config::{
-    BatchTokenBudget, BatchingActorAdmissionConfig, BatchingBackendPolicy, BatchingConfig,
-    ConfigValueSource, DEFAULT_ROWWISE_DECODE, DecodeBatchEffectiveSource, DecodeRuntimeConfig,
+    ACTOR_CYCLE_IDLE_COMMAND_POLL_MS, ActorCycleIdleDiagnostics, BatchTokenBudget,
+    BatchingActorAdmissionConfig, BatchingBackendPolicy, BatchingConfig, ConfigValueSource,
+    DEFAULT_ROWWISE_DECODE, DecodeBatchEffectiveSource, DecodeRuntimeConfig,
     DeterministicInference, DirectDecodeRendezvousBackendPolicy, MaxDecodeBatch,
     MaxDecodeBatchDiagnostics, PrefillLayerBudget, PrefillTokenBudget, StreamStallGrace,
 };
@@ -305,6 +306,18 @@ pub struct BatchingEngineSnapshot {
     pub stream_stall_grace_ms: u64,
     /// Startup source that selected `stream_stall_grace_ms`.
     pub stream_stall_grace_source: ConfigValueSource,
+    /// Configured safe-boundary delay after actor cycles that advanced model work.
+    pub actor_cycle_idle_ms: u64,
+    /// Startup source that selected `actor_cycle_idle_ms`.
+    pub actor_cycle_idle_source: ConfigValueSource,
+    /// True while the actor is cooperatively polling inside the configured delay.
+    pub actor_cycle_idle_active: bool,
+    /// Cooperative waits entered since actor startup.
+    pub actor_cycle_idle_count: u64,
+    /// Cumulative observed cooperative wait wall time.
+    pub total_actor_cycle_idle_ms: f64,
+    /// Largest observed cooperative wait wall time.
+    pub max_actor_cycle_idle_ms: f64,
     pub accepting: bool,
     pub queue_depth: usize,
     pub active_decode: usize,
@@ -1880,13 +1893,38 @@ impl BatchingEngineHandle {
         max_prefill_layers_per_cycle: PrefillLayerBudget,
         response_delivery_policy: ResponseDeliveryPolicy,
     ) -> Self {
+        Self::start_with_actor_runtime_config(
+            forward,
+            max_decode_batch,
+            admission,
+            ActorCycleIdleDiagnostics::default(),
+            max_batch_tokens,
+            max_prefill_tokens_per_cycle,
+            max_prefill_layers_per_cycle,
+            response_delivery_policy,
+        )
+    }
+
+    /// Start an actor from the complete immutable actor policy resolved during
+    /// application startup. The compatibility constructor above keeps tests and
+    /// embedders on the unpaced default.
+    pub fn start_with_actor_runtime_config(
+        forward: Arc<dyn DecodeForward>,
+        max_decode_batch: usize,
+        admission: BatchingActorAdmissionConfig,
+        actor_cycle_idle: ActorCycleIdleDiagnostics,
+        max_batch_tokens: BatchTokenBudget,
+        max_prefill_tokens_per_cycle: PrefillTokenBudget,
+        max_prefill_layers_per_cycle: PrefillLayerBudget,
+        response_delivery_policy: ResponseDeliveryPolicy,
+    ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
         let BatchingActorAdmissionConfig {
             prefix_aware_admission,
             prefill_admission_quantum,
             burst_prefill_admission,
         } = admission;
-        Self::start_with_policy(
+        Self::start_with_policy_and_cycle_idle(
             forward,
             max_decode_batch,
             max_batch_tokens,
@@ -1895,6 +1933,7 @@ impl BatchingEngineHandle {
             prefix_aware_admission,
             prefill_admission_quantum,
             burst_prefill_admission,
+            actor_cycle_idle,
             response_delivery_policy,
         )
     }
@@ -1908,6 +1947,32 @@ impl BatchingEngineHandle {
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
         burst_refill: bool,
+        response_delivery_policy: ResponseDeliveryPolicy,
+    ) -> Self {
+        Self::start_with_policy_and_cycle_idle(
+            forward,
+            max_decode_batch,
+            max_batch_tokens,
+            max_prefill_tokens_per_cycle,
+            max_prefill_layers_per_cycle,
+            prefix_aware_admission,
+            prefill_admission_quantum,
+            burst_refill,
+            ActorCycleIdleDiagnostics::default(),
+            response_delivery_policy,
+        )
+    }
+
+    fn start_with_policy_and_cycle_idle(
+        forward: Arc<dyn DecodeForward>,
+        max_decode_batch: usize,
+        max_batch_tokens: BatchTokenBudget,
+        max_prefill_tokens_per_cycle: PrefillTokenBudget,
+        max_prefill_layers_per_cycle: PrefillLayerBudget,
+        prefix_aware_admission: bool,
+        prefill_admission_quantum: usize,
+        burst_refill: bool,
+        actor_cycle_idle: ActorCycleIdleDiagnostics,
         response_delivery_policy: ResponseDeliveryPolicy,
     ) -> Self {
         let (tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
@@ -1932,6 +1997,7 @@ impl BatchingEngineHandle {
             prefix_aware_admission,
             prefill_admission_quantum,
             burst_refill,
+            actor_cycle_idle,
             response_delivery_policy,
             delivery_worker,
             delivery_results,
@@ -2326,6 +2392,7 @@ struct BatchingEngineActor {
     // anti-scaling (n=32 slower than n=8). Set only for CUDA; Vulkan/Metal keep
     // their tuned yield behavior.
     burst_refill: bool,
+    actor_cycle_idle: ActorCycleIdleDiagnostics,
     response_delivery_policy: ResponseDeliveryPolicy,
     delivery_worker: Option<DeliveryWorker>,
     delivery_results: std_mpsc::Receiver<Vec<DeliveryResult>>,
@@ -2353,6 +2420,7 @@ impl BatchingEngineActor {
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
         burst_refill: bool,
+        actor_cycle_idle: ActorCycleIdleDiagnostics,
         response_delivery_policy: ResponseDeliveryPolicy,
         delivery_worker: DeliveryWorker,
         delivery_results: std_mpsc::Receiver<Vec<DeliveryResult>>,
@@ -2389,6 +2457,13 @@ impl BatchingEngineActor {
             burst_refill,
             "batching active-set policy resolved"
         );
+        tracing::info!(
+            actor_cycle_idle_ms = actor_cycle_idle.milliseconds,
+            actor_cycle_idle_source = %actor_cycle_idle.source,
+            actor_cycle_idle_enabled = actor_cycle_idle.enabled,
+            actor_cycle_idle_command_poll_ms = actor_cycle_idle.command_poll_milliseconds,
+            "batching actor cooperative cycle-idle policy resolved"
+        );
         let max_prefill_tokens_per_cycle_source = max_prefill_tokens_per_cycle.source();
         let configured_max_prefill_tokens_per_cycle = max_prefill_tokens_per_cycle.tokens();
         let max_prefill_tokens_per_cycle = configured_max_prefill_tokens_per_cycle
@@ -2423,6 +2498,8 @@ impl BatchingEngineActor {
                 response_delivery_policy.stream_stall_grace,
             ),
             stream_stall_grace_source: response_delivery_policy.stream_stall_grace_source,
+            actor_cycle_idle_ms: actor_cycle_idle.milliseconds,
+            actor_cycle_idle_source: actor_cycle_idle.source,
             ..BatchingEngineSnapshot::default()
         };
         let published_snapshot = Arc::new(RwLock::new(PublishedBatchingEngineSnapshot {
@@ -2450,6 +2527,7 @@ impl BatchingEngineActor {
             prefix_aware_admission,
             max_prefill_admissions_per_cycle,
             burst_refill,
+            actor_cycle_idle,
             response_delivery_policy,
             delivery_worker: Some(delivery_worker),
             delivery_results,
@@ -2557,6 +2635,7 @@ impl BatchingEngineActor {
                 );
             let advanced_prefill = self.run_prefill_budget(prefill_budget);
             if decoded_tokens > 0 || advanced_prefill {
+                self.cooperative_actor_cycle_idle();
                 continue;
             }
 
@@ -2587,6 +2666,41 @@ impl BatchingEngineActor {
         for reply in self.stop_replies.drain(..) {
             let _ = reply.send(());
         }
+    }
+
+    fn cooperative_actor_cycle_idle(&mut self) {
+        if !self.actor_cycle_idle.enabled || self.actor_cycle_idle.milliseconds == 0 {
+            return;
+        }
+
+        let target = Duration::from_millis(self.actor_cycle_idle.milliseconds);
+        let poll = Duration::from_millis(
+            self.actor_cycle_idle
+                .command_poll_milliseconds
+                .clamp(1, ACTOR_CYCLE_IDLE_COMMAND_POLL_MS),
+        );
+        let started = Instant::now();
+        self.snapshot.actor_cycle_idle_active = true;
+        self.snapshot.actor_cycle_idle_count =
+            self.snapshot.actor_cycle_idle_count.saturating_add(1);
+        self.refresh_snapshot();
+
+        while !self.stopped {
+            let elapsed = started.elapsed();
+            if elapsed >= target {
+                break;
+            }
+            thread::sleep((target - elapsed).min(poll));
+            self.drain_commands();
+            self.drain_delivery_results();
+        }
+
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        self.snapshot.actor_cycle_idle_active = false;
+        self.snapshot.total_actor_cycle_idle_ms += elapsed_ms;
+        self.snapshot.max_actor_cycle_idle_ms =
+            self.snapshot.max_actor_cycle_idle_ms.max(elapsed_ms);
+        self.refresh_snapshot();
     }
 
     fn record_admission_duration(
@@ -5148,6 +5262,7 @@ mod tests {
             prefix_aware_admission,
             prefill_admission_quantum,
             burst_refill,
+            ActorCycleIdleDiagnostics::default(),
             response_delivery_policy,
             delivery_worker,
             delivery_results,
@@ -6312,6 +6427,79 @@ mod tests {
         assert_eq!(settled.response_delivery_backpressured, 0, "{settled:?}");
         assert_eq!(settled.response_stall_evictions, 0, "{settled:?}");
         handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cooperative_actor_cycle_idle_is_accounted_and_stop_responsive() {
+        let batching = BatchingConfig::default().resolve(
+            BatchingBackendPolicy {
+                batching_engine_default_enabled: true,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+                actor_prefill_tile_alignment_required: false,
+                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
+                    enabled: false,
+                    max_batch: 1,
+                    wait_us: 0,
+                    mixed_seq_lens: false,
+                },
+            },
+            1,
+        );
+        let actor_cycle_idle = ActorCycleIdleDiagnostics {
+            milliseconds: 500,
+            source: ConfigValueSource::ConfigFile,
+            enabled: true,
+            command_poll_milliseconds: ACTOR_CYCLE_IDLE_COMMAND_POLL_MS,
+        };
+        let handle = BatchingEngineHandle::start_with_actor_runtime_config(
+            Arc::new(MockForward::default()),
+            1,
+            batching.actor_admission_config(),
+            actor_cycle_idle,
+            BatchTokenBudget::default(),
+            PrefillTokenBudget::default(),
+            PrefillLayerBudget::default(),
+            ResponseDeliveryPolicy::default(),
+        );
+        let mut response = handle.enqueue(request(1, 8)).await.unwrap();
+        assert!(matches!(
+            response.recv().await,
+            Some(EngineEvent::Token { .. })
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = handle.cached_snapshot();
+            if snapshot.actor_cycle_idle_active {
+                assert_eq!(snapshot.actor_cycle_idle_ms, 500);
+                assert_eq!(
+                    snapshot.actor_cycle_idle_source,
+                    ConfigValueSource::ConfigFile
+                );
+                assert_eq!(snapshot.actor_cycle_idle_count, 1);
+                break;
+            }
+            assert!(Instant::now() < deadline, "actor never entered idle");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        let stop_started = Instant::now();
+        tokio::time::timeout(Duration::from_millis(100), handle.stop())
+            .await
+            .expect("stop must interrupt cooperative idle")
+            .unwrap();
+        assert!(stop_started.elapsed() < Duration::from_millis(100));
+
+        let snapshot = handle.cached_snapshot();
+        assert!(!snapshot.actor_cycle_idle_active);
+        assert_eq!(snapshot.actor_cycle_idle_count, 1);
+        assert!(snapshot.total_actor_cycle_idle_ms > 0.0);
+        assert!(snapshot.total_actor_cycle_idle_ms < 100.0, "{snapshot:?}");
+        assert_eq!(
+            snapshot.max_actor_cycle_idle_ms,
+            snapshot.total_actor_cycle_idle_ms
+        );
     }
 
     #[test]
@@ -7722,6 +7910,7 @@ mod tests {
             false,
             8,
             false,
+            ActorCycleIdleDiagnostics::default(),
             response_delivery_policy,
             delivery_worker,
             delivery_results,

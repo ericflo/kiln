@@ -1058,6 +1058,7 @@ Kiln uses a typed TOML config file. Environment overrides are resolved during st
 | `batching.rowwise_decode` | `KILN_BATCHING_ROWWISE_DECODE` | false | Emergency correctness comparison that issues one forward per ready row instead of one true batched forward. It normally reduces throughput. Restart required |
 | `batching.prefix_aware_admission` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` | true | Defer a queued same-adapter strict descendant while its active shorter prefix can become reusable; independent rows remain admissible. Restart required |
 | `batching.prefill_admission_quantum` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` | `auto` (backend policy) | Prompts admitted per actor cycle before returning to decode (`auto` or 1–65536). Auto uses effective decode width on CUDA/Vulkan and 4 on ROCm/Metal/CPU, then clamps to the effective decode width. Restart required |
+| `batching.actor_cycle_idle_ms` | `KILN_BATCHING_ACTOR_CYCLE_IDLE_MS` | 0 | Intentional 0–60000 ms cooperative wait after actor cycles that advanced model work. Zero is unpaced. Nonzero lowers sustained accelerator duty cycle at an explicit throughput/ITL cost; it runs only after synchronous accelerator return, polls control commands within 5 ms, and requires restart |
 | `batching.direct_decode_rendezvous_mode` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` | `auto` (enabled on real backends) | Fallback worker for actor-absent direct streaming effectively-greedy requests only. Sampled, non-streaming, and actor-routed requests bypass it. Restart required |
 | `batching.direct_decode_rendezvous_max_batch` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | `auto` (backend policy) | Fallback cohort width (`auto` or 1–65536), always clamped to effective decode width. Auto is CUDA 1, CPU/ROCm/Metal 8, Vulkan 64. Restart required |
 | `batching.direct_decode_rendezvous_wait_us` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | `auto` (backend policy) | Non-negative collection delay in microseconds. Auto is Metal 100, Vulkan 5000, and 0 elsewhere. Malformed canonical or legacy input fails startup. Restart required |
@@ -1134,8 +1135,9 @@ Batching has the same startup-only provenance contract. The
 `batching_engine.direct_decode_rendezvous`. The
 configuration reports mode intent, backend default, effective actor selection,
 rowwise and prefix-aware toggles, configured/backend/effective admission
-quantum, direct-rendezvous mode/width/wait/mixed-length policy, every value
-source, and the backend-owned burst-admission decision. A worker can be active
+quantum, cooperative actor-cycle idle and source, direct-rendezvous
+mode/width/wait/mixed-length policy, every value source, and the backend-owned
+burst-admission decision. A worker can be active
 while `route_available=false` because actor activity shadows this fallback
 route for real chat completions. The direct route is otherwise limited to direct streaming
 effectively-greedy requests; sampled, non-streaming, and actor-routed requests
@@ -1143,6 +1145,11 @@ bypass it. Under defaults, only Metal routes through the fallback because every
 real backend enables the worker but Metal alone disables the actor.
 The eight deprecated pre-consolidation aliases still parse strictly and warn,
 but new deployments should use the mechanically derived names in the table.
+Health and trusted debug expose the configured actor-cycle idle plus active,
+count, cumulative, and maximum observed wait state. Prometheus publishes the
+same five process-lifetime signals under
+`kiln_batching_engine_actor_cycle_idle_*`, allowing intentional duty-cycle
+pacing to be separated from an unexplained inference pause.
 
 Streaming prefill has a parallel startup-only provenance contract. The
 selected backend supplies automatic dispatch plus base, tape, detached,

@@ -761,6 +761,12 @@
         "effective": 4,
         "effective_source": "backend_policy"
       },
+      "actor_cycle_idle": {
+        "milliseconds": 0,
+        "source": "default",
+        "enabled": false,
+        "command_poll_milliseconds": 5
+      },
       "direct_decode_rendezvous": {
         "mode": {
           "configured": "auto",
@@ -838,6 +844,16 @@
                 startup-only and requires restart.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                <code>actor_cycle_idle</code> is an explicit fixed duty-cycle policy, not a hidden
+                thermal controller. Zero preserves the unpaced actor. A configured value from 1 through
+                60,000 milliseconds waits only after an actor cycle advanced prefill or decode and
+                synchronous accelerator work returned. During the wait the actor polls control commands
+                at intervals no longer than 5 ms; shutdown remains responsive, and the HTTP process and
+                response-delivery worker remain live. Nonzero values deliberately trade throughput and
+                ITL for lower sustained accelerator duty cycle, require restart, and do not replace an
+                external hardware guard.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 <code>configuration.direct_decode_rendezvous</code> is the immutable fallback policy.
                 Its mode is <code>auto</code>, <code>enabled</code>, or <code>disabled</code>; max batch
                 is <code>auto</code> or 1&ndash;65536 and is always clamped to effective decode width;
@@ -871,6 +887,20 @@
                 <a href="docs/configuration/" class="link">complete Configuration Reference</a> for strict
                 grammar and the eight deprecated aliases. In particular, malformed legacy
                 <code>KILN_DECODE_BATCH_WAIT_US</code> now fails startup instead of silently selecting zero.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                A live actor snapshot reports <code>actor_cycle_idle_ms</code>,
+                <code>actor_cycle_idle_source</code>, <code>actor_cycle_idle_active</code>,
+                <code>actor_cycle_idle_count</code>, <code>total_actor_cycle_idle_ms</code>, and
+                <code>max_actor_cycle_idle_ms</code> in health and trusted debug. Prometheus mirrors these
+                as <code>kiln_batching_engine_actor_cycle_idle_configured_seconds</code>,
+                <code>kiln_batching_engine_actor_cycle_idle_active</code>,
+                <code>kiln_batching_engine_actor_cycle_idles_total</code>,
+                <code>kiln_batching_engine_actor_cycle_idle_seconds_total</code>, and
+                <code>kiln_batching_engine_actor_cycle_idle_max_seconds</code>. Serving benchmark driver
+                v13 records the configured source plus measured-window count and elapsed time, settles an
+                idle boundary outside request timing, and fails the
+                <code>actor_cycle_idle_accounted</code> gate on contradictory evidence.
               </p>
               <h5 class="font-semibold mt-4 mb-2">Cross-request prefix-cache policy and capability</h5>
               <pre class="overflow-x-auto text-xs leading-relaxed"><code>{

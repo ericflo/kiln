@@ -39,7 +39,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "12"
+DRIVER_VERSION = "13"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -51,28 +51,30 @@ SUPPORTED_DRIVER_VERSIONS = {
     "9",
     "10",
     "11",
+    "12",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
-    "3", "4", "5", "6", "7", "8", "9", "10", "11", DRIVER_VERSION
+    "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", DRIVER_VERSION
 }
 LIFECYCLE_DRIVER_VERSIONS = {
-    "4", "5", "6", "7", "8", "9", "10", "11", DRIVER_VERSION
+    "4", "5", "6", "7", "8", "9", "10", "11", "12", DRIVER_VERSION
 }
 PRELAUNCH_DRIVER_VERSIONS = {
-    "5", "6", "7", "8", "9", "10", "11", DRIVER_VERSION
+    "5", "6", "7", "8", "9", "10", "11", "12", DRIVER_VERSION
 }
-OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", "8", "9", "10", "11", DRIVER_VERSION}
+OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", "8", "9", "10", "11", "12", DRIVER_VERSION}
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", DRIVER_VERSION
+    "8", "9", "10", "11", "12", DRIVER_VERSION
 }
-RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {DRIVER_VERSION}
-ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {"9", "10", "11", DRIVER_VERSION}
-ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {"10", "11", DRIVER_VERSION}
+RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {"12", DRIVER_VERSION}
+ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {"9", "10", "11", "12", DRIVER_VERSION}
+ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {"10", "11", "12", DRIVER_VERSION}
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", DRIVER_VERSION
+    "7", "8", "9", "10", "11", "12", DRIVER_VERSION
 }
-IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {"11", DRIVER_VERSION}
+IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {"11", "12", DRIVER_VERSION}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {DRIVER_VERSION}
 OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
@@ -206,9 +208,11 @@ DIRECT_RENDEZVOUS_FIELDS = (
     "route_available",
 )
 SERVER_DIAGNOSTICS_SCHEMA_V2 = "kiln.serving-benchmark-server-diagnostics.v2"
-SERVER_DIAGNOSTICS_SCHEMA = "kiln.serving-benchmark-server-diagnostics.v3"
+SERVER_DIAGNOSTICS_SCHEMA_V3 = "kiln.serving-benchmark-server-diagnostics.v3"
+SERVER_DIAGNOSTICS_SCHEMA = "kiln.serving-benchmark-server-diagnostics.v4"
 SERVER_DIAGNOSTICS_SCHEMAS = {
     SERVER_DIAGNOSTICS_SCHEMA_V2,
+    SERVER_DIAGNOSTICS_SCHEMA_V3,
     SERVER_DIAGNOSTICS_SCHEMA,
 }
 ROCM_GRAPH_COUNTER_FIELDS = (
@@ -1862,12 +1866,80 @@ def validate_server_diagnostics_v3(value: Any, label: str) -> dict[str, Any]:
         },
         label,
     )
-    if server["schema"] != SERVER_DIAGNOSTICS_SCHEMA:
+    if server["schema"] != SERVER_DIAGNOSTICS_SCHEMA_V3:
         raise BenchmarkError(f"{label}.schema is unsupported")
     route_record = {key: value for key, value in server.items() if key != "rocm_graphs"}
     route_record["schema"] = SERVER_DIAGNOSTICS_SCHEMA_V2
     validate_server_diagnostics_v2(route_record, label)
     validate_rocm_graph_diagnostics(server["rocm_graphs"], f"{label}.rocm_graphs")
+    return server
+
+
+def validate_server_diagnostics_v4(value: Any, label: str) -> dict[str, Any]:
+    server = _object(value, label)
+    if server.get("schema") != SERVER_DIAGNOSTICS_SCHEMA:
+        raise BenchmarkError(f"{label}.schema is unsupported")
+    batching = server.get("batching_engine")
+    if batching is not None:
+        batching = _object(batching, f"{label}.batching_engine")
+        idle_fields = {
+            "actor_cycle_idle_ms",
+            "actor_cycle_idle_source",
+            "actor_cycle_idle_active_end",
+            "actor_cycle_idle_count",
+            "actor_cycle_idle_seconds",
+            "process_max_actor_cycle_idle_ms",
+        }
+        legacy_batching = {
+            key: item for key, item in batching.items() if key not in idle_fields
+        }
+        if set(batching) - set(legacy_batching) != idle_fields:
+            raise BenchmarkError(
+                f"{label}.batching_engine has incomplete actor-cycle idle diagnostics"
+            )
+        _nonnegative_int(
+            batching["actor_cycle_idle_ms"],
+            f"{label}.batching_engine.actor_cycle_idle_ms",
+        )
+        if batching["actor_cycle_idle_source"] not in {
+            "default",
+            "config_file",
+            "environment",
+        }:
+            raise BenchmarkError(
+                f"{label}.batching_engine.actor_cycle_idle_source is unsupported"
+            )
+        if not isinstance(batching["actor_cycle_idle_active_end"], bool):
+            raise BenchmarkError(
+                f"{label}.batching_engine.actor_cycle_idle_active_end must be boolean"
+            )
+        _nonnegative_int(
+            batching["actor_cycle_idle_count"],
+            f"{label}.batching_engine.actor_cycle_idle_count",
+        )
+        for field in (
+            "actor_cycle_idle_seconds",
+            "process_max_actor_cycle_idle_ms",
+        ):
+            _nonnegative_number(
+                batching[field], f"{label}.batching_engine.{field}"
+            )
+        if batching["actor_cycle_idle_ms"] == 0 and (
+            batching["actor_cycle_idle_count"] != 0
+            or batching["actor_cycle_idle_seconds"] != 0
+        ):
+            raise BenchmarkError(
+                f"{label}.batching_engine reports waits while cycle idle is disabled"
+            )
+
+        legacy = dict(server)
+        legacy["schema"] = SERVER_DIAGNOSTICS_SCHEMA_V3
+        legacy["batching_engine"] = legacy_batching
+        validate_server_diagnostics_v3(legacy, label)
+    else:
+        legacy = dict(server)
+        legacy["schema"] = SERVER_DIAGNOSTICS_SCHEMA_V3
+        validate_server_diagnostics_v3(legacy, label)
     return server
 
 
@@ -2057,7 +2129,9 @@ def validate_benchmark_run(
     if row["server"] is not None:
         if driver_version in ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS:
             server = (
-                validate_server_diagnostics_v3(
+                validate_server_diagnostics_v4(row["server"], f"{label}.server")
+                if driver_version in COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS
+                else validate_server_diagnostics_v3(
                     row["server"], f"{label}.server"
                 )
                 if driver_version in ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS
@@ -2104,6 +2178,20 @@ def validate_benchmark_run(
                 if graph_gate is None or graph_gate["passed"] != expected_graph:
                     raise BenchmarkError(
                         f"{label} has an inconsistent ROCm graph-execution gate"
+                    )
+            if driver_version in COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS:
+                idle_gate = next(
+                    (
+                        item
+                        for item in gates
+                        if item["name"] == "actor_cycle_idle_accounted"
+                    ),
+                    None,
+                )
+                expected_idle = server_actor_cycle_idle_accounted(server)
+                if idle_gate is None or idle_gate["passed"] != expected_idle:
+                    raise BenchmarkError(
+                        f"{label} has an inconsistent actor-cycle idle gate"
                     )
         else:
             server = _object(row["server"], f"{label}.server")
@@ -3707,6 +3795,18 @@ def validate_batching_engine_snapshot(snapshot: Any) -> dict[str, Any]:
         value = snapshot.get(field)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
             raise BenchmarkError(f"invalid batching diagnostic {field}={value!r}")
+    for field in ("actor_cycle_idle_ms", "actor_cycle_idle_count"):
+        _nonnegative_int(snapshot.get(field), f"batching diagnostic {field}")
+    for field in ("total_actor_cycle_idle_ms", "max_actor_cycle_idle_ms"):
+        _nonnegative_number(snapshot.get(field), f"batching diagnostic {field}")
+    if snapshot.get("actor_cycle_idle_source") not in {
+        "default",
+        "config_file",
+        "environment",
+    }:
+        raise BenchmarkError("invalid batching diagnostic actor_cycle_idle_source")
+    if not isinstance(snapshot.get("actor_cycle_idle_active"), bool):
+        raise BenchmarkError("invalid batching diagnostic actor_cycle_idle_active")
     return snapshot
 
 
@@ -3721,6 +3821,32 @@ def batching_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, A
                 f"batching counter {field} regressed from {before[field]} to {after[field]}"
             )
         result[field] = after[field] - before[field]
+    for field in ("actor_cycle_idle_ms", "actor_cycle_idle_source"):
+        if after[field] != before[field]:
+            raise BenchmarkError(f"batching {field} changed during run")
+    if after["actor_cycle_idle_count"] < before["actor_cycle_idle_count"]:
+        raise BenchmarkError("batching actor-cycle idle count regressed")
+    if after["total_actor_cycle_idle_ms"] < before["total_actor_cycle_idle_ms"]:
+        raise BenchmarkError("batching actor-cycle idle wall time regressed")
+    if after["max_actor_cycle_idle_ms"] < before["max_actor_cycle_idle_ms"]:
+        raise BenchmarkError("batching actor-cycle idle maximum regressed")
+    result.update(
+        {
+            "actor_cycle_idle_ms": int(after["actor_cycle_idle_ms"]),
+            "actor_cycle_idle_source": after["actor_cycle_idle_source"],
+            "actor_cycle_idle_active_end": after["actor_cycle_idle_active"],
+            "actor_cycle_idle_count": (
+                int(after["actor_cycle_idle_count"])
+                - int(before["actor_cycle_idle_count"])
+            ),
+            "actor_cycle_idle_seconds": (
+                after["total_actor_cycle_idle_ms"]
+                - before["total_actor_cycle_idle_ms"]
+            )
+            / 1_000.0,
+            "process_max_actor_cycle_idle_ms": after["max_actor_cycle_idle_ms"],
+        }
+    )
     forwards = result["total_decode_forwards"]
     result["mean_decode_rows_per_forward"] = (
         result["total_decode_rows"] / forwards if forwards else 0.0
@@ -3934,6 +4060,26 @@ def server_diagnostics_snapshot(health: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def settled_server_diagnostics_snapshot(
+    url: str, headers: dict[str, str], timeout_secs: float
+) -> dict[str, Any]:
+    """Read one actor-idle boundary outside the measured request window."""
+    deadline: float | None = None
+    while True:
+        snapshot = server_diagnostics_snapshot(fetch_json(url, headers, timeout_secs))
+        batching = snapshot["batching_engine"]
+        if batching is None or not batching["actor_cycle_idle_active"]:
+            return snapshot
+        if deadline is None:
+            configured_seconds = batching["actor_cycle_idle_ms"] / 1_000.0
+            deadline = time.monotonic() + min(
+                timeout_secs, configured_seconds + 1.0
+            )
+        if time.monotonic() >= deadline:
+            return snapshot
+        time.sleep(0.005)
+
+
 def request_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
     result: dict[str, int] = {}
     for field in REQUEST_COUNTER_FIELDS:
@@ -4116,6 +4262,26 @@ def server_diagnostics_has_no_errors(server: dict[str, Any]) -> bool:
         return False
     graph = server.get("rocm_graphs")
     return graph is None or graph["failures"] in {None, 0}
+
+
+def server_actor_cycle_idle_accounted(server: dict[str, Any]) -> bool:
+    batching = server["batching_engine"]
+    if batching is None:
+        return True
+    if batching["actor_cycle_idle_active_end"]:
+        return False
+    configured = batching["actor_cycle_idle_ms"]
+    count = batching["actor_cycle_idle_count"]
+    elapsed = batching["actor_cycle_idle_seconds"]
+    maximum = batching["process_max_actor_cycle_idle_ms"]
+    if configured == 0:
+        return count == 0 and elapsed == 0 and maximum == 0
+    return (
+        batching["actor_cycle_idle_source"] in {"config_file", "environment"}
+        and count > 0
+        and elapsed > 0
+        and maximum > 0
+    )
 
 
 def server_rocm_graph_execution_accounted(server: dict[str, Any]) -> bool:
@@ -4421,6 +4587,25 @@ def summarize_run(
                         ),
                     )
                 )
+                batching = server["batching_engine"]
+                gates.append(
+                    gate(
+                        "actor_cycle_idle_accounted",
+                        server_actor_cycle_idle_accounted(server),
+                        (
+                            "not applicable: batching actor inactive"
+                            if batching is None
+                            else (
+                                f"configured_ms={batching['actor_cycle_idle_ms']}; "
+                                f"source={batching['actor_cycle_idle_source']}; "
+                                f"active_end={batching['actor_cycle_idle_active_end']}; "
+                                f"count={batching['actor_cycle_idle_count']}; "
+                                f"seconds={batching['actor_cycle_idle_seconds']:.6f}; "
+                                f"process_max_ms={batching['process_max_actor_cycle_idle_ms']:.3f}"
+                            )
+                        ),
+                    )
+                )
         else:
             gates.append(
                 gate(
@@ -4526,8 +4711,8 @@ def run_once(
     diagnostics_error: str | None = None
     if diagnostics_url is not None:
         try:
-            diagnostics_before = server_diagnostics_snapshot(
-                fetch_json(diagnostics_url, headers, args.timeout_secs)
+            diagnostics_before = settled_server_diagnostics_snapshot(
+                diagnostics_url, headers, args.timeout_secs
             )
         except Exception as exc:
             diagnostics_error = f"before run: {type(exc).__name__}: {exc}"
@@ -4571,8 +4756,8 @@ def run_once(
     server_delta: dict[str, Any] | None = None
     if diagnostics_url is not None and diagnostics_error is None:
         try:
-            diagnostics_after = server_diagnostics_snapshot(
-                fetch_json(diagnostics_url, headers, args.timeout_secs)
+            diagnostics_after = settled_server_diagnostics_snapshot(
+                diagnostics_url, headers, args.timeout_secs
             )
             assert diagnostics_before is not None
             server_delta = server_diagnostics_delta(

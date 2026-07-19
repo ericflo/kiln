@@ -345,6 +345,7 @@ mode = "auto"
 rowwise_decode = false
 prefix_aware_admission = true
 prefill_admission_quantum = "auto"
+actor_cycle_idle_ms = 0
 direct_decode_rendezvous_mode = "auto"
 direct_decode_rendezvous_max_batch = "auto"
 direct_decode_rendezvous_wait_us = "auto"
@@ -352,7 +353,7 @@ direct_decode_rendezvous_mixed_seq_lens = "auto"</code></pre>
 <pre class="text-sm mt-4"><code>kiln config --file kiln.toml --backend rocm
 kiln serve --config kiln.toml
 curl -s http://localhost:8420/v1/config | jq '.batching'</code></pre>
-        <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>kiln config</code> validates and prints all eight batching fields plus the combined actor-cycle budget, prompt-token and layer ceilings, decode-width ceiling, streaming mode, threshold, and three configured tiles, each with source provenance. <code>auto</code> keeps backend-qualified actor, admission, and direct-rendezvous defaults. Add <code>--backend</code> to resolve effective actor selection, alignment requirement, decode width, streaming dispatch, and tiles and reject an invalid contract without probing hardware or loading model weights. Without it, the command leaves backend-effective values unresolved. After restart, <code>/v1/config</code> reports actual backend policy, effective selection, decode-width clamping, <code>actor_active</code>, and worker versus route availability. The fallback route applies only to actor-absent direct streaming effectively-greedy requests; sampled and non-streaming work bypass it. A live worker can remain unroutable while the actor is active.</p>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>kiln config</code> validates and prints all nine batching fields plus the combined actor-cycle budget, prompt-token and layer ceilings, decode-width ceiling, streaming mode, threshold, and three configured tiles, each with source provenance. <code>auto</code> keeps backend-qualified actor, admission, and direct-rendezvous defaults. <code>actor_cycle_idle_ms</code> is an explicit 0&ndash;60,000 ms safe-boundary duty-cycle delay: zero is unpaced; nonzero trades throughput and ITL for lower sustained accelerator duty cycle and polls control commands within 5 ms. Add <code>--backend</code> to resolve effective actor selection, alignment requirement, decode width, streaming dispatch, and tiles and reject an invalid contract without probing hardware or loading model weights. Without it, the command leaves backend-effective values unresolved. After restart, <code>/v1/config</code> reports actual backend policy, effective selection, decode-width clamping, <code>actor_active</code>, and worker versus route availability. The fallback route applies only to actor-absent direct streaming effectively-greedy requests; sampled and non-streaming work bypass it. A live worker can remain unroutable while the actor is active.</p>
       </div>
       <div class="card p-6 lg:col-span-2">
         <p class="label mb-2">Prefix-cache policy</p>

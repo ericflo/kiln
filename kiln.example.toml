@@ -204,6 +204,13 @@ prefill_admission_quantum = "auto"    # Number of queued prompts admitted per ac
                                       # KILN_BATCHING_PREFILL_ADMISSION_QUANTUM.
                                       # /v1/config batching.configuration reports configured,
                                       # backend-policy, effective, source, and actor-active state.
+actor_cycle_idle_ms = 0               # Intentional 0..=60000 ms safe-boundary wait after an actor
+                                      # cycle advances prefill or decode. Zero preserves the unpaced
+                                      # actor. Nonzero values lower sustained accelerator duty cycle
+                                      # by trading throughput and ITL; they do not read temperature or
+                                      # replace an external hardware guard. Control commands are polled
+                                      # at least every 5 ms. Override mechanically with
+                                      # KILN_BATCHING_ACTOR_CYCLE_IDLE_MS; restart is required.
 direct_decode_rendezvous_mode = "auto" # Fallback worker for actor-absent direct streaming effectively-greedy
                                       # requests only. Auto enables the worker on every real backend.
                                       # It is not used by sampled, non-streaming, or actor-routed work.

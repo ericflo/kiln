@@ -156,6 +156,10 @@ function checkRuntimeConfigSchemaContract(source) {
     'prefillAdmissionQuantum.backend_policy',
     'prefillAdmissionQuantum.effective',
     'prefillAdmissionQuantum.effective_source',
+    'actorCycleIdle.milliseconds',
+    'actorCycleIdle.source',
+    'actorCycleIdle.enabled',
+    'actorCycleIdle.command_poll_milliseconds',
     'batchingConfiguration.burst_prefill_admission',
     'batchingConfiguration.actor_prefill_tile_alignment_required',
     'batchingConfiguration.direct_decode_rendezvous',
@@ -1709,6 +1713,12 @@ async function startServer({
               backend_policy: 16,
               effective: 16,
               effective_source: 'effective_decode_width',
+            },
+            actor_cycle_idle: {
+              milliseconds: 75,
+              source: 'config_file',
+              enabled: true,
+              command_poll_milliseconds: 5,
             },
             direct_decode_rendezvous: {
               mode: {
@@ -4317,6 +4327,7 @@ async function runSmoke(baseUrl, {
     await waitForPanelText(page, '#runtime-config-body', /Prefix admission[\s\S]*on[\s\S]*environment/, 'Runtime config should render prefix-aware admission and source');
     await waitForPanelText(page, '#runtime-config-body', /Prefill configured[\s\S]*32[\s\S]*config_file/, 'Runtime config should render configured prefill admission quantum and source');
     await waitForPanelText(page, '#runtime-config-body', /Prefill effective[\s\S]*16[\s\S]*effective_decode_width/, 'Runtime config should render bounded effective prefill quantum and source');
+    await waitForPanelText(page, '#runtime-config-body', /Cycle idle[\s\S]*75 ms[\s\S]*config_file[\s\S]*poll 5 ms/, 'Runtime config should render cooperative actor-cycle idle, source, and command polling bound');
     await waitForPanelText(page, '#runtime-config-body', /Burst prefill[\s\S]*on/, 'Runtime config should render backend burst-prefill policy');
     await expectDirectDecodeRendezvousRuntimeConfig(page, 'Desktop');
     await expectRocmMatmulRuntimeConfig(page, 'Desktop');

@@ -83,6 +83,14 @@ pub const MAX_DECODE_BATCH_MAX: usize = MAX_BATCH_TOKENS_MAX;
 pub const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
 pub const PREFILL_ADMISSION_QUANTUM_MIN: usize = 1;
 pub const PREFILL_ADMISSION_QUANTUM_MAX: usize = MAX_BATCH_TOKENS_MAX;
+/// Default cooperative idle inserted after an actor cycle that advanced model
+/// work. Zero preserves the unpaced production scheduler.
+pub const DEFAULT_ACTOR_CYCLE_IDLE_MS: u64 = 0;
+/// Keep an accidentally large duty-cycle value from making the actor appear
+/// unavailable for minutes. Command polling remains independently bounded.
+pub const ACTOR_CYCLE_IDLE_MAX_MS: u64 = 60_000;
+/// Maximum interval between control-command polls during cooperative idle.
+pub const ACTOR_CYCLE_IDLE_COMMAND_POLL_MS: u64 = 5;
 /// Bounds for the direct-stream greedy decode rendezvous worker. Its effective
 /// width is also clamped to the already-resolved process decode ceiling.
 pub const DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MIN: usize = 1;
@@ -755,6 +763,74 @@ pub struct DirectDecodeRendezvousWaitUs {
     source: ConfigValueSource,
 }
 
+/// Cooperative idle after a batching actor cycle that performed accelerator
+/// work, plus the startup source that selected it.
+///
+/// Zero disables pacing. Nonzero values intentionally trade throughput and
+/// latency for a lower sustained accelerator duty cycle without suspending the
+/// process or hiding the wait from control-plane diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActorCycleIdle {
+    millis: u64,
+    source: ConfigValueSource,
+}
+
+impl ActorCycleIdle {
+    fn new(millis: u64, source: ConfigValueSource) -> Result<Self> {
+        validate_actor_cycle_idle_ms(millis)?;
+        Ok(Self { millis, source })
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let millis = raw.trim().parse::<u64>().with_context(|| {
+            format!(
+                "{name} must be a decimal integer in 0..={ACTOR_CYCLE_IDLE_MAX_MS}, got {raw:?}"
+            )
+        })?;
+        Self::new(millis, ConfigValueSource::Environment).with_context(|| format!("invalid {name}"))
+    }
+
+    pub const fn millis(self) -> u64 {
+        self.millis
+    }
+
+    pub fn duration(self) -> Duration {
+        Duration::from_millis(self.millis)
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for ActorCycleIdle {
+    fn default() -> Self {
+        Self {
+            millis: DEFAULT_ACTOR_CYCLE_IDLE_MS,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for ActorCycleIdle {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(self.millis)
+    }
+}
+
+impl<'de> Deserialize<'de> for ActorCycleIdle {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = u64::deserialize(deserializer)?;
+        Self::new(millis, ConfigValueSource::ConfigFile).map_err(serde::de::Error::custom)
+    }
+}
+
 impl DirectDecodeRendezvousWaitUs {
     pub const fn new(configured: Option<u64>, source: ConfigValueSource) -> Self {
         Self { configured, source }
@@ -977,6 +1053,9 @@ pub struct BatchingRuntimeConfig {
     pub rowwise_decode: BatchingToggleDiagnostics,
     pub prefix_aware_admission: BatchingToggleDiagnostics,
     pub prefill_admission_quantum: PrefillAdmissionQuantumDiagnostics,
+    /// Intentional safe-boundary delay after actor cycles that advanced model
+    /// work. This is zero unless explicitly configured.
+    pub actor_cycle_idle: ActorCycleIdleDiagnostics,
     pub direct_decode_rendezvous: DirectDecodeRendezvousDiagnostics,
     /// Backend-owned refill behavior, carried here so actor construction does
     /// not retain a second copy of the backend decode policy.
@@ -984,6 +1063,25 @@ pub struct BatchingRuntimeConfig {
     /// Whether startup must prove that actor prompt chunks and direct
     /// streaming-prefill tiles have the same numerical boundary.
     pub actor_prefill_tile_alignment_required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ActorCycleIdleDiagnostics {
+    pub milliseconds: u64,
+    pub source: ConfigValueSource,
+    pub enabled: bool,
+    pub command_poll_milliseconds: u64,
+}
+
+impl Default for ActorCycleIdleDiagnostics {
+    fn default() -> Self {
+        Self {
+            milliseconds: DEFAULT_ACTOR_CYCLE_IDLE_MS,
+            source: ConfigValueSource::Default,
+            enabled: false,
+            command_poll_milliseconds: ACTOR_CYCLE_IDLE_COMMAND_POLL_MS,
+        }
+    }
 }
 
 impl BatchingRuntimeConfig {
@@ -4027,6 +4125,9 @@ pub struct BatchingConfig {
     /// uses either the effective decode width or the latency-oriented default,
     /// according to backend policy.
     pub prefill_admission_quantum: PrefillAdmissionQuantum,
+    /// Cooperative idle in milliseconds after an actor cycle that advanced
+    /// prefill or decode. Zero disables pacing. Default: 0.
+    pub actor_cycle_idle_ms: ActorCycleIdle,
     /// Select the fallback rendezvous worker used by direct streaming greedy
     /// decode when the production batching actor is inactive.
     pub direct_decode_rendezvous_mode: DirectDecodeRendezvousModeSetting,
@@ -4142,6 +4243,12 @@ impl BatchingConfig {
                 backend_policy: backend_quantum,
                 effective: effective_quantum,
                 effective_source: quantum_effective_source,
+            },
+            actor_cycle_idle: ActorCycleIdleDiagnostics {
+                milliseconds: self.actor_cycle_idle_ms.millis(),
+                source: self.actor_cycle_idle_ms.source(),
+                enabled: self.actor_cycle_idle_ms.millis() > 0,
+                command_poll_milliseconds: ACTOR_CYCLE_IDLE_COMMAND_POLL_MS,
             },
             direct_decode_rendezvous: DirectDecodeRendezvousDiagnostics {
                 mode: BatchingModeDiagnostics {
@@ -5341,6 +5448,12 @@ impl NormalizedEnvValue for StreamStallGrace {
     }
 }
 
+impl NormalizedEnvValue for ActorCycleIdle {
+    fn normalized_env_value(&self) -> String {
+        self.millis().normalized_env_value()
+    }
+}
+
 impl NormalizedEnvValue for BatchTokenBudget {
     fn normalized_env_value(&self) -> String {
         self.tokens().normalized_env_value()
@@ -5671,6 +5784,9 @@ macro_rules! public_env_parser {
     (batching_toggle) => {
         BatchingToggle::from_named_environment_value
     };
+    (actor_cycle_idle) => {
+        ActorCycleIdle::from_named_environment_value
+    };
     (prefill_admission_quantum) => {
         PrefillAdmissionQuantum::from_named_environment_value
     };
@@ -5988,6 +6104,7 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         batching.prefill_admission_quantum,
         "KILN_BATCH_PREFILL_ADMISSION_QUANTUM"
     ),
+    public_env_field!(actor_cycle_idle, batching.actor_cycle_idle_ms),
     public_env_field!(
         direct_decode_rendezvous_mode,
         batching.direct_decode_rendezvous_mode,
@@ -6421,6 +6538,7 @@ impl Default for BatchingConfig {
                 ConfigValueSource::Default,
             ),
             prefill_admission_quantum: PrefillAdmissionQuantum::default(),
+            actor_cycle_idle_ms: ActorCycleIdle::default(),
             direct_decode_rendezvous_mode: DirectDecodeRendezvousModeSetting::default(),
             direct_decode_rendezvous_max_batch: DirectDecodeRendezvousMaxBatch::default(),
             direct_decode_rendezvous_wait_us: DirectDecodeRendezvousWaitUs::default(),
@@ -6743,6 +6861,7 @@ impl KilnConfig {
         if let Some(quantum) = self.batching.prefill_admission_quantum.configured() {
             validate_prefill_admission_quantum(quantum)?;
         }
+        validate_actor_cycle_idle_ms(self.batching.actor_cycle_idle_ms.millis())?;
         if let Some(max_batch) = self
             .batching
             .direct_decode_rendezvous_max_batch
@@ -7126,6 +7245,16 @@ fn validate_stream_stall_grace_ms(millis: u64) -> Result<()> {
     Ok(())
 }
 
+fn validate_actor_cycle_idle_ms(millis: u64) -> Result<()> {
+    if millis > ACTOR_CYCLE_IDLE_MAX_MS {
+        anyhow::bail!(
+            "batching.actor_cycle_idle_ms must be between 0 and {} milliseconds, got {millis}",
+            ACTOR_CYCLE_IDLE_MAX_MS
+        );
+    }
+    Ok(())
+}
+
 fn validate_max_batch_tokens(tokens: usize) -> Result<()> {
     if !(MAX_BATCH_TOKENS_MIN..=MAX_BATCH_TOKENS_MAX).contains(&tokens) {
         anyhow::bail!(
@@ -7291,6 +7420,7 @@ mod tests {
         "KILN_AGENT_RUNS_ACCESS",
         "KILN_AGENT_RUN_TIMEOUT_SECS",
         "KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS",
+        "KILN_BATCHING_ACTOR_CYCLE_IDLE_MS",
         "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH",
         "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
         "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE",
@@ -7639,6 +7769,11 @@ mod tests {
         assert_eq!(config.batching.prefill_admission_quantum.configured(), None);
         assert_eq!(
             config.batching.prefill_admission_quantum.source(),
+            ConfigValueSource::Default
+        );
+        assert_eq!(config.batching.actor_cycle_idle_ms.millis(), 0);
+        assert_eq!(
+            config.batching.actor_cycle_idle_ms.source(),
             ConfigValueSource::Default
         );
         assert_eq!(
@@ -8606,7 +8741,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 108);
+        assert_eq!(original_len, 109);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -8677,7 +8812,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 113);
+        assert_eq!(serialized_leaves.len(), 114);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -8763,6 +8898,7 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_BATCHING_ROWWISE_DECODE", "true"),
             ("KILN_BATCHING_PREFIX_AWARE_ADMISSION", "false"),
             ("KILN_BATCHING_PREFILL_ADMISSION_QUANTUM", "16"),
+            ("KILN_BATCHING_ACTOR_CYCLE_IDLE_MS", "75"),
             ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE", "disabled"),
             ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH", "12"),
             ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US", "250"),
@@ -8904,6 +9040,11 @@ rocm_graph_cache_max_bytes = 17179869184
         assert_eq!(
             config.batching.prefill_admission_quantum.configured(),
             Some(16)
+        );
+        assert_eq!(config.batching.actor_cycle_idle_ms.millis(), 75);
+        assert_eq!(
+            config.batching.actor_cycle_idle_ms.source(),
+            ConfigValueSource::Environment
         );
         assert_eq!(
             config.batching.direct_decode_rendezvous_mode.mode(),
@@ -13347,6 +13488,40 @@ served_model_id = "from-toml"
             assert!(error.contains(field), "{field}: {error}");
             assert!(error.contains(value), "{field}: {error}");
         }
+    }
+
+    #[test]
+    fn actor_cycle_idle_is_bounded_and_source_tracked() {
+        for value in [0, 75, ACTOR_CYCLE_IDLE_MAX_MS] {
+            let config: KilnConfig =
+                toml::from_str(&format!("[batching]\nactor_cycle_idle_ms = {value}\n")).unwrap();
+            assert_eq!(config.batching.actor_cycle_idle_ms.millis(), value);
+            assert_eq!(
+                config.batching.actor_cycle_idle_ms.source(),
+                ConfigValueSource::ConfigFile
+            );
+        }
+
+        let error = toml::from_str::<KilnConfig>(&format!(
+            "[batching]\nactor_cycle_idle_ms = {}\n",
+            ACTOR_CYCLE_IDLE_MAX_MS + 1
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("batching.actor_cycle_idle_ms"), "{error}");
+        assert!(error.contains("60001"), "{error}");
+
+        let error = ActorCycleIdle::from_named_environment_value(
+            "KILN_BATCHING_ACTOR_CYCLE_IDLE_MS",
+            "not-a-duration",
+        )
+        .unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("KILN_BATCHING_ACTOR_CYCLE_IDLE_MS"),
+            "{detail}"
+        );
+        assert!(detail.contains("not-a-duration"), "{detail}");
     }
 
     #[cfg(unix)]

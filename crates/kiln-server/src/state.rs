@@ -4201,6 +4201,12 @@ impl AppState {
             prefill_admission_quantum_effective_source = %batching_runtime_config
                 .prefill_admission_quantum
                 .effective_source,
+            actor_cycle_idle_ms = batching_runtime_config.actor_cycle_idle.milliseconds,
+            actor_cycle_idle_source = %batching_runtime_config.actor_cycle_idle.source,
+            actor_cycle_idle_enabled = batching_runtime_config.actor_cycle_idle.enabled,
+            actor_cycle_idle_command_poll_ms = batching_runtime_config
+                .actor_cycle_idle
+                .command_poll_milliseconds,
             direct_decode_rendezvous_scope = DirectDecodeRendezvousRuntimeState::SCOPE,
             direct_decode_rendezvous_mode_configured = %batching_runtime_config
                 .direct_decode_rendezvous
@@ -4365,10 +4371,11 @@ impl AppState {
                     backend_name == "vulkan" && serving_policy.vulkan_resident_prefill,
                 )
                 .with_rowwise_decode(batching_runtime_config.rowwise_decode.enabled);
-            crate::batching_engine::BatchingEngineHandle::start_with_admission_config(
+            crate::batching_engine::BatchingEngineHandle::start_with_actor_runtime_config(
                 Arc::new(forward),
                 max_decode_batch,
                 batching_runtime_config.actor_admission_config(),
+                batching_runtime_config.actor_cycle_idle,
                 max_batch_tokens,
                 max_prefill_tokens_per_cycle,
                 max_prefill_layers_per_cycle,

@@ -1466,6 +1466,52 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_actor_cycle_idle_configured_seconds Configured cooperative safe-boundary idle after batching actor cycles that advanced model work.\n");
+        out.push_str("# TYPE kiln_batching_engine_actor_cycle_idle_configured_seconds gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_actor_cycle_idle_configured_seconds {:.6}",
+                gauges.batching_engine.actor_cycle_idle_ms as f64 / 1_000.0
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_actor_cycle_idle_active Whether the batching actor is currently inside a cooperative cycle-idle wait.\n");
+        out.push_str("# TYPE kiln_batching_engine_actor_cycle_idle_active gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_actor_cycle_idle_active {}",
+                u8::from(gauges.batching_engine.actor_cycle_idle_active)
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_actor_cycle_idles_total Cooperative safe-boundary waits entered since actor startup.\n");
+        out.push_str("# TYPE kiln_batching_engine_actor_cycle_idles_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_actor_cycle_idles_total {}",
+                gauges.batching_engine.actor_cycle_idle_count
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_actor_cycle_idle_seconds_total Cumulative observed cooperative cycle-idle wall time.\n");
+        out.push_str("# TYPE kiln_batching_engine_actor_cycle_idle_seconds_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_actor_cycle_idle_seconds_total {:.6}",
+                gauges.batching_engine.total_actor_cycle_idle_ms / 1_000.0
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_actor_cycle_idle_max_seconds Largest observed cooperative cycle-idle wall time since actor startup.\n");
+        out.push_str("# TYPE kiln_batching_engine_actor_cycle_idle_max_seconds gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_actor_cycle_idle_max_seconds {:.6}",
+                gauges.batching_engine.max_actor_cycle_idle_ms / 1_000.0
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_queue_depth Requests waiting inside the real-model batching engine.\n");
         out.push_str("# TYPE kiln_batching_engine_queue_depth gauge\n");
         push_line(
@@ -3348,6 +3394,7 @@ fn prom_counter2(out: &mut String, name: &str, l1: &str, v1: &str, l2: &str, v2:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConfigValueSource;
 
     fn test_memory_governor_observation() -> CachedMemoryGovernorObservation {
         CachedMemoryGovernorObservation {
@@ -3750,6 +3797,12 @@ mod tests {
             batching_engine_enabled: true,
             batching_engine: BatchingEngineSnapshot {
                 snapshot_age_ms: 1_250,
+                actor_cycle_idle_ms: 75,
+                actor_cycle_idle_source: ConfigValueSource::ConfigFile,
+                actor_cycle_idle_active: true,
+                actor_cycle_idle_count: 5,
+                total_actor_cycle_idle_ms: 375.0,
+                max_actor_cycle_idle_ms: 80.0,
                 queue_depth: 2,
                 active_decode: 3,
                 active_prefill: 2,
@@ -4048,6 +4101,13 @@ mod tests {
         assert!(output.contains("kiln_prompt_token_cache_entries 4"));
         assert!(output.contains("kiln_batching_engine_enabled 1"));
         assert!(output.contains("kiln_batching_engine_snapshot_age_seconds 1.250000"));
+        assert!(
+            output.contains("kiln_batching_engine_actor_cycle_idle_configured_seconds 0.075000")
+        );
+        assert!(output.contains("kiln_batching_engine_actor_cycle_idle_active 1"));
+        assert!(output.contains("kiln_batching_engine_actor_cycle_idles_total 5"));
+        assert!(output.contains("kiln_batching_engine_actor_cycle_idle_seconds_total 0.375000"));
+        assert!(output.contains("kiln_batching_engine_actor_cycle_idle_max_seconds 0.080000"));
         assert!(output.contains("kiln_batching_engine_queue_depth 2"));
         assert!(output.contains("kiln_batching_engine_active_decode 3"));
         assert!(output.contains("kiln_batching_engine_active_prefill 2"));
