@@ -17263,15 +17263,15 @@ pub(crate) fn is_rocm_graph_shape_dependent_attention(error: &anyhow::Error) -> 
         .is_some()
 }
 
-/// Stable per-step inputs threaded through the batched CUDA graph
+/// Stable per-step inputs threaded through batched CUDA/ROCm graph
 /// capture/replay path. Mirrors [`PagedDecodeGraphInputs`] but every
-/// tensor is shaped for `[batch, …]`. The CUDA graph runner pre-allocates
+/// tensor is shaped for `[batch, …]`. The graph runner pre-allocates
 /// these on the device once per `batch_size` bucket; per-step updates
-/// rewrite their contents in place via `cudaMemcpyHtoDAsync` so the
+/// rewrite their contents in place so the
 /// captured kernels read from the same device pointers on every replay.
 /// Consumed by [`model_forward_paged_batched_hidden_with_graph_inputs`]
 /// (the HiddenOnly batched capture forward — #1082 boxes 432/433).
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 #[allow(dead_code)]
 pub(crate) struct BatchedPagedDecodeGraphInputs<'a> {
     /// `[batch]` u32 token-id buffer.
@@ -17729,6 +17729,11 @@ pub struct CachedPagedDecodeMeta {
     pub seqused_k_tensor: Tensor,
     /// Max K/V length across rows in the batch (`max(start_pos) + 1`).
     pub max_seqlen_k: usize,
+    /// Launch bound supplied to the dynamic-length paged-decode kernel.
+    /// Eager metadata uses the exact maximum above. Graph-stable metadata uses
+    /// the whole capture bucket so replay can grow row lengths without
+    /// retaining the capture step's maximum as a baked kernel argument.
+    pub kernel_max_seqlen_k: usize,
     /// Padded block-table width (in pages).
     pub max_blocks_per_seq: usize,
     /// Whether every row's `start_pos` is identical — when true, the strict
@@ -17849,6 +17854,7 @@ impl CachedPagedDecodeMeta {
             block_table_tensor,
             seqused_k_tensor,
             max_seqlen_k,
+            kernel_max_seqlen_k: max_seqlen_k,
             max_blocks_per_seq,
             uniform_start_pos,
             strict_start_slots,
@@ -17887,8 +17893,9 @@ impl CachedPagedDecodeMeta {
     /// ensures one captured graph can serve every decode step within
     /// the bucket without re-capture. The struct's `max_seqlen_k`
     /// field continues to hold the *actual* `max(start_positions) + 1`
-    /// (needed by the strict-path kernel); only the stable-buffer
-    /// shape uses the bucketed value.
+    /// (needed by the strict-path kernel). `kernel_max_seqlen_k` holds the
+    /// bucketed value because the dynamic-length kernel's launch bound is
+    /// captured by value and must remain valid as replay lengths grow.
     pub fn build_with_stable_buffers(
         paged_cache: &PagedKvCache,
         block_tables: &[&BlockTable],
@@ -18028,12 +18035,12 @@ impl CachedPagedDecodeMeta {
         Ok(Self {
             block_table_tensor: stable_block_table_gpu.clone(),
             seqused_k_tensor: stable_seqused_k_gpu.clone(),
-            // Actual (not bucketed) values — downstream kernels need
-            // them to bound reads correctly. The stable buffer width
-            // diverges (bucketed) but the kernel reads only the
-            // active prefix per row via `seqused_k_tensor` (dyn_seqlen
-            // path) or the actual `max_seqlen_k` (strict path).
+            // The strict path needs the actual value. The dynamic-length path
+            // must launch for the entire graph bucket: this scalar becomes a
+            // captured kernel argument, while `seqused_k_tensor` masks each
+            // row to its current active prefix.
             max_seqlen_k,
+            kernel_max_seqlen_k: stable_bucket_max_seqlen_k,
             max_blocks_per_seq,
             uniform_start_pos,
             strict_start_slots,
@@ -18166,12 +18173,14 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // step at bs > 1.
     let (
         max_seqlen_k,
+        kernel_max_seqlen_k,
         uniform_start_pos,
         max_blocks_per_seq,
         own_block_table_tensor,
         own_seqused_k_tensor,
         own_strict_start_slots,
     ): (
+        usize,
         usize,
         bool,
         usize,
@@ -18181,6 +18190,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     ) = match cached_meta {
         Some(meta) => (
             meta.max_seqlen_k,
+            meta.kernel_max_seqlen_k,
             meta.uniform_start_pos,
             meta.max_blocks_per_seq,
             None,
@@ -18273,6 +18283,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 Tensor::from_vec_on(x.device(), seqused_k_vec, vec![batch])?.contiguous()?;
 
             (
+                max_seqlen_k,
                 max_seqlen_k,
                 uniform_start_pos,
                 max_blocks_per_seq,
@@ -18596,7 +18607,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                     block_table_tensor,
                     seqused_k_tensor,
                     graph_outputs,
-                    max_seqlen_k,
+                    kernel_max_seqlen_k,
                     page_block_size,
                     softmax_scale,
                     true,
@@ -24014,7 +24025,7 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
 /// STEPS 2-3 wire this into
 /// [`crate::cuda_graph::CudaGraphRunner::try_capture_batched`] /
 /// `decode_step_paged_batched`, replacing the former in-graph logits twin.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn model_forward_paged_batched_hidden_with_graph_inputs(
     backend: &dyn BackendRuntime,
@@ -24078,6 +24089,10 @@ pub(crate) fn model_forward_paged_batched_hidden_with_graph_inputs(
     // the driver (the first wiring attempt hit `CUDA_ERROR_ILLEGAL_ADDRESS` on
     // step 2). Argmax + DtoH is the caller's job, run outside the captured
     // region.
+    #[cfg(feature = "rocm")]
+    kiln_tensor::rocm_slice_set_dim0(graph_inputs.output_hidden, &hidden, 0)
+        .context("copy ROCm graph-wrapper hidden into stable output_hidden buffer")?;
+    #[cfg(not(feature = "rocm"))]
     graph_inputs
         .output_hidden
         .slice_set(&hidden, 0, 0)
@@ -24102,7 +24117,7 @@ pub(crate) fn model_forward_paged_batched_hidden_with_graph_inputs(
 /// eagerly off the graph, sidestepping the replay-nondeterminism that doubled
 /// output ("BUG2"). Cost is one extra eager batched vocab GEMV + one RMSNorm
 /// per decode step.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) fn lm_head_from_batched_hidden_eager(
     backend: &dyn BackendRuntime,
     output_hidden: &Tensor,
@@ -25886,6 +25901,45 @@ mod tests {
     /// `cfg(test)`-gated and only visible inside kiln-core's own test
     /// build — from another crate's tests it appears unresolved.
     static RESIDENCY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn graph_stable_paged_metadata_keeps_bucketed_kernel_bound() -> Result<()> {
+        let cache = crate::PagedKvCacheKt::new(0, 8, 64, 1, 8, DType::BF16, Device::Cpu)?;
+        let tables = [
+            BlockTable { blocks: vec![0] },
+            BlockTable { blocks: vec![1] },
+            BlockTable { blocks: vec![2] },
+            BlockTable { blocks: vec![3] },
+        ];
+        let table_refs: Vec<&BlockTable> = tables.iter().collect();
+        let positions = [1usize, 2, 3, 4];
+        let stable_block_table = Tensor::from_vec(vec![0u32, 1, 2, 3], (positions.len(), 1usize))?;
+        let stable_seqused_k = Tensor::from_vec(vec![2u32, 3, 4, 5], positions.len())?;
+
+        let stable = CachedPagedDecodeMeta::build_with_stable_buffers(
+            &cache,
+            &table_refs,
+            &positions,
+            &stable_block_table,
+            &stable_seqused_k,
+            #[cfg(feature = "cuda")]
+            None,
+        )?;
+        assert_eq!(stable.max_seqlen_k, 5);
+        assert_eq!(stable.kernel_max_seqlen_k, crate::generate::FA2_KBLOCK_N);
+
+        let eager = CachedPagedDecodeMeta::build(
+            &Device::Cpu,
+            &cache,
+            &table_refs,
+            &positions,
+            #[cfg(feature = "cuda")]
+            None,
+        )?;
+        assert_eq!(eager.max_seqlen_k, 5);
+        assert_eq!(eager.kernel_max_seqlen_k, 5);
+        Ok(())
+    }
 
     #[cfg(feature = "rocm")]
     #[test]

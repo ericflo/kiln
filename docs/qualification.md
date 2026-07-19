@@ -1716,6 +1716,16 @@ performance arm must either disable ROCm graphs explicitly and qualify itself
 as eager, or first add and qualify real multi-row graph capture; resident
 single-row graphs must not imply graph acceleration for a multi-row route.
 
+Current source supersedes that historical single-row limitation for contiguous
+BF16 batches. The runner now keys HIP graphs by width and attention bucket,
+refreshes paged metadata and GDN state through stable device storage, and keeps
+LM head and sampling eager. A bounded gfx1151 width-four regression executed one
+native capture plus 23 changing-input replays; every hidden value and the full
+K/V pools matched an independent eager cache exactly, with zero fallback or
+graph failure. That focused fixture contains full attention only. Production
+Qwen GDN parity, a source-bound c8 serving receipt, and the longer thermal gates
+remain mandatory before this becomes accepted performance evidence.
+
 Serving benchmark driver v15 closes the next attribution gap before another
 ROCm arm. Each successful Kiln stream now retains its exact terminal
 `metadata.performance` object, including the request-local latency phases and

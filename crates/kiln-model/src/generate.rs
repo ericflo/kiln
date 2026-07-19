@@ -50,8 +50,8 @@ use crate::forward::{
 };
 use crate::metal_graph::MetalGraphRunner;
 use crate::rocm_graph::{
-    RocmGraphExecutionMode, RocmGraphExecutionPolicy, RocmGraphLiveTelemetry, RocmGraphRunner,
-    RocmGraphStatsUnavailable, RocmGraphTelemetryHandle,
+    RocmGraphExecutionPolicy, RocmGraphLiveTelemetry, RocmGraphRunner, RocmGraphStatsUnavailable,
+    RocmGraphTelemetryHandle,
 };
 // (#1082) Native single-submit Vulkan-resident decode entry — only referenced
 // from the `#[cfg(feature = "vulkan")]` single-row fast path below.
@@ -305,10 +305,6 @@ pub struct ModelRunner {
     /// `cuda_graph`; its immutable policy is installed at construction. Same
     /// per-step interior-mutability pattern.
     rocm_graph: Mutex<RocmGraphRunner>,
-    /// Immutable construction-time gate for multi-row ROCm fallback timing.
-    /// Other backends and graphs-off ROCm avoid a clock read and mutex on the
-    /// successful batched eager hot path.
-    rocm_graph_capture_requested: bool,
     /// Capture-phase telemetry deliberately lives outside `rocm_graph`, so a
     /// slow native capture cannot make health reporting look unavailable.
     rocm_graph_telemetry: RocmGraphTelemetryHandle,
@@ -2910,8 +2906,6 @@ impl ModelRunner {
     ) -> Self {
         let eos_token_ids = tokenizer.eos_token_ids();
         let cuda_graph = CudaGraphRunner::new(&execution_device, options.cuda_graph);
-        let rocm_graph_capture_requested = matches!(execution_device, kiln_tensor::Device::Rocm(_))
-            && options.rocm_graph.mode() == RocmGraphExecutionMode::LazyCaptureReplay;
         let rocm_graph = RocmGraphRunner::new(&execution_device, options.rocm_graph);
         let rocm_graph_telemetry = rocm_graph.telemetry_handle();
         let metal_graph = MetalGraphRunner::new(&execution_device, options.metal_graphs);
@@ -2947,7 +2941,6 @@ impl ModelRunner {
             active_lora: None,
             cuda_graph: Mutex::new(cuda_graph),
             rocm_graph: Mutex::new(rocm_graph),
-            rocm_graph_capture_requested,
             rocm_graph_telemetry,
             metal_graph: Mutex::new(metal_graph),
             packed_weight_registry: OnceLock::new(),
@@ -5595,42 +5588,30 @@ impl ModelRunner {
 
         if sampled.is_none() && try_contiguous_batched {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
-            let (result, eager_duration) = if has_linear_layers {
+            let result = if has_linear_layers {
                 let mut linear_state_refs: Vec<&mut LinearAttentionState> =
                     linear_states.iter_mut().map(|s| &mut **s).collect();
-                let eager_started = self.rocm_graph_capture_requested.then(Instant::now);
-                let result = self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
+                self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
                     &sequence_lengths,
                     &mut linear_state_refs,
                     Some(&row_ids),
-                );
-                (result, eager_started.map(|started| started.elapsed()))
+                )
             } else {
                 let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
-                let eager_started = self.rocm_graph_capture_requested.then(Instant::now);
-                let result = self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
+                self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
                     &sequence_lengths,
                     &mut no_linear_states,
                     Some(&row_ids),
-                );
-                (result, eager_started.map(|started| started.elapsed()))
+                )
             };
             match result {
-                Ok(tokens) => {
-                    if let Some(eager_duration) = eager_duration {
-                        self.rocm_graph
-                            .lock()
-                            .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?
-                            .record_multi_row_eager_fallback(row_count, eager_duration);
-                    }
-                    sampled = Some(tokens);
-                }
+                Ok(tokens) => sampled = Some(tokens),
                 Err(err)
                     if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) =>
                 {
@@ -6942,6 +6923,52 @@ impl ModelRunner {
         };
         let tokens = {
             let pc_guard = lock_paged_cache(paged_cache)?;
+            #[cfg(feature = "rocm")]
+            let mut empty_linear_state = crate::forward::LinearAttentionState {
+                recurrent_states: Vec::new(),
+                conv_states: Vec::new(),
+            };
+            #[cfg(feature = "rocm")]
+            let rocm_graph_hidden = if batch > 1
+                && paged_decode_replay_primitive_enabled(
+                    self.backend.as_ref(),
+                    &self.config,
+                    batch,
+                    ReplayNativePrimitive::HipGraph,
+                ) {
+                let state = batch_state.as_mut().unwrap_or(&mut empty_linear_state);
+                self.rocm_graph
+                    .lock()
+                    .map_err(|error| anyhow::anyhow!("failed to lock ROCm graph runner: {error}"))?
+                    .decode_step_paged_batched_hidden(
+                        &*self.backend,
+                        input_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_tables,
+                        seq_lens,
+                        state,
+                        self.active_lora.as_ref(),
+                        row_ids,
+                    )?
+            } else {
+                None
+            };
+            #[cfg(feature = "rocm")]
+            let rocm_graph_tokens = if let Some(hidden) = rocm_graph_hidden {
+                let logits = crate::forward::lm_head_from_batched_hidden_eager(
+                    &*self.backend,
+                    &hidden,
+                    &self.weights,
+                    &self.config,
+                )?;
+                Some(crate::sampling::greedy_sample_rows(&logits)?)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "rocm"))]
+            let rocm_graph_tokens: Option<Vec<TokenId>> = None;
             let graph_tokens = if paged_decode_replay_primitive_enabled(
                 self.backend.as_ref(),
                 &self.config,
@@ -6970,7 +6997,7 @@ impl ModelRunner {
             } else {
                 None
             };
-            match graph_tokens {
+            match rocm_graph_tokens.or(graph_tokens) {
                 Some(tokens) => tokens,
                 None => model_forward_paged_decode_contiguous_batch_greedy_with_ids(
                     &*self.backend,
@@ -7337,24 +7364,59 @@ impl ModelRunner {
         };
         let hidden = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            let linear_state_for_forward = if single_row_direct_state {
+            let mut empty_linear_state = crate::forward::LinearAttentionState {
+                recurrent_states: Vec::new(),
+                conv_states: Vec::new(),
+            };
+            let mut linear_state_for_forward = if single_row_direct_state {
                 Some(&mut *linear_states[0])
             } else {
                 batch_state.as_mut()
             };
-            model_forward_paged_decode_contiguous_batch_hidden_with_ids(
-                &*self.backend,
-                input_tokens,
-                &self.weights,
-                &self.config,
-                pc_guard,
-                block_tables,
-                seq_lens,
-                linear_state_for_forward,
-                self.active_lora.as_ref(),
-                row_ids,
-            )
-            .context("batched hidden decode forward pass (paged) failed")?
+            let graph_hidden = if batch > 1
+                && paged_decode_replay_primitive_enabled(
+                    self.backend.as_ref(),
+                    &self.config,
+                    batch,
+                    ReplayNativePrimitive::HipGraph,
+                ) {
+                let state = linear_state_for_forward
+                    .as_deref_mut()
+                    .unwrap_or(&mut empty_linear_state);
+                self.rocm_graph
+                    .lock()
+                    .map_err(|error| anyhow::anyhow!("failed to lock ROCm graph runner: {error}"))?
+                    .decode_step_paged_batched_hidden(
+                        &*self.backend,
+                        input_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_tables,
+                        seq_lens,
+                        state,
+                        self.active_lora.as_ref(),
+                        row_ids,
+                    )?
+            } else {
+                None
+            };
+            match graph_hidden {
+                Some(hidden) => hidden,
+                None => model_forward_paged_decode_contiguous_batch_hidden_with_ids(
+                    &*self.backend,
+                    input_tokens,
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    block_tables,
+                    seq_lens,
+                    linear_state_for_forward.as_deref_mut(),
+                    self.active_lora.as_ref(),
+                    row_ids,
+                )
+                .context("batched hidden decode forward pass (paged) failed")?,
+            }
         };
         if let Some(state) = batch_state.as_ref() {
             if fast_batched_linear_state_scatter_enabled() {

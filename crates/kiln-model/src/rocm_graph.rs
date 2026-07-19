@@ -38,7 +38,12 @@ use crate::forward::{
 use crate::lora_loader::LoraWeights;
 
 #[cfg(feature = "rocm")]
-use crate::forward::{PagedDecodeGraphInputs, model_forward_paged_hidden_with_graph_inputs};
+use crate::forward::{
+    BatchedPagedDecodeGraphInputs, PagedDecodeGraphInputs,
+    model_forward_paged_batched_hidden_with_graph_inputs,
+    model_forward_paged_decode_contiguous_batch_hidden_with_ids,
+    model_forward_paged_hidden_with_graph_inputs,
+};
 #[cfg(feature = "rocm")]
 use kiln_graph::{
     CaptureError, InvalidateReason, ReplayInputs, ReplayKey, ReplayOutputs, ReplayPlan,
@@ -333,13 +338,15 @@ fn synchronize_after_rocm_graph_capture_failure(device: &Device) -> Result<()> {
     Ok(())
 }
 
-/// Cache key for a captured bs=1 decode graph. Mirrors `CudaGraphKey`: with
+/// Cache key for a captured decode graph. With
 /// stable paged metadata the block table / seq_len are refreshed in place each
 /// replay, so they don't enter the key — only the FA2-bucketed K/V geometry
-/// does. Stable metadata is a graph correctness invariant, not a runtime knob.
+/// and batch width do. Stable metadata is a graph correctness invariant, not a
+/// runtime knob.
 #[cfg(feature = "rocm")]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RocmGraphKey {
+    batch_size: usize,
     max_seqlen_k: usize,
     max_blocks_per_seq: usize,
 }
@@ -361,9 +368,25 @@ impl RocmGraphKey {
         let pages_per_chunk = kblock_n / paged_cache.block_size();
         let max_blocks_per_seq = (max_seqlen_k / kblock_n) * pages_per_chunk;
         Self {
+            batch_size: 1,
             max_seqlen_k,
             max_blocks_per_seq,
         }
+    }
+
+    fn new_batched(paged_cache: &PagedKvCacheKt, sequence_lengths: &[usize]) -> Result<Self> {
+        anyhow::ensure!(
+            sequence_lengths.len() > 1,
+            "batched ROCm graph key requires more than one row"
+        );
+        let max_seq_len = sequence_lengths
+            .iter()
+            .copied()
+            .max()
+            .context("batched ROCm graph key requires sequence lengths")?;
+        let mut key = Self::new(paged_cache, max_seq_len);
+        key.batch_size = sequence_lengths.len();
+        Ok(key)
     }
 }
 
@@ -413,6 +436,9 @@ struct RocmGraphOwnerTimeline {
 #[cfg(feature = "rocm")]
 struct RocmGraphSlotState {
     assigned_row: Option<u64>,
+    /// `Some(width)` reserves this otherwise-idle slot for a shared batched
+    /// graph. Single-row request owners must never adopt it.
+    batch_size: Option<usize>,
     linear_state: LinearAttentionState,
     allocations: Vec<RocmAllocationRecord>,
     accounting_complete: bool,
@@ -724,8 +750,8 @@ struct CapturedDecodeGraphRocm {
     /// The instantiated, launchable graph. ROCm uses plain instantiation
     /// (`flags = 0`); auto-free was rejected on gfx1151 / ROCm 7.2.4.
     exec: kiln_hip::RocmGraphExec,
-    /// Graph-stable PRE-final-norm hidden `[1, 1, hidden]`; refreshed in place by
-    /// the captured forward, read eagerly by lm_head after launch.
+    /// Graph-stable PRE-final-norm hidden `[batch, 1, hidden]`; refreshed in
+    /// place by the captured forward, read eagerly by lm_head after launch.
     output_hidden: Tensor,
     /// The non-default capture stream the graph launches on. Replay completion
     /// is ordered into `default_stream` without blocking the host.
@@ -1600,6 +1626,9 @@ pub struct RocmGraphRunner {
     graph_slots: HashMap<RocmGraphOwner, RocmGraphSlotState>,
     #[cfg(feature = "rocm")]
     decode_row_slots: HashMap<u64, RocmGraphOwner>,
+    /// Shared recurrent-state owner for each multi-row graph width.
+    #[cfg(feature = "rocm")]
+    batched_graph_slots: HashMap<usize, RocmGraphOwner>,
     /// Logical rows denied a new persistent slot by the hard retained-byte cap.
     /// Entries live until `release_decode_row` so decode cannot retry the same
     /// expensive graph setup on every token.
@@ -1689,6 +1718,8 @@ impl RocmGraphRunner {
             #[cfg(feature = "rocm")]
             decode_row_slots: HashMap::new(),
             #[cfg(feature = "rocm")]
+            batched_graph_slots: HashMap::new(),
+            #[cfg(feature = "rocm")]
             graph_ineligible_rows: HashMap::new(),
             #[cfg(feature = "rocm")]
             next_graph_slot_id: 1,
@@ -1761,7 +1792,7 @@ impl RocmGraphRunner {
         let active_graph_slot_count = self
             .graph_slots
             .values()
-            .filter(|slot| slot.assigned_row.is_some())
+            .filter(|slot| slot.assigned_row.is_some() || slot.batch_size.is_some())
             .count();
         #[cfg(not(feature = "rocm"))]
         let active_graph_slot_count = 0;
@@ -1885,6 +1916,7 @@ impl RocmGraphRunner {
             )?;
             self.record_budget_relief();
             self.decode_row_slots.clear();
+            self.batched_graph_slots.clear();
             self.graph_ineligible_rows.clear();
             self.non_capture_safe.clear();
             self.capture_retry.clear();
@@ -2008,9 +2040,34 @@ impl RocmGraphRunner {
         snapshot: &LinearAttentionState,
         context: &'static str,
     ) -> Result<()> {
-        state
-            .refresh_batched_state_from_rows_in_place(&[snapshot])
-            .with_context(|| context)
+        anyhow::ensure!(
+            state.recurrent_states.len() == snapshot.recurrent_states.len()
+                && state.conv_states.len() == snapshot.conv_states.len(),
+            "{context}: recurrent/conv layer-count mismatch"
+        );
+        for (destination, source) in state
+            .recurrent_states
+            .iter()
+            .zip(snapshot.recurrent_states.iter())
+        {
+            anyhow::ensure!(
+                destination.dims() == source.dims(),
+                "{context}: recurrent-state shape mismatch"
+            );
+            destination
+                .slice_set(source, 0, 0)
+                .with_context(|| context)?;
+        }
+        for (destination, source) in state.conv_states.iter().zip(snapshot.conv_states.iter()) {
+            anyhow::ensure!(
+                destination.dims() == source.dims(),
+                "{context}: convolution-state shape mismatch"
+            );
+            destination
+                .slice_set(source, 0, 0)
+                .with_context(|| context)?;
+        }
+        Ok(())
     }
 
     #[cfg(feature = "rocm")]
@@ -2079,6 +2136,7 @@ impl RocmGraphRunner {
             owner,
             RocmGraphSlotState {
                 assigned_row: None,
+                batch_size: None,
                 linear_state,
                 allocations,
                 accounting_complete,
@@ -2087,6 +2145,131 @@ impl RocmGraphRunner {
         self.peak_retained_bytes = self.peak_retained_bytes.max(projected.retained_bytes);
         self.counters.record_graph_slot_create();
         Ok(())
+    }
+
+    #[cfg(feature = "rocm")]
+    fn publish_batched_graph_slot(
+        &mut self,
+        batch_size: usize,
+        owner: RocmGraphOwner,
+        linear_state: LinearAttentionState,
+        allocations: Vec<RocmAllocationRecord>,
+        accounting_complete: bool,
+    ) -> std::result::Result<(), RocmGraphFallbackReason> {
+        let candidate_slot = RocmGraphCandidateSlot {
+            owner,
+            allocations: &allocations,
+            accounting_complete,
+        };
+        let projected = self.memory_accounting_with_retained_slots(
+            &HashSet::new(),
+            None,
+            &HashSet::new(),
+            Some(candidate_slot),
+        );
+        if !projected.complete || projected.retained_bytes > self.max_retained_bytes() {
+            let (rejection, reason) = if !projected.complete {
+                (
+                    RocmGraphAdmissionRejection::AccountingIncomplete,
+                    RocmGraphFallbackReason::GraphAccountingIncomplete,
+                )
+            } else {
+                (
+                    RocmGraphAdmissionRejection::ByteBudget,
+                    RocmGraphFallbackReason::GraphCacheByteBudget,
+                )
+            };
+            self.counters.record_pre_capture_skip(rejection);
+            tracing::warn!(
+                batch_size,
+                graph_slot_id = owner.slot_id(),
+                projected_retained_bytes = projected.retained_bytes,
+                max_retained_bytes = self.max_retained_bytes(),
+                accounting_complete = projected.complete,
+                "ROCm batched graph slot rejected by the hard retained-byte budget"
+            );
+            return Err(reason);
+        }
+
+        self.graph_slots.insert(
+            owner,
+            RocmGraphSlotState {
+                assigned_row: None,
+                batch_size: Some(batch_size),
+                linear_state,
+                allocations,
+                accounting_complete,
+            },
+        );
+        self.batched_graph_slots.insert(batch_size, owner);
+        self.peak_retained_bytes = self.peak_retained_bytes.max(projected.retained_bytes);
+        self.counters.record_graph_slot_create();
+        self.record_ownership_mutation();
+        Ok(())
+    }
+
+    #[cfg(feature = "rocm")]
+    fn bind_batched_state_to_slot(
+        &mut self,
+        batch_size: usize,
+        linear_state: &mut LinearAttentionState,
+    ) -> Result<RocmGraphBindOutcome> {
+        if let Some(owner) = self.batched_graph_slots.get(&batch_size).copied() {
+            let valid = self
+                .graph_slots
+                .get(&owner)
+                .is_some_and(|slot| slot.batch_size == Some(batch_size));
+            if !valid {
+                self.batched_graph_slots.remove(&batch_size);
+            }
+        }
+
+        let owner = if let Some(owner) = self.batched_graph_slots.get(&batch_size).copied() {
+            owner
+        } else {
+            let owner = RocmGraphOwner::Slot(self.next_graph_slot_id);
+            self.next_graph_slot_id = self.next_graph_slot_id.saturating_add(1);
+            let (allocations, accounting_complete) = inspect_rocm_tensor_allocations(
+                linear_state
+                    .recurrent_states
+                    .iter()
+                    .chain(linear_state.conv_states.iter()),
+            );
+            if let Err(reason) = self.publish_batched_graph_slot(
+                batch_size,
+                owner,
+                Self::clone_linear_state_handles(linear_state),
+                allocations,
+                accounting_complete,
+            ) {
+                return Ok(RocmGraphBindOutcome::Fallback(reason));
+            }
+            owner
+        };
+
+        let slot = self
+            .graph_slots
+            .get_mut(&owner)
+            .context("ROCm batched graph width points to a missing persistent slot")?;
+        anyhow::ensure!(
+            slot.assigned_row.is_none() && slot.batch_size == Some(batch_size),
+            "ROCm graph slot {} is not reserved for batch width {batch_size}",
+            owner.slot_id()
+        );
+        if !Self::linear_state_handles_match(&slot.linear_state, linear_state) {
+            Self::restore_linear_state_in_place(
+                &mut slot.linear_state,
+                linear_state,
+                "refresh shared ROCm batched graph slot state",
+            )?;
+            linear_state
+                .recurrent_states
+                .clone_from(&slot.linear_state.recurrent_states);
+            linear_state
+                .conv_states
+                .clone_from(&slot.linear_state.conv_states);
+        }
+        Ok(RocmGraphBindOutcome::Bound(owner))
     }
 
     #[cfg(feature = "rocm")]
@@ -2106,7 +2289,7 @@ impl RocmGraphRunner {
             let preferred = self
                 .graph_slots
                 .iter()
-                .filter(|(_, slot)| slot.assigned_row.is_none())
+                .filter(|(_, slot)| slot.assigned_row.is_none() && slot.batch_size.is_none())
                 .map(|(owner, _)| *owner)
                 .filter(|owner| {
                     self.captured
@@ -2116,7 +2299,7 @@ impl RocmGraphRunner {
             let idle = preferred.or_else(|| {
                 self.graph_slots
                     .iter()
-                    .filter(|(_, slot)| slot.assigned_row.is_none())
+                    .filter(|(_, slot)| slot.assigned_row.is_none() && slot.batch_size.is_none())
                     .map(|(owner, _)| *owner)
                     .min_by_key(|owner| owner.slot_id())
             });
@@ -2941,6 +3124,8 @@ impl RocmGraphRunner {
             }
             self.decode_timelines.remove(owner);
         }
+        self.batched_graph_slots
+            .retain(|_, owner| !selected_slots.contains(owner));
         if remove_selected_slots {
             self.decode_row_slots
                 .retain(|_, owner| !selected_slots.contains(owner));
@@ -3368,10 +3553,11 @@ impl RocmGraphRunner {
         result
     }
 
-    /// Account a successful multi-row eager decode when lazy HIP-graph capture
-    /// was requested. Native ROCm capture is currently single-row only, so a
-    /// batched forward is an explicit route fallback rather than graph activity.
-    pub fn record_multi_row_eager_fallback(
+    /// Preserve the legacy fallback counter contract for historical receipt
+    /// and accounting tests. Supported production multi-row routes now enter
+    /// `decode_step_paged_batched_hidden` instead of calling this helper.
+    #[cfg(test)]
+    fn record_multi_row_eager_fallback(
         &mut self,
         batch_rows: usize,
         duration: std::time::Duration,
@@ -3405,6 +3591,225 @@ impl RocmGraphRunner {
                 slow,
                 "ROCm multi-row eager graph fallback completed"
             );
+        }
+    }
+
+    /// Run a true multi-row ROCm decode through a width/attention-geometry
+    /// keyed HIP graph. `Ok(None)` means graph execution was not requested for
+    /// this runner; once requested, every typed deferral is executed and
+    /// accounted here so callers cannot accidentally double-advance state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_step_paged_batched_hidden(
+        &mut self,
+        backend: &dyn BackendRuntime,
+        token_ids: &[u32],
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCacheKt,
+        block_tables: &[&BlockTable],
+        sequence_lengths: &[usize],
+        linear_state: &mut LinearAttentionState,
+        lora: Option<&LoraWeights>,
+        row_ids: Option<&[u64]>,
+    ) -> Result<Option<Tensor>> {
+        let batch_size = token_ids.len();
+        if !self.enabled
+            || !self.capture_requested
+            || self.policy.force_eager_decode()
+            || batch_size <= 1
+        {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            block_tables.len() == batch_size && sequence_lengths.len() == batch_size,
+            "ROCm batched graph decode metadata row-count mismatch"
+        );
+        if let Some(row_ids) = row_ids {
+            anyhow::ensure!(
+                row_ids.len() == batch_size,
+                "ROCm batched graph decode row-id count mismatch"
+            );
+        }
+
+        #[cfg(feature = "rocm")]
+        {
+            let max_seq_len = sequence_lengths.iter().copied().max().unwrap_or(0);
+            let eager = |linear_state: &mut LinearAttentionState| {
+                model_forward_paged_decode_contiguous_batch_hidden_with_ids(
+                    backend,
+                    token_ids,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_tables,
+                    sequence_lengths,
+                    Some(linear_state),
+                    lora,
+                    row_ids,
+                )
+                .context("ROCm batched eager hidden fallback")
+            };
+            Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
+            let requested_key = RocmGraphKey::new_batched(paged_cache, sequence_lengths)?;
+            let owner = match self.bind_batched_state_to_slot(batch_size, linear_state)? {
+                RocmGraphBindOutcome::Bound(owner) => owner,
+                RocmGraphBindOutcome::Fallback(reason) => {
+                    return self
+                        .run_eager_fallback(reason, max_seq_len, std::time::Duration::ZERO, || {
+                            eager(linear_state)
+                        })
+                        .map(Some);
+                }
+            };
+            let cache_key = RocmGraphCacheKey::new(owner, requested_key.clone());
+            let pressure_decision = self.reconcile_memory_pressure(owner)?;
+            if let RocmGraphPressureDecision::EagerOnly(reason) = pressure_decision {
+                return self
+                    .run_eager_fallback(reason, max_seq_len, std::time::Duration::ZERO, || {
+                        eager(linear_state)
+                    })
+                    .map(Some);
+            }
+            if let Some(reason) = self.non_capture_safe.get(&requested_key).copied() {
+                return self
+                    .run_eager_fallback(reason, max_seq_len, std::time::Duration::ZERO, || {
+                        eager(linear_state)
+                    })
+                    .map(Some);
+            }
+
+            if let Some(adapter_gen) = self
+                .captured
+                .get(&cache_key)
+                .map(|captured| captured.adapter_gen)
+            {
+                if adapter_gen == self.adapter_generation {
+                    let replay_started = std::time::Instant::now();
+                    match self.replay_hidden_batched(
+                        &cache_key,
+                        token_ids,
+                        weights,
+                        paged_cache,
+                        block_tables,
+                        sequence_lengths,
+                    ) {
+                        Ok(hidden) => {
+                            self.touch_captured_graph(&cache_key);
+                            return Ok(Some(hidden));
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                batch_size,
+                                error = %format!("{error:#}"),
+                                "ROCm batched graph replay failed; disabling graphs for this runner"
+                            );
+                            self.enabled = false;
+                            self.release_captured_after_device_settlement(
+                                "batched_replay_failure",
+                            )
+                            .with_context(|| {
+                                format!(
+                                    "ROCm batched graph replay failed ({error:#}) and containment failed"
+                                )
+                            })?;
+                            return self
+                                .run_eager_fallback(
+                                    RocmGraphFallbackReason::ReplayFailure,
+                                    max_seq_len,
+                                    replay_started.elapsed(),
+                                    || eager(linear_state),
+                                )
+                                .map(Some);
+                        }
+                    }
+                } else {
+                    self.release_captured_after_device_settlement(
+                        "batched_adapter_generation_mismatch",
+                    )?;
+                }
+            }
+
+            if let RocmGraphPressureDecision::ReplayOnly(reason) = pressure_decision {
+                return self
+                    .run_eager_fallback(reason, max_seq_len, std::time::Duration::ZERO, || {
+                        eager(linear_state)
+                    })
+                    .map(Some);
+            }
+            if self.budget_capture_suppressed(&requested_key) {
+                return self
+                    .run_eager_fallback(
+                        RocmGraphFallbackReason::GraphCacheByteBudget,
+                        max_seq_len,
+                        std::time::Duration::ZERO,
+                        || eager(linear_state),
+                    )
+                    .map(Some);
+            }
+            if let Some(reason) = self.pre_capture_rejection(&cache_key) {
+                return self
+                    .run_eager_fallback(reason, max_seq_len, std::time::Duration::ZERO, || {
+                        eager(linear_state)
+                    })
+                    .map(Some);
+            }
+
+            let capture_started = std::time::Instant::now();
+            match self.try_capture_batched_hidden(
+                backend,
+                owner,
+                token_ids,
+                weights,
+                config,
+                paged_cache,
+                block_tables,
+                sequence_lengths,
+                linear_state,
+                lora,
+            ) {
+                Ok(RocmCaptureStep::CapturedHidden(hidden))
+                | Ok(RocmCaptureStep::CapturedHiddenUncached(hidden)) => Ok(Some(hidden)),
+                Ok(RocmCaptureStep::FallbackEager { reason, .. }) => self
+                    .run_eager_fallback(reason, max_seq_len, capture_started.elapsed(), || {
+                        eager(linear_state)
+                    })
+                    .map(Some),
+                Err(error) => {
+                    tracing::warn!(
+                        batch_size,
+                        error = %format!("{error:#}"),
+                        "ROCm batched graph capture failed; disabling graphs and containing device work"
+                    );
+                    self.enabled = false;
+                    synchronize_after_rocm_graph_capture_failure(&weights.embed_tokens.device())
+                        .with_context(|| {
+                            format!("batched capture failed before recovery: {error:#}")
+                        })?;
+                    self.run_eager_fallback(
+                        RocmGraphFallbackReason::CaptureFailure,
+                        max_seq_len,
+                        capture_started.elapsed(),
+                        || eager(linear_state),
+                    )
+                    .map(Some)
+                }
+            }
+        }
+
+        #[cfg(not(feature = "rocm"))]
+        {
+            let _ = (
+                backend,
+                weights,
+                config,
+                paged_cache,
+                block_tables,
+                sequence_lengths,
+                linear_state,
+                lora,
+                row_ids,
+            );
+            Ok(None)
         }
     }
 
@@ -4766,6 +5171,101 @@ impl RocmGraphRunner {
         Ok(captured.output_hidden.clone())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn replay_hidden_batched(
+        &mut self,
+        key: &RocmGraphCacheKey,
+        token_ids: &[u32],
+        weights: &GpuWeights,
+        paged_cache: &PagedKvCacheKt,
+        block_tables: &[&BlockTable],
+        sequence_lengths: &[usize],
+    ) -> Result<Tensor> {
+        let result = self.replay_hidden_batched_inner(
+            key,
+            token_ids,
+            weights,
+            paged_cache,
+            block_tables,
+            sequence_lengths,
+        );
+        self.counters.record_replay_outcome(result.is_ok());
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn replay_hidden_batched_inner(
+        &self,
+        key: &RocmGraphCacheKey,
+        token_ids: &[u32],
+        weights: &GpuWeights,
+        paged_cache: &PagedKvCacheKt,
+        block_tables: &[&BlockTable],
+        sequence_lengths: &[usize],
+    ) -> Result<Tensor> {
+        let captured = self
+            .captured
+            .get(key)
+            .context("batched ROCm replay: key vanished")?;
+        anyhow::ensure!(
+            key.graph.batch_size == token_ids.len()
+                && block_tables.len() == token_ids.len()
+                && sequence_lengths.len() == token_ids.len(),
+            "batched ROCm replay row-count mismatch"
+        );
+        paged_cache
+            .ensure_pool_identity(captured.kv_pool_identity)
+            .context("refuse batched ROCm graph replay after paged-KV pool replacement")?;
+
+        Self::update_batched_token_buffer(&captured.token_buffer, token_ids)?;
+        Self::update_batched_position_buffer(&captured.position_buffer, sequence_lengths)?;
+        Self::update_rotary_buffers(
+            &captured.rotary_cos_buffer,
+            &captured.rotary_sin_buffer,
+            &weights.rotary_inv_freq,
+            &captured.position_buffer,
+        )?;
+        let (block_table_buffer, seqused_k_buffer, kv_slot_buffer) = (
+            captured
+                .block_table_buffer
+                .as_ref()
+                .context("batched ROCm graph missing stable block table")?,
+            captured
+                .seqused_k_buffer
+                .as_ref()
+                .context("batched ROCm graph missing stable sequence lengths")?,
+            captured
+                .kv_slot_buffer
+                .as_ref()
+                .context("batched ROCm graph missing stable KV slots")?,
+        );
+        Self::update_batched_paged_metadata_buffers(
+            block_table_buffer,
+            seqused_k_buffer,
+            kv_slot_buffer,
+            block_tables,
+            paged_cache,
+            sequence_lengths,
+            captured.max_seqlen_k,
+        )?;
+
+        captured
+            .default_stream
+            .record_event(&captured.replay_inputs_ready_event)
+            .context("record batched ROCm graph replay inputs")?;
+        captured
+            .capture_stream
+            .wait_event(&captured.replay_inputs_ready_event)
+            .context("order batched ROCm graph replay input handoff")?;
+
+        let mut plan = RocmDecodeReplayPlan::new(captured);
+        let replay_key = kiln_graph::ReplayPlan::key(&plan);
+        let replay_inputs = ReplayInputs::new(&replay_key, &captured.replay_state.inputs);
+        kiln_graph::ReplayPlan::replay(&mut plan, replay_inputs)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        Ok(captured.output_hidden.clone())
+    }
+
     fn replay_state_for_capture(
         key: &RocmGraphKey,
         output_hidden: &Tensor,
@@ -4783,9 +5283,9 @@ impl RocmGraphRunner {
         let replay_key = ReplayKey::new(
             Backend::Rocm,
             "paged_decode_graph_outputs",
-            vec![key.max_seqlen_k, key.max_blocks_per_seq],
+            vec![key.batch_size, key.max_seqlen_k, key.max_blocks_per_seq],
             Some(output_hidden.dtype()),
-            1,
+            key.batch_size,
             true,
         );
         let mut resources = vec![
@@ -4826,9 +5326,22 @@ impl RocmGraphRunner {
             .context("update ROCm graph token buffer")
     }
 
+    fn update_batched_token_buffer(token_buffer: &Tensor, token_ids: &[u32]) -> Result<()> {
+        anyhow::ensure!(token_ids.len() > 1, "batched ROCm graph requires width > 1");
+        kiln_tensor::rocm_write_host_in_place(token_buffer, token_ids)
+            .context("update ROCm graph batched token buffer")
+    }
+
     fn update_position_buffer(position_buffer: &Tensor, position: usize) -> Result<()> {
         kiln_tensor::rocm_write_host_in_place(position_buffer, &[position as f32])
             .context("update ROCm graph position buffer")
+    }
+
+    fn update_batched_position_buffer(position_buffer: &Tensor, positions: &[usize]) -> Result<()> {
+        anyhow::ensure!(positions.len() > 1, "batched ROCm graph requires width > 1");
+        let positions: Vec<f32> = positions.iter().map(|&position| position as f32).collect();
+        kiln_tensor::rocm_write_host_in_place(position_buffer, &positions)
+            .context("update ROCm graph batched position buffer")
     }
 
     fn update_rotary_buffers(
@@ -4881,6 +5394,45 @@ impl RocmGraphRunner {
             as u32];
         kiln_tensor::rocm_write_host_in_place(kv_slot_buffer, &slot)
             .context("update ROCm graph KV slot buffer")?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_batched_paged_metadata_buffers(
+        block_table_buffer: &Tensor,
+        seqused_k_buffer: &Tensor,
+        kv_slot_buffer: &Tensor,
+        block_tables: &[&BlockTable],
+        paged_cache: &PagedKvCacheKt,
+        sequence_lengths: &[usize],
+        max_seqlen_k: usize,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            block_tables.len() > 1 && block_tables.len() == sequence_lengths.len(),
+            "batched ROCm graph paged metadata row-count mismatch"
+        );
+        let mut flat = Vec::with_capacity(block_table_buffer.elem_count());
+        for table in block_tables {
+            flat.extend(Self::padded_block_table(table, paged_cache, max_seqlen_k)?);
+        }
+        anyhow::ensure!(
+            flat.len() == block_table_buffer.elem_count(),
+            "batched ROCm graph block-table shape changed across replay"
+        );
+        kiln_tensor::rocm_write_host_in_place(block_table_buffer, &flat)
+            .context("update ROCm graph batched block table")?;
+
+        let sequence_used: Vec<u32> = sequence_lengths
+            .iter()
+            .map(|&length| {
+                u32::try_from(length + 1).context("ROCm graph sequence length exceeds u32")
+            })
+            .collect::<Result<_>>()?;
+        kiln_tensor::rocm_write_host_in_place(seqused_k_buffer, &sequence_used)
+            .context("update ROCm graph batched sequence lengths")?;
+        let slots = paged_cache.resolve_unique_decode_slots(block_tables, sequence_lengths)?;
+        kiln_tensor::rocm_write_host_in_place(kv_slot_buffer, &slots)
+            .context("update ROCm graph batched KV slots")?;
         Ok(())
     }
 
@@ -4941,6 +5493,59 @@ impl RocmGraphRunner {
         Tensor::from_vec_on(device, vec![slot], vec![1]).context("create ROCm graph KV slot buffer")
     }
 
+    fn new_batched_block_table_buffer(
+        block_tables: &[&BlockTable],
+        paged_cache: &PagedKvCacheKt,
+        max_seqlen_k: usize,
+        device: Device,
+    ) -> Result<Tensor> {
+        anyhow::ensure!(
+            block_tables.len() > 1,
+            "batched ROCm graph requires width > 1"
+        );
+        let mut flat = Vec::new();
+        let mut width = None;
+        for table in block_tables {
+            let padded = Self::padded_block_table(table, paged_cache, max_seqlen_k)?;
+            match width {
+                Some(expected) => anyhow::ensure!(
+                    expected == padded.len(),
+                    "batched ROCm graph block-table widths differ"
+                ),
+                None => width = Some(padded.len()),
+            }
+            flat.extend(padded);
+        }
+        Tensor::from_vec_on(
+            device,
+            flat,
+            vec![block_tables.len(), width.expect("non-empty batch")],
+        )
+        .context("create ROCm graph batched block table")
+    }
+
+    fn new_batched_seqused_k_buffer(device: Device, sequence_lengths: &[usize]) -> Result<Tensor> {
+        let values = sequence_lengths
+            .iter()
+            .map(|&length| {
+                u32::try_from(length + 1).context("ROCm graph sequence length exceeds u32")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Tensor::from_vec_on(device, values, vec![sequence_lengths.len()])
+            .context("create ROCm graph batched sequence lengths")
+    }
+
+    fn new_batched_kv_slot_buffer(
+        block_tables: &[&BlockTable],
+        paged_cache: &PagedKvCacheKt,
+        sequence_lengths: &[usize],
+        device: Device,
+    ) -> Result<Tensor> {
+        let slots = paged_cache.resolve_unique_decode_slots(block_tables, sequence_lengths)?;
+        Tensor::from_vec_on(device, slots, vec![block_tables.len()])
+            .context("create ROCm graph batched KV slots")
+    }
+
     fn new_rotary_cos_buffer(
         config: &ModelConfig,
         device: Device,
@@ -4986,6 +5591,32 @@ impl RocmGraphRunner {
             .context("create ROCm graph output hidden")
     }
 
+    fn new_batched_rotary_buffers(
+        weights: &GpuWeights,
+        positions: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let (cos, sin) =
+            crate::forward::rotary_tables_from_tensor(positions, &weights.rotary_inv_freq)?;
+        Ok((
+            cos.to_dtype(kiln_tensor::DType::F32)?
+                .contiguous()
+                .context("create ROCm graph batched rotary cos")?,
+            sin.to_dtype(kiln_tensor::DType::F32)?
+                .contiguous()
+                .context("create ROCm graph batched rotary sin")?,
+        ))
+    }
+
+    fn new_batched_output_hidden(
+        config: &ModelConfig,
+        device: Device,
+        dtype: kiln_tensor::DType,
+        batch_size: usize,
+    ) -> Result<Tensor> {
+        Tensor::zeros_on(device, vec![batch_size, 1, config.hidden_size], dtype)
+            .context("create ROCm graph batched output hidden")
+    }
+
     fn new_paged_decode_outputs(
         config: &ModelConfig,
         device: Device,
@@ -5010,6 +5641,29 @@ impl RocmGraphRunner {
                 )
                 .context("create ROCm graph paged decode LSE")?,
             );
+        }
+        Ok((outputs, lse))
+    }
+
+    fn new_batched_paged_decode_outputs(
+        config: &ModelConfig,
+        device: Device,
+        dtype: kiln_tensor::DType,
+        batch_size: usize,
+    ) -> Result<(Vec<Tensor>, Vec<Tensor>)> {
+        let mut outputs = Vec::with_capacity(config.num_full_attention_layers);
+        let mut lse = Vec::with_capacity(config.num_full_attention_layers);
+        for _ in 0..config.num_full_attention_layers {
+            outputs.push(Tensor::zeros_on(
+                device,
+                vec![batch_size, 1, config.num_attention_heads, config.head_dim],
+                dtype,
+            )?);
+            lse.push(Tensor::zeros_on(
+                device,
+                vec![batch_size, config.num_attention_heads, 1],
+                kiln_tensor::DType::F32,
+            )?);
         }
         Ok((outputs, lse))
     }
@@ -5048,9 +5702,647 @@ impl RocmGraphRunner {
         Ok(outputs)
     }
 
+    fn new_batched_gdn_decode_outputs(
+        config: &ModelConfig,
+        device: Device,
+        batch_size: usize,
+    ) -> Result<Vec<Tensor>> {
+        let num_linear_layers = config.num_layers - config.num_full_attention_layers;
+        let mut outputs = Vec::with_capacity(num_linear_layers);
+        for _ in 0..num_linear_layers {
+            outputs.push(Tensor::zeros_on(
+                device,
+                vec![
+                    batch_size,
+                    1,
+                    config.linear_num_value_heads,
+                    config.linear_value_head_dim,
+                ],
+                kiln_tensor::DType::BF16,
+            )?);
+        }
+        Ok(outputs)
+    }
+
     /// Capture a HIP graph for this decode step (bs=1), launch it once to
     /// compute + advance state, and return this step's logits. Mirrors
     /// `CudaGraphRunner::try_capture`.
+    #[allow(clippy::too_many_arguments)]
+    fn try_capture_batched_hidden(
+        &mut self,
+        backend: &dyn BackendRuntime,
+        owner: RocmGraphOwner,
+        token_ids: &[u32],
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCacheKt,
+        block_tables: &[&BlockTable],
+        sequence_lengths: &[usize],
+        linear_state: &mut LinearAttentionState,
+        lora: Option<&LoraWeights>,
+    ) -> Result<RocmCaptureStep> {
+        let mut result = self.try_capture_batched_hidden_inner(
+            backend,
+            owner,
+            token_ids,
+            weights,
+            config,
+            paged_cache,
+            block_tables,
+            sequence_lengths,
+            linear_state,
+            lora,
+        );
+        if let Ok(RocmCaptureStep::FallbackEager { cleanup_timer, .. }) = &mut result {
+            drop(cleanup_timer.take());
+        }
+        let outcome = match &result {
+            Ok(RocmCaptureStep::CapturedHidden(_)) => RocmGraphCaptureOutcome::SucceededRetained,
+            Ok(RocmCaptureStep::CapturedHiddenUncached(_)) => {
+                RocmGraphCaptureOutcome::SucceededUncached
+            }
+            Ok(RocmCaptureStep::FallbackEager { .. }) => RocmGraphCaptureOutcome::Deferred,
+            Err(_) => RocmGraphCaptureOutcome::Failed,
+        };
+        self.counters.record_capture_outcome(outcome);
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_capture_batched_hidden_inner(
+        &mut self,
+        backend: &dyn BackendRuntime,
+        owner: RocmGraphOwner,
+        token_ids: &[u32],
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCacheKt,
+        block_tables: &[&BlockTable],
+        sequence_lengths: &[usize],
+        linear_state: &mut LinearAttentionState,
+        lora: Option<&LoraWeights>,
+    ) -> Result<RocmCaptureStep> {
+        let batch_size = token_ids.len();
+        anyhow::ensure!(
+            batch_size > 1
+                && block_tables.len() == batch_size
+                && sequence_lengths.len() == batch_size,
+            "batched ROCm graph capture row-count mismatch"
+        );
+        let device = weights.embed_tokens.device();
+        let dtype = weights.embed_tokens.dtype();
+        let device_idx = match device {
+            Device::Rocm(index) => index,
+            _ => anyhow::bail!("ROCm graphs require a ROCm device"),
+        };
+        let key = RocmGraphKey::new_batched(paged_cache, sequence_lengths)?;
+        let cache_key = RocmGraphCacheKey::new(owner, key.clone());
+        let pre_candidate_headroom_timer = self
+            .phase_telemetry
+            .timer(RocmGraphPhase::PreCandidateHeadroom);
+        match self.reconcile_memory_pressure(owner)? {
+            RocmGraphPressureDecision::Normal => {}
+            RocmGraphPressureDecision::ReplayOnly(reason)
+            | RocmGraphPressureDecision::EagerOnly(reason) => {
+                return Ok(RocmCaptureStep::fallback(reason));
+            }
+        }
+        if let Some(reason) = self.reservation_retry_suppressed(&key) {
+            return Ok(RocmCaptureStep::fallback(reason));
+        }
+        if let Some(reason) = self.reserve_capture_entry_capacity(&cache_key)? {
+            return Ok(RocmCaptureStep::fallback(reason));
+        }
+        drop(pre_candidate_headroom_timer);
+        let candidate_warm_timer = self.phase_telemetry.timer(RocmGraphPhase::CandidateWarm);
+
+        let context = kiln_tensor::primary_rocm_context(device_idx)
+            .context("batched ROCm graph capture context")?;
+        let stream = context
+            .new_stream()
+            .map_err(|error| anyhow::anyhow!("create batched ROCm capture stream: {error}"))?;
+        let blaslt_workspace_lease =
+            kiln_tensor::rocm_blaslt_workspace_lease(device_idx, &context, &stream)
+                .context("lease batched ROCm graph hipBLASLt workspace")?;
+        let default_stream = context.default_stream();
+        let replay_inputs_ready_event = context
+            .new_event()
+            .map_err(|error| anyhow::anyhow!("create batched ROCm input event: {error}"))?;
+        let replay_complete_event = context
+            .new_event()
+            .map_err(|error| anyhow::anyhow!("create batched ROCm completion event: {error}"))?;
+
+        let token_buffer = Tensor::from_vec_on(device, token_ids.to_vec(), vec![batch_size])
+            .context("create ROCm graph batched token buffer")?;
+        let positions: Vec<f32> = sequence_lengths.iter().map(|&value| value as f32).collect();
+        let position_buffer = Tensor::from_vec_on(device, positions, vec![batch_size])
+            .context("create ROCm graph batched position buffer")?;
+        let mut output_hidden = Self::new_batched_output_hidden(config, device, dtype, batch_size)?;
+        let (rotary_cos_buffer, rotary_sin_buffer) =
+            Self::new_batched_rotary_buffers(weights, &position_buffer)?;
+        let block_table_buffer = Some(Self::new_batched_block_table_buffer(
+            block_tables,
+            paged_cache,
+            key.max_seqlen_k,
+            device,
+        )?);
+        let seqused_k_buffer = Some(Self::new_batched_seqused_k_buffer(
+            device,
+            sequence_lengths,
+        )?);
+        let kv_slot_buffer = Some(Self::new_batched_kv_slot_buffer(
+            block_tables,
+            paged_cache,
+            sequence_lengths,
+            device,
+        )?);
+        let (paged_decode_outputs, paged_decode_lse) =
+            Self::new_batched_paged_decode_outputs(config, device, dtype, batch_size)?;
+        let gdn_decode_outputs = Self::new_batched_gdn_decode_outputs(config, device, batch_size)?;
+        Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
+        let stable_graph_io_bytes = graph_tensor_bytes(
+            [
+                &token_buffer,
+                &position_buffer,
+                &output_hidden,
+                &rotary_cos_buffer,
+                &rotary_sin_buffer,
+            ]
+            .into_iter()
+            .chain(
+                [
+                    block_table_buffer.as_ref(),
+                    seqused_k_buffer.as_ref(),
+                    kv_slot_buffer.as_ref(),
+                ]
+                .into_iter()
+                .flatten(),
+            )
+            .chain(paged_decode_outputs.iter())
+            .chain(paged_decode_lse.iter())
+            .chain(gdn_decode_outputs.iter()),
+        );
+
+        let arena_context = kiln_tensor::primary_rocm_context(device_idx)
+            .context("batched ROCm capture arena context")?;
+        let arena = std::rc::Rc::new(std::cell::RefCell::new(
+            kiln_tensor::RocmCaptureArena::new_record(arena_context, device_idx),
+        ));
+        let gdn_snapshot = linear_state
+            .snapshot()
+            .context("snapshot batched GDN state before graph warm pass")?;
+        attributed_rocm_graph_synchronize(
+            "batched_default_inputs_before_warmup",
+            "rocm_graph_capture_warmup",
+            stable_graph_io_bytes,
+            "stable_graph_io",
+            || {
+                context
+                    .synchronize_stream_for(
+                        &default_stream,
+                        kiln_tensor::RocmSyncReason::GraphBoundary,
+                    )
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        )?;
+        let (warm_result, warm_htod) =
+            kiln_tensor::with_rocm_htod_observer_detailed(device_idx, || {
+                kiln_tensor::with_rocm_capture_arena(arena.clone(), || unsafe {
+                    kiln_tensor::with_rocm_graph_capture_stream(stream.clone(), || {
+                        let mut graph_inputs = BatchedPagedDecodeGraphInputs {
+                            token_ids: &token_buffer,
+                            positions: &position_buffer,
+                            block_table: block_table_buffer
+                                .as_ref()
+                                .expect("batched block table allocated"),
+                            seqused_k: seqused_k_buffer
+                                .as_ref()
+                                .expect("batched sequence lengths allocated"),
+                            kv_slot: kv_slot_buffer.as_ref().expect("batched KV slots allocated"),
+                            max_seqlen_k: key.max_seqlen_k,
+                            rotary_cos: &rotary_cos_buffer,
+                            rotary_sin: &rotary_sin_buffer,
+                            attn_out: &paged_decode_outputs,
+                            softmax_lse: &paged_decode_lse,
+                            output_hidden: &mut output_hidden,
+                            linear_state,
+                        };
+                        model_forward_paged_batched_hidden_with_graph_inputs(
+                            backend,
+                            token_ids,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_tables,
+                            sequence_lengths,
+                            lora,
+                            &mut graph_inputs,
+                        )
+                    })
+                })
+            });
+        let warm_sync_result = attributed_rocm_graph_synchronize(
+            "batched_capture_stream_warmup_completion",
+            "rocm_graph_capture_warmup",
+            stable_graph_io_bytes,
+            "stable_graph_io",
+            || {
+                context
+                    .synchronize_stream_for(&stream, kiln_tensor::RocmSyncReason::GraphBoundary)
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        );
+        if let Err(error) = warm_result {
+            warm_sync_result.context("settle failed batched ROCm warm pass")?;
+            Self::restore_linear_state_after_execution(
+                &context,
+                linear_state,
+                &gdn_snapshot,
+                "restore batched GDN state after warm-forward failure",
+            )?;
+            if crate::forward::is_rocm_graph_shape_dependent_attention(&error) {
+                self.non_capture_safe
+                    .insert(key, RocmGraphFallbackReason::ShapeDependentAttention);
+                drop(candidate_warm_timer);
+                return Ok(RocmCaptureStep::fallback_after_candidate(
+                    RocmGraphFallbackReason::ShapeDependentAttention,
+                    &self.phase_telemetry,
+                ));
+            }
+            return Err(error).context("batched frozen-pointer warm pass failed");
+        }
+        warm_sync_result?;
+        Self::restore_linear_state_after_execution(
+            &context,
+            linear_state,
+            &gdn_snapshot,
+            "restore batched GDN state after warm pass",
+        )?;
+        drop(gdn_snapshot);
+        drop(candidate_warm_timer);
+        let pre_native_reservation_timer = self
+            .phase_telemetry
+            .timer(RocmGraphPhase::PreNativeReservation);
+
+        let reserved_stable_io = unique_rocm_tensor_allocations(
+            [
+                &token_buffer,
+                &position_buffer,
+                &output_hidden,
+                &rotary_cos_buffer,
+                &rotary_sin_buffer,
+            ]
+            .into_iter()
+            .chain(
+                [
+                    block_table_buffer.as_ref(),
+                    seqused_k_buffer.as_ref(),
+                    kv_slot_buffer.as_ref(),
+                ]
+                .into_iter()
+                .flatten(),
+            )
+            .chain(paged_decode_outputs.iter())
+            .chain(paged_decode_lse.iter())
+            .chain(gdn_decode_outputs.iter()),
+        )
+        .context("measure batched ROCm graph-stable allocations")?;
+        let reserved_capture_arena = {
+            let arena = arena.borrow();
+            unique_rocm_storage_allocations(device_idx, arena.retained_buffers())
+        };
+        let workspace_stats = blaslt_workspace_lease
+            .stats()
+            .map_err(|error| anyhow::anyhow!(error))
+            .context("measure batched ROCm graph hipBLASLt workspace")?;
+        let reserved_workspace =
+            (workspace_stats.retained_bytes > 0).then_some(RocmAllocationRecord {
+                key: RocmAllocationKey {
+                    device_index: device_idx,
+                    allocation_id: workspace_stats.allocation_id as u64,
+                },
+                bytes: workspace_stats.retained_bytes,
+            });
+        let reserved_accounting = RocmGraphEntryAccounting {
+            stable_io: reserved_stable_io,
+            capture_arena: reserved_capture_arena,
+            blaslt_workspace: reserved_workspace,
+        };
+        let transient_candidate_bytes = reserved_accounting.retained_bytes_excluding_slot();
+        self.phase_telemetry
+            .record_transient_candidate_bytes(transient_candidate_bytes);
+        if warm_htod.copy_count > 0 {
+            let attempts = self.capture_retry.entry(key.clone()).or_insert(0);
+            *attempts += 1;
+            let reason = if *attempts >= Self::CAPTURE_RETRY_LIMIT {
+                self.non_capture_safe.insert(
+                    key.clone(),
+                    RocmGraphFallbackReason::PersistentHostRoundTrip,
+                );
+                self.capture_retry.remove(&key);
+                RocmGraphFallbackReason::PersistentHostRoundTrip
+            } else {
+                RocmGraphFallbackReason::ColdCacheHostRoundTrip
+            };
+            for site in &warm_htod.sites {
+                tracing::warn!(
+                    event = "rocm_graph_capture_host_transfer",
+                    reason = reason.as_str(),
+                    batch_size,
+                    source_file = site.source_file,
+                    source_line = site.source_line,
+                    source_column = site.source_column,
+                    bytes_per_copy = site.bytes_per_copy,
+                    copy_count = site.copy_count,
+                    total_bytes = site.total_bytes,
+                    "batched ROCm graph warm pass observed a host-to-device transfer"
+                );
+            }
+            drop(pre_native_reservation_timer);
+            return Ok(RocmCaptureStep::fallback_after_candidate(
+                reason,
+                &self.phase_telemetry,
+            ));
+        }
+        self.capture_retry.remove(&key);
+
+        match self.reconcile_memory_pressure(owner)? {
+            RocmGraphPressureDecision::Normal => {}
+            RocmGraphPressureDecision::ReplayOnly(reason)
+            | RocmGraphPressureDecision::EagerOnly(reason) => {
+                drop(pre_native_reservation_timer);
+                return Ok(RocmCaptureStep::fallback_after_candidate(
+                    reason,
+                    &self.phase_telemetry,
+                ));
+            }
+        }
+        if !self.matching_memory_governor() {
+            self.counters.memory_governor_selector_mismatch_skips = self
+                .counters
+                .memory_governor_selector_mismatch_skips
+                .saturating_add(1);
+            drop(pre_native_reservation_timer);
+            return Ok(RocmCaptureStep::fallback_after_candidate(
+                RocmGraphFallbackReason::MemoryGovernorSelectorMismatch,
+                &self.phase_telemetry,
+            ));
+        }
+        let Some(governor_candidate_reservation) =
+            kiln_memory::MemoryGovernor::try_global_cached_reserve(transient_candidate_bytes)
+        else {
+            self.remember_reservation_denial(&key, transient_candidate_bytes);
+            self.counters.pre_capture_memory_reservation_denied_skips = self
+                .counters
+                .pre_capture_memory_reservation_denied_skips
+                .saturating_add(1);
+            drop(pre_native_reservation_timer);
+            return Ok(RocmCaptureStep::fallback_after_candidate(
+                RocmGraphFallbackReason::MemoryReservationDenied,
+                &self.phase_telemetry,
+            ));
+        };
+        self.reservation_denied_bytes.remove(&key);
+        self.reservation_denied_wide_bytes = None;
+        if let Some(reason) = self.reserve_capture_candidate(&cache_key, &reserved_accounting)? {
+            drop(pre_native_reservation_timer);
+            return Ok(RocmCaptureStep::fallback_after_candidate(
+                reason,
+                &self.phase_telemetry,
+            ));
+        }
+        drop(pre_native_reservation_timer);
+
+        let mut native_capture_timer =
+            Some(self.phase_telemetry.timer(RocmGraphPhase::NativeCapture));
+        arena.borrow_mut().begin_replay();
+        let capture_snapshot = linear_state
+            .snapshot()
+            .context("snapshot batched GDN state before native capture")?;
+        let mut capture_failure_guard = RocmCaptureFailureGuard::new(context.clone());
+        attributed_rocm_graph_synchronize(
+            "batched_default_inputs_before_capture",
+            "rocm_graph_capture_begin",
+            stable_graph_io_bytes,
+            "stable_graph_io",
+            || {
+                context
+                    .synchronize_stream_for(
+                        &default_stream,
+                        kiln_tensor::RocmSyncReason::GraphBoundary,
+                    )
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        )?;
+        attributed_rocm_graph_synchronize(
+            "batched_capture_stream_before_begin",
+            "rocm_graph_capture_begin",
+            stable_graph_io_bytes,
+            "stable_graph_io",
+            || {
+                context
+                    .synchronize_stream_for(&stream, kiln_tensor::RocmSyncReason::GraphBoundary)
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        )?;
+        stream
+            .begin_capture()
+            .map_err(|error| anyhow::anyhow!("begin batched ROCm capture: {error}"))?;
+        let capture_result = kiln_tensor::with_rocm_capture_arena(arena.clone(), || unsafe {
+            kiln_tensor::with_rocm_graph_capture_stream(stream.clone(), || {
+                let mut graph_inputs = BatchedPagedDecodeGraphInputs {
+                    token_ids: &token_buffer,
+                    positions: &position_buffer,
+                    block_table: block_table_buffer
+                        .as_ref()
+                        .expect("batched block table allocated"),
+                    seqused_k: seqused_k_buffer
+                        .as_ref()
+                        .expect("batched sequence lengths allocated"),
+                    kv_slot: kv_slot_buffer.as_ref().expect("batched KV slots allocated"),
+                    max_seqlen_k: key.max_seqlen_k,
+                    rotary_cos: &rotary_cos_buffer,
+                    rotary_sin: &rotary_sin_buffer,
+                    attn_out: &paged_decode_outputs,
+                    softmax_lse: &paged_decode_lse,
+                    output_hidden: &mut output_hidden,
+                    linear_state,
+                };
+                model_forward_paged_batched_hidden_with_graph_inputs(
+                    backend,
+                    token_ids,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_tables,
+                    sequence_lengths,
+                    lora,
+                    &mut graph_inputs,
+                )
+            })
+        });
+        let graph_result = stream.end_capture();
+        if let Err(error) = capture_result {
+            capture_failure_guard.settle_before_rollback()?;
+            capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
+                linear_state,
+                &capture_snapshot,
+                "restore batched GDN state after capture-forward failure",
+            ))?;
+            return Err(error).context("batched forward failed during ROCm graph capture");
+        }
+        let graph = match graph_result {
+            Ok(graph) => graph,
+            Err(error) => {
+                capture_failure_guard.settle_before_rollback()?;
+                capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
+                    linear_state,
+                    &capture_snapshot,
+                    "restore batched GDN state after end-capture failure",
+                ))?;
+                return Err(anyhow::anyhow!("end batched ROCm capture: {error}"));
+            }
+        };
+        capture_failure_guard.graph = Some(graph);
+        let exec = match capture_failure_guard
+            .graph
+            .as_ref()
+            .expect("captured batched graph installed")
+            .instantiate()
+        {
+            Ok(exec) => exec,
+            Err(error) => {
+                capture_failure_guard.settle_before_rollback()?;
+                capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
+                    linear_state,
+                    &capture_snapshot,
+                    "restore batched GDN state after graph-instantiation failure",
+                ))?;
+                return Err(anyhow::anyhow!("instantiate batched ROCm graph: {error}"));
+            }
+        };
+        capture_failure_guard.exec = Some(exec);
+        if let Err(error) = capture_failure_guard
+            .exec
+            .as_ref()
+            .expect("batched ROCm graph exec installed")
+            .launch(&stream)
+        {
+            capture_failure_guard.settle_before_rollback()?;
+            capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
+                linear_state,
+                &capture_snapshot,
+                "restore batched GDN state after first launch failure",
+            ))?;
+            return Err(anyhow::anyhow!("first batched ROCm graph launch: {error}"));
+        }
+        if let Err(error) = attributed_rocm_graph_synchronize(
+            "batched_first_launch_completion",
+            "rocm_graph_first_launch",
+            stable_graph_io_bytes,
+            "stable_graph_io",
+            || {
+                context
+                    .synchronize_stream_for(&stream, kiln_tensor::RocmSyncReason::GraphBoundary)
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        ) {
+            capture_failure_guard.settle_before_rollback()?;
+            capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
+                linear_state,
+                &capture_snapshot,
+                "restore batched GDN state after first-launch wait failure",
+            ))?;
+            return Err(error).context("settle first batched ROCm graph launch");
+        }
+
+        let captured_hidden = output_hidden.clone();
+        let arena_buffers = arena.borrow_mut().take_retained();
+        let workspace_stats = blaslt_workspace_lease
+            .stats()
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let blaslt_workspace =
+            (workspace_stats.retained_bytes > 0).then_some(RocmAllocationRecord {
+                key: RocmAllocationKey {
+                    device_index: device_idx,
+                    allocation_id: workspace_stats.allocation_id as u64,
+                },
+                bytes: workspace_stats.retained_bytes,
+            });
+        let RocmGraphEntryAccounting {
+            stable_io,
+            capture_arena,
+            blaslt_workspace: _,
+        } = reserved_accounting;
+        let accounting = RocmGraphEntryAccounting {
+            stable_io,
+            capture_arena,
+            blaslt_workspace,
+        };
+        let replay_state = Self::replay_state_for_capture(
+            &key,
+            &output_hidden,
+            &token_buffer,
+            &position_buffer,
+            block_table_buffer.as_ref(),
+            seqused_k_buffer.as_ref(),
+            kv_slot_buffer.as_ref(),
+            &rotary_cos_buffer,
+            &rotary_sin_buffer,
+            &paged_decode_outputs,
+            &paged_decode_lse,
+            &gdn_decode_outputs,
+        );
+        let graph = capture_failure_guard
+            .graph
+            .take()
+            .expect("successful batched capture retains source graph");
+        let exec = capture_failure_guard
+            .exec
+            .take()
+            .expect("successful batched capture retains graph exec");
+        capture_failure_guard.disarm();
+        let candidate = CapturedDecodeGraphRocm {
+            accounting,
+            last_used_tick: 0,
+            _graph: graph,
+            exec,
+            output_hidden,
+            capture_stream: stream,
+            context,
+            default_stream,
+            replay_inputs_ready_event,
+            replay_complete_event,
+            adapter_gen: self.adapter_generation,
+            kv_pool_identity: paged_cache.pool_identity(),
+            token_buffer,
+            position_buffer,
+            block_table_buffer,
+            seqused_k_buffer,
+            kv_slot_buffer,
+            rotary_cos_buffer,
+            rotary_sin_buffer,
+            _paged_decode_outputs: paged_decode_outputs,
+            _paged_decode_lse: paged_decode_lse,
+            max_seqlen_k: key.max_seqlen_k,
+            _gdn_decode_outputs: gdn_decode_outputs,
+            _capture_arena_buffers: arena_buffers,
+            replay_state,
+            _blaslt_workspace_lease: blaslt_workspace_lease,
+        };
+        let retained =
+            self.admit_captured_graph(cache_key, candidate, &mut native_capture_timer)?;
+        if retained {
+            governor_candidate_reservation.commit_allocated();
+        }
+        drop(native_capture_timer.take());
+        Ok(if retained {
+            RocmCaptureStep::CapturedHidden(captured_hidden)
+        } else {
+            RocmCaptureStep::CapturedHiddenUncached(captured_hidden)
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn try_capture(
         &mut self,
@@ -5952,6 +7244,24 @@ mod tests {
 
     #[cfg(feature = "rocm")]
     #[test]
+    fn batched_graph_key_includes_width_and_max_attention_geometry() {
+        let cache = PagedKvCacheKt::new(0, 8, 64, 1, 8, kiln_tensor::DType::BF16, Device::Cpu)
+            .expect("metadata-only paged cache");
+
+        let width_two = RocmGraphKey::new_batched(&cache, &[62, 64]).expect("width-two key");
+        let width_three = RocmGraphKey::new_batched(&cache, &[1, 64, 3]).expect("width-three key");
+
+        assert_eq!(width_two.batch_size, 2);
+        assert_eq!(width_two.max_seqlen_k, 128);
+        assert_eq!(width_two.max_blocks_per_seq, 2);
+        assert_eq!(width_three.batch_size, 3);
+        assert_eq!(width_three.max_seqlen_k, width_two.max_seqlen_k);
+        assert_eq!(width_three.max_blocks_per_seq, width_two.max_blocks_per_seq);
+        assert_ne!(width_two, width_three);
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
     fn retained_byte_accounting_deduplicates_physical_allocations_across_categories() {
         let first = RocmAllocationRecord {
             key: RocmAllocationKey {
@@ -6020,6 +7330,7 @@ mod tests {
         let candidate_oldest = RocmGraphCacheKey::new(
             candidate,
             RocmGraphKey {
+                batch_size: 1,
                 max_seqlen_k: 128,
                 max_blocks_per_seq: 2,
             },
@@ -6027,6 +7338,7 @@ mod tests {
         let candidate_middle = RocmGraphCacheKey::new(
             candidate,
             RocmGraphKey {
+                batch_size: 1,
                 max_seqlen_k: 256,
                 max_blocks_per_seq: 4,
             },
@@ -6034,6 +7346,7 @@ mod tests {
         let candidate_newest = RocmGraphCacheKey::new(
             candidate,
             RocmGraphKey {
+                batch_size: 1,
                 max_seqlen_k: 512,
                 max_blocks_per_seq: 8,
             },
@@ -6041,6 +7354,7 @@ mod tests {
         let peer_oldest = RocmGraphCacheKey::new(
             peer,
             RocmGraphKey {
+                batch_size: 1,
                 max_seqlen_k: 128,
                 max_blocks_per_seq: 2,
             },
@@ -6048,6 +7362,7 @@ mod tests {
         let peer_newest = RocmGraphCacheKey::new(
             peer,
             RocmGraphKey {
+                batch_size: 1,
                 max_seqlen_k: 256,
                 max_blocks_per_seq: 4,
             },
@@ -6055,6 +7370,7 @@ mod tests {
         let singleton_key = RocmGraphCacheKey::new(
             singleton,
             RocmGraphKey {
+                batch_size: 1,
                 max_seqlen_k: 128,
                 max_blocks_per_seq: 2,
             },
@@ -6062,6 +7378,7 @@ mod tests {
         let inactive_key = RocmGraphCacheKey::new(
             inactive,
             RocmGraphKey {
+                batch_size: 1,
                 max_seqlen_k: 64,
                 max_blocks_per_seq: 1,
             },
@@ -6102,6 +7419,7 @@ mod tests {
                 RocmGraphCacheKey::new(
                     owner,
                     RocmGraphKey {
+                        batch_size: 1,
                         max_seqlen_k,
                         max_blocks_per_seq: max_seqlen_k / 64,
                     },
@@ -6311,6 +7629,26 @@ mod tests {
             .expect("read hidden")
     }
 
+    #[cfg(feature = "rocm")]
+    fn configure_rocm_graph_test_memory_governor(device: &Device) {
+        let selector = device.memory_probe_selector();
+        kiln_memory::MemoryGovernor::configure_global(
+            selector,
+            kiln_memory::GovernorConfig::default(),
+        )
+        .expect("configure ROCm graph test memory governor");
+        let snapshot = kiln_memory::MemoryGovernor::global().refresh();
+        assert!(
+            !snapshot.observations.probe_failed,
+            "ROCm graph test memory probe must publish a usable snapshot"
+        );
+        assert_eq!(
+            kiln_memory::MemoryGovernor::global_configuration().selector,
+            selector,
+            "ROCm graph runner and process memory governor must name the same device"
+        );
+    }
+
     #[test]
     fn graph_policy_defaults_are_eager_and_cache_bounds_are_validated() {
         let default_policy = RocmGraphExecutionPolicy::default();
@@ -6474,6 +7812,7 @@ mod tests {
                 owner,
                 RocmGraphSlotState {
                     assigned_row: Some(row_id),
+                    batch_size: None,
                     linear_state: LinearAttentionState {
                         recurrent_states: Vec::new(),
                         conv_states: Vec::new(),
@@ -6525,6 +7864,7 @@ mod tests {
             owner,
             RocmGraphSlotState {
                 assigned_row: Some(9),
+                batch_size: None,
                 linear_state: LinearAttentionState {
                     recurrent_states: Vec::new(),
                     conv_states: Vec::new(),
@@ -6568,6 +7908,7 @@ mod tests {
         let requested = RocmGraphCacheKey::new(
             owner,
             RocmGraphKey {
+                batch_size: 1,
                 max_seqlen_k: 512,
                 max_blocks_per_seq: 8,
             },
@@ -6615,6 +7956,7 @@ mod tests {
         assert_eq!(runner.counters.pre_capture_byte_budget_skips, 1);
 
         let key = RocmGraphKey {
+            batch_size: 1,
             max_seqlen_k: 512,
             max_blocks_per_seq: 8,
         };
@@ -6681,6 +8023,7 @@ mod tests {
             RocmGraphExecutionPolicy::lazy_capture_replay(),
         );
         let graph = RocmGraphKey {
+            batch_size: 1,
             max_seqlen_k: 512,
             max_blocks_per_seq: 8,
         };
@@ -6720,6 +8063,7 @@ mod tests {
             owner,
             RocmGraphSlotState {
                 assigned_row: Some(12),
+                batch_size: None,
                 linear_state: LinearAttentionState {
                     recurrent_states: Vec::new(),
                     conv_states: Vec::new(),
@@ -6731,6 +8075,7 @@ mod tests {
         let key = RocmGraphCacheKey::new(
             owner,
             RocmGraphKey {
+                batch_size: 1,
                 max_seqlen_k: 512,
                 max_blocks_per_seq: 8,
             },
@@ -6783,6 +8128,7 @@ mod tests {
             owner,
             RocmGraphSlotState {
                 assigned_row: Some(row_id),
+                batch_size: None,
                 linear_state: LinearAttentionState {
                     recurrent_states: Vec::new(),
                     conv_states: Vec::new(),
@@ -6793,6 +8139,7 @@ mod tests {
         );
         runner.decode_row_slots.insert(row_id, owner);
         let graph = RocmGraphKey {
+            batch_size: 1,
             max_seqlen_k: 1024,
             max_blocks_per_seq: 16,
         };
@@ -6829,6 +8176,7 @@ mod tests {
 
         for bucket in 0..2 {
             let graph = RocmGraphKey {
+                batch_size: 1,
                 max_seqlen_k: 512 + bucket,
                 max_blocks_per_seq: 8,
             };
@@ -6847,6 +8195,7 @@ mod tests {
 
         for bucket in 2..=RocmGraphRunner::MAX_BUDGET_REJECTION_GEOMETRIES {
             let graph = RocmGraphKey {
+                batch_size: 1,
                 max_seqlen_k: 512 + bucket,
                 max_blocks_per_seq: 8,
             };
@@ -6860,6 +8209,7 @@ mod tests {
             Some(runner.budget_relief_generation)
         );
         let unseen = RocmGraphKey {
+            batch_size: 1,
             max_seqlen_k: usize::MAX,
             max_blocks_per_seq: usize::MAX,
         };
@@ -6874,6 +8224,7 @@ mod tests {
             RocmGraphExecutionPolicy::lazy_capture_replay(),
         );
         let graph = RocmGraphKey {
+            batch_size: 1,
             max_seqlen_k: 2048,
             max_blocks_per_seq: 32,
         };
@@ -6887,6 +8238,7 @@ mod tests {
         for bucket in 0..=RocmGraphRunner::MAX_BUDGET_REJECTION_GEOMETRIES {
             runner.remember_reservation_denial(
                 &RocmGraphKey {
+                    batch_size: 1,
                     max_seqlen_k: bucket,
                     max_blocks_per_seq: 1,
                 },
@@ -6936,6 +8288,7 @@ mod tests {
         }
 
         let key = RocmGraphKey {
+            batch_size: 1,
             max_seqlen_k: 512,
             max_blocks_per_seq: 8,
         };
@@ -6944,6 +8297,19 @@ mod tests {
             RocmGraphExecutionPolicy::lazy_capture_replay(),
         );
         let mut first = state([1.0, 2.0], [3.0, 4.0]);
+        let owner = RocmGraphOwner::Slot(runner.next_graph_slot_id);
+        runner.next_graph_slot_id += 1;
+        runner
+            .publish_new_graph_slot(
+                1001,
+                owner,
+                RocmGraphRunner::clone_linear_state_handles(&first),
+                Vec::new(),
+                true,
+            )
+            .expect("install explicitly accounted test slot");
+        runner.decode_row_slots.insert(1001, owner);
+        runner.graph_slots.get_mut(&owner).unwrap().assigned_row = Some(1001);
         let owner = match runner
             .bind_decode_row_to_slot(1001, &key, &mut first)
             .expect("bind first row")
@@ -6987,6 +8353,367 @@ mod tests {
         assert_eq!(runner.stats().graph_slot_reuse_count, 1);
     }
 
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn batched_graph_slot_refreshes_cohort_without_replacing_handles() {
+        fn state(recurrent: [f32; 4], conv: [f32; 4]) -> LinearAttentionState {
+            LinearAttentionState {
+                recurrent_states: vec![
+                    Tensor::from_vec(recurrent.to_vec(), (2, 2)).expect("recurrent state"),
+                ],
+                conv_states: vec![
+                    Tensor::from_vec(conv.to_vec(), (2, 2)).expect("convolution state"),
+                ],
+            }
+        }
+
+        let mut runner = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
+        let mut first = state([1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]);
+        let owner = RocmGraphOwner::Slot(runner.next_graph_slot_id);
+        runner.next_graph_slot_id += 1;
+        runner
+            .publish_batched_graph_slot(
+                2,
+                owner,
+                RocmGraphRunner::clone_linear_state_handles(&first),
+                Vec::new(),
+                true,
+            )
+            .expect("install explicitly accounted batched test slot");
+        assert!(matches!(
+            runner
+                .bind_batched_state_to_slot(2, &mut first)
+                .expect("bind initial cohort"),
+            RocmGraphBindOutcome::Bound(bound) if bound == owner
+        ));
+        let recurrent_id = first.recurrent_states[0].id();
+        let conv_id = first.conv_states[0].id();
+
+        let mut second = state([11.0, 12.0, 13.0, 14.0], [15.0, 16.0, 17.0, 18.0]);
+        assert!(matches!(
+            runner
+                .bind_batched_state_to_slot(2, &mut second)
+                .expect("refresh changed cohort"),
+            RocmGraphBindOutcome::Bound(bound) if bound == owner
+        ));
+
+        assert_eq!(second.recurrent_states[0].id(), recurrent_id);
+        assert_eq!(second.conv_states[0].id(), conv_id);
+        assert_eq!(
+            second.recurrent_states[0].to_vec::<f32>().unwrap(),
+            vec![11.0, 12.0, 13.0, 14.0]
+        );
+        assert_eq!(
+            second.conv_states[0].to_vec::<f32>().unwrap(),
+            vec![15.0, 16.0, 17.0, 18.0]
+        );
+        assert_eq!(runner.batched_graph_slots.get(&2), Some(&owner));
+        let stats = runner.stats();
+        assert_eq!(stats.graph_slot_create_count, 1);
+        assert_eq!(stats.graph_slot_reuse_count, 0);
+        assert_eq!(stats.active_graph_slot_count, 1);
+        assert_eq!(stats.idle_graph_slot_count, 0);
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn single_row_binding_never_adopts_a_batched_graph_slot() {
+        let state = || LinearAttentionState {
+            recurrent_states: vec![Tensor::from_vec(vec![1.0f32, 2.0], (1, 2)).unwrap()],
+            conv_states: vec![Tensor::from_vec(vec![3.0f32, 4.0], (1, 2)).unwrap()],
+        };
+        let mut runner = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
+        let batch_owner = RocmGraphOwner::Slot(1);
+        runner
+            .publish_batched_graph_slot(
+                2,
+                batch_owner,
+                LinearAttentionState {
+                    recurrent_states: Vec::new(),
+                    conv_states: Vec::new(),
+                },
+                Vec::new(),
+                true,
+            )
+            .expect("install batched slot");
+        let row_owner = RocmGraphOwner::Slot(2);
+        runner
+            .publish_new_graph_slot(7, row_owner, state(), Vec::new(), true)
+            .expect("install row slot");
+
+        let mut row_state = state();
+        let key = RocmGraphKey {
+            batch_size: 1,
+            max_seqlen_k: 64,
+            max_blocks_per_seq: 1,
+        };
+        let bound = runner
+            .bind_decode_row_to_slot(7, &key, &mut row_state)
+            .expect("bind row");
+        assert_eq!(bound, RocmGraphBindOutcome::Bound(row_owner));
+        assert_eq!(runner.decode_row_slots.get(&7), Some(&row_owner));
+        assert_eq!(runner.batched_graph_slots.get(&2), Some(&batch_owner));
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn evicting_a_batched_owner_removes_its_width_mapping() {
+        let mut runner = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
+        let owner = RocmGraphOwner::Slot(9);
+        runner
+            .publish_batched_graph_slot(
+                4,
+                owner,
+                LinearAttentionState {
+                    recurrent_states: Vec::new(),
+                    conv_states: Vec::new(),
+                },
+                Vec::new(),
+                true,
+            )
+            .expect("install batched slot");
+
+        runner
+            .evict_graph_owners(
+                &HashSet::from([owner]),
+                "test_batched_slot_eviction",
+                RocmGraphEvictionReason::Invalidation,
+                true,
+            )
+            .expect("evict batched owner");
+
+        assert!(!runner.graph_slots.contains_key(&owner));
+        assert!(!runner.batched_graph_slots.contains_key(&4));
+    }
+
+    /// Real gfx1151 proof that one width-four graph can refresh heterogeneous
+    /// row metadata without changing semantics. Every step is compared against
+    /// an independent eager cache, including the complete K/V pool contents.
+    #[cfg(feature = "rocm")]
+    #[test]
+    #[ignore = "requires an explicit real-ROCm qualification run"]
+    fn batched_graph_width_four_matches_eager_hidden_and_kv() -> Result<()> {
+        assert_eq!(
+            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
+            Some("1"),
+            "set KILN_QUALIFICATION=1 for the explicit hardware run"
+        );
+        assert!(
+            kiln_tensor::rocm_is_available(),
+            "ROCm qualification requested but no ROCm device is available"
+        );
+
+        let device = Device::Rocm(0);
+        configure_rocm_graph_test_memory_governor(&device);
+        let backend = crate::backend::for_device_kt(&device);
+        let (config, weights) = stale_generation_test_fixture(&device);
+        let graph_cache = PagedKvCacheKt::new(
+            1,
+            32,
+            16,
+            config.num_kv_heads,
+            config.head_dim,
+            kiln_tensor::DType::BF16,
+            device,
+        )
+        .expect("batched graph paged cache");
+        let eager_cache = PagedKvCacheKt::new(
+            1,
+            32,
+            16,
+            config.num_kv_heads,
+            config.head_dim,
+            kiln_tensor::DType::BF16,
+            device,
+        )
+        .expect("batched eager paged cache");
+        let tables = [
+            BlockTable { blocks: vec![0, 1] },
+            BlockTable { blocks: vec![4, 5] },
+            BlockTable { blocks: vec![8, 9] },
+            BlockTable {
+                blocks: vec![12, 13],
+            },
+        ];
+        let table_refs: Vec<&BlockTable> = tables.iter().collect();
+        let row_ids = [4101, 4102, 4103, 4104];
+        let mut graph_state = LinearAttentionState {
+            recurrent_states: Vec::new(),
+            conv_states: Vec::new(),
+        };
+        let mut eager_state = LinearAttentionState {
+            recurrent_states: Vec::new(),
+            conv_states: Vec::new(),
+        };
+        let mut graph_runner =
+            RocmGraphRunner::new(&device, RocmGraphExecutionPolicy::lazy_capture_replay());
+
+        for step in 1usize..=24 {
+            let token_ids = [
+                (step % config.vocab_size) as u32,
+                ((step + 5) % config.vocab_size) as u32,
+                ((step + 11) % config.vocab_size) as u32,
+                ((step + 17) % config.vocab_size) as u32,
+            ];
+            let sequence_lengths = [step, step + 1, step + 2, step + 3];
+            let graph_hidden = graph_runner
+                .decode_step_paged_batched_hidden(
+                    backend.as_ref(),
+                    &token_ids,
+                    &weights,
+                    &config,
+                    &graph_cache,
+                    &table_refs,
+                    &sequence_lengths,
+                    &mut graph_state,
+                    None,
+                    Some(&row_ids),
+                )
+                .expect("batched graph decode")
+                .expect("lazy ROCm graph runner must own the requested decode");
+            let eager_hidden = model_forward_paged_decode_contiguous_batch_hidden_with_ids(
+                backend.as_ref(),
+                &token_ids,
+                &weights,
+                &config,
+                &eager_cache,
+                &table_refs,
+                &sequence_lengths,
+                Some(&mut eager_state),
+                None,
+                Some(&row_ids),
+            )
+            .expect("batched eager oracle");
+
+            let graph_values = hidden_f32(&graph_hidden);
+            let eager_values = hidden_f32(&eager_hidden);
+            if graph_values != eager_values {
+                let first = graph_values
+                    .iter()
+                    .zip(&eager_values)
+                    .enumerate()
+                    .find(|(_, (graph, eager))| graph != eager)
+                    .map(|(index, (&graph, &eager))| (index, graph, eager));
+                let max_abs_diff = graph_values
+                    .iter()
+                    .zip(&eager_values)
+                    .map(|(&graph, &eager)| (graph - eager).abs())
+                    .fold(0.0f32, f32::max);
+                let row_diffs: Vec<_> = graph_values
+                    .chunks_exact(config.hidden_size)
+                    .zip(eager_values.chunks_exact(config.hidden_size))
+                    .enumerate()
+                    .map(|(row, (graph, eager))| {
+                        let mismatch_count = graph
+                            .iter()
+                            .zip(eager)
+                            .filter(|(graph, eager)| graph != eager)
+                            .count();
+                        let max_abs_diff = graph
+                            .iter()
+                            .zip(eager)
+                            .map(|(&graph, &eager)| (graph - eager).abs())
+                            .fold(0.0f32, f32::max);
+                        (row, mismatch_count, max_abs_diff)
+                    })
+                    .collect();
+                let captured_inputs = graph_runner.captured.values().next().map(|captured| {
+                    let read_u32 = |tensor: &Tensor| {
+                        tensor
+                            .to_device(Device::Cpu)
+                            .expect("copy captured u32 input to CPU")
+                            .to_vec::<u32>()
+                            .expect("read captured u32 input")
+                    };
+                    let expected_rotary = crate::forward::rotary_tables_from_tensor(
+                        &captured.position_buffer,
+                        &weights.rotary_inv_freq,
+                    )
+                    .expect("recompute expected replay rotary tables");
+                    (
+                        read_u32(&captured.token_buffer),
+                        hidden_f32(&captured.position_buffer),
+                        captured.block_table_buffer.as_ref().map(read_u32),
+                        captured.seqused_k_buffer.as_ref().map(read_u32),
+                        captured.kv_slot_buffer.as_ref().map(read_u32),
+                        hidden_f32(&captured.rotary_cos_buffer) == hidden_f32(&expected_rotary.0),
+                        hidden_f32(&captured.rotary_sin_buffer) == hidden_f32(&expected_rotary.1),
+                    )
+                });
+                let stats = graph_runner.stats();
+                graph_runner
+                    .invalidate()
+                    .context("settle batched graph after hidden parity mismatch")?;
+                anyhow::bail!(
+                    "batched hidden mismatch at step {step}: first={first:?}, \
+                     max_abs_diff={max_abs_diff}, row_diffs={row_diffs:?}, \
+                     captured_inputs={captured_inputs:?}, stats={stats:?}"
+                );
+            }
+            for layer in 0..graph_cache.num_layers() {
+                let (graph_k, graph_v) =
+                    graph_cache.pool_tensors(layer).expect("graph cache layer");
+                let (eager_k, eager_v) =
+                    eager_cache.pool_tensors(layer).expect("eager cache layer");
+                anyhow::ensure!(
+                    hidden_f32(&graph_k) == hidden_f32(&eager_k),
+                    "batched K-pool mismatch at layer {layer}, step {step}"
+                );
+                anyhow::ensure!(
+                    hidden_f32(&graph_v) == hidden_f32(&eager_v),
+                    "batched V-pool mismatch at layer {layer}, step {step}"
+                );
+            }
+        }
+
+        let stats = graph_runner.stats();
+        let retained_width_four = graph_runner.captured.keys().any(|key| {
+            key.graph.batch_size == 4
+                && key.graph.max_seqlen_k == 64
+                && key.graph.max_blocks_per_seq == 4
+        });
+        eprintln!("[rocm-batched-graph-parity] stats={stats:?}");
+        graph_runner
+            .invalidate()
+            .expect("settle batched graphs before evaluating test assertions");
+
+        anyhow::ensure!(
+            stats.capture_successes > 0,
+            "native capture never succeeded: {stats:?}"
+        );
+        anyhow::ensure!(
+            stats.replay_successes == 23,
+            "expected 23 native replays after capture: {stats:?}"
+        );
+        anyhow::ensure!(stats.failures == 0, "native graph failure: {stats:?}");
+        anyhow::ensure!(retained_width_four, "width-four graph was not retained");
+        anyhow::ensure!(
+            stats.active_graph_slot_count == 1 && stats.idle_graph_slot_count == 0,
+            "retained width-four slot must be reported active: {stats:?}"
+        );
+        anyhow::ensure!(
+            stats.fallbacks.multi_row_batch_unsupported == 0,
+            "native multi-row route must not use the historical eager fallback"
+        );
+        eprintln!(
+            "[rocm-batched-graph-parity] captures={}; deferrals={}; replays={}; fallbacks={}",
+            stats.capture_successes,
+            stats.capture_deferrals,
+            stats.replay_successes,
+            stats.fallbacks.total,
+        );
+        Ok(())
+    }
+
     /// A decode geometry that cannot use graph-stable native attention must
     /// remain eager. Capturing its sequence-length-shaped fallback would appear
     /// to succeed but would silently reuse the captured K/V length on replay.
@@ -7002,6 +8729,7 @@ mod tests {
         assert!(kiln_tensor::rocm_is_available());
 
         let device = Device::Rocm(0);
+        configure_rocm_graph_test_memory_governor(&device);
         let backend = crate::backend::for_device_kt(&device);
         let (config, weights) = rocm_graph_test_fixture(&device, 1, 1, 64);
         let graph_cache = PagedKvCacheKt::new(
@@ -7090,6 +8818,7 @@ mod tests {
         assert!(kiln_tensor::rocm_is_available());
 
         let device = Device::Rocm(0);
+        configure_rocm_graph_test_memory_governor(&device);
         let backend = crate::backend::for_device_kt(&device);
         let (config, weights) = stale_generation_test_fixture(&device);
         let graph_cache = PagedKvCacheKt::new(
@@ -7343,6 +9072,7 @@ mod tests {
         );
 
         let device = Device::Rocm(0);
+        configure_rocm_graph_test_memory_governor(&device);
         let backend = crate::backend::for_device_kt(&device);
         let (config, weights) = stale_generation_test_fixture(&device);
         let graph_cache = PagedKvCacheKt::new(

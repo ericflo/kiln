@@ -431,11 +431,14 @@ capture remains enabled, at least one capture or replay succeeds, graph failures
 are zero, and the complete eager-fallback delta is zero. This prevents a
 nominally graph-enabled performance row from passing after executing only the
 eager path. Graph failures also participate in `server_reported_no_errors`.
-Native ROCm capture is currently single-row only. A successful multi-row eager
-forward therefore increments `multi_row_batch_unsupported`, its fallback
-duration, and the total. The receipt remains evidence-valid but
-`rocm_graph_execution_accounted` fails, preventing that eager batch from being
-reported as qualified graph performance.
+Current ROCm capture includes the contiguous BF16 multi-row route. A qualified
+batched graph row must show successful capture/replay, zero graph failures, and
+zero fallback delta; `multi_row_batch_unsupported` remains a closed historical
+reason for receipt compatibility. Older binaries incremented that counter for
+every successful multi-row eager forward, so those receipts remain
+evidence-valid but fail `rocm_graph_execution_accounted`. The current runner
+keys retained batch graphs by width and attention bucket, keeps LM head and
+sampling eager, and reports the shared width slot as active.
 
 ### Cooperative actor-cycle idle evidence
 

@@ -685,12 +685,16 @@ allocated by the measured pre-admission candidate, excluding already-owned
 recurrent slot state and opaque native objects. They are not retained-cache
 bytes and are not governed as if they were already published.
 
-Native ROCm HIP-graph capture currently supports only single-row decode. When
-capture is requested and a successful contiguous eager forward contains more
-than one row, the runner records that completed forward as
-`multi_row_batch_unsupported`, including its elapsed time. It does not claim a
-capture attempt or replay. This makes a configured graph policy distinguishable
-from actual graph execution under batching.
+Native ROCm HIP-graph capture supports both single-row decode and the contiguous
+BF16 multi-row route. Batched graphs are keyed by row count and bucketed
+attention geometry. They retain graph-stable token IDs, positions, RoPE tables,
+block tables, sequence lengths, KV slots, per-layer attention scratch, output
+hidden state, and any GDN recurrent state. Final normalization, LM head, and
+sampling remain eager after the graph. A width-four graph therefore reports one
+active graph slot across changing request cohorts; it is not an idle single-row
+owner. `multi_row_batch_unsupported` remains in the closed schema so historical
+receipts stay valid, but a supported current batched route must leave it zero
+and show real capture/replay activity instead.
 
 The eager-fallback reasons are exactly `multi_row_batch_unsupported`,
 `cold_cache_host_round_trip`,

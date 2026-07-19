@@ -800,6 +800,29 @@ correctness, resilience, and throughput evidence.
 
 CUDA graphs are invalidated when LoRA adapters are swapped (different weight pointers). See `crates/kiln-model/src/cuda_graph.rs`.
 
+### ROCm Graphs for Decode
+
+`accelerator.rocm_graph_mode = "lazy_capture_replay"` requests HIP graph
+capture for eligible single-row and contiguous BF16 multi-row decode. A batch
+graph is keyed by batch width and the bucketed FlashAttention paged-decode
+geometry, so changing cohorts can reuse one graph without changing any captured
+device pointer. The owner slot refreshes recurrent and convolution state in
+place for GDN layers; full-attention layers use stable RoPE, block-table,
+sequence-length, KV-slot, attention-output, and softmax scratch tensors.
+
+The captured region ends at the pre-final-norm hidden state. Final norm, LM
+head, penalties, and sampling execute eagerly so one graph can serve greedy and
+sampled rows without capturing host-visible token selection. Each replay orders
+default-stream input refresh into the private graph stream with an event, then
+orders graph completion back to eager work without a host wait. The paged-KV
+allocation identity and generation must still match before launch.
+
+Health counts a retained width graph as an active slot even though it is shared
+across request cohorts. `multi_row_batch_unsupported` remains a closed legacy
+fallback reason so old receipts remain valid; supported current batch graphs
+must leave it at zero and show successful capture/replay. See
+`crates/kiln-model/src/rocm_graph.rs`.
+
 ### GPTQ INT4 Quantization
 
 Kiln loads GPTQ-quantized models with packed INT4 weights. Each `u32` stores 8 4-bit weights with per-group scales and zero points:
