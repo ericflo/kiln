@@ -1773,8 +1773,8 @@ fn format_actor_prefill_config(config: &crate::config::KilnConfig) -> String {
     }
     let _ = writeln!(
         output,
-        "  {} backend-effective dispatch, tiles, decode width, and actor alignment resolve after backend selection and fail before model-weight loading",
-        style("Prefill startup contract:").dim(),
+        "  {} configured values resolve once against the selected backend and fail before model-weight loading",
+        style("Prefill policy lifecycle:").dim(),
     );
     output
 }
@@ -2148,7 +2148,7 @@ pub fn run_config_check(
             Ok(())
         }
         Err(e) => {
-            eprintln!("{} Configuration error: {e}", style("✗").red().bold());
+            eprintln!("{} Configuration error: {e:#}", style("✗").red().bold());
             std::process::exit(1);
         }
     }
