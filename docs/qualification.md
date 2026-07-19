@@ -1806,6 +1806,37 @@ validate with their original exact-workload fingerprint rule and schemas. The
 KV-scatter candidate must be rerun from clean pushed source with the baseline
 prompt-set ID before its performance disposition can change.
 
+That exact-prompt rerun is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t214802-rocm-strix-halo-kv-device-slot-scatter-v16-exact-prompt-c8.kiln.json`.
+Driver v16 source `efb78d5a5` controlled the evidence lifecycle while the
+explicitly bound runtime remained the unchanged dfea candidate binary
+`sha256:d5fc30c68b3928bb6531937ddf240c183f08456b3b67264515d999cff2900c3f`.
+Both the one-row warmup and eight-row measurement exactly reproduce the v15
+baseline prompt-set hashes and ordered token counts: 147 warmup tokens and
+eight 150-token measured prompts. The warmup output also matches exactly.
+
+The candidate is not a throughput win. Route decode changed from 8,020.113 to
+8,020.094 ms across the same 62 width-four eager forwards, a 0.00024 percent
+reduction. Request-window aggregate throughput changed from 15.2146 to 15.2255
+tokens/second, only 0.0717 percent, while thermally sustainable throughput fell
+from 9.7750 to 9.5032 tokens/second because the post-row cooldown was longer.
+Prefill improved 0.55 percent, p99 TTFT improved 0.54 percent, p50 ITL worsened
+0.36 percent, and p99 ITL improved 1.78 percent; none establishes a material
+KV-scatter effect. Peak device memory differed by only 4 KiB. The measured row
+peaked at 78.25 C and the complete guarded lifecycle at 90.5 C without a trip.
+
+Six of eight measured outputs match the baseline exactly; request indices 3
+and 4 have different content hashes despite identical prompts, seeds, lengths,
+and a common width-four route. The baseline admitted all eight requests
+concurrently while the candidate's process active peak was six, so this
+throughput configuration did not preserve cohort formation and cannot claim
+cross-run exact output parity. The existing real-device KV regression remains
+the positive bit-exact evidence for the writer itself. Keep the device-slot
+scatter because it removes the host round trip and per-row copy structure
+needed for future graph capture, but reject it as a performance optimization
+and make no output-parity claim. Multi-row graph work still requires an exact
+eager-versus-replay parity gate before any serving promotion.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package
