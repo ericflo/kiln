@@ -707,6 +707,21 @@ closes the candidate attribution at that exact first divergence: vLLM matches
 the independent reference and Kiln does not. It does not yet locate Kiln's
 numerical error or establish broader sequence parity.
 
+The current guarded-provenance verification is retained at
+`qualification/oracle-results/rocm/strix-halo/20260719t030411-rocm-strix-halo-hf-next-token-guarded-fingerprint-v1.json`
+from clean pushed source `34ed8241e5e8d9a2772c0baca8fb108ce6328565`.
+The fingerprint phase began at 39.5 C, peaked at 59 C, completed all six pacing
+events over 13.755 seconds, and cooled to 42.875 C with zero trip or timeout.
+The independently guarded HF phase peaked at 60.125 C, completed all five
+pacing events over 12.112 seconds, cooled to 42.75 C, and reported a
+9,457,963,008-byte cgroup peak with zero high, limit, OOM, OOM-kill, or swap
+events. The complete lifecycle took 52.355 seconds. It reproduced argmax
+`15787`, both candidate logits/ranks, and full-logit hash
+`sha256:d4bc2aeb7d6bef608dfe500f6b9759b1fd4ca5eeb924b55b9e63b2e49a0e96d0`
+exactly. This closes the observed hashing-safety counterexample for the focused
+oracle path; it does not qualify broader serving workloads or the remaining
+accelerated-route bisection.
+
 #### ROCm numerical-path attribution
 
 Use the path-attribution runner after the independent HF result above has been

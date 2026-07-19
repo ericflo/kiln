@@ -1,0 +1,294 @@
+{
+  "containment": {
+    "host_available_before_gib": 24,
+    "memory_max_gib": 16,
+    "network": "forbidden",
+    "service": {
+      "phase_settlement_timeout_seconds": 300.0,
+      "policy": {
+        "content_sha256": "sha256:e7347f6c698b33bf3fd6a1a76483118c61d3e5d8b19b64d45609014da40f7620",
+        "id": "strix-halo-hf-oracle-v1",
+        "limit_millicelsius": 93000,
+        "pacing": {
+          "resume_millicelsius": 50000,
+          "resume_stable_samples": 20,
+          "start_millicelsius": 58000
+        },
+        "phase_settlement_timeout_seconds": 300.0,
+        "poll_interval_ms": 50,
+        "safe_handoff": {
+          "stable_samples": 20,
+          "target_millicelsius": 45000,
+          "timeout_seconds": 300.0
+        },
+        "schema": "kiln.host-thermal-policy.v1",
+        "sensor": {
+          "hwmon_name": "k10temp",
+          "label": "Tctl"
+        }
+      },
+      "prelaunch_cooldown": {
+        "completed": true,
+        "elapsed_seconds": 0.9532051839632913,
+        "poll_interval_ms": 50,
+        "sample_count": 20,
+        "scope": "host_package_before_process_creation",
+        "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+        "stable_samples_observed": 20,
+        "stable_samples_required": 20,
+        "target_millicelsius": 45000,
+        "temperature_end_millicelsius": 41500,
+        "temperature_peak_millicelsius": 42750,
+        "temperature_start_millicelsius": 42750,
+        "timeout_seconds": 300.0
+      },
+      "runtime": {
+        "host_temperature_end_millicelsius": 42750,
+        "host_temperature_peak_millicelsius": 60125,
+        "host_temperature_start_millicelsius": 41500,
+        "host_thermal_cooldown_active_end": 0,
+        "host_thermal_cooldown_completed_count": 1,
+        "host_thermal_cooldown_peak_millicelsius": 44250,
+        "host_thermal_cooldown_sample_count": 20,
+        "host_thermal_cooldown_seconds": 0.9535221509868279,
+        "host_thermal_cooldown_stable_sample_count": 20,
+        "host_thermal_cooldown_timeout_count": 0,
+        "host_thermal_guard_trip_count": 0,
+        "host_thermal_pacing_active_end": 0,
+        "host_thermal_pacing_completed_event_count": 5,
+        "host_thermal_pacing_event_count": 5,
+        "host_thermal_pacing_max_seconds": 2.621968275983818,
+        "host_thermal_pacing_max_start_millicelsius": 59750,
+        "host_thermal_pacing_seconds": 12.112304511945695
+      },
+      "schema": "kiln.hf-thermal-containment.v1",
+      "worker_exit_code": 0
+    },
+    "swap_max_bytes": 0
+  },
+  "created_at_utc": "2026-07-19T03:04:11.898733Z",
+  "duration_seconds": 52.355467222980224,
+  "implementation": {
+    "hf_worker_sha256": "sha256:b3f313c2f0ba9893dacbb145efccd1587a94fd1ebb0d555686f8130fea33c069",
+    "python_sha256": "sha256:2700be1aabe3687bd597f21b0eac3b9bbdf7417e93035255a9286c67935b59bd",
+    "supervisor_sha256": "sha256:dcbdce43dc4a103013e21db40995cf85fefab9ee2f8aaf6d824286ae3bce3a83"
+  },
+  "model_fingerprint": {
+    "implementation_sha256": "sha256:ad48f1cada7134cd52568a300425e0c291144a80a0465f55a43e7e54a764cf10",
+    "python_sha256": "sha256:2700be1aabe3687bd597f21b0eac3b9bbdf7417e93035255a9286c67935b59bd",
+    "thermal": {
+      "phase_settlement_timeout_seconds": 300.0,
+      "policy": {
+        "content_sha256": "sha256:e7347f6c698b33bf3fd6a1a76483118c61d3e5d8b19b64d45609014da40f7620",
+        "id": "strix-halo-hf-oracle-v1",
+        "limit_millicelsius": 93000,
+        "pacing": {
+          "resume_millicelsius": 50000,
+          "resume_stable_samples": 20,
+          "start_millicelsius": 58000
+        },
+        "phase_settlement_timeout_seconds": 300.0,
+        "poll_interval_ms": 50,
+        "safe_handoff": {
+          "stable_samples": 20,
+          "target_millicelsius": 45000,
+          "timeout_seconds": 300.0
+        },
+        "schema": "kiln.host-thermal-policy.v1",
+        "sensor": {
+          "hwmon_name": "k10temp",
+          "label": "Tctl"
+        }
+      },
+      "prelaunch_cooldown": {
+        "completed": true,
+        "elapsed_seconds": 0.9536651369999163,
+        "poll_interval_ms": 50,
+        "sample_count": 20,
+        "scope": "host_package_before_process_creation",
+        "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+        "stable_samples_observed": 20,
+        "stable_samples_required": 20,
+        "target_millicelsius": 45000,
+        "temperature_end_millicelsius": 39500,
+        "temperature_peak_millicelsius": 39625,
+        "temperature_start_millicelsius": 39625,
+        "timeout_seconds": 300.0
+      },
+      "runtime": {
+        "host_temperature_end_millicelsius": 42875,
+        "host_temperature_peak_millicelsius": 59000,
+        "host_temperature_start_millicelsius": 39500,
+        "host_thermal_cooldown_active_end": 0,
+        "host_thermal_cooldown_completed_count": 1,
+        "host_thermal_cooldown_peak_millicelsius": 45875,
+        "host_thermal_cooldown_sample_count": 27,
+        "host_thermal_cooldown_seconds": 1.3038588900235482,
+        "host_thermal_cooldown_stable_sample_count": 20,
+        "host_thermal_cooldown_timeout_count": 0,
+        "host_thermal_guard_trip_count": 0,
+        "host_thermal_pacing_active_end": 0,
+        "host_thermal_pacing_completed_event_count": 6,
+        "host_thermal_pacing_event_count": 6,
+        "host_thermal_pacing_max_seconds": 2.4099956760182977,
+        "host_thermal_pacing_max_start_millicelsius": 58875,
+        "host_thermal_pacing_seconds": 13.755429271026514
+      },
+      "schema": "kiln.hf-thermal-containment.v1",
+      "worker_exit_code": 0
+    }
+  },
+  "model_identity": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "content_sha256": "sha256:b1f2cce5baf9e662fc4c2c421b79fccc8787521e6e85810eebffbb4aa43b309f",
+    "id": "Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "oracle": {
+    "argmax": 15787,
+    "argmax_text": " foundation",
+    "attention_implementation": "eager",
+    "candidate_tokens": [
+      {
+        "engine": "kiln",
+        "logit": 18.25,
+        "rank": 2,
+        "text": " baseline",
+        "token_id": 25045
+      },
+      {
+        "engine": "vllm",
+        "logit": 18.5,
+        "rank": 1,
+        "text": " foundation",
+        "token_id": 15787
+      }
+    ],
+    "configuration_sha256": "sha256:3c01b3cdcff8d77cbafac9841bc48c41e5a5b38637231f1bde3d843cd198dbaf",
+    "deterministic_algorithms": true,
+    "device": "AMD Radeon 8060S Graphics",
+    "dtype": "bfloat16",
+    "duration_seconds": 10.272242277977057,
+    "input_token_count": 166,
+    "input_token_ids_sha256": "sha256:709d0a314cde9072ac79b0752e795f1b76bfaea5b553ccdf26f7fbd5ac44b1a0",
+    "linear_attention_implementation": "transformers_torch_fallback",
+    "logits_sha256": "sha256:d4bc2aeb7d6bef608dfe500f6b9759b1fd4ca5eeb924b55b9e63b2e49a0e96d0",
+    "memory_high_events": 0,
+    "memory_max_events": 0,
+    "memory_oom_events": 0,
+    "memory_oom_kill_events": 0,
+    "memory_peak_bytes": 9457963008,
+    "memory_swap_bytes": 0,
+    "modeling_sha256": "sha256:cf085792cb59e5bdf9b88a3d20bd353892289d054662a9c2b662221b97caefba",
+    "output_bytes": 995896,
+    "request_id": "rocm-strix-halo-greedy-c1-first-divergence-v1",
+    "request_sha256": "sha256:fbe61941ebc147d50141a04bb8541e7ccb5bc16d6c893285ec9a2660f51336c4",
+    "tf32_allowed": false,
+    "top_logit_margin": 0.25,
+    "top_tokens": [
+      {
+        "logit": 18.5,
+        "text": " foundation",
+        "token_id": 15787
+      },
+      {
+        "logit": 18.25,
+        "text": " baseline",
+        "token_id": 25045
+      },
+      {
+        "logit": 18.0,
+        "text": " scientifically",
+        "token_id": 71047
+      },
+      {
+        "logit": 17.875,
+        "text": " rigorous",
+        "token_id": 45332
+      },
+      {
+        "logit": 17.125,
+        "text": " deterministic",
+        "token_id": 69892
+      },
+      {
+        "logit": 17.125,
+        "text": " valid",
+        "token_id": 2610
+      },
+      {
+        "logit": 17.0,
+        "text": " robust",
+        "token_id": 21094
+      },
+      {
+        "logit": 16.625,
+        "text": " trustworthy",
+        "token_id": 54067
+      },
+      {
+        "logit": 16.125,
+        "text": " definitive",
+        "token_id": 43230
+      },
+      {
+        "logit": 16.125,
+        "text": " statistically",
+        "token_id": 45287
+      }
+    ],
+    "torch_commit": "cf30153c4c131c8164ee7798e5022d810682e2cb",
+    "torch_hip_version": "7.2.53211",
+    "torch_version": "2.13.0+rocm7.2",
+    "transformers_version": "5.13.1",
+    "vocab": 248320
+  },
+  "reference_artifact": {
+    "bytes": 995896,
+    "location": "local_ignored",
+    "sha256": "sha256:0aa742e242ca359fec5b8b4ea2d58d0e8d3b3dd13a713c7c4f0d9d3c9591f134"
+  },
+  "request": {
+    "contract_path": "qualification/oracles/rocm-strix-halo-greedy-c1-first-divergence-v1.json",
+    "id": "rocm-strix-halo-greedy-c1-first-divergence-v1",
+    "sha256": "sha256:fbe61941ebc147d50141a04bb8541e7ccb5bc16d6c893285ec9a2660f51336c4",
+    "source": {
+      "kiln_receipt": {
+        "content_sha256": "sha256:53b92e8ab8e76cc55ccbb2109fe660a6366c36c37353923ab4030e209b9cb67f",
+        "file_sha256": "sha256:2e1c15c7ff637b144d8ffa2d8a0e3bd21f03c441858ac44dd447af7a5b02572f",
+        "path": "benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.kiln.json"
+      },
+      "source_commit": "1434e0d110ccd012a9142f54b3f0938ab5ca503f",
+      "vllm_receipt": {
+        "content_sha256": "sha256:7b9985dd155eca98e64b58e2f3b094fd9e8dd7510c587305309779e320c3001f",
+        "file_sha256": "sha256:7773d4c207040ab4dd3dbfb5e5f0bf3a310d9312835667f292e9c2932e495692",
+        "path": "benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.vllm.json"
+      }
+    }
+  },
+  "result_sha256": "sha256:a5f02fdef892376c0eaad09b3dc97cf30faae58f531f7bcbfbbea9520de071c1",
+  "schema": "kiln.rocm-hf-next-token-oracle.v1",
+  "source": {
+    "commit": "34ed8241e5e8d9a2772c0baca8fb108ce6328565",
+    "origin_main": "34ed8241e5e8d9a2772c0baca8fb108ce6328565",
+    "tree": "48233dd473d885a67ef21c8839c6f3122ee519cd"
+  },
+  "verdict": {
+    "argmax_candidate": "vllm",
+    "argmax_token_id": 15787,
+    "candidate_attribution_complete": true
+  }
+}
