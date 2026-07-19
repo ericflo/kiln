@@ -18442,7 +18442,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     let run_eager_kv_and_attention = true;
     if run_eager_kv_and_attention {
         let kv_write_done = {
-            #[cfg(any(feature = "cuda", feature = "metal"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "rocm"))]
             {
                 // #1082 suspect 1: when the runner has wired the
                 // `[batch] u32` per-row slot device buffer through
@@ -18457,6 +18457,8 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                         Device::Cuda(_) => false,
                         #[cfg(feature = "metal")]
                         Device::Metal(_) => true,
+                        #[cfg(feature = "rocm")]
+                        Device::Rocm(_) => true,
                         _ => false,
                     };
                     if use_graph_slot_writer {
@@ -18476,7 +18478,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                     false
                 }
             }
-            #[cfg(not(any(feature = "cuda", feature = "metal")))]
+            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "rocm")))]
             {
                 false
             }
@@ -21333,13 +21335,13 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
     // `bench-results/cuda-graph-bs2-secondary-audit.md`).
     stable_rotary_cos_gpu: Option<&Tensor>,
     stable_rotary_sin_gpu: Option<&Tensor>,
-    // CUDA-graph-stable `[batch]` u32 per-row KV-write slot tensor.
-    // When `Some`, the bs>1 KV-write step on the captured path
+    // Runner-owned or per-step `[batch]` u32 per-row KV-write slot tensor.
+    // When `Some`, the bs>1 KV-write step
     // dispatches the fused batched-slot kernel
     // (`PagedKvCache::write_token_major_native_batch_graph_slot`) so
-    // every replay re-reads its per-row destination slot from this
-    // runner-owned device tensor instead of baking host-immediate
-    // slots into the captured kernel args. Closes #1082 suspect 1.
+    // every layer reads its per-row destination slot from one device tensor.
+    // Captured paths supply a stable runner-owned buffer; ROCm eager decode
+    // builds one per step and reuses it across all full-attention layers.
     stable_kv_slot_gpu: Option<&Tensor>,
     #[cfg(feature = "metal")] mut metal_icb_inputs: Option<MetalPagedDecodeIcbInputs<'_>>,
 ) -> Result<Tensor> {
@@ -21418,6 +21420,31 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
         .layers
         .iter()
         .any(|layer| matches!(layer.attention, GpuAttentionWeights::Full(_)));
+
+    // The physical destination slots are identical for every full-attention
+    // layer in one decode step. ROCm's fused device-slot writer consumes this
+    // tensor without a host readback, so build it once here rather than once
+    // per layer. A graph runner's stable slot buffer remains authoritative
+    // when supplied.
+    #[cfg(feature = "rocm")]
+    let rocm_kv_slot_owned: Option<Tensor> = if stable_kv_slot_gpu.is_none()
+        && has_full_attention_layer
+        && matches!(device, Device::Rocm(_))
+    {
+        let slots = paged_cache.resolve_unique_decode_slots(block_tables, start_positions)?;
+        Some(
+            Tensor::from_vec_on(device, slots, vec![batch])?
+                .contiguous()
+                .context("build ROCm batched decode KV slot tensor")?,
+        )
+    } else {
+        None
+    };
+    #[cfg(feature = "rocm")]
+    let effective_kv_slot_gpu = stable_kv_slot_gpu.or(rocm_kv_slot_owned.as_ref());
+    #[cfg(not(feature = "rocm"))]
+    let effective_kv_slot_gpu = stable_kv_slot_gpu;
+
     let cached_paged_meta: Option<CachedPagedDecodeMeta> = if has_full_attention_layer {
         // CUDA graph capture path: when the caller supplies stable
         // `block_table` + `seqused_k` device buffers, build the meta
@@ -21548,7 +21575,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     cached_paged_meta_ref,
                     layer_graph_outputs,
                     layer_rope_tables,
-                    stable_kv_slot_gpu,
+                    effective_kv_slot_gpu,
                     #[cfg(feature = "metal")]
                     layer_metal_icb,
                     #[cfg(feature = "cuda")]

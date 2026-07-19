@@ -3211,24 +3211,23 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_rocm(
     head_dim: usize,
 ) -> Result<(), FlashAttnError> {
     let row_elems = num_kv_heads * head_dim;
-    let bpe = KtDType::BF16.size_in_bytes();
-    let row_bytes = row_elems * bpe;
+    let k_pool_rows = k_pool.element_count() / row_elems;
+    let v_pool_rows = v_pool.element_count() / row_elems;
+    let k_pool_2d = map_kt(k_pool.reshape(vec![k_pool_rows, row_elems]))?;
+    let v_pool_2d = map_kt(v_pool.reshape(vec![v_pool_rows, row_elems]))?;
+    let k_rows = map_kt(rocm_contig(k)?.reshape(vec![batch, row_elems]))?;
+    let v_rows = map_kt(rocm_contig(v)?.reshape(vec![batch, row_elems]))?;
+    let slots = map_kt(rocm_contig(slots)?.reshape(vec![batch]))?;
 
-    let slots_host = map_kt(kiln_tensor::rocm_to_host_copy(slots))?;
-    let slot_vec: Vec<u32> = map_kt(slots_host.to_vec::<u32>())?;
-
-    let k_c = rocm_contig(k)?;
-    let v_c = rocm_contig(v)?;
-    let k_src_base = kiln_kt_bridge::rocm_input_device_ptr(&k_c, KtDType::BF16, "k")?;
-    let v_src_base = kiln_kt_bridge::rocm_input_device_ptr(&v_c, KtDType::BF16, "v")?;
-    let kp_dst = kiln_kt_bridge::rocm_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
-    let vp_dst = kiln_kt_bridge::rocm_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
-    for (r, &slot) in slot_vec.iter().enumerate().take(batch) {
-        let src_off = (r * row_elems * bpe) as u64;
-        let dst_off = (slot as usize * row_elems * bpe) as u64;
-        rocm_d2d_copy(kp_dst + dst_off, k_src_base + src_off, row_bytes, k_pool)?;
-        rocm_d2d_copy(vp_dst + dst_off, v_src_base + src_off, row_bytes, k_pool)?;
-    }
+    // Keep slot selection on the device. Besides replacing 2 * batch D2D
+    // submissions with two indexed scatters, this is capture-safe: the slot
+    // tensor's stable pointer is consumed by the kernel on every replay.
+    map_kt(kiln_tensor::rocm_index_copy_dim0(
+        &k_pool_2d, &slots, &k_rows,
+    ))?;
+    map_kt(kiln_tensor::rocm_index_copy_dim0(
+        &v_pool_2d, &slots, &v_rows,
+    ))?;
     Ok(())
 }
 

@@ -1749,6 +1749,25 @@ prefill is third and residual unaccounted wall time is immaterial. The next
 optimization must address the measured multi-row decode route rather than
 another blind scheduler-delay trial.
 
+The first implementation checkpoint removes one concrete source of ROCm
+multi-row submission and synchronization overhead before attempting graph
+capture. The production BF16 KV writer now resolves the batch's physical slots
+once per decode step, uploads one `[batch]` U32 tensor, and reuses it across all
+full-attention layers. Each layer writes the complete K and V batch with two
+on-device indexed scatters. The former eager path issued two device copies per
+row per layer; the nominal device-slot helper additionally copied the slot
+tensor back to the host before issuing those copies. The new primitive consumes
+the slot tensor on-device, does not synchronize it through the host, and is
+also wired into the stable-buffer path required by a future multi-row HIP
+graph. An explicit real-gfx1151 test writes both production host-resolved slots
+and caller-owned device slots into noncontiguous KV pool rows and verifies every
+BF16 row exactly. This is correctness and launch-count evidence, not a
+throughput claim. Host-resolved batches also reject duplicate physical decode
+slots before device work, preserving exclusive mutable-KV ownership instead of
+introducing a racy indexed write. The exact pushed-source c8 attribution
+workload must determine whether the optimization materially changes decode time
+or thermal load.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package

@@ -462,6 +462,33 @@ pub struct PagedKvCacheKt {
 }
 
 impl PagedKvCacheKt {
+    pub(crate) fn resolve_unique_decode_slots(
+        &self,
+        block_tables: &[&BlockTable],
+        start_positions: &[usize],
+    ) -> Result<Vec<u32>> {
+        anyhow::ensure!(
+            block_tables.len() == start_positions.len(),
+            "decode slot metadata length mismatch"
+        );
+        let mut slots = Vec::with_capacity(start_positions.len());
+        for (row, (&start_position, block_table)) in
+            start_positions.iter().zip(block_tables.iter()).enumerate()
+        {
+            let slot = block_table
+                .slot_for(start_position, self.block_size)
+                .ok_or_else(|| anyhow::anyhow!("decode KV slot lookup failed for row {row}"))?;
+            let slot = u32::try_from(slot)
+                .map_err(|_| anyhow::anyhow!("decode KV slot {slot} exceeds u32"))?;
+            anyhow::ensure!(
+                !slots.contains(&slot),
+                "decode rows share physical KV slot {slot} (row {row})"
+            );
+            slots.push(slot);
+        }
+        Ok(slots)
+    }
+
     /// Create a new paged KV cache with zero-filled pre-allocated pool
     /// tensors. Replaces the candle `PagedKvCache::new` (#1082 candle-drop).
     ///
@@ -1482,18 +1509,9 @@ impl PagedKvCacheKt {
             "batched token-major KV write metadata length mismatch"
         );
 
-        let mut slots = Vec::with_capacity(batch);
-        for idx in 0..batch {
-            let slot = block_tables[idx]
-                .slot_for(start_positions[idx], self.block_size)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("batched token-major KV write slot lookup failed for row {idx}")
-                })?;
-            let slot_u32 = u32::try_from(slot).map_err(|_| {
-                anyhow::anyhow!("batched token-major KV write slot {slot} exceeds u32")
-            })?;
-            slots.push(slot_u32);
-        }
+        let slots = self.resolve_unique_decode_slots(block_tables, start_positions)?;
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "rocm")))]
+        let _ = &slots;
 
         #[cfg(feature = "metal")]
         if matches!(k.device(), kiln_tensor::Device::Metal(_)) {
@@ -1560,43 +1578,34 @@ impl PagedKvCacheKt {
             return Ok(true);
         }
 
-        // ROCm: use the same fast per-row token-major writer as CUDA
-        // (`write_token_major_native` -> `paged_kv_write_token_major_bf16_rocm`,
-        // an in-place device-to-device copy at the host-resolved slot). Without
-        // this, ROCm fell through to the generic head-major `self.write` scatter
-        // below, which transposes K/V to [b,hk,1,d] and host-stages them
-        // ([1,4,1,256] was the dominant decode H2D, one per attention layer).
-        // The transpose(1,2) on the sq==1 dim is a data no-op, so the pool bytes
-        // are identical to the generic path — just no host round-trip.
+        // ROCm: resolve all slots once on the host, upload one compact slot
+        // vector, then scatter the complete K/V batch on-device. This replaces
+        // the prior 2 * batch D2D submissions per full-attention layer and uses
+        // the same capture-safe device-slot primitive as the graph path.
         #[cfg(feature = "rocm")]
         if matches!(k.device(), kiln_tensor::Device::Rocm(_)) {
-            // write_token_major_native resolves each row's slot independently
-            // (block_table.slot_for), so no contiguous-run precheck is needed —
-            // any slot layout is handled. (The CUDA branch above keeps the
-            // precheck for parity with its host-slot kernel contract.)
-            for idx in 0..batch {
-                let k_row = k
-                    .narrow(0, idx, 1)
-                    .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: narrow k row {idx}: {e}"))?
-                    .contiguous()
-                    .map_err(|e| {
-                        anyhow::anyhow!("kt pkv rocm batch: contiguous k row {idx}: {e}")
-                    })?;
-                let v_row = v
-                    .narrow(0, idx, 1)
-                    .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: narrow v row {idx}: {e}"))?
-                    .contiguous()
-                    .map_err(|e| {
-                        anyhow::anyhow!("kt pkv rocm batch: contiguous v row {idx}: {e}")
-                    })?;
-                self.write_token_major_native(
-                    layer_idx,
-                    block_tables[idx],
-                    start_positions[idx],
-                    &k_row,
-                    &v_row,
-                )?;
-            }
+            let pools = self.layers_read();
+            let (k_pool, v_pool) = &pools[layer_idx];
+            let slots_tensor = KtTensor::from_vec_on(k.device(), slots, vec![batch])
+                .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: build slots: {e}"))?;
+            let k_c = k
+                .squeeze(1)
+                .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: squeeze k: {e}"))?
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: contiguous k: {e}"))?;
+            let v_c = v
+                .squeeze(1)
+                .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: squeeze v: {e}"))?
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: contiguous v: {e}"))?;
+            kiln_flash_attn::paged_kv_write_token_major_bf16_batch_slot_kt(
+                k_pool,
+                v_pool,
+                &k_c,
+                &v_c,
+                &slots_tensor,
+            )
+            .map_err(|e| anyhow::anyhow!("kt pkv rocm batch write: {e}"))?;
             return Ok(true);
         }
 
@@ -1653,7 +1662,7 @@ impl PagedKvCacheKt {
     /// which writes a contiguous `[batch, num_kv_heads, head_dim]` block —
     /// so the seq_len=1 dim is squeezed before dispatch (the kernel's
     /// `element_count == batch * kv_heads * head_dim` check is then exact).
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "rocm"))]
     pub fn write_token_major_native_batch_graph_slot(
         &self,
         layer_idx: usize,
@@ -1702,6 +1711,30 @@ impl PagedKvCacheKt {
             )
             .map_err(|e| {
                 anyhow::anyhow!("kt paged_kv_write_token_major_bf16_batch_slot_metal: {e}")
+            })?;
+            return Ok(true);
+        }
+
+        #[cfg(feature = "rocm")]
+        if matches!(k.device(), kiln_tensor::Device::Rocm(_)) {
+            let k_c = k
+                .squeeze(1)
+                .map_err(|e| anyhow::anyhow!("kt pkv rocm batch_slot: squeeze k: {e}"))?
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv rocm batch_slot: contiguous k: {e}"))?;
+            let v_c = v
+                .squeeze(1)
+                .map_err(|e| anyhow::anyhow!("kt pkv rocm batch_slot: squeeze v: {e}"))?
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv rocm batch_slot: contiguous v: {e}"))?;
+            let slots_c = slots
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv rocm batch_slot: contiguous slots: {e}"))?;
+            kiln_flash_attn::paged_kv_write_token_major_bf16_batch_slot_kt(
+                k_pool, v_pool, &k_c, &v_c, &slots_c,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!("kt paged_kv_write_token_major_bf16_batch_slot_rocm: {e}")
             })?;
             return Ok(true);
         }
@@ -2069,6 +2102,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decode_slot_resolution_rejects_duplicate_physical_ownership() {
+        let cache = PagedKvCacheKt::new(1, 4, 4, 1, 2, KtDType::BF16, kiln_tensor::Device::Cpu)
+            .expect("decode-slot test cache");
+        let first = BlockTable { blocks: vec![0] };
+        let second = BlockTable { blocks: vec![1] };
+        assert_eq!(
+            cache
+                .resolve_unique_decode_slots(&[&first, &second], &[2, 3])
+                .expect("unique physical slots"),
+            vec![2, 7]
+        );
+        let error = cache
+            .resolve_unique_decode_slots(&[&first, &first], &[2, 2])
+            .expect_err("duplicate physical slots must fail closed");
+        assert!(error.to_string().contains("share physical KV slot 2"));
+    }
+
     // Physical resize correctness on CPU pools (device-agnostic copy logic; the
     // ROCm/CUDA paths reuse the SAME narrow+slice_set, validated on-box). Proves
     // the elastic actuator (#26) preserves live KV byte-for-byte across a
@@ -2420,6 +2471,103 @@ mod tests {
             &v_vals[row_elems..],
             "row 1 V must land at slot 7 from the Metal slot tensor"
         );
+        Ok(())
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    #[ignore = "requires an explicit real-ROCm qualification run"]
+    fn rocm_batched_writers_scatter_noncontiguous_device_slots() -> Result<()> {
+        assert_eq!(
+            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
+            Some("1"),
+            "set KILN_QUALIFICATION=1 for the explicit hardware run"
+        );
+        assert!(kiln_tensor::rocm_is_available());
+
+        let device = kiln_tensor::Device::Rocm(0);
+        let block_size = 4usize;
+        let kv_heads = 2usize;
+        let head_dim = 4usize;
+        let cache =
+            PagedKvCacheKt::new(1, 4, block_size, kv_heads, head_dim, KtDType::BF16, device)?;
+
+        let mk = |value: f32| half::bf16::from_f32(value);
+        let row_elems = kv_heads * head_dim;
+        let k_values: Vec<_> = (0..2 * row_elems)
+            .map(|index| mk(index as f32 + 1.0))
+            .collect();
+        let v_values: Vec<_> = (0..2 * row_elems)
+            .map(|index| mk(index as f32 + 101.0))
+            .collect();
+        let k = KtTensor::from_vec_on(device, k_values.clone(), vec![2, 1, kv_heads, head_dim])?;
+        let v = KtTensor::from_vec_on(device, v_values.clone(), vec![2, 1, kv_heads, head_dim])?;
+
+        let first_table = BlockTable { blocks: vec![0] };
+        let second_table = BlockTable { blocks: vec![1] };
+        assert!(cache.write_token_major_native_batch(
+            0,
+            &[&first_table, &second_table],
+            &[2, 3],
+            &k,
+            &v,
+        )?);
+
+        let graph_k_values: Vec<_> = (0..2 * row_elems)
+            .map(|index| mk(index as f32 + 201.0))
+            .collect();
+        let graph_v_values: Vec<_> = (0..2 * row_elems)
+            .map(|index| mk(index as f32 + 301.0))
+            .collect();
+        let graph_k = KtTensor::from_vec_on(
+            device,
+            graph_k_values.clone(),
+            vec![2, 1, kv_heads, head_dim],
+        )?;
+        let graph_v = KtTensor::from_vec_on(
+            device,
+            graph_v_values.clone(),
+            vec![2, 1, kv_heads, head_dim],
+        )?;
+        let graph_slots = KtTensor::from_vec_on(device, vec![9u32, 14u32], vec![2])?;
+        assert!(cache.write_token_major_native_batch_graph_slot(
+            0,
+            &graph_k,
+            &graph_v,
+            &graph_slots,
+        )?);
+
+        let (k_pool, v_pool) = cache
+            .pool_tensors(0)
+            .ok_or_else(|| anyhow::anyhow!("missing layer 0 pools"))?;
+        let k_host = k_pool.to_device(kiln_tensor::Device::Cpu)?;
+        let v_host = v_pool.to_device(kiln_tensor::Device::Cpu)?;
+        let k_flat = k_host.flatten_all()?.to_vec1::<half::bf16>()?;
+        let v_flat = v_host.flatten_all()?.to_vec1::<half::bf16>()?;
+        let row = |slot: usize| slot * row_elems;
+
+        for (slot, source_row) in [(2usize, 0usize), (7, 1)] {
+            let source = source_row * row_elems;
+            assert_eq!(
+                &k_flat[row(slot)..row(slot) + row_elems],
+                &k_values[source..source + row_elems]
+            );
+            assert_eq!(
+                &v_flat[row(slot)..row(slot) + row_elems],
+                &v_values[source..source + row_elems]
+            );
+        }
+        for (slot, source_row) in [(9usize, 0usize), (14, 1)] {
+            let source = source_row * row_elems;
+            assert_eq!(
+                &k_flat[row(slot)..row(slot) + row_elems],
+                &graph_k_values[source..source + row_elems]
+            );
+            assert_eq!(
+                &v_flat[row(slot)..row(slot) + row_elems],
+                &graph_v_values[source..source + row_elems]
+            );
+        }
         Ok(())
     }
 }
