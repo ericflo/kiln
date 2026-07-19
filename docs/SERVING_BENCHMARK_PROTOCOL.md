@@ -326,6 +326,22 @@ arm keeps graphs disabled and changes only `prefix_cache.enabled` to `false`:
 It tests whether cross-request KV/recurrent-state reuse explains the remaining
 public-serving divergence.
 
+That result is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t061953-rocm-strix-halo-greedy-c1-no-prefix-cache-counterevidence-v1.kiln.json`.
+With graph execution and prefix caching both disabled, the same 163-token
+prompt still emits `To establish a baseline`. Prefix-cache KV/recurrent-state
+reuse is therefore also excluded from this first divergence. Driver v8 again
+recorded zero thermal trips, a sub-60 C complete lifecycle, clean shutdown and
+cooldown, and no owned residue. Its 6.74 output tokens/second is
+diagnostic-only.
+
+The next tracked arm changes only `batching.mode` from `enabled` to `disabled`
+relative to that result:
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-no-prefix-cache-no-batching-v1.json`.
+The direct streaming rendezvous retains its typed `auto` backend policy. This
+isolates actor-owned prefill/decode scheduling before any lower-level direct
+route is disabled.
+
 ## Running One Profile
 
 ```bash

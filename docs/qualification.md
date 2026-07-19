@@ -1270,6 +1270,27 @@ kernel profile, memory policy, model, prompt, and four-token bound. A
 reuse; `baseline` excludes that subsystem and advances the comparison to the
 batching/direct serving boundary.
 
+The no-prefix-cache result is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t061953-rocm-strix-halo-greedy-c1-no-prefix-cache-counterevidence-v1.kiln.json`
+from exact clean pushed source `e1c2b91a1f25dc5d4769501c89b2388ad5792306`.
+Its exact 163-token measured prompt still emits `To establish a baseline`, so
+cross-request prefix-cache KV and recurrent-state restoration are excluded from
+the pinned divergence. Initial fingerprint, server lifecycle, and final
+fingerprint peaked at 59.375 C, 59.875 C, and 59.75 C with zero hard trips and
+complete cooldown. The measured request peaked at 53 C without pacing, memory
+peaked at 35,214,360,576 bytes, shutdown was normal, and no listener, process,
+or snapshot remained. Its 6.738 output tokens/second and 6.706 thermally
+sustainable output tokens/second are diagnostic-only.
+
+The next one-field discriminator launches
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-no-prefix-cache-no-batching-v1.json`.
+Relative to the no-prefix-cache arm it changes only
+`batching.mode = "disabled"`. The direct streaming rendezvous remains `auto`
+and therefore uses the ROCm backend's typed policy. A `foundation` result
+attributes the defect to actor-owned prefill/decode scheduling; `baseline`
+excludes the actor and advances the comparison to the direct rendezvous/model
+forward boundary.
+
 Serving benchmark driver v8 closes the exposed provenance gap before another
 ROCm request is allowed. It runs both the initial and final model fingerprints
 as start-gated child process groups under the same typed host thermal policy,
