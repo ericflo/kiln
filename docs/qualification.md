@@ -1104,6 +1104,29 @@ layer-common routes, starting with fused RMSNorm and fused MLP dispatch. It
 does not repair the qualified profile or establish parity, performance, or
 endurance acceptance.
 
+The guarded fused norm/MLP pair is retained at
+`qualification/oracle-results/rocm/strix-halo/20260719t041300-rocm-strix-halo-hf-layer-attribution-fused-norm-mlp-fallback-v1.json`
+and
+`qualification/oracle-results/rocm/strix-halo/20260719t041456-rocm-strix-halo-hf-layer-attribution-fused-norm-mlp-only-v1.json`,
+both from clean pushed source `d3ddbdb775b5dfbaa2f7c29976baf6858ca6b5d5`.
+Both arms restore token `15787`, so the group produces an interaction verdict,
+not a single-group cause. Declining the three routes in the otherwise qualified
+policy yields relative RMSE `0.014672443`, `0.036750649`, `0.072686307`, and
+`0.085907010` after layers 0 through 2 and final RMSNorm. The error curve is
+not materially repaired even though the disputed argmax changes. Enabling only
+the three routes on portable policy yields `0.002511601`, `0.004042406`,
+`0.006887352`, and `0.015432001` at the same boundaries. The group is therefore
+not sufficient to induce the qualified failure, while disabling the group is
+sufficient to change that failure's argmax.
+
+The complete lifecycles lasted 226.798 and 89.987 seconds; the first includes a
+67-second cold release build. All six arms stayed at or below 60.125 C, every
+pacing and cooldown interval completed, cgroup event and swap counters remained
+zero, and no owned residue remained. Kiln cgroups peaked at 14,658,469,888 and
+12,110,426,112 bytes. The next discriminator must test each fused norm/MLP leaf
+individually as a qualified-policy fallback. This evidence does not authorize a
+qualified-policy change by itself.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for
