@@ -256,6 +256,16 @@ Phase values are blocking candidates, not an additive critical-path
 decomposition. Work can overlap, especially response delivery with the next
 actor forward, and the broad `decode_ms` interval contains any measured backend
 subphases. Do not sum every phase and compare it with total request time.
+
+For ROCm graph candidates, `event=rocm_graph_capture_host_transfer` attributes
+each unique host-upload site observed by the thread- and device-local warm-pass
+scope. Its closed fallback reason and build-source file/line/column are paired
+with dtype, elements/bytes per copy, copy count, and total bytes. A candidate is
+bounded to 32 unique sites; additional sites collapse into one
+`source_file=bounded_site_overflow` row. This is causal capture-eligibility
+evidence, not a request payload or a Prometheus label, and it must be read next
+to `rocm_graph_fallback` attempt/eager/total duration and graph capture/replay
+counters.
 When computing `unexplained_ms`, Kiln conservatively subtracts the larger of
 serial actor work, response delivery, and the largest backend candidate rather
 than their sum, so overlap cannot falsely erase missing wall time.

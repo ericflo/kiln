@@ -28,10 +28,49 @@ use kiln_hip::{
 /// aggregate can change because another thread or ROCm device made progress.
 pub static ROCM_HTOD_COUNT: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Copy)]
+const ROCM_HTOD_MAX_UNIQUE_SITES: usize = 32;
+
+/// One bounded, source-attributed host-to-ROCm transfer site observed inside a
+/// dynamic capture-safety scope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RocmHtodCopySite {
+    /// Rust source file at the outermost tracked upload call site.
+    pub source_file: &'static str,
+    /// One-indexed source line at the outermost tracked upload call site.
+    pub source_line: u32,
+    /// One-indexed source column at the outermost tracked upload call site.
+    pub source_column: u32,
+    /// Element type copied to the device.
+    pub dtype: crate::DType,
+    /// Number of tensor elements in each aggregated copy.
+    pub elements_per_copy: u64,
+    /// Number of bytes in each aggregated copy.
+    pub bytes_per_copy: u64,
+    /// Number of matching copies observed at this site.
+    pub copy_count: u64,
+    /// Total bytes copied by all matching copies at this site.
+    pub total_bytes: u64,
+}
+
+/// Bounded host-to-ROCm transfer evidence for one dynamic observation scope.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RocmHtodObservation {
+    /// Total number of matching copies observed in the scope.
+    pub copy_count: u64,
+    /// Total number of bytes copied in the scope.
+    pub total_bytes: u64,
+    /// Per-site aggregates, bounded by `ROCM_HTOD_MAX_UNIQUE_SITES`.
+    pub sites: Vec<RocmHtodCopySite>,
+    /// Copies omitted after the unique-site bound was reached.
+    pub unattributed_copy_count: u64,
+    /// Bytes copied by sites omitted after the unique-site bound was reached.
+    pub unattributed_bytes: u64,
+}
+
+#[derive(Clone)]
 struct RocmHtodObserverState {
     device_index: usize,
-    count: u64,
+    observation: RocmHtodObservation,
 }
 
 thread_local! {
@@ -54,12 +93,22 @@ impl Drop for RocmHtodObserverGuard {
 /// thread for exactly `device_index`. Unrelated threads and devices cannot
 /// create false graph-capture safety failures.
 pub fn with_rocm_htod_observer<R>(device_index: usize, operation: impl FnOnce() -> R) -> (R, u64) {
+    let (output, observation) = with_rocm_htod_observer_detailed(device_index, operation);
+    (output, observation.copy_count)
+}
+
+/// Run `operation` while collecting bounded, source-attributed successful
+/// host-to-ROCm copies issued on this thread for exactly `device_index`.
+pub fn with_rocm_htod_observer_detailed<R>(
+    device_index: usize,
+    operation: impl FnOnce() -> R,
+) -> (R, RocmHtodObservation) {
     let depth = ROCM_HTOD_OBSERVERS.with(|observers| {
         let mut observers = observers.borrow_mut();
         let depth = observers.len();
         observers.push(RocmHtodObserverState {
             device_index,
-            count: 0,
+            observation: RocmHtodObservation::default(),
         });
         depth
     });
@@ -68,16 +117,64 @@ pub fn with_rocm_htod_observer<R>(device_index: usize, operation: impl FnOnce() 
         _not_send: std::marker::PhantomData,
     };
     let output = operation();
-    let count = ROCM_HTOD_OBSERVERS.with(|observers| observers.borrow()[depth].count);
+    let observation =
+        ROCM_HTOD_OBSERVERS.with(|observers| observers.borrow()[depth].observation.clone());
     drop(guard);
-    (output, count)
+    (output, observation)
 }
 
+#[track_caller]
+#[cfg(test)]
 fn record_rocm_htod(device_index: usize) {
+    record_rocm_htod_copy(
+        device_index,
+        0,
+        crate::DType::U8,
+        0,
+        std::panic::Location::caller(),
+    );
+}
+
+fn record_rocm_htod_copy(
+    device_index: usize,
+    byte_len: u64,
+    dtype: crate::DType,
+    element_count: u64,
+    source: &'static std::panic::Location<'static>,
+) {
     ROCM_HTOD_OBSERVERS.with(|observers| {
         for observer in observers.borrow_mut().iter_mut() {
             if observer.device_index == device_index {
-                observer.count = observer.count.saturating_add(1);
+                let observation = &mut observer.observation;
+                observation.copy_count = observation.copy_count.saturating_add(1);
+                observation.total_bytes = observation.total_bytes.saturating_add(byte_len);
+                if let Some(site) = observation.sites.iter_mut().find(|site| {
+                    site.source_file == source.file()
+                        && site.source_line == source.line()
+                        && site.source_column == source.column()
+                        && site.dtype == dtype
+                        && site.elements_per_copy == element_count
+                        && site.bytes_per_copy == byte_len
+                }) {
+                    site.copy_count = site.copy_count.saturating_add(1);
+                    site.total_bytes = site.total_bytes.saturating_add(byte_len);
+                } else if observation.sites.len() < ROCM_HTOD_MAX_UNIQUE_SITES {
+                    observation.sites.push(RocmHtodCopySite {
+                        source_file: source.file(),
+                        source_line: source.line(),
+                        source_column: source.column(),
+                        dtype,
+                        elements_per_copy: element_count,
+                        bytes_per_copy: byte_len,
+                        copy_count: 1,
+                        total_bytes: byte_len,
+                    });
+                } else {
+                    observation.unattributed_copy_count =
+                        observation.unattributed_copy_count.saturating_add(1);
+                    observation.unattributed_bytes =
+                        observation.unattributed_bytes.saturating_add(byte_len);
+                }
             }
         }
     });
@@ -1372,6 +1469,7 @@ pub fn rocm_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
 
 /// Copy a contiguous host (CPU) tensor up to a fresh ROCm buffer on
 /// `device_index`. ROCm analog of `host_to_cuda_copy`.
+#[track_caller]
 pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
     let ctx = primary_rocm_context(device_index)?;
     host_to_rocm_copy_with_context(src, &ctx)
@@ -1380,6 +1478,7 @@ pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
 /// Copy a contiguous host tensor to a fresh buffer owned by an explicit ROCm
 /// context. This is the policy-preserving upload path for isolated runtimes and
 /// tests that must not mutate process-global configuration.
+#[track_caller]
 pub fn host_to_rocm_copy_with_context(
     src: &crate::Tensor,
     ctx: &Arc<RocmContext>,
@@ -1429,7 +1528,13 @@ pub fn host_to_rocm_copy_with_context(
 
     // Notify capture-safety observers scoped to this thread and device. Keep the
     // process-wide aggregate for compatibility with the public counter API.
-    record_rocm_htod(device_index);
+    record_rocm_htod_copy(
+        device_index,
+        u64::try_from(byte_len).unwrap_or(u64::MAX),
+        dtype,
+        u64::try_from(n_elements).unwrap_or(u64::MAX),
+        std::panic::Location::caller(),
+    );
     ROCM_HTOD_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // SAFETY: clone_htod synchronizes its stream before returning, so the
@@ -1447,6 +1552,7 @@ pub fn host_to_rocm_copy_with_context(
 
 /// Host → ROCm copy — back-compat alias for [`host_to_rocm_copy`], mirroring
 /// `host_to_cuda_copy_ctx`.
+#[track_caller]
 pub fn host_to_rocm_copy_ctx(src: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
     host_to_rocm_copy(src, device_index)
 }
@@ -1626,6 +1732,68 @@ mod execution_policy_tests {
         assert_eq!(outer, 3);
         assert_eq!(inner_same, 1);
         assert_eq!(inner_other, 1);
+    }
+
+    #[test]
+    fn detailed_htod_observer_aggregates_copy_sites_and_bytes() {
+        let source = std::panic::Location::caller();
+        let ((), observation) = with_rocm_htod_observer_detailed(2, || {
+            record_rocm_htod_copy(2, 16, DType::F32, 4, source);
+            record_rocm_htod_copy(2, 16, DType::F32, 4, source);
+            record_rocm_htod_copy(3, 64, DType::BF16, 32, source);
+        });
+
+        assert_eq!(observation.copy_count, 2);
+        assert_eq!(observation.total_bytes, 32);
+        assert_eq!(observation.unattributed_copy_count, 0);
+        assert_eq!(observation.unattributed_bytes, 0);
+        assert_eq!(observation.sites.len(), 1);
+        let site = observation.sites[0];
+        assert_eq!(site.source_file, source.file());
+        assert_eq!(site.source_line, source.line());
+        assert_eq!(site.source_column, source.column());
+        assert_eq!(site.dtype, DType::F32);
+        assert_eq!(site.elements_per_copy, 4);
+        assert_eq!(site.bytes_per_copy, 16);
+        assert_eq!(site.copy_count, 2);
+        assert_eq!(site.total_bytes, 32);
+    }
+
+    #[test]
+    fn detailed_htod_observer_bounds_unique_sites_and_accounts_for_overflow() {
+        let source = std::panic::Location::caller();
+        let extra_sites = 5_u64;
+        let ((), observation) = with_rocm_htod_observer_detailed(2, || {
+            for element_count in 1..=(ROCM_HTOD_MAX_UNIQUE_SITES as u64 + extra_sites) {
+                record_rocm_htod_copy(
+                    2,
+                    element_count * DType::F32.size_in_bytes() as u64,
+                    DType::F32,
+                    element_count,
+                    source,
+                );
+            }
+        });
+
+        assert_eq!(
+            observation.copy_count,
+            ROCM_HTOD_MAX_UNIQUE_SITES as u64 + extra_sites
+        );
+        assert_eq!(observation.sites.len(), ROCM_HTOD_MAX_UNIQUE_SITES);
+        assert_eq!(observation.unattributed_copy_count, extra_sites);
+        let first_omitted = ROCM_HTOD_MAX_UNIQUE_SITES as u64 + 1;
+        let last_omitted = ROCM_HTOD_MAX_UNIQUE_SITES as u64 + extra_sites;
+        let omitted_elements = (first_omitted + last_omitted) * extra_sites / 2;
+        assert_eq!(
+            observation.unattributed_bytes,
+            omitted_elements * DType::F32.size_in_bytes() as u64
+        );
+        assert_eq!(
+            observation.total_bytes,
+            (1..=last_omitted)
+                .map(|elements| elements * DType::F32.size_in_bytes() as u64)
+                .sum::<u64>()
+        );
     }
 
     #[test]

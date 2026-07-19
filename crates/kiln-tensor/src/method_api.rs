@@ -1352,6 +1352,7 @@ impl Tensor {
     /// both type-check; the produced tensor's dtype follows the scalar
     /// type, mirroring candle's `WithDType`. `device` is any
     /// [`Borrow<Device>`](Borrow) (`&Device` or owned).
+    #[track_caller]
     pub fn arange<S: ArangeScalar>(start: S, end: S, device: impl Borrow<Device>) -> Result<Self> {
         let cpu = ops::arange(start.to_f32(), end.to_f32(), 1.0, S::DTYPE)?;
         cpu.to_device(*device.borrow())
@@ -1393,6 +1394,7 @@ impl Tensor {
     /// flip to `from_slice` + `reshape`. Built via
     /// [`Tensor::from_slice`] then moved to `device`. `device` is any
     /// [`Borrow<Device>`](Borrow) (`&Device` or owned).
+    #[track_caller]
     pub fn new<E: Element>(data: &[E], device: impl Borrow<Device>) -> Result<Self> {
         let cpu = Self::from_slice(data, vec![data.len()])?;
         cpu.to_device(*device.borrow())

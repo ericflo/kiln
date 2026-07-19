@@ -354,6 +354,7 @@ impl Tensor {
     /// [`Self::from_vec`] and uploads via [`crate::host_to_cuda_copy`]
     /// — the same path [`Self::cuda_from_slice`] uses. The element
     /// type `E` parameter mirrors [`Self::from_vec`] / [`Self::from_slice`].
+    #[track_caller]
     pub fn from_vec_on<E: Element>(
         device: Device,
         values: Vec<E>,
@@ -421,6 +422,7 @@ impl Tensor {
     /// wraps on the host then H2D-uploads via the candle-free
     /// [`crate::host_to_cuda_copy_ctx`]. Metal, Vulkan, and ROCm upload through
     /// their backend host-copy helpers when the corresponding feature is enabled.
+    #[track_caller]
     pub fn from_raw_bytes_on(
         device: Device,
         dtype: DType,
@@ -1078,6 +1080,7 @@ impl Tensor {
     /// | CUDA(i)→CUDA(j)   | `Err` — cross-device GPU transfer NYI |
     /// | other cross-back  | `Err` — Metal/Vulkan paths NYI        |
     #[cfg(feature = "cuda")]
+    #[track_caller]
     pub fn to_device(&self, target: Device) -> Result<Self> {
         let src = self.device();
         if src == target {
@@ -1111,6 +1114,7 @@ impl Tensor {
     /// succeed (cheap clone); every cross-device case returns `Err`
     /// because no GPU backend is linked.
     #[cfg(not(feature = "cuda"))]
+    #[track_caller]
     pub fn to_device(&self, target: Device) -> Result<Self> {
         let src = self.device();
         if src == target {

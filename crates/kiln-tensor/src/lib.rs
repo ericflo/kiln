@@ -199,18 +199,20 @@ pub use rocm_matmul::{
 pub use rocm_ops::*;
 #[cfg(feature = "rocm")]
 pub use rocm_storage::{
-    RocmStorage, host_to_rocm_copy, host_to_rocm_copy_ctx, host_to_rocm_copy_with_context,
-    primary_rocm_context, primary_rocm_context_with_execution_policy, rocm_cleanup_quarantined,
-    rocm_contiguous, rocm_execution_policy, rocm_htod_count, rocm_is_available,
-    rocm_log_softmax_last_axis, rocm_log_softmax_last_axis_f32, rocm_mem_get_info, rocm_pool_stats,
-    rocm_slice_set_dim0, rocm_softmax_last_axis, rocm_sync_telemetry_snapshot,
-    rocm_synchronize_compute_stream, rocm_synchronize_compute_stream_for,
-    rocm_synchronize_default_stream, rocm_synchronize_device_for, rocm_synchronize_external_yield,
+    RocmHtodCopySite, RocmHtodObservation, RocmStorage, host_to_rocm_copy, host_to_rocm_copy_ctx,
+    host_to_rocm_copy_with_context, primary_rocm_context,
+    primary_rocm_context_with_execution_policy, rocm_cleanup_quarantined, rocm_contiguous,
+    rocm_execution_policy, rocm_htod_count, rocm_is_available, rocm_log_softmax_last_axis,
+    rocm_log_softmax_last_axis_f32, rocm_mem_get_info, rocm_pool_stats, rocm_slice_set_dim0,
+    rocm_softmax_last_axis, rocm_sync_telemetry_snapshot, rocm_synchronize_compute_stream,
+    rocm_synchronize_compute_stream_for, rocm_synchronize_default_stream,
+    rocm_synchronize_device_for, rocm_synchronize_external_yield,
     rocm_synchronize_external_yield_for_stream,
     rocm_synchronize_legacy_device_same_stream_dependency, rocm_synchronize_same_stream_dependency,
     rocm_synchronize_tensor_same_stream_dependency, rocm_synchronize_tensor_stream,
     rocm_synchronize_tensor_stream_for, rocm_to_host_copy, rocm_trim_pool,
     rocm_write_host_in_place, rocm_zeros_ctx, with_rocm_htod_observer,
+    with_rocm_htod_observer_detailed,
 };
 #[cfg(feature = "vulkan")]
 pub use vulkan_allocator::VulkanAllocator;

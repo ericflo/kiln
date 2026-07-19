@@ -626,6 +626,16 @@
                 </table>
               </div>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                A warm candidate that performs a host upload emits
+                <code>event=rocm_graph_capture_host_transfer</code> once per unique source site. Each record carries
+                the same closed fallback reason, build-source file/line/column, dtype, elements and bytes per copy,
+                copy count, and total bytes. Observation is thread- and device-scoped and bounded to 32 unique sites
+                per candidate; excess sites collapse into one <code>source_file=bounded_site_overflow</code> record.
+                No request text, token ID, tensor value, allocation address, shape, or source site becomes a metric
+                label. Pair these records with fallback duration and capture/replay counters rather than treating
+                their absence as proof of graph replay.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Health flattens these two authorities into <code>decode_runtime.rocm_graphs</code>. Full-statistic
                 fields are null when unavailable. Its <code>state</code> is <code>enabled</code> or
                 <code>disabled</code> when full statistics exist, <code>busy</code> only for

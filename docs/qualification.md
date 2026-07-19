@@ -1730,6 +1730,16 @@ reason, every fallback lasting at least 100 ms, and every failed eager fallback
 also emits `event=rocm_graph_fallback` with attempt, eager, and total duration.
 Qualification validates the health invariants and attributes these events to
 the exact ITL window; unknown reason strings do not receive graph attribution.
+When a warm candidate observes a host upload, it also emits one
+`event=rocm_graph_capture_host_transfer` record per unique source site. The
+record carries the same closed fallback `reason`, build-source file, line and
+column, dtype, elements and bytes per copy, copy count, and total bytes. The
+dynamic observer is thread- and device-scoped, aggregates at most 32 unique
+sites per candidate, and emits one `source_file=bounded_site_overflow` aggregate
+if more sites occur. These records contain no request text, token ID, tensor
+value, allocation address, or unbounded shape label. Use them to distinguish a
+one-time shape-cache fill from a persistent per-forward host path; do not infer
+capture or replay success from their absence without checking graph counters.
 The mixed-load receipt also records call, slow-call, cumulative duration, and
 maximum duration for pre-candidate headroom, candidate warm, pre-native
 reservation, native capture, and rejected-candidate cleanup, plus peak exact

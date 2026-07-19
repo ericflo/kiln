@@ -5332,8 +5332,8 @@ impl RocmGraphRunner {
         // forward OUTSIDE capture, so if it did a host round-trip the captured
         // pass would too: skip capture for this geometry and fall back to eager
         // BEFORE begin_capture, leaving the device clean.
-        let (warm_result, warm_htod_count) =
-            kiln_tensor::with_rocm_htod_observer(device_idx, || {
+        let (warm_result, warm_htod) =
+            kiln_tensor::with_rocm_htod_observer_detailed(device_idx, || {
                 kiln_tensor::with_rocm_capture_arena(arena.clone(), || {
                     // SAFETY: the default input stream was drained above; the warm pass
                     // is settled on `stream` before any buffer can leave this scope.
@@ -5462,7 +5462,7 @@ impl RocmGraphRunner {
         let transient_candidate_bytes = reserved_accounting.retained_bytes_excluding_slot();
         self.phase_telemetry
             .record_transient_candidate_bytes(transient_candidate_bytes);
-        if warm_htod_count > 0 {
+        if warm_htod.copy_count > 0 {
             // The warm forward did a host round-trip. This is EITHER a one-time
             // cold-cache fill (shape-keyed broadcast/gqa-expand gather indices
             // upload once per `max_seqlen_k` bucket, then every step + replay in
@@ -5478,7 +5478,7 @@ impl RocmGraphRunner {
             *attempts += 1;
             let fallback_reason = if *attempts >= Self::CAPTURE_RETRY_LIMIT {
                 tracing::debug!(
-                    htod = warm_htod_count,
+                    htod = warm_htod.copy_count,
                     attempts = *attempts,
                     "ROCm graph: geometry not capture-safe (persistent host round-trip); \
                      caching skip + running eager"
@@ -5491,13 +5491,43 @@ impl RocmGraphRunner {
                 RocmGraphFallbackReason::PersistentHostRoundTrip
             } else {
                 tracing::debug!(
-                    htod = warm_htod_count,
+                    htod = warm_htod.copy_count,
                     attempts = *attempts,
                     "ROCm graph: warm pass did a host round-trip (likely cold cache fill); \
                      running eager, will retry capture next step"
                 );
                 RocmGraphFallbackReason::ColdCacheHostRoundTrip
             };
+            for site in &warm_htod.sites {
+                tracing::warn!(
+                    event = "rocm_graph_capture_host_transfer",
+                    reason = fallback_reason.as_str(),
+                    source_file = site.source_file,
+                    source_line = site.source_line,
+                    source_column = site.source_column,
+                    dtype = %site.dtype,
+                    elements_per_copy = site.elements_per_copy,
+                    bytes_per_copy = site.bytes_per_copy,
+                    copy_count = site.copy_count,
+                    total_bytes = site.total_bytes,
+                    "ROCm graph capture-safety observer attributed a host-to-device transfer"
+                );
+            }
+            if warm_htod.unattributed_copy_count > 0 {
+                tracing::warn!(
+                    event = "rocm_graph_capture_host_transfer",
+                    reason = fallback_reason.as_str(),
+                    source_file = "bounded_site_overflow",
+                    source_line = 0,
+                    source_column = 0,
+                    dtype = "mixed",
+                    elements_per_copy = 0,
+                    bytes_per_copy = 0,
+                    copy_count = warm_htod.unattributed_copy_count,
+                    total_bytes = warm_htod.unattributed_bytes,
+                    "ROCm graph capture-safety observer omitted unique host-to-device transfer sites"
+                );
+            }
             drop(pre_native_reservation_timer);
             return Ok(RocmCaptureStep::fallback_after_candidate(
                 fallback_reason,
