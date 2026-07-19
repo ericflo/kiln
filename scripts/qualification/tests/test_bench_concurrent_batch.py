@@ -91,6 +91,56 @@ def valid_prelaunch_cooldown() -> dict:
     }
 
 
+def valid_request_performance(max_tokens: int, *, batching: bool = True) -> dict:
+    gap_samples = max(0, max_tokens - 1)
+    gap_stat = 4.0 if gap_samples else None
+    phases = {field: None for field in bench.REQUEST_PHASE_FIELDS}
+    phases.update(
+        actor_queue_ms=0.1,
+        actor_admission_ms=0.1,
+        prefill_ms=0.5,
+        decode_ms=max_tokens * 0.25,
+        actor_cycle_idle_ms=max_tokens * 0.5,
+        response_delivery_ms=0.1,
+        handler_queue_ms=0.1,
+        client_delivery_ms=0.1,
+        unexplained_ms=0.0,
+    )
+    reasons = {field: 0 for field in bench.REQUEST_STALL_REASON_FIELDS}
+    return {
+        "prompt_tokens": 42,
+        "completion_tokens": max_tokens,
+        "ttft_ms": 4.0,
+        "prefill_ms": 0.5,
+        "actor_queue_ms": 0.1,
+        "actor_admission_ms": 0.1,
+        "actor_prefill_wall_ms": 0.5,
+        "resident_prefill_used": False if batching else None,
+        "decode_ms": max_tokens * 0.25,
+        "total_latency_ms": max_tokens * 4.0,
+        "decode_tokens_per_sec": 250.0,
+        "adapter_used": "none",
+        "thinking_mode": "disabled",
+        "finish_reason": "length",
+        "latency": {
+            "emitted_tokens": max_tokens,
+            "gap_samples": gap_samples,
+            "retained_gap_samples": gap_samples,
+            "gap_samples_truncated": False,
+            "ttft_ms": 4.0,
+            "itl_ms_p50": gap_stat,
+            "itl_ms_p99": gap_stat,
+            "itl_ms_p999": gap_stat,
+            "max_itl_ms": gap_stat,
+            "stall_threshold_ms": 20.0 if gap_samples else None,
+            "stall_count": 0,
+            "unexplained_stall_count": 0,
+            "stall_reasons": reasons,
+            "phases": phases,
+        },
+    }
+
+
 def valid_fingerprint_thermal_evidence(
     policy_value: dict | None = None,
 ) -> dict:
@@ -412,17 +462,23 @@ class FakeHandler(BaseHTTPRequestHandler):
             )
             for token in range(max_tokens):
                 time.sleep(0.004)
-                self._event(
-                    {
-                        "model": "test-model",
-                        "choices": [
-                            {
-                                "delta": {"content": f"token-{token} "},
-                                "finish_reason": "length" if token + 1 == max_tokens else None,
-                            }
-                        ],
+                event = {
+                    "model": "test-model",
+                    "choices": [
+                        {
+                            "delta": {"content": f"token-{token} "},
+                            "finish_reason": "length" if token + 1 == max_tokens else None,
+                        }
+                    ],
+                }
+                if token + 1 == max_tokens:
+                    event["metadata"] = {
+                        "performance": valid_request_performance(
+                            max_tokens,
+                            batching=self.state.request_route == "batching_engine",
+                        )
                     }
-                )
+                self._event(event)
             self._event(
                 {
                     "model": "test-model",
@@ -1318,6 +1374,33 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertFalse(checks["positive_completion_usage"])
         self.assertFalse(checks["fixed_output_length"])
 
+    def test_request_performance_evidence_must_be_index_ordered(self) -> None:
+        performance = valid_request_performance(3)
+        evidence = [
+            {"index": index, "performance": json.loads(json.dumps(performance))}
+            for index in (1, 0)
+        ]
+        summary = bench.build_request_phase_summary(
+            row["performance"] for row in evidence
+        )
+        output_evidence = [
+            {"index": index, "completion_tokens": 3, "finish_reason": "length"}
+            for index in (0, 1)
+        ]
+        with self.assertRaisesRegex(bench.BenchmarkError, "ordered"):
+            bench.validate_request_performance_evidence(
+                evidence,
+                summary,
+                label="fixture.request_performance",
+                engine_name="kiln",
+                concurrency=2,
+                success_count=2,
+                error_indices=set(),
+                prompt_token_counts=[42, 42],
+                output_evidence_rows=output_evidence,
+                completion_tokens=6,
+            )
+
     def test_absolute_memory_limit_is_a_verdict_gate(self) -> None:
         now = time.perf_counter()
         result = bench.RequestResult(
@@ -2134,7 +2217,26 @@ class ServingBenchmarkTests(unittest.TestCase):
             return_code, output = self._run_cli_fixture(fake, directory)
             receipt = bench.strict_json_loads(output.read_bytes())
             self.assertEqual(bench.main(["--validate-receipt", str(output)]), 0)
-            self.assertEqual(receipt["driver_version"], "14")
+            self.assertEqual(receipt["driver_version"], "15")
+            run = receipt["runs"][0]
+            self.assertEqual(len(run["request_performance"]), 1)
+            self.assertEqual(
+                run["request_performance"][0]["performance"]["completion_tokens"],
+                3,
+            )
+            self.assertEqual(
+                run["request_phase_summary"]["phases"]["actor_cycle_idle_ms"][
+                    "observed_request_count"
+                ],
+                1,
+            )
+            self.assertTrue(
+                next(
+                    gate
+                    for gate in run["gates"]
+                    if gate["name"] == "request_performance_accounted"
+                )["passed"]
+            )
             self.assertEqual(
                 receipt["host_thermal"]["model_fingerprint"]["schema"],
                 bench.MODEL_FINGERPRINT_THERMAL_SCHEMA,
@@ -2146,7 +2248,49 @@ class ServingBenchmarkTests(unittest.TestCase):
                 256,
             )
 
-            driver_v13 = json.loads(json.dumps(receipt))
+            driver_v14 = json.loads(json.dumps(receipt))
+            driver_v14["driver_version"] = "14"
+            for row in [driver_v14["warmup"], *driver_v14["runs"]]:
+                if row is None:
+                    continue
+                row.pop("request_performance")
+                row.pop("request_phase_summary")
+                row["gates"] = [
+                    gate
+                    for gate in row["gates"]
+                    if gate["name"] != "request_performance_accounted"
+                ]
+            driver_v14.pop("receipt_sha256")
+            driver_v14["receipt_sha256"] = bench.canonical_sha256(driver_v14)
+            bench.validate_benchmark_receipt(driver_v14)
+
+            tampered_summary = json.loads(json.dumps(receipt))
+            tampered_distribution = tampered_summary["runs"][0][
+                "request_phase_summary"
+            ]["phases"]["actor_cycle_idle_ms"]
+            for statistic in ("p50", "p99", "max"):
+                tampered_distribution[statistic] += 1.0
+            tampered_summary.pop("receipt_sha256")
+            tampered_summary["receipt_sha256"] = bench.canonical_sha256(
+                tampered_summary
+            )
+            with self.assertRaisesRegex(bench.BenchmarkError, "not derived"):
+                bench.validate_benchmark_receipt(tampered_summary)
+
+            tampered_request = json.loads(json.dumps(receipt))
+            tampered_request["runs"][0]["request_performance"][0][
+                "performance"
+            ]["completion_tokens"] += 1
+            tampered_request.pop("receipt_sha256")
+            tampered_request["receipt_sha256"] = bench.canonical_sha256(
+                tampered_request
+            )
+            with self.assertRaisesRegex(
+                bench.BenchmarkError, "emitted_tokens disagrees"
+            ):
+                bench.validate_benchmark_receipt(tampered_request)
+
+            driver_v13 = json.loads(json.dumps(driver_v14))
             driver_v13["driver_version"] = "13"
             for row in [driver_v13["warmup"], *driver_v13["runs"]]:
                 if row is None:
@@ -2165,7 +2309,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             driver_v13["receipt_sha256"] = bench.canonical_sha256(driver_v13)
             bench.validate_benchmark_receipt(driver_v13)
 
-            legacy = json.loads(json.dumps(receipt))
+            legacy = json.loads(json.dumps(driver_v14))
             legacy["driver_version"] = "11"
             legacy_fingerprint = legacy["host_thermal"]["model_fingerprint"]
             legacy_fingerprint["schema"] = bench.MODEL_FINGERPRINT_THERMAL_SCHEMA_V1
@@ -2265,6 +2409,16 @@ class ServingBenchmarkTests(unittest.TestCase):
             vllm_receipt["completion"]["finalization_checks"][
                 "execution_identity_unchanged"
             ] = "not_applicable"
+            for row in [vllm_receipt["warmup"], *vllm_receipt["runs"]]:
+                if row is None:
+                    continue
+                row["request_performance"] = None
+                row["request_phase_summary"] = None
+                row["gates"] = [
+                    gate
+                    for gate in row["gates"]
+                    if gate["name"] != "request_performance_accounted"
+                ]
             vllm_receipt.pop("receipt_sha256")
             vllm_receipt["receipt_sha256"] = bench.canonical_sha256(vllm_receipt)
             bench.validate_benchmark_receipt(vllm_receipt)

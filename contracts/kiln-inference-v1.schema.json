@@ -282,6 +282,7 @@
         "actor_queue_ms",
         "actor_admission_ms",
         "actor_prefill_wall_ms",
+        "resident_prefill_used",
         "decode_ms",
         "total_latency_ms",
         "decode_tokens_per_sec",
@@ -298,6 +299,7 @@
         "actor_queue_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
         "actor_admission_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
         "actor_prefill_wall_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "resident_prefill_used": { "$ref": "#/$defs/NullableBoolean" },
         "decode_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
         "total_latency_ms": { "type": "number", "minimum": 0 },
         "decode_tokens_per_sec": { "$ref": "#/$defs/NullableNonNegativeNumber" },
@@ -579,7 +581,7 @@
       "type": "object",
       "required": [
         "actor_queue_ms", "actor_admission_ms", "tokenization_ms", "prefill_ms",
-        "decode_ms", "sampling_ms", "readback_ms", "response_delivery_ms",
+        "decode_ms", "actor_cycle_idle_ms", "sampling_ms", "readback_ms", "response_delivery_ms",
         "handler_queue_ms", "client_delivery_ms", "gpu_lock_wait_ms",
         "graph_capture_ms", "graph_replay_ms", "synchronization_ms", "resize_ms",
         "trim_ms", "adapter_ms", "training_ms", "unexplained_ms"
@@ -590,6 +592,7 @@
         "tokenization_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
         "prefill_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
         "decode_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
+        "actor_cycle_idle_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
         "sampling_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
         "readback_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
         "response_delivery_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
@@ -612,7 +615,7 @@
     "LatencyStallReasonCounts": {
       "type": "object",
       "required": [
-        "actor_queue", "actor_admission", "actor_prefill", "actor_decode",
+        "actor_queue", "actor_admission", "actor_prefill", "actor_decode", "actor_cycle_idle",
         "response_delivery", "handler_queue", "client_delivery", "sampling",
         "readback", "gpu_lock_wait", "graph_capture", "graph_replay",
         "synchronization", "resize", "trim", "adapter", "training", "unexplained"
@@ -622,6 +625,7 @@
         "actor_admission": { "$ref": "#/$defs/NonNegativeInteger" },
         "actor_prefill": { "$ref": "#/$defs/NonNegativeInteger" },
         "actor_decode": { "$ref": "#/$defs/NonNegativeInteger" },
+        "actor_cycle_idle": { "$ref": "#/$defs/NonNegativeInteger" },
         "response_delivery": { "$ref": "#/$defs/NonNegativeInteger" },
         "handler_queue": { "$ref": "#/$defs/NonNegativeInteger" },
         "client_delivery": { "$ref": "#/$defs/NonNegativeInteger" },
@@ -1044,6 +1048,7 @@
           "type": ["string", "null"],
           "enum": [
             "actor_queue", "actor_admission", "actor_prefill", "actor_decode",
+            "actor_cycle_idle",
             "response_delivery", "handler_queue", "client_delivery", "sampling",
             "readback", "gpu_lock_wait", "graph_capture", "graph_replay",
             "synchronization", "resize", "trim", "adapter", "training",

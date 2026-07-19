@@ -39,7 +39,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "14"
+DRIVER_VERSION = "15"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -53,36 +53,38 @@ SUPPORTED_DRIVER_VERSIONS = {
     "11",
     "12",
     "13",
+    "14",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
-    "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", DRIVER_VERSION
+    "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
 }
 LIFECYCLE_DRIVER_VERSIONS = {
-    "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", DRIVER_VERSION
+    "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
 }
 PRELAUNCH_DRIVER_VERSIONS = {
-    "5", "6", "7", "8", "9", "10", "11", "12", "13", DRIVER_VERSION
+    "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
 }
 OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", DRIVER_VERSION
+    "7", "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
 }
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", "13", DRIVER_VERSION
+    "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
 }
-RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {"12", "13", DRIVER_VERSION}
+RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {"12", "13", "14", DRIVER_VERSION}
 ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "9", "10", "11", "12", "13", DRIVER_VERSION
+    "9", "10", "11", "12", "13", "14", DRIVER_VERSION
 }
 ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "10", "11", "12", "13", DRIVER_VERSION
+    "10", "11", "12", "13", "14", DRIVER_VERSION
 }
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", DRIVER_VERSION
+    "7", "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
 }
-IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {"11", "12", "13", DRIVER_VERSION}
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {DRIVER_VERSION}
+IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {"11", "12", "13", "14", DRIVER_VERSION}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", DRIVER_VERSION}
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = {DRIVER_VERSION}
 OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
@@ -341,6 +343,7 @@ RUN_KEYS = {
 }
 RUN_KEYS_V3 = RUN_KEYS | {"prompt_token_counts", "host_thermal"}
 RUN_KEYS_V7 = RUN_KEYS_V3 | {"output_evidence"}
+RUN_KEYS_V15 = RUN_KEYS_V7 | {"request_performance", "request_phase_summary"}
 OUTPUT_EVIDENCE_KEYS = {
     "index",
     "output_sha256",
@@ -353,6 +356,111 @@ OUTPUT_EVIDENCE_KEYS = {
     "exact_output",
 }
 EXACT_OUTPUT_KEYS = {"reasoning_content_base64", "content_base64"}
+REQUEST_PERFORMANCE_EVIDENCE_KEYS = {"index", "performance"}
+CHAT_PERFORMANCE_KEYS = {
+    "prompt_tokens",
+    "completion_tokens",
+    "ttft_ms",
+    "prefill_ms",
+    "actor_queue_ms",
+    "actor_admission_ms",
+    "actor_prefill_wall_ms",
+    "resident_prefill_used",
+    "decode_ms",
+    "total_latency_ms",
+    "decode_tokens_per_sec",
+    "adapter_used",
+    "thinking_mode",
+    "finish_reason",
+    "latency",
+}
+REQUEST_LATENCY_KEYS = {
+    "emitted_tokens",
+    "gap_samples",
+    "retained_gap_samples",
+    "gap_samples_truncated",
+    "ttft_ms",
+    "itl_ms_p50",
+    "itl_ms_p99",
+    "itl_ms_p999",
+    "max_itl_ms",
+    "stall_threshold_ms",
+    "stall_count",
+    "unexplained_stall_count",
+    "stall_reasons",
+    "phases",
+}
+REQUEST_PHASE_FIELDS = (
+    "actor_queue_ms",
+    "actor_admission_ms",
+    "tokenization_ms",
+    "prefill_ms",
+    "decode_ms",
+    "actor_cycle_idle_ms",
+    "sampling_ms",
+    "readback_ms",
+    "response_delivery_ms",
+    "handler_queue_ms",
+    "client_delivery_ms",
+    "gpu_lock_wait_ms",
+    "graph_capture_ms",
+    "graph_replay_ms",
+    "synchronization_ms",
+    "resize_ms",
+    "trim_ms",
+    "adapter_ms",
+    "training_ms",
+    "unexplained_ms",
+)
+REQUEST_STALL_REASON_FIELDS = (
+    "actor_queue",
+    "actor_admission",
+    "actor_prefill",
+    "actor_decode",
+    "actor_cycle_idle",
+    "response_delivery",
+    "handler_queue",
+    "client_delivery",
+    "sampling",
+    "readback",
+    "gpu_lock_wait",
+    "graph_capture",
+    "graph_replay",
+    "synchronization",
+    "resize",
+    "trim",
+    "adapter",
+    "training",
+    "unexplained",
+)
+REQUEST_PERFORMANCE_METRIC_FIELDS = (
+    "ttft_ms",
+    "prefill_ms",
+    "actor_queue_ms",
+    "actor_admission_ms",
+    "actor_prefill_wall_ms",
+    "decode_ms",
+    "total_latency_ms",
+    "decode_tokens_per_sec",
+)
+REQUEST_PHASE_SUMMARY_SCHEMA = "kiln.serving-benchmark-request-phase-summary.v1"
+REQUEST_PHASE_SUMMARY_KEYS = {
+    "schema",
+    "performance_request_count",
+    "latency_request_count",
+    "emitted_tokens",
+    "stall_count",
+    "unexplained_stall_count",
+    "stall_reasons",
+    "phases",
+    "request_metrics",
+}
+REQUEST_DISTRIBUTION_KEYS = {
+    "observed_request_count",
+    "p50",
+    "p99",
+    "max",
+}
 MODEL_IDENTITY_KEYS = {
     "id",
     "path",
@@ -2013,6 +2121,317 @@ def validate_server_diagnostics_v5(value: Any, label: str) -> dict[str, Any]:
     return server
 
 
+def _nullable_nonnegative_number(value: Any, label: str) -> float | None:
+    if value is None:
+        return None
+    return _nonnegative_number(value, label)
+
+
+def validate_request_latency_diagnostics(
+    value: Any, label: str
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    latency = _object(value, label)
+    _exact_keys(latency, REQUEST_LATENCY_KEYS, label)
+    for field in (
+        "emitted_tokens",
+        "gap_samples",
+        "retained_gap_samples",
+        "stall_count",
+        "unexplained_stall_count",
+    ):
+        _nonnegative_int(latency[field], f"{label}.{field}")
+    if latency["retained_gap_samples"] > 8192:
+        raise BenchmarkError(f"{label}.retained_gap_samples exceeds 8192")
+    if not isinstance(latency["gap_samples_truncated"], bool):
+        raise BenchmarkError(f"{label}.gap_samples_truncated must be boolean")
+    for field in (
+        "ttft_ms",
+        "itl_ms_p50",
+        "itl_ms_p99",
+        "itl_ms_p999",
+        "max_itl_ms",
+        "stall_threshold_ms",
+    ):
+        _nullable_nonnegative_number(latency[field], f"{label}.{field}")
+
+    expected_gap_samples = max(0, latency["emitted_tokens"] - 1)
+    if latency["gap_samples"] != expected_gap_samples:
+        raise BenchmarkError(
+            f"{label}.gap_samples must equal emitted_tokens minus one"
+        )
+    if latency["retained_gap_samples"] > latency["gap_samples"]:
+        raise BenchmarkError(f"{label}.retained_gap_samples exceeds gap_samples")
+    if latency["gap_samples_truncated"]:
+        if latency["retained_gap_samples"] >= latency["gap_samples"]:
+            raise BenchmarkError(
+                f"{label}.gap_samples_truncated requires discarded samples"
+            )
+    elif latency["retained_gap_samples"] != latency["gap_samples"]:
+        raise BenchmarkError(
+            f"{label}.retained_gap_samples must cover every untruncated gap"
+        )
+
+    percentile_fields = (
+        "itl_ms_p50",
+        "itl_ms_p99",
+        "itl_ms_p999",
+        "max_itl_ms",
+        "stall_threshold_ms",
+    )
+    if latency["retained_gap_samples"] == 0:
+        if any(latency[field] is not None for field in percentile_fields):
+            raise BenchmarkError(f"{label} reports gap statistics without retained gaps")
+    else:
+        if any(latency[field] is None for field in percentile_fields):
+            raise BenchmarkError(f"{label} omits statistics for retained gaps")
+        if not (
+            latency["itl_ms_p50"]
+            <= latency["itl_ms_p99"]
+            <= latency["itl_ms_p999"]
+            <= latency["max_itl_ms"]
+        ):
+            raise BenchmarkError(f"{label} ITL percentiles are not monotonic")
+    if latency["stall_count"] > latency["retained_gap_samples"]:
+        raise BenchmarkError(f"{label}.stall_count exceeds retained gaps")
+
+    reasons = _object(latency["stall_reasons"], f"{label}.stall_reasons")
+    _exact_keys(reasons, set(REQUEST_STALL_REASON_FIELDS), f"{label}.stall_reasons")
+    for field in REQUEST_STALL_REASON_FIELDS:
+        _nonnegative_int(reasons[field], f"{label}.stall_reasons.{field}")
+    if sum(reasons.values()) != latency["stall_count"]:
+        raise BenchmarkError(f"{label}.stall_reasons do not sum to stall_count")
+    if reasons["unexplained"] != latency["unexplained_stall_count"]:
+        raise BenchmarkError(
+            f"{label}.unexplained_stall_count disagrees with stall_reasons"
+        )
+
+    phases = _object(latency["phases"], f"{label}.phases")
+    _exact_keys(phases, set(REQUEST_PHASE_FIELDS), f"{label}.phases")
+    for field in REQUEST_PHASE_FIELDS:
+        _nullable_nonnegative_number(phases[field], f"{label}.phases.{field}")
+    return latency
+
+
+def validate_chat_performance_metadata(value: Any, label: str) -> dict[str, Any]:
+    performance = _object(value, label)
+    _exact_keys(performance, CHAT_PERFORMANCE_KEYS, label)
+    for field in ("prompt_tokens", "completion_tokens"):
+        _nonnegative_int(performance[field], f"{label}.{field}")
+    for field in (
+        "ttft_ms",
+        "prefill_ms",
+        "actor_queue_ms",
+        "actor_admission_ms",
+        "actor_prefill_wall_ms",
+        "decode_ms",
+        "decode_tokens_per_sec",
+    ):
+        _nullable_nonnegative_number(performance[field], f"{label}.{field}")
+    _nonnegative_number(performance["total_latency_ms"], f"{label}.total_latency_ms")
+    if performance["resident_prefill_used"] is not None and not isinstance(
+        performance["resident_prefill_used"], bool
+    ):
+        raise BenchmarkError(f"{label}.resident_prefill_used must be boolean or null")
+    for field in ("adapter_used", "thinking_mode", "finish_reason"):
+        if not isinstance(performance[field], str) or not performance[field]:
+            raise BenchmarkError(f"{label}.{field} must be a non-empty string")
+    if performance["finish_reason"] not in {"error", "length", "stop", "tool_calls"}:
+        raise BenchmarkError(f"{label}.finish_reason is invalid")
+    latency = validate_request_latency_diagnostics(
+        performance["latency"], f"{label}.latency"
+    )
+    if latency is not None:
+        if latency["emitted_tokens"] != performance["completion_tokens"]:
+            raise BenchmarkError(
+                f"{label}.latency.emitted_tokens disagrees with completion_tokens"
+            )
+        if latency["ttft_ms"] != performance["ttft_ms"]:
+            raise BenchmarkError(f"{label}.latency.ttft_ms disagrees with ttft_ms")
+    return performance
+
+
+def request_distribution(values: Iterable[float]) -> dict[str, Any]:
+    observed = list(values)
+    return {
+        "observed_request_count": len(observed),
+        "p50": percentile_r7(observed, 0.50),
+        "p99": percentile_r7(observed, 0.99),
+        "max": max(observed) if observed else None,
+    }
+
+
+def build_request_phase_summary(
+    performances: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    performance_rows = list(performances)
+    latencies = [
+        performance["latency"]
+        for performance in performance_rows
+        if performance["latency"] is not None
+    ]
+    return {
+        "schema": REQUEST_PHASE_SUMMARY_SCHEMA,
+        "performance_request_count": len(performance_rows),
+        "latency_request_count": len(latencies),
+        "emitted_tokens": sum(row["emitted_tokens"] for row in latencies),
+        "stall_count": sum(row["stall_count"] for row in latencies),
+        "unexplained_stall_count": sum(
+            row["unexplained_stall_count"] for row in latencies
+        ),
+        "stall_reasons": {
+            field: sum(row["stall_reasons"][field] for row in latencies)
+            for field in REQUEST_STALL_REASON_FIELDS
+        },
+        "phases": {
+            field: request_distribution(
+                row["phases"][field]
+                for row in latencies
+                if row["phases"][field] is not None
+            )
+            for field in REQUEST_PHASE_FIELDS
+        },
+        "request_metrics": {
+            field: request_distribution(
+                row[field] for row in performance_rows if row[field] is not None
+            )
+            for field in REQUEST_PERFORMANCE_METRIC_FIELDS
+        },
+    }
+
+
+def validate_request_distribution(value: Any, label: str) -> dict[str, Any]:
+    distribution = _object(value, label)
+    _exact_keys(distribution, REQUEST_DISTRIBUTION_KEYS, label)
+    _nonnegative_int(
+        distribution["observed_request_count"],
+        f"{label}.observed_request_count",
+    )
+    for field in ("p50", "p99", "max"):
+        _nullable_nonnegative_number(distribution[field], f"{label}.{field}")
+    if distribution["observed_request_count"] == 0:
+        if any(distribution[field] is not None for field in ("p50", "p99", "max")):
+            raise BenchmarkError(f"{label} reports statistics without observations")
+    else:
+        if any(distribution[field] is None for field in ("p50", "p99", "max")):
+            raise BenchmarkError(f"{label} omits statistics for observations")
+        if not distribution["p50"] <= distribution["p99"] <= distribution["max"]:
+            raise BenchmarkError(f"{label} statistics are not monotonic")
+    return distribution
+
+
+def validate_request_performance_evidence(
+    performance_value: Any,
+    summary_value: Any,
+    *,
+    label: str,
+    engine_name: str | None,
+    concurrency: int,
+    success_count: int,
+    error_indices: set[int],
+    prompt_token_counts: list[int],
+    output_evidence_rows: list[dict[str, Any]],
+    completion_tokens: int,
+) -> bool:
+    if engine_name == "vllm" or engine_name is None:
+        if performance_value is not None or summary_value is not None:
+            raise BenchmarkError(
+                f"{label} must be null for "
+                + ("vLLM" if engine_name == "vllm" else "unspecified engines")
+            )
+        return False
+    if engine_name != "kiln":
+        raise BenchmarkError(f"{label} has unsupported engine {engine_name!r}")
+    if not isinstance(performance_value, list):
+        raise BenchmarkError(f"{label} must be an array for Kiln")
+
+    output_by_index = {row["index"]: row for row in output_evidence_rows}
+    indices: set[int] = set()
+    previous_index = -1
+    performances: list[dict[str, Any]] = []
+    for position, value in enumerate(performance_value):
+        evidence_label = f"{label}[{position}]"
+        evidence = _object(value, evidence_label)
+        _exact_keys(evidence, REQUEST_PERFORMANCE_EVIDENCE_KEYS, evidence_label)
+        index = evidence["index"]
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < concurrency
+            or index in error_indices
+            or index in indices
+        ):
+            raise BenchmarkError(f"{evidence_label}.index is invalid or duplicate")
+        if index <= previous_index:
+            raise BenchmarkError(f"{label} must be ordered by request index")
+        previous_index = index
+        performance = validate_chat_performance_metadata(
+            evidence["performance"], f"{evidence_label}.performance"
+        )
+        output = output_by_index.get(index)
+        if output is None:
+            raise BenchmarkError(f"{evidence_label} has no successful output evidence")
+        if performance["prompt_tokens"] != prompt_token_counts[index]:
+            raise BenchmarkError(f"{evidence_label} prompt-token accounting disagrees")
+        if performance["completion_tokens"] != output["completion_tokens"]:
+            raise BenchmarkError(f"{evidence_label} completion-token accounting disagrees")
+        if performance["finish_reason"] != output["finish_reason"]:
+            raise BenchmarkError(f"{evidence_label} finish reason disagrees")
+        indices.add(index)
+        performances.append(performance)
+
+    summary = _object(summary_value, f"{label}_summary")
+    _exact_keys(summary, REQUEST_PHASE_SUMMARY_KEYS, f"{label}_summary")
+    if summary["schema"] != REQUEST_PHASE_SUMMARY_SCHEMA:
+        raise BenchmarkError(f"{label}_summary.schema is unsupported")
+    for field in (
+        "performance_request_count",
+        "latency_request_count",
+        "emitted_tokens",
+        "stall_count",
+        "unexplained_stall_count",
+    ):
+        _nonnegative_int(summary[field], f"{label}_summary.{field}")
+    reasons = _object(summary["stall_reasons"], f"{label}_summary.stall_reasons")
+    _exact_keys(
+        reasons,
+        set(REQUEST_STALL_REASON_FIELDS),
+        f"{label}_summary.stall_reasons",
+    )
+    for field in REQUEST_STALL_REASON_FIELDS:
+        _nonnegative_int(reasons[field], f"{label}_summary.stall_reasons.{field}")
+    phases = _object(summary["phases"], f"{label}_summary.phases")
+    _exact_keys(phases, set(REQUEST_PHASE_FIELDS), f"{label}_summary.phases")
+    for field in REQUEST_PHASE_FIELDS:
+        validate_request_distribution(
+            phases[field], f"{label}_summary.phases.{field}"
+        )
+    metrics = _object(
+        summary["request_metrics"], f"{label}_summary.request_metrics"
+    )
+    _exact_keys(
+        metrics,
+        set(REQUEST_PERFORMANCE_METRIC_FIELDS),
+        f"{label}_summary.request_metrics",
+    )
+    for field in REQUEST_PERFORMANCE_METRIC_FIELDS:
+        validate_request_distribution(
+            metrics[field], f"{label}_summary.request_metrics.{field}"
+        )
+
+    expected_summary = build_request_phase_summary(performances)
+    if summary != expected_summary:
+        raise BenchmarkError(f"{label}_summary is not derived from request evidence")
+    complete = (
+        len(performances) == success_count
+        and sum(row["completion_tokens"] for row in performances)
+        == completion_tokens
+        and all(row["latency"] is not None for row in performances)
+    )
+    return complete
+
+
 def validate_benchmark_run(
     value: Any,
     *,
@@ -2024,6 +2443,7 @@ def validate_benchmark_run(
     memory_limit_bytes: int | None,
     workload_profile: str | None,
     host_thermal_policy: dict[str, Any] | None = None,
+    engine_name: str | None = None,
 ) -> None:
     row = _object(value, label)
     run_keys = RUN_KEYS
@@ -2031,6 +2451,8 @@ def validate_benchmark_run(
         run_keys = RUN_KEYS_V3
     if driver_version in OUTPUT_EVIDENCE_DRIVER_VERSIONS:
         run_keys = RUN_KEYS_V7
+    if driver_version in REQUEST_PERFORMANCE_DRIVER_VERSIONS:
+        run_keys = RUN_KEYS_V15
     _exact_keys(row, run_keys, label)
     if row["concurrency"] != concurrency or row["repeat"] != repeat:
         raise BenchmarkError(f"{label} does not match its declared concurrency/repeat")
@@ -2139,6 +2561,20 @@ def validate_benchmark_run(
             completion_tokens=row["completion_tokens"],
             output_set_sha256=row["output_set_sha256"],
         )
+    request_performance_complete: bool | None = None
+    if driver_version in REQUEST_PERFORMANCE_DRIVER_VERSIONS:
+        request_performance_complete = validate_request_performance_evidence(
+            row["request_performance"],
+            row["request_phase_summary"],
+            label=f"{label}.request_performance",
+            engine_name=engine_name,
+            concurrency=concurrency,
+            success_count=row["success_count"],
+            error_indices=error_indices,
+            prompt_token_counts=row["prompt_token_counts"],
+            output_evidence_rows=row["output_evidence"],
+            completion_tokens=row["completion_tokens"],
+        )
     gates = row["gates"]
     if not isinstance(gates, list) or not gates:
         raise BenchmarkError(f"{label}.gates must be a non-empty array")
@@ -2151,6 +2587,27 @@ def validate_benchmark_run(
         if not isinstance(gate["detail"], str) or not isinstance(gate["passed"], bool):
             raise BenchmarkError(f"{label}.gates[{index}] has invalid field types")
         gate_names.add(gate["name"])
+    if driver_version in REQUEST_PERFORMANCE_DRIVER_VERSIONS:
+        performance_gate = next(
+            (
+                item
+                for item in gates
+                if item["name"] == "request_performance_accounted"
+            ),
+            None,
+        )
+        if engine_name == "kiln":
+            if (
+                performance_gate is None
+                or performance_gate["passed"] != request_performance_complete
+            ):
+                raise BenchmarkError(
+                    f"{label} has an inconsistent request-performance gate"
+                )
+        elif performance_gate is not None:
+            raise BenchmarkError(
+                f"{label} has a Kiln-only request-performance gate"
+            )
 
     if row["memory"] is not None:
         memory = _object(row["memory"], f"{label}.memory")
@@ -3213,6 +3670,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 memory_limit_bytes=memory_limit_bytes,
                 workload_profile=workload.get("profile"),
                 host_thermal_policy=receipt.get("host_thermal", {}).get("policy"),
+                engine_name=engine["name"],
             )
     elif receipt["warmup"] is not None:
         raise BenchmarkError("receipt has an undeclared warmup")
@@ -3237,6 +3695,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 memory_limit_bytes=memory_limit_bytes,
                 workload_profile=workload.get("profile"),
                 host_thermal_policy=receipt.get("host_thermal", {}).get("policy"),
+                engine_name=engine["name"],
             )
     if driver_version in THERMAL_DRIVER_VERSIONS:
         thermal_rows = list(runs)
@@ -3630,6 +4089,7 @@ class RequestResult:
     finish_reason: str | None
     done: bool
     error: str | None
+    server_performance: dict[str, Any] | None = None
 
     @property
     def ttft_ms(self) -> float | None:
@@ -3706,6 +4166,7 @@ def failed_result(
         finish_reason=None,
         done=False,
         error=f"{type(exc).__name__}: {exc}",
+        server_performance=None,
     )
 
 
@@ -3782,6 +4243,8 @@ def stream_request(
         reasoning_parts: list[str] = []
         reasons: list[str] = []
         usage_records = 0
+        performance_records = 0
+        server_performance: dict[str, Any] | None = None
         prompt_tokens = completion_tokens = total_tokens = 0
         done = False
         parser = SSEParser()
@@ -3810,6 +4273,17 @@ def stream_request(
                         if usage_records != 1:
                             raise BenchmarkError("stream emitted multiple usage records")
                         prompt_tokens, completion_tokens, total_tokens = validate_usage(usage)
+                    metadata = value.get("metadata")
+                    if isinstance(metadata, dict) and "performance" in metadata:
+                        performance_records += 1
+                        if performance_records != 1:
+                            raise BenchmarkError(
+                                "stream emitted multiple performance records"
+                            )
+                        server_performance = validate_chat_performance_metadata(
+                            metadata["performance"],
+                            "stream metadata.performance",
+                        )
             for data in parser.finish():
                 if data == "[DONE]":
                     done = True
@@ -3839,6 +4313,7 @@ def stream_request(
             finish_reason=reasons[0],
             done=True,
             error=None,
+            server_performance=server_performance,
         )
     except Exception as exc:
         if isinstance(exc, urllib.error.HTTPError):
@@ -4501,6 +4976,7 @@ def summarize_run(
     server: dict[str, Any] | None,
     diagnostics_error: str | None,
     output_evidence_mode: str = "hashes",
+    engine_name: str | None = None,
 ) -> dict[str, Any]:
     successes = [result for result in results if result.error is None]
     errors = [
@@ -4696,6 +5172,32 @@ def summarize_run(
                     f"batching-engine error delta: {server['total_errors']}",
                 )
             )
+    request_performance_rows: list[dict[str, Any]] | None = None
+    request_phase_summary: dict[str, Any] | None = None
+    if engine_name == "kiln":
+        request_performance_rows = [
+            {"index": result.index, "performance": result.server_performance}
+            for result in sorted(successes, key=lambda result: result.index)
+            if result.server_performance is not None
+        ]
+        request_phase_summary = build_request_phase_summary(
+            row["performance"] for row in request_performance_rows
+        )
+        latency_count = request_phase_summary["latency_request_count"]
+        complete = (
+            len(request_performance_rows) == len(successes)
+            and latency_count == len(successes)
+        )
+        gates.append(
+            gate(
+                "request_performance_accounted",
+                complete,
+                (
+                    f"performance={len(request_performance_rows)}/{len(successes)} "
+                    f"successful requests; latency={latency_count}/{len(successes)}"
+                ),
+            )
+        )
     output_evidence_rows = [
         output_evidence(result, output_evidence_mode)
         for result in sorted(successes, key=lambda result: result.index)
@@ -4748,6 +5250,8 @@ def summarize_run(
         "prompt_set_sha256": canonical_sha256(prompt_rows),
         "output_set_sha256": canonical_sha256(output_rows),
         "output_evidence": output_evidence_rows,
+        "request_performance": request_performance_rows,
+        "request_phase_summary": request_phase_summary,
         "memory": memory,
         "server": server,
         "gates": gates,
@@ -4869,6 +5373,7 @@ def run_once(
         server=server_delta,
         diagnostics_error=diagnostics_error,
         output_evidence_mode=args.output_evidence,
+        engine_name=args.engine,
     )
 
 

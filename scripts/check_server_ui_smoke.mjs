@@ -969,6 +969,7 @@ function smokeRequestLatency() {
       actor_admission: 0,
       actor_prefill: 0,
       actor_decode: 0,
+      actor_cycle_idle: 0,
       response_delivery: 0,
       handler_queue: 0,
       client_delivery: 0,
@@ -990,6 +991,7 @@ function smokeRequestLatency() {
       tokenization_ms: 1,
       prefill_ms: 290,
       decode_ms: 63,
+      actor_cycle_idle_ms: 0,
       sampling_ms: null,
       readback_ms: null,
       response_delivery_ms: 2,
@@ -2282,6 +2284,7 @@ async function startServer({
         unexplained_stall_count: 0,
         stall_reasons: {
           actor_queue: 0, actor_admission: 0, actor_prefill: 0, actor_decode: 0,
+          actor_cycle_idle: 0,
           response_delivery: 0, handler_queue: 0, client_delivery: 0, sampling: 0,
           readback: 0, gpu_lock_wait: 0, graph_capture: 0, graph_replay: 0,
           synchronization: 0, resize: 0, trim: 0, adapter: 0, training: 0,

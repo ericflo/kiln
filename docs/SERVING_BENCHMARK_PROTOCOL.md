@@ -246,13 +246,41 @@ latency, request throughput, output-token throughput, SLO goodput, dispatch
 spread, prompt/output hashes, DRM memory, failures, and Kiln server-route
 diagnostics.
 
-Driver v7 through v13 retain one ordered `output_evidence` row for every successful
+Driver v7 through v15 retain one ordered `output_evidence` row for every successful
 request. Hash-only evidence is the default and includes the combined semantic
 output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
 tokens, and finish reason. The validator requires these rows to cover exactly
 the successful request indices, reproduce the aggregate output-set hash, and
 reproduce the run's completion-token total. An aggregate mismatch can therefore
 no longer hide whether one request or the entire row diverged.
+
+### Request-local performance evidence
+
+Driver v15 retains Kiln's terminal `metadata.performance` object for every
+successful measured request. The comparison profiles enable that response field
+through the typed `server.chat_performance_metadata` setting. The driver does
+not add `include_performance` or another Kiln-only field to the measured request
+body, so Kiln and vLLM continue to receive identical inputs. vLLM rows record
+both `request_performance` and `request_phase_summary` as `null`.
+
+Each Kiln `request_performance` row is bound to its request index. Strict
+validation requires its prompt/completion usage and finish reason to agree with
+the independent usage and output-evidence records. It also requires the closed
+latency object to reconcile emitted tokens, retained gaps, total stall count,
+all 19 stall-reason counts, and all 20 nullable phase fields. Missing terminal
+metadata or a null latency object fails the `request_performance_accounted`
+gate for an otherwise successful Kiln request; malformed metadata fails that
+request and remains visible as a structured counterexample.
+
+`request_phase_summary` is derived entirely from those retained request rows.
+For each phase and terminal request metric it records the non-null request
+population plus p50, p99, and maximum. It also totals emitted tokens and closed
+stall-reason counts. Phase durations are deliberately not summed: concurrent
+requests share and overlap actor/device work, so summing request-local phase
+time would not describe service-wall time. Use route-level before/after server
+counters to rank service-wall cost and request distributions to identify which
+clients experienced it. The validator recomputes the complete summary and
+rejects edited or stale aggregates.
 
 ### Idle-boundary cooldown evidence
 
@@ -917,20 +945,22 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v14 is the current contract. It adds explicit multi-row ROCm graph
-fallback accounting and diagnostics v5 without changing the request workload,
-output contract, or thermal limits. Driver v13 added closed cooperative
+Driver v15 is the current contract. It adds strict per-request Kiln terminal
+performance evidence and derived phase distributions without changing the
+common request body, workload, output contract, or thermal limits. Driver v14
+added explicit multi-row ROCm graph fallback accounting and diagnostics v5.
+Driver v13 added closed cooperative
 actor-cycle idle policy and measured-window accounting. Driver v12 added a bounded,
 receipt-recorded model-fingerprint read rate without changing the double-read
 integrity contract. Driver v11 added typed idle-boundary
 cooldown evidence to v10. Driver v10 added closed ROCm graph execution evidence;
 v9 added route-aware
 batching-actor and direct-rendezvous diagnostics; and v8 added mandatory initial
-and final guarded model-fingerprint lifecycles. A v14 exact-output run may use a
-strict-valid v7 through v14 reference because the model, thermal-policy,
+and final guarded model-fingerprint lifecycles. A v15 exact-output run may use a
+strict-valid v7 through v15 reference because the model, thermal-policy,
 prompt, and output contracts remain comparison-compatible; the current arm
-must still satisfy v14 multi-row graph-route accounting, v13 actor-cycle idle
-accounting, v12 fingerprint pacing, v11
+must still satisfy v15 request-performance accounting, v14 multi-row
+graph-route accounting, v13 actor-cycle idle accounting, v12 fingerprint pacing, v11
 idle cooling, v10 graph accounting, v9 routing, and v8 containment. Driver v7 added mandatory ordered
 per-request output evidence and
 structured mismatch localization to the v6 lifecycle contract.
@@ -943,6 +973,6 @@ identity semantics. Owned evidence contains the content-hashed launch document,
 absolute server-log fingerprint, shutdown signal/status/timing,
 forced-shutdown flag, and process-group liveness. Attached and explicitly
 unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
-from missing fields. Historical driver v2 through v13 receipts remain valid
-under their original contracts, but do not satisfy current v14 performance
+from missing fields. Historical driver v2 through v14 receipts remain valid
+under their original contracts, but do not satisfy current v15 performance
 acceptance.

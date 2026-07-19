@@ -2695,7 +2695,11 @@ impl BatchingEngineActor {
             self.drain_delivery_results();
         }
 
-        let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        let elapsed = started.elapsed();
+        let elapsed_ms = elapsed.as_secs_f64() * 1_000.0;
+        for active in &mut self.active {
+            active.token_phase_durations.add_actor_cycle_idle(elapsed);
+        }
         self.snapshot.actor_cycle_idle_active = false;
         self.snapshot.total_actor_cycle_idle_ms += elapsed_ms;
         self.snapshot.max_actor_cycle_idle_ms =
@@ -6500,6 +6504,58 @@ mod tests {
             snapshot.max_actor_cycle_idle_ms,
             snapshot.total_actor_cycle_idle_ms
         );
+    }
+
+    #[tokio::test]
+    async fn cooperative_actor_cycle_idle_reaches_the_next_token_timing() {
+        let batching = BatchingConfig::default().resolve(
+            BatchingBackendPolicy {
+                batching_engine_default_enabled: true,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+                actor_prefill_tile_alignment_required: false,
+                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
+                    enabled: false,
+                    max_batch: 1,
+                    wait_us: 0,
+                    mixed_seq_lens: false,
+                },
+            },
+            1,
+        );
+        let actor_cycle_idle = ActorCycleIdleDiagnostics {
+            milliseconds: 20,
+            source: ConfigValueSource::ConfigFile,
+            enabled: true,
+            command_poll_milliseconds: ACTOR_CYCLE_IDLE_COMMAND_POLL_MS,
+        };
+        let handle = BatchingEngineHandle::start_with_actor_runtime_config(
+            Arc::new(MockForward::default()),
+            1,
+            batching.actor_admission_config(),
+            actor_cycle_idle,
+            BatchTokenBudget::default(),
+            PrefillTokenBudget::default(),
+            PrefillLayerBudget::default(),
+            ResponseDeliveryPolicy::default(),
+        );
+        let mut response = handle.enqueue(request(1, 2)).await.unwrap();
+        assert!(matches!(
+            response.recv().await,
+            Some(EngineEvent::Token { .. })
+        ));
+        let second = tokio::time::timeout(Duration::from_secs(1), response.recv())
+            .await
+            .expect("second token must arrive")
+            .expect("second token event must exist");
+        let EngineEvent::Token { timing, .. } = second else {
+            panic!("expected second token, got {second:?}");
+        };
+        assert!(
+            timing.phases_since_previous_token.actor_cycle_idle >= Duration::from_millis(20),
+            "{timing:?}"
+        );
+        handle.stop().await.unwrap();
     }
 
     #[test]

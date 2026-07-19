@@ -84,6 +84,7 @@ use the same `RequestLatencyDiagnostics` object:
     "actor_admission": 0,
     "actor_prefill": 0,
     "actor_decode": 0,
+    "actor_cycle_idle": 0,
     "response_delivery": 0,
     "handler_queue": 0,
     "client_delivery": 0,
@@ -105,6 +106,7 @@ use the same `RequestLatencyDiagnostics` object:
     "tokenization_ms": 1.0,
     "prefill_ms": 20.0,
     "decode_ms": 8.0,
+    "actor_cycle_idle_ms": 0.0,
     "sampling_ms": null,
     "readback_ms": null,
     "response_delivery_ms": 1.0,
@@ -145,6 +147,7 @@ The currently measured batching path exposes:
 | `tokenization_ms` | Prompt token encoding in the request handler |
 | `prefill_ms` | Actor prefill wall time accumulated while the request is active |
 | `decode_ms` | Actor decode wall time accumulated while the request is active |
+| `actor_cycle_idle_ms` | Configured cooperative post-work idle elapsed while the request remained active |
 | `sampling_ms` | Post-transformer final norm, LM head, penalties/filters, selection, and token return when that tail has a distinct boundary |
 | `gpu_lock_wait_ms` | Time waiting to acquire the shared inference GPU-coordination guard for a decode step |
 | `synchronization_ms` | Time spent settling the decode step at the backend's external-yield boundary |
@@ -178,11 +181,17 @@ cache from the absence of hits.
 
 The batching engine measures `gpu_lock_wait_ms` and `synchronization_ms` on the
 owned decode invocation and propagates those observations only to requests
-active for that step. Direct streaming measures `tokenization_ms`, model-ready-to-bridge
+active for that step. It likewise adds the actual elapsed cooperative
+`batching.actor_cycle_idle_ms` wait only to rows that remain active when the
+wait completes. The phase is measured as zero when that policy is disabled,
+and can become the dominant `actor_cycle_idle` stall reason; it is not folded
+into actor decode or left as unexplained wall time. Direct streaming measures
+`tokenization_ms`, model-ready-to-bridge
 `response_delivery_ms`, bridge-to-handler `handler_queue_ms`, response-body
 enqueue `client_delivery_ms`, and request-local `unexplained_ms`. Its
 `actor_queue_ms`, `actor_admission_ms`, `prefill_ms`, and `decode_ms` fields are
-`null`, because that path does not expose actor phase boundaries; its backend
+`null`, as is `actor_cycle_idle_ms`, because that path does not expose actor
+phase boundaries; its backend
 subphase fields also remain `null` until the direct model path returns the same
 invocation-owned timing envelope.
 
@@ -213,6 +222,17 @@ successful measured requests that omitted the entire terminal phase object and
 is a hard qualification failure. These are source-bound measured-window
 aggregates, not values reconstructed from threshold-filtered logs. Older
 receipts created before this contract are not backfilled.
+
+Serving comparison driver v15 preserves the full terminal performance object
+for every successful Kiln request as ordered `request_performance` evidence and
+derives `request_phase_summary` from it. Each phase and terminal request metric
+has an `observed_request_count`, p50, p99, and maximum; missing phases therefore
+remain distinguishable from measured zero. The strict validator reconciles the
+objects with independent usage/output records and recomputes the summary. The
+comparison request body remains common with vLLM: typed server configuration
+enables Kiln's terminal summary, while per-token timing objects remain disabled.
+Because actor/device work can be shared across concurrent requests, these phase
+distributions are request-impact evidence, not additive service-wall totals.
 
 The ROCm mixed-load workload runs a separate fixed-seed sampled profile before
 its ordinary measurement window: eight concurrent requests, 32 output tokens
@@ -281,7 +301,8 @@ reduced by only the largest measured backend subphase; detailed phases may
 overlap, so subtracting their sum would manufacture coverage. A candidate must
 explain at least the smaller of 250 ms or half the gap; otherwise the reason is
 `unexplained`. The bounded reason set is `actor_queue`, `actor_admission`,
-`actor_prefill`, `actor_decode`, `response_delivery`, `handler_queue`,
+`actor_prefill`, `actor_decode`, `actor_cycle_idle`, `response_delivery`,
+`handler_queue`,
 `client_delivery`, `sampling`, `readback`, `gpu_lock_wait`, `graph_capture`,
 `graph_replay`, `synchronization`, `resize`, `trim`, `adapter`, `training`, and
 `unexplained`. Reasons whose phase is unsupported remain zero.

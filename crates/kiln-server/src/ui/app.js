@@ -2918,7 +2918,8 @@ function requestLatencySection(r) {
   ];
   const phaseLabels = {
     actor_queue_ms: 'Actor queue', actor_admission_ms: 'Admission', tokenization_ms: 'Tokenization',
-    prefill_ms: 'Actor prefill', decode_ms: 'Actor decode', sampling_ms: 'Sampling',
+    prefill_ms: 'Actor prefill', decode_ms: 'Actor decode',
+    actor_cycle_idle_ms: 'Actor cycle idle', sampling_ms: 'Sampling',
     readback_ms: 'Readback', response_delivery_ms: 'Response delivery',
     handler_queue_ms: 'Handler queue', client_delivery_ms: 'Body enqueue',
     gpu_lock_wait_ms: 'GPU lock wait', graph_capture_ms: 'Graph capture',
@@ -2933,7 +2934,8 @@ function requestLatencySection(r) {
   const missing = Object.entries(phaseLabels).filter(([key]) => phases[key] == null).map(([, label]) => label);
   const reasonLabels = {
     actor_queue: 'actor queue', actor_admission: 'admission', actor_prefill: 'prefill',
-    actor_decode: 'decode', response_delivery: 'response delivery', handler_queue: 'handler queue',
+    actor_decode: 'decode', actor_cycle_idle: 'actor cycle idle',
+    response_delivery: 'response delivery', handler_queue: 'handler queue',
     client_delivery: 'body enqueue', sampling: 'sampling', readback: 'readback',
     gpu_lock_wait: 'GPU lock wait', graph_capture: 'graph capture', graph_replay: 'graph replay',
     synchronization: 'synchronization', resize: 'resize', trim: 'trim', adapter: 'adapter',

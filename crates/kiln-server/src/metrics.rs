@@ -76,12 +76,13 @@ const THINKING_BUDGET_OUTCOMES: [&str; 9] = [
     "unresolved",
 ];
 
-const LATENCY_PHASES: [&str; 19] = [
+const LATENCY_PHASES: [&str; 20] = [
     "actor_queue",
     "actor_admission",
     "tokenization",
     "prefill",
     "decode",
+    "actor_cycle_idle",
     "sampling",
     "readback",
     "response_delivery",
@@ -3274,6 +3275,7 @@ fn latency_phase_values(phases: &LatencyPhaseTimings) -> [Option<f64>; LATENCY_P
         phases.tokenization_ms,
         phases.prefill_ms,
         phases.decode_ms,
+        phases.actor_cycle_idle_ms,
         phases.sampling_ms,
         phases.readback_ms,
         phases.response_delivery_ms,

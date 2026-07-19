@@ -127,6 +127,7 @@ pub struct TokenPhaseDurations {
     pub actor_admission: Duration,
     pub actor_prefill: Duration,
     pub actor_decode: Duration,
+    pub actor_cycle_idle: Duration,
     pub response_delivery: Duration,
     pub backend: BackendPhaseDurations,
     pub unexplained: Duration,
@@ -149,6 +150,10 @@ impl TokenPhaseDurations {
         self.actor_decode = self.actor_decode.saturating_add(duration);
     }
 
+    pub fn add_actor_cycle_idle(&mut self, duration: Duration) {
+        self.actor_cycle_idle = self.actor_cycle_idle.saturating_add(duration);
+    }
+
     pub fn add_response_delivery(&mut self, duration: Duration) {
         self.response_delivery = self.response_delivery.saturating_add(duration);
     }
@@ -162,7 +167,8 @@ impl TokenPhaseDurations {
             .actor_queue
             .saturating_add(self.actor_admission)
             .saturating_add(self.actor_prefill)
-            .saturating_add(self.actor_decode);
+            .saturating_add(self.actor_decode)
+            .saturating_add(self.actor_cycle_idle);
         // Delivery can overlap actor work for other rows. Without an interval
         // trace, max() is the conservative lower bound on the covered union;
         // summing would double-count overlap and hide genuinely unexplained
@@ -182,6 +188,7 @@ impl TokenPhaseDurations {
                 LatencyStallReason::ActorDecode,
                 self.backend.actor_decode_residual(self.actor_decode),
             ),
+            (LatencyStallReason::ActorCycleIdle, self.actor_cycle_idle),
             (LatencyStallReason::ResponseDelivery, self.response_delivery),
             (
                 LatencyStallReason::Sampling,
@@ -235,6 +242,9 @@ impl TokenPhaseDurations {
         totals.actor_admission = totals.actor_admission.saturating_add(self.actor_admission);
         totals.actor_prefill = totals.actor_prefill.saturating_add(self.actor_prefill);
         totals.actor_decode = totals.actor_decode.saturating_add(self.actor_decode);
+        totals.actor_cycle_idle = totals
+            .actor_cycle_idle
+            .saturating_add(self.actor_cycle_idle);
         self.backend.add_to(&mut totals.backend);
         totals.unexplained = totals.unexplained.saturating_add(self.unexplained);
     }
@@ -268,6 +278,7 @@ pub enum LatencyStallReason {
     ActorAdmission,
     ActorPrefill,
     ActorDecode,
+    ActorCycleIdle,
     ResponseDelivery,
     HandlerQueue,
     ClientDelivery,
@@ -285,11 +296,12 @@ pub enum LatencyStallReason {
 }
 
 impl LatencyStallReason {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::ActorQueue,
         Self::ActorAdmission,
         Self::ActorPrefill,
         Self::ActorDecode,
+        Self::ActorCycleIdle,
         Self::ResponseDelivery,
         Self::HandlerQueue,
         Self::ClientDelivery,
@@ -312,6 +324,7 @@ impl LatencyStallReason {
             Self::ActorAdmission => "actor_admission",
             Self::ActorPrefill => "actor_prefill",
             Self::ActorDecode => "actor_decode",
+            Self::ActorCycleIdle => "actor_cycle_idle",
             Self::ResponseDelivery => "response_delivery",
             Self::HandlerQueue => "handler_queue",
             Self::ClientDelivery => "client_delivery",
@@ -335,20 +348,21 @@ impl LatencyStallReason {
             Self::ActorAdmission => 1,
             Self::ActorPrefill => 2,
             Self::ActorDecode => 3,
-            Self::ResponseDelivery => 4,
-            Self::HandlerQueue => 5,
-            Self::ClientDelivery => 6,
-            Self::Sampling => 7,
-            Self::Readback => 8,
-            Self::GpuLockWait => 9,
-            Self::GraphCapture => 10,
-            Self::GraphReplay => 11,
-            Self::Synchronization => 12,
-            Self::Resize => 13,
-            Self::Trim => 14,
-            Self::Adapter => 15,
-            Self::Training => 16,
-            Self::Unexplained => 17,
+            Self::ActorCycleIdle => 4,
+            Self::ResponseDelivery => 5,
+            Self::HandlerQueue => 6,
+            Self::ClientDelivery => 7,
+            Self::Sampling => 8,
+            Self::Readback => 9,
+            Self::GpuLockWait => 10,
+            Self::GraphCapture => 11,
+            Self::GraphReplay => 12,
+            Self::Synchronization => 13,
+            Self::Resize => 14,
+            Self::Trim => 15,
+            Self::Adapter => 16,
+            Self::Training => 17,
+            Self::Unexplained => 18,
         }
     }
 }
@@ -367,6 +381,7 @@ pub struct LatencyPhaseTimings {
     pub tokenization_ms: Option<f64>,
     pub prefill_ms: Option<f64>,
     pub decode_ms: Option<f64>,
+    pub actor_cycle_idle_ms: Option<f64>,
     pub sampling_ms: Option<f64>,
     pub readback_ms: Option<f64>,
     pub response_delivery_ms: Option<f64>,
@@ -389,6 +404,7 @@ pub struct LatencyStallReasonCounts {
     pub actor_admission: u64,
     pub actor_prefill: u64,
     pub actor_decode: u64,
+    pub actor_cycle_idle: u64,
     pub response_delivery: u64,
     pub handler_queue: u64,
     pub client_delivery: u64,
@@ -412,6 +428,7 @@ impl LatencyStallReasonCounts {
             LatencyStallReason::ActorAdmission => &mut self.actor_admission,
             LatencyStallReason::ActorPrefill => &mut self.actor_prefill,
             LatencyStallReason::ActorDecode => &mut self.actor_decode,
+            LatencyStallReason::ActorCycleIdle => &mut self.actor_cycle_idle,
             LatencyStallReason::ResponseDelivery => &mut self.response_delivery,
             LatencyStallReason::HandlerQueue => &mut self.handler_queue,
             LatencyStallReason::ClientDelivery => &mut self.client_delivery,
@@ -435,6 +452,7 @@ impl LatencyStallReasonCounts {
             .saturating_add(self.actor_admission)
             .saturating_add(self.actor_prefill)
             .saturating_add(self.actor_decode)
+            .saturating_add(self.actor_cycle_idle)
             .saturating_add(self.response_delivery)
             .saturating_add(self.handler_queue)
             .saturating_add(self.client_delivery)
@@ -631,6 +649,8 @@ impl RequestLatencyTracker {
                     .then(|| duration_ms(self.phase_totals.actor_prefill)),
                 decode_ms: (token_phase_observed && self.actor_phases_observed)
                     .then(|| duration_ms(self.phase_totals.actor_decode)),
+                actor_cycle_idle_ms: (token_phase_observed && self.actor_phases_observed)
+                    .then(|| duration_ms(self.phase_totals.actor_cycle_idle)),
                 sampling_ms: self.phase_totals.backend.sampling.map(duration_ms),
                 readback_ms: self.phase_totals.backend.readback.map(duration_ms),
                 response_delivery_ms: token_phase_observed
@@ -771,6 +791,42 @@ mod tests {
     }
 
     #[test]
+    fn cooperative_actor_cycle_idle_is_request_local_and_not_unexplained() {
+        let start = Instant::now();
+        let mut tracker = RequestLatencyTracker::new(start, None);
+        for offset_ms in [0, 10, 20] {
+            let ready_at = start + Duration::from_millis(offset_ms);
+            tracker.record_token(
+                EngineTokenTiming::ready(ready_at, TokenPhaseDurations::default()),
+                ready_at,
+            );
+        }
+
+        let ready_at = start + Duration::from_millis(320);
+        let observation = tracker
+            .record_token(
+                EngineTokenTiming::ready(
+                    ready_at,
+                    TokenPhaseDurations {
+                        actor_decode: Duration::from_millis(120),
+                        actor_cycle_idle: Duration::from_millis(180),
+                        ..TokenPhaseDurations::default()
+                    },
+                ),
+                ready_at,
+            )
+            .unwrap();
+
+        assert_eq!(observation.reason, LatencyStallReason::ActorCycleIdle);
+        assert_eq!(observation.attributed_duration, Duration::from_millis(180));
+        let diagnostics = tracker.diagnostics();
+        assert_eq!(diagnostics.stall_reasons.actor_cycle_idle, 1);
+        assert_eq!(diagnostics.unexplained_stall_count, 0);
+        assert_eq!(diagnostics.phases.actor_cycle_idle_ms, Some(180.0));
+        assert_eq!(diagnostics.phases.unexplained_ms, Some(0.0));
+    }
+
+    #[test]
     fn overlapping_delivery_and_actor_work_do_not_hide_unexplained_time() {
         let mut phases = TokenPhaseDurations {
             actor_decode: Duration::from_millis(60),
@@ -830,6 +886,7 @@ mod tests {
         tracker.record_client_delivery(start, start);
         let phases = tracker.diagnostics().phases;
         assert_eq!(phases.actor_queue_ms, Some(0.0));
+        assert_eq!(phases.actor_cycle_idle_ms, Some(0.0));
         assert_eq!(phases.tokenization_ms, Some(0.0));
         assert_eq!(phases.client_delivery_ms, Some(0.0));
         assert_eq!(phases.unexplained_ms, Some(0.0));

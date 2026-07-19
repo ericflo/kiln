@@ -1716,6 +1716,22 @@ performance arm must either disable ROCm graphs explicitly and qualify itself
 as eager, or first add and qualify real multi-row graph capture; resident
 single-row graphs must not imply graph acceleration for a multi-row route.
 
+Serving benchmark driver v15 closes the next attribution gap before another
+ROCm arm. Each successful Kiln stream now retains its exact terminal
+`metadata.performance` object, including the request-local latency phases and
+stall reasons, and the receipt derives per-phase request populations plus p50,
+p99, and maximum values. Usage, finish reason, emitted-token counts, retained
+gaps, stall totals, and the complete closed phase/reason sets are reconciled by
+strict validation. The common Kiln/vLLM request body is unchanged: the tracked
+Kiln profiles already enable terminal summaries through typed server config,
+while vLLM rows use explicit nulls. Request phase durations are not summed
+across concurrent clients because shared actor work overlaps; route-level
+health deltas remain the service-wall evidence. In particular, the configured
+cooperative actor wait now reaches each request that remains active through the
+wait as `actor_cycle_idle_ms` and can classify its next token stall instead of
+appearing as unexplained ITL. The first source-bound ROCm v15 attribution run is
+still required before selecting the next optimization.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package
