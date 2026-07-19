@@ -39,14 +39,15 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "8"
-SUPPORTED_DRIVER_VERSIONS = {"2", "3", "4", "5", "6", "7", DRIVER_VERSION}
-THERMAL_DRIVER_VERSIONS = {"3", "4", "5", "6", "7", DRIVER_VERSION}
-LIFECYCLE_DRIVER_VERSIONS = {"4", "5", "6", "7", DRIVER_VERSION}
-PRELAUNCH_DRIVER_VERSIONS = {"5", "6", "7", DRIVER_VERSION}
-OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", DRIVER_VERSION}
-MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {DRIVER_VERSION}
-REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {"7", DRIVER_VERSION}
+DRIVER_VERSION = "9"
+SUPPORTED_DRIVER_VERSIONS = {"2", "3", "4", "5", "6", "7", "8", DRIVER_VERSION}
+THERMAL_DRIVER_VERSIONS = {"3", "4", "5", "6", "7", "8", DRIVER_VERSION}
+LIFECYCLE_DRIVER_VERSIONS = {"4", "5", "6", "7", "8", DRIVER_VERSION}
+PRELAUNCH_DRIVER_VERSIONS = {"5", "6", "7", "8", DRIVER_VERSION}
+OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", "8", DRIVER_VERSION}
+MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {"8", DRIVER_VERSION}
+ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {DRIVER_VERSION}
+REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {"7", "8", DRIVER_VERSION}
 OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
@@ -157,6 +158,25 @@ COUNTER_FIELDS = (
     "total_admission_ms",
     "total_errors",
 )
+
+REQUEST_COUNTER_FIELDS = ("total", "ok", "error", "timeout", "rejected")
+DECODE_BATCHER_COUNTER_FIELDS = (
+    "submitted_jobs",
+    "executed_batches",
+    "executed_rows",
+    "runner_calls",
+    "runner_busy_jobs",
+    "failed_jobs",
+)
+DIRECT_RENDEZVOUS_FIELDS = (
+    "scope",
+    "backend_available",
+    "backend_unavailable_reason",
+    "actor_active",
+    "worker_active",
+    "route_available",
+)
+SERVER_DIAGNOSTICS_SCHEMA = "kiln.serving-benchmark-server-diagnostics.v2"
 
 SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 RECEIPT_KEYS = {
@@ -1328,6 +1348,156 @@ def validate_output_evidence(
         raise BenchmarkError(f"{label} does not reproduce output_set_sha256")
 
 
+def validate_server_diagnostics_v2(value: Any, label: str) -> dict[str, Any]:
+    server = _object(value, label)
+    _exact_keys(
+        server,
+        {
+            "schema",
+            "request_route",
+            "requests",
+            "routing",
+            "batching_engine",
+            "decode_batcher",
+        },
+        label,
+    )
+    if server["schema"] != SERVER_DIAGNOSTICS_SCHEMA:
+        raise BenchmarkError(f"{label}.schema is unsupported")
+    if server["request_route"] not in {"batching_engine", "direct_streaming"}:
+        raise BenchmarkError(f"{label}.request_route is unsupported")
+
+    requests = _object(server["requests"], f"{label}.requests")
+    request_fields = {
+        *REQUEST_COUNTER_FIELDS,
+        "active_end",
+        "process_active_peak",
+    }
+    _exact_keys(requests, request_fields, f"{label}.requests")
+    for field in request_fields:
+        _nonnegative_int(requests[field], f"{label}.requests.{field}")
+    if requests["total"] != sum(
+        requests[field] for field in REQUEST_COUNTER_FIELDS[1:]
+    ):
+        raise BenchmarkError(f"{label}.requests status counters disagree")
+    if requests["active_end"] > requests["process_active_peak"]:
+        raise BenchmarkError(f"{label}.requests active_end exceeds process peak")
+
+    routing = _object(server["routing"], f"{label}.routing")
+    _exact_keys(
+        routing,
+        {"batching_actor_effective", "direct_decode_rendezvous"},
+        f"{label}.routing",
+    )
+    actor_effective = routing["batching_actor_effective"]
+    if not isinstance(actor_effective, bool):
+        raise BenchmarkError(f"{label}.routing.batching_actor_effective must be boolean")
+    direct = _object(
+        routing["direct_decode_rendezvous"],
+        f"{label}.routing.direct_decode_rendezvous",
+    )
+    _exact_keys(
+        direct,
+        set(DIRECT_RENDEZVOUS_FIELDS),
+        f"{label}.routing.direct_decode_rendezvous",
+    )
+    if not isinstance(direct["scope"], str) or not direct["scope"]:
+        raise BenchmarkError(
+            f"{label}.routing.direct_decode_rendezvous.scope must be non-empty"
+        )
+    for field in (
+        "backend_available",
+        "actor_active",
+        "worker_active",
+        "route_available",
+    ):
+        if not isinstance(direct[field], bool):
+            raise BenchmarkError(
+                f"{label}.routing.direct_decode_rendezvous.{field} must be boolean"
+            )
+    reason = direct["backend_unavailable_reason"]
+    if direct["backend_available"]:
+        if reason is not None:
+            raise BenchmarkError(f"{label} available direct backend has a reason")
+    elif not isinstance(reason, str) or not reason:
+        raise BenchmarkError(f"{label} unavailable direct backend omits its reason")
+    route_available = (
+        direct["backend_available"]
+        and not direct["actor_active"]
+        and direct["worker_active"]
+    )
+    if direct["route_available"] != route_available:
+        raise BenchmarkError(f"{label} direct-route ownership is inconsistent")
+    if direct["actor_active"] != actor_effective:
+        raise BenchmarkError(f"{label} actor ownership is inconsistent")
+    expected_request_route = (
+        "batching_engine" if actor_effective else "direct_streaming"
+    )
+    if server["request_route"] != expected_request_route:
+        raise BenchmarkError(f"{label}.request_route disagrees with actor ownership")
+
+    batching = server["batching_engine"]
+    if batching is not None:
+        batching = _object(batching, f"{label}.batching_engine")
+        required_batching = set(COUNTER_FIELDS) | {
+            "effective_max_decode_batch",
+            "process_max_observed_batch",
+            "mean_decode_rows_per_forward",
+            "batched_decode_forward_fraction",
+        }
+        _exact_keys(batching, required_batching, f"{label}.batching_engine")
+        for field, item in batching.items():
+            _nonnegative_number(item, f"{label}.batching_engine.{field}")
+    if (batching is not None) != actor_effective:
+        raise BenchmarkError(f"{label}.batching_engine availability is inconsistent")
+
+    decode_batcher = server["decode_batcher"]
+    if decode_batcher is not None:
+        decode_batcher = _object(decode_batcher, f"{label}.decode_batcher")
+        integer_fields = {
+            *DECODE_BATCHER_COUNTER_FIELDS,
+            "process_max_observed_batch",
+            "process_max_runner_calls_per_token",
+            "runner_call_budget_per_token",
+        }
+        required_direct = {
+            *integer_fields,
+            "mean_runner_calls_per_executed_row",
+            "runner_call_budget_exceeded",
+        }
+        _exact_keys(decode_batcher, required_direct, f"{label}.decode_batcher")
+        for field in integer_fields:
+            _nonnegative_int(
+                decode_batcher[field], f"{label}.decode_batcher.{field}"
+            )
+        mean_calls = decode_batcher["mean_runner_calls_per_executed_row"]
+        if mean_calls is not None:
+            _nonnegative_number(
+                mean_calls,
+                f"{label}.decode_batcher.mean_runner_calls_per_executed_row",
+            )
+        expected_mean = (
+            decode_batcher["runner_calls"] / decode_batcher["executed_rows"]
+            if decode_batcher["executed_rows"]
+            else None
+        )
+        if mean_calls != expected_mean:
+            raise BenchmarkError(f"{label}.decode_batcher mean runner calls disagree")
+        budget_exceeded = decode_batcher["runner_call_budget_exceeded"]
+        if not isinstance(budget_exceeded, bool):
+            raise BenchmarkError(
+                f"{label}.decode_batcher.runner_call_budget_exceeded must be boolean"
+            )
+        if budget_exceeded != (
+            decode_batcher["process_max_runner_calls_per_token"]
+            > decode_batcher["runner_call_budget_per_token"]
+        ):
+            raise BenchmarkError(f"{label}.decode_batcher budget state disagrees")
+    if (decode_batcher is not None) != direct["worker_active"]:
+        raise BenchmarkError(f"{label}.decode_batcher availability is inconsistent")
+    return server
+
+
 def validate_benchmark_run(
     value: Any,
     *,
@@ -1509,18 +1679,49 @@ def validate_benchmark_run(
             if token_gate is None or token_gate["passed"] != expected_pass:
                 raise BenchmarkError(f"{label} has an inconsistent prompt-shape gate")
     if row["server"] is not None:
-        server = _object(row["server"], f"{label}.server")
-        required_server = set(COUNTER_FIELDS) | {
-            "total_batched_decode_forwards",
-            "effective_max_decode_batch",
-            "process_max_observed_batch",
-            "mean_decode_rows_per_forward",
-            "batched_decode_forward_fraction",
-        }
-        _exact_keys(server, required_server, f"{label}.server")
-        for name, item in server.items():
-            if item is not None:
-                _nonnegative_number(item, f"{label}.server.{name}")
+        if driver_version in ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS:
+            server = validate_server_diagnostics_v2(
+                row["server"], f"{label}.server"
+            )
+            no_errors_gate = next(
+                (item for item in gates if item["name"] == "server_reported_no_errors"),
+                None,
+            )
+            expected_no_errors = server_diagnostics_has_no_errors(server)
+            if (
+                no_errors_gate is None
+                or no_errors_gate["passed"] != expected_no_errors
+            ):
+                raise BenchmarkError(
+                    f"{label} has an inconsistent server-error gate"
+                )
+            accounting_gate = next(
+                (item for item in gates if item["name"] == "server_request_accounting"),
+                None,
+            )
+            expected_accounting = server_request_accounting_matches(
+                server, concurrency
+            )
+            if (
+                accounting_gate is None
+                or accounting_gate["passed"] != expected_accounting
+            ):
+                raise BenchmarkError(
+                    f"{label} has an inconsistent server-accounting gate"
+                )
+        else:
+            server = _object(row["server"], f"{label}.server")
+            required_server = set(COUNTER_FIELDS) | {
+                "total_batched_decode_forwards",
+                "effective_max_decode_batch",
+                "process_max_observed_batch",
+                "mean_decode_rows_per_forward",
+                "batched_decode_forward_fraction",
+            }
+            _exact_keys(server, required_server, f"{label}.server")
+            for name, item in server.items():
+                if item is not None:
+                    _nonnegative_number(item, f"{label}.server.{name}")
 
     passed = (
         row["success_count"] == concurrency
@@ -3054,9 +3255,7 @@ def fetch_json(url: str, headers: dict[str, str], timeout_secs: float) -> dict[s
     return value
 
 
-def batching_snapshot(health: dict[str, Any]) -> dict[str, Any]:
-    runtime = health.get("decode_runtime")
-    snapshot = runtime.get("batching_engine") if isinstance(runtime, dict) else None
+def validate_batching_engine_snapshot(snapshot: Any) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         raise BenchmarkError("diagnostics omit decode_runtime.batching_engine")
     for field in ("max_decode_batch", "max_observed_batch_size", *COUNTER_FIELDS):
@@ -3085,6 +3284,299 @@ def batching_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, A
         result["total_batched_decode_forwards"] / forwards if forwards else 0.0
     )
     return result
+
+
+def validate_request_snapshot(value: Any) -> dict[str, int]:
+    snapshot = _object(value, "diagnostics.requests")
+    required = {*REQUEST_COUNTER_FIELDS, "active", "active_peak"}
+    _exact_keys(snapshot, required, "diagnostics.requests")
+    normalized = {
+        field: _nonnegative_int(snapshot[field], f"diagnostics.requests.{field}")
+        for field in required
+    }
+    status_total = sum(normalized[field] for field in REQUEST_COUNTER_FIELDS[1:])
+    if normalized["total"] != status_total:
+        raise BenchmarkError(
+            "diagnostics.requests.total disagrees with ok/error/timeout/rejected"
+        )
+    if normalized["active"] > normalized["active_peak"]:
+        raise BenchmarkError("diagnostics.requests.active exceeds active_peak")
+    return normalized
+
+
+def validate_decode_batcher_snapshot(value: Any) -> dict[str, Any]:
+    snapshot = _object(value, "diagnostics.decode_runtime.decode_batcher")
+    integer_fields = {
+        *DECODE_BATCHER_COUNTER_FIELDS,
+        "max_runner_calls_per_token",
+        "runner_call_budget_per_token",
+        "max_observed_batch",
+    }
+    required = {
+        *integer_fields,
+        "runner_calls_per_token",
+        "runner_call_budget_exceeded",
+    }
+    _exact_keys(snapshot, required, "diagnostics.decode_runtime.decode_batcher")
+    normalized: dict[str, Any] = {
+        field: _nonnegative_int(
+            snapshot[field], f"diagnostics.decode_runtime.decode_batcher.{field}"
+        )
+        for field in integer_fields
+    }
+    calls_per_token = snapshot["runner_calls_per_token"]
+    if calls_per_token is not None:
+        calls_per_token = _nonnegative_number(
+            calls_per_token,
+            "diagnostics.decode_runtime.decode_batcher.runner_calls_per_token",
+        )
+    expected_calls_per_token = (
+        normalized["runner_calls"] / normalized["executed_rows"]
+        if normalized["executed_rows"]
+        else None
+    )
+    if calls_per_token != expected_calls_per_token:
+        raise BenchmarkError(
+            "diagnostics.decode_runtime.decode_batcher.runner_calls_per_token "
+            "disagrees with runner_calls/executed_rows"
+        )
+    exceeded = snapshot["runner_call_budget_exceeded"]
+    if not isinstance(exceeded, bool):
+        raise BenchmarkError(
+            "diagnostics.decode_runtime.decode_batcher.runner_call_budget_exceeded "
+            "must be boolean"
+        )
+    expected_exceeded = (
+        normalized["max_runner_calls_per_token"]
+        > normalized["runner_call_budget_per_token"]
+    )
+    if exceeded != expected_exceeded:
+        raise BenchmarkError(
+            "diagnostics.decode_runtime.decode_batcher runner-call budget disagrees"
+        )
+    normalized["runner_calls_per_token"] = calls_per_token
+    normalized["runner_call_budget_exceeded"] = exceeded
+    return normalized
+
+
+def server_diagnostics_snapshot(health: dict[str, Any]) -> dict[str, Any]:
+    requests = validate_request_snapshot(health.get("requests"))
+    runtime = _object(health.get("decode_runtime"), "diagnostics.decode_runtime")
+    batching_configuration = _object(
+        runtime.get("batching_configuration"),
+        "diagnostics.decode_runtime.batching_configuration",
+    )
+    mode = _object(
+        batching_configuration.get("mode"),
+        "diagnostics.decode_runtime.batching_configuration.mode",
+    )
+    batching_actor_effective = mode.get("effective_enabled")
+    if not isinstance(batching_actor_effective, bool):
+        raise BenchmarkError(
+            "diagnostics.decode_runtime.batching_configuration.mode.effective_enabled "
+            "must be boolean"
+        )
+
+    direct_value = _object(
+        runtime.get("direct_decode_rendezvous"),
+        "diagnostics.decode_runtime.direct_decode_rendezvous",
+    )
+    direct = {
+        "scope": direct_value.get("scope"),
+        "backend_available": direct_value.get("backend_available"),
+        "backend_unavailable_reason": direct_value.get("backend_unavailable_reason"),
+        "actor_active": direct_value.get("actor_active"),
+        "worker_active": direct_value.get("worker_active"),
+        "route_available": direct_value.get("route_available"),
+    }
+    if not isinstance(direct["scope"], str) or not direct["scope"]:
+        raise BenchmarkError(
+            "diagnostics.decode_runtime.direct_decode_rendezvous.scope must be non-empty"
+        )
+    for field in (
+        "backend_available",
+        "actor_active",
+        "worker_active",
+        "route_available",
+    ):
+        if not isinstance(direct[field], bool):
+            raise BenchmarkError(
+                f"diagnostics.decode_runtime.direct_decode_rendezvous.{field} must be boolean"
+            )
+    reason = direct["backend_unavailable_reason"]
+    if direct["backend_available"]:
+        if reason is not None:
+            raise BenchmarkError(
+                "available direct-rendezvous backend has an unavailable reason"
+            )
+    elif not isinstance(reason, str) or not reason:
+        raise BenchmarkError(
+            "unavailable direct-rendezvous backend omits its reason"
+        )
+    expected_route_available = (
+        direct["backend_available"]
+        and not direct["actor_active"]
+        and direct["worker_active"]
+    )
+    if direct["route_available"] != expected_route_available:
+        raise BenchmarkError(
+            "direct-rendezvous route availability disagrees with runtime ownership"
+        )
+    if direct["actor_active"] != batching_actor_effective:
+        raise BenchmarkError(
+            "direct-rendezvous actor state disagrees with effective batching mode"
+        )
+
+    batching_value = runtime.get("batching_engine")
+    batching_engine = (
+        validate_batching_engine_snapshot(batching_value)
+        if batching_value is not None
+        else None
+    )
+    if (batching_engine is not None) != batching_actor_effective:
+        raise BenchmarkError(
+            "batching-engine diagnostics disagree with effective batching mode"
+        )
+
+    decode_batcher_value = runtime.get("decode_batcher")
+    decode_batcher = (
+        validate_decode_batcher_snapshot(decode_batcher_value)
+        if decode_batcher_value is not None
+        else None
+    )
+    if (decode_batcher is not None) != direct["worker_active"]:
+        raise BenchmarkError(
+            "decode-batcher diagnostics disagree with direct-rendezvous worker state"
+        )
+    return {
+        "request_route": (
+            "batching_engine" if batching_actor_effective else "direct_streaming"
+        ),
+        "requests": requests,
+        "routing": {
+            "batching_actor_effective": batching_actor_effective,
+            "direct_decode_rendezvous": direct,
+        },
+        "batching_engine": batching_engine,
+        "decode_batcher": decode_batcher,
+    }
+
+
+def request_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for field in REQUEST_COUNTER_FIELDS:
+        if after[field] < before[field]:
+            raise BenchmarkError(
+                f"request counter {field} regressed from {before[field]} to {after[field]}"
+            )
+        result[field] = after[field] - before[field]
+    if after["active_peak"] < before["active_peak"]:
+        raise BenchmarkError(
+            "request active_peak regressed from "
+            f"{before['active_peak']} to {after['active_peak']}"
+        )
+    result["active_end"] = after["active"]
+    result["process_active_peak"] = after["active_peak"]
+    return result
+
+
+def decode_batcher_delta(
+    before: dict[str, Any], after: dict[str, Any]
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for field in DECODE_BATCHER_COUNTER_FIELDS:
+        if after[field] < before[field]:
+            raise BenchmarkError(
+                f"decode-batcher counter {field} regressed from "
+                f"{before[field]} to {after[field]}"
+            )
+        result[field] = after[field] - before[field]
+    if after["max_observed_batch"] < before["max_observed_batch"]:
+        raise BenchmarkError("decode-batcher max_observed_batch regressed")
+    if (
+        after["max_runner_calls_per_token"]
+        < before["max_runner_calls_per_token"]
+    ):
+        raise BenchmarkError("decode-batcher max_runner_calls_per_token regressed")
+    if (
+        after["runner_call_budget_per_token"]
+        != before["runner_call_budget_per_token"]
+    ):
+        raise BenchmarkError("decode-batcher runner-call budget changed during run")
+    result.update(
+        {
+            "mean_runner_calls_per_executed_row": (
+                result["runner_calls"] / result["executed_rows"]
+                if result["executed_rows"]
+                else None
+            ),
+            "process_max_observed_batch": after["max_observed_batch"],
+            "process_max_runner_calls_per_token": after[
+                "max_runner_calls_per_token"
+            ],
+            "runner_call_budget_per_token": after["runner_call_budget_per_token"],
+            "runner_call_budget_exceeded": after["runner_call_budget_exceeded"],
+        }
+    )
+    return result
+
+
+def server_diagnostics_delta(
+    before: dict[str, Any], after: dict[str, Any]
+) -> dict[str, Any]:
+    if before["request_route"] != after["request_route"]:
+        raise BenchmarkError("effective request route changed during run")
+    if before["routing"] != after["routing"]:
+        raise BenchmarkError("server routing ownership changed during run")
+    before_batching = before["batching_engine"]
+    after_batching = after["batching_engine"]
+    if (before_batching is None) != (after_batching is None):
+        raise BenchmarkError("batching-engine availability changed during run")
+    before_direct = before["decode_batcher"]
+    after_direct = after["decode_batcher"]
+    if (before_direct is None) != (after_direct is None):
+        raise BenchmarkError("decode-batcher availability changed during run")
+    return {
+        "schema": SERVER_DIAGNOSTICS_SCHEMA,
+        "request_route": after["request_route"],
+        "requests": request_delta(before["requests"], after["requests"]),
+        "routing": after["routing"],
+        "batching_engine": (
+            batching_delta(before_batching, after_batching)
+            if before_batching is not None and after_batching is not None
+            else None
+        ),
+        "decode_batcher": (
+            decode_batcher_delta(before_direct, after_direct)
+            if before_direct is not None and after_direct is not None
+            else None
+        ),
+    }
+
+
+def server_diagnostics_has_no_errors(server: dict[str, Any]) -> bool:
+    requests = server["requests"]
+    if requests["error"] or requests["timeout"] or requests["rejected"]:
+        return False
+    batching_engine = server["batching_engine"]
+    if batching_engine is not None and batching_engine["total_errors"]:
+        return False
+    decode_batcher = server["decode_batcher"]
+    return decode_batcher is None or (
+        decode_batcher["failed_jobs"] == 0
+        and not decode_batcher["runner_call_budget_exceeded"]
+    )
+
+
+def server_request_accounting_matches(
+    server: dict[str, Any], concurrency: int
+) -> bool:
+    requests = server["requests"]
+    return (
+        requests["total"] == concurrency
+        and requests["ok"] == concurrency
+        and requests["active_end"] == 0
+    )
 
 
 class MemorySampler:
@@ -3303,13 +3795,52 @@ def summarize_run(
             )
         )
     if server is not None:
-        gates.append(
-            gate(
-                "server_reported_no_errors",
-                server["total_errors"] == 0,
-                f"batching-engine error delta: {server['total_errors']}",
+        if server.get("schema") == SERVER_DIAGNOSTICS_SCHEMA:
+            request_errors = {
+                field: server["requests"][field]
+                for field in ("error", "timeout", "rejected")
+            }
+            batching_errors = (
+                server["batching_engine"]["total_errors"]
+                if server["batching_engine"] is not None
+                else 0
             )
-        )
+            direct_errors = (
+                server["decode_batcher"]["failed_jobs"]
+                if server["decode_batcher"] is not None
+                else 0
+            )
+            gates.extend(
+                [
+                    gate(
+                        "server_reported_no_errors",
+                        server_diagnostics_has_no_errors(server),
+                        (
+                            f"route={server['request_route']}; request={request_errors}; "
+                            f"batching_engine={batching_errors}; "
+                            f"decode_batcher={direct_errors}"
+                        ),
+                    ),
+                    gate(
+                        "server_request_accounting",
+                        server_request_accounting_matches(server, concurrency),
+                        (
+                            f"total={server['requests']['total']}, "
+                            f"ok={server['requests']['ok']}, "
+                            f"active_end={server['requests']['active_end']}; "
+                            f"expected={concurrency}"
+                        ),
+                    ),
+                ]
+            )
+        else:
+            gates.append(
+                gate(
+                    "server_reported_no_errors",
+                    server["total_errors"] == 0,
+                    f"batching-engine error delta: {server['total_errors']}",
+                )
+            )
     output_evidence_rows = [
         output_evidence(result, output_evidence_mode)
         for result in sorted(successes, key=lambda result: result.index)
@@ -3407,7 +3938,7 @@ def run_once(
     diagnostics_error: str | None = None
     if diagnostics_url is not None:
         try:
-            diagnostics_before = batching_snapshot(
+            diagnostics_before = server_diagnostics_snapshot(
                 fetch_json(diagnostics_url, headers, args.timeout_secs)
             )
         except Exception as exc:
@@ -3452,11 +3983,13 @@ def run_once(
     server_delta: dict[str, Any] | None = None
     if diagnostics_url is not None and diagnostics_error is None:
         try:
-            diagnostics_after = batching_snapshot(
+            diagnostics_after = server_diagnostics_snapshot(
                 fetch_json(diagnostics_url, headers, args.timeout_secs)
             )
             assert diagnostics_before is not None
-            server_delta = batching_delta(diagnostics_before, diagnostics_after)
+            server_delta = server_diagnostics_delta(
+                diagnostics_before, diagnostics_after
+            )
         except Exception as exc:
             diagnostics_error = f"after run: {type(exc).__name__}: {exc}"
 
@@ -3770,8 +4303,24 @@ def workload_contract(args: argparse.Namespace, sizes: list[int]) -> dict[str, A
 
 def print_run(row: dict[str, Any]) -> None:
     server = row.get("server") or {}
-    width = server.get("process_max_observed_batch")
-    mean = server.get("mean_decode_rows_per_forward")
+    route = "unobserved"
+    if server.get("schema") == SERVER_DIAGNOSTICS_SCHEMA:
+        route = server["request_route"]
+        route_diagnostics = (
+            server["batching_engine"]
+            if route == "batching_engine"
+            else server["decode_batcher"]
+        ) or {}
+        width = route_diagnostics.get("process_max_observed_batch")
+        mean = (
+            route_diagnostics.get("mean_decode_rows_per_forward")
+            if route == "batching_engine"
+            else route_diagnostics.get("mean_runner_calls_per_executed_row")
+        )
+    else:
+        route = "batching_engine" if server else route
+        width = server.get("process_max_observed_batch")
+        mean = server.get("mean_decode_rows_per_forward")
     width_text = "n/a" if width is None else str(width)
     mean_text = "n/a" if mean is None else f"{mean:.2f}"
     print(
@@ -3780,7 +4329,7 @@ def print_run(row: dict[str, Any]) -> None:
         f"good_tok/s={row['slo_goodput_tokens_per_s']:.2f} "
         f"ttft_p99={row['ttft_ms_p99'] or 0.0:.1f}ms "
         f"itl_p99={row['client_visible_itl_ms_p99'] or 0.0:.1f}ms "
-        f"batch_max={width_text} batch_mean={mean_text} "
+        f"route={route} route_max={width_text} route_mean={mean_text} "
         f"ok={row['success_count']}/{row['request_count']}",
         flush=True,
     )

@@ -186,15 +186,52 @@ Every request uses a launch barrier, deterministic prompt identity, explicit
 sampling and template fields, streaming usage, a fixed completion length, and a
 bounded timeout. The receipt retains TTFT, client-visible ITL, end-to-end
 latency, request throughput, output-token throughput, SLO goodput, dispatch
-spread, prompt/output hashes, DRM memory, failures, and Kiln batching deltas.
+spread, prompt/output hashes, DRM memory, failures, and Kiln server-route
+diagnostics.
 
-Driver v7 and v8 retain one ordered `output_evidence` row for every successful
+Driver v7 through v9 retain one ordered `output_evidence` row for every successful
 request. Hash-only evidence is the default and includes the combined semantic
 output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
 tokens, and finish reason. The validator requires these rows to cover exactly
 the successful request indices, reproduce the aggregate output-set hash, and
 reproduce the run's completion-token total. An aggregate mismatch can therefore
 no longer hide whether one request or the entire row diverged.
+
+### Server route diagnostics
+
+Driver v9 replaces the batching-only `server` record with
+`kiln.serving-benchmark-server-diagnostics.v2`. This is a receipt-contract
+change, not a request-workload change; strict-valid v7 and v8 receipts remain
+accepted and comparison-compatible.
+
+The v9 record always retains the effective request route as either
+`batching_engine` or `direct_streaming`. It also retains:
+
+- deltas for the process-wide `ok`, `error`, `timeout`, and `rejected` request
+  counters, plus the end-of-window active count and process peak;
+- the effective batching-actor bit and the complete direct-rendezvous ownership
+  state: backend availability and reason, actor/worker liveness, scope, and
+  whether that worker is routable;
+- batching-engine decode, prefill, admission, error, width, and timing deltas
+  when the actor exists; and
+- direct-rendezvous submitted/executed row, batch, runner-call, busy, failure,
+  width, and runner-call-budget evidence when that worker exists.
+
+Presence is strict. An effective batching actor requires batching-engine
+diagnostics; an absent actor requires them to be null. Direct-worker liveness
+must agree with the decode-batcher record, and route availability must equal
+`backend_available && !actor_active && worker_active`. Before/after ownership
+must be identical. All cumulative counters must be monotonic.
+
+Two run gates consume this evidence. `server_reported_no_errors` requires zero
+request errors/timeouts/rejections, zero actor errors, zero direct-worker
+failures, and no direct runner-call-budget violation. The independent
+`server_request_accounting` gate requires exactly one server `ok` result per
+declared client request and zero active requests after the window. A direct
+stream without a rendezvous worker remains observable through the universal
+request counters rather than being rejected merely because actor counters are
+absent. Console rows name the effective route and show the corresponding actor
+width/mean or rendezvous width/runner-call mean.
 
 ### Output divergence diagnostics
 

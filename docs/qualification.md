@@ -1291,16 +1291,34 @@ attributes the defect to actor-owned prefill/decode scheduling; `baseline`
 excludes the actor and advances the comparison to the direct rendezvous/model
 forward boundary.
 
-Serving benchmark driver v8 closes the exposed provenance gap before another
-ROCm request is allowed. It runs both the initial and final model fingerprints
+The first direct-path attempt retained
+`benchmarks/receipts/rocm/strix-halo/20260719t062650-rocm-strix-halo-greedy-c1-direct-driver-v8-diagnostics-failed-v1.kiln.json`.
+Its four-token warmup completed and emitted `To establish a foundation`, but
+driver v8 failed the warmup verdict before the pinned 163-token measurement
+because it unconditionally required `decode_runtime.batching_engine`. The
+typed arm had disabled that actor, so the health response correctly omitted it
+and exposed the live direct-rendezvous worker instead. This is failed harness
+evidence only: the distinct 160-token warmup cannot answer the measured prompt's
+correctness discriminator. Initial fingerprint, server, and final fingerprint
+lifecycles stayed below 60 C, all 35 server pacing intervals completed, and
+shutdown/cooldown left no listener, process, or snapshot residue.
+
+Serving benchmark driver v9 retains the v8 provenance containment and makes
+server diagnostics route-aware before retrying that arm. Driver v8 runs both
+the initial and final model fingerprints
 as start-gated child process groups under the same typed host thermal policy,
 requires complete pacing and post-exit cooldown for each, and retains both
 closed lifecycles plus implementation and Python hashes in
 `host_thermal.model_fingerprint`. Owned mode shuts down and cools the accelerator
 server before the final full rehash. A missing initial lifecycle is invalid; a
 missing final lifecycle requires a failed model-identity finalization check.
-Strict-valid driver-v7 references remain comparison-compatible, so the retained
-vLLM arm does not need an expensive rerun merely to exercise this safety repair.
+Driver v9 additionally binds universal request-status deltas, effective
+actor/direct ownership, batching-engine deltas when that actor exists, and
+direct-rendezvous deltas when that worker exists. Exact server request
+accounting and route-local error/budget gates now apply to either route without
+inventing zero actor counters. Strict-valid driver-v7 and driver-v8 references
+remain comparison-compatible, so the retained vLLM arm does not need an
+expensive rerun merely to exercise either safety repair.
 
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
