@@ -1768,6 +1768,23 @@ introducing a racy indexed write. The exact pushed-source c8 attribution
 workload must determine whether the optimization materially changes decode time
 or thermal load.
 
+The first source-bound c8 run of that checkpoint is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t212213-rocm-strix-halo-kv-device-slot-scatter-v15-c8.kiln.json`,
+but it is not an exact A/B result. All eight requests completed exactly 32
+tokens, request-local evidence was complete, the measured row peaked at 79 C,
+and the owned lifecycle peaked at 89.625 C without a trip. The route reported
+8.421 seconds of decode, 6.604 seconds of fixed actor idle, and 2.269 seconds of
+prefill; aggregate and thermally sustainable output were 14.873 and 9.455
+tokens/second. Those values do not show an optimization win. More importantly,
+driver v15 derives prompt text from the operational `run_id`. Giving the
+candidate a distinct receipt/log identity therefore changed every prompt from
+150 to 152 tokens and changed both prompt/output set hashes. The result is valid
+as a candidate correctness and thermal receipt but incomparable to the prior
+8.020-second decode row. Do not retry with a reused `run_id`, because that would
+overwrite the earlier external server log. The benchmark protocol must first
+separate stable prompt-set identity from unique run/artifact identity and bind
+both into strict validation.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package
