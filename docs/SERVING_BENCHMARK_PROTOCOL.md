@@ -410,6 +410,25 @@ Neither outcome is performance or acceptance evidence. Repair the resulting
 subpath and repeat source-paired multi-token parity before returning to the
 serving matrix.
 
+The exact-prompt result is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t071900-rocm-strix-halo-greedy-c1-actor-prefill-single-chunk-v1.kiln.json`.
+It reuses the parent run ID because that ID participates in fixed-profile
+prompt construction: the measured input is again 163 tokens with prompt-set
+hash `sha256:faf24ebb93fc7e75a2e78111b921a32aece716d56d9b67d2907ae251217a8d9e`.
+The first invocation used a longer run ID, changed the prompt to 167 tokens,
+and is deliberately not retained as causal evidence.
+
+With the exact prompt, the actor emits `To establish a foundation`, matching
+the direct and HF/vLLM arms. Its server record proves one 163-token prefill
+chunk across eight forwards, seven layer yields, and 32 transformer layers,
+then three one-row decode forwards. The 64-token actor parent used three chunks
+and emitted `baseline`. Layer resumption remains active in both actor arms, so
+the changed prompt-token chunk boundary is causal and layer yielding is
+excluded for this discriminator. The 9.49 output tokens/second window is
+diagnostic-only. The complete guarded lifecycle had zero trips or errors,
+peaked at 60.125 C, shut down without force, cooled completely, and left no
+process, listener, or snapshot residue.
+
 ## Running One Profile
 
 ```bash

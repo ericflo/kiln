@@ -1360,6 +1360,29 @@ boundary causal. `baseline` excludes token chunking and moves the next repair
 to layer resumption or the remaining actor handoff. This bounded four-token arm
 cannot qualify performance, concurrency, or endurance.
 
+The exact-prompt result is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t071900-rocm-strix-halo-greedy-c1-actor-prefill-single-chunk-v1.kiln.json`
+from exact clean pushed source `3375fb714e6782ec722746fa30c39b85d05445a8`.
+The run deliberately reuses the prior run ID because fixed serving profiles
+include it in the prompt. This restores the exact 163-token input and
+`sha256:faf24ebb93fc7e75a2e78111b921a32aece716d56d9b67d2907ae251217a8d9e`
+prompt-set hash. An earlier invocation with a longer run ID produced a
+167-token prompt and is rejected as causal evidence rather than silently
+compared.
+
+The exact arm emits `To establish a foundation`, matching the direct and
+HF/vLLM arms where the 64-token actor parent emits `baseline`. The route-aware
+record proves the batching actor remained active, processed one 163-token
+chunk across eight prefill forwards, seven layer yields, and 32 layers, then
+ran three one-row decode forwards with no error. Since layer resumption remains
+active, the one changed prefill-token boundary is causal and the layer-yield
+implementation is excluded for this discriminator. The request reported 9.493
+output tokens/second, 9.401 thermally sustainable output tokens/second, 235.7
+ms TTFT, and 62.1 ms p99 ITL without request-window pacing; these are
+diagnostic-only. Initial fingerprint, server, and final fingerprint lifecycles
+peaked at 59.875, 60.125, and 59.75 C with zero trips, complete cooldowns,
+normal shutdown, and no listener, process, or snapshot residue.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for
