@@ -1929,8 +1929,9 @@ unstarted arm from a partial one. Request failures count actual HTTP/stream
 failures only; dirty shutdown and snapshot residue derive from teardown rather
 than being invented for every failed case.
 
-The stable serving run also attests the default 64-token prompt-work ceiling
-(`server.max_prefill_tokens_per_cycle`), the default four-layer yield ceiling
+The stable serving run also attests the default 256-token prompt-work ceiling
+(`server.max_prefill_tokens_per_cycle`), the 512-token combined scheduling
+budget (`server.max_batch_tokens`), the default four-layer yield ceiling
 (`server.max_prefill_layers_per_cycle`), and both startup provenances. Admission
 and resumable prefill share the token ceiling after ready decode rows reserve
 their tokens. A retained token chunk then yields between transformer-layer
@@ -2104,7 +2105,11 @@ python3 scripts/qualification/run.py \
 ```
 
 The driver builds once and starts one server process with 12 active-request
-slots. Its graph-required operating point reserves one protected geometry for
+slots. Its source-bound TOML pins the route-invariant 256-token ROCm prefill
+boundary and a 512-token combined scheduling budget, leaving room for the full
+prefill chunk beside the effective eight-row decode width. Health and trusted
+debug must report both values with `config_file` provenance. Its graph-required
+operating point reserves one protected geometry for
 each declared active owner and pre-reserves zero transition entries, so the
 checked 12-entry ceiling is `12 * 1 + 0` and matches the product default. Runtime
 admission consumes unused global headroom freely. Only at entry or byte

@@ -334,6 +334,8 @@ def health_fixture(
             "batching_engine": {
                 "stream_stall_grace_ms": serve.STREAM_STALL_GRACE_MS,
                 "stream_stall_grace_source": "config_file",
+                "max_batch_tokens": serve.MAX_BATCH_TOKENS,
+                "max_batch_tokens_source": "config_file",
                 "max_prefill_tokens_per_cycle": serve.MAX_PREFILL_TOKENS_PER_CYCLE,
                 "max_prefill_tokens_per_cycle_source": "config_file",
                 "max_prefill_layers_per_cycle": serve.MAX_PREFILL_LAYERS_PER_CYCLE,
@@ -536,6 +538,8 @@ def debug_fixture(
             "snapshot": {
                 "stream_stall_grace_ms": serve.STREAM_STALL_GRACE_MS,
                 "stream_stall_grace_source": "config_file",
+                "max_batch_tokens": serve.MAX_BATCH_TOKENS,
+                "max_batch_tokens_source": "config_file",
                 "max_prefill_tokens_per_cycle": serve.MAX_PREFILL_TOKENS_PER_CYCLE,
                 "max_prefill_tokens_per_cycle_source": "config_file",
                 "max_prefill_layers_per_cycle": serve.MAX_PREFILL_LAYERS_PER_CYCLE,
@@ -2269,6 +2273,14 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     self.assertEqual(
                         parsed["server"]["stream_stall_grace_ms"],
                         serve.STREAM_STALL_GRACE_MS,
+                    )
+                    self.assertEqual(
+                        parsed["server"]["max_batch_tokens"],
+                        config["server"]["max_batch_tokens"],
+                    )
+                    self.assertEqual(
+                        parsed["server"]["max_prefill_tokens_per_cycle"],
+                        config["server"]["max_prefill_tokens_per_cycle"],
                     )
                     self.assertEqual(
                         parsed["server"]["http_send_buffer_bytes"],

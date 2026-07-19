@@ -77,11 +77,12 @@
             "http_send_buffer_bytes": 4096,
             "log_format": "json",
             "max_active_requests": 1,
+            "max_batch_tokens": 512,
             "max_decode_batch": 1,
             "max_prefill_layers_per_cycle": 4,
             "max_prefill_staging_priority_burst": 0,
             "max_prefill_staging_slots": 0,
-            "max_prefill_tokens_per_cycle": 64,
+            "max_prefill_tokens_per_cycle": 256,
             "request_timeout_seconds": 180,
             "stream_stall_grace_ms": 2000
           }
@@ -104,11 +105,12 @@
             "http_send_buffer_bytes": 4096,
             "log_format": "json",
             "max_active_requests": 1,
+            "max_batch_tokens": 512,
             "max_decode_batch": 1,
             "max_prefill_layers_per_cycle": 4,
             "max_prefill_staging_priority_burst": 0,
             "max_prefill_staging_slots": 0,
-            "max_prefill_tokens_per_cycle": 64,
+            "max_prefill_tokens_per_cycle": 256,
             "request_timeout_seconds": 180,
             "stream_stall_grace_ms": 2000
           }

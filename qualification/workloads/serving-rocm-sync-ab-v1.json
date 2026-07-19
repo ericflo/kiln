@@ -107,11 +107,12 @@
             "log_format": "json",
             "request_timeout_seconds": 180,
             "stream_stall_grace_ms": 2000,
+            "max_batch_tokens": 512,
             "max_decode_batch": 8,
             "max_prefill_staging_slots": 4,
             "max_active_requests": 12,
             "max_prefill_staging_priority_burst": 4,
-            "max_prefill_tokens_per_cycle": 64,
+            "max_prefill_tokens_per_cycle": 256,
             "max_prefill_layers_per_cycle": 4
           }
         },
@@ -135,11 +136,12 @@
             "log_format": "json",
             "request_timeout_seconds": 180,
             "stream_stall_grace_ms": 2000,
+            "max_batch_tokens": 512,
             "max_decode_batch": 8,
             "max_prefill_staging_slots": 4,
             "max_active_requests": 12,
             "max_prefill_staging_priority_burst": 4,
-            "max_prefill_tokens_per_cycle": 64,
+            "max_prefill_tokens_per_cycle": 256,
             "max_prefill_layers_per_cycle": 4
           }
         }

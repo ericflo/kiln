@@ -758,6 +758,10 @@ kiln serve --config rocm-graph-eager.toml
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           The committed Strix Halo ROCm development soak provisions 12 entries, matching the product default: one
           protected geometry for each of 12 declared active owners and zero pre-reserved transition entries.
+          Its typed launch file pins <code>server.max_prefill_tokens_per_cycle=256</code> and
+          <code>server.max_batch_tokens=512</code>; health and trusted debug must attribute both to the config file,
+          and startup fails before model loading if the route-invariant prefill boundary no longer fits beside the
+          effective decode width.
           Unused global headroom remains shared. At saturation, idle owners precede minimum fair-LRU active relief,
           which creates only the transition room then required while preserving one projected graph per active
           owner and every live recurrent-state slot. A same-binary A/B completed the identical first seven-wave

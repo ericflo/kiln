@@ -101,7 +101,8 @@ OUTLIER_HISTORY_SIZE = 64
 SLOW_SOCKET_BUFFER_BYTES = 4096
 HTTP_SEND_BUFFER_BYTES = 4096
 STREAM_STALL_GRACE_MS = 2000
-MAX_PREFILL_TOKENS_PER_CYCLE = 64
+MAX_BATCH_TOKENS = 512
+MAX_PREFILL_TOKENS_PER_CYCLE = 256
 MAX_PREFILL_LAYERS_PER_CYCLE = 4
 MAX_DECODE_BATCH = 8
 MAX_PREFILL_STAGING_SLOTS = 4
@@ -327,6 +328,7 @@ def _variant_config(
             "log_format": "json",
             "request_timeout_seconds": request_timeout_seconds,
             "stream_stall_grace_ms": STREAM_STALL_GRACE_MS,
+            "max_batch_tokens": MAX_BATCH_TOKENS,
             "max_decode_batch": MAX_DECODE_BATCH,
             "max_prefill_staging_slots": MAX_PREFILL_STAGING_SLOTS,
             "max_active_requests": MAX_ACTIVE_REQUESTS,
@@ -2655,6 +2657,7 @@ def write_server_config(
         f"request_timeout_secs = {server['request_timeout_seconds']}",
         f"http_send_buffer_bytes = {server['http_send_buffer_bytes']}",
         f"stream_stall_grace_ms = {server['stream_stall_grace_ms']}",
+        f"max_batch_tokens = {server['max_batch_tokens']}",
         f"max_prefill_tokens_per_cycle = {server['max_prefill_tokens_per_cycle']}",
         f"max_prefill_layers_per_cycle = {server['max_prefill_layers_per_cycle']}",
         f"max_decode_batch = {server['max_decode_batch']}",
@@ -3372,6 +3375,13 @@ def attest_runtime(
             failures.append("health batching stream-stall grace does not match config")
         if batching.get("stream_stall_grace_source") != "config_file":
             failures.append("health batching stream-stall grace source is not file")
+        expected_batch_tokens = VARIANT_CONFIGS[variant]["server"][
+            "max_batch_tokens"
+        ]
+        if batching.get("max_batch_tokens") != expected_batch_tokens:
+            failures.append("health batching token budget does not match config")
+        if batching.get("max_batch_tokens_source") != "config_file":
+            failures.append("health batching token budget source is not file")
         expected_active_policy = {
             "max_decode_batch": VARIANT_CONFIGS[variant]["server"]["max_decode_batch"],
             "max_prefill_staging_slots": VARIANT_CONFIGS[variant]["server"][
@@ -3422,6 +3432,11 @@ def attest_runtime(
                 or debug_snapshot.get("stream_stall_grace_source") != "config_file"
             ):
                 failures.append("debug batching stream-stall policy does not match file")
+            if (
+                debug_snapshot.get("max_batch_tokens") != expected_batch_tokens
+                or debug_snapshot.get("max_batch_tokens_source") != "config_file"
+            ):
+                failures.append("debug batching token budget does not match file")
             for field, expected_value in expected_active_policy.items():
                 if debug_snapshot.get(field) != expected_value:
                     failures.append(

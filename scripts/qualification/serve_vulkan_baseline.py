@@ -30,6 +30,7 @@ OVERALL_TIMEOUT_SECONDS = 1800.0
 # Correctness containment, not a latency SLO. Every observed duration remains a
 # first-class metric and cross-engine performance is gated by the benchmark matrix.
 REQUEST_TIMEOUT_SECONDS = 600.0
+VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE = 64
 WARMUP_MAX_TOKENS = 16
 MAX_TOKENS = 32
 PAUSE_GATE_MS = 2_000.0
@@ -62,6 +63,9 @@ def _effective_config() -> dict[str, Any]:
         **mixed.VULKAN_BUILD_SPEC.effective_config(),
         "timeout_seconds": int(BUILD_TIMEOUT_SECONDS),
     }
+    value["server"]["max_prefill_tokens_per_cycle"] = (
+        VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE
+    )
     value["model"] = {
         "vulkan_decode_weight_prewarm": mixed.VULKAN_DECODE_WEIGHT_PREWARM,
         "vulkan_decode_weight_prewarm_mib_per_second": (

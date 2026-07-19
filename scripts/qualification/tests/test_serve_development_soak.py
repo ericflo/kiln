@@ -302,6 +302,8 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.ROCM_RUNTIME,
         )
         self.assertEqual(rocm["server"]["max_active_requests"], 12)
+        self.assertEqual(rocm["server"]["max_batch_tokens"], 512)
+        self.assertEqual(rocm["server"]["max_prefill_tokens_per_cycle"], 256)
         self.assertEqual(rocm["soak"]["rocm_graph_cache_entries"], 12)
         self.assertEqual(
             rocm["soak"]["rocm_graph_admission_policy"],

@@ -64,6 +64,7 @@
           "log_format": "json",
           "request_timeout_seconds": 600,
           "stream_stall_grace_ms": 2000,
+          "max_batch_tokens": 512,
           "max_decode_batch": 2,
           "max_prefill_staging_slots": 2,
           "max_active_requests": 4,
