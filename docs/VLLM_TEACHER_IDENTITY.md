@@ -621,6 +621,9 @@ Both engines also recorded zero SLO-goodput because the conservative host guard
 inserted multi-second process stops. Preserve the pair as counterevidence;
 the source-paired driver-v7 c1 follow-up is retained at
 `benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.{kiln,vllm}.json`.
+Driver v8 continues to accept that strict-valid v7 receipt as an exact-output
+reference while requiring the new arm's model provenance hashing to be
+continuously thermally contained.
 Both outputs contain 64 tokens and no reasoning. They agree through generated
 token index 2 (`To establish a`) and diverge at index 3: Kiln emits token
 `25045` (` baseline`) while vLLM emits `15787` (` foundation`). The first

@@ -26,6 +26,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -38,12 +39,14 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "7"
-SUPPORTED_DRIVER_VERSIONS = {"2", "3", "4", "5", "6", DRIVER_VERSION}
-THERMAL_DRIVER_VERSIONS = {"3", "4", "5", "6", DRIVER_VERSION}
-LIFECYCLE_DRIVER_VERSIONS = {"4", "5", "6", DRIVER_VERSION}
-PRELAUNCH_DRIVER_VERSIONS = {"5", "6", DRIVER_VERSION}
-OUTPUT_EVIDENCE_DRIVER_VERSIONS = {DRIVER_VERSION}
+DRIVER_VERSION = "8"
+SUPPORTED_DRIVER_VERSIONS = {"2", "3", "4", "5", "6", "7", DRIVER_VERSION}
+THERMAL_DRIVER_VERSIONS = {"3", "4", "5", "6", "7", DRIVER_VERSION}
+LIFECYCLE_DRIVER_VERSIONS = {"4", "5", "6", "7", DRIVER_VERSION}
+PRELAUNCH_DRIVER_VERSIONS = {"5", "6", "7", DRIVER_VERSION}
+OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", DRIVER_VERSION}
+MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {DRIVER_VERSION}
+REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {"7", DRIVER_VERSION}
 OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
@@ -52,6 +55,7 @@ QUALIFICATION_DIR = ROOT / "scripts" / "qualification"
 if str(QUALIFICATION_DIR) not in sys.path:
     sys.path.insert(0, str(QUALIFICATION_DIR))
 
+import hf_thermal_supervisor as fingerprint_supervisor  # noqa: E402
 import host_thermal_guard as thermal  # noqa: E402
 import host_thermal_policy as thermal_policy_file  # noqa: E402
 from model_fingerprint import (  # noqa: E402
@@ -61,6 +65,8 @@ from model_fingerprint import (  # noqa: E402
 from strict_json import loads as strict_json_loads  # noqa: E402
 
 HOST_THERMAL_POLICY_SCHEMA = thermal_policy_file.SCHEMA
+MODEL_FINGERPRINT_SCRIPT = QUALIFICATION_DIR / "model_fingerprint.py"
+MODEL_FINGERPRINT_THERMAL_SCHEMA = "kiln.serving-model-fingerprint-thermal.v1"
 
 PROFILE_CONTRACTS = {
     "greedy-short": {
@@ -886,6 +892,64 @@ def bind_model_identity(value: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def fingerprint_model_with_thermal_containment(
+    model_path: Path,
+    model_id: str,
+    *,
+    policy_path: Path | None,
+    phase: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if policy_path is None:
+        return fingerprint_model(model_path, model_id), None
+    try:
+        resolved_policy = policy_path.expanduser().resolve(strict=True)
+        python = Path(sys.executable).resolve(strict=True)
+        script = MODEL_FINGERPRINT_SCRIPT.resolve(strict=True)
+    except OSError as exc:
+        raise BenchmarkError(f"model fingerprint containment input is invalid: {exc}") from exc
+    environment = {
+        "HOME": os.environ.get("HOME", str(Path.home())),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONHASHSEED": "20260715",
+    }
+    try:
+        with tempfile.TemporaryDirectory(prefix="kiln-serving-model-fingerprint-") as raw:
+            workspace = Path(raw).resolve(strict=True)
+            environment["TMPDIR"] = str(workspace)
+            returncode, stdout, stderr, evidence = fingerprint_supervisor.supervise(
+                policy_path=resolved_policy,
+                workspace=workspace,
+                worker_command=[
+                    str(python),
+                    str(script),
+                    "--model-path",
+                    str(model_path),
+                    "--model-id",
+                    model_id,
+                    "--json",
+                ],
+                worker_environment=environment,
+                worker_phase=phase,
+            )
+    except fingerprint_supervisor.SupervisorError as exc:
+        raise BenchmarkError(f"guarded model fingerprint failed: {exc}") from exc
+    if stderr:
+        sys.stderr.write(stderr)
+    if returncode != 0:
+        raise BenchmarkError(
+            f"guarded model fingerprint worker exited {returncode}: {stderr[-3000:]}"
+        )
+    try:
+        value = strict_json_loads(stdout)
+    except Exception as exc:
+        raise BenchmarkError(f"guarded model fingerprint output is invalid: {exc}") from exc
+    if not isinstance(value, dict):
+        raise BenchmarkError("guarded model fingerprint output must be an object")
+    return value, evidence
+
+
 def validate_model_identity(value: Any, label: str) -> dict[str, Any]:
     identity = _object(value, label)
     _exact_keys(identity, MODEL_IDENTITY_KEYS, label)
@@ -1495,17 +1559,53 @@ HOST_THERMAL_EVIDENCE_KEYS = {
 }
 
 
-def validate_host_thermal_receipt(value: Any) -> tuple[str, bool]:
+def validate_model_fingerprint_thermal_record(
+    value: Any,
+    *,
+    policy_record: dict[str, Any],
+) -> bool:
+    label = "receipt.host_thermal.model_fingerprint"
+    record = _object(value, label)
+    _exact_keys(
+        record,
+        {"schema", "implementation_sha256", "python_sha256", "initial", "final"},
+        label,
+    )
+    if record["schema"] != MODEL_FINGERPRINT_THERMAL_SCHEMA:
+        raise BenchmarkError(f"{label}.schema is unsupported")
+    _sha256(record["implementation_sha256"], f"{label}.implementation_sha256")
+    _sha256(record["python_sha256"], f"{label}.python_sha256")
+    for phase in ("initial", "final"):
+        evidence = record[phase]
+        if phase == "final" and evidence is None:
+            continue
+        try:
+            validated = fingerprint_supervisor.validate_evidence(evidence)
+        except fingerprint_supervisor.SupervisorError as exc:
+            raise BenchmarkError(f"{label}.{phase} is invalid: {exc}") from exc
+        if validated["policy"] != policy_record:
+            raise BenchmarkError(f"{label}.{phase} policy disagrees with server guard")
+    return record["final"] is not None
+
+
+def validate_host_thermal_receipt(
+    value: Any,
+    *,
+    driver_version: str,
+) -> tuple[str, bool, bool | None]:
     host_thermal = _object(value, "receipt.host_thermal")
+    expected_keys = {
+        "mode",
+        "unsafe_no_guard_acknowledged",
+        "policy",
+        "process_group",
+        "evidence",
+    }
+    if driver_version in MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS:
+        expected_keys.add("model_fingerprint")
     _exact_keys(
         host_thermal,
-        {
-            "mode",
-            "unsafe_no_guard_acknowledged",
-            "policy",
-            "process_group",
-            "evidence",
-        },
+        expected_keys,
         "receipt.host_thermal",
     )
     if not isinstance(host_thermal["unsafe_no_guard_acknowledged"], bool):
@@ -1516,12 +1616,21 @@ def validate_host_thermal_receipt(value: Any) -> tuple[str, bool]:
     if mode == "not_configured":
         if host_thermal["unsafe_no_guard_acknowledged"] is not True or any(
             host_thermal[name] is not None
-            for name in ("policy", "process_group", "evidence")
+            for name in (
+                "policy",
+                "process_group",
+                "evidence",
+                *(
+                    ("model_fingerprint",)
+                    if driver_version in MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS
+                    else ()
+                ),
+            )
         ):
             raise BenchmarkError(
                 "unconfigured host thermal evidence requires an explicit unsafe acknowledgment"
             )
-        return mode, False
+        return mode, False, None
     if mode not in {"attached_process_group", "owned_process_group"}:
         raise BenchmarkError("receipt.host_thermal.mode is unsupported")
     if host_thermal["unsafe_no_guard_acknowledged"] is not False:
@@ -1531,6 +1640,12 @@ def validate_host_thermal_receipt(value: Any) -> tuple[str, bool]:
             host_thermal["policy"], "receipt.host_thermal.policy"
         )
     )
+    model_fingerprint_final_present: bool | None = None
+    if driver_version in MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS:
+        model_fingerprint_final_present = validate_model_fingerprint_thermal_record(
+            host_thermal["model_fingerprint"],
+            policy_record=policy_record,
+        )
     process = _object(
         host_thermal["process_group"], "receipt.host_thermal.process_group"
     )
@@ -1660,7 +1775,7 @@ def validate_host_thermal_receipt(value: Any) -> tuple[str, bool]:
         and evidence["host_temperature_end_millicelsius"]
         <= safe_handoff["target_millicelsius"]
     )
-    return mode, operationally_passed
+    return mode, operationally_passed, model_fingerprint_final_present
 
 
 def validate_prelaunch_cooldown(
@@ -2239,13 +2354,19 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     if diagnostics["timed_request_path_affected"] is not False:
         raise BenchmarkError("receipt diagnostics must remain outside the timed request path")
     if driver_version in THERMAL_DRIVER_VERSIONS:
-        host_thermal_mode, host_thermal_passed = validate_host_thermal_receipt(
-            receipt["host_thermal"]
+        (
+            host_thermal_mode,
+            host_thermal_passed,
+            model_fingerprint_final_present,
+        ) = validate_host_thermal_receipt(
+            receipt["host_thermal"],
+            driver_version=driver_version,
         )
         if driver_version == "3" and host_thermal_mode == "owned_process_group":
             raise BenchmarkError("driver v3 cannot claim owned server lifecycle evidence")
     else:
         host_thermal_mode, host_thermal_passed = "legacy", True
+        model_fingerprint_final_present = None
     if driver_version in LIFECYCLE_DRIVER_VERSIONS:
         server_lifecycle_mode, server_lifecycle_passed = validate_server_lifecycle(
             receipt["server_lifecycle"],
@@ -2430,6 +2551,24 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 "receipt.completion.finalization_checks.host_thermal_handoff "
                 "must be not_applicable without a guard"
             )
+        if driver_version in MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS:
+            guarded_mode = host_thermal_mode in {
+                "attached_process_group",
+                "owned_process_group",
+            }
+            if not guarded_mode and model_fingerprint_final_present is not None:
+                raise BenchmarkError(
+                    "receipt has model fingerprint thermal evidence without a guard"
+                )
+            if (
+                guarded_mode
+                and completion_checks["model_identity_unchanged"] == "passed"
+                and model_fingerprint_final_present is not True
+            ):
+                raise BenchmarkError(
+                    "receipt model fingerprint thermal evidence disagrees with "
+                    "its finalization check"
+                )
         if driver_version in LIFECYCLE_DRIVER_VERSIONS:
             shutdown_check = completion_checks["server_shutdown"]
             if server_lifecycle_mode == "owned_process_group":
@@ -3354,9 +3493,10 @@ def compare_reference(receipt: dict[str, Any], reference_path: Path) -> dict[str
             f"cannot load reference receipt {reference_path}: {type(exc).__name__}: {exc}"
         ) from exc
     validate_benchmark_receipt(reference)
-    if reference.get("driver_version") != DRIVER_VERSION:
+    if reference.get("driver_version") not in REFERENCE_COMPATIBLE_DRIVER_VERSIONS:
         raise BenchmarkError(
-            f"reference receipt must use current driver version {DRIVER_VERSION}"
+            "reference receipt must use a comparison-compatible driver version in "
+            f"{sorted(REFERENCE_COMPATIBLE_DRIVER_VERSIONS)}"
         )
     if reference.get("workload_fingerprint") != receipt.get("workload_fingerprint"):
         raise BenchmarkError("reference receipt has a different workload fingerprint")
@@ -3873,11 +4013,32 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 raise BenchmarkError("--runtime-identity is required for this engine/source state")
         try:
-            model_identity = bind_model_identity(
-                fingerprint_model(args.model_path, args.model)
+            initial_model_identity, initial_fingerprint_thermal = (
+                fingerprint_model_with_thermal_containment(
+                    args.model_path,
+                    args.model,
+                    policy_path=args.host_thermal_policy,
+                    phase="model-fingerprint-initial",
+                )
             )
+            model_identity = bind_model_identity(initial_model_identity)
         except ModelFingerprintError as exc:
             raise BenchmarkError(f"model fingerprint failed: {exc}") from exc
+        model_fingerprint_thermal_record = (
+            {
+                "schema": MODEL_FINGERPRINT_THERMAL_SCHEMA,
+                "implementation_sha256": fingerprint_runtime_artifact(
+                    MODEL_FINGERPRINT_SCRIPT
+                )["sha256"],
+                "python_sha256": fingerprint_runtime_artifact(
+                    Path(sys.executable).resolve(strict=True)
+                )["sha256"],
+                "initial": initial_fingerprint_thermal,
+                "final": None,
+            }
+            if initial_fingerprint_thermal is not None
+            else None
+        )
         runtime_artifact = fingerprint_runtime_artifact(args.runtime_artifact)
         runtime_manifest = (
             load_vllm_runtime_manifest(args.runtime_artifact)
@@ -4138,37 +4299,6 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception as exc:
                     record_completion_failure("memory_sampler_stop", exc)
 
-        run_finalization_check(
-            "repository_unchanged",
-            lambda: require_repository_unchanged(repo),
-        )
-
-        def verify_model_identity() -> None:
-            try:
-                model_after = bind_model_identity(
-                    fingerprint_model(args.model_path, args.model)
-                )
-            except ModelFingerprintError as exc:
-                raise BenchmarkError(f"model fingerprint recheck failed: {exc}") from exc
-            if model_after != model_identity:
-                raise BenchmarkError("model identity changed during measurement")
-
-        run_finalization_check("model_identity_unchanged", verify_model_identity)
-
-        def verify_runtime_artifact() -> None:
-            if fingerprint_runtime_artifact(args.runtime_artifact) != runtime_artifact:
-                raise BenchmarkError("runtime artifact changed during measurement")
-
-        run_finalization_check("runtime_artifact_unchanged", verify_runtime_artifact)
-        if args.engine == "vllm":
-            def verify_runtime_manifest() -> None:
-                if load_vllm_runtime_manifest(args.runtime_artifact) != runtime_manifest:
-                    raise BenchmarkError("vLLM runtime manifest changed during measurement")
-
-            run_finalization_check("runtime_manifest_unchanged", verify_runtime_manifest)
-        else:
-            finalization_checks["runtime_manifest_unchanged"] = "not_applicable"
-
         if args.engine == "kiln":
             def verify_execution_identity() -> None:
                 if runtime_execution_identity is None:
@@ -4264,6 +4394,7 @@ def main(argv: list[str] | None = None) -> int:
                 "unsafe_no_guard_acknowledged": False,
                 "policy": thermal_policy_record,
                 "process_group": attached_process.receipt_identity(),
+                "model_fingerprint": model_fingerprint_thermal_record,
                 "evidence": {
                     **thermal_guard.metric_values(),
                     **thermal_guard.pacing_metric_values(),
@@ -4285,8 +4416,49 @@ def main(argv: list[str] | None = None) -> int:
                 "unsafe_no_guard_acknowledged": True,
                 "policy": None,
                 "process_group": None,
+                "model_fingerprint": None,
                 "evidence": None,
             }
+
+        def verify_model_identity() -> None:
+            try:
+                model_after_raw, final_fingerprint_thermal = (
+                    fingerprint_model_with_thermal_containment(
+                        args.model_path,
+                        args.model,
+                        policy_path=args.host_thermal_policy,
+                        phase="model-fingerprint-final",
+                    )
+                )
+                model_after = bind_model_identity(model_after_raw)
+            except ModelFingerprintError as exc:
+                raise BenchmarkError(f"model fingerprint recheck failed: {exc}") from exc
+            if model_fingerprint_thermal_record is not None:
+                model_fingerprint_thermal_record["final"] = final_fingerprint_thermal
+            if model_after != model_identity:
+                raise BenchmarkError("model identity changed during measurement")
+
+        run_finalization_check("model_identity_unchanged", verify_model_identity)
+
+        run_finalization_check(
+            "repository_unchanged",
+            lambda: require_repository_unchanged(repo),
+        )
+
+        def verify_runtime_artifact() -> None:
+            if fingerprint_runtime_artifact(args.runtime_artifact) != runtime_artifact:
+                raise BenchmarkError("runtime artifact changed during measurement")
+
+        run_finalization_check("runtime_artifact_unchanged", verify_runtime_artifact)
+        if args.engine == "vllm":
+
+            def verify_runtime_manifest() -> None:
+                if load_vllm_runtime_manifest(args.runtime_artifact) != runtime_manifest:
+                    raise BenchmarkError("vLLM runtime manifest changed during measurement")
+
+            run_finalization_check("runtime_manifest_unchanged", verify_runtime_manifest)
+        else:
+            finalization_checks["runtime_manifest_unchanged"] = "not_applicable"
 
         if owned_server is not None:
             server_lifecycle = {

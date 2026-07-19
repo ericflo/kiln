@@ -13,14 +13,15 @@ Every measured run requires `--host-thermal-policy` and exactly one server
 ownership mode:
 
 - `--server-launch-config PATH` is the default for local qualification. The
-  driver fingerprints the source, model, and runtime, then requires stable host
-  cooldown before process creation. It launches a new process group, arms
-  thermal containment before the first readiness request, requires the loopback
-  port to be unbound before launch, waits for `/v1/models`, proves the listening
-  socket belongs to that process group, runs the workload, verifies the
-  live runtime, sends `SIGTERM`, requires the whole process group to disappear,
-  monitors the hard limit through exit, completes host cooldown, and hashes the
-  server log.
+  driver fingerprints the model in its own guarded child lifecycle, fingerprints
+  source and runtime, then requires stable host cooldown before server process
+  creation. It launches a new process group, arms thermal containment before the
+  first readiness request, requires the loopback port to be unbound before
+  launch, waits for `/v1/models`, proves the listening socket belongs to that
+  process group, runs the workload, verifies the live runtime, sends `SIGTERM`,
+  requires the whole process group to disappear, monitors the hard limit through
+  exit, completes host cooldown, repeats the model fingerprint in a second
+  guarded lifecycle, and hashes the server log.
 - `--server-pid PID` attaches to an already running process-group leader. The
   guard is armed before `/v1/models` or `/health`. The driver leaves the process
   alive only after the configured safe-handoff temperature is stable.
@@ -28,12 +29,15 @@ ownership mode:
   counterevidence. It can never produce a passing receipt.
 
 Owned launch eliminates the manual gap in which model loading or inference
-prewarm could run before the guard attached. The pre-launch cooldown also
-eliminates a subtler gap: model-content and runtime hashing can heat a shared
-CPU/GPU package before the child exists. PID attachment remains useful for
-remote orchestration that already owns process creation, but that orchestrator
-is responsible for containment and its starting host state before the benchmark
-starts.
+prewarm could run before the guard attached. Driver v8 also removes the
+model-provenance gap: both full model fingerprints run as start-gated child
+process groups under the selected thermal policy and complete their own stable
+post-exit cooldown. The server pre-launch cooldown then clears heat from source
+and runtime hashing plus launch validation before server creation. PID attachment
+remains useful for remote orchestration that already owns process creation, but
+that orchestrator is responsible for containment and its starting host state
+before the benchmark starts. Its server is returned after safe handoff before
+the final guarded fingerprint; it must remain quiescent during that recheck.
 
 Owned mode accepts only an origin-only loopback HTTP base URL. On Linux it
 matches the listening TCP/TCP6 socket inode with descriptors held by the leader
@@ -136,15 +140,24 @@ The closed policy fields are:
 | `safe_handoff.timeout_seconds` | Positive deadline for each boundary cooldown. |
 | `phase_settlement_timeout_seconds` | Positive deadline for an active pacing interval to settle before or after each workload row. |
 
-For owned runs, the driver resolves and reads the selected sensor only after all
-source/model/runtime fingerprinting and launch validation have completed. It
-does not call `Popen` until `safe_handoff.stable_samples` consecutive readings
-are at or below `safe_handoff.target_millicelsius`. A timeout fails before any
-child exists. Driver v5 and later receipts retain the sensor path, policy
+Driver v8 resolves the selected sensor before model hashing. Each initial and
+final fingerprint worker starts blocked on a private gate; the supervisor first
+requires a stable prelaunch boundary, attaches the continuous process-group
+guard, releases the worker, reconciles every pacing interval, requires a clean
+exit, and completes a stable post-exit cooldown. The receipt retains both closed
+`kiln.hf-thermal-containment.v1` records under
+`host_thermal.model_fingerprint`, plus the fingerprint implementation and Python
+hashes. Missing initial evidence is invalid. Missing final evidence is accepted
+only with a failed `model_identity_unchanged` check. Both evidence policies must
+equal the server guard's content-hashed policy.
+
+After the initial fingerprint and remaining provenance work, owned mode does not
+call the server `Popen` until `safe_handoff.stable_samples` consecutive readings
+are at or below `safe_handoff.target_millicelsius`. A timeout fails before the
+server child exists. Driver v5 and later receipts retain the sensor path, policy
 values, start, peak, and end temperatures, sample count, stable count, elapsed
-time, scope, and completion state for this boundary. The receipt validator
-requires those values to match the content-hashed thermal policy and the runtime
-guard's sensor.
+time, scope, and completion state for this boundary. The validator requires
+those values to match the runtime guard's sensor.
 
 Cooling remains part of wall-clock service cost. Each row records both request
 window output throughput and thermally sustainable throughput including pacing
@@ -175,7 +188,7 @@ bounded timeout. The receipt retains TTFT, client-visible ITL, end-to-end
 latency, request throughput, output-token throughput, SLO goodput, dispatch
 spread, prompt/output hashes, DRM memory, failures, and Kiln batching deltas.
 
-Driver v7 retains one ordered `output_evidence` row for every successful
+Driver v7 and v8 retain one ordered `output_evidence` row for every successful
 request. Hash-only evidence is the default and includes the combined semantic
 output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
 tokens, and finish reason. The validator requires these rows to cover exactly
@@ -362,8 +375,12 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v7 is the current contract. It adds mandatory ordered per-request output
-evidence and structured mismatch localization to the v6 lifecycle contract.
+Driver v8 is the current contract. It adds mandatory initial and final guarded
+model-fingerprint lifecycles to the v7 output-evidence contract. A v8 exact-output
+run may use a strict-valid v7 or v8 reference because the workload, model,
+thermal-policy, prompt, and output contracts are unchanged; the current arm must
+still satisfy v8 containment. Driver v7 added mandatory ordered per-request
+output evidence and structured mismatch localization to the v6 lifecycle contract.
 Driver v6 retains the v5 mandatory post-provenance, pre-process cooldown and
 adds the structured startup-failure evidence described above. It also validates
 embedded vLLM identity objects by JSON value while continuing to bind the
@@ -372,6 +389,6 @@ identity semantics. Owned evidence contains the content-hashed launch document,
 absolute server-log fingerprint, shutdown signal/status/timing,
 forced-shutdown flag, and process-group liveness. Attached and explicitly
 unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
-from missing fields. Historical driver v2 through v6 receipts remain valid
-under their original contracts, but do not satisfy the current v7 correctness
-evidence contract or current performance acceptance.
+from missing fields. Historical driver v2 through v7 receipts remain valid
+under their original contracts, but do not satisfy the current v8 provenance
+containment or current performance acceptance.

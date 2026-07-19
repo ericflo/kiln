@@ -88,6 +88,40 @@ def valid_prelaunch_cooldown() -> dict:
     }
 
 
+def valid_fingerprint_thermal_evidence() -> dict:
+    policy_record, policy, settlement = bench.validate_host_thermal_policy_value(
+        valid_host_thermal_policy(), "fixture policy"
+    )
+    return {
+        "phase_settlement_timeout_seconds": settlement,
+        "policy": policy_record,
+        "prelaunch_cooldown": valid_prelaunch_cooldown(),
+        "runtime": {
+            "host_temperature_end_millicelsius": 50_000,
+            "host_temperature_peak_millicelsius": 60_000,
+            "host_temperature_start_millicelsius": 50_000,
+            "host_thermal_cooldown_active_end": 0,
+            "host_thermal_cooldown_completed_count": 1,
+            "host_thermal_cooldown_peak_millicelsius": 60_000,
+            "host_thermal_cooldown_sample_count": 4,
+            "host_thermal_cooldown_seconds": 0.25,
+            "host_thermal_cooldown_stable_sample_count": policy.cooldown_stable_samples,
+            "host_thermal_cooldown_timeout_count": 0,
+            "host_thermal_guard_trip_count": 0,
+            "host_thermal_pacing_active_end": 0,
+            "host_thermal_pacing_completed_event_count": 1,
+            "host_thermal_pacing_event_count": 1,
+            "host_thermal_pacing_max_seconds": 0.1,
+            "host_thermal_pacing_max_start_millicelsius": (
+                policy.pacing_start_millicelsius or 0
+            ),
+            "host_thermal_pacing_seconds": 0.1,
+        },
+        "schema": bench.fingerprint_supervisor.SCHEMA,
+        "worker_exit_code": 0,
+    }
+
+
 class FakeAttachedProcessGroup:
     pid = 4321
 
@@ -374,6 +408,25 @@ class ServingBenchmarkTests(unittest.TestCase):
             "dirty": False,
             "source_tree_sha256": "sha256:" + "b" * 64,
         }
+
+        def contained_fingerprint(
+            _model_path: Path,
+            _model_id: str,
+            *,
+            policy_path: Path | None,
+            phase: str,
+        ) -> tuple[dict, dict | None]:
+            self.assertIn(
+                phase,
+                {"model-fingerprint-initial", "model-fingerprint-final"},
+            )
+            return (
+                model_fingerprint,
+                valid_fingerprint_thermal_evidence()
+                if policy_path is not None
+                else None,
+            )
+
         with ExitStack() as stack:
             stack.enter_context(
                 mock.patch.object(
@@ -382,7 +435,9 @@ class ServingBenchmarkTests(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch.object(
-                    bench, "fingerprint_model", return_value=model_fingerprint
+                    bench,
+                    "fingerprint_model_with_thermal_containment",
+                    side_effect=contained_fingerprint,
                 )
             )
             if fetch_json is not None:
@@ -750,6 +805,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             ],
         }
         reference = json.loads(json.dumps(current))
+        reference["driver_version"] = "7"
         reference["engine"]["name"] = "kiln"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "reference.json"
@@ -804,6 +860,51 @@ class ServingBenchmarkTests(unittest.TestCase):
                     bench.BenchmarkError, "duplicate JSON object key"
                 ):
                     bench.compare_reference(current, path)
+
+    def test_model_fingerprint_runs_in_guarded_closed_worker(self) -> None:
+        raw_identity = {
+            "id": "test-model",
+            "path": "/models/test-model",
+            "weight_files": [],
+            "config_hash": "sha256:" + "a" * 64,
+            "tokenizer_hash": "sha256:" + "b" * 64,
+            "chat_template_hash": None,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "policy.json"
+            policy.write_text(json.dumps(valid_host_thermal_policy()))
+            with mock.patch.object(
+                bench.fingerprint_supervisor,
+                "supervise",
+                return_value=(
+                    0,
+                    json.dumps(raw_identity),
+                    "",
+                    valid_fingerprint_thermal_evidence(),
+                ),
+            ) as supervise:
+                identity, evidence = bench.fingerprint_model_with_thermal_containment(
+                    Path("/models/test-model"),
+                    "test-model",
+                    policy_path=policy,
+                    phase="model-fingerprint-initial",
+                )
+        self.assertEqual(identity, raw_identity)
+        self.assertEqual(evidence, valid_fingerprint_thermal_evidence())
+        call = supervise.call_args.kwargs
+        self.assertEqual(call["worker_phase"], "model-fingerprint-initial")
+        self.assertEqual(call["worker_command"][1], str(bench.MODEL_FINGERPRINT_SCRIPT))
+        self.assertNotIn("--start-gate", call["worker_command"])
+        self.assertEqual(
+            set(call["worker_environment"]),
+            {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONHASHSEED", "TMPDIR"},
+        )
+        inherited = "\0".join(
+            f"{key}={value}" for key, value in call["worker_environment"].items()
+        )
+        self.assertNotIn("HF_TOKEN", inherited)
+        self.assertNotIn("KILN_", inherited)
 
     def test_full_output_evidence_is_bounded_validated_and_locates_divergence(
         self,
@@ -1222,7 +1323,12 @@ class ServingBenchmarkTests(unittest.TestCase):
                     bench, "repository_identity", return_value=clean_repository
                 ),
                 mock.patch.object(
-                    bench, "fingerprint_model", return_value=model_fingerprint
+                    bench,
+                    "fingerprint_model_with_thermal_containment",
+                    return_value=(
+                        model_fingerprint,
+                        valid_fingerprint_thermal_evidence(),
+                    ),
                 ),
                 mock.patch.object(
                     bench,
@@ -1298,6 +1404,31 @@ class ServingBenchmarkTests(unittest.TestCase):
             tampered.pop("receipt_sha256")
             tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
             with self.assertRaisesRegex(bench.BenchmarkError, "absent"):
+                bench.validate_benchmark_receipt(tampered)
+
+            tampered = json.loads(json.dumps(receipt))
+            tampered["host_thermal"].pop("model_fingerprint")
+            tampered.pop("receipt_sha256")
+            tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+            with self.assertRaisesRegex(bench.BenchmarkError, "missing keys"):
+                bench.validate_benchmark_receipt(tampered)
+
+            tampered = json.loads(json.dumps(receipt))
+            tampered["host_thermal"]["model_fingerprint"]["final"] = None
+            tampered.pop("receipt_sha256")
+            tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+            with self.assertRaisesRegex(
+                bench.BenchmarkError, "disagrees with its finalization check"
+            ):
+                bench.validate_benchmark_receipt(tampered)
+
+            tampered = json.loads(json.dumps(receipt))
+            tampered["host_thermal"]["model_fingerprint"]["initial"]["runtime"][
+                "host_temperature_peak_millicelsius"
+            ] = 90_000
+            tampered.pop("receipt_sha256")
+            tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+            with self.assertRaisesRegex(bench.BenchmarkError, "did not close safely"):
                 bench.validate_benchmark_receipt(tampered)
 
             vllm_receipt = json.loads(json.dumps(receipt))
@@ -1398,6 +1529,7 @@ class ServingBenchmarkTests(unittest.TestCase):
                 "unsafe_no_guard_acknowledged": True,
                 "policy": None,
                 "process_group": None,
+                "model_fingerprint": None,
                 "evidence": None,
             },
         )

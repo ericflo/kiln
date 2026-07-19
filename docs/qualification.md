@@ -1231,6 +1231,17 @@ localizing the new first-token divergence with the guarded layer oracle.
 Reference comparison is independent of lifecycle acceptance: a complete
 output comparison must remain visible even when the thermal verdict fails.
 
+Serving benchmark driver v8 closes the exposed provenance gap before another
+ROCm request is allowed. It runs both the initial and final model fingerprints
+as start-gated child process groups under the same typed host thermal policy,
+requires complete pacing and post-exit cooldown for each, and retains both
+closed lifecycles plus implementation and Python hashes in
+`host_thermal.model_fingerprint`. Owned mode shuts down and cools the accelerator
+server before the final full rehash. A missing initial lifecycle is invalid; a
+missing final lifecycle requires a failed model-identity finalization check.
+Strict-valid driver-v7 references remain comparison-compatible, so the retained
+vLLM arm does not need an expensive rerun merely to exercise this safety repair.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for
