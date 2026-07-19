@@ -1698,6 +1698,24 @@ structurally valid, but `rocm_graph_execution_accounted` stays failed because
 the measured row did not execute a graph. This is route evidence, not a waiver
 for the graph-performance gate.
 
+The exact source-bound confirmation is
+`benchmarks/receipts/rocm/strix-halo/20260719t200129-rocm-strix-halo-multi-row-graph-accounting-v14-c8.kiln.json`.
+All 62 measured decode forwards were width four, and diagnostics v5 reported
+exactly 62 `multi_row_batch_unsupported` fallbacks, zero captures, zero replays,
+zero graph failures, and zero other fallback reasons. All eight requests still
+completed exactly 32 tokens without a server error, the measured row peaked at
+76.75 C, and the owned lifecycle peaked at 89.375 C with no guard trip and a
+clean unforced exit. This closes the silent-accounting defect.
+
+It does not rehabilitate the performance arm. Aggregate output was 14.780
+tokens/second, thermally sustainable output was 9.684 tokens/second, p99 TTFT
+was 2.800 seconds, p50/p99 ITL was 479.098/1,049.803 ms, and SLO goodput was
+zero. The strict receipt therefore failed the graph-performance gate as
+designed. Do not retry or expand this configuration. A subsequent batched
+performance arm must either disable ROCm graphs explicitly and qualify itself
+as eager, or first add and qualify real multi-row graph capture; resident
+single-row graphs must not imply graph acceleration for a multi-row route.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package
