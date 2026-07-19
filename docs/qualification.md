@@ -529,23 +529,37 @@ python3 scripts/qualification/run.py \
 The single required case executes two accelerator stages sequentially. It
 never holds the model in ROCm and Vulkan at the same time:
 
-1. The HF stage requires at least 23 GiB `MemAvailable`, then runs eager BF16
-   Qwen3.5-4B in a private-network systemd service with `MemoryMax=16G`, zero
-   service swap, a 600-second cap, deterministic algorithms, TF32 disabled, and
-   fixed input IDs `[1,2,3,4,5,6,7,8,100]`. It writes one safetensors artifact
-   containing the input IDs and all 248,320 final-position F32 logits.
-2. The pinned HF process reads its own cgroup-v2 memory peak, swap, and
+1. The HF stage requires at least 23 GiB `MemAvailable`, then creates a
+   private-network systemd service with `MemoryMax=16G`, zero service swap, a
+   600-second cap, and control-group teardown. Inside that service, the thermal
+   supervisor validates the content-hashed
+   `qualification/host-policies/strix-halo-hf-oracle-v1.json` policy, requires
+   20 consecutive 50 ms package samples at or below 45 C, and only then creates
+   the accelerator worker in a new process group. The worker blocks on a private
+   start gate until the supervisor has attached the continuous guard.
+2. The guard samples the exact `k10temp/Tctl` input every 50 ms, stops the
+   complete worker process group at 58 C, resumes it after 20 consecutive
+   samples at or below 50 C, and terminates the group at 93 C. It remains armed
+   through eager BF16 model load and forward, then requires the dead worker's
+   host package to produce 20 consecutive samples at or below 45 C before the
+   service can report success. Missing or ambiguous sensors, malformed samples,
+   unreconciled stops, a trip, or a 300-second cooldown timeout fails closed.
+3. The pinned worker uses deterministic algorithms, disables TF32, evaluates
+   fixed input IDs `[1,2,3,4,5,6,7,8,100]`, and writes one safetensors artifact
+   containing the input IDs and all 248,320 final-position F32 logits. It reads
+   its own cgroup-v2 memory peak, swap, and
    OOM/limit events before it exits. This self-report is intentional: the
    qualification runner's bubblewrap PID/network namespace can launch and wait
    for a user service, but a post-exit `systemctl --user show` cannot reconnect
    to the host user bus. `systemd-run --wait` remains the exit verdict, and a
    missing, malformed, swapped, or OOM-bearing telemetry record fails closed.
-3. After HF exits, the driver requires 24 GiB `MemAvailable` before Vulkan can
+4. After HF exits and its cooldown completes, the driver requires 24 GiB
+   `MemAvailable` before Vulkan can
    start. The Rust test runs through `cargo-test-bounded.sh` with offline Cargo,
    private networking, `CPUQuota=50%`, `MemoryMax=17G`, zero service swap, a
    1,740-second cap, and a seven-GiB host reserve. The closed qualification
    environment forwards only the runner-owned model and HF-reference paths plus the hardware gate.
-4. Kiln loads the same weights and input IDs through both its production
+5. Kiln loads the same weights and input IDs through both its production
    resident and nonresident Vulkan paths. Those two paths must remain
    bit-identical. The resident result is then compared with every HF logit;
    argmax must match exactly, top-10 overlap must be at least 9/10, maximum
@@ -555,8 +569,10 @@ never holds the model in ROCm and Vulkan at the same time:
 
 The compact result records the comparison metrics, HF cgroup peak and service
 swap, the deterministic raw-logit tensor hash, the independently computed
-reference-artifact hash, memory ceilings, attention routes, and exact input
-IDs. Raw model output remains below the ignored `.qualification/` run tree.
+reference-artifact hash, memory ceilings, attention routes, exact input IDs,
+content-hashed thermal policy, prelaunch samples, runtime package peak, pacing
+count and duration, and post-exit cooldown evidence. Raw model output remains
+below the ignored `.qualification/` run tree.
 Validate a new receipt before changing documentation:
 
 ```bash
@@ -587,12 +603,79 @@ while host available memory remained above the reserved floor, then 24 GiB was
 available after teardown. This is retained as a host-pressure signal for the
 development soak rather than hidden behind the passing numerical verdict.
 
-This receipt closes the Phase 6 independent CPU/HF full-model comparison when
-combined with the tokenizer, sampling, selected-logprob, cache, cancellation,
-and live-eval receipts above. It covers one deterministic next-token
-full-vocabulary forward. It does not establish multi-token public-model output
-parity, public HTTP eval quality, long-duration stability, large-batch
-throughput, or competitive performance against vLLM.
+This historical receipt closes the numerical Phase 6 independent CPU/HF
+full-model comparison when combined with the tokenizer, sampling,
+selected-logprob, cache, cancellation, and live-eval receipts above. It predates
+the now-required thermal supervisor evidence, so it does not satisfy the current
+workload manifest or the final common-tree gate without a rerun. It covers one
+deterministic next-token full-vocabulary forward. It does not establish
+multi-token public-model output parity, public HTTP eval quality, long-duration
+stability, large-batch throughput, or competitive performance against vLLM.
+
+### ROCm serving first-divergence oracle
+
+Use the focused ROCm oracle only after a source-paired exact greedy comparison
+has retained both engine outputs and localized their first different token. It
+is a diagnostic correctness gate, not a serving throughput measurement. The
+tracked request
+`qualification/oracles/rocm-strix-halo-greedy-c1-first-divergence-v1.json`
+binds the exact Kiln and vLLM receipt file/content hashes, their common source
+commit, the model weights/config/tokenizer/template identity, the original
+user message, chat-template invocation, 163 prompt token IDs, and the first
+three common continuation tokens `[1206,5517,264]`. Its complete 166-token
+input has canonical hash
+`sha256:709d0a314cde9072ac79b0752e795f1b76bfaea5b553ccdf26f7fbd5ac44b1a0`.
+The two declared candidates are Kiln token `25045` (` baseline`) and vLLM token
+`15787` (` foundation`).
+The machine-readable field references are published as
+[HF Next-Token Request Schema](site:docs/hf-next-token-request-schema/) and
+[ROCm HF Next-Token Result Schema](site:docs/rocm-hf-next-token-result-schema/).
+Both close every object to unknown fields; the executable validator additionally
+enforces cross-field hashes, token concatenation, source-receipt contents,
+candidate ranks, thermal reconciliation, and the canonical result self-hash.
+
+Run it only from a clean `HEAD` already pushed to `origin/main`; every path
+below is intentionally absolute:
+
+```bash
+python3 scripts/qualification/rocm_hf_next_token_oracle.py run \
+  --model "$(pwd)/Qwen3.5-4B" \
+  --trainer-python "$(pwd)/target/qualification/hf-trl-roundtrip/.venv/bin/python" \
+  --request "$(pwd)/qualification/oracles/rocm-strix-halo-greedy-c1-first-divergence-v1.json" \
+  --host-thermal-policy "$(pwd)/qualification/host-policies/strix-halo-hf-oracle-v1.json" \
+  --out "$(pwd)/.qualification/rocm-hf-next-token-result.json"
+```
+
+Before the service exists, the driver strictly validates both source receipts,
+hashes the complete model content, verifies at least 23 GiB `MemAvailable`, and
+requires `HEAD == origin/main`. Model hashing occurs before the supervised
+prelaunch cooldown so provenance work cannot hand a hot package directly to
+the accelerator. The systemd service then supplies the same 16 GiB memory,
+zero-swap, private-network, 600-second control-group boundary used by the full
+Vulkan oracle. The gated worker independently reloads the pinned tokenizer and
+must reproduce every prompt ID and every retained token's decoded bytes before
+loading the model. It pins ROCm PyTorch, Transformers sources and versions,
+eager attention, the Transformers torch linear-attention fallback, BF16,
+deterministic algorithms, and TF32-off execution.
+
+The compact result retains the full-vocabulary F32-logit hash, argmax and text,
+top ten token IDs/text/logits, both candidate logits and vocabulary ranks,
+argmax margin, package versions, cgroup peak/limit/OOM/swap counters, thermal
+policy and lifecycle, clean pushed source identity, implementation hashes, and
+an explicit `kiln`, `vllm`, or `neither` attribution. The roughly one-MiB raw
+logit artifact remains ignored. The result has a canonical `result_sha256` and
+can be checked without running the model:
+
+```bash
+python3 scripts/qualification/rocm_hf_next_token_oracle.py check \
+  .qualification/rocm-hf-next-token-result.json \
+  --require-current-source
+```
+
+An attributed argmax identifies which engine selected the eager HF reference's
+top token at the first divergence. It does not prove multi-token parity, explain
+the losing engine's numerical defect, accept either thermal pacing policy for
+performance, or replace the complete concurrency/profile matrix.
 
 Model-serving workloads additionally require `--model` with the exact local
 model directory and `--model-id` with its public identity. Select each declared

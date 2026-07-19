@@ -1,0 +1,21 @@
+{
+  "schema": "kiln.host-thermal-policy.v1",
+  "id": "strix-halo-hf-oracle-v1",
+  "sensor": {
+    "hwmon_name": "k10temp",
+    "label": "Tctl"
+  },
+  "limit_millicelsius": 93000,
+  "poll_interval_ms": 50,
+  "pacing": {
+    "start_millicelsius": 58000,
+    "resume_millicelsius": 50000,
+    "resume_stable_samples": 20
+  },
+  "safe_handoff": {
+    "target_millicelsius": 45000,
+    "stable_samples": 20,
+    "timeout_seconds": 300.0
+  },
+  "phase_settlement_timeout_seconds": 300.0
+}

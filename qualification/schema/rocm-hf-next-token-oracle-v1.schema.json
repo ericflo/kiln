@@ -1,0 +1,448 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/schemas/rocm-hf-next-token-oracle-v1.schema.json",
+  "title": "Kiln ROCm Hugging Face Next-Token Oracle Result v1",
+  "description": "Compact source-, input-, cgroup-, and thermal-bound evidence for one eager Hugging Face next-token attribution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "result_sha256",
+    "created_at_utc",
+    "duration_seconds",
+    "source",
+    "implementation",
+    "request",
+    "model_identity",
+    "containment",
+    "oracle",
+    "reference_artifact",
+    "verdict"
+  ],
+  "properties": {
+    "schema": { "const": "kiln.rocm-hf-next-token-oracle.v1" },
+    "result_sha256": { "$ref": "#/$defs/sha256" },
+    "created_at_utc": { "type": "string", "format": "date-time" },
+    "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "origin_main", "tree"],
+      "properties": {
+        "commit": { "$ref": "#/$defs/gitObject" },
+        "origin_main": { "$ref": "#/$defs/gitObject" },
+        "tree": { "$ref": "#/$defs/gitObject" }
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hf_worker_sha256", "python_sha256", "supervisor_sha256"],
+      "properties": {
+        "hf_worker_sha256": { "$ref": "#/$defs/sha256" },
+        "python_sha256": { "$ref": "#/$defs/sha256" },
+        "supervisor_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_path", "id", "sha256", "source"],
+      "properties": {
+        "contract_path": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "source": { "$ref": "#/$defs/sourcePair" }
+      }
+    },
+    "model_identity": { "$ref": "#/$defs/modelIdentity" },
+    "containment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host_available_before_gib",
+        "memory_max_gib",
+        "network",
+        "service",
+        "swap_max_bytes"
+      ],
+      "properties": {
+        "host_available_before_gib": { "type": "integer", "minimum": 23 },
+        "memory_max_gib": { "const": 16 },
+        "network": { "const": "forbidden" },
+        "service": { "$ref": "#/$defs/thermalEvidence" },
+        "swap_max_bytes": { "const": 0 }
+      }
+    },
+    "oracle": { "$ref": "#/$defs/oracleEvidence" },
+    "reference_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "location", "sha256"],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 1 },
+        "location": { "const": "local_ignored" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "argmax_candidate",
+        "argmax_token_id",
+        "candidate_attribution_complete"
+      ],
+      "properties": {
+        "argmax_candidate": { "enum": ["kiln", "vllm", "neither"] },
+        "argmax_token_id": { "$ref": "#/$defs/tokenId" },
+        "candidate_attribution_complete": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "gitObject": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "tokenId": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 248319
+    },
+    "receiptReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "file_sha256", "content_sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "file_sha256": { "$ref": "#/$defs/sha256" },
+        "content_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "sourcePair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_commit", "kiln_receipt", "vllm_receipt"],
+      "properties": {
+        "source_commit": { "$ref": "#/$defs/gitObject" },
+        "kiln_receipt": { "$ref": "#/$defs/receiptReference" },
+        "vllm_receipt": { "$ref": "#/$defs/receiptReference" }
+      }
+    },
+    "weightFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "modelIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "content_sha256",
+        "config_hash",
+        "tokenizer_hash",
+        "chat_template_hash",
+        "weight_files"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "content_sha256": { "$ref": "#/$defs/sha256" },
+        "config_hash": { "$ref": "#/$defs/sha256" },
+        "tokenizer_hash": { "$ref": "#/$defs/sha256" },
+        "chat_template_hash": { "$ref": "#/$defs/sha256" },
+        "weight_files": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/weightFile" }
+        }
+      }
+    },
+    "topToken": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token_id", "text", "logit"],
+      "properties": {
+        "token_id": { "$ref": "#/$defs/tokenId" },
+        "text": { "type": "string" },
+        "logit": { "type": "number" }
+      }
+    },
+    "candidateToken": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "token_id", "text", "logit", "rank"],
+      "properties": {
+        "engine": { "enum": ["kiln", "vllm"] },
+        "token_id": { "$ref": "#/$defs/tokenId" },
+        "text": { "type": "string" },
+        "logit": { "type": "number" },
+        "rank": { "type": "integer", "minimum": 1, "maximum": 248320 }
+      }
+    },
+    "oracleEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attention_implementation",
+        "argmax",
+        "argmax_text",
+        "candidate_tokens",
+        "configuration_sha256",
+        "deterministic_algorithms",
+        "device",
+        "dtype",
+        "duration_seconds",
+        "input_token_count",
+        "input_token_ids_sha256",
+        "linear_attention_implementation",
+        "logits_sha256",
+        "memory_high_events",
+        "memory_max_events",
+        "memory_oom_events",
+        "memory_oom_kill_events",
+        "memory_peak_bytes",
+        "memory_swap_bytes",
+        "modeling_sha256",
+        "output_bytes",
+        "request_id",
+        "request_sha256",
+        "tf32_allowed",
+        "top_logit_margin",
+        "top_tokens",
+        "torch_commit",
+        "torch_hip_version",
+        "torch_version",
+        "transformers_version",
+        "vocab"
+      ],
+      "properties": {
+        "attention_implementation": { "const": "eager" },
+        "argmax": { "$ref": "#/$defs/tokenId" },
+        "argmax_text": { "type": "string", "minLength": 1 },
+        "candidate_tokens": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "allOf": [
+                { "$ref": "#/$defs/candidateToken" },
+                { "properties": { "engine": { "const": "kiln" } } }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/candidateToken" },
+                { "properties": { "engine": { "const": "vllm" } } }
+              ]
+            }
+          ],
+          "items": false
+        },
+        "configuration_sha256": { "$ref": "#/$defs/sha256" },
+        "deterministic_algorithms": { "const": true },
+        "device": { "type": "string", "minLength": 1 },
+        "dtype": { "const": "bfloat16" },
+        "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "input_token_count": { "type": "integer", "minimum": 1 },
+        "input_token_ids_sha256": { "$ref": "#/$defs/sha256" },
+        "linear_attention_implementation": {
+          "const": "transformers_torch_fallback"
+        },
+        "logits_sha256": { "$ref": "#/$defs/sha256" },
+        "memory_high_events": { "type": "integer", "minimum": 0 },
+        "memory_max_events": { "type": "integer", "minimum": 0 },
+        "memory_oom_events": { "type": "integer", "minimum": 0 },
+        "memory_oom_kill_events": { "type": "integer", "minimum": 0 },
+        "memory_peak_bytes": { "type": "integer", "minimum": 1 },
+        "memory_swap_bytes": { "type": "integer", "minimum": 0 },
+        "modeling_sha256": { "$ref": "#/$defs/sha256" },
+        "output_bytes": { "type": "integer", "minimum": 1 },
+        "request_id": { "type": "string", "minLength": 1 },
+        "request_sha256": { "$ref": "#/$defs/sha256" },
+        "tf32_allowed": { "const": false },
+        "top_logit_margin": { "type": "number", "exclusiveMinimum": 0 },
+        "top_tokens": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/topToken" }
+        },
+        "torch_commit": { "$ref": "#/$defs/gitObject" },
+        "torch_hip_version": { "type": "string", "minLength": 1 },
+        "torch_version": { "const": "2.13.0+rocm7.2" },
+        "transformers_version": { "const": "5.13.1" },
+        "vocab": { "const": 248320 }
+      }
+    },
+    "thermalPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "id",
+        "sensor",
+        "limit_millicelsius",
+        "poll_interval_ms",
+        "pacing",
+        "safe_handoff",
+        "phase_settlement_timeout_seconds",
+        "content_sha256"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.host-thermal-policy.v1" },
+        "id": { "type": "string", "minLength": 1 },
+        "sensor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hwmon_name", "label"],
+          "properties": {
+            "hwmon_name": { "type": "string", "minLength": 1 },
+            "label": { "type": "string", "minLength": 1 }
+          }
+        },
+        "limit_millicelsius": { "type": "integer", "minimum": 1 },
+        "poll_interval_ms": { "type": "integer", "minimum": 1 },
+        "pacing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "start_millicelsius",
+            "resume_millicelsius",
+            "resume_stable_samples"
+          ],
+          "properties": {
+            "start_millicelsius": { "type": "integer", "minimum": 1 },
+            "resume_millicelsius": { "type": "integer", "minimum": 1 },
+            "resume_stable_samples": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "safe_handoff": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["target_millicelsius", "stable_samples", "timeout_seconds"],
+          "properties": {
+            "target_millicelsius": { "type": "integer", "minimum": 1 },
+            "stable_samples": { "type": "integer", "minimum": 1 },
+            "timeout_seconds": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        "phase_settlement_timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "content_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "prelaunchCooldown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "completed",
+        "elapsed_seconds",
+        "poll_interval_ms",
+        "sample_count",
+        "scope",
+        "sensor_path",
+        "stable_samples_observed",
+        "stable_samples_required",
+        "target_millicelsius",
+        "temperature_end_millicelsius",
+        "temperature_peak_millicelsius",
+        "temperature_start_millicelsius",
+        "timeout_seconds"
+      ],
+      "properties": {
+        "completed": { "const": true },
+        "elapsed_seconds": { "type": "number", "minimum": 0 },
+        "poll_interval_ms": { "type": "integer", "minimum": 1 },
+        "sample_count": { "type": "integer", "minimum": 1 },
+        "scope": { "const": "host_package_before_process_creation" },
+        "sensor_path": { "type": "string", "minLength": 1 },
+        "stable_samples_observed": { "type": "integer", "minimum": 1 },
+        "stable_samples_required": { "type": "integer", "minimum": 1 },
+        "target_millicelsius": { "type": "integer" },
+        "temperature_end_millicelsius": { "type": "integer" },
+        "temperature_peak_millicelsius": { "type": "integer" },
+        "temperature_start_millicelsius": { "type": "integer" },
+        "timeout_seconds": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "thermalRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host_temperature_end_millicelsius",
+        "host_temperature_peak_millicelsius",
+        "host_temperature_start_millicelsius",
+        "host_thermal_cooldown_active_end",
+        "host_thermal_cooldown_completed_count",
+        "host_thermal_cooldown_peak_millicelsius",
+        "host_thermal_cooldown_sample_count",
+        "host_thermal_cooldown_seconds",
+        "host_thermal_cooldown_stable_sample_count",
+        "host_thermal_cooldown_timeout_count",
+        "host_thermal_guard_trip_count",
+        "host_thermal_pacing_active_end",
+        "host_thermal_pacing_completed_event_count",
+        "host_thermal_pacing_event_count",
+        "host_thermal_pacing_max_seconds",
+        "host_thermal_pacing_max_start_millicelsius",
+        "host_thermal_pacing_seconds"
+      ],
+      "properties": {
+        "host_temperature_end_millicelsius": { "type": "integer" },
+        "host_temperature_peak_millicelsius": { "type": "integer" },
+        "host_temperature_start_millicelsius": { "type": "integer" },
+        "host_thermal_cooldown_active_end": { "const": 0 },
+        "host_thermal_cooldown_completed_count": { "const": 1 },
+        "host_thermal_cooldown_peak_millicelsius": { "type": "integer" },
+        "host_thermal_cooldown_sample_count": { "type": "integer", "minimum": 1 },
+        "host_thermal_cooldown_seconds": { "type": "number", "minimum": 0 },
+        "host_thermal_cooldown_stable_sample_count": { "type": "integer", "minimum": 1 },
+        "host_thermal_cooldown_timeout_count": { "const": 0 },
+        "host_thermal_guard_trip_count": { "const": 0 },
+        "host_thermal_pacing_active_end": { "const": 0 },
+        "host_thermal_pacing_completed_event_count": { "type": "integer", "minimum": 0 },
+        "host_thermal_pacing_event_count": { "type": "integer", "minimum": 0 },
+        "host_thermal_pacing_max_seconds": { "type": "number", "minimum": 0 },
+        "host_thermal_pacing_max_start_millicelsius": { "type": "integer", "minimum": 0 },
+        "host_thermal_pacing_seconds": { "type": "number", "minimum": 0 }
+      }
+    },
+    "thermalEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "phase_settlement_timeout_seconds",
+        "policy",
+        "prelaunch_cooldown",
+        "runtime",
+        "worker_exit_code"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.hf-thermal-containment.v1" },
+        "phase_settlement_timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "policy": { "$ref": "#/$defs/thermalPolicy" },
+        "prelaunch_cooldown": { "$ref": "#/$defs/prelaunchCooldown" },
+        "runtime": { "$ref": "#/$defs/thermalRuntime" },
+        "worker_exit_code": { "const": 0 }
+      }
+    }
+  }
+}

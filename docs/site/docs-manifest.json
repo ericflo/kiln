@@ -131,6 +131,22 @@
       "description": "Typed host sensor, pacing, hard-limit, per-phase settlement, and safe live-process handoff contract for local serving benchmarks."
     },
     {
+      "source": "qualification/schema/hf-next-token-request-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "hf-next-token-request-schema",
+      "title": "HF Next-Token Request Schema",
+      "section": "serving",
+      "description": "Source-paired prompt, tokenizer, model, continuation-prefix, and disputed-candidate contract for an independent eager Hugging Face attribution."
+    },
+    {
+      "source": "qualification/schema/rocm-hf-next-token-oracle-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "rocm-hf-next-token-result-schema",
+      "title": "ROCm HF Next-Token Result Schema",
+      "section": "serving",
+      "description": "Compact source, implementation, full-vocabulary logit, cgroup-memory, thermal-lifecycle, artifact, and candidate-attribution evidence."
+    },
+    {
       "source": "qualification/schema/serving-benchmark-server-launch-v1.schema.json",
       "kind": "json_schema",
       "slug": "serving-benchmark-launch-schema",

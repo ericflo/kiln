@@ -11,6 +11,12 @@ import sys
 import time
 from pathlib import Path
 
+from hf_next_token_contract import (
+    PASS_PREFIX as NEXT_TOKEN_PASS_PREFIX,
+    canonical_sha256,
+    load_request,
+)
+
 
 SCHEMA = "kiln.qwen35-hf-full-logits.v1"
 INPUT_TOKEN_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 100]
@@ -81,7 +87,7 @@ def _load_packages():
         import torch
         import transformers
         from safetensors.torch import save_file
-        from transformers import AutoModelForCausalLM
+        from transformers import AutoModelForCausalLM, AutoTokenizer
         from transformers.models.qwen3_5 import configuration_qwen3_5, modeling_qwen3_5
     except ImportError as exc:
         raise OracleError(
@@ -119,7 +125,33 @@ def _load_packages():
             "the oracle requires Transformers' pinned independent torch fallback, "
             "but optional fused linear-attention packages are active"
         )
-    return torch, AutoModelForCausalLM, save_file
+    return torch, AutoModelForCausalLM, AutoTokenizer, save_file
+
+
+def _wait_for_start_gate(path: Path | None, timeout_seconds: float = 60.0) -> None:
+    if path is None:
+        return
+    if not path.is_absolute():
+        raise OracleError("--start-gate must be absolute")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if path.is_symlink():
+            raise OracleError("start gate must not be a symlink")
+        if path.is_file():
+            try:
+                payload = path.read_bytes()
+            except OSError as exc:
+                raise OracleError(f"cannot read start gate: {exc}") from exc
+            if payload != b"go\n":
+                raise OracleError("start gate payload must equal 'go\\n'")
+            return
+        if path.exists():
+            raise OracleError("start gate must be a regular file")
+        if time.monotonic() >= deadline:
+            raise OracleError(
+                f"start gate was not released within {timeout_seconds:.3f} seconds"
+            )
+        time.sleep(0.01)
 
 
 def _validate_paths(model_path: Path, output_path: Path) -> tuple[Path, Path]:
@@ -138,9 +170,20 @@ def _validate_paths(model_path: Path, output_path: Path) -> tuple[Path, Path]:
     return model, output
 
 
-def generate(model_path: Path, output_path: Path) -> dict[str, object]:
+def generate(
+    model_path: Path,
+    output_path: Path,
+    *,
+    request_path: Path | None = None,
+    start_gate: Path | None = None,
+) -> tuple[dict[str, object], bool]:
     model_path, output_path = _validate_paths(model_path, output_path)
-    torch, AutoModelForCausalLM, save_file = _load_packages()
+    request: dict[str, object] | None = None
+    request_sha256: str | None = None
+    if request_path is not None:
+        request, request_sha256 = load_request(request_path)
+    _wait_for_start_gate(start_gate)
+    torch, AutoModelForCausalLM, AutoTokenizer, save_file = _load_packages()
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise OracleError("the bounded HF oracle requires exactly one Torch accelerator")
     if torch.version.hip is None:
@@ -151,6 +194,37 @@ def generate(model_path: Path, output_path: Path) -> dict[str, object]:
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.set_float32_matmul_precision("highest")
     started = time.monotonic()
+    input_token_ids = INPUT_TOKEN_IDS
+    if request is not None:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+        prompt = request["prompt"]
+        encoded = tokenizer.apply_chat_template(
+            prompt["messages"],
+            tokenize=True,
+            add_generation_prompt=prompt["add_generation_prompt"],
+            **prompt["template_kwargs"],
+        )
+        token_ids = encoded["input_ids"]
+        if hasattr(token_ids, "tolist"):
+            token_ids = token_ids.tolist()
+        if token_ids and isinstance(token_ids[0], list):
+            token_ids = token_ids[0]
+        if token_ids != prompt["token_ids"]:
+            raise OracleError(
+                "pinned tokenizer/chat template does not reproduce request prompt token IDs"
+            )
+        for item in [*request["continuation_prefix"], *request["candidates"]]:
+            decoded = tokenizer.decode(
+                [item["token_id"]],
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+            if decoded != item["text"]:
+                raise OracleError(
+                    f"pinned tokenizer decodes token {item['token_id']} as {decoded!r}; "
+                    f"request records {item['text']!r}"
+                )
+        input_token_ids = request["input_token_ids"]
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         dtype=torch.bfloat16,
@@ -158,7 +232,7 @@ def generate(model_path: Path, output_path: Path) -> dict[str, object]:
         low_cpu_mem_usage=True,
         attn_implementation="eager",
     ).eval().to("cuda")
-    input_ids = torch.tensor([INPUT_TOKEN_IDS], dtype=torch.long, device="cuda")
+    input_ids = torch.tensor([input_token_ids], dtype=torch.long, device="cuda")
     with torch.inference_mode():
         logits = model(input_ids=input_ids, use_cache=False).logits[0, -1].float().cpu()
     if logits.ndim != 1 or logits.numel() != 248_320:
@@ -172,7 +246,7 @@ def generate(model_path: Path, output_path: Path) -> dict[str, object]:
     metadata = {
         "attention_implementation": "eager",
         "device_name": torch.cuda.get_device_name(0),
-        "input_token_ids": json.dumps(INPUT_TOKEN_IDS, separators=(",", ":")),
+        "input_token_ids": json.dumps(input_token_ids, separators=(",", ":")),
         "linear_attention_implementation": "transformers_torch_fallback",
         "schema": SCHEMA,
         "torch_commit": TORCH_COMMIT,
@@ -202,25 +276,79 @@ def generate(model_path: Path, output_path: Path) -> dict[str, object]:
         "vocab": int(logits.numel()),
     }
     evidence.update(_current_cgroup_memory())
-    return evidence
+    if request is not None:
+        top_values, top_indices = torch.topk(logits, k=10, largest=True, sorted=True)
+        top_tokens = [
+            {
+                "logit": float(value),
+                "text": tokenizer.decode(
+                    [int(token_id)],
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                ),
+                "token_id": int(token_id),
+            }
+            for value, token_id in zip(top_values.tolist(), top_indices.tolist())
+        ]
+        candidates = []
+        for item in request["candidates"]:
+            token_id = item["token_id"]
+            logit = float(logits[token_id].item())
+            candidates.append(
+                {
+                    "engine": item["engine"],
+                    "logit": logit,
+                    "rank": int((logits > logit).sum().item()) + 1,
+                    "text": item["text"],
+                    "token_id": token_id,
+                }
+            )
+        evidence.update(
+            {
+                "attention_implementation": "eager",
+                "argmax_text": top_tokens[0]["text"],
+                "candidate_tokens": candidates,
+                "configuration_sha256": f"sha256:{CONFIGURATION_SHA256}",
+                "deterministic_algorithms": True,
+                "dtype": "bfloat16",
+                "input_token_count": len(input_token_ids),
+                "input_token_ids_sha256": canonical_sha256(input_token_ids),
+                "linear_attention_implementation": "transformers_torch_fallback",
+                "modeling_sha256": f"sha256:{MODELING_SHA256}",
+                "request_id": request["id"],
+                "request_sha256": request_sha256,
+                "tf32_allowed": False,
+                "torch_commit": TORCH_COMMIT,
+                "top_logit_margin": float(top_values[0].item() - top_values[1].item()),
+                "top_tokens": top_tokens,
+            }
+        )
+    return evidence, request is not None
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--request", type=Path)
+    parser.add_argument("--start-gate", type=Path)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
-        evidence = generate(args.model, args.output)
+        evidence, is_next_token = generate(
+            args.model,
+            args.output,
+            request_path=args.request,
+            start_gate=args.start_gate,
+        )
     except BaseException as exc:
         print(f"HF full-logit oracle failed: {exc}", file=sys.stderr)
         return 1
     print(
-        "KILN_HF_FULL_LOGIT_REFERENCE_PASS "
+        (NEXT_TOKEN_PASS_PREFIX if is_next_token else "KILN_HF_FULL_LOGIT_REFERENCE_PASS ")
         + json.dumps(evidence, allow_nan=False, separators=(",", ":"), sort_keys=True),
         flush=True,
     )

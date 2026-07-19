@@ -21,6 +21,50 @@ sys.modules[SPEC.name] = oracle
 SPEC.loader.exec_module(oracle)
 
 
+def hf_fixture(**updates):
+    value = {
+        "memory_limit_gib": 16,
+        "logits_sha256": "sha256:" + "c" * 64,
+        "memory_high_events": 0,
+        "memory_max_events": 0,
+        "memory_peak_bytes": 10_000_000_000,
+        "reference_sha256": "sha256:" + "a" * 64,
+        "swap_bytes": 0,
+        "thermal": {
+            "phase_settlement_timeout_seconds": 300.0,
+            "policy": {
+                "content_sha256": "sha256:e7347f6c698b33bf3fd6a1a76483118c61d3e5d8b19b64d45609014da40f7620",
+                "id": "strix-halo-hf-oracle-v1",
+                "limit_millicelsius": 93000,
+                "pacing": {
+                    "resume_millicelsius": 50000,
+                    "resume_stable_samples": 20,
+                    "start_millicelsius": 58000,
+                },
+                "phase_settlement_timeout_seconds": 300.0,
+                "poll_interval_ms": 50,
+                "safe_handoff": {
+                    "stable_samples": 20,
+                    "target_millicelsius": 45000,
+                    "timeout_seconds": 300.0,
+                },
+                "schema": "kiln.host-thermal-policy.v1",
+                "sensor": {"hwmon_name": "k10temp", "label": "Tctl"},
+            },
+            "prelaunch_cooldown": {"completed": True},
+            "runtime": {
+                "host_temperature_peak_millicelsius": 70000,
+                "host_thermal_pacing_event_count": 2,
+                "host_thermal_pacing_seconds": 3.5,
+            },
+            "schema": "kiln.hf-thermal-containment.v1",
+            "worker_exit_code": 0,
+        },
+    }
+    value.update(updates)
+    return value
+
+
 class VulkanHfModelOracleTests(unittest.TestCase):
     def test_invocation_artifact_path_is_anchored_without_dereferencing(self) -> None:
         relative = Path(".qualification/results/case.json")
@@ -43,6 +87,7 @@ class VulkanHfModelOracleTests(unittest.TestCase):
                 model=Path("model"),
                 output=Path("reference.safetensors"),
                 workspace=Path("workspace"),
+                policy=Path("policy.json"),
             )
         with self.assertRaisesRegex(oracle.QualificationError, "paths must be absolute"):
             oracle._run_vulkan_comparison(
@@ -63,7 +108,7 @@ class VulkanHfModelOracleTests(unittest.TestCase):
             link = root / "model-link"
             link.symlink_to(model, target_is_directory=True)
             with self.assertRaisesRegex(oracle.QualificationError, "non-symlink"):
-                oracle._validate_inputs(link, Path(sys.executable))
+                oracle._validate_inputs(link, Path(sys.executable), root / "policy.json")
 
     def test_hf_service_is_private_bounded_zero_swap_and_environment_empty(self) -> None:
         command = oracle._bounded_hf_command(
@@ -71,6 +116,8 @@ class VulkanHfModelOracleTests(unittest.TestCase):
             python=Path("/venv/bin/python"),
             model=Path("/models/qwen"),
             output=Path("/run/hf.safetensors"),
+            policy=Path("/repo/qualification/host-policies/oracle.json"),
+            workspace=Path("/run"),
             temporary_directory=Path("/run/tmp"),
             memory_limit_gib=16,
         )
@@ -88,6 +135,8 @@ class VulkanHfModelOracleTests(unittest.TestCase):
             "HF_HUB_OFFLINE=1",
             "TRANSFORMERS_OFFLINE=1",
             "/venv/bin/python",
+            str(oracle.HF_SUPERVISOR),
+            "/repo/qualification/host-policies/oracle.json",
             "/models/qwen",
             "/run/hf.safetensors",
         ):
@@ -146,15 +195,7 @@ class VulkanHfModelOracleTests(unittest.TestCase):
     def test_case_result_is_closed_sorted_and_records_thresholds(self) -> None:
         result = oracle._result_document(
             duration=12.5,
-            hf={
-                "memory_limit_gib": 16,
-                "logits_sha256": "sha256:" + "c" * 64,
-                "memory_high_events": 0,
-                "memory_max_events": 0,
-                "memory_peak_bytes": 10_000_000_000,
-                "reference_sha256": "sha256:" + "a" * 64,
-                "swap_bytes": 0,
-            },
+            hf=hf_fixture(),
             comparison={
                 "argmax_equal": 1,
                 "cosine": 0.99999,
@@ -171,8 +212,11 @@ class VulkanHfModelOracleTests(unittest.TestCase):
             [
                 "argmax_equal",
                 "cosine_similarity",
+                "hf_host_temperature_peak_millicelsius",
                 "hf_peak_memory_bytes",
                 "hf_swap_bytes",
+                "hf_thermal_pacing_event_count",
+                "hf_thermal_pacing_seconds",
                 "max_abs_error",
                 "mean_abs_error",
                 "top10_overlap",
@@ -193,15 +237,11 @@ class VulkanHfModelOracleTests(unittest.TestCase):
         variant = workload["variants"][0]
         result = oracle._result_document(
             duration=1.0,
-            hf={
-                "memory_limit_gib": 16,
-                "logits_sha256": "sha256:" + "d" * 64,
-                "memory_high_events": 0,
-                "memory_max_events": 0,
-                "memory_peak_bytes": 1,
-                "reference_sha256": "sha256:" + "b" * 64,
-                "swap_bytes": 0,
-            },
+            hf=hf_fixture(
+                logits_sha256="sha256:" + "d" * 64,
+                memory_peak_bytes=1,
+                reference_sha256="sha256:" + "b" * 64,
+            ),
             comparison={
                 "argmax_equal": 1,
                 "cosine": 1.0,

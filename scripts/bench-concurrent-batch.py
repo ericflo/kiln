@@ -37,7 +37,6 @@ from typing import Any, Callable, Iterable
 
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
-HOST_THERMAL_POLICY_SCHEMA = "kiln.host-thermal-policy.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
 DRIVER_VERSION = "7"
 SUPPORTED_DRIVER_VERSIONS = {"2", "3", "4", "5", "6", DRIVER_VERSION}
@@ -54,11 +53,14 @@ if str(QUALIFICATION_DIR) not in sys.path:
     sys.path.insert(0, str(QUALIFICATION_DIR))
 
 import host_thermal_guard as thermal  # noqa: E402
+import host_thermal_policy as thermal_policy_file  # noqa: E402
 from model_fingerprint import (  # noqa: E402
     ModelFingerprintError,
     fingerprint_model,
 )
 from strict_json import loads as strict_json_loads  # noqa: E402
+
+HOST_THERMAL_POLICY_SCHEMA = thermal_policy_file.SCHEMA
 
 PROFILE_CONTRACTS = {
     "greedy-short": {
@@ -418,17 +420,6 @@ class AttachedProcessGroup:
         }
 
 
-HOST_THERMAL_POLICY_KEYS = {
-    "schema",
-    "id",
-    "sensor",
-    "limit_millicelsius",
-    "poll_interval_ms",
-    "pacing",
-    "safe_handoff",
-    "phase_settlement_timeout_seconds",
-}
-
 SERVER_LAUNCH_KEYS = {
     "schema",
     "id",
@@ -462,90 +453,22 @@ def validate_host_thermal_policy_value(
     value: Any,
     label: str,
 ) -> tuple[dict[str, Any], thermal.HostThermalPolicy, float]:
-    value = _object(value, label)
-    has_content_hash = "content_sha256" in value
-    _exact_keys(
+    return thermal_policy_file.validate(
         value,
-        HOST_THERMAL_POLICY_KEYS
-        | ({"content_sha256"} if has_content_hash else set()),
         label,
-    )
-    raw = dict(value)
-    recorded_hash = raw.pop("content_sha256", None)
-    if raw["schema"] != HOST_THERMAL_POLICY_SCHEMA:
-        raise BenchmarkError(
-            f"host thermal policy must use schema {HOST_THERMAL_POLICY_SCHEMA}"
-        )
-    if not isinstance(raw["id"], str) or re.fullmatch(
-        r"[a-z0-9][a-z0-9._-]{2,127}", raw["id"]
-    ) is None:
-        raise BenchmarkError("host thermal policy id must be a portable identifier")
-    sensor = _object(raw["sensor"], f"{label}.sensor")
-    _exact_keys(sensor, {"hwmon_name", "label"}, f"{label}.sensor")
-    for name in ("hwmon_name", "label"):
-        if not isinstance(sensor[name], str) or not sensor[name]:
-            raise BenchmarkError(f"{label}.sensor.{name} must be non-empty")
-    pacing = _object(raw["pacing"], f"{label}.pacing")
-    legacy_hashed_pacing = (
-        has_content_hash and "resume_stable_samples" not in pacing
-    )
-    _exact_keys(
-        pacing,
-        {"start_millicelsius", "resume_millicelsius"}
-        | (set() if legacy_hashed_pacing else {"resume_stable_samples"}),
-        f"{label}.pacing",
-    )
-    handoff = _object(raw["safe_handoff"], f"{label}.safe_handoff")
-    _exact_keys(
-        handoff,
-        {"target_millicelsius", "stable_samples", "timeout_seconds"},
-        f"{label}.safe_handoff",
-    )
-    settlement_timeout = _nonnegative_number(
-        raw["phase_settlement_timeout_seconds"],
-        f"{label}.phase_settlement_timeout_seconds",
-    )
-    if settlement_timeout <= 0:
-        raise BenchmarkError(
-            "host thermal policy phase settlement timeout must be positive"
-        )
-    policy = thermal.HostThermalPolicy(
-        hwmon_name=sensor.get("hwmon_name"),
-        label=sensor.get("label"),
-        limit_millicelsius=raw["limit_millicelsius"],
-        poll_interval_ms=raw["poll_interval_ms"],
-        pacing_start_millicelsius=pacing["start_millicelsius"],
-        pacing_resume_millicelsius=pacing["resume_millicelsius"],
-        pacing_resume_stable_samples=pacing.get("resume_stable_samples", 1),
-        cooldown_target_millicelsius=handoff["target_millicelsius"],
-        cooldown_stable_samples=handoff["stable_samples"],
-        cooldown_timeout_seconds=handoff["timeout_seconds"],
-        cooldown_mode="live_process_safe_handoff",
         error_type=BenchmarkError,
+        cooldown_mode="live_process_safe_handoff",
     )
-    content_hash = canonical_sha256(raw)
-    if recorded_hash is not None and _sha256(
-        recorded_hash, f"{label}.content_sha256"
-    ) != content_hash:
-        raise BenchmarkError(f"{label}.content_sha256 does not match policy content")
-    normalized = dict(raw)
-    normalized["content_sha256"] = content_hash
-    return normalized, policy, settlement_timeout
 
 
 def load_host_thermal_policy(
     path: Path,
 ) -> tuple[dict[str, Any], thermal.HostThermalPolicy, float]:
-    if path.is_symlink() or not path.is_file():
-        raise BenchmarkError(f"host thermal policy is not a regular file: {path}")
-    data = path.read_bytes()
-    if len(data) > 64 * 1024:
-        raise BenchmarkError("host thermal policy exceeds 64 KiB")
-    try:
-        raw = strict_json_loads(data)
-    except Exception as exc:
-        raise BenchmarkError(f"cannot load host thermal policy {path}: {exc}") from exc
-    return validate_host_thermal_policy_value(raw, "host thermal policy")
+    return thermal_policy_file.load(
+        path,
+        error_type=BenchmarkError,
+        cooldown_mode="live_process_safe_handoff",
+    )
 
 
 def wait_for_prelaunch_cooldown(
@@ -555,88 +478,12 @@ def wait_for_prelaunch_cooldown(
     trace_callback: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     """Wait for stable host cooling after provenance work and before Popen."""
-
-    input_path = thermal.resolve_hwmon_temperature_input(
-        policy.hwmon_name,
-        policy.label,
-        hwmon_root,
+    return thermal_policy_file.wait_for_prelaunch_cooldown(
+        policy,
+        hwmon_root=hwmon_root,
+        trace_callback=trace_callback,
         error_type=BenchmarkError,
     )
-    poll_interval_seconds = policy.poll_interval_ms / 1000.0
-    started = time.monotonic()
-    deadline = started + policy.cooldown_timeout_seconds
-    sample_count = 0
-    stable_samples = 0
-    start_temperature: int | None = None
-    peak_temperature: int | None = None
-    end_temperature: int | None = None
-
-    def trace(event: str, **fields: Any) -> None:
-        if trace_callback is not None:
-            trace_callback(event, **fields)
-
-    trace(
-        "host_thermal_prelaunch_cooldown_started",
-        scope="host_package_before_process_creation",
-        sensor_path=str(input_path),
-        target_millicelsius=policy.cooldown_target_millicelsius,
-        stable_samples=policy.cooldown_stable_samples,
-        timeout_seconds=policy.cooldown_timeout_seconds,
-        poll_interval_ms=policy.poll_interval_ms,
-    )
-    while True:
-        temperature = thermal.read_hwmon_temperature_millicelsius(
-            input_path,
-            error_type=BenchmarkError,
-        )
-        sample_count += 1
-        if start_temperature is None:
-            start_temperature = temperature
-            peak_temperature = temperature
-        peak_temperature = max(peak_temperature, temperature)
-        end_temperature = temperature
-        if temperature <= policy.cooldown_target_millicelsius:
-            stable_samples += 1
-        else:
-            stable_samples = 0
-        elapsed = time.monotonic() - started
-        if stable_samples >= policy.cooldown_stable_samples:
-            evidence = {
-                "scope": "host_package_before_process_creation",
-                "sensor_path": str(input_path),
-                "poll_interval_ms": policy.poll_interval_ms,
-                "target_millicelsius": policy.cooldown_target_millicelsius,
-                "stable_samples_required": policy.cooldown_stable_samples,
-                "stable_samples_observed": stable_samples,
-                "timeout_seconds": policy.cooldown_timeout_seconds,
-                "sample_count": sample_count,
-                "temperature_start_millicelsius": start_temperature,
-                "temperature_peak_millicelsius": peak_temperature,
-                "temperature_end_millicelsius": end_temperature,
-                "elapsed_seconds": elapsed,
-                "completed": True,
-            }
-            trace("host_thermal_prelaunch_cooldown_completed", **evidence)
-            return evidence
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            trace(
-                "host_thermal_prelaunch_cooldown_timed_out",
-                sensor_path=str(input_path),
-                sample_count=sample_count,
-                stable_samples_observed=stable_samples,
-                temperature_start_millicelsius=start_temperature,
-                temperature_peak_millicelsius=peak_temperature,
-                temperature_end_millicelsius=end_temperature,
-                elapsed_seconds=elapsed,
-            )
-            raise BenchmarkError(
-                "host thermal pre-launch cooldown did not reach "
-                f"{policy.cooldown_target_millicelsius} millicelsius for "
-                f"{policy.cooldown_stable_samples} consecutive samples within "
-                f"{policy.cooldown_timeout_seconds:.3f} seconds"
-            )
-        time.sleep(min(poll_interval_seconds, remaining))
 
 
 @dataclasses.dataclass(frozen=True)

@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/schemas/hf-next-token-request-v1.schema.json",
+  "title": "Kiln Hugging Face Next-Token Request v1",
+  "description": "Closed source-paired input contract for an independent eager Hugging Face next-token attribution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "id",
+    "source",
+    "model_identity",
+    "prompt",
+    "continuation_prefix",
+    "input_token_ids",
+    "input_token_ids_sha256",
+    "candidates"
+  ],
+  "properties": {
+    "schema": { "const": "kiln.hf-next-token-request.v1" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_commit", "kiln_receipt", "vllm_receipt"],
+      "properties": {
+        "source_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "kiln_receipt": { "$ref": "#/$defs/receiptReference" },
+        "vllm_receipt": { "$ref": "#/$defs/receiptReference" }
+      }
+    },
+    "model_identity": { "$ref": "#/$defs/modelIdentity" },
+    "prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generator",
+        "messages",
+        "add_generation_prompt",
+        "template_kwargs",
+        "utf8_sha256",
+        "token_count",
+        "token_ids"
+      ],
+      "properties": {
+        "generator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id",
+            "phase",
+            "request_index",
+            "profile",
+            "template_version"
+          ],
+          "properties": {
+            "run_id": { "type": "string", "minLength": 1 },
+            "phase": { "type": "string", "minLength": 1 },
+            "request_index": { "const": 0 },
+            "profile": { "const": "short" },
+            "template_version": { "const": "fixed-serving-profiles-v1" }
+          }
+        },
+        "messages": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["role", "content"],
+              "properties": {
+                "role": { "const": "user" },
+                "content": { "type": "string", "minLength": 1 }
+              }
+            }
+          ],
+          "items": false
+        },
+        "add_generation_prompt": { "const": true },
+        "template_kwargs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enable_thinking"],
+          "properties": {
+            "enable_thinking": { "const": false }
+          }
+        },
+        "utf8_sha256": { "$ref": "#/$defs/sha256" },
+        "token_count": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "token_ids": { "$ref": "#/$defs/tokenIds" }
+      }
+    },
+    "continuation_prefix": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/token" }
+    },
+    "input_token_ids": { "$ref": "#/$defs/tokenIds" },
+    "input_token_ids_sha256": { "$ref": "#/$defs/sha256" },
+    "candidates": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "allOf": [
+            { "$ref": "#/$defs/candidate" },
+            { "properties": { "engine": { "const": "kiln" } } }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/candidate" },
+            { "properties": { "engine": { "const": "vllm" } } }
+          ]
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "tokenId": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 248319
+    },
+    "tokenIds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": { "$ref": "#/$defs/tokenId" }
+    },
+    "token": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token_id", "text"],
+      "properties": {
+        "token_id": { "$ref": "#/$defs/tokenId" },
+        "text": { "type": "string" }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "token_id", "text"],
+      "properties": {
+        "engine": { "enum": ["kiln", "vllm"] },
+        "token_id": { "$ref": "#/$defs/tokenId" },
+        "text": { "type": "string" }
+      }
+    },
+    "receiptReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "file_sha256", "content_sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "file_sha256": { "$ref": "#/$defs/sha256" },
+        "content_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "weightFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "modelIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "content_sha256",
+        "config_hash",
+        "tokenizer_hash",
+        "chat_template_hash",
+        "weight_files"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "content_sha256": { "$ref": "#/$defs/sha256" },
+        "config_hash": { "$ref": "#/$defs/sha256" },
+        "tokenizer_hash": { "$ref": "#/$defs/sha256" },
+        "chat_template_hash": { "$ref": "#/$defs/sha256" },
+        "weight_files": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/weightFile" }
+        }
+      }
+    }
+  }
+}
