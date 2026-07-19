@@ -1,0 +1,18 @@
+{
+  "schema": "kiln.serving-benchmark-server-launch.v1",
+  "id": "kiln-rocm-strix-halo-serving-comparison-prefill-layers-16-v1",
+  "command": [
+    "./target/release/kiln",
+    "serve",
+    "--config",
+    "qualification/server-config/kiln-rocm-strix-halo-serving-comparison-prefill-layers-16-v1.toml"
+  ],
+  "working_directory": "../..",
+  "log_directory": "../../.qualification/kiln-serving/logs/prefill-layers-16-v1",
+  "readiness_poll_interval_ms": 250,
+  "startup_timeout_seconds": 600.0,
+  "shutdown_timeout_seconds": 65.0,
+  "acceptable_exit_codes": [
+    0
+  ]
+}

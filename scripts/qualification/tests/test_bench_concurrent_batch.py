@@ -566,6 +566,55 @@ class ServingBenchmarkTests(unittest.TestCase):
                 f"qualification/server-config/{name}.toml",
             )
 
+    def test_rocm_prefill_layer_discriminators_change_one_typed_field(self) -> None:
+        config_root = ROOT / "qualification" / "server-config"
+        launch_root = ROOT / "qualification" / "server-launch"
+        base_name = "kiln-rocm-strix-halo-serving-comparison-v2"
+        family_prefix = (
+            "kiln-rocm-strix-halo-serving-comparison-prefill-layers-"
+        )
+        base = self._parse_server_config(config_root / f"{base_name}.toml")
+        self.assertEqual(base["server"]["max_prefill_layers_per_cycle"], 4)
+
+        for layer_count in (4, 8, 16, 32):
+            launch_name = f"{family_prefix}{layer_count}-v1"
+            launch_path = launch_root / f"{launch_name}.json"
+            raw = bench.strict_json_loads(launch_path.read_bytes())
+            parsed = bench.validate_server_launch_config_value(
+                raw,
+                config_directory=launch_path.parent,
+                label=launch_name,
+                require_local_paths=False,
+            )
+            self.assertEqual(parsed.record["id"], launch_name)
+            self.assertEqual(
+                parsed.record["log_directory"],
+                f"../../.qualification/kiln-serving/logs/"
+                f"prefill-layers-{layer_count}-v1",
+            )
+
+            if layer_count == 4:
+                self.assertEqual(
+                    parsed.record["command"][-1],
+                    f"qualification/server-config/{base_name}.toml",
+                )
+                continue
+
+            config_name = f"{family_prefix}{layer_count}-v1"
+            self.assertEqual(
+                parsed.record["command"][-1],
+                f"qualification/server-config/{config_name}.toml",
+            )
+            candidate = self._parse_server_config(
+                config_root / f"{config_name}.toml"
+            )
+            self.assertEqual(
+                candidate["server"]["max_prefill_layers_per_cycle"],
+                layer_count,
+            )
+            candidate["server"]["max_prefill_layers_per_cycle"] = 4
+            self.assertEqual(candidate, base)
+
     def _run_cli_fixture(
         self,
         fake: FakeServer,

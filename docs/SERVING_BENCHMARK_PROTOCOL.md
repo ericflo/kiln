@@ -497,6 +497,41 @@ binary unless their actor is disabled. V2 is a static candidate until an exact
 rebuilt-binary hardware arm reproduces `foundation`, followed by multi-token
 and concurrent parity.
 
+### ROCm actor-prefill layer-yield screening
+
+The repaired v2 route still yields actor-owned prefill after every four of the
+model's 32 transformer layers. The current development-soak counterexample
+shows lower GPU occupancy, 46.1 percent lower aggregate output throughput, and
+far more slow actor-prefill phases than the immediately preceding accepted
+run. A guarded four-arm discriminator tests whether repeated actor dispatch and
+resumption is causal:
+
+| Arm | Launch record | `max_prefill_layers_per_cycle` |
+| --- | --- | ---: |
+| control | `qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-prefill-layers-4-v1.json` | 4 |
+| candidate | `qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-prefill-layers-8-v1.json` | 8 |
+| candidate | `qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-prefill-layers-16-v1.json` | 16 |
+| candidate | `qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-prefill-layers-32-v1.json` | 32 |
+
+The control launches the production-v2 TOML. The other three TOMLs differ
+from it in exactly that one typed field, enforced by a qualification-tooling
+test. Their separate log directories allow every arm to reuse one `--run-id`;
+because the run ID seeds prompt construction, this makes request bodies and
+sampling seeds identical across arms. Run them serially from one clean pushed
+source and one immutable runtime artifact with the same model fingerprint,
+`mixed` profile, concurrency rows, output length, thermal policy, and memory
+limit.
+
+This is a screening experiment, not production qualification. Any arm with an
+output mismatch, request or route error, graph failure or fallback, thermal
+trip, forced shutdown, source drift, or residue is rejected regardless of
+speed. Compare request-window and thermally sustainable aggregate output
+throughput, TTFT/ITL tails, prefill forwards and layer yields, decode batching,
+GPU memory, graph counters, and pacing. Promote only a Pareto improvement that
+reduces dispatch work without hiding latency behind thermal pauses; confirm the
+chosen arm against the four-layer control before changing the production
+default or resuming the longer soak.
+
 ## Running One Profile
 
 ```bash
