@@ -1729,8 +1729,25 @@ across concurrent clients because shared actor work overlaps; route-level
 health deltas remain the service-wall evidence. In particular, the configured
 cooperative actor wait now reaches each request that remains active through the
 wait as `actor_cycle_idle_ms` and can classify its next token stall instead of
-appearing as unexplained ITL. The first source-bound ROCm v15 attribution run is
-still required before selecting the next optimization.
+appearing as unexplained ITL.
+
+The source-bound confirmation is
+`benchmarks/receipts/rocm/strix-halo/20260719t204756-rocm-strix-halo-request-phase-attribution-v15-c8.kiln.json`.
+All eight requests contributed complete performance and latency objects and
+finished with exactly 32 tokens. Median request-local phase time was 7.955
+seconds for decode, 6.404 seconds for configured actor-cycle idle, 2.128
+seconds for prefill, and 6.131 ms unexplained. The route-level deltas independently
+reported 8.020 seconds across 62 eager width-four decode forwards, 6.604 seconds
+across 66 actor waits, and 2.283 seconds across 17 prefill forwards. There were
+no request stalls, unexplained stalls, server errors, thermal trips, or cleanup
+failures. Aggregate output was 15.215 tokens/second, thermally sustainable
+output was 9.775 tokens/second, p99 TTFT was 2.801 seconds, and p50/p99 ITL was
+458.133/1,064.860 ms. The receipt remains intentionally failed because all 62
+multi-row forwards used the explicitly accounted eager fallback instead of a
+ROCm graph. This ranks eager decode first and the fixed cooling wait second;
+prefill is third and residual unaccounted wall time is immaterial. The next
+optimization must address the measured multi-row decode route rather than
+another blind scheduler-delay trial.
 
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
