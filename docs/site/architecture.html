@@ -1067,6 +1067,12 @@ kiln_rocm_graph_fallback_duration_seconds_max</code></pre>
           bounds each candidate to 32 unique sites plus one overflow aggregate. These fields stay in structured logs;
           they are deliberately excluded from Prometheus labels and contain no request or tensor contents.
         </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Materialized ROCm broadcast keeps graph ownership self-contained. Its rank-eight shape and stride
+          descriptor is a 272-byte kernel value captured in the graph node, not a device buffer populated by four
+          host uploads. Replays therefore do not depend on an evictable metadata cache or an allocation whose lifetime
+          is outside the retained graph entry.
+        </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           A fatal execution or synchronization failure marks the device cleanup-quarantined for the rest of
           the process lifetime. The flag is shared across every context for that device ordinal; a later

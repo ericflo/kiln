@@ -5,7 +5,10 @@
 //! expanded across batch/head axes. The old ROCm path flattened these into very
 //! large `index_select_dim0` launches.
 
-use kiln_tensor::{Device, Tensor, ops::broadcast_to, rocm_is_available, rocm_to_host_copy};
+use kiln_tensor::{
+    Device, Tensor, ops::broadcast_to, rocm_is_available, rocm_to_host_copy,
+    with_rocm_htod_observer_detailed,
+};
 
 fn to_host_f32(t: &Tensor) -> Vec<f32> {
     let host = rocm_to_host_copy(t).expect("rocm_to_host_copy");
@@ -52,7 +55,14 @@ fn run_case(in_shape: Vec<usize>, target_shape: Vec<usize>) {
     let data = iota(n_in, 1.0);
     let x = Tensor::from_vec_on(Device::Rocm(0), data.clone(), in_shape.clone())
         .expect("from_vec_on Rocm");
-    let y = broadcast_to(&x, &target_shape).expect("broadcast_to Rocm");
+    let (result, host_uploads) =
+        with_rocm_htod_observer_detailed(0, || broadcast_to(&x, &target_shape));
+    let y = result.expect("broadcast_to Rocm");
+    assert_eq!(
+        host_uploads.copy_count, 0,
+        "broadcast metadata must be passed as captured kernel values: {:?}",
+        host_uploads.sites
+    );
     assert_eq!(y.shape(), target_shape.as_slice());
 
     let got = to_host_f32(&y);

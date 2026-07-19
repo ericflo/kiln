@@ -266,6 +266,11 @@ bounded to 32 unique sites; additional sites collapse into one
 evidence, not a request payload or a Prometheus label, and it must be read next
 to `rocm_graph_fallback` attempt/eager/total duration and graph capture/replay
 counters.
+Production ROCm materialized broadcast passes its at-most-eight-rank
+shape/stride descriptor as a captured kernel value. It does not allocate or
+upload device metadata per broadcast. A transfer event naming
+`rocm_ops/index_select.rs` metadata construction therefore identifies a stale
+binary or a regression, not expected cold-cache behavior.
 When computing `unexplained_ms`, Kiln conservatively subtracts the larger of
 serial actor work, response delivery, and the largest backend candidate rather
 than their sum, so overlap cannot falsely erase missing wall time.

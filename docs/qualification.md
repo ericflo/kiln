@@ -1740,6 +1740,11 @@ if more sites occur. These records contain no request text, token ID, tensor
 value, allocation address, or unbounded shape label. Use them to distinguish a
 one-time shape-cache fill from a persistent per-forward host path; do not infer
 capture or replay success from their absence without checking graph counters.
+ROCm materialized broadcast is capture-safe by construction for Kiln's
+documented maximum rank of eight: the host wrapper copies shape and stride
+values into a 272-byte descriptor that the runtime records as a kernel-node
+value. It creates no device metadata buffers and performs no metadata upload,
+so replay has no cache-eviction or external-buffer lifetime dependency.
 The mixed-load receipt also records call, slow-call, cumulative duration, and
 maximum duration for pre-candidate headroom, candidate warm, pre-native
 reservation, native capture, and rejected-candidate cleanup, plus peak exact

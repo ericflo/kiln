@@ -43,6 +43,7 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 
+#define MAX_RANK 8
 #define BLOCK_SIZE 256
 
 namespace {
@@ -101,30 +102,39 @@ __global__ void kiln_index_select_axis_n_kernel(const uint8_t* __restrict__ src,
     }
 }
 
+// Shape metadata is a kernel value, not device memory. This keeps broadcast
+// graph-capturable without four tiny host-to-device uploads per invocation.
+// The 272-byte descriptor is well below the 4 KiB CUDA kernel-parameter limit.
+struct BroadcastDesc {
+    int64_t in_shape[MAX_RANK];
+    int64_t target_shape[MAX_RANK];
+    int64_t in_strides[MAX_RANK];
+    int64_t out_strides[MAX_RANK];
+    int32_t rank;
+    int32_t elem_bytes;
+    int64_t n_out;
+};
+static_assert(sizeof(BroadcastDesc) == 272, "unexpected broadcast descriptor ABI size");
+
 __global__ void kiln_broadcast_to_kernel(const uint8_t* __restrict__ src,
                                          uint8_t* __restrict__ dst,
-                                         const int64_t* __restrict__ in_shape,
-                                         const int64_t* __restrict__ target_shape,
-                                         const int64_t* __restrict__ in_strides,
-                                         const int64_t* __restrict__ out_strides,
-                                         int32_t rank,
-                                         int64_t n_out,
-                                         int64_t elem_bytes) {
+                                         BroadcastDesc desc) {
     int64_t flat = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (flat >= n_out) return;
+    if (flat >= desc.n_out) return;
 
     int64_t rem = flat;
     int64_t src_elem = 0;
-    for (int32_t axis = 0; axis < rank; ++axis) {
-        int64_t out_idx = rem / out_strides[axis];
-        rem -= out_idx * out_strides[axis];
-        int64_t in_idx = (in_shape[axis] == 1 && target_shape[axis] != 1) ? 0 : out_idx;
-        src_elem += in_idx * in_strides[axis];
+    for (int32_t axis = 0; axis < desc.rank; ++axis) {
+        int64_t out_idx = rem / desc.out_strides[axis];
+        rem -= out_idx * desc.out_strides[axis];
+        int64_t in_idx =
+            (desc.in_shape[axis] == 1 && desc.target_shape[axis] != 1) ? 0 : out_idx;
+        src_elem += in_idx * desc.in_strides[axis];
     }
 
-    int64_t src_off = src_elem * elem_bytes;
-    int64_t dst_off = flat * elem_bytes;
-    for (int64_t b = 0; b < elem_bytes; ++b) {
+    int64_t src_off = src_elem * desc.elem_bytes;
+    int64_t dst_off = flat * desc.elem_bytes;
+    for (int32_t b = 0; b < desc.elem_bytes; ++b) {
         dst[dst_off + b] = src[src_off + b];
     }
 }
@@ -164,16 +174,30 @@ extern "C" int kiln_index_select_dim0_async(const void* src,
 
 extern "C" int kiln_broadcast_to_async(const void* src,
                                        void* dst,
-                                       const void* in_shape_i64,
-                                       const void* target_shape_i64,
-                                       const void* in_strides_i64,
-                                       const void* out_strides_i64,
+                                       const int64_t* in_shape_host,
+                                       const int64_t* target_shape_host,
+                                       const int64_t* in_strides_host,
+                                       const int64_t* out_strides_host,
                                        int32_t rank,
                                        int64_t n_out,
                                        int64_t elem_bytes,
                                        cudaStream_t stream) {
-    if (rank < 0 || n_out < 0 || elem_bytes <= 0) return 1;
+    if (rank < 0 || rank > MAX_RANK || n_out < 0 || elem_bytes <= 0 ||
+        elem_bytes > 8) return 1;
     if (rank == 0 || n_out == 0) return 0;
+    if (in_shape_host == nullptr || target_shape_host == nullptr ||
+        in_strides_host == nullptr || out_strides_host == nullptr) return 3;
+
+    BroadcastDesc desc;
+    desc.rank = rank;
+    desc.elem_bytes = static_cast<int32_t>(elem_bytes);
+    desc.n_out = n_out;
+    for (int32_t axis = 0; axis < MAX_RANK; ++axis) {
+        desc.in_shape[axis] = axis < rank ? in_shape_host[axis] : 1;
+        desc.target_shape[axis] = axis < rank ? target_shape_host[axis] : 1;
+        desc.in_strides[axis] = axis < rank ? in_strides_host[axis] : 0;
+        desc.out_strides[axis] = axis < rank ? out_strides_host[axis] : 0;
+    }
 
     int64_t blocks_i64 = (n_out + BLOCK_SIZE - 1) / BLOCK_SIZE;
     if (blocks_i64 > (int64_t)2147483647) return 2;
@@ -182,13 +206,7 @@ extern "C" int kiln_broadcast_to_async(const void* src,
     kiln_broadcast_to_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
         static_cast<const uint8_t*>(src),
         static_cast<uint8_t*>(dst),
-        static_cast<const int64_t*>(in_shape_i64),
-        static_cast<const int64_t*>(target_shape_i64),
-        static_cast<const int64_t*>(in_strides_i64),
-        static_cast<const int64_t*>(out_strides_i64),
-        rank,
-        n_out,
-        elem_bytes);
+        desc);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return 1000 + static_cast<int>(err);
