@@ -2478,11 +2478,6 @@ mod tests {
     #[test]
     #[ignore = "requires an explicit real-ROCm qualification run"]
     fn rocm_batched_writers_scatter_noncontiguous_device_slots() -> Result<()> {
-        assert_eq!(
-            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
-            Some("1"),
-            "set KILN_QUALIFICATION=1 for the explicit hardware run"
-        );
         assert!(kiln_tensor::rocm_is_available());
 
         let device = kiln_tensor::Device::Rocm(0);
