@@ -768,7 +768,10 @@ mod rocm {
     }
 
     fn tensor_logits(tensor: &Tensor) -> Result<Vec<f32>> {
-        let values = tensor.flatten_all()?.to_vec1::<f32>()?;
+        let values = tensor
+            .flatten_all()?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?;
         anyhow::ensure!(
             values.iter().all(|value| value.is_finite()),
             "Kiln logits are non-finite"
@@ -873,6 +876,21 @@ mod rocm {
                 .filter(|index| reference_top10.contains(index))
                 .count(),
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn tensor_logits_explicitly_casts_bf16() {
+            let tensor = Tensor::from_vec(vec![1.25_f32, -2.5], (2,))
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+
+            assert_eq!(tensor_logits(&tensor).unwrap(), vec![1.25, -2.5]);
+        }
     }
 }
 
