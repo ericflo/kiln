@@ -328,6 +328,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batching_max_observed_batch_size": ("rows", "max", False),
     "cancellation_confirmed_count": ("count", "sum", False),
     "completion_token_count": ("tokens", "sum", False),
+    "output_token_throughput_per_second": ("tokens/s", "rate", False),
     "device_fault_event_count": ("count", "sum", True),
     "external_yield_sync_failure_count": ("count", "sum", True),
     "external_yield_sync_max_ms": ("ms", "max", True),
@@ -2452,12 +2453,11 @@ def measurement_result_evidence(
     itls = [gap for result in successes for gap in result.itl_ms]
     ttfts = [result.ttft_ms for result in successes]
     prompt_tokens = [result.prompt_tokens for result in successes]
+    completion_tokens = sum(result.completion_tokens for result in successes)
     values: dict[str, float | int] = {
         "attributed_itl_outlier_count": outliers.attributed,
         "cancellation_confirmed_count": cancellation_count,
-        "completion_token_count": sum(
-            result.completion_tokens for result in successes
-        ),
+        "completion_token_count": completion_tokens,
         "device_fault_event_count": sum(
             event.category == "device_fault" for event in all_server_events
         ),
@@ -2467,6 +2467,9 @@ def measurement_result_evidence(
         "non_finite_response_count": sum(
             result.error is not None and "non-finite" in result.error.lower()
             for result in results
+        ),
+        "output_token_throughput_per_second": (
+            completion_tokens / duration_seconds if duration_seconds > 0 else 0.0
         ),
         "prompt_tokens_max": max(prompt_tokens, default=0),
         "prompt_tokens_min": min(prompt_tokens, default=0),

@@ -119,6 +119,23 @@ const generatedDocsPages = [
     ],
   },
   {
+    label: 'Serving Benchmark Protocol',
+    path: publishedPath('docs/serving-benchmark-protocol/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/serving-benchmark-protocol/',
+    h1: 'Serving Benchmark Protocol',
+    anchors: ['server-route-diagnostics'],
+    terms: [
+      'Driver v10',
+      'kiln.serving-benchmark-server-diagnostics.v3',
+      'rocm_graphs',
+      'capture_successes',
+      'replay_successes',
+      'persistent_host_round_trip',
+      'rocm_graph_execution_accounted',
+      'backend_without_graph_runner',
+    ],
+  },
+  {
     label: 'Configuration Reference',
     path: publishedPath('docs/configuration/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/configuration/',

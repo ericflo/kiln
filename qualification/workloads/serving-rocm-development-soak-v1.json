@@ -331,6 +331,7 @@
               "latency_phase_unexplained_request_count",
               "measurement_final_snapshot_complete",
               "non_finite_response_count",
+              "output_token_throughput_per_second",
               "prefix_cache_active_leases_end",
               "prefix_cache_baseline_cached_entries",
               "prefix_cache_baseline_state_bytes",

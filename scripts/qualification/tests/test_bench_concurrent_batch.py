@@ -238,6 +238,16 @@ class FakeState:
         self.decode_batcher_counters = {
             field: 0 for field in bench.DECODE_BATCHER_COUNTER_FIELDS
         }
+        self.rocm_graph_counters = {
+            field: 0 for field in bench.ROCM_GRAPH_COUNTER_FIELDS
+        }
+        self.rocm_graph_gauges = {
+            field: 0 for field in bench.ROCM_GRAPH_GAUGE_FIELDS
+        }
+        self.rocm_graph_fallbacks = {
+            field: 0
+            for field in (*bench.ROCM_GRAPH_FALLBACK_COUNTER_FIELDS, "max_duration_micros")
+        }
         self.execution_identity = {
             "provenance_type": "kiln.execution-provenance.v1",
             "backend": "test",
@@ -303,6 +313,17 @@ class FakeState:
                 },
                 "batching_engine": batching_snapshot if actor_active else None,
                 "decode_batcher": direct_snapshot if worker_active else None,
+                "rocm_graphs": {
+                    "requested": True,
+                    "capture_requested": True,
+                    "enabled": True,
+                    "capture_enabled": True,
+                    "state": "enabled",
+                    "unavailable_reason": None,
+                    **self.rocm_graph_counters,
+                    **self.rocm_graph_gauges,
+                    "fallbacks": self.rocm_graph_fallbacks,
+                },
             },
         }
 
@@ -400,6 +421,16 @@ class FakeHandler(BaseHTTPRequestHandler):
                     self.state.decode_batcher_counters["executed_batches"] += decode_tokens
                     self.state.decode_batcher_counters["executed_rows"] += decode_tokens
                     self.state.decode_batcher_counters["runner_calls"] += decode_tokens
+                if self.state.rocm_graph_counters["capture_attempts"] == 0:
+                    self.state.rocm_graph_counters["capture_attempts"] = 1
+                    self.state.rocm_graph_counters["capture_successes"] = 1
+                    self.state.rocm_graph_counters["cache_admission_successes"] = 1
+                    self.state.rocm_graph_counters["graph_slot_create_count"] = 1
+                    self.state.rocm_graph_gauges["captured_graph_count"] = 1
+                    self.state.rocm_graph_gauges["graph_slot_count"] = 1
+                    self.state.rocm_graph_gauges["idle_graph_slot_count"] = 1
+                self.state.rocm_graph_counters["replay_attempts"] += max_tokens
+                self.state.rocm_graph_counters["replay_successes"] += max_tokens
 
     def _event(self, value: dict) -> None:
         self.wfile.write(f"data: {json.dumps(value)}\n\n".encode())
@@ -782,6 +813,12 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertEqual(result["server"]["batching_engine"]["total_errors"], 0)
         self.assertEqual(result["server"]["requests"]["ok"], 4)
+        self.assertEqual(result["server"]["schema"], bench.SERVER_DIAGNOSTICS_SCHEMA)
+        self.assertEqual(result["server"]["rocm_graphs"]["capture_successes"], 1)
+        self.assertEqual(result["server"]["rocm_graphs"]["replay_successes"], 12)
+        self.assertEqual(result["server"]["rocm_graphs"]["fallbacks"]["total"], 0)
+        checks = {gate["name"]: gate["passed"] for gate in result["gates"]}
+        self.assertTrue(checks["rocm_graph_execution_accounted"])
         self.assertEqual(len(fake.state.bodies), 4)
         self.assertEqual(
             len({body["messages"][0]["content"] for body in fake.state.bodies}),
@@ -867,7 +904,72 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(bench.server_diagnostics_has_no_errors(server))
         self.assertTrue(bench.server_request_accounting_matches(server, 1))
-        bench.validate_server_diagnostics_v2(server, "direct fixture")
+        bench.validate_server_diagnostics_v3(server, "direct fixture")
+
+    def test_driver_v9_server_diagnostics_remain_strict_valid(self) -> None:
+        state = FakeState()
+        before = bench.server_diagnostics_snapshot(state.health())
+        state.request_counters["ok"] = 1
+        after = bench.server_diagnostics_snapshot(state.health())
+        server = bench.server_diagnostics_delta(before, after)
+        legacy = {key: value for key, value in server.items() if key != "rocm_graphs"}
+        legacy["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V2
+
+        bench.validate_server_diagnostics_v2(legacy, "driver-v9 fixture")
+
+    def test_rocm_graph_diagnostics_reject_regressed_counters(self) -> None:
+        state = FakeState()
+        state.rocm_graph_counters["replay_attempts"] = 2
+        state.rocm_graph_counters["replay_successes"] = 2
+        before = bench.server_diagnostics_snapshot(state.health())
+        state.rocm_graph_counters["replay_attempts"] = 1
+        state.rocm_graph_counters["replay_successes"] = 1
+        after = bench.server_diagnostics_snapshot(state.health())
+
+        with self.assertRaisesRegex(bench.BenchmarkError, "replay_attempts regressed"):
+            bench.server_diagnostics_delta(before, after)
+
+    def test_rocm_graph_fallback_fails_execution_accounting_gate(self) -> None:
+        state = FakeState()
+        before = bench.server_diagnostics_snapshot(state.health())
+        state.rocm_graph_counters["capture_attempts"] = 1
+        state.rocm_graph_counters["capture_deferrals"] = 1
+        state.rocm_graph_fallbacks["total"] = 1
+        state.rocm_graph_fallbacks["cold_cache_host_round_trip"] = 1
+        after = bench.server_diagnostics_snapshot(state.health())
+        server = bench.server_diagnostics_delta(before, after)
+
+        bench.validate_server_diagnostics_v3(server, "fallback fixture")
+        self.assertFalse(bench.server_rocm_graph_execution_accounted(server))
+
+    def test_backend_without_rocm_graph_runner_is_explicitly_unavailable(self) -> None:
+        state = FakeState()
+        health = state.health()
+        graph = health["decode_runtime"]["rocm_graphs"]
+        graph["state"] = "unavailable"
+        graph["unavailable_reason"] = "backend_without_graph_runner"
+        for field in (
+            "requested",
+            "capture_requested",
+            "enabled",
+            "capture_enabled",
+            *bench.ROCM_GRAPH_COUNTER_FIELDS,
+            *bench.ROCM_GRAPH_GAUGE_FIELDS,
+            "fallbacks",
+        ):
+            graph[field] = None
+
+        before = bench.server_diagnostics_snapshot(health)
+        server = bench.server_diagnostics_delta(before, before)
+
+        bench.validate_server_diagnostics_v3(server, "unavailable fixture")
+        self.assertTrue(bench.server_rocm_graph_execution_accounted(server))
+        self.assertIsNone(server["rocm_graphs"]["replay_successes"])
+
+        server["rocm_graphs"]["state"] = "busy"
+        server["rocm_graphs"]["unavailable_reason"] = "graph_runner_busy"
+        bench.validate_server_diagnostics_v3(server, "busy fixture")
+        self.assertFalse(bench.server_rocm_graph_execution_accounted(server))
 
     def test_zero_token_success_is_rejected(self) -> None:
         now = time.perf_counter()

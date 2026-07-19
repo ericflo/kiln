@@ -189,7 +189,7 @@ latency, request throughput, output-token throughput, SLO goodput, dispatch
 spread, prompt/output hashes, DRM memory, failures, and Kiln server-route
 diagnostics.
 
-Driver v7 through v9 retain one ordered `output_evidence` row for every successful
+Driver v7 through v10 retain one ordered `output_evidence` row for every successful
 request. Hash-only evidence is the default and includes the combined semantic
 output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
 tokens, and finish reason. The validator requires these rows to cover exactly
@@ -232,6 +232,59 @@ stream without a rendezvous worker remains observable through the universal
 request counters rather than being rejected merely because actor counters are
 absent. Console rows name the effective route and show the corresponding actor
 width/mean or rendezvous width/runner-call mean.
+
+Driver v10 extends this route record to
+`kiln.serving-benchmark-server-diagnostics.v3` with one required
+`rocm_graphs` object. Driver-v9 `v2` records remain strict-valid and
+comparison-compatible; the validator dispatches by receipt driver version and
+does not reinterpret an old record as `v3`.
+
+The graph record is a before/after measurement-window contract. It retains:
+
+- the end-of-window `enabled`/`disabled` state, requested and effective capture
+  bits, and an explicit unavailable reason when the backend has no ROCm graph
+  runner;
+- monotonic-window deltas for `capture_attempts`, `capture_successes`,
+  `capture_deferrals`, and `capture_failures`; `replay_attempts`,
+  `replay_successes`, and `replay_failures`; aggregate `failures`;
+  `graph_slot_create_count`, `graph_slot_reuse_count`, and
+  `cache_admission_successes`;
+- start and end gauges for captured graphs and total, active, and idle graph
+  slots; and
+- deltas for every closed eager-fallback reason, fallback count, slow-fallback
+  count, accumulated fallback duration, and the process-wide maximum fallback
+  duration observed by the end boundary.
+
+The closed fallback reason keys are `cold_cache_host_round_trip`,
+`persistent_host_round_trip`, `shape_dependent_attention`,
+`graph_cache_capacity`, `graph_cache_byte_budget`,
+`graph_accounting_incomplete`, `moderate_memory_pressure`,
+`tight_memory_pressure`, `critical_memory_pressure`,
+`memory_reservation_denied`, `memory_governor_selector_mismatch`,
+`capture_failure`, and `replay_failure`. The record also carries `total`,
+`slow`, `total_duration_micros`, and `process_max_duration_micros`.
+
+The validator requires replay attempts to equal successful plus failed replay
+launches, aggregate graph failures to equal capture plus replay failures, and
+active plus idle slots to equal total slots at both boundaries. Every monotonic
+counter and the process maximum must not regress. The fallback total must equal
+the sum of its closed reason counters. Requested policy cannot change during a
+run; a circuit breaker may change effective execution from enabled to disabled,
+but cannot silently rearm. Diagnostic availability cannot appear or disappear
+between boundaries.
+
+A backend without a ROCm graph runner emits `state=unavailable`,
+`unavailable_reason=backend_without_graph_runner`, and null graph
+counters/gauges. Busy or poisoned ownership is not treated as backend absence.
+It fails the graph-accounting gate because the benchmark cannot prove what ran.
+
+Driver v10 adds `rocm_graph_execution_accounted`. When native capture is not
+requested, or the backend explicitly has no ROCm graph runner, the gate passes
+without inventing activity. When capture is requested, the run passes only if
+capture remains enabled, at least one capture or replay succeeds, graph failures
+are zero, and the complete eager-fallback delta is zero. This prevents a
+nominally graph-enabled performance row from passing after executing only the
+eager path. Graph failures also participate in `server_reported_no_errors`.
 
 ### Output divergence diagnostics
 

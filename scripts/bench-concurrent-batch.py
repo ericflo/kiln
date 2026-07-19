@@ -39,15 +39,26 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "9"
-SUPPORTED_DRIVER_VERSIONS = {"2", "3", "4", "5", "6", "7", "8", DRIVER_VERSION}
-THERMAL_DRIVER_VERSIONS = {"3", "4", "5", "6", "7", "8", DRIVER_VERSION}
-LIFECYCLE_DRIVER_VERSIONS = {"4", "5", "6", "7", "8", DRIVER_VERSION}
-PRELAUNCH_DRIVER_VERSIONS = {"5", "6", "7", "8", DRIVER_VERSION}
-OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", "8", DRIVER_VERSION}
-MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {"8", DRIVER_VERSION}
-ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {DRIVER_VERSION}
-REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {"7", "8", DRIVER_VERSION}
+DRIVER_VERSION = "10"
+SUPPORTED_DRIVER_VERSIONS = {
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    DRIVER_VERSION,
+}
+THERMAL_DRIVER_VERSIONS = {"3", "4", "5", "6", "7", "8", "9", DRIVER_VERSION}
+LIFECYCLE_DRIVER_VERSIONS = {"4", "5", "6", "7", "8", "9", DRIVER_VERSION}
+PRELAUNCH_DRIVER_VERSIONS = {"5", "6", "7", "8", "9", DRIVER_VERSION}
+OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", "8", "9", DRIVER_VERSION}
+MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {"8", "9", DRIVER_VERSION}
+ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {"9", DRIVER_VERSION}
+ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {DRIVER_VERSION}
+REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {"7", "8", "9", DRIVER_VERSION}
 OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
@@ -176,7 +187,52 @@ DIRECT_RENDEZVOUS_FIELDS = (
     "worker_active",
     "route_available",
 )
-SERVER_DIAGNOSTICS_SCHEMA = "kiln.serving-benchmark-server-diagnostics.v2"
+SERVER_DIAGNOSTICS_SCHEMA_V2 = "kiln.serving-benchmark-server-diagnostics.v2"
+SERVER_DIAGNOSTICS_SCHEMA = "kiln.serving-benchmark-server-diagnostics.v3"
+SERVER_DIAGNOSTICS_SCHEMAS = {
+    SERVER_DIAGNOSTICS_SCHEMA_V2,
+    SERVER_DIAGNOSTICS_SCHEMA,
+}
+ROCM_GRAPH_COUNTER_FIELDS = (
+    "capture_attempts",
+    "capture_successes",
+    "capture_deferrals",
+    "capture_failures",
+    "replay_attempts",
+    "replay_successes",
+    "replay_failures",
+    "failures",
+    "graph_slot_create_count",
+    "graph_slot_reuse_count",
+    "cache_admission_successes",
+)
+ROCM_GRAPH_GAUGE_FIELDS = (
+    "captured_graph_count",
+    "graph_slot_count",
+    "active_graph_slot_count",
+    "idle_graph_slot_count",
+)
+ROCM_GRAPH_FALLBACK_REASON_FIELDS = (
+    "cold_cache_host_round_trip",
+    "persistent_host_round_trip",
+    "shape_dependent_attention",
+    "graph_cache_capacity",
+    "graph_cache_byte_budget",
+    "graph_accounting_incomplete",
+    "moderate_memory_pressure",
+    "tight_memory_pressure",
+    "critical_memory_pressure",
+    "memory_reservation_denied",
+    "memory_governor_selector_mismatch",
+    "capture_failure",
+    "replay_failure",
+)
+ROCM_GRAPH_FALLBACK_COUNTER_FIELDS = (
+    "total",
+    *ROCM_GRAPH_FALLBACK_REASON_FIELDS,
+    "slow",
+    "total_duration_micros",
+)
 
 SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 RECEIPT_KEYS = {
@@ -1362,7 +1418,7 @@ def validate_server_diagnostics_v2(value: Any, label: str) -> dict[str, Any]:
         },
         label,
     )
-    if server["schema"] != SERVER_DIAGNOSTICS_SCHEMA:
+    if server["schema"] != SERVER_DIAGNOSTICS_SCHEMA_V2:
         raise BenchmarkError(f"{label}.schema is unsupported")
     if server["request_route"] not in {"batching_engine", "direct_streaming"}:
         raise BenchmarkError(f"{label}.request_route is unsupported")
@@ -1495,6 +1551,137 @@ def validate_server_diagnostics_v2(value: Any, label: str) -> dict[str, Any]:
             raise BenchmarkError(f"{label}.decode_batcher budget state disagrees")
     if (decode_batcher is not None) != direct["worker_active"]:
         raise BenchmarkError(f"{label}.decode_batcher availability is inconsistent")
+    return server
+
+
+def validate_rocm_graph_record(
+    value: Any,
+    label: str,
+    *,
+    gauge_suffixes: tuple[str, ...],
+    fallback_max_field: str,
+) -> dict[str, Any]:
+    graph = _object(value, label)
+    configuration_fields = {
+        "state",
+        "unavailable_reason",
+        "requested",
+        "capture_requested",
+        "enabled",
+        "capture_enabled",
+    }
+    counter_fields = set(ROCM_GRAPH_COUNTER_FIELDS)
+    gauge_fields = {
+        f"{field}{suffix}"
+        for field in ROCM_GRAPH_GAUGE_FIELDS
+        for suffix in gauge_suffixes
+    }
+    _exact_keys(
+        graph,
+        configuration_fields | counter_fields | gauge_fields | {"fallbacks"},
+        label,
+    )
+    if graph["state"] not in {"enabled", "disabled", "busy", "unavailable"}:
+        raise BenchmarkError(f"{label}.state is unsupported")
+
+    available = graph["state"] in {"enabled", "disabled"}
+    reason = graph["unavailable_reason"]
+    optional_fields = {
+        "requested",
+        "capture_requested",
+        "enabled",
+        "capture_enabled",
+        *counter_fields,
+        *gauge_fields,
+    }
+    if available:
+        if reason is not None:
+            raise BenchmarkError(f"{label} available graph diagnostics have a reason")
+        for field in (
+            "requested",
+            "capture_requested",
+            "enabled",
+            "capture_enabled",
+        ):
+            if not isinstance(graph[field], bool):
+                raise BenchmarkError(f"{label}.{field} must be boolean")
+        if graph["enabled"] != (graph["state"] == "enabled"):
+            raise BenchmarkError(f"{label}.state disagrees with enabled")
+        if graph["capture_enabled"] and not graph["capture_requested"]:
+            raise BenchmarkError(
+                f"{label}.capture_enabled requires capture_requested"
+            )
+        for field in counter_fields | gauge_fields:
+            _nonnegative_int(graph[field], f"{label}.{field}")
+        if graph["failures"] != (
+            graph["capture_failures"] + graph["replay_failures"]
+        ):
+            raise BenchmarkError(f"{label}.failures disagrees with failure classes")
+        if graph["replay_attempts"] != (
+            graph["replay_successes"] + graph["replay_failures"]
+        ):
+            raise BenchmarkError(f"{label}.replay attempt accounting disagrees")
+        for suffix in gauge_suffixes:
+            slots = graph[f"graph_slot_count{suffix}"]
+            active = graph[f"active_graph_slot_count{suffix}"]
+            idle = graph[f"idle_graph_slot_count{suffix}"]
+            if active + idle != slots:
+                raise BenchmarkError(
+                    f"{label} graph-slot gauges disagree at {suffix or 'snapshot'}"
+                )
+        fallbacks = _object(graph["fallbacks"], f"{label}.fallbacks")
+        _exact_keys(
+            fallbacks,
+            {*ROCM_GRAPH_FALLBACK_COUNTER_FIELDS, fallback_max_field},
+            f"{label}.fallbacks",
+        )
+        for field, item in fallbacks.items():
+            _nonnegative_int(item, f"{label}.fallbacks.{field}")
+        if fallbacks["total"] != sum(
+            fallbacks[field] for field in ROCM_GRAPH_FALLBACK_REASON_FIELDS
+        ):
+            raise BenchmarkError(f"{label}.fallback reason accounting disagrees")
+    else:
+        if not isinstance(reason, str) or not reason:
+            raise BenchmarkError(f"{label} unavailable graph diagnostics omit a reason")
+        for field in optional_fields:
+            if graph[field] is not None:
+                raise BenchmarkError(f"{label}.{field} must be null when unavailable")
+        if graph["fallbacks"] is not None:
+            raise BenchmarkError(f"{label}.fallbacks must be null when unavailable")
+    return graph
+
+
+def validate_rocm_graph_diagnostics(value: Any, label: str) -> dict[str, Any]:
+    return validate_rocm_graph_record(
+        value,
+        label,
+        gauge_suffixes=("_start", "_end"),
+        fallback_max_field="process_max_duration_micros",
+    )
+
+
+def validate_server_diagnostics_v3(value: Any, label: str) -> dict[str, Any]:
+    server = _object(value, label)
+    _exact_keys(
+        server,
+        {
+            "schema",
+            "request_route",
+            "requests",
+            "routing",
+            "batching_engine",
+            "decode_batcher",
+            "rocm_graphs",
+        },
+        label,
+    )
+    if server["schema"] != SERVER_DIAGNOSTICS_SCHEMA:
+        raise BenchmarkError(f"{label}.schema is unsupported")
+    route_record = {key: value for key, value in server.items() if key != "rocm_graphs"}
+    route_record["schema"] = SERVER_DIAGNOSTICS_SCHEMA_V2
+    validate_server_diagnostics_v2(route_record, label)
+    validate_rocm_graph_diagnostics(server["rocm_graphs"], f"{label}.rocm_graphs")
     return server
 
 
@@ -1680,8 +1867,14 @@ def validate_benchmark_run(
                 raise BenchmarkError(f"{label} has an inconsistent prompt-shape gate")
     if row["server"] is not None:
         if driver_version in ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS:
-            server = validate_server_diagnostics_v2(
-                row["server"], f"{label}.server"
+            server = (
+                validate_server_diagnostics_v3(
+                    row["server"], f"{label}.server"
+                )
+                if driver_version in ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS
+                else validate_server_diagnostics_v2(
+                    row["server"], f"{label}.server"
+                )
             )
             no_errors_gate = next(
                 (item for item in gates if item["name"] == "server_reported_no_errors"),
@@ -1709,6 +1902,20 @@ def validate_benchmark_run(
                 raise BenchmarkError(
                     f"{label} has an inconsistent server-accounting gate"
                 )
+            if driver_version in ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS:
+                graph_gate = next(
+                    (
+                        item
+                        for item in gates
+                        if item["name"] == "rocm_graph_execution_accounted"
+                    ),
+                    None,
+                )
+                expected_graph = server_rocm_graph_execution_accounted(server)
+                if graph_gate is None or graph_gate["passed"] != expected_graph:
+                    raise BenchmarkError(
+                        f"{label} has an inconsistent ROCm graph-execution gate"
+                    )
         else:
             server = _object(row["server"], f"{label}.server")
             required_server = set(COUNTER_FIELDS) | {
@@ -3359,6 +3566,31 @@ def validate_decode_batcher_snapshot(value: Any) -> dict[str, Any]:
     return normalized
 
 
+def validate_rocm_graph_snapshot(value: Any) -> dict[str, Any]:
+    label = "diagnostics.decode_runtime.rocm_graphs"
+    snapshot = _object(value, label)
+    normalized = {
+        field: snapshot.get(field)
+        for field in (
+            "state",
+            "unavailable_reason",
+            "requested",
+            "capture_requested",
+            "enabled",
+            "capture_enabled",
+            *ROCM_GRAPH_COUNTER_FIELDS,
+            *ROCM_GRAPH_GAUGE_FIELDS,
+            "fallbacks",
+        )
+    }
+    return validate_rocm_graph_record(
+        normalized,
+        label,
+        gauge_suffixes=("",),
+        fallback_max_field="max_duration_micros",
+    )
+
+
 def server_diagnostics_snapshot(health: dict[str, Any]) -> dict[str, Any]:
     requests = validate_request_snapshot(health.get("requests"))
     runtime = _object(health.get("decode_runtime"), "diagnostics.decode_runtime")
@@ -3448,6 +3680,7 @@ def server_diagnostics_snapshot(health: dict[str, Any]) -> dict[str, Any]:
         raise BenchmarkError(
             "decode-batcher diagnostics disagree with direct-rendezvous worker state"
         )
+    rocm_graphs = validate_rocm_graph_snapshot(runtime.get("rocm_graphs"))
     return {
         "request_route": (
             "batching_engine" if batching_actor_effective else "direct_streaming"
@@ -3459,6 +3692,7 @@ def server_diagnostics_snapshot(health: dict[str, Any]) -> dict[str, Any]:
         },
         "batching_engine": batching_engine,
         "decode_batcher": decode_batcher,
+        "rocm_graphs": rocm_graphs,
     }
 
 
@@ -3521,6 +3755,78 @@ def decode_batcher_delta(
     return result
 
 
+def rocm_graph_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    before_available = before["state"] in {"enabled", "disabled"}
+    after_available = after["state"] in {"enabled", "disabled"}
+    if before_available != after_available:
+        raise BenchmarkError("ROCm graph diagnostic availability changed during run")
+    if not before_available:
+        if before != after:
+            raise BenchmarkError("unavailable ROCm graph diagnostics changed during run")
+        return {
+            "state": after["state"],
+            "unavailable_reason": after["unavailable_reason"],
+            "requested": None,
+            "capture_requested": None,
+            "enabled": None,
+            "capture_enabled": None,
+            **{field: None for field in ROCM_GRAPH_COUNTER_FIELDS},
+            **{
+                f"{field}_{boundary}": None
+                for field in ROCM_GRAPH_GAUGE_FIELDS
+                for boundary in ("start", "end")
+            },
+            "fallbacks": None,
+        }
+
+    for field in ("requested", "capture_requested"):
+        if before[field] != after[field]:
+            raise BenchmarkError(f"ROCm graph {field} changed during run")
+    for field in ("enabled", "capture_enabled"):
+        if not before[field] and after[field]:
+            raise BenchmarkError(f"ROCm graph {field} rearmed during run")
+
+    result: dict[str, Any] = {
+        "state": after["state"],
+        "unavailable_reason": after["unavailable_reason"],
+        "requested": after["requested"],
+        "capture_requested": after["capture_requested"],
+        "enabled": after["enabled"],
+        "capture_enabled": after["capture_enabled"],
+    }
+    for field in ROCM_GRAPH_COUNTER_FIELDS:
+        if after[field] < before[field]:
+            raise BenchmarkError(
+                f"ROCm graph counter {field} regressed from "
+                f"{before[field]} to {after[field]}"
+            )
+        result[field] = after[field] - before[field]
+    for field in ROCM_GRAPH_GAUGE_FIELDS:
+        result[f"{field}_start"] = before[field]
+        result[f"{field}_end"] = after[field]
+
+    before_fallbacks = before["fallbacks"]
+    after_fallbacks = after["fallbacks"]
+    fallback_delta: dict[str, int] = {}
+    for field in ROCM_GRAPH_FALLBACK_COUNTER_FIELDS:
+        if after_fallbacks[field] < before_fallbacks[field]:
+            raise BenchmarkError(
+                f"ROCm graph fallback counter {field} regressed from "
+                f"{before_fallbacks[field]} to {after_fallbacks[field]}"
+            )
+        fallback_delta[field] = after_fallbacks[field] - before_fallbacks[field]
+    if (
+        after_fallbacks["max_duration_micros"]
+        < before_fallbacks["max_duration_micros"]
+    ):
+        raise BenchmarkError("ROCm graph fallback max duration regressed")
+    fallback_delta["process_max_duration_micros"] = after_fallbacks[
+        "max_duration_micros"
+    ]
+    result["fallbacks"] = fallback_delta
+    return result
+
+
 def server_diagnostics_delta(
     before: dict[str, Any], after: dict[str, Any]
 ) -> dict[str, Any]:
@@ -3551,6 +3857,9 @@ def server_diagnostics_delta(
             if before_direct is not None and after_direct is not None
             else None
         ),
+        "rocm_graphs": rocm_graph_delta(
+            before["rocm_graphs"], after["rocm_graphs"]
+        ),
     }
 
 
@@ -3562,9 +3871,26 @@ def server_diagnostics_has_no_errors(server: dict[str, Any]) -> bool:
     if batching_engine is not None and batching_engine["total_errors"]:
         return False
     decode_batcher = server["decode_batcher"]
-    return decode_batcher is None or (
-        decode_batcher["failed_jobs"] == 0
-        and not decode_batcher["runner_call_budget_exceeded"]
+    if decode_batcher is not None and (
+        decode_batcher["failed_jobs"] != 0
+        or decode_batcher["runner_call_budget_exceeded"]
+    ):
+        return False
+    graph = server.get("rocm_graphs")
+    return graph is None or graph["failures"] in {None, 0}
+
+
+def server_rocm_graph_execution_accounted(server: dict[str, Any]) -> bool:
+    graph = server["rocm_graphs"]
+    if graph["state"] in {"busy", "unavailable"}:
+        return graph["unavailable_reason"] == "backend_without_graph_runner"
+    if not graph["capture_requested"]:
+        return graph["failures"] == 0 and graph["fallbacks"]["total"] == 0
+    return (
+        graph["capture_enabled"]
+        and graph["failures"] == 0
+        and graph["fallbacks"]["total"] == 0
+        and graph["capture_successes"] + graph["replay_successes"] > 0
     )
 
 
@@ -3795,7 +4121,7 @@ def summarize_run(
             )
         )
     if server is not None:
-        if server.get("schema") == SERVER_DIAGNOSTICS_SCHEMA:
+        if server.get("schema") in SERVER_DIAGNOSTICS_SCHEMAS:
             request_errors = {
                 field: server["requests"][field]
                 for field in ("error", "timeout", "rejected")
@@ -3810,6 +4136,8 @@ def summarize_run(
                 if server["decode_batcher"] is not None
                 else 0
             )
+            graph = server.get("rocm_graphs")
+            graph_failures = graph["failures"] if graph is not None else None
             gates.extend(
                 [
                     gate(
@@ -3818,7 +4146,8 @@ def summarize_run(
                         (
                             f"route={server['request_route']}; request={request_errors}; "
                             f"batching_engine={batching_errors}; "
-                            f"decode_batcher={direct_errors}"
+                            f"decode_batcher={direct_errors}; "
+                            f"rocm_graph_failures={graph_failures}"
                         ),
                     ),
                     gate(
@@ -3833,6 +4162,27 @@ def summarize_run(
                     ),
                 ]
             )
+            if server["schema"] == SERVER_DIAGNOSTICS_SCHEMA:
+                graph = server["rocm_graphs"]
+                fallback_count = (
+                    None
+                    if graph["fallbacks"] is None
+                    else graph["fallbacks"]["total"]
+                )
+                gates.append(
+                    gate(
+                        "rocm_graph_execution_accounted",
+                        server_rocm_graph_execution_accounted(server),
+                        (
+                            f"state={graph['state']}; "
+                            f"capture_requested={graph['capture_requested']}; "
+                            f"capture_successes={graph['capture_successes']}; "
+                            f"replay_successes={graph['replay_successes']}; "
+                            f"failures={graph['failures']}; "
+                            f"fallbacks={fallback_count}"
+                        ),
+                    )
+                )
         else:
             gates.append(
                 gate(
@@ -4304,7 +4654,7 @@ def workload_contract(args: argparse.Namespace, sizes: list[int]) -> dict[str, A
 def print_run(row: dict[str, Any]) -> None:
     server = row.get("server") or {}
     route = "unobserved"
-    if server.get("schema") == SERVER_DIAGNOSTICS_SCHEMA:
+    if server.get("schema") in SERVER_DIAGNOSTICS_SCHEMAS:
         route = server["request_route"]
         route_diagnostics = (
             server["batching_engine"]

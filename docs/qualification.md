@@ -2163,9 +2163,15 @@ snapshot residue, or GPU/RSS peak more than 512 MiB above the post-warmup
 baseline. Attributed outliers remain counted for review. The receipt also
 records p50/p99/p99.9 TTFT and ITL, graph activity, prefix-cache reuse,
 graph/slot residency and reuse, external-yield synchronization, memory
-baselines/peaks, request/token counts, and cancellation count. Shutdown must
-return zero without force after the decode worker is joined, and snapshot
-cleanup must leave no residue.
+baselines/peaks, request/token counts, aggregate measured output throughput,
+and cancellation count. `output_token_throughput_per_second` is exactly the
+successful measured completion-token count divided by
+`soak_duration_seconds`. It excludes setup, graph/prefix warmup, and
+stabilization, includes all wall time and thermal pacing after the measured
+phase begins, and is zero for a partial result whose measured duration is zero.
+The numerator and denominator remain separate receipt metrics so the rate can
+be independently reproduced. Shutdown must return zero without force after the
+decode worker is joined, and snapshot cleanup must leave no residue.
 
 ROCm results always declare the base serving metrics plus the shared host
 memory, swap, temperature, thermal-pacing, and accelerator clock/power metrics.
@@ -2200,8 +2206,10 @@ diagnostic evidence, not by itself a performance acceptance threshold.
 
 This `kind: soak` workload is intentionally a non-comparative pass/fail gate,
 so its `comparison_policy` is null. Do not use it to claim relative throughput
-or latency; use the serving benchmark protocol for those claims. The 30-minute
-receipt also does not replace the final 24-hour ROCm phase soak.
+or latency; its explicit rate answers what the completed soak delivered, not
+what the machine can deliver at a controlled concurrency or against vLLM. Use
+the serving benchmark protocol for those claims. The 30-minute receipt also
+does not replace the final 24-hour ROCm phase soak.
 
 Build, runtime setup, and measurement use independent absolute deadlines. The
 exact source-bound build has its own 900-second limit from the checked build
