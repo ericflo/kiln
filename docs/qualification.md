@@ -1068,6 +1068,32 @@ at or below 59.875 C, every pacing and cooldown interval completed, cgroup
 event and swap counters remained zero, and no owned residue remained. Kiln
 cgroups peaked at 14,658,535,424 and 12,110,376,960 bytes.
 
+The guarded split q/gate pair is retained at
+`qualification/oracle-results/rocm/strix-halo/20260719t035301-rocm-strix-halo-hf-layer-attribution-split-q-gate-fallback-v1.json`
+and
+`qualification/oracle-results/rocm/strix-halo/20260719t035556-rocm-strix-halo-hf-layer-attribution-split-q-gate-only-v1.json`,
+both from clean pushed source `ae6504f3b445f8d45302c030f221071f94582491`.
+Disabling only `split_q_gate_f32_output` in the otherwise qualified policy is
+bit-for-bit identical to the qualified result: it emits token `25045`, retains
+final logit hash
+`sha256:b5acbda785044ca46d6cddb9aea03258dd4f99fb1904dcb5983be49ef68fd603`,
+and has relative RMSE `0.014871503`, `0.036848969`, `0.065551177`, and
+`0.085119899` after layers 0 through 2 and final RMSNorm. Enabling only that
+leaf on the portable model policy restores token `15787`; its corresponding
+values are `0.002575195`, `0.004210653`, `0.007065248`, and `0.016856438`.
+The direct and inverse arms therefore exclude this route as the cause for this
+state; it neither repairs the qualified composition when disabled nor induces
+the defect when enabled alone.
+
+The two complete lifecycles lasted 219.112 and 90.214 seconds. Their guarded
+arms stayed at or below 61.25 C, all pacing and cooldown intervals completed,
+all cgroup event and swap counters remained zero, and no owned residue
+remained. Kiln cgroups peaked at 14,657,499,136 and 12,110,065,664 bytes. This
+evidence authorizes a grouped discriminator over the remaining live
+layer-common routes, starting with fused RMSNorm and fused MLP dispatch. It
+does not repair the qualified profile or establish parity, performance, or
+endurance acceptance.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for
