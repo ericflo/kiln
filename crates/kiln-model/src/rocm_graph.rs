@@ -7649,6 +7649,15 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rocm")]
+    fn require_explicit_rocm_qualification() {
+        assert_eq!(
+            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
+            Some("1"),
+            "set KILN_QUALIFICATION=1 for the explicit hardware run"
+        );
+    }
+
     #[test]
     fn graph_policy_defaults_are_eager_and_cache_bounds_are_validated() {
         let default_policy = RocmGraphExecutionPolicy::default();
@@ -8502,11 +8511,7 @@ mod tests {
     #[test]
     #[ignore = "requires an explicit real-ROCm qualification run"]
     fn batched_graph_width_four_matches_eager_hidden_and_kv() -> Result<()> {
-        assert_eq!(
-            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
-            Some("1"),
-            "set KILN_QUALIFICATION=1 for the explicit hardware run"
-        );
+        require_explicit_rocm_qualification();
         assert!(
             kiln_tensor::rocm_is_available(),
             "ROCm qualification requested but no ROCm device is available"
@@ -8721,11 +8726,7 @@ mod tests {
     #[test]
     #[ignore = "requires an explicit real-ROCm qualification run"]
     fn shape_dependent_attention_is_cached_as_typed_eager_fallback() {
-        assert_eq!(
-            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
-            Some("1"),
-            "set KILN_QUALIFICATION=1 for the explicit hardware run"
-        );
+        require_explicit_rocm_qualification();
         assert!(kiln_tensor::rocm_is_available());
 
         let device = Device::Rocm(0);
@@ -8810,11 +8811,7 @@ mod tests {
     #[test]
     #[ignore = "requires an explicit real-ROCm qualification run"]
     fn graph_parity_across_buckets_prefix_cancellation_and_adapter_boundary() {
-        assert_eq!(
-            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
-            Some("1"),
-            "set KILN_QUALIFICATION=1 for the explicit hardware run"
-        );
+        require_explicit_rocm_qualification();
         assert!(kiln_tensor::rocm_is_available());
 
         let device = Device::Rocm(0);
@@ -9061,11 +9058,7 @@ mod tests {
     #[test]
     #[ignore = "requires an explicit real-ROCm qualification run"]
     fn stale_pool_generation_refuses_native_replay_and_falls_back_eager() {
-        assert_eq!(
-            std::env::var("KILN_QUALIFICATION").ok().as_deref(),
-            Some("1"),
-            "set KILN_QUALIFICATION=1 for the explicit hardware run"
-        );
+        require_explicit_rocm_qualification();
         assert!(
             kiln_tensor::rocm_is_available(),
             "ROCm qualification requested but no ROCm device is available"
