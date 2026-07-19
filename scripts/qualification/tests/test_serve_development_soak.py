@@ -351,6 +351,7 @@ class ServeRocmSoakTests(unittest.TestCase):
                 "poll_interval_ms": 250,
                 "resume_signal": "SIGCONT",
                 "itl_attribution": "host_thermal_pacing",
+                "timeout_seconds": 180.0,
             },
         )
         self.assertEqual(
@@ -447,6 +448,7 @@ class ServeRocmSoakTests(unittest.TestCase):
                 "poll_interval_ms": 250,
                 "resume_signal": "SIGCONT",
                 "itl_attribution": "host_thermal_pacing",
+                "timeout_seconds": 180.0,
             },
         )
         self.assertEqual(
@@ -2041,6 +2043,53 @@ class ServeRocmSoakTests(unittest.TestCase):
             guard.pacing_metric_values()["host_thermal_pacing_active_end"], 0
         )
 
+    def test_thermal_guard_monitor_times_out_stopped_process_independently(
+        self,
+    ) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sensor = root / "hwmon3"
+            sensor.mkdir()
+            (sensor / "name").write_text("k10temp\n", encoding="utf-8")
+            (sensor / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            temperature = sensor / "temp1_input"
+            temperature.write_text("89000\n", encoding="utf-8")
+            guard = soak.HostThermalGuard(
+                process,
+                hwmon_name="k10temp",
+                label="Tctl",
+                limit_millicelsius=97_000,
+                pacing_start_millicelsius=88_000,
+                pacing_resume_millicelsius=80_000,
+                pacing_timeout_seconds=2.0,
+                hwmon_root=root,
+            )
+            guard.trace_callback = mock.Mock()
+            with (
+                mock.patch.object(soak.os, "killpg") as killpg,
+                mock.patch.object(
+                    soak.time, "monotonic", side_effect=[10.0, 12.0, 12.0]
+                ),
+            ):
+                guard._sample()
+                temperature.write_text("85000\n", encoding="utf-8")
+                guard._sample()
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(4321, signal.SIGSTOP),
+                mock.call(4321, signal.SIGTERM),
+                mock.call(4321, signal.SIGCONT),
+            ],
+        )
+        self.assertIn("independent 2.000-second timeout", guard.trip_reason or "")
+        self.assertEqual(
+            guard.pacing_metric_values()["host_thermal_pacing_active_end"], 0
+        )
+
     def test_thermal_guard_close_releases_a_stopped_process(self) -> None:
         process = mock.Mock(pid=4321)
         process.poll.return_value = None
@@ -2419,6 +2468,8 @@ class ServeRocmSoakTests(unittest.TestCase):
         invalid = (
             ({"poll_interval_seconds": math.nan}, "poll interval"),
             ({"cooldown_timeout_seconds": math.inf}, "cooldown timeout"),
+            ({"pacing_timeout_seconds": math.inf}, "pacing timeout"),
+            ({"pacing_timeout_seconds": 1.0}, "timeout requires pacing"),
             ({"limit_millicelsius": True}, "limit must be a positive integer"),
         )
         for overrides, message in invalid:

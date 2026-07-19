@@ -122,6 +122,14 @@ stable cooldown target. The controller sends `SIGSTOP` and `SIGCONT` to the
 complete server process group. Crossing the hard limit sends `SIGTERM`, records
 the trip, and fails the run.
 
+The phase-settlement deadline is also installed in the independent monitor as
+the maximum duration of any single stopped interval. It is not only checked by
+the request-driving thread: if that thread is blocked while already-submitted
+accelerator work prevents the package from reaching the resume gate, the
+monitor sends `SIGTERM`, releases the stopped group with `SIGCONT`, and fails
+closed. This prevents a request wait and an unreachable resume temperature from
+deadlocking each other.
+
 The closed policy fields are:
 
 | Field | Contract |
@@ -138,7 +146,7 @@ The closed policy fields are:
 | `safe_handoff.target_millicelsius` | Maximum temperature accepted before owned process creation and after shutdown, or before returning an attached live process. It cannot exceed the pacing-resume temperature. |
 | `safe_handoff.stable_samples` | Consecutive samples required at or below the target. |
 | `safe_handoff.timeout_seconds` | Positive deadline for each boundary cooldown. |
-| `phase_settlement_timeout_seconds` | Positive deadline for an active pacing interval to settle before or after each workload row. |
+| `phase_settlement_timeout_seconds` | Positive deadline for an active pacing interval. Enforced independently by the monitor and synchronously before/after each workload row. |
 
 Driver v8 resolves the selected sensor before model hashing. Each initial and
 final fingerprint worker starts blocked on a private gate; the supervisor first
@@ -531,6 +539,28 @@ GPU memory, graph counters, and pacing. Promote only a Pareto improvement that
 reduces dispatch work without hiding latency behind thermal pauses; confirm the
 chosen arm against the four-layer control before changing the production
 default or resuming the longer soak.
+
+The first exact-source control attempt on `11057981f` completed its eight-way
+mixed row but did not produce a receipt and is not performance evidence. All
+eight requests produced 256 tokens at a printed 1.98 aggregate tokens/second;
+p99 TTFT/ITL were 113.3/6.55 seconds, and native decode occupancy reached only
+two rows with a 1.09-row mean. During the following twelve-way row, the c32
+host policy stopped the server at 63.25 C and could not reach its 45 C resume
+gate. The process remained stopped for 453.167 seconds; Tctl stayed near 52 C
+and the DRM busy counter reported 100 percent. An operator interrupt exercised
+the owned cleanup path: the server resumed, handled `SIGTERM`, removed its
+private snapshot, drained graph state, and the controller cooled the host to
+44.875 C with no process residue. The bound 96,380-byte server log has SHA-256
+`d2bdd83287d082e506a95174cc4dcb099923ac6c14acd69dfbbb889bd4e14cc0`.
+
+This attempt exposed a controller defect rather than a layer-quantum result.
+The synchronous settlement timeout was unreachable while the workload thread
+waited for the paused requests. The shared thermal monitor now owns the same
+typed timeout and can terminate plus release a stopped process group without
+waiting for request completion. Screening restarts with a bounded c8 row from
+the corrected clean pushed source; c12 is not retried until the c8 arms identify
+a viable candidate and the watchdog behavior is retained in a failed receipt
+if another resume gate becomes unreachable.
 
 ## Running One Profile
 

@@ -129,6 +129,7 @@ def validate(
         pacing_start_millicelsius=pacing["start_millicelsius"],
         pacing_resume_millicelsius=pacing["resume_millicelsius"],
         pacing_resume_stable_samples=pacing.get("resume_stable_samples", 1),
+        pacing_timeout_seconds=settlement_timeout,
         cooldown_target_millicelsius=handoff["target_millicelsius"],
         cooldown_stable_samples=handoff["stable_samples"],
         cooldown_timeout_seconds=handoff["timeout_seconds"],

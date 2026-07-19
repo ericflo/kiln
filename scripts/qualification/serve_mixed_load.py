@@ -63,6 +63,7 @@ RUNTIME_HOST_THERMAL_POLICY = thermal.HostThermalPolicy(
     poll_interval_ms=250,
     pacing_start_millicelsius=88_000,
     pacing_resume_millicelsius=86_000,
+    pacing_timeout_seconds=180.0,
     cooldown_target_millicelsius=75_000,
     cooldown_stable_samples=8,
     cooldown_timeout_seconds=180.0,

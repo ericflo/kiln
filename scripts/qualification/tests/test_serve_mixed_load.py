@@ -1214,6 +1214,7 @@ class ServeMixedLoadTests(unittest.TestCase):
                 "resume_signal": "SIGCONT",
                 "scope": "server_process_group",
                 "start_millicelsius": 88_000,
+                "timeout_seconds": 180.0,
             },
         }
         expected_metrics = sorted(serve.METRIC_DEFINITIONS)

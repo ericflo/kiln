@@ -1513,6 +1513,10 @@ exactly one Linux hwmon input by `name=k10temp` and `label=Tctl`, polls every
 88,000 millicelsius, and resumes it with `SIGCONT` at or below 86,000. A
 97,000-millicelsius reading, missing or ambiguous selector, malformed input,
 controller error, or signal error fails closed and terminates the server group.
+No stopped interval may exceed 180 seconds. The monitor owns that timeout and
+can terminate and release the stopped group even while the workload thread is
+blocked on an inference request, so already-submitted accelerator work cannot
+strand the controller below an unreachable resume gate.
 Cooling consumes existing wall-clock and request deadlines, so throughput
 includes the host's sustainable pacing cost rather than excluding it. Pacing
 intervals join ITL attribution as `host_thermal_pacing`. Before sending the

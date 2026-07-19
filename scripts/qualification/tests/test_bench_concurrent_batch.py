@@ -1422,6 +1422,15 @@ class ServingBenchmarkTests(unittest.TestCase):
             self.assertEqual(policy.cooldown_mode, "live_process_safe_handoff")
             self.assertEqual(policy.pacing_resume_stable_samples, 2)
             self.assertEqual(settlement_timeout, 30.0)
+            self.assertEqual(policy.pacing_timeout_seconds, settlement_timeout)
+            self.assertEqual(
+                policy.guard_kwargs()["pacing_timeout_seconds"],
+                settlement_timeout,
+            )
+            self.assertEqual(
+                policy.effective_config()["thermal_pacing"]["timeout_seconds"],
+                settlement_timeout,
+            )
             bench.validate_host_thermal_policy_value(record, "fixture")
 
             legacy_record = json.loads(json.dumps(record))

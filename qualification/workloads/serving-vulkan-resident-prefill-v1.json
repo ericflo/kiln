@@ -131,7 +131,8 @@
             "resume_millicelsius": 86000,
             "resume_signal": "SIGCONT",
             "scope": "server_process_group",
-            "start_millicelsius": 88000
+            "start_millicelsius": 88000,
+            "timeout_seconds": 180.0
           }
         },
         "vulkan_buffer_pool_gb": 3.0
