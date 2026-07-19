@@ -1724,7 +1724,11 @@ native capture plus 23 changing-input replays; every hidden value and the full
 K/V pools matched an independent eager cache exactly, with zero fallback or
 graph failure. That focused fixture contains full attention only. Production
 Qwen GDN parity, a source-bound c8 serving receipt, and the longer thermal gates
-remain mandatory before this becomes accepted performance evidence.
+remain mandatory before this becomes accepted performance evidence. A second
+bounded hybrid fixture now covers one production ROCm GDN layer followed by one
+full-attention layer: one capture plus seven replays matched eager hidden,
+recurrent, convolution, and full K/V state exactly, with 286,720 retained GDN
+slot bytes fully accounted.
 
 Serving benchmark driver v15 closes the next attribution gap before another
 ROCm arm. Each successful Kiln stream now retains its exact terminal

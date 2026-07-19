@@ -7619,6 +7619,103 @@ mod tests {
     }
 
     #[cfg(feature = "rocm")]
+    fn rocm_graph_hybrid_test_fixture(device: &Device) -> (ModelConfig, GpuWeights) {
+        use crate::forward::{
+            GpuAttentionWeights, GpuFfnWeights, GpuLayerWeights, GpuLinearAttentionWeights,
+        };
+
+        let (mut config, mut weights) = stale_generation_test_fixture(device);
+        config.num_layers = 2;
+        config.num_full_attention_layers = 1;
+        config.full_attention_interval = 2;
+        config.linear_num_key_heads = config.num_kv_heads;
+        config.linear_key_head_dim = config.head_dim;
+        config.linear_num_value_heads = config.num_attention_heads;
+        config.linear_value_head_dim = config.head_dim;
+        config.linear_conv_kernel_dim = 4;
+
+        let random_bf16 = |shape: Vec<usize>| {
+            Tensor::randn(0.0_f32, 0.02, shape, device)
+                .expect("random ROCm hybrid graph fixture tensor")
+                .to_dtype(kiln_tensor::DType::BF16)
+                .expect("cast ROCm hybrid graph fixture tensor")
+        };
+        let transposed = |tensor: &Tensor| {
+            tensor
+                .t()
+                .expect("transpose ROCm hybrid graph fixture tensor")
+                .contiguous()
+                .expect("materialize ROCm hybrid graph fixture transpose")
+        };
+
+        let qkv_dim = config.linear_qkv_dim();
+        let value_dim = config.linear_v_dim();
+        let value_heads = config.linear_num_value_heads;
+        let in_proj_qkv = random_bf16(vec![qkv_dim, config.hidden_size]);
+        let in_proj_z = random_bf16(vec![value_dim, config.hidden_size]);
+        let out_proj = random_bf16(vec![config.hidden_size, value_dim]);
+        let in_proj_a = random_bf16(vec![value_heads, config.hidden_size]);
+        let in_proj_b = random_bf16(vec![value_heads, config.hidden_size]);
+        let gate_proj = random_bf16(vec![config.intermediate_size, config.hidden_size]);
+        let up_proj = random_bf16(vec![config.intermediate_size, config.hidden_size]);
+        let down_proj = random_bf16(vec![config.hidden_size, config.intermediate_size]);
+        let linear_layer = GpuLayerWeights {
+            input_layernorm: Tensor::ones(config.hidden_size, kiln_tensor::DType::BF16, device)
+                .expect("hybrid input norm"),
+            post_attention_layernorm: Tensor::ones(
+                config.hidden_size,
+                kiln_tensor::DType::BF16,
+                device,
+            )
+            .expect("hybrid post-attention norm"),
+            attention: GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
+                in_proj_qkv_t: transposed(&in_proj_qkv),
+                in_proj_z_t: transposed(&in_proj_z),
+                in_proj_a_t: transposed(&in_proj_a),
+                in_proj_b_t: transposed(&in_proj_b),
+                out_proj_t: transposed(&out_proj),
+                in_proj_qkv,
+                in_proj_z,
+                out_proj,
+                in_proj_a,
+                in_proj_b,
+                conv1d: random_bf16(vec![qkv_dim, 1, config.linear_conv_kernel_dim]),
+                norm: Tensor::ones(
+                    config.linear_value_head_dim,
+                    kiln_tensor::DType::F32,
+                    device,
+                )
+                .expect("hybrid GDN norm"),
+                a_log: Tensor::zeros(value_heads, kiln_tensor::DType::F32, *device)
+                    .expect("hybrid GDN a_log"),
+                a_log_gates: Tensor::zeros(value_heads, kiln_tensor::DType::F32, *device)
+                    .expect("hybrid GDN a_log gates"),
+                dt_bias: Tensor::zeros(value_heads, kiln_tensor::DType::BF16, *device)
+                    .expect("hybrid GDN dt bias"),
+                in_proj_ab_t: None,
+                out_proj_marlin: None,
+                in_proj_qkvzab_w8: None,
+            }),
+            mlp: GpuFfnWeights {
+                gate_proj_t: transposed(&gate_proj),
+                up_proj_t: transposed(&up_proj),
+                down_proj_t: transposed(&down_proj),
+                gate_proj,
+                up_proj,
+                down_proj,
+                gate_up_proj_t: None,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
+            },
+        };
+        weights.layers.insert(0, linear_layer);
+        (config, weights)
+    }
+
+    #[cfg(feature = "rocm")]
     fn hidden_f32(tensor: &Tensor) -> Vec<f32> {
         tensor
             .to_device(Device::Cpu)
@@ -8716,6 +8813,144 @@ mod tests {
             stats.replay_successes,
             stats.fallbacks.total,
         );
+        Ok(())
+    }
+
+    /// Real gfx1151 proof that captured GDN recurrent and convolution state
+    /// advances exactly once per native batch replay.
+    #[cfg(feature = "rocm")]
+    #[test]
+    #[ignore = "requires an explicit real-ROCm qualification run"]
+    fn batched_graph_hybrid_gdn_state_matches_eager() -> Result<()> {
+        require_explicit_rocm_qualification();
+        assert!(
+            kiln_tensor::rocm_is_available(),
+            "ROCm qualification requested but no ROCm device is available"
+        );
+
+        let device = Device::Rocm(0);
+        configure_rocm_graph_test_memory_governor(&device);
+        let backend = crate::backend::for_device_kt(&device);
+        let (config, weights) = rocm_graph_hybrid_test_fixture(&device);
+        let graph_cache = PagedKvCacheKt::new(
+            config.num_full_attention_layers,
+            32,
+            16,
+            config.num_kv_heads,
+            config.head_dim,
+            kiln_tensor::DType::BF16,
+            device,
+        )?;
+        let eager_cache = PagedKvCacheKt::new(
+            config.num_full_attention_layers,
+            32,
+            16,
+            config.num_kv_heads,
+            config.head_dim,
+            kiln_tensor::DType::BF16,
+            device,
+        )?;
+        let tables = [
+            BlockTable { blocks: vec![0, 1] },
+            BlockTable { blocks: vec![4, 5] },
+            BlockTable { blocks: vec![8, 9] },
+            BlockTable {
+                blocks: vec![12, 13],
+            },
+        ];
+        let table_refs: Vec<&BlockTable> = tables.iter().collect();
+        let row_ids = [4201, 4202, 4203, 4204];
+        let mut graph_state = LinearAttentionState::new_with_batch_for_inference_runtime(
+            &config,
+            row_ids.len(),
+            &device,
+            backend.as_ref(),
+        )?;
+        let mut eager_state = LinearAttentionState::new_with_batch_for_inference_runtime(
+            &config,
+            row_ids.len(),
+            &device,
+            backend.as_ref(),
+        )?;
+        let mut graph_runner =
+            RocmGraphRunner::new(&device, RocmGraphExecutionPolicy::lazy_capture_replay());
+
+        for step in 1usize..=8 {
+            let token_ids = [
+                (step % config.vocab_size) as u32,
+                ((step + 5) % config.vocab_size) as u32,
+                ((step + 11) % config.vocab_size) as u32,
+                ((step + 17) % config.vocab_size) as u32,
+            ];
+            let sequence_lengths = [step, step + 1, step + 2, step + 3];
+            let graph_hidden = graph_runner
+                .decode_step_paged_batched_hidden(
+                    backend.as_ref(),
+                    &token_ids,
+                    &weights,
+                    &config,
+                    &graph_cache,
+                    &table_refs,
+                    &sequence_lengths,
+                    &mut graph_state,
+                    None,
+                    Some(&row_ids),
+                )?
+                .context("hybrid graph runner declined a requested batch")?;
+            let eager_hidden = model_forward_paged_decode_contiguous_batch_hidden_with_ids(
+                backend.as_ref(),
+                &token_ids,
+                &weights,
+                &config,
+                &eager_cache,
+                &table_refs,
+                &sequence_lengths,
+                Some(&mut eager_state),
+                None,
+                Some(&row_ids),
+            )?;
+
+            let parity = hidden_f32(&graph_hidden) == hidden_f32(&eager_hidden)
+                && graph_state
+                    .recurrent_states
+                    .iter()
+                    .zip(&eager_state.recurrent_states)
+                    .all(|(graph, eager)| hidden_f32(graph) == hidden_f32(eager))
+                && graph_state
+                    .conv_states
+                    .iter()
+                    .zip(&eager_state.conv_states)
+                    .all(|(graph, eager)| hidden_f32(graph) == hidden_f32(eager));
+            if !parity {
+                graph_runner.invalidate()?;
+                anyhow::bail!("hybrid ROCm graph hidden/GDN state mismatch at step {step}");
+            }
+            for layer in 0..graph_cache.num_layers() {
+                let (graph_k, graph_v) = graph_cache
+                    .pool_tensors(layer)
+                    .context("hybrid graph cache layer")?;
+                let (eager_k, eager_v) = eager_cache
+                    .pool_tensors(layer)
+                    .context("hybrid eager cache layer")?;
+                if hidden_f32(&graph_k) != hidden_f32(&eager_k)
+                    || hidden_f32(&graph_v) != hidden_f32(&eager_v)
+                {
+                    graph_runner.invalidate()?;
+                    anyhow::bail!("hybrid ROCm graph K/V mismatch at layer {layer}, step {step}");
+                }
+            }
+        }
+
+        let stats = graph_runner.stats();
+        eprintln!("[rocm-batched-graph-hybrid-parity] stats={stats:?}");
+        graph_runner.invalidate()?;
+        anyhow::ensure!(
+            stats.capture_successes == 1 && stats.replay_successes == 7,
+            "hybrid graph did not capture once and replay seven times: {stats:?}"
+        );
+        anyhow::ensure!(stats.failures == 0 && stats.fallbacks.total == 0);
+        anyhow::ensure!(stats.retained_slot_state_bytes > 0);
+        anyhow::ensure!(stats.active_graph_slot_count == 1 && stats.idle_graph_slot_count == 0);
         Ok(())
     }
 
