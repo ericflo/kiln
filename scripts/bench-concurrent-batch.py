@@ -4362,7 +4362,6 @@ def main(argv: list[str] | None = None) -> int:
         }
         if (
             args.reference_receipt is not None
-            and not completion_failures
             and host_thermal_record["mode"]
             in {"attached_process_group", "owned_process_group"}
             and len(runs) == len(sizes) * args.repeats

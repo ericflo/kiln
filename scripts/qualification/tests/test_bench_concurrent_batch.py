@@ -339,6 +339,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         guarded: bool = True,
         thermal_guard_factory: object = FakeThermalGuard,
         engine: str = "kiln",
+        extra_args: list[str] | None = None,
     ) -> tuple[int, Path]:
         output = Path(directory) / "receipt.json"
         runtime_artifact = Path(directory) / "kiln-server"
@@ -412,8 +413,7 @@ class ServingBenchmarkTests(unittest.TestCase):
                 if guarded
                 else ["--unsafe-no-host-thermal-guard"]
             )
-            return_code = bench.main(
-                [
+            arguments = [
                     "--engine",
                     engine,
                     "--base-url",
@@ -442,7 +442,8 @@ class ServingBenchmarkTests(unittest.TestCase):
                     str(output),
                     *thermal_args,
                 ]
-            )
+            arguments.extend(extra_args or [])
+            return_code = bench.main(arguments)
         return return_code, output
 
     def test_prompts_are_unique_per_row_and_preserve_the_marker_multiset(self) -> None:
@@ -1324,25 +1325,37 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(recorded_hash, bench.canonical_sha256(receipt))
 
     def test_cli_preserves_completed_rows_when_final_health_probe_fails(self) -> None:
-        with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
-            original_fetch_json = bench.fetch_json
-            health_calls = 0
-
-            def fail_final_health(
-                url: str, headers: dict[str, str], timeout_secs: float
-            ) -> dict:
-                nonlocal health_calls
-                if url.endswith("/health"):
-                    health_calls += 1
-                    if health_calls == 4:
-                        raise bench.BenchmarkError("injected final health failure")
-                return original_fetch_json(url, headers, timeout_secs)
-
-            return_code, output = self._run_cli_fixture(
-                fake, directory, fetch_json=fail_final_health
+        with (
+            FakeServer() as reference_server,
+            tempfile.TemporaryDirectory() as reference_directory,
+        ):
+            reference_code, reference_path = self._run_cli_fixture(
+                reference_server, reference_directory
             )
-            receipt = bench.strict_json_loads(output.read_bytes())
-            bench.validate_benchmark_receipt(receipt)
+            self.assertEqual(reference_code, 0)
+
+            with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
+                original_fetch_json = bench.fetch_json
+                health_calls = 0
+
+                def fail_final_health(
+                    url: str, headers: dict[str, str], timeout_secs: float
+                ) -> dict:
+                    nonlocal health_calls
+                    if url.endswith("/health"):
+                        health_calls += 1
+                        if health_calls == 4:
+                            raise bench.BenchmarkError("injected final health failure")
+                    return original_fetch_json(url, headers, timeout_secs)
+
+                return_code, output = self._run_cli_fixture(
+                    fake,
+                    directory,
+                    fetch_json=fail_final_health,
+                    extra_args=["--reference-receipt", str(reference_path)],
+                )
+                receipt = bench.strict_json_loads(output.read_bytes())
+                bench.validate_benchmark_receipt(receipt)
 
         self.assertEqual(return_code, 2)
         self.assertEqual(receipt["verdict"], "failed")
@@ -1350,6 +1363,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(receipt["runs"][0]["verdict"], "passed")
         self.assertEqual(receipt["completion"]["expected_run_count"], 1)
         self.assertEqual(receipt["completion"]["completed_run_count"], 1)
+        self.assertTrue(receipt["comparison"]["matched"])
         self.assertEqual(
             receipt["completion"]["finalization_checks"][
                 "execution_identity_unchanged"

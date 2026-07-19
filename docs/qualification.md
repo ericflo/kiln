@@ -1221,13 +1221,15 @@ The same attempt failed closed at the independent host-safety boundary. The
 measured window reported 4.259 output tokens/second and 4.258 thermally
 sustainable output tokens/second, but the process-group guard recorded one
 hard trip at 93.125 C and a 93.25 C peak from post-measurement thermal inertia.
-It terminated the server, completed cooldown at 43.375 C, removed the private model
-snapshot, and left no process or listener residue. Model fingerprinting before
+It terminated the server, completed cooldown at 43.375 C, removed the private
+model snapshot, and left no process or listener residue. Model fingerprinting before
 server creation also peaked at 92.875 C, outside continuous guard ownership.
 These values are counterevidence, not performance results. Further ROCm serving
 execution is gated on containing provenance hashing and thermal overshoot,
 preserving reference comparison on otherwise complete failed runs, and
 localizing the new first-token divergence with the guarded layer oracle.
+Reference comparison is independent of lifecycle acceptance: a complete
+output comparison must remain visible even when the thermal verdict fails.
 
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain

@@ -802,6 +802,7 @@ const generatedDocsPages = [
       '20260719t052911-rocm-strix-halo-greedy-c1-rmsnorm-repair-failed-v1.kiln.json',
       'does not establish multi-token parity',
       'post-measurement thermal inertia',
+      'Reference comparison is independent of lifecycle acceptance',
       'Missing devices and skipped tests are failures',
       'Vulkan serving baseline',
       'serving-vulkan-baseline-v1.json',

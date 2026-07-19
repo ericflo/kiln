@@ -211,6 +211,12 @@ either arm is hash-only, request cardinality and changed fields still remain
 available, while the byte offsets are null and `exact_output_compared` is
 false. Full text is never copied into the comparison summary itself.
 
+Reference comparison is independent of lifecycle acceptance. When every
+declared request row completed, the driver retains the comparison even if a
+repository, identity, shutdown, or thermal finalization check failed. The
+receipt verdict remains failed; preserving the comparison prevents a safety
+failure from hiding whether the completed model outputs matched.
+
 ### Current Strix Halo ROCm comparison
 
 The first exact-source pair uses commit `8f1e026b3`, Qwen3.5-4B, the fast
