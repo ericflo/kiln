@@ -989,6 +989,33 @@ portable result remains valid numerical evidence but does not claim guarded
 hashing; current-source receipts must retain that separate lifecycle, and a
 small guarded hardware run must verify it before any wider workload resumes.
 
+The guarded mixed-profile pair is retained at
+`qualification/oracle-results/rocm/strix-halo/20260719t031503-rocm-strix-halo-hf-layer-attribution-model-fallback-v1.json`
+and
+`qualification/oracle-results/rocm/strix-halo/20260719t032012-rocm-strix-halo-hf-layer-attribution-tensor-fallback-v1.json`,
+both from clean pushed source `2b5b33665bb6af835ee7034b5bd43903843cc5a3`.
+`model_fallback` restores token `15787` while preserving the qualified tensor
+policy. Its relative RMSE is `0.002575195`, `0.004210653`, and `0.007065248`
+after linear-attention layers 0 through 2, then `0.016856438` after final
+RMSNorm. Conversely, `tensor_fallback` preserves the qualified model policy
+and reproduces token `25045`, final logit hash
+`sha256:b5acbda785044ca46d6cddb9aea03258dd4f99fb1904dcb5983be49ef68fd603`,
+and the qualified relative-RMSE curve exactly: `0.014871503`, `0.036848969`,
+`0.065551177`, and `0.085119899` at the same boundaries. This pair localizes
+the defect to accelerated model dispatch rather than the optional low-level
+tensor routes. The first observed error remains layer 0 linear attention; the
+next discriminator must divide model-level recurrent-mixer dispatch from the
+other model routes before any repair is selected.
+
+The model- and tensor-fallback lifecycles completed in 89.496 and 147.114
+seconds. Across their six independently supervised fingerprint, HF, and Kiln
+arms, peak package temperature was 59.875 C; every pacing interval and cooldown
+completed, all cgroup high, limit, OOM, OOM-kill, and swap counters remained
+zero, and no owned process or service remained. The two Kiln cgroups peaked at
+12,109,606,912 and 14,658,228,224 bytes. These results authorize a narrower
+correctness discriminator only. They do not qualify fallback performance,
+multi-token parity, serving throughput, a soak, or final ROCm acceptance.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for
