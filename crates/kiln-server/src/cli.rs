@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use console::style;
 pub use kiln_core::thinking_budget::ExplicitThinkingBudget as ThinkingBudgetArg;
 use kiln_core::tokenizer::KilnTokenizer;
@@ -348,6 +348,8 @@ const CONFIG_OVERVIEW: &str = r#"Validate a Kiln TOML config file without starti
 Use this before `kiln serve` to catch invalid values, confirm resolved model settings, and preview process-lifetime accelerator, cache, and decoding policies.
 
 By default, `kiln config` checks the built-in defaults plus environment overrides. Pass `--file` to validate a specific TOML file and see the effective settings that `kiln serve --config <file>` would use.
+
+Pass `--backend` to resolve and validate the target backend's scheduling policy without probing hardware or loading model weights.
 "#;
 
 const CONFIG_EXAMPLES: &str = r#"Examples:
@@ -356,6 +358,9 @@ const CONFIG_EXAMPLES: &str = r#"Examples:
 
   kiln config --file kiln.toml
       Validate kiln.toml before starting the server with `kiln serve --config kiln.toml`.
+
+  kiln config --file kiln.toml --backend rocm
+      Resolve ROCm batching and streaming-prefill policy and reject an invalid actor-prefill contract without touching the accelerator.
 
   kiln config --file ./config/production.toml
       Check a production config file and print the effective server, model, logging, and feature settings.
@@ -670,6 +675,11 @@ pub enum Commands {
         /// Path to config file to validate
         #[arg(long, short)]
         file: Option<String>,
+
+        /// Resolve and validate scheduling policy for a target backend without
+        /// probing hardware or loading model weights.
+        #[arg(long, value_enum, value_name = "BACKEND")]
+        backend: Option<ConfigCheckBackend>,
     },
 
     /// Configure pi to use this Kiln server as its model backend.
@@ -716,6 +726,27 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         no_crisp: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ConfigCheckBackend {
+    Cpu,
+    Cuda,
+    Rocm,
+    Metal,
+    Vulkan,
+}
+
+impl ConfigCheckBackend {
+    fn policy_identity(self) -> (&'static str, kiln_tensor::Device) {
+        match self {
+            Self::Cpu => ("cpu", kiln_tensor::Device::Cpu),
+            Self::Cuda => ("cuda", kiln_tensor::Device::Cuda(0)),
+            Self::Rocm => ("rocm", kiln_tensor::Device::Rocm(0)),
+            Self::Metal => ("metal", kiln_tensor::Device::Metal(0)),
+            Self::Vulkan => ("vulkan", kiln_tensor::Device::Vulkan(0)),
+        }
+    }
 }
 
 /// `kiln judge` subcommands. (Grand plan §10.6.)
@@ -1657,8 +1688,208 @@ fn format_checkpoint_boundary_config(
     output
 }
 
+fn format_actor_prefill_config(config: &crate::config::KilnConfig) -> String {
+    use std::fmt::Write as _;
+
+    let configured = |value: Option<usize>, unit: &str| {
+        value
+            .map(|number| format!("{number}{unit}"))
+            .unwrap_or_else(|| "auto".to_owned())
+    };
+    let mut output = String::new();
+    for (label, value, source) in [
+        (
+            "Actor cycle token budget:",
+            format!("{} tokens", config.server.max_batch_tokens.tokens()),
+            config.server.max_batch_tokens.source(),
+        ),
+        (
+            "Actor prefill token ceiling:",
+            format!(
+                "{} tokens",
+                config.server.max_prefill_tokens_per_cycle.tokens()
+            ),
+            config.server.max_prefill_tokens_per_cycle.source(),
+        ),
+        (
+            "Actor prefill layer ceiling:",
+            format!(
+                "{} layers",
+                config.server.max_prefill_layers_per_cycle.layers()
+            ),
+            config.server.max_prefill_layers_per_cycle.source(),
+        ),
+        (
+            "Decode width ceiling:",
+            configured(config.server.max_decode_batch.limit(), ""),
+            config.server.max_decode_batch.source(),
+        ),
+        (
+            "Streaming prefill mode:",
+            config.streaming_prefill.mode.mode().to_string(),
+            config.streaming_prefill.mode.source(),
+        ),
+        (
+            "Streaming prefill threshold:",
+            configured(
+                config.streaming_prefill.threshold_tokens.configured(),
+                " tokens",
+            ),
+            config.streaming_prefill.threshold_tokens.source(),
+        ),
+        (
+            "Streaming base tile:",
+            configured(config.streaming_prefill.tile_tokens.configured(), " tokens"),
+            config.streaming_prefill.tile_tokens.source(),
+        ),
+        (
+            "Streaming tape tile:",
+            configured(
+                config.streaming_prefill.tape_tile_tokens.configured(),
+                " tokens",
+            ),
+            config.streaming_prefill.tape_tile_tokens.source(),
+        ),
+        (
+            "Streaming detached full-attention tile:",
+            configured(
+                config
+                    .streaming_prefill
+                    .detached_full_attn_tile_tokens
+                    .configured(),
+                " tokens",
+            ),
+            config
+                .streaming_prefill
+                .detached_full_attn_tile_tokens
+                .source(),
+        ),
+    ] {
+        let _ = writeln!(
+            output,
+            "  {} {value} (source: {source})",
+            style(label).dim()
+        );
+    }
+    let _ = writeln!(
+        output,
+        "  {} backend-effective dispatch, tiles, decode width, and actor alignment resolve after backend selection and fail before model-weight loading",
+        style("Prefill startup contract:").dim(),
+    );
+    output
+}
+
+fn format_streaming_prefill_dispatch(
+    rule: crate::config::StreamingPrefillDispatchRuleDiagnostics,
+) -> String {
+    match rule.policy {
+        crate::config::StreamingPrefillDispatchPolicy::Never => "never".to_owned(),
+        crate::config::StreamingPrefillDispatchPolicy::AllNonEmpty => "all_non_empty".to_owned(),
+        crate::config::StreamingPrefillDispatchPolicy::PromptTokensAtLeast => format!(
+            "prompt_tokens_at_least {} tokens",
+            rule.minimum_prompt_tokens
+                .expect("prompt-token dispatch rule must carry its threshold")
+        ),
+    }
+}
+
+fn format_actor_prefill_backend_config(
+    config: &crate::config::KilnConfig,
+    backend: ConfigCheckBackend,
+) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    use std::fmt::Write as _;
+
+    let (backend_name, device) = backend.policy_identity();
+    let decode_policy = kiln_model::DecodeBatcherPolicy::for_backend(backend_name, device);
+    let decode_runtime = crate::batching_engine::resolve_decode_runtime_config(
+        config.server.deterministic,
+        config.server.max_decode_batch,
+        Some(decode_policy),
+        config.server.max_batch_tokens,
+    );
+    let batching = config.batching.resolve(
+        crate::config::BatchingBackendPolicy::from_decode_batcher_policy(decode_policy),
+        decode_runtime.max_decode_batch.effective,
+    );
+    let streaming =
+        config
+            .streaming_prefill
+            .resolve(kiln_model::StreamingPrefillBackendPolicy::for_backend(
+                backend_name,
+                device,
+            ));
+    crate::config::validate_actor_prefill_tile_contract(
+        batching,
+        streaming,
+        config.server.max_batch_tokens,
+        config.server.max_prefill_tokens_per_cycle,
+        decode_runtime.max_decode_batch.effective,
+    )
+    .with_context(|| format!("invalid {backend_name} actor-prefill contract"))?;
+
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
+        "  {} {backend_name} (hardware-free policy preview)",
+        style("Target backend:").dim()
+    );
+    let _ = writeln!(
+        output,
+        "  {} {} (source: {})",
+        style("Batching actor effective:").dim(),
+        batching.mode.effective_enabled,
+        batching.mode.effective_source
+    );
+    let _ = writeln!(
+        output,
+        "  {} {} (source: backend_policy)",
+        style("Actor prefill alignment required:").dim(),
+        batching.actor_prefill_tile_alignment_required
+    );
+    let _ = writeln!(
+        output,
+        "  {} {} rows (source: {})",
+        style("Effective decode width:").dim(),
+        decode_runtime.max_decode_batch.effective,
+        decode_runtime.max_decode_batch.effective_source
+    );
+    let _ = writeln!(
+        output,
+        "  {} {} (source: {})",
+        style("Effective streaming dispatch:").dim(),
+        format_streaming_prefill_dispatch(streaming.dispatch.effective),
+        streaming.dispatch.effective_source
+    );
+    for (label, diagnostics) in [
+        ("Effective streaming base tile:", streaming.tile_tokens),
+        ("Effective streaming tape tile:", streaming.tape_tile_tokens),
+        (
+            "Effective detached full-attention tile:",
+            streaming.detached_full_attn_tile_tokens,
+        ),
+    ] {
+        let _ = writeln!(
+            output,
+            "  {} {} tokens (source: {})",
+            style(label).dim(),
+            diagnostics.effective,
+            diagnostics.effective_source
+        );
+    }
+    let _ = writeln!(
+        output,
+        "  {} valid (no hardware probe or model load)",
+        style("Actor-prefill backend contract:").dim()
+    );
+    Ok(output)
+}
+
 /// Run the `config check` CLI subcommand: validate config without starting.
-pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
+pub fn run_config_check(
+    file: Option<&str>,
+    backend: Option<ConfigCheckBackend>,
+) -> anyhow::Result<()> {
     use crate::config::KilnConfig;
 
     match KilnConfig::load(file).and_then(|config| {
@@ -1667,9 +1898,16 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             .validate_for_model(&kiln_core::config::ModelConfig::qwen3_5_4b())?;
         config.speculative.validate_for_serving()?;
         let checkpoint_boundary_policy = config.training.checkpoint_boundary_policy()?;
-        Ok((config, checkpoint_boundary_policy))
+        let actor_prefill_backend_output = backend
+            .map(|target| format_actor_prefill_backend_config(&config, target))
+            .transpose()?;
+        Ok((
+            config,
+            checkpoint_boundary_policy,
+            actor_prefill_backend_output,
+        ))
     }) {
-        Ok((config, checkpoint_boundary_policy)) => {
+        Ok((config, checkpoint_boundary_policy, actor_prefill_backend_output)) => {
             let accelerator_runtime = config
                 .accelerator
                 .resolved_policy(config.server.serving_profile);
@@ -1814,6 +2052,10 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 style("Batching actor:").dim(),
                 config.batching.mode.mode()
             );
+            print!("{}", format_actor_prefill_config(&config));
+            if let Some(output) = actor_prefill_backend_output {
+                print!("{output}");
+            }
             println!(
                 "  {} {}",
                 style("Direct streaming rendezvous:").dim(),
@@ -4042,6 +4284,140 @@ checkpoint_boundary_cache_gb = 2.5
             assert!(
                 output.contains(expected),
                 "missing {expected:?} in {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn actor_prefill_config_output_reports_complete_configured_contract() {
+        let defaults = crate::config::KilnConfig::default();
+        let default_output = format_actor_prefill_config(&defaults);
+        for expected in [
+            "Actor cycle token budget: 512 tokens (source: default)",
+            "Actor prefill token ceiling: 256 tokens (source: default)",
+            "Actor prefill layer ceiling: 4 layers (source: default)",
+            "Decode width ceiling: auto (source: default)",
+            "Streaming prefill mode: auto (source: default)",
+            "Streaming prefill threshold: auto (source: default)",
+            "Streaming base tile: auto (source: default)",
+            "Streaming tape tile: auto (source: default)",
+            "Streaming detached full-attention tile: auto (source: default)",
+            "fail before model-weight loading",
+        ] {
+            assert!(
+                default_output.contains(expected),
+                "missing {expected:?} in {default_output:?}"
+            );
+        }
+
+        let explicit: crate::config::KilnConfig = toml::from_str(
+            r#"
+[server]
+max_batch_tokens = 640
+max_prefill_tokens_per_cycle = 256
+max_prefill_layers_per_cycle = 8
+max_decode_batch = 16
+
+[streaming_prefill]
+mode = "enabled"
+threshold_tokens = 256
+tile_tokens = 256
+tape_tile_tokens = 512
+detached_full_attn_tile_tokens = 8192
+"#,
+        )
+        .unwrap();
+        let explicit_output = format_actor_prefill_config(&explicit);
+        for expected in [
+            "Actor cycle token budget: 640 tokens (source: config_file)",
+            "Actor prefill token ceiling: 256 tokens (source: config_file)",
+            "Actor prefill layer ceiling: 8 layers (source: config_file)",
+            "Decode width ceiling: 16 (source: config_file)",
+            "Streaming prefill mode: enabled (source: config_file)",
+            "Streaming prefill threshold: 256 tokens (source: config_file)",
+            "Streaming base tile: 256 tokens (source: config_file)",
+            "Streaming tape tile: 512 tokens (source: config_file)",
+            "Streaming detached full-attention tile: 8192 tokens (source: config_file)",
+        ] {
+            assert!(
+                explicit_output.contains(expected),
+                "missing {expected:?} in {explicit_output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn actor_prefill_backend_preflight_resolves_rocm_and_rejects_legacy_chunk() {
+        let defaults = crate::config::KilnConfig::default();
+        let output = format_actor_prefill_backend_config(&defaults, ConfigCheckBackend::Rocm)
+            .expect("default ROCm actor-prefill contract should be valid");
+        for expected in [
+            "Target backend: rocm (hardware-free policy preview)",
+            "Batching actor effective: true (source: backend_policy)",
+            "Actor prefill alignment required: true (source: backend_policy)",
+            "Effective decode width: 8 rows (source: backend_policy)",
+            "Effective streaming dispatch: prompt_tokens_at_least 256 tokens (source: backend_policy)",
+            "Effective streaming base tile: 256 tokens (source: backend_policy)",
+            "Effective streaming tape tile: 256 tokens (source: backend_policy)",
+            "Actor-prefill backend contract: valid (no hardware probe or model load)",
+        ] {
+            assert!(
+                output.contains(expected),
+                "missing {expected:?} in {output:?}"
+            );
+        }
+
+        let legacy: crate::config::KilnConfig = toml::from_str(
+            r#"
+[server]
+max_prefill_tokens_per_cycle = 64
+"#,
+        )
+        .unwrap();
+        let error = format_actor_prefill_backend_config(&legacy, ConfigCheckBackend::Rocm)
+            .expect_err("legacy 64-token ROCm actor chunk must fail preflight");
+        let error = format!("{error:#}");
+        assert!(error.contains("invalid rocm actor-prefill contract"));
+        assert!(error.contains(
+            "server.max_prefill_tokens_per_cycle=64 must equal the backend's effective streaming_prefill.tile_tokens=256"
+        ));
+
+        let actor_disabled: crate::config::KilnConfig = toml::from_str(
+            r#"
+[server]
+max_prefill_tokens_per_cycle = 64
+
+[batching]
+mode = "disabled"
+"#,
+        )
+        .unwrap();
+        format_actor_prefill_backend_config(&actor_disabled, ConfigCheckBackend::Rocm)
+            .expect("the alignment contract is inert when the actor is explicitly disabled");
+    }
+
+    #[test]
+    fn config_check_backend_cli_is_explicit_and_closed() {
+        let cli =
+            Cli::try_parse_from(["kiln", "config", "--file", "kiln.toml", "--backend", "rocm"])
+                .expect("documented ROCm config preflight should parse");
+        match cli.command {
+            Some(Commands::ConfigCheck { file, backend }) => {
+                assert_eq!(file.as_deref(), Some("kiln.toml"));
+                assert_eq!(backend, Some(ConfigCheckBackend::Rocm));
+            }
+            _ => panic!("expected config command"),
+        }
+
+        let error = match Cli::try_parse_from(["kiln", "config", "--backend", "auto"]) {
+            Ok(_) => panic!("config preflight must require one concrete target backend"),
+            Err(error) => error,
+        };
+        let rendered = error.to_string();
+        for backend in ["cpu", "cuda", "rocm", "metal", "vulkan"] {
+            assert!(
+                rendered.contains(backend),
+                "missing {backend:?} in {rendered:?}"
             );
         }
     }

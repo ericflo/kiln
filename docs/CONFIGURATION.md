@@ -111,11 +111,15 @@ Validate without starting the server:
 
 ```bash
 kiln config --file kiln.toml
+kiln config --file kiln.toml --backend rocm
 ```
 
 This command uses the same typed loader and environment precedence as serving,
 but its pretty output is a summary rather than a complete effective-config
-dump.
+dump. The optional `--backend cpu|cuda|rocm|metal|vulkan` selector resolves that
+target's static scheduling capabilities and applies the same actor-prefill
+startup validator as `kiln serve`. It does not enumerate devices, probe memory,
+open an accelerator, or load model weights.
 
 ## Coverage summary
 
@@ -879,8 +883,16 @@ clients must use `route_available` for this deliberately narrow direct route.
 `kiln config --file <path>` validates and prints all eight `[batching]` startup
 values: actor mode, rowwise decode, prefix-aware admission, prefill quantum,
 direct rendezvous mode, maximum batch, wait microseconds, and mixed-sequence
-policy. It cannot report backend-effective or live route state because it does
-not construct a model; inspect `/v1/config` after restart for those facts.
+policy. It also prints the combined actor-cycle budget, prompt-token and layer
+ceilings, configured decode-width ceiling, streaming mode, threshold, base,
+tape, and detached full-attention tiles with source provenance. It does not
+construct an accelerator. Add `--backend rocm` (or another target) to resolve
+the effective actor selection, alignment requirement, decode width, streaming
+dispatch, and tiles from the same backend policies used at serve startup. The
+command applies the real actor-prefill contract and exits nonzero before any
+hardware access when the combination is invalid. Without `--backend`, it names
+those values as a serve-startup contract instead of guessing a target. Inspect
+`/v1/config` after restart for actual selected-device and live route facts.
 
 ## `[model]`
 
@@ -1816,7 +1828,10 @@ Kiln currently exposes several complementary, partial views:
 
 - `kiln config --file <path>` performs authoritative parsing and validation,
   then prints a human-oriented subset of resolved fields, including the ROCm
-  synchronization mode and configured/effective graph policy.
+  synchronization mode and configured/effective graph policy. Adding
+  `--backend <target>` resolves hardware-independent scheduling capabilities
+  and rejects an invalid actor-prefill contract, but deliberately does not
+  claim device availability or live route state.
 - `GET /v1/config` reports runtime diagnostics for serving profile, the
   versioned accelerator runtime policy, effective
   decode width, speculative configuration and availability, VRAM/KV state,
@@ -1889,7 +1904,8 @@ lands, use the typed validation command plus startup/runtime diagnostics.
 These are current implementation facts, not recommended architecture:
 
 1. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
-   typed object with provenance and backend-derived values.
+   typed object with provenance and backend-derived values. The CLI's optional
+   backend preview is intentionally limited to static scheduling policy.
 2. **Deprecated aliases:** 61 non-canonical spellings across 58 fields remain
    temporarily for compatibility, including `KILN_DEFAULT_NO_THINK`. Each use
    warns at startup; canonical and compatibility names cannot silently

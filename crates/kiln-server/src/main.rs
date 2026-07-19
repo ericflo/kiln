@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
         _ => (None, false),
     };
     let diagnostics_config_path = match &args.command {
-        Some(Commands::ConfigCheck { file }) => file.as_deref().or(args.config.as_deref()),
+        Some(Commands::ConfigCheck { file, .. }) => file.as_deref().or(args.config.as_deref()),
         _ => args.config.as_deref(),
     };
     let bootstrap_logging = kiln_server::logging::bootstrap_config(diagnostics_config_path);
@@ -324,8 +324,8 @@ async fn main() -> Result<()> {
             )
             .await;
         }
-        Some(Commands::ConfigCheck { ref file }) => {
-            return cli::run_config_check(file.as_deref().or(args.config.as_deref()));
+        Some(Commands::ConfigCheck { ref file, backend }) => {
+            return cli::run_config_check(file.as_deref().or(args.config.as_deref()), backend);
         }
         Some(Commands::Train(ref train)) => match train {
             TrainCommands::Sft {
