@@ -394,8 +394,20 @@ This four-token c1 result is localization evidence only. It does not separate
 actor prefill from actor decode/state assembly, prove 64-token parity, qualify
 the actor-disabled configuration for production, or support concurrency,
 throughput, latency, or endurance claims. Its 9.40 output tokens/second is
-diagnostic-only. The next correction must repair or disable the divergent actor
-subpath, then repeat source-paired multi-token parity before returning to the
+diagnostic-only.
+
+The actor-enabled parent reports three prompt-token chunks, 24 prefill
+forwards, 21 layer yields, and 96 completed transformer layers for the measured
+163-token prompt. The direct arm does not use this actor prefill route. The
+next source-bound discriminator is
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-no-prefix-cache-prefill-256-v1.json`.
+It changes only `server.max_prefill_tokens_per_cycle` from 64 to 256. The
+measured prompt therefore fits in one actor token chunk while the unchanged
+four-layer quantum still requires eight forwards and seven layer yields.
+`foundation` localizes the defect to token-chunk boundaries; `baseline` rules
+out that boundary and leaves layer resumption or a later actor transition.
+Neither outcome is performance or acceptance evidence. Repair the resulting
+subpath and repeat source-paired multi-token parity before returning to the
 serving matrix.
 
 ## Running One Profile
@@ -479,11 +491,13 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v8 is the current contract. It adds mandatory initial and final guarded
-model-fingerprint lifecycles to the v7 output-evidence contract. A v8 exact-output
-run may use a strict-valid v7 or v8 reference because the workload, model,
-thermal-policy, prompt, and output contracts are unchanged; the current arm must
-still satisfy v8 containment. Driver v7 added mandatory ordered per-request
+Driver v9 is the current contract. It adds route-aware batching-actor and
+direct-rendezvous diagnostics to v8 without changing the workload or output
+contract. Driver v8 added mandatory initial and final guarded model-fingerprint
+lifecycles to v7. A v9 exact-output run may use a strict-valid v7, v8, or v9
+reference because the model, thermal-policy, prompt, and output contracts are
+unchanged; the current arm must still satisfy v9 routing and v8 containment.
+Driver v7 added mandatory ordered per-request
 output evidence and structured mismatch localization to the v6 lifecycle contract.
 Driver v6 retains the v5 mandatory post-provenance, pre-process cooldown and
 adds the structured startup-failure evidence described above. It also validates

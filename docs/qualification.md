@@ -1346,6 +1346,20 @@ diagnostic-only. Initial fingerprint, server, and final fingerprint peaks were
 59.5, 60.0, and 59.875 C, every lifecycle and cooldown completed without a
 trip, and no listener, process, or snapshot remained.
 
+The actor-enabled parent records three prompt-token chunks, 24 prefill
+forwards, 21 layer yields, and 96 completed transformer layers for the exact
+163-token prompt. The direct route has no actor prefill counter. To separate
+actor token chunking from layer resumption, launch
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-no-prefix-cache-prefill-256-v1.json`.
+Relative to the actor-enabled no-prefix parent, it changes only
+`server.max_prefill_tokens_per_cycle = 256`; graphs stay disabled, prefix
+caching stays disabled, the actor stays enabled, and the four-layer quantum is
+unchanged. The prompt must therefore complete as one token chunk across eight
+layer-group forwards and seven yields. `foundation` makes the 64-token chunk
+boundary causal. `baseline` excludes token chunking and moves the next repair
+to layer resumption or the remaining actor handoff. This bounded four-token arm
+cannot qualify performance, concurrency, or endurance.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for

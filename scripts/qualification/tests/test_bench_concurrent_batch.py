@@ -445,6 +445,10 @@ class ServingBenchmarkTests(unittest.TestCase):
             "kiln-rocm-strix-halo-serving-comparison-graph-disabled-"
             "no-prefix-cache-no-batching-v1"
         )
+        prefill_256_name = (
+            "kiln-rocm-strix-halo-serving-comparison-graph-disabled-"
+            "no-prefix-cache-prefill-256-v1"
+        )
 
         base = tomllib.loads((config_root / f"{base_name}.toml").read_text())
         diagnostic = tomllib.loads(
@@ -477,11 +481,24 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertEqual(no_batching, no_prefix)
 
+        prefill_256 = tomllib.loads(
+            (config_root / f"{prefill_256_name}.toml").read_text()
+        )
+        self.assertEqual(
+            prefill_256["server"]["max_prefill_tokens_per_cycle"], 256
+        )
+        prefill_256["server"]["max_prefill_tokens_per_cycle"] = 64
+        no_prefix = tomllib.loads(
+            (config_root / f"{no_prefix_name}.toml").read_text()
+        )
+        self.assertEqual(prefill_256, no_prefix)
+
         for name in (
             base_name,
             diagnostic_name,
             no_prefix_name,
             no_batching_name,
+            prefill_256_name,
         ):
             path = launch_root / f"{name}.json"
             raw = bench.strict_json_loads(path.read_bytes())
