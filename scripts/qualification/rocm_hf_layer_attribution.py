@@ -35,7 +35,12 @@ WORKER_PREFIX = "KILN_ROCM_HF_LAYER_ATTRIBUTION "
 HF_MEMORY_MAX_GIB = 16
 HF_RUNTIME_MAX_SECONDS = 600
 RECOVERY_TIMEOUT_SECONDS = 300
-KERNEL_PROFILES = ("qualified", "portable_fallback")
+KERNEL_PROFILES = (
+    "qualified",
+    "portable_fallback",
+    "model_fallback",
+    "tensor_fallback",
+)
 
 
 class LayerAttributionError(RuntimeError):

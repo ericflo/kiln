@@ -212,6 +212,23 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             self.assertEqual(len(spec["environment"]), 6)
             self.assertFalse(any(name.startswith("KILN_") for name in spec["environment"]))
 
+            for profile in ("model_fallback", "tensor_fallback"):
+                profile_workspace = workspace / profile
+                profile_workspace.mkdir()
+                profile_spec = attribution._layer_worker_spec(
+                    workspace=profile_workspace,
+                    binary=binary,
+                    binary_sha256="sha256:" + "1" * 64,
+                    model=model,
+                    request=request,
+                    reference=reference,
+                    kernel_profile=profile,
+                )
+                profile_document = json.loads(profile_spec.read_text())
+                self.assertEqual(
+                    profile_document["argv"][-2:], ["--kernel-profile", profile]
+                )
+
             with self.assertRaisesRegex(attribution.LayerAttributionError, "unsupported"):
                 attribution._layer_worker_spec(
                     workspace=workspace / "invalid",
@@ -309,6 +326,10 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             [],
         )
         self.assertEqual(attribution.validate_worker_marker(fallback["worker"]), fallback["worker"])
+        for profile in ("model_fallback", "tensor_fallback"):
+            diagnostic = copy.deepcopy(fallback["worker"])
+            diagnostic["kernel_policy"] = profile
+            self.assertEqual(attribution.validate_worker_marker(diagnostic), diagnostic)
         invalid = copy.deepcopy(fallback["worker"])
         invalid["kernel_policy"] = "individual_switches"
         with self.assertRaisesRegex(attribution.LayerAttributionError, "request or output"):

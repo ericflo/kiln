@@ -50,39 +50,49 @@ mod rocm {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum KernelProfile {
+        ModelFallback,
         Qualified,
         PortableFallback,
+        TensorFallback,
     }
 
     impl KernelProfile {
         fn parse(value: &str) -> Result<Self> {
             match value {
+                "model_fallback" => Ok(Self::ModelFallback),
                 "qualified" => Ok(Self::Qualified),
                 "portable_fallback" => Ok(Self::PortableFallback),
+                "tensor_fallback" => Ok(Self::TensorFallback),
                 _ => anyhow::bail!(
-                    "--kernel-profile must be qualified or portable_fallback, got {value}"
+                    "--kernel-profile must be model_fallback, qualified, portable_fallback, or tensor_fallback, got {value}"
                 ),
             }
         }
 
         const fn label(self) -> &'static str {
             match self {
+                Self::ModelFallback => "model_fallback",
                 Self::Qualified => "qualified",
                 Self::PortableFallback => "portable_fallback",
+                Self::TensorFallback => "tensor_fallback",
             }
         }
 
         const fn model_policy(self) -> RocmKernelPolicy {
             match self {
+                Self::ModelFallback => RocmKernelPolicy::portable_fallback(),
                 Self::Qualified => RocmKernelPolicy::qualified(),
                 Self::PortableFallback => RocmKernelPolicy::portable_fallback(),
+                Self::TensorFallback => RocmKernelPolicy::qualified(),
             }
         }
 
         const fn tensor_policy(self) -> RocmTensorKernelPolicy {
             match self {
+                Self::ModelFallback => RocmTensorKernelPolicy::qualified(),
                 Self::Qualified => RocmTensorKernelPolicy::qualified(),
                 Self::PortableFallback => RocmTensorKernelPolicy::portable_fallback(),
+                Self::TensorFallback => RocmTensorKernelPolicy::portable_fallback(),
             }
         }
     }
@@ -396,7 +406,7 @@ mod rocm {
             .unwrap_or(KernelProfile::Qualified);
         anyhow::ensure!(
             layer_attribution || kernel_profile == KernelProfile::Qualified,
-            "portable_fallback is supported only with --layer-attribution"
+            "diagnostic kernel profiles are supported only with --layer-attribution"
         );
         Ok(Args {
             kernel_profile,
@@ -1236,6 +1246,24 @@ mod rocm {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn diagnostic_profiles_split_model_and_tensor_route_groups() {
+            let model = KernelProfile::parse("model_fallback").unwrap();
+            assert_eq!(model.model_policy(), RocmKernelPolicy::portable_fallback());
+            assert_eq!(model.tensor_policy(), RocmTensorKernelPolicy::qualified());
+            assert_eq!(model.label(), "model_fallback");
+
+            let tensor = KernelProfile::parse("tensor_fallback").unwrap();
+            assert_eq!(tensor.model_policy(), RocmKernelPolicy::qualified());
+            assert_eq!(
+                tensor.tensor_policy(),
+                RocmTensorKernelPolicy::portable_fallback()
+            );
+            assert_eq!(tensor.label(), "tensor_fallback");
+
+            assert!(KernelProfile::parse("individual_switches").is_err());
+        }
 
         #[test]
         fn tensor_logits_explicitly_casts_bf16() {

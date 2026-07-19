@@ -340,7 +340,12 @@
         "input_token_ids_sha256": { "$ref": "#/$defs/sha256" },
         "kernel_policy": {
           "type": "string",
-          "enum": ["qualified", "portable_fallback"]
+          "enum": [
+            "qualified",
+            "portable_fallback",
+            "model_fallback",
+            "tensor_fallback"
+          ]
         },
         "largest_relative_error_growth": { "$ref": "#/$defs/errorGrowth" },
         "observed_next_tokens": {

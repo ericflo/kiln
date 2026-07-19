@@ -873,16 +873,27 @@ python3 scripts/qualification/rocm_hf_layer_attribution.py run \
 ```
 
 `--kernel-profile` is a closed typed choice. `qualified` is the production
-model/tensor policy and remains the default. `portable_fallback` preserves the
-same ROCm device, BF16 weights, paged state, prompt, and layer capture while
-declining every accelerated model route and every optional accelerated tensor
-route. Use a source-paired portable-fallback rerun after a qualified result has
-localized an early numerical difference: improvement isolates the defect to
-the accelerated policy as a group, while an unchanged curve rules that group
-out. The worker marker, compact result, JSON Schema, and checker bind the chosen
-profile; the closed worker environment never translates it through an ambient
-environment variable. The path-attribution mode remains qualified-only because
-its graph route is itself the object under test.
+model/tensor policy and remains the default. Three layer-only diagnostic
+profiles preserve the same ROCm device, BF16 weights, paged state, prompt, and
+layer capture:
+
+- `portable_fallback` declines every accelerated model route and every optional
+  accelerated tensor route.
+- `model_fallback` declines accelerated model routes while retaining the
+  qualified low-level tensor policy.
+- `tensor_fallback` retains qualified model dispatch while declining optional
+  accelerated tensor routes.
+
+Use the source-paired portable profile first to determine whether acceleration
+as a group changes the error curve. If it does, run both mixed profiles: a
+correct `model_fallback` with an incorrect `tensor_fallback` localizes the
+defect to accelerated model dispatch, while the inverse localizes it to
+low-level tensor dispatch. If both are wrong or both are correct, the result is
+an interaction or a non-exclusive cause and must not be reported as a single
+group. The worker marker, compact result, JSON Schema, and checker bind the
+chosen profile; the closed worker environment never translates it through an
+ambient environment variable. The path-attribution mode remains qualified-only
+because its graph route is itself the object under test.
 
 The HF arm uses the pinned PyTorch/Transformers fallback implementation,
 BF16 weights, eager full attention, deterministic algorithms, TF32 disabled,
