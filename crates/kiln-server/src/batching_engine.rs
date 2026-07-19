@@ -7180,11 +7180,13 @@ mod tests {
         assert_eq!(actor.max_prefill_staging_slots, 2);
         assert_eq!(actor.max_active_requests, 4);
         assert_eq!(actor.snapshot.max_prefill_staging_priority_burst, 4);
+        let staging_entry_token_limit = actor.prefill_staging_entry_token_limit();
+        let ordinary_short_tail = staging_entry_token_limit - actor.max_prefill_tokens_per_cycle;
 
         let mut receivers = Vec::new();
         for key in [10, 20] {
             let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
-            let mut prompt = vec![1; 400];
+            let mut prompt = vec![1; staging_entry_token_limit + 80];
             *prompt.last_mut().unwrap() = key;
             queue_test_request(&mut actor, request_with_tokens(prompt, 4), response_tx);
             receivers.push(response_rx);
@@ -7192,7 +7194,11 @@ mod tests {
         actor.admit_waiting();
         assert_eq!(actor.active_admission_lane_counts(), (2, 0));
 
-        for (key, prompt_len) in [(30, 400), (40, 276), (50, 100)] {
+        for (key, prompt_len) in [
+            (30, staging_entry_token_limit + 80),
+            (40, ordinary_short_tail),
+            (50, 100),
+        ] {
             let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
             let mut prompt = vec![1; prompt_len];
             *prompt.last_mut().unwrap() = key;
@@ -7379,11 +7385,22 @@ mod tests {
             false,
             ResponseDeliveryPolicy::default(),
         );
+        let ordinary_short_tail = actor
+            .max_prefill_tokens_per_cycle
+            .saturating_mul(SHORT_PREFILL_PRIORITY_MAX_CHUNKS);
+        let staging_entry_token_limit = actor.prefill_staging_entry_token_limit();
+        let boundary_tokens = ordinary_short_tail + 20;
+        assert!(boundary_tokens <= staging_entry_token_limit);
+        let long_tokens = staging_entry_token_limit.saturating_mul(2);
         let mut receivers = Vec::new();
         for (key, tokens, lane) in [
-            (LONG_A, 1_024, ActiveAdmissionLane::Ordinary),
-            (LONG_B, 1_024, ActiveAdmissionLane::Ordinary),
-            (BOUNDARY, 276, ActiveAdmissionLane::PrefillStaging),
+            (LONG_A, long_tokens, ActiveAdmissionLane::Ordinary),
+            (LONG_B, long_tokens, ActiveAdmissionLane::Ordinary),
+            (
+                BOUNDARY,
+                boundary_tokens,
+                ActiveAdmissionLane::PrefillStaging,
+            ),
         ] {
             let req = request_with_tokens(vec![key; tokens], 1);
             let RequestPreparation::Prefilling { slot, .. } = forward
@@ -7398,7 +7415,10 @@ mod tests {
             receivers.push(response_rx);
         }
 
-        assert_eq!(actor.prefill_staging_entry_token_limit(), 320);
+        assert_eq!(
+            staging_entry_token_limit,
+            ordinary_short_tail + actor.max_prefill_tokens_per_cycle
+        );
         assert_eq!(actor.select_prefill_index(64), Some((2, true)));
         assert_eq!(actor.snapshot.total_prefill_staging_priority_forwards, 1);
 
