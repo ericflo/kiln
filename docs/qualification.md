@@ -1660,18 +1660,34 @@ fell to 10.299 tokens/second, p99 TTFT reached 18.514 seconds, p99 ITL reached
 This proves the mechanism and thermal effect but rejects the 100 ms/four-layer
 combination for production latency; do not expand it to the mixed matrix.
 
-The next one-field discriminator is
+The completed prefill-amortization discriminator was
 `qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-decode-batch-4-actor-cycle-idle-100ms-prefill-layers-32-v1.json`.
 It retains the thermally contained profile and changes only
 `server.max_prefill_layers_per_cycle` from four to 32. For this eight-request
 Qwen3.5-4B row, that can reduce the measured 128 prefill forwards to 16 while
 leaving the 100 ms decode-cycle boundary intact. The purpose is to amortize
 prefill waits and recover TTFT in one larger step, not to weaken decode cooling.
-The same driver-v13 accounting, 93 C hard limit, exact output length, memory,
-graph, route, lifecycle, and finalization gates apply. Any trip, missing usage,
-diagnostic contradiction, or residue rejects the arm; a formally passing row
-still requires useful latency and SLO goodput before any longer matrix is
-allowed.
+The exact run reduced prefill forwards to 17 and actor waits from 159 to 66,
+recovering p99 TTFT from 18.514 to 2.799 seconds and aggregate output from
+10.299 to 15.174 tokens/second. It stayed thermally contained at 78.375 C for
+the measured row and 90 C for the complete lifecycle, and all eight requests
+completed exactly 32 tokens. The actor wait itself remained bounded to
+100.244 ms.
+
+The strict receipt is
+`benchmarks/receipts/rocm/strix-halo/20260719t190930-rocm-strix-halo-greedy-c8-decode-batch-4-actor-cycle-idle-100ms-prefill-layers-32-v13.kiln.json`.
+Its verdict is failed. Two single-row graphs were already resident from warmup,
+but the measured width-four path recorded zero graph capture attempts, replays,
+fallbacks, failures, or an unavailable reason. The required
+`rocm_graph_execution_accounted` gate therefore failed. Separately, keeping all
+eight prompts decode-ready exposed the cost of rotating two eager width-four
+cohorts: each forward took roughly 122--141 ms before the explicit 100 ms idle,
+p50/p99 ITL rose to 461.309/1,058.994 ms, and SLO goodput remained zero. This is
+not actor-wait oversleep; the process maximum proves that wait stayed near its
+configured bound. Do not retry this profile or run the longer matrix. Before
+another performance arm, the multi-row eager route must report why the requested
+single-row ROCm graph runner was inapplicable, and the evidence gate must
+distinguish explicit inapplicability from silent zero activity.
 
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
