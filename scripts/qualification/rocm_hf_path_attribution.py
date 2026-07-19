@@ -28,6 +28,9 @@ BUILD_SCRIPT = ROOT / "scripts/cargo-bounded.sh"
 GUARDED_EXEC = ROOT / "scripts/qualification/guarded_exec.py"
 SUPERVISOR = ROOT / "scripts/qualification/hf_thermal_supervisor.py"
 SCHEMA = "kiln.rocm-hf-path-attribution-result.v1"
+LEGACY_UNGUARDED_FINGERPRINT_RESULTS = {
+    "sha256:47206ec2cd5e91d53f3f8652ba34dc51e5a0a2dfa93ba1122369527741df874a",
+}
 WORKER_SCHEMA = "kiln.rocm-hf-path-attribution.v1"
 WORKER_PREFIX = "KILN_ROCM_HF_PATH_ATTRIBUTION "
 MEMORY_MAX_GIB = 48
@@ -502,9 +505,16 @@ def execute(
         or reference_path.stat().st_size != oracle_result["reference_artifact"]["bytes"]
     ):
         raise AttributionError("raw HF reference does not match the retained result")
-    model, model_identity = hf_oracle._validate_model(model_path, request["model_identity"])
     python = hf_oracle._validate_executable(python_path)
     policy_path = policy_path.resolve(strict=True)
+    model, model_identity, model_fingerprint = hf_oracle._validate_model(
+        model_path,
+        request["model_identity"],
+        policy=policy_path,
+        python=python,
+    )
+    if hf_oracle._repository_identity() != source:
+        raise AttributionError("repository identity changed during model fingerprinting")
     available = hf_oracle._available_gib()
     if available < MIN_AVAILABLE_GIB:
         raise AttributionError(
@@ -584,6 +594,7 @@ def execute(
             "runner_sha256": hf_oracle._file_sha256(Path(__file__)),
             "supervisor_sha256": hf_oracle._file_sha256(SUPERVISOR),
         },
+        "model_fingerprint": model_fingerprint,
         "model_identity": model_identity,
         "oracle_reference": {
             "bytes": reference_path.stat().st_size,
@@ -626,13 +637,26 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         "source",
         "worker",
     }
-    if not isinstance(value, dict) or set(value) != fields or value["schema"] != SCHEMA:
+    allowed_fields = (fields, fields | {"model_fingerprint"})
+    if (
+        not isinstance(value, dict)
+        or set(value) not in allowed_fields
+        or value["schema"] != SCHEMA
+    ):
         raise AttributionError("result fields or schema are invalid")
     unsigned = dict(value)
     unsigned.pop("result_sha256")
     expected_hash = contract.canonical_sha256(unsigned)
     if value["result_sha256"] != expected_hash:
         raise AttributionError("result_sha256 is inconsistent")
+    try:
+        hf_oracle.validate_model_fingerprint_evidence(
+            value.get("model_fingerprint"),
+            result_sha256=value["result_sha256"],
+            legacy_result_sha256s=LEGACY_UNGUARDED_FINGERPRINT_RESULTS,
+        )
+    except hf_oracle.OracleRunError as exc:
+        raise AttributionError(str(exc)) from exc
     worker = validate_worker_marker(value["worker"])
     if not isinstance(value["containment"], dict):
         raise AttributionError("result containment must be an object")
@@ -646,6 +670,12 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         or thermal != value["containment"]["thermal"]
     ):
         raise AttributionError("result containment is inconsistent")
+    model_fingerprint = value.get("model_fingerprint")
+    if (
+        model_fingerprint is not None
+        and model_fingerprint["thermal"]["policy"] != thermal["policy"]
+    ):
+        raise AttributionError("model fingerprint and attribution thermal policies differ")
     if not isinstance(value["request"], dict):
         raise AttributionError("result request must be an object")
     request_path = _path_from_repository(value["request"].get("path"), "request.path")
@@ -737,6 +767,18 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
     ]:
         if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
             raise AttributionError("result contains an invalid SHA-256 digest")
+    if require_current_source:
+        expected_implementation = {
+            "guarded_exec_sha256": hf_oracle._file_sha256(GUARDED_EXEC),
+            "runner_sha256": hf_oracle._file_sha256(Path(__file__)),
+            "supervisor_sha256": hf_oracle._file_sha256(SUPERVISOR),
+        }
+        if value["implementation"] != expected_implementation:
+            raise AttributionError("result implementation does not match current source")
+        if value["model_fingerprint"]["implementation_sha256"] != hf_oracle._file_sha256(
+            hf_oracle.MODEL_FINGERPRINT_SCRIPT
+        ):
+            raise AttributionError("model fingerprint implementation does not match current source")
     if (
         _finite_number(value["binary"]["build_duration_seconds"], "binary build duration")
         <= 0

@@ -43,6 +43,9 @@ REQUEST_PATH = (
     / "qualification/oracles/rocm-strix-halo-greedy-c1-first-divergence-v1.json"
 )
 POLICY_PATH = ROOT / "qualification/host-policies/strix-halo-hf-oracle-v1.json"
+ALTERNATE_POLICY_PATH = (
+    ROOT / "qualification/host-policies/strix-halo-serving-benchmark-c32-v1.json"
+)
 
 
 def next_token_evidence() -> dict[str, object]:
@@ -103,43 +106,50 @@ def next_token_evidence() -> dict[str, object]:
     }
 
 
-def thermal_evidence() -> dict[str, object]:
-    policy, _runtime_policy, _settlement = host_thermal_policy.load(POLICY_PATH)
+def thermal_evidence(policy_path: Path = POLICY_PATH) -> dict[str, object]:
+    policy, runtime_policy, settlement = host_thermal_policy.load(
+        policy_path,
+        cooldown_mode="post_process_exit_consecutive_samples",
+    )
+    safe_temperature = runtime_policy.cooldown_target_millicelsius - 1_000
+    peak_temperature = min(80_000, runtime_policy.limit_millicelsius - 1_000)
     return {
-        "phase_settlement_timeout_seconds": 300.0,
+        "phase_settlement_timeout_seconds": settlement,
         "policy": policy,
         "prelaunch_cooldown": {
             "completed": True,
             "elapsed_seconds": 1.0,
-            "poll_interval_ms": 50,
-            "sample_count": 20,
+            "poll_interval_ms": runtime_policy.poll_interval_ms,
+            "sample_count": runtime_policy.cooldown_stable_samples,
             "scope": "host_package_before_process_creation",
             "sensor_path": "/sys/class/hwmon/hwmon0/temp1_input",
-            "stable_samples_observed": 20,
-            "stable_samples_required": 20,
-            "target_millicelsius": 45000,
-            "temperature_end_millicelsius": 44000,
-            "temperature_peak_millicelsius": 45000,
-            "temperature_start_millicelsius": 45000,
-            "timeout_seconds": 300.0,
+            "stable_samples_observed": runtime_policy.cooldown_stable_samples,
+            "stable_samples_required": runtime_policy.cooldown_stable_samples,
+            "target_millicelsius": runtime_policy.cooldown_target_millicelsius,
+            "temperature_end_millicelsius": safe_temperature,
+            "temperature_peak_millicelsius": runtime_policy.cooldown_target_millicelsius,
+            "temperature_start_millicelsius": runtime_policy.cooldown_target_millicelsius,
+            "timeout_seconds": runtime_policy.cooldown_timeout_seconds,
         },
         "runtime": {
-            "host_temperature_end_millicelsius": 44000,
-            "host_temperature_peak_millicelsius": 80000,
-            "host_temperature_start_millicelsius": 44000,
+            "host_temperature_end_millicelsius": safe_temperature,
+            "host_temperature_peak_millicelsius": peak_temperature,
+            "host_temperature_start_millicelsius": safe_temperature,
             "host_thermal_cooldown_active_end": 0,
             "host_thermal_cooldown_completed_count": 1,
-            "host_thermal_cooldown_peak_millicelsius": 80000,
+            "host_thermal_cooldown_peak_millicelsius": peak_temperature,
             "host_thermal_cooldown_sample_count": 100,
             "host_thermal_cooldown_seconds": 5.0,
-            "host_thermal_cooldown_stable_sample_count": 20,
+            "host_thermal_cooldown_stable_sample_count": runtime_policy.cooldown_stable_samples,
             "host_thermal_cooldown_timeout_count": 0,
             "host_thermal_guard_trip_count": 0,
             "host_thermal_pacing_active_end": 0,
             "host_thermal_pacing_completed_event_count": 2,
             "host_thermal_pacing_event_count": 2,
             "host_thermal_pacing_max_seconds": 2.0,
-            "host_thermal_pacing_max_start_millicelsius": 59000,
+            "host_thermal_pacing_max_start_millicelsius": (
+                runtime_policy.pacing_start_millicelsius or 0
+            ),
             "host_thermal_pacing_seconds": 3.0,
         },
         "schema": supervisor.SCHEMA,
@@ -263,6 +273,46 @@ class HfNextTokenOracleTests(unittest.TestCase):
                 [sys.executable, str(REQUEST_PATH), "--start-gate", "/tmp/gate"]
             )
 
+    def test_model_fingerprint_runs_as_guarded_worker_with_closed_environment(self) -> None:
+        request, _request_sha256 = contract.load_request(REQUEST_PATH)
+        raw_identity = {**request["model_identity"], "path": "/models/pinned"}
+        raw_identity.pop("content_sha256")
+        stdout = json.dumps(raw_identity)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            supervisor,
+            "supervise",
+            return_value=(0, stdout, "", thermal_evidence()),
+        ) as supervise:
+            model = Path(directory) / "model"
+            model.mkdir()
+            actual_model, identity, evidence = runner._validate_model(
+                model,
+                request["model_identity"],
+                policy=POLICY_PATH,
+                python=Path(sys.executable).resolve(),
+            )
+        command = supervise.call_args.kwargs["worker_command"]
+        environment = supervise.call_args.kwargs["worker_environment"]
+        self.assertEqual(actual_model, model.resolve())
+        self.assertEqual(identity, request["model_identity"])
+        self.assertEqual(evidence["thermal"], thermal_evidence())
+        self.assertEqual(
+            set(environment), {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONHASHSEED", "TMPDIR"}
+        )
+        self.assertEqual(command[1], str(runner.MODEL_FINGERPRINT_SCRIPT))
+        self.assertNotIn("--start-gate", command)
+        self.assertEqual(supervise.call_args.kwargs["worker_phase"], "model-fingerprint")
+        self.assertNotIn("HF_TOKEN", environment)
+        self.assertNotIn("KILN_", "\0".join(f"{key}={value}" for key, value in environment.items()))
+
+    def test_guarded_fingerprint_output_requires_strict_json_object(self) -> None:
+        identity = runner._parse_guarded_fingerprint_output('{"id":"model"}')
+        self.assertEqual(identity, {"id": "model"})
+        with self.assertRaisesRegex(runner.OracleRunError, "invalid JSON"):
+            runner._parse_guarded_fingerprint_output("noise")
+        with self.assertRaisesRegex(runner.OracleRunError, "must be an object"):
+            runner._parse_guarded_fingerprint_output("[]")
+
     def test_result_checker_binds_request_containment_and_self_hash(self) -> None:
         request, request_sha256 = contract.load_request(REQUEST_PATH)
         oracle = next_token_evidence()
@@ -283,6 +333,11 @@ class HfNextTokenOracleTests(unittest.TestCase):
                 "hf_worker_sha256": "sha256:" + "1" * 64,
                 "python_sha256": "sha256:" + "2" * 64,
                 "supervisor_sha256": "sha256:" + "3" * 64,
+            },
+            "model_fingerprint": {
+                "implementation_sha256": "sha256:" + "5" * 64,
+                "python_sha256": "sha256:" + "2" * 64,
+                "thermal": thermal_evidence(),
             },
             "model_identity": request["model_identity"],
             "oracle": oracle,
@@ -321,6 +376,22 @@ class HfNextTokenOracleTests(unittest.TestCase):
             path = Path(directory) / "result.json"
             path.write_text(json.dumps(result))
             self.assertEqual(runner.validate_result(path), result)
+            mismatch = copy.deepcopy(result)
+            mismatch["model_fingerprint"]["thermal"] = thermal_evidence(ALTERNATE_POLICY_PATH)
+            mismatch["result_sha256"] = contract.canonical_sha256(
+                {name: value for name, value in mismatch.items() if name != "result_sha256"}
+            )
+            path.write_text(json.dumps(mismatch))
+            with self.assertRaisesRegex(runner.OracleRunError, "thermal policies differ"):
+                runner.validate_result(path)
+            missing = copy.deepcopy(result)
+            missing.pop("model_fingerprint")
+            missing["result_sha256"] = contract.canonical_sha256(
+                {name: value for name, value in missing.items() if name != "result_sha256"}
+            )
+            path.write_text(json.dumps(missing))
+            with self.assertRaisesRegex(runner.OracleRunError, "thermal evidence is required"):
+                runner.validate_result(path)
             result["verdict"]["argmax_candidate"] = "vllm"
             path.write_text(json.dumps(result))
             with self.assertRaisesRegex(runner.OracleRunError, "result_sha256"):

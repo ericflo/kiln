@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -25,6 +26,32 @@ READ_CHUNK_BYTES = 8 * 1024 * 1024
 
 class ModelFingerprintError(RuntimeError):
     """Raised when a model directory cannot be fingerprinted safely."""
+
+
+def _wait_for_start_gate(path: Path | None, timeout_seconds: float = 60.0) -> None:
+    if path is None:
+        return
+    if not path.is_absolute():
+        raise ModelFingerprintError("--start-gate must be absolute")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if path.is_symlink():
+            raise ModelFingerprintError("start gate must not be a symlink")
+        if path.is_file():
+            try:
+                payload = path.read_bytes()
+            except OSError as exc:
+                raise ModelFingerprintError(f"cannot read start gate: {exc}") from exc
+            if payload != b"go\n":
+                raise ModelFingerprintError("start gate payload must equal 'go\\n'")
+            return
+        if path.exists():
+            raise ModelFingerprintError("start gate must be a regular file")
+        if time.monotonic() >= deadline:
+            raise ModelFingerprintError(
+                f"start gate was not released within {timeout_seconds:.3f} seconds"
+            )
+        time.sleep(0.01)
 
 
 @dataclass
@@ -401,6 +428,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--model-path", required=True, type=Path, help="local model directory")
     parser.add_argument("--model-id", help="receipt model ID (default: model directory name)")
     parser.add_argument("--json", action="store_true", help="emit the receipt model object as JSON")
+    parser.add_argument("--start-gate", type=Path, help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -417,6 +445,7 @@ def _print_human(value: dict[str, Any]) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
+        _wait_for_start_gate(args.start_gate)
         value = fingerprint_model(args.model_path, args.model_id)
     except ModelFingerprintError as exc:
         print(f"model fingerprint failed: {exc}", file=sys.stderr)

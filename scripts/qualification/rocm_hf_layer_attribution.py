@@ -26,6 +26,10 @@ from strict_json import loads as strict_json_loads
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = "kiln.rocm-hf-layer-attribution-result.v1"
+LEGACY_UNGUARDED_FINGERPRINT_RESULTS = {
+    "sha256:8134c9c4a42f4d0fd5582ea72a7b4e8548e65fd12e80ca336af2bdadea1f370d",
+    "sha256:f14ca700b0df823b8c8e6d3f592b7ed876c0345482aa7b57079dc6a439dba372",
+}
 WORKER_SCHEMA = "kiln.rocm-hf-layer-attribution.v1"
 WORKER_PREFIX = "KILN_ROCM_HF_LAYER_ATTRIBUTION "
 HF_MEMORY_MAX_GIB = 16
@@ -368,9 +372,16 @@ def execute(
     request_path = request_path.resolve(strict=True)
     request, request_sha256 = contract.load_request(request_path)
     contract.validate_source_receipts(request, ROOT)
-    model, model_identity = hf_oracle._validate_model(model_path, request["model_identity"])
     python = hf_oracle._validate_executable(python_path)
     policy = policy_path.resolve(strict=True)
+    model, model_identity, model_fingerprint = hf_oracle._validate_model(
+        model_path,
+        request["model_identity"],
+        policy=policy,
+        python=python,
+    )
+    if hf_oracle._repository_identity() != source:
+        raise LayerAttributionError("repository identity changed during model fingerprinting")
     available_before_hf = hf_oracle._available_gib()
     if available_before_hf < hf_oracle.MIN_AVAILABLE_GIB:
         raise LayerAttributionError(
@@ -511,6 +522,7 @@ def execute(
             "runner_sha256": hf_oracle._file_sha256(Path(__file__)),
             "supervisor_sha256": hf_oracle._file_sha256(path_attribution.SUPERVISOR),
         },
+        "model_fingerprint": model_fingerprint,
         "model_identity": model_identity,
         "reference": {
             "bytes": reference.stat().st_size,
@@ -556,12 +568,25 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         "source",
         "worker",
     }
-    if not isinstance(value, dict) or set(value) != fields or value["schema"] != SCHEMA:
+    allowed_fields = (fields, fields | {"model_fingerprint"})
+    if (
+        not isinstance(value, dict)
+        or set(value) not in allowed_fields
+        or value["schema"] != SCHEMA
+    ):
         raise LayerAttributionError("layer result fields or schema are invalid")
     unsigned = dict(value)
     unsigned.pop("result_sha256")
     if value["result_sha256"] != contract.canonical_sha256(unsigned):
         raise LayerAttributionError("result_sha256 is inconsistent")
+    try:
+        hf_oracle.validate_model_fingerprint_evidence(
+            value.get("model_fingerprint"),
+            result_sha256=value["result_sha256"],
+            legacy_result_sha256s=LEGACY_UNGUARDED_FINGERPRINT_RESULTS,
+        )
+    except hf_oracle.OracleRunError as exc:
+        raise LayerAttributionError(str(exc)) from exc
     worker = validate_worker_marker(value["worker"])
     request_record = value["request"]
     if not isinstance(request_record, dict) or set(request_record) != {"path", "sha256"}:
@@ -629,6 +654,12 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
             or supervisor.validate_evidence(record["thermal"]) != record["thermal"]
         ):
             raise LayerAttributionError(f"layer result {name} containment is invalid")
+    model_fingerprint = value.get("model_fingerprint")
+    if model_fingerprint is not None and any(
+        model_fingerprint["thermal"]["policy"] != containment[name]["thermal"]["policy"]
+        for name in ("hf", "kiln")
+    ):
+        raise LayerAttributionError("model fingerprint and layer thermal policies differ")
     source = value["source"]
     if (
         not isinstance(source, dict)
@@ -667,6 +698,11 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         "supervisor_sha256",
     }:
         raise LayerAttributionError("layer result implementation fields are invalid")
+    if (
+        model_fingerprint is not None
+        and model_fingerprint["python_sha256"] != implementation["python_sha256"]
+    ):
+        raise LayerAttributionError("model fingerprint and layer interpreter hashes differ")
     digests = [
         value["result_sha256"],
         reference["sha256"],
@@ -675,6 +711,22 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
     ]
     if any(re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None for digest in digests):
         raise LayerAttributionError("layer result contains an invalid SHA-256 digest")
+    if require_current_source:
+        expected_implementation = {
+            "guarded_exec_sha256": hf_oracle._file_sha256(path_attribution.GUARDED_EXEC),
+            "hf_worker_sha256": hf_oracle._file_sha256(Path(hf_worker.__file__)),
+            "python_sha256": implementation["python_sha256"],
+            "runner_sha256": hf_oracle._file_sha256(Path(__file__)),
+            "supervisor_sha256": hf_oracle._file_sha256(path_attribution.SUPERVISOR),
+        }
+        if implementation != expected_implementation:
+            raise LayerAttributionError("layer implementation does not match current source")
+        if value["model_fingerprint"]["implementation_sha256"] != hf_oracle._file_sha256(
+            hf_oracle.MODEL_FINGERPRINT_SCRIPT
+        ):
+            raise LayerAttributionError(
+                "model fingerprint implementation does not match current source"
+            )
     if _finite(value["duration_seconds"], "duration_seconds") <= 0:
         raise LayerAttributionError("layer result duration must be positive")
     return value

@@ -56,6 +56,7 @@
       }
     },
     "model_identity": { "$ref": "#/$defs/modelIdentity" },
+    "model_fingerprint": { "$ref": "#/$defs/modelFingerprintEvidence" },
     "containment": {
       "type": "object",
       "additionalProperties": false,
@@ -166,6 +167,17 @@
           "minItems": 1,
           "items": { "$ref": "#/$defs/weightFile" }
         }
+      }
+    },
+    "modelFingerprintEvidence": {
+      "description": "Continuous thermal containment and source identity for the separate model-provenance hashing process. Absent only from the exact retained legacy result accepted by the checker.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["implementation_sha256", "python_sha256", "thermal"],
+      "properties": {
+        "implementation_sha256": { "$ref": "#/$defs/sha256" },
+        "python_sha256": { "$ref": "#/$defs/sha256" },
+        "thermal": { "$ref": "#/$defs/thermalEvidence" }
       }
     },
     "topToken": {

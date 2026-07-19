@@ -30,6 +30,9 @@
     "model_identity": {
       "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/modelIdentity"
     },
+    "model_fingerprint": {
+      "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/modelFingerprintEvidence"
+    },
     "request": { "$ref": "#/$defs/request" },
     "reference": { "$ref": "#/$defs/reference" },
     "containment": { "$ref": "#/$defs/containment" },

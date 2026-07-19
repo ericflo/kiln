@@ -96,6 +96,8 @@ def supervise(
     policy_path: Path,
     workspace: Path,
     worker_command: list[str],
+    worker_environment: dict[str, str] | None = None,
+    worker_phase: str = "hf-eager-forward",
 ) -> tuple[int, str, str, dict[str, Any]]:
     if not policy_path.is_absolute() or not workspace.is_absolute():
         raise SupervisorError("policy and workspace paths must be absolute")
@@ -107,6 +109,8 @@ def supervise(
         cooldown_mode="post_process_exit_consecutive_samples",
     )
     command = _validate_worker_command(worker_command)
+    if not worker_phase:
+        raise SupervisorError("worker phase must not be empty")
     prelaunch = thermal_policy_file.wait_for_prelaunch_cooldown(
         policy,
         trace_callback=_trace,
@@ -123,6 +127,7 @@ def supervise(
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
+        env=worker_environment,
     )
     guard: thermal.HostThermalGuard | None = None
     stdout = ""
@@ -139,7 +144,7 @@ def supervise(
         if guard.trip_reason is not None:
             raise SupervisorError(guard.trip_reason)
         _release_gate(gate)
-        guard.set_phase("hf-eager-forward")
+        guard.set_phase(worker_phase)
         stdout, stderr = process.communicate(timeout=WORKER_TIMEOUT_SECONDS)
     except BaseException:
         _terminate_group(process)

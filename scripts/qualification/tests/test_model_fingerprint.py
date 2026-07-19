@@ -255,6 +255,36 @@ class ModelFingerprintTests(unittest.TestCase):
         self.assertIsNone(value["chat_template_hash"])
         self.assertEqual(set(self.root.iterdir()), before)
 
+    def test_cli_start_gate_is_absolute_exact_and_checked_before_hashing(self) -> None:
+        self._write("model.safetensors", b"weight")
+        with self.assertRaisesRegex(model_fingerprint.ModelFingerprintError, "must be absolute"):
+            model_fingerprint._wait_for_start_gate(Path("relative"), timeout_seconds=0.01)
+        with tempfile.TemporaryDirectory() as directory:
+            gate = Path(directory) / "gate"
+            gate.write_bytes(b"go\n")
+            model_fingerprint._wait_for_start_gate(gate, timeout_seconds=0.01)
+            gate.write_bytes(b"wrong")
+            with self.assertRaisesRegex(model_fingerprint.ModelFingerprintError, "payload"):
+                model_fingerprint._wait_for_start_gate(gate, timeout_seconds=0.01)
+
+        gate = Path(self.tmp.name) / "released"
+        gate.write_bytes(b"go\n")
+        stdout = io.StringIO()
+        with mock.patch.object(
+            model_fingerprint, "fingerprint_model", wraps=model_fingerprint.fingerprint_model
+        ) as fingerprint, contextlib.redirect_stdout(stdout):
+            return_code = model_fingerprint.main(
+                [
+                    "--model-path",
+                    str(self.root),
+                    "--json",
+                    "--start-gate",
+                    str(gate),
+                ]
+            )
+        self.assertEqual(return_code, 0)
+        fingerprint.assert_called_once_with(self.root, None)
+
     def test_tokenizer_config_template_fallback_hashes_decoded_string_bytes(self) -> None:
         self._write("model.safetensors", b"weight")
         (self.root / "chat_template.jinja").unlink()

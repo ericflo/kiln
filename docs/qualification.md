@@ -647,25 +647,41 @@ python3 scripts/qualification/rocm_hf_next_token_oracle.py run \
   --out "$(pwd)/.qualification/rocm-hf-next-token-result.json"
 ```
 
-Before the service exists, the driver strictly validates both source receipts,
-hashes the complete model content, verifies at least 23 GiB `MemAvailable`, and
-requires `HEAD == origin/main`. Model hashing occurs before the supervised
-prelaunch cooldown so provenance work cannot hand a hot package directly to
-the accelerator. The systemd service then supplies the same 16 GiB memory,
-zero-swap, private-network, 600-second control-group boundary used by the full
-Vulkan oracle. The gated worker independently reloads the pinned tokenizer and
-must reproduce every prompt ID and every retained token's decoded bytes before
-loading the model. It pins ROCm PyTorch, Transformers sources and versions,
-eager attention, the Transformers torch linear-attention fallback, BF16,
-deterministic algorithms, and TF32-off execution.
+Before an accelerator service exists, the driver strictly validates both source
+receipts, requires `HEAD == origin/main`, resolves the declared thermal policy
+and interpreter, and fingerprints the complete model in a separate process.
+That process receives only `HOME`, locale, `PATH`, `PYTHONHASHSEED`, and its
+private `TMPDIR`; no ambient token or `KILN_*` configuration crosses the
+boundary. The supervisor owns the worker's private start gate, requires the
+stable 45 C prelaunch boundary, attaches the continuous package guard, and only
+then releases model hashing. Hashing is stopped at 58 C, resumes after 20
+consecutive samples at or below 50 C, terminates at the 93 C hard limit, and
+must complete the same 45 C post-exit cooldown. An exception or timeout tears
+down the complete fingerprint process group and prevents result creation.
+
+The fingerprint worker holds non-symlink regular-file descriptors, hashes all
+declared weight shards and configuration/tokenizer/template inputs, and
+rechecks their metadata and contents before accepting the identity. The driver
+then verifies at least 23 GiB `MemAvailable`. The accelerator systemd service
+supplies the same 16 GiB memory, zero-swap, private-network, 600-second
+control-group boundary used by the full Vulkan oracle. Its gated worker
+independently reloads the pinned tokenizer and must reproduce every prompt ID
+and every retained token's decoded bytes before loading the model. It pins ROCm
+PyTorch, Transformers sources and versions, eager attention, the Transformers
+torch linear-attention fallback, BF16, deterministic algorithms, and TF32-off
+execution.
 
 The compact result retains the full-vocabulary F32-logit hash, argmax and text,
 top ten token IDs/text/logits, both candidate logits and vocabulary ranks,
 argmax margin, package versions, cgroup peak/limit/OOM/swap counters, thermal
 policy and lifecycle, clean pushed source identity, implementation hashes, and
-an explicit `kiln`, `vllm`, or `neither` attribution. The roughly one-MiB raw
-logit artifact remains ignored. The result has a canonical `result_sha256` and
-can be checked without running the model:
+an explicit `kiln`, `vllm`, or `neither` attribution. New results also contain
+`model_fingerprint`, binding the fingerprint script and interpreter hashes plus
+its complete prelaunch, pacing, peak, and cooldown evidence. The checker accepts
+that field's absence only for the exact canonical hashes of the four retained
+pre-correction oracle/path/layer results; an arbitrary new result cannot omit
+it. The roughly one-MiB raw logit artifact remains ignored. The result has a
+canonical `result_sha256` and can be checked without running the model:
 
 ```bash
 python3 scripts/qualification/rocm_hf_next_token_oracle.py check \
@@ -736,7 +752,10 @@ python3 scripts/qualification/rocm_hf_path_attribution.py run \
 
 Before device execution, the runner revalidates the request, both source
 receipts, retained HF result, full model content, raw reference, interpreter,
-clean source identity, and at least 23 GiB of host-available memory. It performs
+clean source identity, and at least 23 GiB of host-available memory. Full model
+content uses the same separately gated, continuously guarded fingerprint
+process described above, and the path result binds its implementation,
+interpreter, and thermal lifecycle. It performs
 an offline locked `gfx1151` release build through `scripts/cargo-bounded.sh`
 with a 15 GiB build floor, 50 percent CPU quota, zero swap, private networking,
 and the versioned `closed-source-build-v1` environment policy. Ambient
@@ -857,7 +876,9 @@ supervisor as the next-token oracle. Forward hooks retain only one cloned last
 row per boundary; the ignored safetensors artifact contains the 34-by-2,560
 F32 matrix, the exact input IDs, and final logits. The marker and compact result
 bind its aggregate row hash, ordered names, model/request identity, installed
-source hashes, cgroup events, and complete thermal lifecycle.
+source hashes, cgroup events, and complete thermal lifecycle. Before this arm,
+the separately gated fingerprint process uses the same declared policy and its
+own complete lifecycle is retained alongside the model identity.
 
 The Kiln arm rebuilds the shared attribution example through the offline
 `gfx1151` closed-source build service. Its exact-argv open-inode gate then runs
@@ -936,9 +957,11 @@ owned residue. Model provenance hashing immediately before HF supervision
 heated the package to 93.5 C, above the runtime policy's 93 C limit but below
 the outer source-build guard's 97 C ceiling. The prelaunch gate then waited
 5.721 seconds and required 20 stable samples at or below 45 C before creating
-the process, so inference was contained, but hashing itself was not. No wider
-workload should follow until provenance hashing is covered by the same
-continuous thermal policy.
+the process, so inference was contained, but hashing itself was not. That
+counterexample prompted the guarded fingerprint process described above. The
+portable result remains valid numerical evidence but does not claim guarded
+hashing; current-source receipts must retain that separate lifecycle, and a
+small guarded hardware run must verify it before any wider workload resumes.
 
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain

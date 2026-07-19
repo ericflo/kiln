@@ -258,6 +258,11 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
                 "runner_sha256": "sha256:" + "5" * 64,
                 "supervisor_sha256": "sha256:" + "6" * 64,
             },
+            "model_fingerprint": {
+                "implementation_sha256": "sha256:" + "7" * 64,
+                "python_sha256": "sha256:" + "4" * 64,
+                "thermal": oracle["containment"]["service"],
+            },
             "model_identity": request["model_identity"],
             "reference": {
                 "bytes": evidence["output_bytes"],

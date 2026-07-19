@@ -11,6 +11,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -19,19 +20,22 @@ from typing import Any
 
 import hf_next_token_contract as contract
 import hf_thermal_supervisor as supervisor
-from model_fingerprint import ModelFingerprintError, fingerprint_model
 from strict_json import loads as strict_json_loads
 
 
 ROOT = Path(__file__).resolve().parents[2]
 HF_SCRIPT = ROOT / "scripts/qualification/qwen35_hf_logits.py"
 SUPERVISOR_SCRIPT = ROOT / "scripts/qualification/hf_thermal_supervisor.py"
+MODEL_FINGERPRINT_SCRIPT = ROOT / "scripts/qualification/model_fingerprint.py"
 SCHEMA = "kiln.rocm-hf-next-token-oracle.v1"
 PASS_PREFIX = "KILN_ROCM_HF_NEXT_TOKEN_ORACLE_PASS "
 MEMORY_MAX_GIB = 16
 HOST_RESERVE_GIB = 7
 MIN_AVAILABLE_GIB = MEMORY_MAX_GIB + HOST_RESERVE_GIB
 RUNTIME_MAX_SECONDS = 600
+LEGACY_UNGUARDED_FINGERPRINT_RESULTS = {
+    "sha256:f65f3a40c1ed2a41c675991a4a7345109efeb8ffb4ef976d2920a735e408751b",
+}
 
 
 class OracleRunError(RuntimeError):
@@ -109,18 +113,101 @@ def _validate_executable(path: Path) -> Path:
     return path
 
 
-def _validate_model(model: Path, expected: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+def _fingerprint_environment(workspace: Path) -> dict[str, str]:
+    return {
+        "HOME": os.environ.get("HOME", str(Path.home())),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONHASHSEED": "20260715",
+        "TMPDIR": str(workspace),
+    }
+
+
+def _parse_guarded_fingerprint_output(output: str) -> dict[str, Any]:
+    try:
+        identity = strict_json_loads(output)
+    except Exception as exc:
+        raise OracleRunError(f"guarded model fingerprint output is invalid JSON: {exc}") from exc
+    if not isinstance(identity, dict):
+        raise OracleRunError("guarded model fingerprint output must be an object")
+    return identity
+
+
+def _validate_model(
+    model: Path,
+    expected: dict[str, Any],
+    *,
+    policy: Path,
+    python: Path,
+) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     model = model.absolute()
     if model.is_symlink():
         raise OracleRunError("--model must be a non-symlink directory")
     model = model.resolve(strict=True)
-    try:
-        actual = _bind_model_identity(fingerprint_model(model, expected["id"]))
-    except ModelFingerprintError as exc:
-        raise OracleRunError(f"model fingerprint failed: {exc}") from exc
+    with tempfile.TemporaryDirectory(prefix="kiln-model-fingerprint-") as raw_workspace:
+        workspace = Path(raw_workspace).resolve(strict=True)
+        command = [
+            str(python),
+            str(MODEL_FINGERPRINT_SCRIPT),
+            "--model-path",
+            str(model),
+            "--model-id",
+            expected["id"],
+            "--json",
+        ]
+        returncode, stdout, stderr, thermal = supervisor.supervise(
+            policy_path=policy,
+            workspace=workspace,
+            worker_command=command,
+            worker_environment=_fingerprint_environment(workspace),
+            worker_phase="model-fingerprint",
+        )
+    sys.stderr.write(stderr)
+    if returncode != 0:
+        raise OracleRunError(
+            f"thermally guarded model fingerprint exited {returncode}: {stderr[-3000:]}"
+        )
+    actual_raw = _parse_guarded_fingerprint_output(stdout)
+    actual = _bind_model_identity(actual_raw)
     if actual != expected:
         raise OracleRunError("model fingerprint does not match the source-paired request")
-    return model, actual
+    return model, actual, {
+        "implementation_sha256": _file_sha256(MODEL_FINGERPRINT_SCRIPT),
+        "python_sha256": _file_sha256(python),
+        "thermal": thermal,
+    }
+
+
+def validate_model_fingerprint_evidence(
+    value: Any,
+    *,
+    result_sha256: str,
+    legacy_result_sha256s: set[str],
+) -> dict[str, Any] | None:
+    if value is None:
+        if result_sha256 not in legacy_result_sha256s:
+            raise OracleRunError("model fingerprint thermal evidence is required")
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "implementation_sha256",
+        "python_sha256",
+        "thermal",
+    }:
+        raise OracleRunError("model fingerprint evidence fields are not closed")
+    if any(
+        not isinstance(value[name], str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", value[name]) is None
+        for name in ("implementation_sha256", "python_sha256")
+    ):
+        raise OracleRunError("model fingerprint implementation hashes are not canonical")
+    try:
+        thermal = supervisor.validate_evidence(value["thermal"])
+    except supervisor.SupervisorError as exc:
+        raise OracleRunError(str(exc)) from exc
+    if thermal != value["thermal"]:
+        raise OracleRunError("model fingerprint thermal evidence is inconsistent")
+    return value
 
 
 def _bounded_command(
@@ -238,7 +325,8 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         "source",
         "verdict",
     }
-    if not isinstance(value, dict) or set(value) != fields:
+    allowed_fields = (fields, fields | {"model_fingerprint"})
+    if not isinstance(value, dict) or set(value) not in allowed_fields:
         raise OracleRunError("oracle result fields are not closed")
     recorded_hash = value["result_sha256"]
     unsigned = dict(value)
@@ -247,6 +335,11 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         raise OracleRunError("oracle result_sha256 does not match its content")
     if value["schema"] != SCHEMA:
         raise OracleRunError(f"oracle result schema must equal {SCHEMA}")
+    validate_model_fingerprint_evidence(
+        value.get("model_fingerprint"),
+        result_sha256=recorded_hash,
+        legacy_result_sha256s=LEGACY_UNGUARDED_FINGERPRINT_RESULTS,
+    )
     request_ref = value["request"]
     if not isinstance(request_ref, dict) or set(request_ref) != {
         "contract_path",
@@ -286,6 +379,12 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         or thermal["worker_exit_code"] != 0
     ):
         raise OracleRunError("oracle result containment evidence is inconsistent")
+    model_fingerprint = value.get("model_fingerprint")
+    if (
+        model_fingerprint is not None
+        and model_fingerprint["thermal"]["policy"] != thermal["policy"]
+    ):
+        raise OracleRunError("model fingerprint and oracle thermal policies differ")
     if oracle["request_id"] != request["id"] or oracle["request_sha256"] != request_sha256:
         raise OracleRunError("oracle result HF evidence does not bind its request")
     if oracle["input_token_ids_sha256"] != request["input_token_ids_sha256"]:
@@ -331,6 +430,11 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         for item in implementation.values()
     ):
         raise OracleRunError("oracle result implementation hashes are not closed and canonical")
+    if (
+        model_fingerprint is not None
+        and model_fingerprint["python_sha256"] != implementation["python_sha256"]
+    ):
+        raise OracleRunError("model fingerprint and oracle interpreter hashes differ")
     if require_current_source:
         if source != _repository_identity():
             raise OracleRunError("oracle result source does not equal the current pushed source")
@@ -341,6 +445,10 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         }
         if implementation != expected_implementation:
             raise OracleRunError("oracle implementation hashes do not match current source")
+        if value["model_fingerprint"]["implementation_sha256"] != _file_sha256(
+            MODEL_FINGERPRINT_SCRIPT
+        ):
+            raise OracleRunError("model fingerprint implementation does not match current source")
     return value
 
 
@@ -352,6 +460,7 @@ def execute(
     policy_path: Path,
     result_path: Path,
 ) -> dict[str, Any]:
+    started = time.monotonic()
     result_path = result_path.absolute()
     if result_path.exists() or result_path.is_symlink():
         raise OracleRunError(f"refusing to replace result {result_path}")
@@ -362,7 +471,15 @@ def execute(
     contract.validate_source_receipts(request, ROOT)
     source = _repository_identity()
     python = _validate_executable(python_path)
-    model, model_identity = _validate_model(model_path, request["model_identity"])
+    policy = policy_path.resolve(strict=True)
+    model, model_identity, model_fingerprint = _validate_model(
+        model_path,
+        request["model_identity"],
+        policy=policy,
+        python=python,
+    )
+    if _repository_identity() != source:
+        raise OracleRunError("repository identity changed during model fingerprinting")
     available = _available_gib()
     if available < MIN_AVAILABLE_GIB:
         raise OracleRunError(
@@ -379,10 +496,9 @@ def execute(
         model=model,
         request=request_path,
         output=reference,
-        policy=policy_path,
+        policy=policy,
         workspace=workspace,
     )
-    started = time.monotonic()
     completed = subprocess.run(
         command,
         cwd=ROOT,
@@ -425,6 +541,8 @@ def execute(
         raise OracleRunError("bounded HF oracle did not retain a regular logits artifact")
     if oracle["output_bytes"] != reference.stat().st_size:
         raise OracleRunError("HF evidence output byte count disagrees with the artifact")
+    if _repository_identity() != source:
+        raise OracleRunError("repository identity changed during HF oracle execution")
     matching = [
         item["engine"]
         for item in oracle["candidate_tokens"]
@@ -446,6 +564,7 @@ def execute(
             "python_sha256": _file_sha256(python),
             "supervisor_sha256": _file_sha256(SUPERVISOR_SCRIPT),
         },
+        "model_fingerprint": model_fingerprint,
         "model_identity": model_identity,
         "oracle": oracle,
         "reference_artifact": {

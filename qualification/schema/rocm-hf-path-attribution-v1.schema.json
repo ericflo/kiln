@@ -84,6 +84,9 @@
     "model_identity": {
       "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/modelIdentity"
     },
+    "model_fingerprint": {
+      "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/modelFingerprintEvidence"
+    },
     "oracle_reference": {
       "description": "The retained HF oracle result and ignored raw safetensors reference consumed by the Kiln worker.",
       "type": "object",
