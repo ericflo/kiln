@@ -671,6 +671,26 @@ temperature target at a verified idle boundary after warmup and around each
 measured row, while keeping that cooling time inside thermally sustainable
 throughput. Only then may the same c8 full-output control be repeated.
 
+The paced-startup replay completed all 8,411,510,272 source bytes and 32 layers
+before readiness, but the following cold-boundary greedy c8 row reached the
+unchanged 93 C hard limit after 5.069 measured seconds. The guard terminated the
+server cleanly and all eight clients rejected incomplete streams without
+terminal usage. This moves the active blocker from startup to concurrent
+inference; the mixed profile and longer matrix remain prohibited unchanged.
+
+The next source-bound discriminator is
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-decode-batch-4-v1.json`.
+Its TOML differs from production v2 only by changing
+`server.max_decode_batch` from 8 to 4. Client concurrency remains eight, as do
+the prompt set, 32-token exact-output requirement, four-layer prefill quantum,
+256-token prefill tile, graph/cache policy, upload pacing, memory limit, and
+93 C guard. Reuse the exact
+`rocm-strix-halo-prefill-layer-pacing-c8-v1-greedy-short` run ID so request
+bodies and seeds stay fixed. This is a bounded thermal and decode-packing
+discriminator, not a production default or a throughput acceptance run. A trip,
+incomplete response, output mismatch, graph/route error, forced shutdown, or
+residue rejects it and prohibits an unchanged retry.
+
 ## Running One Profile
 
 ```bash

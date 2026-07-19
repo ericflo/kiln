@@ -1564,6 +1564,21 @@ content-hashed evidence for intermediate progress. A replay is not accepted
 merely because startup survives: the unchanged host thermal, memory, swap,
 cleanup, output, and throughput gates still apply.
 
+The first paced replay proved that startup contract: all 8,411,510,272 source
+bytes and 32 layers completed before readiness. Its following greedy c8 row
+still reached the unchanged 93 C hard limit after 5.069 measured seconds, so
+the blocker is now sustained concurrent inference rather than accelerator
+upload. Do not run the mixed profile or a longer matrix unchanged. The next
+tracked launch is
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-decode-batch-4-v1.json`.
+Its parsed TOML differs from production v2 only in
+`server.max_decode_batch = 4`; concurrency remains eight and the exact run ID,
+prompts, output length, thermal policy, graph/cache policy, prefill policy, and
+memory limit remain fixed. This arm may identify whether eight-row decode
+packing is causal. It is not an accepted default, does not weaken the thermal
+ceiling, and must stop after any guard, lifecycle, route, graph, output, or
+receipt failure.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package

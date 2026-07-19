@@ -640,6 +640,40 @@ class ServingBenchmarkTests(unittest.TestCase):
             candidate["server"]["max_prefill_layers_per_cycle"] = 4
             self.assertEqual(candidate, base)
 
+    def test_rocm_decode_width_discriminator_changes_one_typed_field(self) -> None:
+        config_root = ROOT / "qualification" / "server-config"
+        launch_root = ROOT / "qualification" / "server-launch"
+        base_name = "kiln-rocm-strix-halo-serving-comparison-v2"
+        candidate_name = (
+            "kiln-rocm-strix-halo-serving-comparison-decode-batch-4-v1"
+        )
+        base = self._parse_server_config(config_root / f"{base_name}.toml")
+        candidate = self._parse_server_config(
+            config_root / f"{candidate_name}.toml"
+        )
+        self.assertEqual(base["server"]["max_decode_batch"], 8)
+        self.assertEqual(candidate["server"]["max_decode_batch"], 4)
+        candidate["server"]["max_decode_batch"] = 8
+        self.assertEqual(candidate, base)
+
+        launch_path = launch_root / f"{candidate_name}.json"
+        raw = bench.strict_json_loads(launch_path.read_bytes())
+        parsed = bench.validate_server_launch_config_value(
+            raw,
+            config_directory=launch_path.parent,
+            label=candidate_name,
+            require_local_paths=False,
+        )
+        self.assertEqual(parsed.record["id"], candidate_name)
+        self.assertEqual(
+            parsed.record["command"][-1],
+            f"qualification/server-config/{candidate_name}.toml",
+        )
+        self.assertEqual(
+            parsed.record["log_directory"],
+            "../../.qualification/kiln-serving/logs/decode-batch-4-v1",
+        )
+
     def _run_cli_fixture(
         self,
         fake: FakeServer,
