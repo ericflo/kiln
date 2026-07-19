@@ -1,6 +1,6 @@
 {
   "schema": "kiln.host-thermal-policy.v1",
-  "id": "strix-halo-serving-benchmark-c32-v1",
+  "id": "strix-halo-serving-benchmark-hard-limit-v1",
   "sensor": {
     "hwmon_name": "k10temp",
     "label": "Tctl"
@@ -8,9 +8,7 @@
   "limit_millicelsius": 93000,
   "poll_interval_ms": 250,
   "pacing": {
-    "start_millicelsius": 60000,
-    "resume_millicelsius": 45000,
-    "resume_stable_samples": 8
+    "mode": "hard_limit_only"
   },
   "safe_handoff": {
     "target_millicelsius": 45000,

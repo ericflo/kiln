@@ -61,9 +61,6 @@ RUNTIME_HOST_THERMAL_POLICY = thermal.HostThermalPolicy(
     label="Tctl",
     limit_millicelsius=97_000,
     poll_interval_ms=250,
-    pacing_start_millicelsius=88_000,
-    pacing_resume_millicelsius=86_000,
-    pacing_timeout_seconds=180.0,
     cooldown_target_millicelsius=75_000,
     cooldown_stable_samples=8,
     cooldown_timeout_seconds=180.0,
@@ -4381,6 +4378,11 @@ def itl_outlier_gate_failures(values: dict[str, float | int]) -> list[str]:
             f"{non_thermal} healthy-request ITL outliers coincided with "
             "non-thermal runtime events"
         )
+    if thermal != 0:
+        failures.append(
+            f"{thermal} ITL outliers were attributed to prohibited active-work "
+            "thermal pacing"
+        )
     return failures
 
 
@@ -5435,14 +5437,16 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         lifecycle_failures.append("host thermal cooldown timed out after teardown")
     if final_thermal_values["host_thermal_pacing_active_end"] != 0:
         lifecycle_failures.append("host thermal pacing remained active after teardown")
-    if (
-        final_thermal_values["host_thermal_pacing_completed_event_count"]
-        != final_thermal_values["host_thermal_pacing_event_count"]
-    ):
+    if final_thermal_values["host_thermal_pacing_event_count"] != 0:
         lifecycle_failures.append(
-            "host thermal pacing events did not all complete: "
-            f"{final_thermal_values['host_thermal_pacing_completed_event_count']} != "
-            f"{final_thermal_values['host_thermal_pacing_event_count']}"
+            "hard-limit-only serving policy unexpectedly started "
+            f"{final_thermal_values['host_thermal_pacing_event_count']} pacing events"
+        )
+    if final_thermal_values["host_thermal_pacing_completed_event_count"] != 0:
+        lifecycle_failures.append(
+            "hard-limit-only serving policy unexpectedly completed "
+            f"{final_thermal_values['host_thermal_pacing_completed_event_count']} "
+            "pacing events"
         )
     if shutdown_outcome.forced:
         lifecycle_failures.append(

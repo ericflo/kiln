@@ -44,7 +44,8 @@ REQUEST_PATH = (
 )
 POLICY_PATH = ROOT / "qualification/host-policies/strix-halo-hf-oracle-v1.json"
 ALTERNATE_POLICY_PATH = (
-    ROOT / "qualification/host-policies/strix-halo-serving-benchmark-c32-v1.json"
+    ROOT
+    / "qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json"
 )
 
 
@@ -219,7 +220,7 @@ class HfNextTokenOracleTests(unittest.TestCase):
         record, policy, settlement = host_thermal_policy.load(POLICY_PATH)
         self.assertEqual(
             record["content_sha256"],
-            "sha256:e7347f6c698b33bf3fd6a1a76483118c61d3e5d8b19b64d45609014da40f7620",
+            "sha256:3c175cfbf85da62e63ff4c8f01facdcd679c066d85c0a9595451aa26260f87c3",
         )
         self.assertEqual(policy.cooldown_mode, "live_process_safe_handoff")
         self.assertEqual(settlement, 300.0)

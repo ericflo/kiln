@@ -116,19 +116,22 @@ Equivalent local Kiln launch document structure:
 ## Thermal Contract
 
 `kiln.host-thermal-policy.v1` selects exactly one hwmon sensor and defines a
-hard termination limit, polling cadence, stop/resume pacing hysteresis,
-consecutive stable samples before resume, phase-settlement deadline, and a
-stable cooldown target. The controller sends `SIGSTOP` and `SIGCONT` to the
-complete server process group. Crossing the hard limit sends `SIGTERM`, records
-the trip, and fails the run.
+hard termination limit, polling cadence, an explicit protection mode,
+phase-settlement deadline, and a stable cooldown target. `hard_limit_only`
+continuously monitors and terminates at the limit but never suspends active
+work. `process_group_stop` additionally defines stop/resume hysteresis and
+sends `SIGSTOP`/`SIGCONT` to the complete process group; use it only where that
+mechanism has been qualified for the runtime and device. Crossing the hard
+limit always sends `SIGTERM`, records the trip, and fails the run.
 
-The phase-settlement deadline is also installed in the independent monitor as
-the maximum duration of any single stopped interval. It is not only checked by
-the request-driving thread: if that thread is blocked while already-submitted
-accelerator work prevents the package from reaching the resume gate, the
-monitor sends `SIGTERM`, releases the stopped group with `SIGCONT`, and fails
-closed. This prevents a request wait and an unreachable resume temperature from
-deadlocking each other.
+For `process_group_stop`, the phase-settlement deadline is also installed in
+the independent monitor as the maximum duration of any single stopped
+interval. It is not only checked by the request-driving thread: if that thread
+is blocked while already-submitted accelerator work prevents the package from
+reaching the resume gate, the monitor sends `SIGTERM`, releases the stopped
+group with `SIGCONT`, and fails closed. `hard_limit_only` has no stopped
+interval, so the field remains a receipt-compatible phase bound but never arms
+`SIGSTOP`.
 
 The closed policy fields are:
 
@@ -138,19 +141,20 @@ The closed policy fields are:
 | `id` | Stable portable policy identifier, 3 to 128 characters. |
 | `sensor.hwmon_name` | Exact Linux hwmon device name. The selector must resolve once. |
 | `sensor.label` | Exact temperature-channel label beneath that hwmon device. |
-| `limit_millicelsius` | Hard termination boundary, strictly above the pacing start. |
+| `limit_millicelsius` | Hard termination boundary. It must be strictly above the pacing start when process-stop pacing is selected. |
 | `poll_interval_ms` | Positive cadence shared by pre-launch cooling, runtime protection, pacing, and final cooldown. |
-| `pacing.start_millicelsius` | Temperature at which the complete process group is stopped. |
-| `pacing.resume_millicelsius` | Lower temperature at which resume becomes eligible. |
-| `pacing.resume_stable_samples` | Consecutive eligible samples required before `SIGCONT`. |
-| `safe_handoff.target_millicelsius` | Maximum temperature accepted before owned process creation and after shutdown, or before returning an attached live process. It cannot exceed the pacing-resume temperature. |
+| `pacing.mode` | Required tagged choice: `hard_limit_only` or `process_group_stop`. |
+| `pacing.start_millicelsius` | Required only for `process_group_stop`; temperature at which the complete process group is stopped. |
+| `pacing.resume_millicelsius` | Required only for `process_group_stop`; lower temperature at which resume becomes eligible. |
+| `pacing.resume_stable_samples` | Required only for `process_group_stop`; consecutive eligible samples required before `SIGCONT`. |
+| `safe_handoff.target_millicelsius` | Maximum temperature accepted before owned process creation and after shutdown, or before returning an attached live process. Under process-stop pacing it cannot exceed the pacing-resume temperature. |
 | `safe_handoff.stable_samples` | Consecutive samples required at or below the target. |
 | `safe_handoff.timeout_seconds` | Positive deadline for each boundary cooldown. |
-| `phase_settlement_timeout_seconds` | Positive deadline for an active pacing interval. Enforced independently by the monitor and synchronously before/after each workload row. |
+| `phase_settlement_timeout_seconds` | Positive phase bound. Under `process_group_stop`, it is also the independently enforced maximum active pacing interval; under `hard_limit_only`, no stop interval exists. |
 
 Driver v8 resolves the selected sensor before model hashing. Each initial and
 final fingerprint worker starts blocked on a private gate; the supervisor first
-requires a stable prelaunch boundary, attaches the continuous process-group
+requires a stable prelaunch boundary, attaches the continuous selected-mode
 guard, releases the worker, reconciles every pacing interval, requires a clean
 exit, and completes a stable post-exit cooldown. The receipt retains both closed
 `kiln.hf-thermal-containment.v1` records under
@@ -168,10 +172,11 @@ time, scope, and completion state for this boundary. The validator requires
 those values to match the runtime guard's sensor.
 
 Cooling remains part of wall-clock service cost. Each row records both request
-window output throughput and thermally sustainable throughput including pacing
-settlement. The top-level receipt records start, peak, and final temperature;
-all pacing durations; guard errors and trips; cooldown duration and samples;
-sensor path; process identity; and final liveness.
+window output throughput and thermally sustainable throughput including any
+pacing settlement. The top-level receipt records the selected content-hashed
+policy, start/peak/final temperature, every pacing duration (zero under
+`hard_limit_only`), guard errors and trips, cooldown duration and samples,
+sensor path, process identity, and final liveness.
 
 Owned mode disables new pacing immediately before shutdown, releases any active
 stop, and keeps hard-limit monitoring active until the child exits. Attached
@@ -641,7 +646,7 @@ python3 scripts/bench-concurrent-batch.py \
   --max-tokens 64 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
-  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-c32-v1.json \
+  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json \
   --server-launch-config qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v1.json \
   --output-evidence hashes \
   --out .qualification/serving/greedy-short.kiln.json
@@ -684,7 +689,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --out-dir .qualification/serving/rocm-qualified-v1 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
-  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-c32-v1.json \
+  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json \
   --server-launch-config qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v1.json \
   --output-evidence hashes
 ```

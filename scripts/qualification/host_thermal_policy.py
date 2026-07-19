@@ -101,14 +101,40 @@ def validate(
             raise error_type(f"{label}.sensor.{name} must be non-empty")
 
     pacing = _object(raw["pacing"], f"{label}.pacing", error_type)
-    legacy_hashed_pacing = has_content_hash and "resume_stable_samples" not in pacing
-    _exact_keys(
-        pacing,
-        {"start_millicelsius", "resume_millicelsius"}
-        | (set() if legacy_hashed_pacing else {"resume_stable_samples"}),
-        f"{label}.pacing",
-        error_type,
-    )
+    legacy_hashed_pacing = has_content_hash and "mode" not in pacing
+    if legacy_hashed_pacing:
+        _exact_keys(
+            pacing,
+            {"start_millicelsius", "resume_millicelsius"}
+            | (
+                {"resume_stable_samples"}
+                if "resume_stable_samples" in pacing
+                else set()
+            ),
+            f"{label}.pacing",
+            error_type,
+        )
+        pacing_mode = "process_group_stop"
+    else:
+        pacing_mode = pacing.get("mode")
+        if pacing_mode == "process_group_stop":
+            _exact_keys(
+                pacing,
+                {
+                    "mode",
+                    "start_millicelsius",
+                    "resume_millicelsius",
+                    "resume_stable_samples",
+                },
+                f"{label}.pacing",
+                error_type,
+            )
+        elif pacing_mode == "hard_limit_only":
+            _exact_keys(pacing, {"mode"}, f"{label}.pacing", error_type)
+        else:
+            raise error_type(
+                f"{label}.pacing.mode must be process_group_stop or hard_limit_only"
+            )
     handoff = _object(raw["safe_handoff"], f"{label}.safe_handoff", error_type)
     _exact_keys(
         handoff,
@@ -126,10 +152,24 @@ def validate(
         label=sensor["label"],
         limit_millicelsius=raw["limit_millicelsius"],
         poll_interval_ms=raw["poll_interval_ms"],
-        pacing_start_millicelsius=pacing["start_millicelsius"],
-        pacing_resume_millicelsius=pacing["resume_millicelsius"],
-        pacing_resume_stable_samples=pacing.get("resume_stable_samples", 1),
-        pacing_timeout_seconds=settlement_timeout,
+        pacing_start_millicelsius=(
+            pacing["start_millicelsius"]
+            if pacing_mode == "process_group_stop"
+            else None
+        ),
+        pacing_resume_millicelsius=(
+            pacing["resume_millicelsius"]
+            if pacing_mode == "process_group_stop"
+            else None
+        ),
+        pacing_resume_stable_samples=(
+            pacing.get("resume_stable_samples", 1)
+            if pacing_mode == "process_group_stop"
+            else 1
+        ),
+        pacing_timeout_seconds=(
+            settlement_timeout if pacing_mode == "process_group_stop" else None
+        ),
         cooldown_target_millicelsius=handoff["target_millicelsius"],
         cooldown_stable_samples=handoff["stable_samples"],
         cooldown_timeout_seconds=handoff["timeout_seconds"],

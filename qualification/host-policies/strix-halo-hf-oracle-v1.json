@@ -8,6 +8,7 @@
   "limit_millicelsius": 93000,
   "poll_interval_ms": 50,
   "pacing": {
+    "mode": "process_group_stop",
     "start_millicelsius": 58000,
     "resume_millicelsius": 50000,
     "resume_stable_samples": 20

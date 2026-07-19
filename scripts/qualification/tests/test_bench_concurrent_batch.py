@@ -59,6 +59,7 @@ def valid_host_thermal_policy() -> dict:
         "limit_millicelsius": 90_000,
         "poll_interval_ms": 250,
         "pacing": {
+            "mode": "process_group_stop",
             "start_millicelsius": 78_000,
             "resume_millicelsius": 70_000,
             "resume_stable_samples": 2,
@@ -1434,6 +1435,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             bench.validate_host_thermal_policy_value(record, "fixture")
 
             legacy_record = json.loads(json.dumps(record))
+            legacy_record["pacing"].pop("mode")
             legacy_record["pacing"].pop("resume_stable_samples")
             legacy_record.pop("content_sha256")
             legacy_record["content_sha256"] = bench.canonical_sha256(legacy_record)
@@ -1443,8 +1445,9 @@ class ServingBenchmarkTests(unittest.TestCase):
             self.assertEqual(legacy_policy.pacing_resume_stable_samples, 1)
 
             legacy_input = json.loads(json.dumps(value))
+            legacy_input["pacing"].pop("mode")
             legacy_input["pacing"].pop("resume_stable_samples")
-            with self.assertRaisesRegex(bench.BenchmarkError, "missing keys"):
+            with self.assertRaisesRegex(bench.BenchmarkError, "pacing.mode"):
                 bench.validate_host_thermal_policy_value(legacy_input, "input")
 
             tampered = json.loads(json.dumps(record))
@@ -1456,6 +1459,57 @@ class ServingBenchmarkTests(unittest.TestCase):
             path.write_text(json.dumps(value))
             with self.assertRaisesRegex(bench.BenchmarkError, "resume < start"):
                 bench.load_host_thermal_policy(path)
+
+    def test_host_thermal_hard_limit_only_policy_never_arms_process_stop(self) -> None:
+        value = valid_host_thermal_policy()
+        value["id"] = "test-hard-limit-only-v1"
+        value["pacing"] = {"mode": "hard_limit_only"}
+
+        record, policy, settlement_timeout = (
+            bench.validate_host_thermal_policy_value(value, "fixture")
+        )
+
+        self.assertEqual(record["pacing"], {"mode": "hard_limit_only"})
+        self.assertEqual(settlement_timeout, 30.0)
+        self.assertIsNone(policy.pacing_start_millicelsius)
+        self.assertIsNone(policy.pacing_resume_millicelsius)
+        self.assertIsNone(policy.pacing_timeout_seconds)
+        self.assertNotIn("thermal_pacing", policy.effective_config())
+        self.assertIsNone(policy.guard_kwargs()["pacing_start_millicelsius"])
+        self.assertIsNone(policy.guard_kwargs()["pacing_resume_millicelsius"])
+        self.assertIsNone(policy.guard_kwargs()["pacing_timeout_seconds"])
+
+        invalid = json.loads(json.dumps(value))
+        invalid["pacing"]["start_millicelsius"] = 78_000
+        with self.assertRaisesRegex(bench.BenchmarkError, "unknown keys"):
+            bench.validate_host_thermal_policy_value(invalid, "fixture")
+
+        invalid = json.loads(json.dumps(value))
+        invalid["pacing"]["mode"] = "cooperative"
+        with self.assertRaisesRegex(bench.BenchmarkError, "must be"):
+            bench.validate_host_thermal_policy_value(invalid, "fixture")
+
+    def test_tracked_strix_halo_serving_policy_is_hard_limit_only(self) -> None:
+        path = (
+            ROOT
+            / "qualification"
+            / "host-policies"
+            / "strix-halo-serving-benchmark-hard-limit-v1.json"
+        )
+
+        record, policy, settlement_timeout = bench.load_host_thermal_policy(path)
+
+        self.assertEqual(record["id"], "strix-halo-serving-benchmark-hard-limit-v1")
+        self.assertEqual(record["pacing"], {"mode": "hard_limit_only"})
+        self.assertEqual(record["limit_millicelsius"], 93_000)
+        self.assertEqual(
+            record["content_sha256"],
+            "sha256:1c8f1fea09898beede339d5b559a1dcd1351e1530ff4fd2f60350684a14f54e1",
+        )
+        self.assertEqual(settlement_timeout, 300.0)
+        self.assertIsNone(policy.pacing_start_millicelsius)
+        self.assertIsNone(policy.pacing_resume_millicelsius)
+        self.assertIsNone(policy.pacing_timeout_seconds)
 
     def test_prelaunch_cooldown_requires_consecutive_post_provenance_samples(self) -> None:
         policy_record, policy, _timeout = bench.validate_host_thermal_policy_value(

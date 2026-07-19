@@ -40,18 +40,33 @@
       "minimum": 1
     },
     "pacing": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "start_millicelsius",
-        "resume_millicelsius",
-        "resume_stable_samples"
-      ],
-      "properties": {
-        "start_millicelsius": { "type": "integer", "minimum": 1 },
-        "resume_millicelsius": { "type": "integer", "minimum": 1 },
-        "resume_stable_samples": { "type": "integer", "minimum": 1 }
-      }
+      "description": "Explicit runtime protection mode. hard_limit_only never suspends active accelerator work; process_group_stop is valid only where stopping the complete process group has been independently qualified.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": { "const": "hard_limit_only" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "start_millicelsius",
+            "resume_millicelsius",
+            "resume_stable_samples"
+          ],
+          "properties": {
+            "mode": { "const": "process_group_stop" },
+            "start_millicelsius": { "type": "integer", "minimum": 1 },
+            "resume_millicelsius": { "type": "integer", "minimum": 1 },
+            "resume_stable_samples": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ]
     },
     "safe_handoff": {
       "type": "object",

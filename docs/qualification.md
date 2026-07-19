@@ -1507,22 +1507,21 @@ phase remains contained by the broad actor `decode_ms` interval.
 Every ROCm mixed-load arm applies the same independent host thermal policy from
 server launch through readiness, warmup, the isolated sampled wave, ordinary
 measurement, drain, server exit, and a bounded post-exit cooldown. The typed
-`host_safety` object selects
-exactly one Linux hwmon input by `name=k10temp` and `label=Tctl`, polls every
-250 ms, pauses the complete server process group with `SIGSTOP` at or above
-88,000 millicelsius, and resumes it with `SIGCONT` at or below 86,000. A
-97,000-millicelsius reading, missing or ambiguous selector, malformed input,
-controller error, or signal error fails closed and terminates the server group.
-No stopped interval may exceed 180 seconds. The monitor owns that timeout and
-can terminate and release the stopped group even while the workload thread is
-blocked on an inference request, so already-submitted accelerator work cannot
-strand the controller below an unreachable resume gate.
-Cooling consumes existing wall-clock and request deadlines, so throughput
-includes the host's sustainable pacing cost rather than excluding it. Pacing
-intervals join ITL attribution as `host_thermal_pacing`. Before sending the
-server its teardown signal, the controller atomically disables new pacing and
-releases any stopped process group while continuing to enforce the 97 C hard
-limit. This prevents a late `SIGSTOP` from delaying or stranding shutdown.
+`host_safety` object selects exactly one Linux hwmon input by `name=k10temp`
+and `label=Tctl` and polls every 250 ms. Runtime protection is
+hard-limit-only: a 97,000-millicelsius reading, missing or ambiguous selector,
+malformed input, controller error, or termination error fails closed and
+terminates the server group. It never sends `SIGSTOP` while accelerator work
+may be outstanding.
+
+This replaces the earlier 88/86 C process-group stop policy. Two exact Strix
+Halo ROCm serving rows showed that stopping the host process can leave queued
+GPU work reporting 100-percent busy while package temperature remains above
+the resume gate. The independent 180/300-second watchdog successfully
+contained those runs, but a timeout does not make active-work suspension a
+valid pacing mechanism. Source-bound ROCm and Vulkan serving qualification
+therefore prohibits process-stop pacing. A future cooperative mechanism must
+first prove that the backend has reached an idle ownership boundary.
 
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
@@ -1534,22 +1533,16 @@ the controller continues the bounded cooldown attempt rather than silently
 calling the host ready.
 
 The receipt retains start/peak/end package temperature, guard error and trip
-counts, pacing start/completion counts, total and maximum pacing seconds,
-hottest pacing start, and whether a pause remained active at teardown. Adaptive
-ITL evidence retains the total attributed count and partitions it into
-`host_thermal_pacing_itl_outlier_count` and
-`non_thermal_attributed_itl_outlier_count`. A mixed-load pass permits the first
-only when every attributed gap reconciles to one of those two counts; it still
-requires both the non-thermal attributed count and unexplained count to be zero.
-This makes the required external controller visible without allowing a model,
-scheduler, allocator, graph, or synchronization pause to hide behind it. It also
-retains cooldown active/completed/timeout counts, duration, sample count,
-consecutive stable count, and post-exit peak. A pass requires zero guard error,
-trip, cooldown timeout, or active final controller; exactly one completed
-cooldown; and identical started and completed pacing counts. A pacing interval
-that ends because the protected process has exited is completed with an explicit
-`process_exited` reason rather than misreported as an interruption. These checks
-apply to the short mixed-load gate, the resident-prefill oracle, and the longer
+counts, zero-valued compatibility pacing counters, cooldown
+active/completed/timeout counts, duration, sample count, consecutive stable
+count, and post-exit peak. Adaptive ITL evidence retains the total attributed
+count and still partitions it into `host_thermal_pacing_itl_outlier_count` and
+`non_thermal_attributed_itl_outlier_count`; the thermal-pacing partition must
+now be zero because the policy cannot create an active-work pause. A pass
+requires zero guard error, trip, cooldown timeout, non-thermal attributed
+outlier, unexplained outlier, or active final controller, exactly one completed
+cooldown, and zero started pacing intervals. These checks apply to the short
+mixed-load gate, the resident-prefill oracle, and the longer
 development/endurance soaks; the source-build watchdog is a separate guard
 around the compiler/linker service.
 
@@ -2458,38 +2451,24 @@ transient compiler/linker service. A build trip exits with status 3, while a
 missing or invalid sensor fails preflight with status 2; neither can be recorded
 as a successful source-bound build.
 
-Both the ROCm and Vulkan soaks also use that continuously scheduled controller for
-hysteretic pacing. At or above 88,000 millicelsius it sends `SIGSTOP` to the
-complete server process group, including an inference wave already in progress.
-The Python qualification controller is outside that process group, so sensor,
-host-memory, and deadline observation continue while the server is stopped. At
-or below 86,000 millicelsius the controller sends `SIGCONT`. This bounds each
-stop more tightly while retaining a two-degree hysteresis against rapid
-stop/start oscillation and does not depend on reaching a request boundary. The
-97,000 millicelsius safety check is evaluated first on every sample and remains
-unchanged: a stopped group that reaches the limit receives `SIGTERM` followed by
-`SIGCONT`, allowing termination and cleanup to run rather than leaving a stopped
-process behind. Sensor ambiguity, read failure, controller-thread failure, and
-signal failure all remain fail-closed conditions. Teardown first disables new
-pacing under the same transition lock, releases any active stop, and leaves the
-hard-limit sampler running while the server exits. This closes the race in which
-a polling iteration could issue `SIGSTOP` after teardown had already checked for
-an active pause.
+Current ROCm and Vulkan serving soaks use this controller in hard-limit-only
+mode. No setup, stabilization, measurement, drain, or teardown path may send
+`SIGSTOP` while accelerator work can be outstanding. A 97,000-millicelsius
+sample terminates the complete server group and fails the case; the lower
+93,000-millicelsius ceiling in the shared standalone serving benchmark fails
+that shorter experiment earlier. Sensor ambiguity, read failure,
+controller-thread failure, and signal failure remain fail-closed conditions.
+The receipt retains the compatibility `host_thermal_pacing_*` metrics, but a
+current pass requires active, started, and completed pacing counts all to be
+zero. Any ITL outlier attributed to host thermal pacing is also a failure,
+because the current policy cannot legitimately create such an interval.
 
-Pacing does not suspend either phase deadline or a request deadline. Cooling
-therefore consumes the existing setup or measurement envelope and cannot extend
-a run, conceal an unsustainable workload, or turn a deadline failure into a
-pass. Each pause and release emits a `host_thermal_pacing` observation; measured
-token gaps overlapping that interval are attributed to the named host control,
-not silently reported as an unexplained inference stall. The receipt publishes
-`active_end`, completed and started event counts, total seconds, longest
-interval, and hottest starting reading under `host_thermal_pacing_*`. A clean
-result requires no active pause at teardown and requires every started event to
-have completed. A deliberate teardown release or observed process exit completes
-the interval with its reason; a controller close or safety trip remains an
-interruption. A measured throughput result
-includes the cooling time required to sustain this workload on the named host
-rather than reporting only its short-burst rate.
+The guard still sends `SIGCONT` after fail-closed termination as defensive
+cleanup for a process group stopped by an external actor or a historical
+controller. This does not arm pacing and does not make process suspension part
+of the current serving contract. Pre-launch and post-exit stable-temperature
+handoffs separate experiments without changing a measured phase deadline or
+hiding the thermal cost of an active workload.
 
 Server exit is not the end of host containment. ROCm mixed-load, ROCm/Vulkan
 development and endurance soaks, and the Vulkan resident-prefill oracle wait for
@@ -2510,8 +2489,13 @@ partial evidence from a normal final drain; only a run that obtains and validate
 the final health/debug/memory snapshots publishes `1`. This flag is diagnostic,
 not a way for a failed case to satisfy an acceptance threshold.
 
+The receipts below predate the hard-limit-only contract. They retain evidence
+for the retired process-stop experiment and its chronology, but they cannot
+satisfy the current source-bound serving gate even when their historical
+verdict was pass.
+
 The clean `1ea855a51` Strix Halo run disproved the former boundary-only policy
-and motivated the continuous controller above. Six stabilization cycles completed 30 exact responses plus
+and, at the time, motivated a continuous process-stop controller. Six stabilization cycles completed 30 exact responses plus
 three cancellations and converged to two consecutive cycles with zero DRM
 growth, live-buffer growth, allocations, frees, pool misses, evictions, or
 uncached allocations. Measurement began after 1,085.45 setup seconds. Its first
@@ -2526,11 +2510,11 @@ It is strictly source/artifact/commit-valid, records at least 16,861,724,672
 bytes available, 103,718,912 bytes of swap growth, clean unforced teardown, no
 worker or snapshot residue, and no device or batching fault. Raising the 97 C
 limit, deleting the 96-word supported prompt, or rerunning the boundary-only
-policy would not close this gate. The continuous process-group controller must
-still pass a clean pushed-source run before it supports a Vulkan qualification
-claim.
+policy would not close that historical gate. At that point the continuous
+process-group controller still had to pass a clean pushed-source run before it
+could support the then-current Vulkan qualification claim.
 
-That gate passed on the clean pushed `e79d3686d` source. The retained receipt is
+That historical gate passed on the clean pushed `e79d3686d` source. The retained receipt is
 `qualification/receipts/vulkan/strix-halo/20260716t154944163408z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1.json`.
 It is strictly current-source, local-artifact, and known-commit valid. Six setup
 cycles completed 30 exact responses and three cancellations, covered every
@@ -2564,8 +2548,10 @@ hash is `sha256:bfc5defbb8889d2ebe73c0f5890fc6d0a0f378ed65487c0bd60245541f9bddbe
 the receipt file hash is
 `sha256:d7e4459d774e86dc6e560c834c8f4d847a1eb33ff7965dcd6b810d8274ba82ea`.
 
-This passes the 30-minute Vulkan development-soak contract for the exact named
-machine and declared four-active profile. It does not establish eight-hour
+This passed the retired 30-minute Vulkan development-soak contract for the exact
+named machine and declared four-active profile. Its 123 active-work pauses mean
+it does not pass the current hard-limit-only contract, which requires a fresh
+clean run with zero pacing events. It does not establish eight-hour
 endurance, stable-profile resident admission, broader prompt/concurrency
 coverage, CUDA or Metal parity, or throughput competitiveness with vLLM. In
 particular, measured p99 TTFT was 150,147.60 ms; this is acceptable for the
@@ -2980,7 +2966,7 @@ on a development receipt. It deliberately retains the development soak's exact
 four-active-request service envelope, one/four-way prompt cohorts, periodic
 cancellation, semantic oracle, fixed KV and Vulkan recycler policy, resident
 route gates, 8 GiB host-memory floor, 512 MiB swap-growth cap, continuous
-88/86 C process-group pacing, and independent 97 C hard stop. The different
+hard-limit-only 97 C host protection, and zero permitted pacing events. The different
 deterministic seed and eight-hour duration exercise a longer request sequence
 without silently widening the already-qualified operating point.
 
@@ -2990,7 +2976,8 @@ stabilization starts a fresh 29,400-second measurement deadline: 28,800 required
 seconds plus the unchanged 600-second request containment window. The outer
 case timeout is 32,280 seconds, exactly those limits plus a separate 180 seconds
 for cancellation, process-group shutdown, private-snapshot cleanup, and result
-publication. Pacing counts against runtime setup and measurement deadlines. A
+publication. Thermal protection never suspends active work or extends runtime
+setup and measurement deadlines. A
 setup failure still reports zero measured duration, and a measurement failure
 retains evidence only through the last fully completed and drained wave with
 `measurement_final_snapshot_complete=0`.
@@ -2998,16 +2985,18 @@ retains evidence only through the last fully completed and drained wave with
 A pass requires the same exact response, device, ownership, memory, thermal,
 worker, and lifecycle verdicts as the development soak across the full measured
 window. In particular, hardware absence or a Vulkan skip fails the required
-case; every ITL outlier must have a bounded known attribution; every thermal
-pause must be released; final health, debug, allocator, cache, process-memory,
+case; every ITL outlier must have a bounded known attribution; thermal pacing
+must remain identically zero; final health, debug, allocator, cache, process-memory,
 and DRM snapshots must complete; and teardown must leave no server, request
 worker, or private snapshot. This endurance result qualifies only this named
 host and declared experimental operating point. It does not establish a
 high-concurrency performance claim, stable-profile resident admission, or
-portability to CUDA, Metal, or another Vulkan machine.
+portability to CUDA, Metal, or another Vulkan machine. Historical endurance
+receipts that contain process-stop pacing remain diagnostic records and do not
+satisfy this current contract.
 
-The clean pushed `3897239fe` source passed this contract on the named Strix
-Halo. The retained receipt is
+The clean pushed `3897239fe` source passed the retired process-stop version of
+this contract on the named Strix Halo. The retained receipt is
 `qualification/receipts/vulkan/strix-halo/20260716t165320275412z-vulkan-strix-halo-serving-vulkan-endurance-7db5d986fd-v1.json`
 with file hash
 `sha256:118274f07578024cd1a65af2342a388f8be66dee636853d6e0d99698575ce604`.
@@ -3047,8 +3036,10 @@ non-finite-response, synchronization, graph, ownership, worker, shutdown, and
 snapshot failures were all zero; final snapshots completed, shutdown was
 unforced and zero, and the private snapshot was removed.
 
-This result establishes eight-hour endurance only for this declared
-four-active-request operating point on this named host. It does not make the
+This historical result established eight-hour endurance for the then-declared
+four-active-request operating point on this named host. Its 1,063 pacing events
+mean it does not satisfy the current hard-limit-only contract; that gate
+requires a fresh zero-pacing run. The historical result also does not make the
 point fast: aggregate measured completion goodput was 0.454 tokens/second,
 p99 TTFT was 152,290.00 ms, and p99 ITL was 2,477.96 ms, including required
 cooling time. Those values remain explicit performance limitations and do not

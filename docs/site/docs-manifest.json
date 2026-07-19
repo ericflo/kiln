@@ -128,7 +128,7 @@
       "slug": "host-thermal-policy-schema",
       "title": "Host Thermal Policy Schema",
       "section": "serving",
-      "description": "Typed host sensor, pacing, hard-limit, per-phase settlement, and safe live-process handoff contract for local serving benchmarks."
+      "description": "Typed host sensor, explicit hard-limit-only or process-stop protection, per-phase settlement, and safe live-process handoff contract for local serving benchmarks."
     },
     {
       "source": "qualification/schema/hf-next-token-request-v1.schema.json",

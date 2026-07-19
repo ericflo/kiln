@@ -113,15 +113,14 @@ driver attaches is then the supervisor's responsibility. Both modes bind PID,
 PGID, Linux boot ID, process start ticks, executable path, and command-line hash.
 
 On this Strix Halo, use
-`qualification/host-policies/strix-halo-serving-benchmark-v1.json`. It starts
-pacing at 68 C, resumes only after eight consecutive 250 ms samples at or below
-55 C, terminates the process group at 93 C, and requires the same stable 55 C
-window before returning control. These conservative candidate limits derive
-from the retained 98 C overshoot, the 90.5 C one-request prewarm counterexample,
-and a measured 17.6 C post-stop rise under the rejected single-sample 78/70 C
-policy. The 93 C emergency stop remains 4 C below the old limit while pacing
-starts 25 C earlier; the limits become performance-qualified only after a
-guarded campaign completes.
+`qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json`.
+It samples Tctl every 250 ms, terminates the process group at 93 C, never sends
+`SIGSTOP` during active accelerator work, and requires eight consecutive
+samples at or below 45 C before launch and after exit. The earlier 68/55 C,
+58/50 C, and 60/45 C process-stop policies are retained only inside immutable
+receipts. Two active ROCm serving rows left the device at 100-percent busy while
+the stopped host process could not reach its resume gate, so those standalone
+policy files have been removed and must not be reconstructed for serving.
 `--unsafe-no-host-thermal-guard` exists only to retain diagnostic
 counterevidence: it forces the top-level receipt verdict to `failed` even when
 all request rows pass.
@@ -196,7 +195,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --max-tokens 64 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 30000000000 \
-  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-v1.json \
+  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json \
   --server-launch-config .qualification/serving/rocm-kiln-launch.json \
   --out-dir /tmp/kiln-serving-campaign
 ```
@@ -239,7 +238,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --max-tokens 64 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 30000000000 \
-  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-v1.json \
+  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json \
   --server-launch-config .qualification/serving/rocm-vllm-launch.json \
   --reference-dir /tmp/kiln-serving-campaign \
   --out-dir /tmp/vllm-serving-campaign

@@ -533,8 +533,10 @@ Strix Halo comparison:
   is the launcher-produced runtime manifest;
 - `qualification/server-launch/vllm-rocm-strix-halo-triton-text-private-cache-v3.json`
   is the current atomic owned-launch document; and
-- `qualification/host-policies/strix-halo-serving-benchmark-fast-guard-v1.json`
-  is the thermal policy used by the first guarded startup and comparison runs.
+- `qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json`
+  is the current serving thermal policy. The first guarded startup and
+  comparison receipts embed the now-retired 58/50 C process-stop policy; do
+  not reuse that policy for active ROCm serving.
 
 The manifest binds vLLM
 `0.23.1rc1.dev1261+gc71a583aa.rocm723`, PyTorch

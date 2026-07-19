@@ -75,9 +75,6 @@ HOST_THERMAL_POLICY = thermal.HostThermalPolicy(
     label="Tctl",
     limit_millicelsius=97_000,
     poll_interval_ms=int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
-    pacing_start_millicelsius=88_000,
-    pacing_resume_millicelsius=86_000,
-    pacing_timeout_seconds=180.0,
     cooldown_target_millicelsius=75_000,
     cooldown_stable_samples=8,
     cooldown_timeout_seconds=180.0,
@@ -4094,14 +4091,16 @@ def execute(
         observed_pacing = thermal_guard.pacing_metric_values()
         if observed_pacing["host_thermal_pacing_active_end"] != 0:
             failures.append("host thermal pacing remained active after teardown")
-        if (
-            observed_pacing["host_thermal_pacing_completed_event_count"]
-            != observed_pacing["host_thermal_pacing_event_count"]
-        ):
+        if observed_pacing["host_thermal_pacing_event_count"] != 0:
             failures.append(
-                "host thermal pacing events did not all complete: "
-                f"{observed_pacing['host_thermal_pacing_completed_event_count']} != "
-                f"{observed_pacing['host_thermal_pacing_event_count']}"
+                "hard-limit-only serving policy unexpectedly started "
+                f"{observed_pacing['host_thermal_pacing_event_count']} pacing events"
+            )
+        if observed_pacing["host_thermal_pacing_completed_event_count"] != 0:
+            failures.append(
+                "hard-limit-only serving policy unexpectedly completed "
+                f"{observed_pacing['host_thermal_pacing_completed_event_count']} "
+                "pacing events"
             )
 
     if values is None:

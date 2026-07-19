@@ -1204,18 +1204,6 @@ class ServeMixedLoadTests(unittest.TestCase):
                 "target_millicelsius": 75_000,
                 "timeout_seconds": 180.0,
             },
-            "thermal_pacing": {
-                "deadline_accounting": "included",
-                "itl_attribution": "host_thermal_pacing",
-                "mode": "continuous_process_group_stop",
-                "pause_signal": "SIGSTOP",
-                "poll_interval_ms": 250,
-                "resume_millicelsius": 86_000,
-                "resume_signal": "SIGCONT",
-                "scope": "server_process_group",
-                "start_millicelsius": 88_000,
-                "timeout_seconds": 180.0,
-            },
         }
         expected_metrics = sorted(serve.METRIC_DEFINITIONS)
 
@@ -2939,19 +2927,21 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         )
         self.assertEqual(counts, serve.ItlOutlierCounts(1, 0, 1, 0))
 
-    def test_itl_gate_accepts_only_reconciled_thermal_attribution(self) -> None:
+    def test_itl_gate_rejects_active_work_thermal_attribution(self) -> None:
         values = {
             "attributed_itl_outlier_count": 95,
             "host_thermal_pacing_itl_outlier_count": 95,
             "non_thermal_attributed_itl_outlier_count": 0,
             "unexplained_itl_outlier_count": 0,
         }
-        self.assertEqual(serve.itl_outlier_gate_failures(values), [])
+        failures = serve.itl_outlier_gate_failures(values)
+        self.assertTrue(any("prohibited active-work" in failure for failure in failures))
 
         values["non_thermal_attributed_itl_outlier_count"] = 1
         failures = serve.itl_outlier_gate_failures(values)
         self.assertTrue(any("did not reconcile" in failure for failure in failures))
         self.assertTrue(any("non-thermal runtime" in failure for failure in failures))
+        self.assertTrue(any("prohibited active-work" in failure for failure in failures))
 
         values.update(
             attributed_itl_outlier_count=96,

@@ -33,10 +33,11 @@ def hf_fixture(**updates):
         "thermal": {
             "phase_settlement_timeout_seconds": 300.0,
             "policy": {
-                "content_sha256": "sha256:e7347f6c698b33bf3fd6a1a76483118c61d3e5d8b19b64d45609014da40f7620",
+                "content_sha256": "sha256:3c175cfbf85da62e63ff4c8f01facdcd679c066d85c0a9595451aa26260f87c3",
                 "id": "strix-halo-hf-oracle-v1",
                 "limit_millicelsius": 93000,
                 "pacing": {
+                    "mode": "process_group_stop",
                     "resume_millicelsius": 50000,
                     "resume_stable_samples": 20,
                     "start_millicelsius": 58000,

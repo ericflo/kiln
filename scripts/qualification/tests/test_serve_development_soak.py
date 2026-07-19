@@ -338,22 +338,7 @@ class ServeRocmSoakTests(unittest.TestCase):
                 "timeout_seconds": 180.0,
             },
         )
-        self.assertEqual(
-            rocm["soak"]["host_thermal_pacing"],
-            {
-                "start_millicelsius": 88_000,
-                "resume_millicelsius": 86_000,
-                "poll_interval_ms": 250,
-                "deadline_accounting": "included",
-                "mode": "continuous_process_group_stop",
-                "scope": "server_process_group",
-                "pause_signal": "SIGSTOP",
-                "poll_interval_ms": 250,
-                "resume_signal": "SIGCONT",
-                "itl_attribution": "host_thermal_pacing",
-                "timeout_seconds": 180.0,
-            },
-        )
+        self.assertNotIn("host_thermal_pacing", rocm["soak"])
         self.assertEqual(
             rocm["soak"]["accelerator_telemetry"],
             {
@@ -435,22 +420,7 @@ class ServeRocmSoakTests(unittest.TestCase):
             vulkan["soak"]["host_thermal_cooldown"],
             rocm["soak"]["host_thermal_cooldown"],
         )
-        self.assertEqual(
-            vulkan["soak"]["host_thermal_pacing"],
-            {
-                "start_millicelsius": 88_000,
-                "resume_millicelsius": 86_000,
-                "poll_interval_ms": 250,
-                "deadline_accounting": "included",
-                "mode": "continuous_process_group_stop",
-                "scope": "server_process_group",
-                "pause_signal": "SIGSTOP",
-                "poll_interval_ms": 250,
-                "resume_signal": "SIGCONT",
-                "itl_attribution": "host_thermal_pacing",
-                "timeout_seconds": 180.0,
-            },
-        )
+        self.assertNotIn("host_thermal_pacing", vulkan["soak"])
         self.assertEqual(
             vulkan["soak"]["accelerator_telemetry"]["mode"], "if_available"
         )
@@ -1895,6 +1865,40 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(guard.metric_values()["host_thermal_guard_trip_count"], 1)
         self.assertEqual(
             guard.metric_values()["host_temperature_peak_millicelsius"], 97_000
+        )
+
+    def test_hard_limit_only_guard_never_stops_active_process_group(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sensor = root / "hwmon3"
+            sensor.mkdir()
+            (sensor / "name").write_text("k10temp\n", encoding="utf-8")
+            (sensor / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            (sensor / "temp1_input").write_text("96000\n", encoding="utf-8")
+            guard = soak.HostThermalGuard(
+                process,
+                hwmon_name="k10temp",
+                label="Tctl",
+                limit_millicelsius=97_000,
+                hwmon_root=root,
+            )
+            with mock.patch.object(soak.os, "killpg") as killpg:
+                self.assertEqual(guard._sample(), 96_000)
+
+        killpg.assert_not_called()
+        self.assertIsNone(guard.trip_reason)
+        self.assertEqual(
+            guard.pacing_metric_values(),
+            {
+                "host_thermal_pacing_active_end": 0,
+                "host_thermal_pacing_completed_event_count": 0,
+                "host_thermal_pacing_event_count": 0,
+                "host_thermal_pacing_max_seconds": 0.0,
+                "host_thermal_pacing_max_start_millicelsius": 0,
+                "host_thermal_pacing_seconds": 0.0,
+            },
         )
 
     def test_thermal_pacing_stops_and_resumes_the_process_group(self) -> None:

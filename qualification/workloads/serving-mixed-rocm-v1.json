@@ -73,18 +73,6 @@
             "stable_samples": 8,
             "target_millicelsius": 75000,
             "timeout_seconds": 180.0
-          },
-          "thermal_pacing": {
-            "deadline_accounting": "included",
-            "itl_attribution": "host_thermal_pacing",
-            "mode": "continuous_process_group_stop",
-            "pause_signal": "SIGSTOP",
-            "poll_interval_ms": 250,
-            "resume_millicelsius": 86000,
-            "resume_signal": "SIGCONT",
-            "scope": "server_process_group",
-            "start_millicelsius": 88000,
-            "timeout_seconds": 180.0
           }
         },
         "server": {
@@ -458,18 +446,6 @@
             "scope": "host_package",
             "stable_samples": 8,
             "target_millicelsius": 75000,
-            "timeout_seconds": 180.0
-          },
-          "thermal_pacing": {
-            "deadline_accounting": "included",
-            "itl_attribution": "host_thermal_pacing",
-            "mode": "continuous_process_group_stop",
-            "pause_signal": "SIGSTOP",
-            "poll_interval_ms": 250,
-            "resume_millicelsius": 86000,
-            "resume_signal": "SIGCONT",
-            "scope": "server_process_group",
-            "start_millicelsius": 88000,
             "timeout_seconds": 180.0
           }
         },
@@ -845,18 +821,6 @@
             "stable_samples": 8,
             "target_millicelsius": 75000,
             "timeout_seconds": 180.0
-          },
-          "thermal_pacing": {
-            "deadline_accounting": "included",
-            "itl_attribution": "host_thermal_pacing",
-            "mode": "continuous_process_group_stop",
-            "pause_signal": "SIGSTOP",
-            "poll_interval_ms": 250,
-            "resume_millicelsius": 86000,
-            "resume_signal": "SIGCONT",
-            "scope": "server_process_group",
-            "start_millicelsius": 88000,
-            "timeout_seconds": 180.0
           }
         },
         "server": {
@@ -1230,18 +1194,6 @@
             "scope": "host_package",
             "stable_samples": 8,
             "target_millicelsius": 75000,
-            "timeout_seconds": 180.0
-          },
-          "thermal_pacing": {
-            "deadline_accounting": "included",
-            "itl_attribution": "host_thermal_pacing",
-            "mode": "continuous_process_group_stop",
-            "pause_signal": "SIGSTOP",
-            "poll_interval_ms": 250,
-            "resume_millicelsius": 86000,
-            "resume_signal": "SIGCONT",
-            "scope": "server_process_group",
-            "start_millicelsius": 88000,
             "timeout_seconds": 180.0
           }
         },
@@ -1617,18 +1569,6 @@
             "stable_samples": 8,
             "target_millicelsius": 75000,
             "timeout_seconds": 180.0
-          },
-          "thermal_pacing": {
-            "deadline_accounting": "included",
-            "itl_attribution": "host_thermal_pacing",
-            "mode": "continuous_process_group_stop",
-            "pause_signal": "SIGSTOP",
-            "poll_interval_ms": 250,
-            "resume_millicelsius": 86000,
-            "resume_signal": "SIGCONT",
-            "scope": "server_process_group",
-            "start_millicelsius": 88000,
-            "timeout_seconds": 180.0
           }
         },
         "server": {
@@ -2002,18 +1942,6 @@
             "scope": "host_package",
             "stable_samples": 8,
             "target_millicelsius": 75000,
-            "timeout_seconds": 180.0
-          },
-          "thermal_pacing": {
-            "deadline_accounting": "included",
-            "itl_attribution": "host_thermal_pacing",
-            "mode": "continuous_process_group_stop",
-            "pause_signal": "SIGSTOP",
-            "poll_interval_ms": 250,
-            "resume_millicelsius": 86000,
-            "resume_signal": "SIGCONT",
-            "scope": "server_process_group",
-            "start_millicelsius": 88000,
             "timeout_seconds": 180.0
           }
         },

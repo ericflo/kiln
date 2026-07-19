@@ -769,19 +769,19 @@ kiln serve --config rocm-graph-eager.toml
           settled seven measured capacity transactions with zero fallback. Treat 12 as the qualified Strix Halo
           point, not a universal optimum, and require local evidence before raising it. The soak terminates below
           8 GiB <code>MemAvailable</code> and fails above 512 MiB swap growth. The soak, shorter ROCm mixed-load
-          gate, and Vulkan soak share the independent 250 ms thermal controller: pace the complete server group
-          at 88,000/86,000 millicelsius and fail closed at 97,000 millicelsius. Pacing time remains inside request
-          and phase deadlines and is emitted as <code>host_thermal_pacing</code>, so a sustainable throughput result
-          cannot discard cooling time or mislabel a controlled pause as unexplained inference latency. The
+          gate, and Vulkan soak share the independent 250 ms hard-limit-only thermal controller. It never sends
+          <code>SIGSTOP</code> while accelerator work may be outstanding and fails closed at 97,000
+          millicelsius. Two exact ROCm serving rows proved that process-stop pacing can leave the device at
+          100-percent busy while the package cannot reach its resume gate, so any nonzero
+          <code>host_thermal_pacing_event_count</code> now fails source-bound serving qualification. The
           mixed-load client and server share a 180-second request bound and separately count thermal-paced,
-          non-thermal attributed, and unexplained ITL gaps; only reconciled thermal-only attribution may pass.
-          Teardown
-          disables new stops and releases any paced group before termination, then preserves hard-limit monitoring
-          through process exit. The runner returns only after eight consecutive 250 ms readings are at or below
+          non-thermal attributed, and unexplained ITL gaps; all three populations must be zero under the current
+          policy. Teardown preserves hard-limit monitoring through process exit. The runner returns only after
+          eight consecutive 250 ms readings are at or below
           75,000 millicelsius; the cooldown has a 180-second bound, explicit receipt metrics, and fails closed on
           timeout. A memory
-          hard-stop follows <code>SIGTERM</code> with <code>SIGCONT</code> so a thermally stopped group can execute
-          shutdown immediately.
+          hard-stop still follows <code>SIGTERM</code> with <code>SIGCONT</code> as fail-safe cleanup for a legacy
+          already-stopped group, but the current serving policy never initiates that state.
         </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           The first clean 256-token route-invariant development soak passed correctness and lifecycle gates but is
@@ -799,7 +799,7 @@ kiln serve --config rocm-graph-eager.toml
           50 percent GPU busy define the active set. Compare
           <code>accelerator_sclk_active_min_hz</code>, <code>accelerator_sclk_active_p50_hz</code>, and
           <code>accelerator_sclk_active_below_half_max_count</code> with active power and edge temperature, host
-          pacing, graph events, allocator activity, and phase timing. ROCm requires available, error-free
+          thermal state, graph events, allocator activity, and phase timing. ROCm requires available, error-free
           telemetry with measured active samples; zero availability or an idle-only measurement fails the case.
           Vulkan uses the same closed metric schema when AMD sysfs is present and explicitly records unavailable
           telemetry on other Vulkan devices. Low SCLK correlation supports a device-wide clock-state hypothesis;
@@ -808,8 +808,9 @@ kiln serve --config rocm-graph-eager.toml
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Qualification compilation, runtime setup, measurement, and teardown have separate checked bounds. The
           runtime setup clock starts only after the exact source-bound build succeeds; build time cannot consume
-          warmup or stabilization evidence. Thermal pacing still counts against whichever runtime phase is active,
-          and the outer containment timeout is derived from all phase limits rather than silently truncating one.
+          warmup or stabilization evidence. Runtime thermal monitoring and final cooldown remain inside their
+          declared phase bounds, and the outer containment timeout is derived from all phase limits rather than
+          silently truncating one.
         </p>
 
         <h3 class="font-semibold mt-6 mb-3">Capture exact graph memory diagnostics</h3>
