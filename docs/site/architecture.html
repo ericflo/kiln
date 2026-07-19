@@ -549,13 +549,15 @@ training request
           decode routes, exact long-attention routes, W8 decode projections, bounded training routes, all
           four qualified tensor-level paged-attention accelerations, and eleven qualified native
           flash-attention route decisions while keeping the slower gfx1151
-          multi-block GDN prefill experiment off. <code>portable_fallback</code>
+          multi-block GDN prefill experiment and the correctness-disabled fused RMSNorm route off.
+          This installs forty-three of forty-five accelerated routes. <code>portable_fallback</code>
           declines all forty-five accelerated ROCm model/tensor routes and delegates to supported portable
           implementations, making reference comparison intentional and reproducible. It deliberately retains
           thirty correctness and bounded-work leaves across training, paged attention, concat, finite checks,
           RMSNorm, and flash-attention tiling and fallback geometry.
           <code>experimental_multiblock</code> is the qualified set plus that unqualified multi-block prefill
-          kernel and therefore fails startup outside the experimental serving profile.
+          kernel, retains fused RMSNorm off, and therefore installs forty-four of forty-five accelerated routes
+          while failing startup outside the experimental serving profile.
         </p>
         <div class="overflow-x-auto mt-4">
           <table class="w-full text-sm" style="color: var(--fg-dim);">
@@ -581,7 +583,7 @@ training request
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>paged_decode_dyn_seqlen_batch</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_mlp_silu_mul</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_mlp_gate_up_prefill</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_rmsnorm</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_rmsnorm</code></td><td class="p-2">off (correctness)</td><td class="p-2">off</td><td class="p-2">off (correctness)</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>long_flash_attn</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>native_rectangular_causal_flash</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>w8_projection</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>

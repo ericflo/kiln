@@ -72,7 +72,7 @@ impl RocmKernelPolicy {
             paged_decode_dyn_seqlen_batch: true,
             fused_mlp_silu_mul: true,
             fused_mlp_gate_up_prefill: true,
-            fused_rmsnorm: true,
+            fused_rmsnorm: false,
             long_flash_attn: true,
             native_rectangular_causal_flash: true,
             w8_projection: true,
@@ -195,8 +195,9 @@ impl RocmKernelPolicy {
         }
     }
 
-    /// Diagnostic policy that changes only fused RMSNorm dispatch from the
-    /// qualified model policy.
+    /// Historical diagnostic policy that explicitly declines fused RMSNorm.
+    /// It is identical to the repaired qualified policy and remains available
+    /// only so source-bound evidence can be reproduced.
     pub const fn fused_rmsnorm_fallback() -> Self {
         Self {
             fused_rmsnorm: false,
@@ -330,7 +331,7 @@ mod tests {
             qualified.accelerated_routes(),
             [
                 true, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                false, true, true, true, true, true, true, true, true, true, true, true, true,
+                false, true, true, true, true, true, false, true, true, true, true, true, true,
                 true, true, true,
             ]
         );
@@ -339,7 +340,7 @@ mod tests {
             gdn_fallback.accelerated_routes(),
             [
                 true, false, false, false, true, false, false, false, false, false, false, false,
-                false, true, false, true, true, true, true, true, true, true, true, true, true,
+                false, true, false, true, true, true, true, true, false, true, true, true, true,
                 true, true, true, true, true,
             ]
         );
@@ -379,7 +380,7 @@ mod tests {
             fused_mlp_silu_mul_fallback.accelerated_routes(),
             [
                 true, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                false, true, true, true, false, true, true, true, true, true, true, true, true,
+                false, true, true, true, false, true, false, true, true, true, true, true, true,
                 true, true, true,
             ]
         );
@@ -387,7 +388,7 @@ mod tests {
             fused_mlp_gate_up_prefill_fallback.accelerated_routes(),
             [
                 true, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                false, true, true, true, true, false, true, true, true, true, true, true, true,
+                false, true, true, true, true, false, false, true, true, true, true, true, true,
                 true, true, true,
             ]
         );
@@ -395,7 +396,7 @@ mod tests {
             split_q_gate_fallback.accelerated_routes(),
             [
                 true, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                false, true, true, true, true, true, true, true, true, true, true, true, true,
+                false, true, true, true, true, true, false, true, true, true, true, true, true,
                 true, true, false,
             ]
         );
@@ -407,7 +408,14 @@ mod tests {
                 false, false, false, false, false, true,
             ]
         );
-        assert_eq!(experimental.accelerated_routes(), [true; 30]);
+        assert_eq!(
+            experimental.accelerated_routes(),
+            [
+                true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+                true, true, true, true, true, true, false, true, true, true, true, true, true,
+                true, true, true,
+            ]
+        );
 
         for policy in [
             qualified,

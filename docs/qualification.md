@@ -877,6 +877,12 @@ model/tensor policy and remains the default. Twelve layer-only diagnostic
 profiles preserve the same ROCm device, BF16 weights, paged state, prompt, and
 layer capture:
 
+Current source keeps fused RMSNorm disabled in `qualified` and
+`experimental_multiblock`; those profiles install 43 and 44 of the 45
+accelerated model/tensor routes, respectively. Retained results from earlier
+source revisions bind their historical profile composition by commit and tree
+and must not be interpreted as the current `qualified` composition.
+
 - `portable_fallback` declines every accelerated model route and every optional
   accelerated tensor route.
 - `model_fallback` declines accelerated model routes while retaining the
@@ -895,9 +901,12 @@ layer capture:
   policy.
 - `fused_norm_mlp_only` is its exact inverse: it enables only those three model
   routes on portable model policy and retains qualified tensor policy.
-- `fused_rmsnorm_fallback`, `fused_mlp_silu_mul_fallback`, and
-  `fused_mlp_gate_up_prefill_fallback` each decline exactly the named route in
-  the otherwise qualified model policy and retain qualified tensor policy.
+- `fused_rmsnorm_fallback` is retained as a historical diagnostic name and is
+  identical to the repaired current `qualified` policy.
+- `fused_mlp_silu_mul_fallback` and `fused_mlp_gate_up_prefill_fallback` each
+  decline the named MLP route while inheriting the current qualified policy,
+  including its disabled fused RMSNorm route, and retain qualified tensor
+  policy.
 - `split_q_gate_fallback` changes only the split q/gate F32-output projection
   leaf from the qualified model policy and retains qualified tensor policy.
 - `split_q_gate_only` is its exact inverse: it enables only that model leaf on
@@ -928,7 +937,8 @@ evidence makes that leaf causal. The inverse excludes it. Matching verdicts
 again require reporting an interaction instead of claiming single-route
 causality.
 
-If the split q/gate pair excludes that route, run both fused norm/MLP profiles.
+For pre-repair source revisions, if the split q/gate pair excludes that route,
+run both fused norm/MLP profiles.
 Correct fallback plus incorrect fused-only evidence localizes the defect to the
 three-route group. The inverse excludes the group. Matching verdicts require an
 interaction claim before any member is disabled in the qualified policy.
@@ -936,7 +946,9 @@ If both group arms are correct, run all three single-route fallbacks. A correct
 single fallback establishes that the named route is necessary under the
 qualified composition; an incorrect result excludes that route as the sole
 necessary member. Multiple correct results require another interaction claim,
-not an arbitrary production-policy change.
+not an arbitrary production-policy change. On current source, run `qualified`
+directly for requalification; the fused RMSNorm fallback is intentionally a
+no-op retained for source-bound evidence compatibility.
 
 The HF arm uses the pinned PyTorch/Transformers fallback implementation,
 BF16 weights, eager full attention, deterministic algorithms, TF32 disabled,

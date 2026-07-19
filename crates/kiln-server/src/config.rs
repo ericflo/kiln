@@ -1778,12 +1778,14 @@ impl<'de> Deserialize<'de> for CudaKernelProfileSetting {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RocmKernelProfile {
-    /// Strix Halo-qualified native route set. This is the production default.
+    /// Strix Halo-qualified native route set with correctness-disabled fused
+    /// RMSNorm. This is the production default.
     #[default]
     Qualified,
     /// Decline all profile-governed routes and use portable model fallbacks.
     PortableFallback,
-    /// Qualified routes plus the unqualified multi-block GDN prefill kernel.
+    /// Qualified routes plus the unqualified multi-block GDN prefill kernel;
+    /// fused RMSNorm remains correctness-disabled.
     ExperimentalMultiblock,
 }
 
