@@ -182,7 +182,7 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
                 policy=Path("/policy.json"),
                 workspace=hf_workspace,
             )
-            self.assertIn("MemoryMax=16G", hf_command)
+            self.assertIn("MemoryMax=20G", hf_command)
             self.assertIn("MemorySwapMax=0", hf_command)
             self.assertIn("PrivateNetwork=yes", hf_command)
             self.assertEqual(hf_command[-1], "--capture-layer-last-rows")
@@ -267,7 +267,7 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             "containment": {
                 "hf": {
                     "host_available_before_gib": 25,
-                    "memory_max_gib": 16,
+                    "memory_max_gib": 20,
                     "network": "forbidden",
                     "thermal": oracle["containment"]["service"],
                 },
@@ -362,6 +362,13 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             path = Path(directory) / "result.json"
             path.write_text(json.dumps(result), encoding="ascii")
             self.assertEqual(attribution.validate_result(path), result)
+            historical = copy.deepcopy(result)
+            historical["containment"]["hf"]["memory_max_gib"] = 16
+            historical["result_sha256"] = contract.canonical_sha256(
+                {name: value for name, value in historical.items() if name != "result_sha256"}
+            )
+            path.write_text(json.dumps(historical), encoding="ascii")
+            self.assertEqual(attribution.validate_result(path), historical)
             result["worker"]["largest_relative_error_growth"]["index"] = 4
             path.write_text(json.dumps(result), encoding="ascii")
             with self.assertRaisesRegex(attribution.LayerAttributionError, "result_sha256"):

@@ -219,6 +219,7 @@ def _bounded_command(
     output: Path,
     policy: Path,
     workspace: Path,
+    memory_max_gib: int = MEMORY_MAX_GIB,
 ) -> list[str]:
     temporary = workspace / "tmp"
     temporary.mkdir(mode=0o700)
@@ -235,7 +236,7 @@ def _bounded_command(
         "-p",
         "Type=exec",
         "-p",
-        f"MemoryMax={MEMORY_MAX_GIB}G",
+        f"MemoryMax={memory_max_gib}G",
         "-p",
         "MemorySwapMax=0",
         "-p",

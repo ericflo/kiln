@@ -952,14 +952,21 @@ no-op retained for source-bound evidence compatibility.
 
 The HF arm uses the pinned PyTorch/Transformers fallback implementation,
 BF16 weights, eager full attention, deterministic algorithms, TF32 disabled,
-a private-network 16 GiB zero-swap service, and the same closed thermal
-supervisor as the next-token oracle. Forward hooks retain only one cloned last
-row per boundary; the ignored safetensors artifact contains the 34-by-2,560
-F32 matrix, the exact input IDs, and final logits. The marker and compact result
-bind its aggregate row hash, ordered names, model/request identity, installed
-source hashes, cgroup events, and complete thermal lifecycle. Before this arm,
-the separately gated fingerprint process uses the same declared policy and its
-own complete lifecycle is retained alongside the model identity.
+a private-network 20 GiB zero-swap service, and the same closed thermal
+supervisor as the next-token oracle. The 23 GiB host-availability preflight is
+unchanged. The layer arm has a larger ceiling than the independent 16 GiB
+next-token arm because a cold unified-memory load can charge both file-backed
+safetensors pages and GPU allocations to its cgroup. Any high, max, OOM,
+OOM-kill, or swap event still rejects the evidence. Forward hooks retain only
+one cloned last row per boundary; the ignored safetensors artifact contains the
+34-by-2,560 F32 matrix, the exact input IDs, and final logits. The marker and
+compact result bind its aggregate row hash, ordered names, model/request
+identity, installed source hashes, cgroup events, and complete thermal
+lifecycle. Before this arm, the separately gated fingerprint process uses the
+same declared policy and its own complete lifecycle is retained alongside the
+model identity. Retained historical results record the earlier 16 GiB ceiling;
+the checker accepts that value only as historical evidence, while
+`--require-current-source` requires the current 20 GiB contract.
 
 The Kiln arm rebuilds the shared attribution example through the offline
 `gfx1151` closed-source build service. Its exact-argv open-inode gate then runs

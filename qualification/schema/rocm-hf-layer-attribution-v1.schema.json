@@ -229,7 +229,7 @@
       "required": ["host_available_before_gib", "memory_max_gib", "network", "thermal"],
       "properties": {
         "host_available_before_gib": { "type": "integer", "minimum": 23 },
-        "memory_max_gib": { "enum": [16, 48] },
+        "memory_max_gib": { "enum": [16, 20, 48] },
         "network": { "const": "forbidden" },
         "thermal": {
           "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/thermalEvidence"

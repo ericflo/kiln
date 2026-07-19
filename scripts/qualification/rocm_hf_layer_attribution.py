@@ -32,7 +32,8 @@ LEGACY_UNGUARDED_FINGERPRINT_RESULTS = {
 }
 WORKER_SCHEMA = "kiln.rocm-hf-layer-attribution.v1"
 WORKER_PREFIX = "KILN_ROCM_HF_LAYER_ATTRIBUTION "
-HF_MEMORY_MAX_GIB = 16
+LEGACY_HF_MEMORY_MAX_GIB = 16
+HF_MEMORY_MAX_GIB = 20
 HF_RUNTIME_MAX_SECONDS = 600
 RECOVERY_TIMEOUT_SECONDS = 300
 KERNEL_PROFILES = (
@@ -135,6 +136,7 @@ def _bounded_hf_command(
             output=output,
             policy=policy,
             workspace=workspace,
+            memory_max_gib=HF_MEMORY_MAX_GIB,
         ),
         "--capture-layer-last-rows",
     ]
@@ -653,16 +655,24 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
     containment = value["containment"]
     if not isinstance(containment, dict) or set(containment) != {"hf", "kiln"}:
         raise LayerAttributionError("layer result containment fields are invalid")
-    for name, memory, minimum in (
-        ("hf", HF_MEMORY_MAX_GIB, hf_oracle.MIN_AVAILABLE_GIB),
-        ("kiln", path_attribution.MEMORY_MAX_GIB, path_attribution.MIN_AVAILABLE_GIB),
+    for name, memories, minimum in (
+        (
+            "hf",
+            {LEGACY_HF_MEMORY_MAX_GIB, HF_MEMORY_MAX_GIB},
+            hf_oracle.MIN_AVAILABLE_GIB,
+        ),
+        (
+            "kiln",
+            {path_attribution.MEMORY_MAX_GIB},
+            path_attribution.MIN_AVAILABLE_GIB,
+        ),
     ):
         record = containment[name]
         if (
             not isinstance(record, dict)
             or set(record)
             != {"host_available_before_gib", "memory_max_gib", "network", "thermal"}
-            or record["memory_max_gib"] != memory
+            or record["memory_max_gib"] not in memories
             or record["network"] != "forbidden"
             or record["host_available_before_gib"] < minimum
             or supervisor.validate_evidence(record["thermal"]) != record["thermal"]
@@ -684,6 +694,8 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         raise LayerAttributionError("layer result source identity is invalid")
     if require_current_source and source != hf_oracle._repository_identity():
         raise LayerAttributionError("layer result source does not match current pushed source")
+    if require_current_source and containment["hf"]["memory_max_gib"] != HF_MEMORY_MAX_GIB:
+        raise LayerAttributionError("layer result HF containment does not match current source")
     binary = value["binary"]
     if (
         not isinstance(binary, dict)
