@@ -3013,6 +3013,14 @@ impl LinearAttentionState {
         })
     }
 
+    /// Extract one batch row into storage that cannot alias the batch tensor.
+    ///
+    /// A one-row narrow of a contiguous tensor can itself be contiguous, so
+    /// `contiguous()` is not an ownership boundary here.
+    fn detached_batch_row(tensor: &Tensor, batch_idx: usize) -> Result<Tensor> {
+        Ok(tensor.narrow(0, batch_idx, 1)?.copy()?)
+    }
+
     /// Split a batched state into one-row states in batch order.
     pub fn split_batch_rows(&self) -> Result<Vec<Self>> {
         let batch = self.batch_size()?;
@@ -3021,10 +3029,10 @@ impl LinearAttentionState {
             let mut recurrent_states = Vec::with_capacity(self.recurrent_states.len());
             let mut conv_states = Vec::with_capacity(self.conv_states.len());
             for tensor in &self.recurrent_states {
-                recurrent_states.push(tensor.narrow(0, batch_idx, 1)?.contiguous()?);
+                recurrent_states.push(Self::detached_batch_row(tensor, batch_idx)?);
             }
             for tensor in &self.conv_states {
-                conv_states.push(tensor.narrow(0, batch_idx, 1)?.contiguous()?);
+                conv_states.push(Self::detached_batch_row(tensor, batch_idx)?);
             }
             rows.push(Self {
                 recurrent_states,
@@ -3049,11 +3057,12 @@ impl LinearAttentionState {
         Ok(())
     }
 
-    /// Replace one-row destination tensors from this batched state.
+    /// Replace one-row destination tensors with independent copies from this
+    /// batched state.
     ///
     /// This avoids the extra `restore_from` copies in [`Self::scatter_batch_rows`]
-    /// for scheduler-owned batch decode rows, where CUDA graph pointer stability
-    /// is not required because batch-size > 1 graph replay is not used.
+    /// for scheduler-owned decode rows. Graph pointer stability belongs to the
+    /// runner-owned batched slot; per-request row state must own its storage.
     pub fn scatter_batch_rows_replace(&self, destinations: &mut [&mut Self]) -> Result<()> {
         let batch = self.batch_size()?;
         anyhow::ensure!(
@@ -3082,11 +3091,11 @@ impl LinearAttentionState {
                 .iter_mut()
                 .zip(self.recurrent_states.iter())
             {
-                *dst_tensor = src_tensor.narrow(0, row_idx, 1)?.contiguous()?;
+                *dst_tensor = Self::detached_batch_row(src_tensor, row_idx)?;
             }
             for (dst_tensor, src_tensor) in dst.conv_states.iter_mut().zip(self.conv_states.iter())
             {
-                *dst_tensor = src_tensor.narrow(0, row_idx, 1)?.contiguous()?;
+                *dst_tensor = Self::detached_batch_row(src_tensor, row_idx)?;
             }
         }
 
@@ -3261,18 +3270,16 @@ impl LinearAttentionState {
                 &mut dst_tensors,
             )? {
                 for (row_idx, dst_tensor) in dst_tensors.into_iter().enumerate() {
-                    *dst_tensor = self.recurrent_states[layer_idx]
-                        .narrow(0, row_idx, 1)?
-                        .contiguous()?;
+                    *dst_tensor =
+                        Self::detached_batch_row(&self.recurrent_states[layer_idx], row_idx)?;
                 }
             }
         }
 
         for layer_idx in 0..self.conv_states.len() {
             for (row_idx, dst) in destinations.iter_mut().enumerate() {
-                dst.conv_states[layer_idx] = self.conv_states[layer_idx]
-                    .narrow(0, row_idx, 1)?
-                    .contiguous()?;
+                dst.conv_states[layer_idx] =
+                    Self::detached_batch_row(&self.conv_states[layer_idx], row_idx)?;
             }
         }
 
@@ -24330,18 +24337,18 @@ pub fn model_forward_paged_batched_decode_hidden(
                 .with_context(|| format!("batched GDN layer {layer_idx}"))?;
 
                 for (row_idx, state) in linear_states.iter_mut().enumerate() {
-                    state.recurrent_states[linear_attn_idx] = recurrent_state
-                        .narrow(0, row_idx, 1)?
-                        .contiguous()
-                        .with_context(|| {
-                            format!("split recurrent state row {row_idx} for GDN layer {layer_idx}")
-                        })?;
-                    state.conv_states[linear_attn_idx] = conv_state
-                        .narrow(0, row_idx, 1)?
-                        .contiguous()
-                        .with_context(|| {
-                            format!("split conv state row {row_idx} for GDN layer {layer_idx}")
-                        })?;
+                    state.recurrent_states[linear_attn_idx] =
+                        LinearAttentionState::detached_batch_row(&recurrent_state, row_idx)
+                            .with_context(|| {
+                                format!(
+                                    "split recurrent state row {row_idx} for GDN layer {layer_idx}"
+                                )
+                            })?;
+                    state.conv_states[linear_attn_idx] =
+                        LinearAttentionState::detached_batch_row(&conv_state, row_idx)
+                            .with_context(|| {
+                                format!("split conv state row {row_idx} for GDN layer {layer_idx}")
+                            })?;
                 }
 
                 hidden = {
@@ -31896,6 +31903,14 @@ mod tests {
 
         let split = batched.split_batch_rows()?;
         assert_eq!(split.len(), 2);
+        assert!(!std::sync::Arc::ptr_eq(
+            split[0].recurrent_states[0].storage(),
+            batched.recurrent_states[0].storage()
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            split[0].conv_states[0].storage(),
+            batched.conv_states[0].storage()
+        ));
         assert_eq!(
             split[0].recurrent_states[0]
                 .flatten_all()?
@@ -31949,6 +31964,14 @@ mod tests {
             let mut destinations = [&mut replace_dst0, &mut replace_dst1];
             batched.scatter_batch_rows_replace(&mut destinations)?;
         }
+        assert!(!std::sync::Arc::ptr_eq(
+            replace_dst0.recurrent_states[0].storage(),
+            batched.recurrent_states[0].storage()
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            replace_dst0.conv_states[0].storage(),
+            batched.conv_states[0].storage()
+        ));
         assert_eq!(
             replace_dst0.recurrent_states[0]
                 .flatten_all()?

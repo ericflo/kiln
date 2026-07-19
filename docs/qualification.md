@@ -1730,6 +1730,37 @@ full-attention layer: one capture plus seven replays matched eager hidden,
 recurrent, convolution, and full K/V state exactly, with 286,720 retained GDN
 slot bytes fully accounted.
 
+The first source-bound production-model c8 arm is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t230545-rocm-strix-halo-native-batch-graphs-v16-exact-prompt-c8.kiln.json`.
+Its measured row passed every route and lifecycle gate: all eight requests
+completed 32 tokens, effective decode width was exactly four, one multi-row
+graph capture led to 61 replays, and no fallback or graph failure occurred.
+Decode service wall fell from the exact-prompt eager row's 8.020 seconds to
+6.598 seconds and aggregate output reached 16.616 tokens/second. The row peaked
+at 80.375 C, the complete owned lifecycle peaked at 89.375 C without tripping
+the 93 C guard, and device memory stayed below 50 GB at 35,433,390,080 bytes.
+These are candidate measurements only. The strict receipt failed exact-output
+comparison at request indices 1, 2, 4, and 5, so none of the performance result
+is accepted for promotion.
+
+A same-binary, same-prompt diagnostic with only typed
+`accelerator.rocm_graph_mode` changed to `disabled` also differed from the
+historical eager receipt, at indices 4 and 7. That shows the prior rotating-c8
+receipt is not a sufficient bitwise cross-process oracle by itself. The graph
+failure nevertheless exposed a concrete actor-lifecycle defect: extracting a
+one-row GDN state with `narrow(...).contiguous()` could return a view because
+the narrow was already contiguous. Per-request recurrent and convolution state
+therefore aliased the reusable batch slot, and loading the second width-four
+cohort could overwrite the first cohort's saved state. Row extraction now uses
+an explicit device copy in both shared state helpers and the legacy eager
+batched GDN route. Portable tests assert independent storage, and an
+actor-faithful gfx1151 regression alternates two disjoint width-four cohorts for
+16 turns through one persistent graph slot. It records one capture and 15
+replays while matching eager hidden, recurrent, convolution, and complete K/V
+state exactly at every turn, with zero fallback or failure. A rebuilt
+fixed-source c8 graph/eager pair remains required before accepting output
+parity or throughput.
+
 Serving benchmark driver v15 closes the next attribution gap before another
 ROCm arm. Each successful Kiln stream now retains its exact terminal
 `metadata.performance` object, including the request-local latency phases and

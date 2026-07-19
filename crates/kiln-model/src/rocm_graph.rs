@@ -8954,6 +8954,195 @@ mod tests {
         Ok(())
     }
 
+    /// Real gfx1151 proof that one persistent width slot can alternate between
+    /// unrelated GDN cohorts without leaking or staling either cohort's state.
+    /// This matches continuous batching more closely than advancing one fixed
+    /// set of rows through every replay.
+    #[cfg(feature = "rocm")]
+    #[test]
+    #[ignore = "requires an explicit real-ROCm qualification run"]
+    fn batched_graph_alternating_gdn_cohorts_match_eager() -> Result<()> {
+        require_explicit_rocm_qualification();
+        assert!(
+            kiln_tensor::rocm_is_available(),
+            "ROCm qualification requested but no ROCm device is available"
+        );
+
+        let device = Device::Rocm(0);
+        configure_rocm_graph_test_memory_governor(&device);
+        let backend = crate::backend::for_device_kt(&device);
+        let (config, weights) = rocm_graph_hybrid_test_fixture(&device);
+        let graph_cache = PagedKvCacheKt::new(
+            config.num_full_attention_layers,
+            32,
+            16,
+            config.num_kv_heads,
+            config.head_dim,
+            kiln_tensor::DType::BF16,
+            device,
+        )?;
+        let eager_cache = PagedKvCacheKt::new(
+            config.num_full_attention_layers,
+            32,
+            16,
+            config.num_kv_heads,
+            config.head_dim,
+            kiln_tensor::DType::BF16,
+            device,
+        )?;
+        let tables = [
+            [
+                BlockTable { blocks: vec![0, 1] },
+                BlockTable { blocks: vec![4, 5] },
+                BlockTable { blocks: vec![8, 9] },
+                BlockTable {
+                    blocks: vec![12, 13],
+                },
+            ],
+            [
+                BlockTable {
+                    blocks: vec![16, 17],
+                },
+                BlockTable {
+                    blocks: vec![20, 21],
+                },
+                BlockTable {
+                    blocks: vec![24, 25],
+                },
+                BlockTable {
+                    blocks: vec![28, 29],
+                },
+            ],
+        ];
+        let row_ids = [[4301, 4302, 4303, 4304], [4401, 4402, 4403, 4404]];
+        let new_row = || {
+            LinearAttentionState::new_with_batch_for_inference_runtime(
+                &config,
+                1,
+                &device,
+                backend.as_ref(),
+            )
+        };
+        let new_cohort = || {
+            (0..row_ids[0].len())
+                .map(|_| new_row())
+                .collect::<Result<Vec<_>>>()
+        };
+        let mut graph_rows = [new_cohort()?, new_cohort()?];
+        let mut eager_rows = [new_cohort()?, new_cohort()?];
+        let mut graph_runner =
+            RocmGraphRunner::new(&device, RocmGraphExecutionPolicy::lazy_capture_replay());
+
+        for turn in 0usize..16 {
+            let cohort = turn % 2;
+            let step = turn / 2 + 1;
+            let offset = cohort * 29;
+            let token_ids = [
+                ((step + offset) % config.vocab_size) as u32,
+                ((step + offset + 5) % config.vocab_size) as u32,
+                ((step + offset + 11) % config.vocab_size) as u32,
+                ((step + offset + 17) % config.vocab_size) as u32,
+            ];
+            let sequence_lengths = [step, step + 1, step + 2, step + 3];
+            let table_refs: Vec<&BlockTable> = tables[cohort].iter().collect();
+            let graph_row_refs: Vec<&LinearAttentionState> = graph_rows[cohort].iter().collect();
+            let eager_row_refs: Vec<&LinearAttentionState> = eager_rows[cohort].iter().collect();
+            let mut graph_state = LinearAttentionState::from_batch_rows(&graph_row_refs)?;
+            let mut eager_state = LinearAttentionState::from_batch_rows(&eager_row_refs)?;
+            let recurrent_input_match = graph_state
+                .recurrent_states
+                .iter()
+                .zip(&eager_state.recurrent_states)
+                .all(|(graph, eager)| hidden_f32(graph) == hidden_f32(eager));
+            let conv_input_match = graph_state
+                .conv_states
+                .iter()
+                .zip(&eager_state.conv_states)
+                .all(|(graph, eager)| hidden_f32(graph) == hidden_f32(eager));
+            anyhow::ensure!(
+                recurrent_input_match && conv_input_match,
+                "alternating-cohort oracle inputs diverged before cohort {cohort}, step {step}"
+            );
+            let graph_hidden = graph_runner
+                .decode_step_paged_batched_hidden(
+                    backend.as_ref(),
+                    &token_ids,
+                    &weights,
+                    &config,
+                    &graph_cache,
+                    &table_refs,
+                    &sequence_lengths,
+                    &mut graph_state,
+                    None,
+                    Some(&row_ids[cohort]),
+                )?
+                .context("alternating-cohort graph runner declined a requested batch")?;
+            let eager_hidden = model_forward_paged_decode_contiguous_batch_hidden_with_ids(
+                backend.as_ref(),
+                &token_ids,
+                &weights,
+                &config,
+                &eager_cache,
+                &table_refs,
+                &sequence_lengths,
+                Some(&mut eager_state),
+                None,
+                Some(&row_ids[cohort]),
+            )?;
+
+            let hidden_match = hidden_f32(&graph_hidden) == hidden_f32(&eager_hidden);
+            let recurrent_match = graph_state
+                .recurrent_states
+                .iter()
+                .zip(&eager_state.recurrent_states)
+                .all(|(graph, eager)| hidden_f32(graph) == hidden_f32(eager));
+            let conv_match = graph_state
+                .conv_states
+                .iter()
+                .zip(&eager_state.conv_states)
+                .all(|(graph, eager)| hidden_f32(graph) == hidden_f32(eager));
+            if !(hidden_match && recurrent_match && conv_match) {
+                let stats = graph_runner.stats();
+                graph_runner.invalidate()?;
+                anyhow::bail!(
+                    "alternating-cohort ROCm graph mismatch for cohort {cohort} at step {step}: \
+                     hidden_match={hidden_match}, recurrent_match={recurrent_match}, \
+                     conv_match={conv_match}, stats={stats:?}"
+                );
+            }
+            graph_rows[cohort] = graph_state.split_batch_rows()?;
+            eager_rows[cohort] = eager_state.split_batch_rows()?;
+            for layer in 0..graph_cache.num_layers() {
+                let (graph_k, graph_v) = graph_cache
+                    .pool_tensors(layer)
+                    .context("alternating graph cache layer")?;
+                let (eager_k, eager_v) = eager_cache
+                    .pool_tensors(layer)
+                    .context("alternating eager cache layer")?;
+                if hidden_f32(&graph_k) != hidden_f32(&eager_k)
+                    || hidden_f32(&graph_v) != hidden_f32(&eager_v)
+                {
+                    graph_runner.invalidate()?;
+                    anyhow::bail!(
+                        "alternating-cohort ROCm graph K/V mismatch at layer {layer}, \
+                         cohort {cohort}, step {step}"
+                    );
+                }
+            }
+        }
+
+        let stats = graph_runner.stats();
+        eprintln!("[rocm-batched-graph-alternating-parity] stats={stats:?}");
+        graph_runner.invalidate()?;
+        anyhow::ensure!(
+            stats.capture_successes == 1 && stats.replay_successes == 15,
+            "alternating graph did not capture once and replay fifteen times: {stats:?}"
+        );
+        anyhow::ensure!(stats.failures == 0 && stats.fallbacks.total == 0);
+        anyhow::ensure!(stats.active_graph_slot_count == 1 && stats.idle_graph_slot_count == 0);
+        Ok(())
+    }
+
     /// A decode geometry that cannot use graph-stable native attention must
     /// remain eager. Capturing its sequence-length-shaped fallback would appear
     /// to succeed but would silently reuse the captured K/V length on replay.
