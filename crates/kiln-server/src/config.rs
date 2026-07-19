@@ -7316,6 +7316,7 @@ mod tests {
         "KILN_MEMORY_VULKAN_BUFFER_POOL_GB",
         "KILN_MODEL_ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND",
         "KILN_MODEL_ADAPTER_DIR",
+        "KILN_MODEL_CHECKPOINT_READ_MIB_PER_SECOND",
         "KILN_MODEL_MODEL_ID",
         "KILN_MODEL_PATH",
         "KILN_MODEL_SERVED_MODEL_ID",
@@ -8605,7 +8606,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 107);
+        assert_eq!(original_len, 108);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -8676,7 +8677,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 112);
+        assert_eq!(serialized_leaves.len(), 113);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
