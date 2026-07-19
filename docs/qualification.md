@@ -1031,6 +1031,33 @@ zero, and no owned process or service remained. The two Kiln cgroups peaked at
 correctness discriminator only. They do not qualify fallback performance,
 multi-token parity, serving throughput, a soak, or final ROCm acceptance.
 
+The guarded GDN subgroup pair is retained at
+`qualification/oracle-results/rocm/strix-halo/20260719t033606-rocm-strix-halo-hf-layer-attribution-gdn-fallback-v1.json`
+and
+`qualification/oracle-results/rocm/strix-halo/20260719t033810-rocm-strix-halo-hf-layer-attribution-non-gdn-fallback-v1.json`,
+both from clean pushed source `d2d3656556b0fc73858499fbc63650af9505caf2`.
+`gdn_fallback` keeps the other 18 model leaves qualified and remains wrong at
+token `25045`; its layer-0/1/2 and final-norm relative RMSE values are
+`0.014459307`, `0.037805305`, `0.066248279`, and `0.088236589`.
+`non_gdn_fallback` keeps only the qualified GDN/recurrent family and restores
+token `15787`; its corresponding values fall to `0.002066817`, `0.003870959`,
+`0.006575082`, and `0.016082606`. Under these disjoint compositions, the
+GDN/recurrent policy family is excluded and the causal group is the remaining
+18 model leaves.
+
+The first divergence still occurs inside layer 0, before a full-attention
+layer can affect that token's hidden state. Within the remaining group, the
+live early-layer candidates are the split q/gate F32-output projection, fused
+RMSNorm, and fused MLP routes; full-attention, LoRA, sampled-head, and weight-8
+routes cannot be selected for this BF16, adapter-free layer-0 boundary. The
+next source-bound discriminator should therefore test the split q/gate route
+directly before widening the internal boundary inventory. The GDN and
+non-GDN lifecycles completed in 234.968 and 89.977 seconds, respectively; the
+first includes a 67-second cold release build. All six guarded arms remained
+at or below 59.875 C, every pacing and cooldown interval completed, cgroup
+event and swap counters remained zero, and no owned residue remained. Kiln
+cgroups peaked at 14,658,535,424 and 12,110,376,960 bytes.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for
