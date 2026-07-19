@@ -134,6 +134,7 @@ def _vulkan_variant_config() -> dict[str, Any]:
         "prefill_admission_quantum": VULKAN_QUALIFIED_PREFILL_ADMISSION_QUANTUM,
     }
     config["model"] = {
+        "checkpoint_read_mib_per_second": mixed.CHECKPOINT_READ_MIB_PER_SECOND,
         "accelerator_weight_upload_mib_per_second": (
             mixed.ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND
         ),

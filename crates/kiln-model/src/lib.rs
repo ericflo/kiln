@@ -1,6 +1,7 @@
 pub mod adapter_merge;
 pub mod backend;
 pub mod cancel;
+mod checkpoint_read;
 pub mod cuda_graph;
 mod cuda_policy;
 // (#1082 Wave F2) `cuda_train` deleted — the hand-rolled candle-autograd
@@ -85,6 +86,10 @@ pub use backend::{
 // with the candle-parity opt-in feature; production uses `for_device_kt`.
 pub use backend::{DecodeWeightPrewarmCancelled, DecodeWeightPrewarmPolicy};
 pub use cancel::CancelHandle;
+pub use checkpoint_read::{
+    CHECKPOINT_READ_CANCELLATION_POLL_MILLISECONDS, CHECKPOINT_READ_PHASES,
+    CheckpointReadCancelled, CheckpointReadPhaseReport, CheckpointReadPolicy, CheckpointReadReport,
+};
 pub use cuda_graph::CudaGraphExecutionPolicy;
 #[cfg(feature = "cuda")]
 pub use cuda_policy::{CudaKernelPolicy, install_cuda_kernel_policy};

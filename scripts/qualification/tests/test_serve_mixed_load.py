@@ -2283,6 +2283,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     self.assertEqual(parsed["model"]["adapter_dir"], str(adapters))
                     self.assertEqual(parsed["model"]["snapshot_dir"], str(snapshots))
                     self.assertEqual(
+                        parsed["model"]["checkpoint_read_mib_per_second"],
+                        serve.CHECKPOINT_READ_MIB_PER_SECOND,
+                    )
+                    self.assertEqual(
                         parsed["model"][
                             "accelerator_weight_upload_mib_per_second"
                         ],

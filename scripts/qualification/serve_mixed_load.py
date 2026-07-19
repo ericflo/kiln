@@ -294,6 +294,7 @@ VULKAN_BUILD_SPEC = SourceBuildSpec(
 )
 VULKAN_DECODE_WEIGHT_PREWARM = True
 VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND = 256
+CHECKPOINT_READ_MIB_PER_SECOND = 256
 ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND = 256
 
 
@@ -311,6 +312,7 @@ def _variant_config(
     return {
         "build": ROCM_BUILD_SPEC.effective_config(),
         "model": {
+            "checkpoint_read_mib_per_second": CHECKPOINT_READ_MIB_PER_SECOND,
             "accelerator_weight_upload_mib_per_second": (
                 ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND
             ),
@@ -2689,6 +2691,13 @@ def write_server_config(
         f"model_id = {_toml_string(MODEL_SOURCE_ID)}",
         f"adapter_dir = {_toml_string(str(adapter_dir))}",
         f"snapshot_dir = {_toml_string(str(snapshot_dir))}",
+        "checkpoint_read_mib_per_second = "
+        + str(
+            model.get(
+                "checkpoint_read_mib_per_second",
+                CHECKPOINT_READ_MIB_PER_SECOND,
+            )
+        ),
         "accelerator_weight_upload_mib_per_second = "
         + str(
             model.get(

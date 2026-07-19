@@ -46,6 +46,7 @@
           "rocm_path": "/opt/rocm"
         },
         "model": {
+          "checkpoint_read_mib_per_second": 256,
           "accelerator_weight_upload_mib_per_second": 256
         },
         "runtime": {

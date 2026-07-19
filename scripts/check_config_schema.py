@@ -220,6 +220,16 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
         ({"server": {"max_decode_batch": "auto"}}, True, "auto union"),
         ({"server": {"max_decode_batch": 0}}, False, "bounded union"),
         (
+            {"model": {"checkpoint_read_mib_per_second": 256}},
+            True,
+            "bounded checkpoint read rate",
+        ),
+        (
+            {"model": {"checkpoint_read_mib_per_second": 0}},
+            False,
+            "zero checkpoint read rate",
+        ),
+        (
             {"model": {"accelerator_weight_upload_mib_per_second": 256}},
             True,
             "bounded accelerator weight upload rate",

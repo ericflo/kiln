@@ -677,16 +677,27 @@
           "x-kiln-environment": "KILN_MODEL_SNAPSHOT_DIR",
           "x-kiln-validation": "Must be non-empty when set. The environment alias uniquely treats an empty or whitespace-only value as a request to clear the TOML value. Without a value, Kiln tries a location beside the model and then the system temporary directory."
         },
+        "checkpoint_read_mib_per_second": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384,
+          "description": "1..=16384 when set. Independently bounds the private snapshot copy, initial full content verification, and post-upload full verification. Reflinked bytes are not charged as reads. Shutdown is checked between bounded chunks and at most every 25 ms during waits. Omission removes rate limiting but preserves cancellation. Applies to real-model startup on every backend, requires restart, and is never active during inference. GET /v1/config.model_startup.checkpoint_read reports all three phase observations.",
+          "x-kiln-path": "model.checkpoint_read_mib_per_second",
+          "x-kiln-type-and-default": "optional unsigned integer MiB/s; omitted (None)",
+          "x-kiln-canonical-env": "KILN_MODEL_CHECKPOINT_READ_MIB_PER_SECOND (implemented)",
+          "x-kiln-environment": "KILN_MODEL_CHECKPOINT_READ_MIB_PER_SECOND",
+          "x-kiln-validation": "1..=16384 when set. Independently bounds the private snapshot copy, initial full content verification, and post-upload full verification. Reflinked bytes are not charged as reads. Shutdown is checked between bounded chunks and at most every 25 ms during waits. Omission removes rate limiting but preserves cancellation. Applies to real-model startup on every backend, requires restart, and is never active during inference. GET /v1/config.model_startup.checkpoint_read reports all three phase observations."
+        },
         "accelerator_weight_upload_mib_per_second": {
           "type": "integer",
           "minimum": 1,
           "maximum": 16384,
-          "description": "1..=16384 when set. Bounds the average schedule by eager base-model source bytes, with checkpoints after base tensors and each complete transformer layer. Transforms can add device work, so this is not a bus-throughput cap. Shutdown is checked at each checkpoint and at most every 25 ms during pacing waits; the current upload quantum is not interruptible. Omission removes rate limiting but preserves boundary cancellation. Inapplicable to mock and CPU-only execution. Startup-only, restart required, and never active during inference. GET /v1/config.model_startup.accelerator_weight_upload reports the resolved policy and completed observation.",
+          "description": "1..=16384 when set. Reserves the cumulative eager base-model source-byte schedule before the base group and each layer, then checks it again after the unit. The base group adds shutdown boundaries after embedding upload, transpose, pack, final norm, and rotary initialization. Transforms can add device work, so this is not a bus-throughput cap. The current backend operation is not interruptible; reservation waits poll cancellation every 25 ms. Omission removes rate limiting but preserves boundary cancellation. Inapplicable to mock and CPU-only execution. Startup-only, restart required, and never active during inference. GET /v1/config.model_startup.accelerator_weight_upload reports reserved/completed bytes and layers.",
           "x-kiln-path": "model.accelerator_weight_upload_mib_per_second",
           "x-kiln-type-and-default": "optional unsigned integer MiB/s; omitted (None)",
           "x-kiln-canonical-env": "KILN_MODEL_ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND (implemented)",
           "x-kiln-environment": "KILN_MODEL_ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND",
-          "x-kiln-validation": "1..=16384 when set. Bounds the average schedule by eager base-model source bytes, with checkpoints after base tensors and each complete transformer layer. Transforms can add device work, so this is not a bus-throughput cap. Shutdown is checked at each checkpoint and at most every 25 ms during pacing waits; the current upload quantum is not interruptible. Omission removes rate limiting but preserves boundary cancellation. Inapplicable to mock and CPU-only execution. Startup-only, restart required, and never active during inference. GET /v1/config.model_startup.accelerator_weight_upload reports the resolved policy and completed observation."
+          "x-kiln-validation": "1..=16384 when set. Reserves the cumulative eager base-model source-byte schedule before the base group and each layer, then checks it again after the unit. The base group adds shutdown boundaries after embedding upload, transpose, pack, final norm, and rotary initialization. Transforms can add device work, so this is not a bus-throughput cap. The current backend operation is not interruptible; reservation waits poll cancellation every 25 ms. Omission removes rate limiting but preserves boundary cancellation. Inapplicable to mock and CPU-only execution. Startup-only, restart required, and never active during inference. GET /v1/config.model_startup.accelerator_weight_upload reports reserved/completed bytes and layers."
         },
         "vulkan_decode_weight_prewarm": {
           "type": "boolean",
@@ -1913,9 +1924,9 @@
       }
     }
   ],
-  "x-kiln-field-count": 112,
+  "x-kiln-field-count": 113,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 107,
+  "x-kiln-canonical-environment-count": 108,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 71,
   "x-kiln-compatibility-alias-count": 76,

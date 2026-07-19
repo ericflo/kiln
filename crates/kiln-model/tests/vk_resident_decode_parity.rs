@@ -58,7 +58,10 @@ fn qualification_required() -> bool {
 
 fn run(model_dir: &std::path::Path) -> Result<()> {
     let config = ModelConfig::qwen3_5_4b();
-    let opts = LoadModelOptions { load_mtp: false };
+    let opts = LoadModelOptions {
+        load_mtp: false,
+        ..Default::default()
+    };
     let model_weights = load_model_with_options(model_dir, &config, opts)?;
 
     let device = Device::Cpu;

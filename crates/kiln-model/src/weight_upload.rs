@@ -9,7 +9,8 @@ use anyhow::Result;
 use serde::Serialize;
 
 pub const ACCELERATOR_WEIGHT_UPLOAD_CANCELLATION_POLL_MILLISECONDS: u64 = 25;
-pub const ACCELERATOR_WEIGHT_UPLOAD_CANCELLATION_BOUNDARY: &str = "base_then_each_layer";
+pub const ACCELERATOR_WEIGHT_UPLOAD_CANCELLATION_BOUNDARY: &str =
+    "reserve_before_base_and_each_layer; base_upload_then_transpose_then_pack_then_final";
 
 const CANCELLATION_POLL: Duration =
     Duration::from_millis(ACCELERATOR_WEIGHT_UPLOAD_CANCELLATION_POLL_MILLISECONDS);
@@ -22,8 +23,10 @@ pub struct AcceleratorWeightUploadReport {
     pub configured_bytes_per_second: Option<u64>,
     pub source_bytes_completed: u64,
     pub source_bytes_total: u64,
+    pub source_bytes_reserved: u64,
     pub completed_layers: usize,
     pub total_layers: usize,
+    pub reserved_layers: usize,
     pub elapsed_milliseconds: u64,
     pub paced_milliseconds: u64,
     pub complete: bool,
@@ -51,8 +54,10 @@ impl AcceleratorWeightUploadPolicy {
                 configured_bytes_per_second: Some(max_bytes_per_second),
                 source_bytes_completed: 0,
                 source_bytes_total: 0,
+                source_bytes_reserved: 0,
                 completed_layers: 0,
                 total_layers: 0,
+                reserved_layers: 0,
                 elapsed_milliseconds: 0,
                 paced_milliseconds: 0,
                 complete: false,
@@ -73,8 +78,10 @@ impl AcceleratorWeightUploadPolicy {
                 configured_bytes_per_second: None,
                 source_bytes_completed: 0,
                 source_bytes_total: 0,
+                source_bytes_reserved: 0,
                 completed_layers: 0,
                 total_layers: 0,
+                reserved_layers: 0,
                 elapsed_milliseconds: 0,
                 paced_milliseconds: 0,
                 complete: false,
@@ -111,6 +118,10 @@ pub(crate) struct AcceleratorWeightUploadPacer<'a> {
     source_bytes_total: usize,
     total_layers: usize,
     paced: Duration,
+    source_bytes_completed: usize,
+    completed_layers: usize,
+    source_bytes_reserved: usize,
+    reserved_layers: usize,
 }
 
 impl<'a> AcceleratorWeightUploadPacer<'a> {
@@ -130,9 +141,68 @@ impl<'a> AcceleratorWeightUploadPacer<'a> {
             source_bytes_total,
             total_layers,
             paced: Duration::ZERO,
+            source_bytes_completed: 0,
+            completed_layers: 0,
+            source_bytes_reserved: 0,
+            reserved_layers: 0,
         };
-        pacer.publish("started", 0, 0, false);
+        pacer.publish("started", false);
         Ok(pacer)
+    }
+
+    pub(crate) fn prepare(
+        &mut self,
+        stage: &'static str,
+        source_bytes_reserved: usize,
+        reserved_layers: usize,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            source_bytes_reserved >= self.source_bytes_completed
+                && source_bytes_reserved <= self.source_bytes_total,
+            "weight-upload reservation is outside remaining source bytes"
+        );
+        anyhow::ensure!(
+            reserved_layers >= self.completed_layers && reserved_layers <= self.total_layers,
+            "weight-upload layer reservation is outside remaining layers"
+        );
+        self.source_bytes_reserved = source_bytes_reserved;
+        self.reserved_layers = reserved_layers;
+        self.publish(stage, false);
+        self.wait_for_target(source_bytes_reserved, stage)?;
+        self.publish(stage, false);
+        tracing::info!(
+            stage,
+            source_bytes_completed = self.source_bytes_completed,
+            source_bytes_reserved,
+            source_bytes_total = self.source_bytes_total,
+            completed_layers = self.completed_layers,
+            reserved_layers,
+            total_layers = self.total_layers,
+            configured_mib_per_second = ?self
+                .policy
+                .max_bytes_per_second()
+                .map(|rate| rate / (1024 * 1024)),
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            paced_ms = self.paced.as_millis() as u64,
+            "accelerator weight upload reservation ready"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn boundary(&mut self, stage: &'static str) -> Result<()> {
+        self.publish(stage, false);
+        self.policy.ensure_active()?;
+        tracing::info!(
+            stage,
+            source_bytes_completed = self.source_bytes_completed,
+            source_bytes_reserved = self.source_bytes_reserved,
+            completed_layers = self.completed_layers,
+            reserved_layers = self.reserved_layers,
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            paced_ms = self.paced.as_millis() as u64,
+            "accelerator weight upload cooperative boundary"
+        );
+        Ok(())
     }
 
     pub(crate) fn checkpoint(
@@ -156,31 +226,15 @@ impl<'a> AcceleratorWeightUploadPacer<'a> {
                 "completed weight-upload progress does not match its declared totals"
             );
         }
-        self.publish(stage, source_bytes_completed, completed_layers, false);
+        self.source_bytes_completed = source_bytes_completed;
+        self.completed_layers = completed_layers;
+        self.source_bytes_reserved = source_bytes_completed;
+        self.reserved_layers = completed_layers;
+        self.publish(stage, false);
         self.policy.ensure_active()?;
-
-        if let Some(rate) = self.policy.max_bytes_per_second() {
-            let target = target_elapsed(source_bytes_completed, rate);
-            loop {
-                self.policy.ensure_active()?;
-                let elapsed = self.started.elapsed();
-                if elapsed >= target {
-                    break;
-                }
-                let sleep_for = target.saturating_sub(elapsed).min(CANCELLATION_POLL);
-                let sleep_started = Instant::now();
-                std::thread::sleep(sleep_for);
-                self.paced = self.paced.saturating_add(sleep_started.elapsed());
-                self.publish(stage, source_bytes_completed, completed_layers, false);
-            }
-        }
+        self.wait_for_target(source_bytes_completed, stage)?;
         self.policy.ensure_active()?;
-        self.publish(
-            stage,
-            source_bytes_completed,
-            completed_layers,
-            stage == "complete",
-        );
+        self.publish(stage, stage == "complete");
 
         if completed_layers == 0
             || completed_layers == self.total_layers
@@ -205,13 +259,26 @@ impl<'a> AcceleratorWeightUploadPacer<'a> {
         Ok(())
     }
 
-    fn publish(
-        &self,
-        stage: &'static str,
-        source_bytes_completed: usize,
-        completed_layers: usize,
-        complete: bool,
-    ) {
+    fn wait_for_target(&mut self, source_bytes: usize, stage: &'static str) -> Result<()> {
+        if let Some(rate) = self.policy.max_bytes_per_second() {
+            let target = target_elapsed(source_bytes, rate);
+            loop {
+                self.policy.ensure_active()?;
+                let elapsed = self.started.elapsed();
+                if elapsed >= target {
+                    break;
+                }
+                let sleep_for = target.saturating_sub(elapsed).min(CANCELLATION_POLL);
+                let sleep_started = Instant::now();
+                std::thread::sleep(sleep_for);
+                self.paced = self.paced.saturating_add(sleep_started.elapsed());
+                self.publish(stage, false);
+            }
+        }
+        Ok(())
+    }
+
+    fn publish(&self, stage: &'static str, complete: bool) {
         let mut report = self
             .policy
             .report
@@ -220,10 +287,12 @@ impl<'a> AcceleratorWeightUploadPacer<'a> {
         *report = AcceleratorWeightUploadReport {
             stage,
             configured_bytes_per_second: self.policy.max_bytes_per_second(),
-            source_bytes_completed: u64::try_from(source_bytes_completed).unwrap_or(u64::MAX),
+            source_bytes_completed: u64::try_from(self.source_bytes_completed).unwrap_or(u64::MAX),
             source_bytes_total: u64::try_from(self.source_bytes_total).unwrap_or(u64::MAX),
-            completed_layers,
+            source_bytes_reserved: u64::try_from(self.source_bytes_reserved).unwrap_or(u64::MAX),
+            completed_layers: self.completed_layers,
             total_layers: self.total_layers,
+            reserved_layers: self.reserved_layers,
             elapsed_milliseconds: self.started.elapsed().as_millis() as u64,
             paced_milliseconds: self.paced.as_millis() as u64,
             complete,
@@ -284,7 +353,7 @@ mod tests {
             cancellation.store(true, Ordering::Release);
         });
         let started = Instant::now();
-        let error = pacer.checkpoint("complete", 1, 1).unwrap_err();
+        let error = pacer.prepare("base_reserved", 1, 1).unwrap_err();
         cancel_thread.join().unwrap();
         assert!(
             error
@@ -293,7 +362,9 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_millis(500));
         let report = policy.report();
-        assert_eq!(report.source_bytes_completed, 1);
+        assert_eq!(report.source_bytes_completed, 0);
+        assert_eq!(report.source_bytes_reserved, 1);
+        assert_eq!(report.reserved_layers, 1);
         assert!(!report.complete);
         Ok(())
     }
@@ -302,15 +373,21 @@ mod tests {
     fn completed_report_matches_declared_totals() -> Result<()> {
         let policy = AcceleratorWeightUploadPolicy::unlimited();
         let mut pacer = AcceleratorWeightUploadPacer::new(&policy, 1024, 2)?;
+        pacer.prepare("base_reserved", 24, 0)?;
+        pacer.boundary("base_embedding_uploaded")?;
         pacer.checkpoint("base", 24, 0)?;
+        pacer.prepare("layer_reserved", 512, 1)?;
         pacer.checkpoint("layer", 512, 1)?;
+        pacer.prepare("layer_reserved", 1024, 2)?;
         pacer.checkpoint("layer", 1024, 2)?;
         pacer.checkpoint("complete", 1024, 2)?;
         let report = policy.report();
         assert_eq!(report.stage, "complete");
         assert_eq!(report.source_bytes_completed, 1024);
         assert_eq!(report.source_bytes_total, 1024);
+        assert_eq!(report.source_bytes_reserved, 1024);
         assert_eq!(report.completed_layers, 2);
+        assert_eq!(report.reserved_layers, 2);
         assert_eq!(report.total_layers, 2);
         assert!(report.complete);
         Ok(())

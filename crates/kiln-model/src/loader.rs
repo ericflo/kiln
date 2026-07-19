@@ -14,6 +14,7 @@ use safetensors::SafeTensors;
 
 use kiln_core::config::ModelConfig;
 
+use crate::checkpoint_read::{CheckpointReadPacer, CheckpointReadPhase, CheckpointReadPolicy};
 use crate::quantized::{self, GptqConfig};
 use crate::weights::*;
 
@@ -72,7 +73,7 @@ struct TensorMapEntry<'a> {
 type TensorMap<'a> = HashMap<String, TensorMapEntry<'a>>;
 
 /// Optional loader toggles for startup-sensitive callers.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct LoadModelOptions {
     /// Load the checkpoint's native MTP head when present.
     ///
@@ -81,11 +82,18 @@ pub struct LoadModelOptions {
     /// tensors and upload them to the accelerator, so this is a startup-latency
     /// policy rather than a lifetime memory or routing guarantee.
     pub load_mtp: bool,
+    /// Optional shared policy for snapshot copying and both loader-owned
+    /// checkpoint content-verification passes. Omission preserves unlimited
+    /// reads while retaining cooperative cancellation boundaries.
+    pub checkpoint_read_policy: Option<CheckpointReadPolicy>,
 }
 
 impl Default for LoadModelOptions {
     fn default() -> Self {
-        Self { load_mtp: true }
+        Self {
+            load_mtp: true,
+            checkpoint_read_policy: None,
+        }
     }
 }
 
@@ -142,7 +150,16 @@ pub fn load_model_with_options_and_snapshot_dir(
     options: LoadModelOptions,
     snapshot_dir: Option<&Path>,
 ) -> Result<ModelWeights> {
-    let snapshot = create_immutable_model_snapshot(model_dir, snapshot_dir).with_context(|| {
+    let checkpoint_read_policy = options
+        .checkpoint_read_policy
+        .clone()
+        .unwrap_or_else(CheckpointReadPolicy::unlimited);
+    let snapshot = create_immutable_model_snapshot(
+        model_dir,
+        snapshot_dir,
+        &checkpoint_read_policy,
+    )
+    .with_context(|| {
         format!(
             "failed to create immutable model snapshot from {}; configure a private snapshot directory on a filesystem with sufficient free space",
             model_dir.display()
@@ -163,6 +180,7 @@ pub fn load_model_with_options_and_snapshot_dir(
             &gptq_config,
             options,
             Arc::clone(&snapshot.lease),
+            checkpoint_read_policy,
         );
     }
 
@@ -171,6 +189,7 @@ pub fn load_model_with_options_and_snapshot_dir(
         config,
         options,
         Arc::clone(&snapshot.lease),
+        checkpoint_read_policy,
     )
 }
 
@@ -180,6 +199,7 @@ fn load_model_dense(
     config: &ModelConfig,
     options: LoadModelOptions,
     snapshot_lease: Arc<ModelSnapshotLease>,
+    checkpoint_read_policy: CheckpointReadPolicy,
 ) -> Result<ModelWeights> {
     let shards = discover_shards(model_dir)?;
     tracing::info!(
@@ -191,8 +211,11 @@ fn load_model_dense(
 
     // Memory-map all shards and parse safetensors headers.
     let loaded_shards = mmap_shards(&shards)?;
-    let source_content_guard =
-        loaded_shard_content_guard(&loaded_shards, Arc::clone(&snapshot_lease))?;
+    let source_content_guard = loaded_shard_content_guard(
+        &loaded_shards,
+        Arc::clone(&snapshot_lease),
+        checkpoint_read_policy,
+    )?;
     let source_content_sha256 = source_content_guard.initial_sha256().to_string();
     let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
@@ -301,6 +324,7 @@ fn load_model_gptq(
     gptq_config: &GptqConfig,
     _options: LoadModelOptions,
     snapshot_lease: Arc<ModelSnapshotLease>,
+    checkpoint_read_policy: CheckpointReadPolicy,
 ) -> Result<ModelWeights> {
     let shards = discover_shards(model_dir)?;
     tracing::info!(
@@ -311,7 +335,8 @@ fn load_model_gptq(
     );
 
     let loaded_shards = mmap_shards(&shards)?;
-    let source_content_guard = loaded_shard_content_guard(&loaded_shards, snapshot_lease)?;
+    let source_content_guard =
+        loaded_shard_content_guard(&loaded_shards, snapshot_lease, checkpoint_read_policy)?;
     let source_content_sha256 = source_content_guard.initial_sha256().to_string();
     let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
@@ -388,6 +413,7 @@ fn load_model_gptq(
 fn create_immutable_model_snapshot(
     model_dir: &Path,
     configured_snapshot_root: Option<&Path>,
+    checkpoint_read_policy: &CheckpointReadPolicy,
 ) -> Result<ImmutableModelSnapshot> {
     let source_root = model_dir
         .canonicalize()
@@ -438,9 +464,21 @@ fn create_immutable_model_snapshot(
     let mut copied_files = 0usize;
     let mut cache_release_attempts = 0usize;
     let mut cache_release_successes = 0usize;
+    let mut logical_bytes_completed = 0u64;
+    let mut rate_limited_bytes_completed = 0u64;
+    let mut read_pacer =
+        checkpoint_read_policy.phase(CheckpointReadPhase::SnapshotCopy, total_bytes)?;
     for (source, relative) in &inputs {
         let destination = directory.path().join(relative);
-        let outcome = copy_snapshot_input(source, &destination, remaining_bytes, directory.path())?;
+        let outcome = copy_snapshot_input(
+            source,
+            &destination,
+            remaining_bytes,
+            directory.path(),
+            &mut read_pacer,
+            &mut logical_bytes_completed,
+            &mut rate_limited_bytes_completed,
+        )?;
         if outcome.copied {
             copied_files += 1;
         } else {
@@ -454,6 +492,7 @@ fn create_immutable_model_snapshot(
                 .len(),
         );
     }
+    read_pacer.complete(logical_bytes_completed, rate_limited_bytes_completed)?;
     #[cfg(unix)]
     File::open(directory.path())
         .and_then(|file| file.sync_all())
@@ -474,6 +513,10 @@ fn create_immutable_model_snapshot(
         cache_release_attempts,
         cache_release_successes,
         cache_release_failures = cache_release_attempts.saturating_sub(cache_release_successes),
+        configured_read_mib_per_second = ?checkpoint_read_policy
+            .max_bytes_per_second()
+            .map(|rate| rate / (1024 * 1024)),
+        rate_limited_bytes = rate_limited_bytes_completed,
         "created private immutable model snapshot"
     );
     Ok(ImmutableModelSnapshot {
@@ -519,6 +562,9 @@ fn copy_snapshot_input(
     destination_path: &Path,
     remaining_logical_bytes: u64,
     snapshot_root: &Path,
+    read_pacer: &mut CheckpointReadPacer<'_>,
+    logical_bytes_completed: &mut u64,
+    rate_limited_bytes_completed: &mut u64,
 ) -> Result<SnapshotCopyOutcome> {
     let mut source = open_regular_source(source_path, "model snapshot input")?;
     let expected_len = source
@@ -554,6 +600,10 @@ fn copy_snapshot_input(
                 snapshot_write_error(error, destination_path, remaining_logical_bytes)
             })?;
             remaining -= read as u64;
+            *logical_bytes_completed = logical_bytes_completed.saturating_add(read as u64);
+            *rate_limited_bytes_completed =
+                rate_limited_bytes_completed.saturating_add(read as u64);
+            read_pacer.checkpoint(*logical_bytes_completed, *rate_limited_bytes_completed)?;
         }
         let mut extra = [0u8; 1];
         if source
@@ -566,6 +616,9 @@ fn copy_snapshot_input(
                 source_path.display()
             );
         }
+    } else {
+        *logical_bytes_completed = logical_bytes_completed.saturating_add(expected_len);
+        read_pacer.checkpoint(*logical_bytes_completed, *rate_limited_bytes_completed)?;
     }
 
     destination
@@ -1023,6 +1076,7 @@ fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<LoadedShard>> {
 fn loaded_shard_content_guard(
     shards: &[LoadedShard],
     snapshot_lease: Arc<ModelSnapshotLease>,
+    checkpoint_read_policy: CheckpointReadPolicy,
 ) -> Result<SourceContentGuard> {
     let retained = shards
         .iter()
@@ -1046,14 +1100,14 @@ fn loaded_shard_content_guard(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    SourceContentGuard::new(retained, snapshot_lease)
+    SourceContentGuard::new(retained, snapshot_lease, checkpoint_read_policy)
 }
 
 #[cfg(test)]
 fn loaded_shard_content_sha256(shards: &[LoadedShard]) -> String {
     let directory = tempfile::tempdir().unwrap();
     let lease = Arc::new(ModelSnapshotLease::new(directory));
-    loaded_shard_content_guard(shards, lease)
+    loaded_shard_content_guard(shards, lease, CheckpointReadPolicy::unlimited())
         .unwrap()
         .initial_sha256()
         .to_string()
@@ -2210,6 +2264,60 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_read_policy_accounts_all_loader_owned_phases() {
+        let tensors = tiny_model_tensors("model.language_model.");
+        let tensor_refs = tensors
+            .iter()
+            .map(|(name, shape, dtype)| (name.as_str(), shape.clone(), *dtype))
+            .collect::<Vec<_>>();
+        let bytes = create_test_safetensors(&tensor_refs);
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("model.safetensors"), &bytes).unwrap();
+        let policy = CheckpointReadPolicy::unlimited();
+        let weights = load_model_with_options(
+            dir.path(),
+            &tiny_model_config(),
+            LoadModelOptions {
+                load_mtp: false,
+                checkpoint_read_policy: Some(policy.clone()),
+            },
+        )
+        .unwrap();
+
+        let during = policy.report();
+        assert!(during.snapshot_copy.complete);
+        assert!(during.initial_content_verification.complete);
+        assert!(!during.post_upload_content_verification.complete);
+        assert!(!during.complete);
+        assert_eq!(
+            during.initial_content_verification.logical_bytes_completed,
+            bytes.len() as u64
+        );
+        assert_eq!(
+            during
+                .initial_content_verification
+                .rate_limited_bytes_completed,
+            bytes.len() as u64
+        );
+
+        weights.verify_source_content_unchanged().unwrap();
+        let completed = policy.report();
+        assert!(completed.complete);
+        assert_eq!(
+            completed
+                .post_upload_content_verification
+                .logical_bytes_completed,
+            bytes.len() as u64
+        );
+        assert_eq!(
+            completed
+                .post_upload_content_verification
+                .rate_limited_bytes_completed,
+            bytes.len() as u64
+        );
+    }
+
+    #[test]
     fn private_snapshot_is_cleaned_after_last_owner_drops() {
         let (_dir, _source, weights) = load_tiny_source_guard_fixture();
         let snapshot_root = weights
@@ -2801,9 +2909,15 @@ mod tests {
         fs::write(dir.path().join("model.safetensors"), &bytes).unwrap();
 
         let config = tiny_model_config();
-        let weights =
-            load_model_with_options(dir.path(), &config, LoadModelOptions { load_mtp: false })
-                .unwrap();
+        let weights = load_model_with_options(
+            dir.path(),
+            &config,
+            LoadModelOptions {
+                load_mtp: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(weights.mtp.is_none(), "MTP should stay off the eager path");
         assert!(
             weights.deferred_mtp.is_some(),

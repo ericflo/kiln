@@ -2470,6 +2470,15 @@ pub struct AppState {
     /// Immutable operational policy consumed by request handlers without
     /// rereading process environment.
     pub operational_runtime: Arc<crate::config::OperationalRuntimeConfig>,
+    /// Typed startup-only checkpoint read setting retained for resolved
+    /// configuration diagnostics.
+    pub checkpoint_read_mib_per_second: Option<u64>,
+    /// Whether a real-model load applied the checkpoint read policy.
+    pub checkpoint_read_applicable: bool,
+    /// Stable public explanation when checkpoint read pacing is inapplicable.
+    pub checkpoint_read_not_applicable_reason: Option<&'static str>,
+    /// Exact snapshot/verification phase accounting for a real model.
+    pub checkpoint_read_report: Option<kiln_model::CheckpointReadReport>,
     /// Typed startup-only accelerator-weight upload setting retained for
     /// resolved configuration diagnostics.
     pub accelerator_weight_upload_mib_per_second: Option<u64>,
@@ -3320,6 +3329,10 @@ impl AppState {
             speculative_config,
             speculative_runtime_policy: SpeculativeRuntimePolicy::default(),
             operational_runtime: Arc::new(crate::config::OperationalRuntimeConfig::default()),
+            checkpoint_read_mib_per_second: None,
+            checkpoint_read_applicable: false,
+            checkpoint_read_not_applicable_reason: Some("mock_mode"),
+            checkpoint_read_report: None,
             accelerator_weight_upload_mib_per_second: None,
             accelerator_weight_upload_applicable: false,
             accelerator_weight_upload_not_applicable_reason: Some("mock_mode"),
@@ -4478,6 +4491,10 @@ impl AppState {
             speculative_config,
             speculative_runtime_policy,
             operational_runtime: Arc::new(crate::config::OperationalRuntimeConfig::default()),
+            checkpoint_read_mib_per_second: None,
+            checkpoint_read_applicable: true,
+            checkpoint_read_not_applicable_reason: None,
+            checkpoint_read_report: None,
             accelerator_weight_upload_mib_per_second: None,
             accelerator_weight_upload_applicable: device_kt.is_gpu(),
             accelerator_weight_upload_not_applicable_reason: device_kt

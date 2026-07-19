@@ -230,6 +230,11 @@ model_id = "Qwen/Qwen3.5-4B"
                                       # overrides this value. The snapshot remains
                                       # leased by the running model and is cleaned
                                       # when that lease ends.
+# checkpoint_read_mib_per_second = 256 # Optional independent rate for snapshot
+                                      # copy plus both full loader verification
+                                      # passes. Reflinked bytes are free. Omission
+                                      # is unlimited; cancellation remains active
+                                      # between bounded read chunks.
 # accelerator_weight_upload_mib_per_second = 256 # Optional startup-only rate based
                                       # on source-weight bytes. Use on thermally or
                                       # memory-pressure-sensitive hosts. Omission is

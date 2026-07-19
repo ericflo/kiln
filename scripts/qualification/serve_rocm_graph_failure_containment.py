@@ -68,6 +68,7 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
         "timeout_seconds": TIMEOUT_SECONDS,
     },
     "model": {
+        "checkpoint_read_mib_per_second": mixed.CHECKPOINT_READ_MIB_PER_SECOND,
         "accelerator_weight_upload_mib_per_second": (
             mixed.ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND
         ),

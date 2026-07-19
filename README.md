@@ -752,13 +752,26 @@ their revision. A user
 with the same UID (or root) can still discover and rewrite process-owned files;
 Kiln treats that as part of the trusted host boundary.
 
+On hosts where copying or hashing a checkpoint creates sustained host pressure,
+set `model.checkpoint_read_mib_per_second` to `1..=16384`. The private snapshot
+copy, initial full content verification, and post-upload full verification each
+receive a fresh cumulative schedule; reflinked bytes do not consume the read
+budget. Reads use bounded chunks, check shutdown between chunks, and poll at
+most every 25 ms while waiting. Omission leaves reads unlimited without
+removing cancellation. The policy applies to real-model startup on every
+backend, ends before readiness, and is reported with per-phase logical bytes,
+physically rate-limited bytes, elapsed time, and pacing time under
+`GET /v1/config.model_startup.checkpoint_read`.
+
 On hosts where eager accelerator materialization creates unacceptable thermal
 or memory pressure, set `model.accelerator_weight_upload_mib_per_second` to a
-rate in `1..=16384`. Kiln schedules against base-model source bytes and yields
-after the embedding/final-norm group and each complete transformer layer;
+rate in `1..=16384`. Kiln reserves the cumulative source-byte budget before the
+base group and before each transformer layer, then verifies it again after the
+unit. Within the base group it checks shutdown after the embedding upload,
+transpose, W8 pack, final norm, and rotary initialization;
 backend transforms can add work, so this is pressure shaping rather than an
-exact interconnect cap. The current upload quantum is not interruptible, but
-shutdown is checked at each boundary and every 25 ms during pacing waits.
+exact interconnect cap. The current backend operation is not interruptible, but
+shutdown is checked at each boundary and every 25 ms during reservation waits.
 Omitting the field removes rate limiting without removing boundary
 cancellation. Mock and CPU-only execution report the field as inapplicable and
 do not pace. This policy ends before readiness and cannot cause an

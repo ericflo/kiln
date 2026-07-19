@@ -314,9 +314,15 @@ mod rocm {
             config.dtype == ModelDType::BF16,
             "expected BF16 model config"
         );
-        let raw_weights =
-            load_model_with_options(&args.model, &config, LoadModelOptions { load_mtp: false })
-                .context("load Qwen3.5 model")?;
+        let raw_weights = load_model_with_options(
+            &args.model,
+            &config,
+            LoadModelOptions {
+                load_mtp: false,
+                ..Default::default()
+            },
+        )
+        .context("load Qwen3.5 model")?;
         let weights = GpuWeights::from_model_weights(&raw_weights, &config, &device)
             .context("upload Qwen3.5 weights to ROCm")?;
         drop(raw_weights);

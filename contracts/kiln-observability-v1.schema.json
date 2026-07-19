@@ -429,13 +429,59 @@
           }
         },
         "model_startup": {
+          "checkpoint_read": {
+            "configured_mib_per_second": 1,
+            "rate_limited": false,
+            "applicable": false,
+            "not_applicable_reason": "mock_mode",
+            "phases": [
+              "snapshot_copy",
+              "initial_content_verification",
+              "post_upload_content_verification"
+            ],
+            "cancellation_poll_milliseconds": 25,
+            "current_work_quantum_interruptible": false,
+            "active_during_inference": false,
+            "restart_required_to_change": true,
+            "observed": {
+              "configured_bytes_per_second": 1,
+              "snapshot_copy": {
+                "stage": "value",
+                "logical_bytes_completed": 0,
+                "logical_bytes_total": 0,
+                "rate_limited_bytes_completed": 0,
+                "elapsed_milliseconds": 0,
+                "paced_milliseconds": 0,
+                "complete": true
+              },
+              "initial_content_verification": {
+                "stage": "value",
+                "logical_bytes_completed": 0,
+                "logical_bytes_total": 0,
+                "rate_limited_bytes_completed": 0,
+                "elapsed_milliseconds": 0,
+                "paced_milliseconds": 0,
+                "complete": true
+              },
+              "post_upload_content_verification": {
+                "stage": "value",
+                "logical_bytes_completed": 0,
+                "logical_bytes_total": 0,
+                "rate_limited_bytes_completed": 0,
+                "elapsed_milliseconds": 0,
+                "paced_milliseconds": 0,
+                "complete": true
+              },
+              "complete": true
+            }
+          },
           "accelerator_weight_upload": {
             "configured_mib_per_second": 1,
             "rate_limited": false,
             "applicable": false,
             "not_applicable_reason": "mock_mode",
             "source_byte_accounting": "base_model_source_bytes",
-            "cancellation_boundary": "base_then_each_layer",
+            "cancellation_boundary": "reserve_before_base_and_each_layer; base_upload_then_transpose_then_pack_then_final",
             "cancellation_poll_milliseconds": 25,
             "current_work_quantum_interruptible": false,
             "active_during_inference": false,
@@ -445,8 +491,10 @@
               "configured_bytes_per_second": 1,
               "source_bytes_completed": 1,
               "source_bytes_total": 1,
+              "source_bytes_reserved": 1,
               "completed_layers": 1,
               "total_layers": 1,
+              "reserved_layers": 1,
               "elapsed_milliseconds": 0,
               "paced_milliseconds": 0,
               "complete": true
@@ -2289,7 +2337,7 @@
           "const": "base_model_source_bytes"
         },
         "cancellation_boundary": {
-          "const": "base_then_each_layer"
+          "const": "reserve_before_base_and_each_layer; base_upload_then_transpose_then_pack_then_final"
         },
         "cancellation_poll_milliseconds": {
           "const": 25
@@ -2326,8 +2374,10 @@
         "configured_bytes_per_second",
         "source_bytes_completed",
         "source_bytes_total",
+        "source_bytes_reserved",
         "completed_layers",
         "total_layers",
+        "reserved_layers",
         "elapsed_milliseconds",
         "paced_milliseconds",
         "complete"
@@ -2352,10 +2402,16 @@
         "source_bytes_total": {
           "$ref": "#/$defs/PositiveInteger"
         },
+        "source_bytes_reserved": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
         "completed_layers": {
           "$ref": "#/$defs/PositiveInteger"
         },
         "total_layers": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "reserved_layers": {
           "$ref": "#/$defs/PositiveInteger"
         },
         "elapsed_milliseconds": {
@@ -3324,6 +3380,161 @@
       ],
       "description": "Checkpoint-boundary retention or sparse replay mode.",
       "x-kiln-rust-type": "CheckpointBoundaryRecomputeMode",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CheckpointReadConfigResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured_mib_per_second",
+        "rate_limited",
+        "applicable",
+        "not_applicable_reason",
+        "phases",
+        "cancellation_poll_milliseconds",
+        "current_work_quantum_interruptible",
+        "active_during_inference",
+        "restart_required_to_change",
+        "observed"
+      ],
+      "properties": {
+        "configured_mib_per_second": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rate_limited": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "applicable": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "not_applicable_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "mock_mode"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phases": {
+          "const": [
+            "snapshot_copy",
+            "initial_content_verification",
+            "post_upload_content_verification"
+          ]
+        },
+        "cancellation_poll_milliseconds": {
+          "const": 25
+        },
+        "current_work_quantum_interruptible": {
+          "const": false
+        },
+        "active_during_inference": {
+          "const": false
+        },
+        "restart_required_to_change": {
+          "const": true
+        },
+        "observed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckpointReadReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Resolved startup-only checkpoint-read policy and completed real-model observations.",
+      "x-kiln-rust-type": "CheckpointReadConfigResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CheckpointReadPhaseReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "logical_bytes_completed",
+        "logical_bytes_total",
+        "rate_limited_bytes_completed",
+        "elapsed_milliseconds",
+        "paced_milliseconds",
+        "complete"
+      ],
+      "properties": {
+        "stage": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "logical_bytes_completed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "logical_bytes_total": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "rate_limited_bytes_completed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "elapsed_milliseconds": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "paced_milliseconds": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "complete": {
+          "const": true
+        }
+      },
+      "description": "Completed logical/read-byte, elapsed-time, and pacing accounting for one checkpoint-read phase.",
+      "x-kiln-rust-type": "kiln_model::CheckpointReadPhaseReport",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CheckpointReadReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured_bytes_per_second",
+        "snapshot_copy",
+        "initial_content_verification",
+        "post_upload_content_verification",
+        "complete"
+      ],
+      "properties": {
+        "configured_bytes_per_second": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot_copy": {
+          "$ref": "#/$defs/CheckpointReadPhaseReport"
+        },
+        "initial_content_verification": {
+          "$ref": "#/$defs/CheckpointReadPhaseReport"
+        },
+        "post_upload_content_verification": {
+          "$ref": "#/$defs/CheckpointReadPhaseReport"
+        },
+        "complete": {
+          "const": true
+        }
+      },
+      "description": "Exact completed accounting for all loader-owned checkpoint-read phases.",
+      "x-kiln-rust-type": "kiln_model::CheckpointReadReport",
       "x-kiln-field-schema-status": "complete"
     },
     "ConfigHashes": {
@@ -6046,9 +6257,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "checkpoint_read",
         "accelerator_weight_upload"
       ],
       "properties": {
+        "checkpoint_read": {
+          "$ref": "#/$defs/CheckpointReadConfigResponse"
+        },
         "accelerator_weight_upload": {
           "$ref": "#/$defs/AcceleratorWeightUploadConfigResponse"
         }

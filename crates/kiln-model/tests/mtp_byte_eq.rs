@@ -48,7 +48,10 @@ fn run(model_dir: &Path) -> Result<()> {
         qwen35_4b_config().context("could not build Qwen3.5-4B model config for byte-eq test")?;
 
     // 1. Load MTP via the kiln loader.
-    let opts = LoadModelOptions { load_mtp: true };
+    let opts = LoadModelOptions {
+        load_mtp: true,
+        ..Default::default()
+    };
     let weights = load_model_with_options(model_dir, &config, opts)
         .with_context(|| format!("kiln load_model failed for {}", model_dir.display()))?;
     let mtp = weights

@@ -1562,6 +1562,7 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(
             variant["effective_config"]["model"],
             {
+                "checkpoint_read_mib_per_second": 256,
                 "accelerator_weight_upload_mib_per_second": 256,
                 "vulkan_decode_weight_prewarm": True,
                 "vulkan_decode_weight_prewarm_mib_per_second": 256,

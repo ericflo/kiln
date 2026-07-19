@@ -54,6 +54,7 @@ model_id = "Qwen/Qwen3.5-4B"
 served_model_id = "Qwen3.5-4B"
 adapter_dir = ".qualification/callsite/adapters"
 snapshot_dir = ".qualification/callsite/snapshots"
+checkpoint_read_mib_per_second = 256
 accelerator_weight_upload_mib_per_second = 256
 vulkan_decode_weight_prewarm = true
 vulkan_decode_weight_prewarm_mib_per_second = 512

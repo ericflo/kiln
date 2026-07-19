@@ -123,18 +123,18 @@ open an accelerator, or load model weights.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 112 fixed leaf
+The accepted TOML surface contains 15 top-level sections and 113 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 112 fixed fields:
+credential. Of the 113 fixed fields:
 
-- 107 implement the canonical mechanical environment name;
+- 108 implement the canonical mechanical environment name;
 - 71 also retain one or more deprecated compatibility spellings (76 aliases
   total);
 - 5 are config-file-only and have no environment override;
 - the 76 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 112 fixed fields and both dynamic credential fields.
+The tables below cover all 113 fixed fields and both dynamic credential fields.
 The schema additionally records the accepted deprecated TOML-only
 `streaming_prefill.enabled` compatibility field so validators match the loader.
 
@@ -903,7 +903,8 @@ those values as a serve-startup contract instead of guessing a target. Inspect
 | `model.tokenizer_path` | optional string; omitted (`None`) | `KILN_MODEL_TOKENIZER_PATH` (implemented) | `KILN_TOKENIZER_PATH` (deprecated compatibility) | Must be non-empty when set. |
 | `model.adapter_dir` | optional string; omitted (`None`) | `KILN_MODEL_ADAPTER_DIR` (implemented) | `KILN_ADAPTER_DIR` (deprecated compatibility) | Must be non-empty when set. For the Qwen3.5-4B profile, omission resolves to `<model.path>/adapters`. |
 | `model.snapshot_dir` | optional string; omitted (`None`) | `KILN_MODEL_SNAPSHOT_DIR` (implemented) | `KILN_MODEL_SNAPSHOT_DIR` | Must be non-empty when set. The environment alias uniquely treats an empty or whitespace-only value as a request to clear the TOML value. Without a value, Kiln tries a location beside the model and then the system temporary directory. |
-| `model.accelerator_weight_upload_mib_per_second` | optional unsigned integer MiB/s; omitted (`None`) | `KILN_MODEL_ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND` (implemented) | `KILN_MODEL_ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND` | `1..=16384` when set. Bounds the average schedule by eager base-model source bytes, with checkpoints after base tensors and each complete transformer layer. Transforms can add device work, so this is not a bus-throughput cap. Shutdown is checked at each checkpoint and at most every 25 ms during pacing waits; the current upload quantum is not interruptible. Omission removes rate limiting but preserves boundary cancellation. Inapplicable to mock and CPU-only execution. Startup-only, restart required, and never active during inference. `GET /v1/config.model_startup.accelerator_weight_upload` reports the resolved policy and completed observation. |
+| `model.checkpoint_read_mib_per_second` | optional unsigned integer MiB/s; omitted (`None`) | `KILN_MODEL_CHECKPOINT_READ_MIB_PER_SECOND` (implemented) | `KILN_MODEL_CHECKPOINT_READ_MIB_PER_SECOND` | `1..=16384` when set. Independently bounds the private snapshot copy, initial full content verification, and post-upload full verification. Reflinked bytes are not charged as reads. Shutdown is checked between bounded chunks and at most every 25 ms during waits. Omission removes rate limiting but preserves cancellation. Applies to real-model startup on every backend, requires restart, and is never active during inference. `GET /v1/config.model_startup.checkpoint_read` reports all three phase observations. |
+| `model.accelerator_weight_upload_mib_per_second` | optional unsigned integer MiB/s; omitted (`None`) | `KILN_MODEL_ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND` (implemented) | `KILN_MODEL_ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND` | `1..=16384` when set. Reserves the cumulative eager base-model source-byte schedule before the base group and each layer, then checks it again after the unit. The base group adds shutdown boundaries after embedding upload, transpose, pack, final norm, and rotary initialization. Transforms can add device work, so this is not a bus-throughput cap. The current backend operation is not interruptible; reservation waits poll cancellation every 25 ms. Omission removes rate limiting but preserves boundary cancellation. Inapplicable to mock and CPU-only execution. Startup-only, restart required, and never active during inference. `GET /v1/config.model_startup.accelerator_weight_upload` reports reserved/completed bytes and layers. |
 | `model.vulkan_decode_weight_prewarm` | boolean; `true` | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM` (implemented) | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM` | Populates backend-private Vulkan decode-weight caches during startup. Disable only to trade first-request latency for lower startup work. Restart required. |
 | `model.vulkan_decode_weight_prewarm_mib_per_second` | unsigned integer MiB/s; `256` | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND` (implemented) | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND` | `1..=16384`. Bounds the average Vulkan decode-weight cache materialization rate. Pacing checks shutdown at least every 25 ms between uploads. Restart required. |
 | `model.served_model_id` | optional string; omitted (`None`) | `KILN_MODEL_SERVED_MODEL_ID` (implemented) | `KILN_SERVED_MODEL_ID` (deprecated compatibility) | Must be non-empty when set. Otherwise the effective id is the final slash-separated component of `model.model_id` (`Qwen3.5-4B` by default). `serve --served-model-id` applies a typed, validated override after environment resolution. |

@@ -11,6 +11,8 @@ use kiln_core::model_provenance::{BaseWeightShardIdentity, BaseWeightShardManife
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 
+use crate::checkpoint_read::{CheckpointReadPacer, CheckpointReadPhase, CheckpointReadPolicy};
+
 /// Data type for stored tensor data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TensorDType {
@@ -534,6 +536,7 @@ pub(crate) struct SourceContentGuard {
     shards: Vec<SourceContentShard>,
     initial_shard_count: usize,
     initial_manifest: BaseWeightShardManifest,
+    checkpoint_read_policy: CheckpointReadPolicy,
     /// Declared after retained files so Windows closes mappings/handles before
     /// `TempDir` attempts recursive cleanup.
     _snapshot_lease: Arc<ModelSnapshotLease>,
@@ -551,25 +554,35 @@ impl SourceContentGuard {
     pub(crate) fn new(
         shards: Vec<(String, Arc<File>, Arc<Mmap>)>,
         snapshot_lease: Arc<ModelSnapshotLease>,
+        checkpoint_read_policy: CheckpointReadPolicy,
     ) -> Result<Self> {
-        let shards = shards
-            .into_iter()
-            .map(|(filename, file, mmap)| {
-                let expected_digest: [u8; 32] = Sha256::digest(&mmap[..]).into();
-                let identity = BaseWeightShardIdentity::from_digest(
-                    filename,
-                    mmap.len() as u64,
-                    expected_digest,
-                )
-                .context("construct base-weight shard identity")?;
-                Ok(SourceContentShard {
-                    identity,
-                    expected_digest,
-                    file,
-                    _mmap: mmap,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let total_bytes = shards.iter().try_fold(0u64, |total, (_, _, mmap)| {
+            total
+                .checked_add(mmap.len() as u64)
+                .context("checkpoint content-verification byte count overflow")
+        })?;
+        let mut pacer = checkpoint_read_policy
+            .phase(CheckpointReadPhase::InitialContentVerification, total_bytes)?;
+        let mut bytes_completed = 0u64;
+        let mut retained = Vec::with_capacity(shards.len());
+        for (filename, file, mmap) in shards {
+            let expected_digest =
+                hash_open_file_exact(&file, mmap.len() as u64, &mut pacer, &mut bytes_completed)
+                    .with_context(|| {
+                        format!("failed to fingerprint model source shard {filename}")
+                    })?;
+            let identity =
+                BaseWeightShardIdentity::from_digest(filename, mmap.len() as u64, expected_digest)
+                    .context("construct base-weight shard identity")?;
+            retained.push(SourceContentShard {
+                identity,
+                expected_digest,
+                file,
+                _mmap: mmap,
+            });
+        }
+        pacer.complete(bytes_completed, bytes_completed)?;
+        let shards = retained;
         let initial_shard_count = shards.len();
         let initial_manifest = BaseWeightShardManifest::new(
             shards.iter().map(|shard| shard.identity.clone()).collect(),
@@ -579,6 +592,7 @@ impl SourceContentGuard {
             shards,
             initial_shard_count,
             initial_manifest,
+            checkpoint_read_policy,
             _snapshot_lease: snapshot_lease,
         })
     }
@@ -605,6 +619,16 @@ impl SourceContentGuard {
             );
         }
 
+        let total_bytes = self.shards.iter().try_fold(0u64, |total, shard| {
+            total
+                .checked_add(shard.identity.size_bytes)
+                .context("post-upload content-verification byte count overflow")
+        })?;
+        let mut pacer = self.checkpoint_read_policy.phase(
+            CheckpointReadPhase::PostUploadContentVerification,
+            total_bytes,
+        )?;
+        let mut bytes_completed = 0u64;
         for shard in &self.shards {
             let filename = &shard.identity.filename;
             let expected_len = shard.identity.size_bytes;
@@ -619,8 +643,9 @@ impl SourceContentGuard {
                 );
             }
 
-            let digest = hash_open_file_exact(&shard.file, expected_len)
-                .with_context(|| format!("failed to verify model source shard {filename}"))?;
+            let digest =
+                hash_open_file_exact(&shard.file, expected_len, &mut pacer, &mut bytes_completed)
+                    .with_context(|| format!("failed to verify model source shard {filename}"))?;
             let after_len = shard
                 .file
                 .metadata()
@@ -644,13 +669,19 @@ impl SourceContentGuard {
                 );
             }
         }
+        pacer.complete(bytes_completed, bytes_completed)?;
         Ok(())
     }
 }
 
 const SOURCE_VERIFY_BUFFER_BYTES: usize = 256 * 1024;
 
-fn hash_open_file_exact(file: &File, expected_len: u64) -> Result<[u8; 32]> {
+fn hash_open_file_exact(
+    file: &File,
+    expected_len: u64,
+    pacer: &mut CheckpointReadPacer<'_>,
+    phase_bytes_completed: &mut u64,
+) -> Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; SOURCE_VERIFY_BUFFER_BYTES];
     let mut offset = 0u64;
@@ -668,6 +699,8 @@ fn hash_open_file_exact(file: &File, expected_len: u64) -> Result<[u8; 32]> {
         }
         hasher.update(&buffer[..read]);
         offset += read as u64;
+        *phase_bytes_completed = phase_bytes_completed.saturating_add(read as u64);
+        pacer.checkpoint(*phase_bytes_completed, *phase_bytes_completed)?;
     }
 
     let mut extra = [0u8; 1];

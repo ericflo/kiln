@@ -60,6 +60,28 @@ applies only to provenance reads; it cannot pace server startup or inference
 and is outside every request-timing window. Standalone `model_fingerprint.py`
 remains unlimited when its optional `--max-read-mib-per-second` is omitted.
 
+### Server checkpoint-read and upload pacing
+
+The driver's fingerprint policy does not govern the owned server. Named-host
+ROCm and Vulkan profiles separately set
+`model.checkpoint_read_mib_per_second = 256`. The server applies an independent
+cumulative schedule to each private snapshot copy, initial full loader-owned
+content verification, and post-upload full verification. Bounded chunks check
+shutdown; reflinked bytes count as logical snapshot progress without consuming
+the read budget. `GET /v1/config.model_startup.checkpoint_read` exposes all
+three completed phase records, including logical and rate-limited bytes,
+elapsed time, pacing time, and the startup-only invariant.
+
+Those profiles also set `model.accelerator_weight_upload_mib_per_second = 256`.
+The upload pacer reserves the next cumulative source-byte target before the base
+group and each layer rather than letting a hot unit run before its wait. It
+checks shutdown again after embedding upload, transpose, W8 packing, final norm,
+and rotary initialization, and after every layer. The current backend operation
+remains non-interruptible. API evidence binds reserved and completed bytes and
+layers; the exclusive content-hashed log binds intermediate stages. Neither
+policy is active after readiness or permits weakening the external thermal
+guard.
+
 Owned mode accepts only an origin-only loopback HTTP base URL. On Linux it
 matches the listening TCP/TCP6 socket inode with descriptors held by the leader
 or another member of the launched process group. An old listener on the port,

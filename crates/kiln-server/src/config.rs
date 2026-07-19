@@ -3414,6 +3414,10 @@ pub struct ModelConfig {
     /// directory. `KILN_MODEL_SNAPSHOT_DIR` is the explicit environment
     /// override.
     pub snapshot_dir: Option<String>,
+    /// Optional average read rate for immutable snapshot copying and each
+    /// loader-owned full checkpoint verification pass. Omission leaves reads
+    /// unlimited while retaining cooperative cancellation between chunks.
+    pub checkpoint_read_mib_per_second: Option<u64>,
     /// Optional average source-weight rate for eager accelerator upload.
     /// Omission leaves startup unlimited. A configured rate bounds sustained
     /// pressure and checks shutdown at least every 25 ms between layer uploads.
@@ -6009,6 +6013,7 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     public_env_field!(some_text, model.tokenizer_path, "KILN_TOKENIZER_PATH"),
     public_env_field!(some_text, model.adapter_dir, "KILN_ADAPTER_DIR"),
     public_env_field!(snapshot_dir, model.snapshot_dir, "KILN_MODEL_SNAPSHOT_DIR"),
+    public_env_field!(optional_u64, model.checkpoint_read_mib_per_second),
     public_env_field!(optional_u64, model.accelerator_weight_upload_mib_per_second),
     public_env_field!(bool, model.vulkan_decode_weight_prewarm),
     public_env_field!(u64, model.vulkan_decode_weight_prewarm_mib_per_second),
@@ -6268,6 +6273,7 @@ impl Default for ModelConfig {
             tokenizer_path: None,
             adapter_dir: None,
             snapshot_dir: None,
+            checkpoint_read_mib_per_second: None,
             accelerator_weight_upload_mib_per_second: None,
             vulkan_decode_weight_prewarm: true,
             vulkan_decode_weight_prewarm_mib_per_second: 256,
@@ -6778,12 +6784,21 @@ impl KilnConfig {
                 anyhow::bail!("{field} must be non-empty when set, got {value:?}");
             }
         }
-        if let Some(rate) = self.model.accelerator_weight_upload_mib_per_second
-            && !(1..=16_384).contains(&rate)
-        {
-            anyhow::bail!(
-                "model.accelerator_weight_upload_mib_per_second must be in 1..=16384 when set, got {rate}"
-            );
+        for (field, rate) in [
+            (
+                "model.checkpoint_read_mib_per_second",
+                self.model.checkpoint_read_mib_per_second,
+            ),
+            (
+                "model.accelerator_weight_upload_mib_per_second",
+                self.model.accelerator_weight_upload_mib_per_second,
+            ),
+        ] {
+            if let Some(rate) = rate
+                && !(1..=16_384).contains(&rate)
+            {
+                anyhow::bail!("{field} must be in 1..=16384 when set, got {rate}");
+            }
         }
         if !(1..=16_384).contains(&self.model.vulkan_decode_weight_prewarm_mib_per_second) {
             anyhow::bail!(
@@ -13091,6 +13106,7 @@ level = "warn"
     fn test_served_model_id_default_derivation() {
         let config = ModelConfig::default();
         assert_eq!(config.effective_served_model_id(), "Qwen3.5-4B");
+        assert_eq!(config.checkpoint_read_mib_per_second, None);
         assert_eq!(config.accelerator_weight_upload_mib_per_second, None);
         assert!(config.vulkan_decode_weight_prewarm);
         assert_eq!(config.vulkan_decode_weight_prewarm_mib_per_second, 256);
@@ -13110,6 +13126,23 @@ level = "warn"
 
         let mut config = KilnConfig::default();
         config.model.accelerator_weight_upload_mib_per_second = Some(256);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn checkpoint_read_rate_is_optional_and_bounded() {
+        for invalid in [0, 16_385] {
+            let mut config = KilnConfig::default();
+            config.model.checkpoint_read_mib_per_second = Some(invalid);
+            let error = config.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("model.checkpoint_read_mib_per_second"),
+                "{error}"
+            );
+        }
+
+        let mut config = KilnConfig::default();
+        config.model.checkpoint_read_mib_per_second = Some(256);
         config.validate().unwrap();
     }
 

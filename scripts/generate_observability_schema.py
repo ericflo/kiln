@@ -1298,13 +1298,47 @@ def build_definitions() -> None:
         "default_thinking_budget_ms": nullable(ref("NonNegativeInteger")),
         "fold_reasoning_into_content": ref("Boolean"),
     }, "Resolved server-wide thinking and reasoning-content defaults.")
+    add_object("CheckpointReadPhaseReport", "kiln_model::CheckpointReadPhaseReport", {
+        "stage": ref("NonEmptyString"),
+        "logical_bytes_completed": ref("NonNegativeInteger"),
+        "logical_bytes_total": ref("NonNegativeInteger"),
+        "rate_limited_bytes_completed": ref("NonNegativeInteger"),
+        "elapsed_milliseconds": ref("NonNegativeInteger"),
+        "paced_milliseconds": ref("NonNegativeInteger"),
+        "complete": {"const": True},
+    }, "Completed logical/read-byte, elapsed-time, and pacing accounting for one checkpoint-read phase.")
+    add_object("CheckpointReadReport", "kiln_model::CheckpointReadReport", {
+        "configured_bytes_per_second": nullable(ref("PositiveInteger")),
+        "snapshot_copy": ref("CheckpointReadPhaseReport"),
+        "initial_content_verification": ref("CheckpointReadPhaseReport"),
+        "post_upload_content_verification": ref("CheckpointReadPhaseReport"),
+        "complete": {"const": True},
+    }, "Exact completed accounting for all loader-owned checkpoint-read phases.")
+    add_object("CheckpointReadConfigResponse", "CheckpointReadConfigResponse", {
+        "configured_mib_per_second": nullable(ref("PositiveInteger")),
+        "rate_limited": ref("Boolean"),
+        "applicable": ref("Boolean"),
+        "not_applicable_reason": nullable({"enum": ["mock_mode"]}),
+        "phases": {"const": [
+            "snapshot_copy",
+            "initial_content_verification",
+            "post_upload_content_verification",
+        ]},
+        "cancellation_poll_milliseconds": {"const": 25},
+        "current_work_quantum_interruptible": {"const": False},
+        "active_during_inference": {"const": False},
+        "restart_required_to_change": {"const": True},
+        "observed": nullable(ref("CheckpointReadReport")),
+    }, "Resolved startup-only checkpoint-read policy and completed real-model observations.")
     add_object("AcceleratorWeightUploadReport", "kiln_model::AcceleratorWeightUploadReport", {
         "stage": ref("NonEmptyString"),
         "configured_bytes_per_second": nullable(ref("PositiveInteger")),
         "source_bytes_completed": ref("PositiveInteger"),
         "source_bytes_total": ref("PositiveInteger"),
+        "source_bytes_reserved": ref("PositiveInteger"),
         "completed_layers": ref("PositiveInteger"),
         "total_layers": ref("PositiveInteger"),
+        "reserved_layers": ref("PositiveInteger"),
         "elapsed_milliseconds": ref("NonNegativeInteger"),
         "paced_milliseconds": ref("NonNegativeInteger"),
         "complete": {"const": True},
@@ -1315,7 +1349,7 @@ def build_definitions() -> None:
         "applicable": ref("Boolean"),
         "not_applicable_reason": nullable({"enum": ["mock_mode", "cpu_device"]}),
         "source_byte_accounting": {"const": "base_model_source_bytes"},
-        "cancellation_boundary": {"const": "base_then_each_layer"},
+        "cancellation_boundary": {"const": "reserve_before_base_and_each_layer; base_upload_then_transpose_then_pack_then_final"},
         "cancellation_poll_milliseconds": {"const": 25},
         "current_work_quantum_interruptible": {"const": False},
         "active_during_inference": {"const": False},
@@ -1323,6 +1357,7 @@ def build_definitions() -> None:
         "observed": nullable(ref("AcceleratorWeightUploadReport")),
     }, "Resolved startup-only accelerator-weight upload policy and completed real-model observation.")
     add_object("ModelStartupConfigResponse", "ModelStartupConfigResponse", {
+        "checkpoint_read": ref("CheckpointReadConfigResponse"),
         "accelerator_weight_upload": ref("AcceleratorWeightUploadConfigResponse"),
     }, "Resolved model-startup resource policy and observations.")
     add_object("SpeculativeBackendMtpConfig", "SpeculativeBackendMtpConfig", {

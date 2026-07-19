@@ -63,7 +63,22 @@ struct ConfigResponse {
 
 #[derive(Serialize)]
 struct ModelStartupConfigResponse {
+    checkpoint_read: CheckpointReadConfigResponse,
     accelerator_weight_upload: AcceleratorWeightUploadConfigResponse,
+}
+
+#[derive(Serialize)]
+struct CheckpointReadConfigResponse {
+    configured_mib_per_second: Option<u64>,
+    rate_limited: bool,
+    applicable: bool,
+    not_applicable_reason: Option<&'static str>,
+    phases: [&'static str; 3],
+    cancellation_poll_milliseconds: u64,
+    current_work_quantum_interruptible: bool,
+    active_during_inference: bool,
+    restart_required_to_change: bool,
+    observed: Option<kiln_model::CheckpointReadReport>,
 }
 
 #[derive(Serialize)]
@@ -481,6 +496,20 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         streaming_prefill: state.streaming_prefill_runtime_config,
         speculative: build_speculative_config(&state),
         model_startup: ModelStartupConfigResponse {
+            checkpoint_read: CheckpointReadConfigResponse {
+                configured_mib_per_second: state.checkpoint_read_mib_per_second,
+                rate_limited: state.checkpoint_read_applicable
+                    && state.checkpoint_read_mib_per_second.is_some(),
+                applicable: state.checkpoint_read_applicable,
+                not_applicable_reason: state.checkpoint_read_not_applicable_reason,
+                phases: kiln_model::CHECKPOINT_READ_PHASES,
+                cancellation_poll_milliseconds:
+                    kiln_model::CHECKPOINT_READ_CANCELLATION_POLL_MILLISECONDS,
+                current_work_quantum_interruptible: false,
+                active_during_inference: false,
+                restart_required_to_change: true,
+                observed: state.checkpoint_read_report.clone(),
+            },
             accelerator_weight_upload: AcceleratorWeightUploadConfigResponse {
                 configured_mib_per_second: state.accelerator_weight_upload_mib_per_second,
                 rate_limited: state.accelerator_weight_upload_applicable
@@ -995,6 +1024,20 @@ mod tests {
         assert_eq!(upload["applicable"], false);
         assert_eq!(upload["not_applicable_reason"], "mock_mode");
         assert!(upload["observed"].is_null());
+        let checkpoint = &json["model_startup"]["checkpoint_read"];
+        assert!(checkpoint["configured_mib_per_second"].is_null());
+        assert_eq!(checkpoint["rate_limited"], false);
+        assert_eq!(checkpoint["applicable"], false);
+        assert_eq!(checkpoint["not_applicable_reason"], "mock_mode");
+        assert_eq!(
+            checkpoint["phases"],
+            serde_json::json!([
+                "snapshot_copy",
+                "initial_content_verification",
+                "post_upload_content_verification"
+            ])
+        );
+        assert!(checkpoint["observed"].is_null());
     }
 
     #[tokio::test]
@@ -1008,6 +1051,25 @@ mod tests {
             .resolved_policy(state.serving_profile);
         state.default_thinking_budget_tokens = Some(64);
         state.default_thinking_budget_ms = Some(1_500);
+        state.checkpoint_read_mib_per_second = Some(256);
+        state.checkpoint_read_applicable = true;
+        state.checkpoint_read_not_applicable_reason = None;
+        let checkpoint_phase = |stage| kiln_model::CheckpointReadPhaseReport {
+            stage,
+            logical_bytes_completed: 9_000_000_000,
+            logical_bytes_total: 9_000_000_000,
+            rate_limited_bytes_completed: 9_000_000_000,
+            elapsed_milliseconds: 35_156,
+            paced_milliseconds: 30_000,
+            complete: true,
+        };
+        state.checkpoint_read_report = Some(kiln_model::CheckpointReadReport {
+            configured_bytes_per_second: Some(256 * 1024 * 1024),
+            snapshot_copy: checkpoint_phase("snapshot_copy"),
+            initial_content_verification: checkpoint_phase("initial_content_verification"),
+            post_upload_content_verification: checkpoint_phase("post_upload_content_verification"),
+            complete: true,
+        });
         state.accelerator_weight_upload_mib_per_second = Some(256);
         state.accelerator_weight_upload_applicable = true;
         state.accelerator_weight_upload_not_applicable_reason = None;
@@ -1016,8 +1078,10 @@ mod tests {
             configured_bytes_per_second: Some(256 * 1024 * 1024),
             source_bytes_completed: 8_000_000_000,
             source_bytes_total: 8_000_000_000,
+            source_bytes_reserved: 8_000_000_000,
             completed_layers: 32,
             total_layers: 32,
+            reserved_layers: 32,
             elapsed_milliseconds: 31_250,
             paced_milliseconds: 20_000,
             complete: true,
@@ -1134,19 +1198,41 @@ mod tests {
         );
         assert_eq!(json["generation"]["default_thinking_budget_tokens"], 64);
         assert_eq!(json["generation"]["default_thinking_budget_ms"], 1_500);
+        let checkpoint = &json["model_startup"]["checkpoint_read"];
+        assert_eq!(checkpoint["configured_mib_per_second"], 256);
+        assert_eq!(checkpoint["rate_limited"], true);
+        assert_eq!(checkpoint["applicable"], true);
+        assert!(checkpoint["not_applicable_reason"].is_null());
+        assert_eq!(checkpoint["cancellation_poll_milliseconds"], 25);
+        assert_eq!(checkpoint["current_work_quantum_interruptible"], false);
+        assert_eq!(checkpoint["active_during_inference"], false);
+        assert_eq!(checkpoint["restart_required_to_change"], true);
+        assert_eq!(
+            checkpoint["observed"]["initial_content_verification"]["logical_bytes_total"],
+            9_000_000_000_u64
+        );
+        assert_eq!(checkpoint["observed"]["complete"], true);
         let upload = &json["model_startup"]["accelerator_weight_upload"];
         assert_eq!(upload["configured_mib_per_second"], 256);
         assert_eq!(upload["rate_limited"], true);
         assert_eq!(upload["applicable"], true);
         assert!(upload["not_applicable_reason"].is_null());
         assert_eq!(upload["source_byte_accounting"], "base_model_source_bytes");
-        assert_eq!(upload["cancellation_boundary"], "base_then_each_layer");
+        assert_eq!(
+            upload["cancellation_boundary"],
+            "reserve_before_base_and_each_layer; base_upload_then_transpose_then_pack_then_final"
+        );
         assert_eq!(upload["cancellation_poll_milliseconds"], 25);
         assert_eq!(upload["current_work_quantum_interruptible"], false);
         assert_eq!(upload["active_during_inference"], false);
         assert_eq!(upload["restart_required_to_change"], true);
         assert_eq!(upload["observed"]["source_bytes_total"], 8_000_000_000_u64);
+        assert_eq!(
+            upload["observed"]["source_bytes_reserved"],
+            8_000_000_000_u64
+        );
         assert_eq!(upload["observed"]["completed_layers"], 32);
+        assert_eq!(upload["observed"]["reserved_layers"], 32);
         assert_eq!(upload["observed"]["complete"], true);
         assert_eq!(json["decode_runtime"]["deterministic"]["enabled"], false);
         assert_eq!(json["decode_runtime"]["deterministic"]["source"], "default");

@@ -5361,7 +5361,6 @@ impl GpuWeights {
         upload_policy: &AcceleratorWeightUploadPolicy,
     ) -> Result<Self> {
         let source_bytes_total = weights.base_model_total_bytes();
-        let mut source_bytes_completed = 0usize;
         let mut upload_pacer = AcceleratorWeightUploadPacer::new(
             upload_policy,
             source_bytes_total,
@@ -5374,6 +5373,12 @@ impl GpuWeights {
         #[cfg(feature = "rocm")]
         let w8a16_enabled = matches!(device, Device::Rocm(_))
             && crate::rocm_policy::current_rocm_kernel_policy().w8_projection;
+        let base_source_bytes = weights
+            .embedding
+            .embed_tokens
+            .size_bytes()
+            .saturating_add(weights.final_norm.size_bytes());
+        upload_pacer.prepare("base_reserved", base_source_bytes, 0)?;
         // On Metal and on Vulkan-active processes, `embed_tokens` itself
         // is never read past `embedding_lookup_from_weights` (which falls
         // back to `embed_tokens_t` whenever the dims don't match the
@@ -5392,12 +5397,14 @@ impl GpuWeights {
                     TransposedWeightCacheMissPolicy::PersistBeforeReadiness,
                 )
                 .context("embed_tokens transposed upload")?;
+                upload_pacer.boundary("base_embedding_transpose_uploaded")?;
                 let embed_tokens = dropped_weight_stub(&weights.embedding.embed_tokens, device)
                     .context("embed_tokens stub")?;
                 (embed_tokens, embed_tokens_t)
             } else {
                 let embed_tokens = weight_to_tensor(&weights.embedding.embed_tokens, device)
                     .context("embed_tokens")?;
+                upload_pacer.boundary("base_embedding_uploaded")?;
                 let embed_tokens_t = cached_transpose_for_weight(
                     &weights.embedding.embed_tokens,
                     &embed_tokens,
@@ -5405,6 +5412,7 @@ impl GpuWeights {
                     TransposedWeightCacheMissPolicy::PersistBeforeReadiness,
                 )
                 .context("embed_tokens cached transpose")?;
+                upload_pacer.boundary("base_embedding_transpose_uploaded")?;
                 (embed_tokens, embed_tokens_t)
             };
         let lm_head_w8 = {
@@ -5422,13 +5430,14 @@ impl GpuWeights {
                 None
             }
         };
+        upload_pacer.boundary("base_embedding_pack_complete")?;
         let final_norm = weight_to_tensor(&weights.final_norm, device).context("final_norm")?;
+        upload_pacer.boundary("base_final_norm_uploaded")?;
         let rotary_inv_freq =
             compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
                 .context("rotary_inv_freq")?;
-        source_bytes_completed = source_bytes_completed
-            .saturating_add(weights.embedding.embed_tokens.size_bytes())
-            .saturating_add(weights.final_norm.size_bytes());
+        upload_pacer.boundary("base_rotary_initialized")?;
+        let mut source_bytes_completed = base_source_bytes;
         upload_pacer.checkpoint("base", source_bytes_completed, 0)?;
         // Base weights are uploaded before the server declares readiness, so
         // already-computed cache misses may be persisted synchronously here.
@@ -5457,6 +5466,9 @@ impl GpuWeights {
         let mut layers = Vec::with_capacity(weights.layers.len());
         for (i, lw) in weights.layers.iter().enumerate() {
             let ctx = |name: &str| format!("layer {i} {name}");
+            let layer_source_bytes_completed =
+                source_bytes_completed.saturating_add(lw.total_bytes());
+            upload_pacer.prepare("layer_reserved", layer_source_bytes_completed, i + 1)?;
 
             let (input_layernorm, post_attention_layernorm, attention) = match &lw.attention {
                 crate::weights::AttentionWeights::Full(attn) => {
@@ -5814,7 +5826,7 @@ impl GpuWeights {
                 )
                 .context(ctx("paced marlin pack"))?;
             }
-            source_bytes_completed = source_bytes_completed.saturating_add(lw.total_bytes());
+            source_bytes_completed = layer_source_bytes_completed;
             upload_pacer.checkpoint("layer", source_bytes_completed, i + 1)?;
         }
 

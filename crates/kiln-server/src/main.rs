@@ -758,6 +758,7 @@ async fn main() -> Result<()> {
         config.server.stream_stall_grace_ms,
     );
     let mut model_snapshot_cleanup = None;
+    let mut checkpoint_read_report = None;
     let mut accelerator_weight_upload_report = None;
     let mut state = if let Some(mp) = model_path {
         // Real inference mode: load model weights and create ModelRunner.
@@ -841,12 +842,43 @@ async fn main() -> Result<()> {
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message(format!("loading model weights from {mp}"));
         }
-        let model_weights = kiln_model::load_model_with_options_and_snapshot_dir(
+        let checkpoint_read_policy = match config.model.checkpoint_read_mib_per_second {
+            Some(rate_mib_per_second) => kiln_model::CheckpointReadPolicy::paced(
+                rate_mib_per_second.saturating_mul(1024 * 1024),
+                Arc::clone(&process_shutdown.requested),
+            )?,
+            None => kiln_model::CheckpointReadPolicy::cancellable(Arc::clone(
+                &process_shutdown.requested,
+            )),
+        };
+        tracing::info!(
+            configured_mib_per_second = ?config.model.checkpoint_read_mib_per_second,
+            phases = ?kiln_model::CHECKPOINT_READ_PHASES,
+            cancellation_poll_ms = kiln_model::CHECKPOINT_READ_CANCELLATION_POLL_MILLISECONDS,
+            chunk_bytes = 8 * 1024 * 1024,
+            active_during_inference = false,
+            "checkpoint read policy resolved"
+        );
+        let model_weights = match kiln_model::load_model_with_options_and_snapshot_dir(
             Path::new(mp),
             &model_config,
-            kiln_model::LoadModelOptions { load_mtp: false },
+            kiln_model::LoadModelOptions {
+                load_mtp: false,
+                checkpoint_read_policy: Some(checkpoint_read_policy.clone()),
+            },
             config.model.snapshot_dir.as_deref().map(Path::new),
-        )?;
+        ) {
+            Ok(weights) => weights,
+            Err(error)
+                if error
+                    .downcast_ref::<kiln_model::CheckpointReadCancelled>()
+                    .is_some() =>
+            {
+                process_shutdown.requested_during_startup("checkpoint_read_cancelled");
+                return Ok(());
+            }
+            Err(error) => return Err(error).context("checkpoint materialization failed"),
+        };
         if process_shutdown.requested_during_startup("immutable_model_snapshot_loaded") {
             return Ok(());
         }
@@ -933,9 +965,27 @@ async fn main() -> Result<()> {
             gpu_weights.base_weight_shard_manifest.as_ref() == Some(&base_weight_shard_manifest),
             "GPU weights did not retain the verified base-weight shard manifest"
         );
-        model_weights
-            .verify_source_content_unchanged()
-            .context("model source changed between load and completed GPU upload")?;
+        match model_weights.verify_source_content_unchanged() {
+            Ok(()) => {}
+            Err(error)
+                if error
+                    .downcast_ref::<kiln_model::CheckpointReadCancelled>()
+                    .is_some() =>
+            {
+                process_shutdown.requested_during_startup("checkpoint_read_cancelled");
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(error)
+                    .context("model source changed between load and completed GPU upload");
+            }
+        }
+        let completed_checkpoint_reads = checkpoint_read_policy.report();
+        anyhow::ensure!(
+            completed_checkpoint_reads.complete,
+            "checkpoint materialization returned without complete phase accounting"
+        );
+        checkpoint_read_report = Some(completed_checkpoint_reads);
         drop(model_weights);
         tracing::info!(
             base_model_source_sha256,
@@ -1109,6 +1159,10 @@ async fn main() -> Result<()> {
             .resolve_operational_runtime(&state.adapter_dir)
             .context("failed to resolve immutable operational runtime configuration")?,
     );
+    state.checkpoint_read_mib_per_second = config.model.checkpoint_read_mib_per_second;
+    state.checkpoint_read_applicable = model_path.is_some();
+    state.checkpoint_read_not_applicable_reason = model_path.is_none().then_some("mock_mode");
+    state.checkpoint_read_report = checkpoint_read_report;
     state.accelerator_weight_upload_mib_per_second =
         config.model.accelerator_weight_upload_mib_per_second;
     state.accelerator_weight_upload_report = accelerator_weight_upload_report;

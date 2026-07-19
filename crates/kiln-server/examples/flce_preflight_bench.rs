@@ -303,7 +303,10 @@ fn main() -> Result<()> {
     let model_weights = kiln_model::load_model_with_options(
         &model_path,
         &model_config,
-        kiln_model::LoadModelOptions { load_mtp: false },
+        kiln_model::LoadModelOptions {
+            load_mtp: false,
+            ..Default::default()
+        },
     )
     .context("load_model")?;
     let kt_device = kiln_server::device::select_device_kt()?;

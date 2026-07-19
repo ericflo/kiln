@@ -3102,7 +3102,10 @@ fn main() -> Result<()> {
     let model_weights = kiln_model::load_model_with_options(
         model_path,
         &model_config,
-        kiln_model::LoadModelOptions { load_mtp: false },
+        kiln_model::LoadModelOptions {
+            load_mtp: false,
+            ..Default::default()
+        },
     )
     .context("failed to load model weights")?;
 

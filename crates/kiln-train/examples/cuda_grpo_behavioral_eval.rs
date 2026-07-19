@@ -293,7 +293,10 @@ fn main() -> Result<()> {
     let model_weights = kiln_model::load_model_with_options(
         &args.model_path,
         &model_config,
-        kiln_model::LoadModelOptions { load_mtp: false },
+        kiln_model::LoadModelOptions {
+            load_mtp: false,
+            ..Default::default()
+        },
     )
     .context("load model weights")?;
     // #1082: kt-native — `device` is a kt `Device::Cuda(0)`, passed directly.

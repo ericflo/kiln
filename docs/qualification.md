@@ -1548,21 +1548,28 @@ unchanged or raise the ceiling. Pace or partition accelerator-weight startup at
 cooperative product boundaries, with typed configuration and explicit progress
 evidence, before repeating the c8 control.
 
-The source-bound Strix Halo ROCm and Vulkan serving profiles set
-`model.accelerator_weight_upload_mib_per_second = 256`; this is a named-host
-GPU qualification policy, not the product-wide default; mock and CPU-only
-execution report it as inapplicable and do not pace. Generated server TOML and
-each checked workload `effective_config.model` must agree exactly. Upload
-progress is accounted in base-model source bytes after the base tensor group
-and every complete transformer layer. Backend conversions can perform more
-work than that byte count implies, and the current group or layer remains the
-largest non-interruptible quantum. Pacing waits poll shutdown every 25 ms.
-Once ready, `GET /v1/config.model_startup.accelerator_weight_upload` must show
-the configured rate, `active_during_inference=false`, matching completed and
-total byte/layer counts, and `complete=true`; the exclusive server log remains
-content-hashed evidence for intermediate progress. A replay is not accepted
-merely because startup survives: the unchanged host thermal, memory, swap,
-cleanup, output, and throughput gates still apply.
+The source-bound Strix Halo ROCm and Vulkan serving profiles set both
+`model.checkpoint_read_mib_per_second = 256` and
+`model.accelerator_weight_upload_mib_per_second = 256`; these are named-host
+qualification policies, not product-wide defaults. Generated server TOML and
+every checked workload `effective_config.model` must agree exactly. Checkpoint
+read pacing applies a fresh cumulative schedule to the snapshot copy, initial
+full content verification, and post-upload full verification; reflinked bytes
+are logical progress but are not charged as reads. Each phase checks shutdown
+between bounded chunks and publishes logical/read bytes plus elapsed/paced time.
+
+Accelerator upload reserves the cumulative base-model source-byte budget before
+the base group and every layer, then publishes completed progress after the
+unit. The base group checks shutdown after embedding upload, transpose, W8
+packing, final norm, and rotary initialization. Backend operations remain
+individually non-interruptible and conversions can perform more work than the
+source byte count implies. Both policies poll shutdown every 25 ms while
+waiting and end before readiness. Once ready, `GET /v1/config.model_startup`
+must show complete checkpoint-read observations, matching reserved/completed
+upload bytes and layers, and `active_during_inference=false` for both. The
+exclusive server log remains content-hashed evidence for intermediate progress.
+A replay is not accepted merely because startup survives: the unchanged host
+thermal, memory, swap, cleanup, output, and throughput gates still apply.
 
 The first paced replay proved that startup contract: all 8,411,510,272 source
 bytes and 32 layers completed before readiness. Its following greedy c8 row
