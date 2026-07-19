@@ -883,6 +883,13 @@ layer capture:
   qualified low-level tensor policy.
 - `tensor_fallback` retains qualified model dispatch while declining optional
   accelerated tensor routes.
+- `gdn_fallback` declines the 12 model-policy leaves that own GDN projections,
+  gates, recurrent mixing, fused decode, fused convolution, and the default-off
+  multiblock route while retaining the other 18 model leaves and qualified
+  tensor policy.
+- `non_gdn_fallback` is the exact model-policy inverse: it retains the qualified
+  GDN/recurrent family, including the default-off multiblock value, declines
+  the other 18 model leaves, and retains qualified tensor policy.
 
 Use the source-paired portable profile first to determine whether acceleration
 as a group changes the error curve. If it does, run both mixed profiles: a
@@ -894,6 +901,14 @@ group. The worker marker, compact result, JSON Schema, and checker bind the
 chosen profile; the closed worker environment never translates it through an
 ambient environment variable. The path-attribution mode remains qualified-only
 because its graph route is itself the object under test.
+
+After the mixed model/tensor pair localizes a defect to model dispatch, run
+both GDN subgroup profiles. A correct `gdn_fallback` paired with an incorrect
+`non_gdn_fallback` localizes the defect to the GDN/recurrent family; the inverse
+localizes it to the other model routes. As with the broader pair, two matching
+verdicts establish an interaction or non-exclusive cause and must not be forced
+into a single subgroup. These profile names are selectable only by the guarded
+layer-attribution binary and are not server configuration values.
 
 The HF arm uses the pinned PyTorch/Transformers fallback implementation,
 BF16 weights, eager full attention, deterministic algorithms, TF32 disabled,

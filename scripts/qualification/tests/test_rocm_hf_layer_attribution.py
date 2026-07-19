@@ -212,7 +212,12 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             self.assertEqual(len(spec["environment"]), 6)
             self.assertFalse(any(name.startswith("KILN_") for name in spec["environment"]))
 
-            for profile in ("model_fallback", "tensor_fallback"):
+            for profile in (
+                "model_fallback",
+                "tensor_fallback",
+                "gdn_fallback",
+                "non_gdn_fallback",
+            ):
                 profile_workspace = workspace / profile
                 profile_workspace.mkdir()
                 profile_spec = attribution._layer_worker_spec(
@@ -326,7 +331,12 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             [],
         )
         self.assertEqual(attribution.validate_worker_marker(fallback["worker"]), fallback["worker"])
-        for profile in ("model_fallback", "tensor_fallback"):
+        for profile in (
+            "model_fallback",
+            "tensor_fallback",
+            "gdn_fallback",
+            "non_gdn_fallback",
+        ):
             diagnostic = copy.deepcopy(fallback["worker"])
             diagnostic["kernel_policy"] = profile
             self.assertEqual(attribution.validate_worker_marker(diagnostic), diagnostic)

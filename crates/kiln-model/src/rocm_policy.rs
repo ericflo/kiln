@@ -132,6 +132,47 @@ impl RocmKernelPolicy {
         }
     }
 
+    /// Diagnostic policy that declines the complete GDN/recurrent model-route
+    /// family while preserving every other qualified model route.
+    pub const fn gdn_fallback() -> Self {
+        Self {
+            gdn_ab_in_proj: false,
+            gdn_prefill_ab_in_proj: false,
+            gdn_prefill_gates: false,
+            gdn: false,
+            gdn_gates: false,
+            gdn_gated_rms_norm: false,
+            gdn_decode_fused: false,
+            gdn_decode_unexpanded_qk: false,
+            gdn_decode_qk_norm_recurrent: false,
+            gdn_decode_qk_norm_recurrent_rmsnorm: false,
+            fused_conv1d: false,
+            gdn_full_chunk_forward_multiblock: false,
+            ..Self::qualified()
+        }
+    }
+
+    /// Diagnostic inverse of [`Self::gdn_fallback`]: retain only the
+    /// qualified GDN/recurrent model-route family and decline every other
+    /// accelerated model route.
+    pub const fn non_gdn_fallback() -> Self {
+        Self {
+            gdn_ab_in_proj: true,
+            gdn_prefill_ab_in_proj: true,
+            gdn_prefill_gates: true,
+            gdn: true,
+            gdn_gates: true,
+            gdn_gated_rms_norm: true,
+            gdn_decode_fused: true,
+            gdn_decode_unexpanded_qk: true,
+            gdn_decode_qk_norm_recurrent: true,
+            gdn_decode_qk_norm_recurrent_rmsnorm: true,
+            fused_conv1d: true,
+            gdn_full_chunk_forward_multiblock: false,
+            ..Self::portable_fallback()
+        }
+    }
+
     /// Qualified policy plus the unqualified multi-block GDN prefill route.
     pub const fn experimental_multiblock() -> Self {
         Self {
@@ -206,6 +247,8 @@ mod tests {
     fn profiles_cover_accelerated_routes_and_training_safeguards() {
         let qualified = RocmKernelPolicy::qualified();
         let fallback = RocmKernelPolicy::portable_fallback();
+        let gdn_fallback = RocmKernelPolicy::gdn_fallback();
+        let non_gdn_fallback = RocmKernelPolicy::non_gdn_fallback();
         let experimental = RocmKernelPolicy::experimental_multiblock();
 
         assert_eq!(
@@ -217,9 +260,31 @@ mod tests {
             ]
         );
         assert_eq!(fallback.accelerated_routes(), [false; 30]);
+        assert_eq!(
+            gdn_fallback.accelerated_routes(),
+            [
+                true, false, false, false, true, false, false, false, false, false, false, false,
+                false, true, false, true, true, true, true, true, true, true, true, true, true,
+                true, true, true, true, true,
+            ]
+        );
+        assert_eq!(
+            non_gdn_fallback.accelerated_routes(),
+            [
+                false, true, true, true, false, true, true, true, true, true, true, true, true,
+                false, false, false, false, false, false, false, false, false, false, false, false,
+                false, false, false, false, false,
+            ]
+        );
         assert_eq!(experimental.accelerated_routes(), [true; 30]);
 
-        for policy in [qualified, fallback, experimental] {
+        for policy in [
+            qualified,
+            fallback,
+            gdn_fallback,
+            non_gdn_fallback,
+            experimental,
+        ] {
             assert!(policy.training_mlp_chunking);
             assert_eq!(policy.training_mlp_chunk_tokens, 512);
             assert!(policy.split_q_gate_training);

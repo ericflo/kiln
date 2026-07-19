@@ -40,6 +40,8 @@ KERNEL_PROFILES = (
     "portable_fallback",
     "model_fallback",
     "tensor_fallback",
+    "gdn_fallback",
+    "non_gdn_fallback",
 )
 
 

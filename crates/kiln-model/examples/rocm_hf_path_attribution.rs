@@ -50,7 +50,9 @@ mod rocm {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum KernelProfile {
+        GdnFallback,
         ModelFallback,
+        NonGdnFallback,
         Qualified,
         PortableFallback,
         TensorFallback,
@@ -59,19 +61,23 @@ mod rocm {
     impl KernelProfile {
         fn parse(value: &str) -> Result<Self> {
             match value {
+                "gdn_fallback" => Ok(Self::GdnFallback),
                 "model_fallback" => Ok(Self::ModelFallback),
+                "non_gdn_fallback" => Ok(Self::NonGdnFallback),
                 "qualified" => Ok(Self::Qualified),
                 "portable_fallback" => Ok(Self::PortableFallback),
                 "tensor_fallback" => Ok(Self::TensorFallback),
                 _ => anyhow::bail!(
-                    "--kernel-profile must be model_fallback, qualified, portable_fallback, or tensor_fallback, got {value}"
+                    "--kernel-profile must be gdn_fallback, model_fallback, non_gdn_fallback, qualified, portable_fallback, or tensor_fallback, got {value}"
                 ),
             }
         }
 
         const fn label(self) -> &'static str {
             match self {
+                Self::GdnFallback => "gdn_fallback",
                 Self::ModelFallback => "model_fallback",
+                Self::NonGdnFallback => "non_gdn_fallback",
                 Self::Qualified => "qualified",
                 Self::PortableFallback => "portable_fallback",
                 Self::TensorFallback => "tensor_fallback",
@@ -80,7 +86,9 @@ mod rocm {
 
         const fn model_policy(self) -> RocmKernelPolicy {
             match self {
+                Self::GdnFallback => RocmKernelPolicy::gdn_fallback(),
                 Self::ModelFallback => RocmKernelPolicy::portable_fallback(),
+                Self::NonGdnFallback => RocmKernelPolicy::non_gdn_fallback(),
                 Self::Qualified => RocmKernelPolicy::qualified(),
                 Self::PortableFallback => RocmKernelPolicy::portable_fallback(),
                 Self::TensorFallback => RocmKernelPolicy::qualified(),
@@ -89,7 +97,9 @@ mod rocm {
 
         const fn tensor_policy(self) -> RocmTensorKernelPolicy {
             match self {
+                Self::GdnFallback => RocmTensorKernelPolicy::qualified(),
                 Self::ModelFallback => RocmTensorKernelPolicy::qualified(),
+                Self::NonGdnFallback => RocmTensorKernelPolicy::qualified(),
                 Self::Qualified => RocmTensorKernelPolicy::qualified(),
                 Self::PortableFallback => RocmTensorKernelPolicy::portable_fallback(),
                 Self::TensorFallback => RocmTensorKernelPolicy::portable_fallback(),
@@ -1261,6 +1271,16 @@ mod rocm {
                 RocmTensorKernelPolicy::portable_fallback()
             );
             assert_eq!(tensor.label(), "tensor_fallback");
+
+            let gdn = KernelProfile::parse("gdn_fallback").unwrap();
+            assert_eq!(gdn.model_policy(), RocmKernelPolicy::gdn_fallback());
+            assert_eq!(gdn.tensor_policy(), RocmTensorKernelPolicy::qualified());
+            assert_eq!(gdn.label(), "gdn_fallback");
+
+            let non_gdn = KernelProfile::parse("non_gdn_fallback").unwrap();
+            assert_eq!(non_gdn.model_policy(), RocmKernelPolicy::non_gdn_fallback());
+            assert_eq!(non_gdn.tensor_policy(), RocmTensorKernelPolicy::qualified());
+            assert_eq!(non_gdn.label(), "non_gdn_fallback");
 
             assert!(KernelProfile::parse("individual_switches").is_err());
         }
