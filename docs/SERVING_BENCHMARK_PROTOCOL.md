@@ -721,6 +721,21 @@ v12's 256 MiB/s model-fingerprint bound and prove both guarded provenance
 lifecycles remain below the unchanged hard limit before the inference result is
 interpreted.
 
+The exact replay from clean pushed source `75ae28f54` proved both provenance
+lifecycles, but still did not test decode width. The initial and final
+double-pass workers peaked at 39.25 C and 40.875 C with zero trip. The server
+started at 39.375 C, copied its 9,319,828,096-byte private snapshot, loaded
+8,022 MB across 32 CPU layers, and reached 93.5 C during the first base-weight
+upload group before readiness. The guard sent `SIGTERM`; shutdown was unforced,
+the snapshot was removed, stable cooldown ended at 42 C, and no process or
+listener remained. The strict failed v12 receipt is
+`benchmarks/receipts/rocm/strix-halo/20260719t165036-rocm-strix-halo-greedy-c8-decode-batch-4-v12.kiln.json`.
+Its empty warmup and run list make the boundary explicit. Do not retry this
+launch unchanged or interpret it as evidence about width four. The next source
+change must bound and identify snapshot materialization, CPU checkpoint load,
+and the first accelerator upload quantum while preserving the immutable private
+snapshot and full checkpoint integrity contract.
+
 ## Running One Profile
 
 ```bash

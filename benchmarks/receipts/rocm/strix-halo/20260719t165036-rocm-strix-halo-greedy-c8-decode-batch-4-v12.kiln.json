@@ -1,0 +1,365 @@
+{
+  "completion": {
+    "completed_run_count": 0,
+    "expected_run_count": 1,
+    "failures": [
+      {
+        "detail": "BenchmarkError: owned server thermal containment tripped during startup: host k10temp/Tctl reached 93500 millicelsius at or above the 93000-millicelsius safety limit\n{\"timestamp\":\"2026-07-19T16:52:02.115284Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"SFT checkpoint-boundary policy resolved\",\"recompute_mode\":\"auto\",\"recompute_threshold_tokens\":8192,\"anchor_stride\":\"None\",\"cache_target_bytes\":6442450944,\"immutable_after_startup\":true},\"target\":\"kiln\"}\n{\"timestamp\":\"2026-07-19T16:52:02.115366Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"serving profile resolved\",\"profile\":\"experimental\",\"source\":\"config_file\",\"immutable_after_startup\":true,\"request_overrides_allowed\":false,\"effective_policy_source\":\"serving_profile\",\"inference_admission\":true,\"training_gpu_ownership\":true,\"adapter_weight_transitions\":true,\"dynamic_kv_resize\":true,\"allocator_reclaim\":true,\"live_graph_capture\":true,\"vulkan_resident_prefill\":true,\"exclusive_gpu_behavior\":\"writer_priority\"},\"target\":\"kiln\"}\n\n  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n  \u2502           \ud83d\udd25 K I L N \ud83d\udd25             \u2502\n  \u2502   inference \u00b7 training \u00b7 adapters   \u2502\n  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n\n  Version: 0.4.1\n  Config: qualification/server-config/kiln-rocm-strix-halo-serving-comparison-decode-batch-4-v1.toml\n  Mode: GPU inference\n  Model: /home/ericflo/Development/kiln/Qwen3.5-4B\n  CUDA: not available\n  Listen: http://127.0.0.1:8420\n\n  Endpoints: /ui/, /v1/chat/completions, /v1/completions, /v1/train/sft, /health, /metrics\n\n{\"timestamp\":\"2026-07-19T16:52:02.582702Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"ROCm available \u2014 using AMD GPU device 0 (hipBLASLt + HIP kernels)\"},\"target\":\"kiln_server::device\"}\n{\"timestamp\":\"2026-07-19T16:52:05.244472Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"created private immutable model snapshot\",\"source\":\"/home/ericflo/Development/kiln/Qwen3.5-4B\",\"snapshot\":\"/home/ericflo/Development/kiln/.qualification/callsite/snapshots/.kiln-model-snapshot-mQk6kX\",\"files\":2,\"logical_bytes\":9319828096,\"cloned_files\":0,\"copied_files\":2,\"cache_release_attempts\":4,\"cache_release_successes\":4,\"cache_release_failures\":0},\"target\":\"kiln_model::loader\"}\n{\"timestamp\":\"2026-07-19T16:52:05.244560Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"Loading model from /home/ericflo/Development/kiln/.qualification/callsite/snapshots/.kiln-model-snapshot-mQk6kX (2 shards)\"},\"target\":\"kiln_model::loader\"}\n{\"timestamp\":\"2026-07-19T16:52:09.952264Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"Using weight name prefix: \\\"model.language_model.\\\"\"},\"target\":\"kiln_model::loader\"}\n{\"timestamp\":\"2026-07-19T16:52:09.952420Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"Native MTP head detected; deferring CPU load until first use\",\"mtp_prefix\":\"mtp.\"},\"target\":\"kiln_model::loader\"}\n{\"timestamp\":\"2026-07-19T16:52:09.952429Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"Loaded 4206M parameters (8022 MB) across 32 layers\"},\"target\":\"kiln_model::loader\"}\n{\"timestamp\":\"2026-07-19T16:52:09.952502Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"accelerator weight upload policy resolved\",\"configured_mib_per_second\":\"Some(256)\",\"effective_mib_per_second\":\"Some(256)\",\"applicable\":true,\"cancellation_boundary\":\"base_then_each_layer\",\"cancellation_poll_ms\":25,\"source_byte_accounting\":true,\"active_during_inference\":false},\"target\":\"kiln\"}\n{\"timestamp\":\"2026-07-19T16:52:12.108885Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"process shutdown requested\",\"signal\":\"SIGTERM\"},\"target\":\"kiln\"}\n",
+        "phase": "server_startup"
+      },
+      {
+        "detail": "BenchmarkError: Kiln execution identity is unavailable because startup did not complete",
+        "phase": "execution_identity_unchanged"
+      },
+      {
+        "detail": "BenchmarkError: host k10temp/Tctl reached 93500 millicelsius at or above the 93000-millicelsius safety limit",
+        "phase": "host_thermal_handoff"
+      }
+    ],
+    "finalization_checks": {
+      "execution_identity_unchanged": "failed",
+      "host_thermal_handoff": "failed",
+      "model_identity_unchanged": "passed",
+      "repository_unchanged": "passed",
+      "runtime_artifact_unchanged": "passed",
+      "runtime_manifest_unchanged": "not_applicable",
+      "server_shutdown": "passed"
+    }
+  },
+  "created_at": "2026-07-19T16:53:32.723083+00:00",
+  "diagnostics": {
+    "timed_request_path_affected": false,
+    "url": "http://127.0.0.1:8420/health"
+  },
+  "driver_environment": {
+    "hostname": "llmbox",
+    "machine": "x86_64",
+    "platform": "Linux-7.0.14-arch1-1-x86_64-with-glibc2.43",
+    "python": "3.14.6",
+    "repository": {
+      "commit": "75ae28f54a73ffb8565be18c9ccdefd47b367140",
+      "dirty": false,
+      "source_tree_sha256": "sha256:248d3ccefc7de7b5fb88a0d863156f06cf604f015d7936965f568800ead2d617"
+    }
+  },
+  "driver_version": "12",
+  "engine": {
+    "authentication_configured": false,
+    "authentication_source": "none",
+    "available_models": [],
+    "base_url": "http://127.0.0.1:8420",
+    "model": "Qwen3.5-4B",
+    "model_identity": {
+      "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+      "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+      "content_sha256": "sha256:b1f2cce5baf9e662fc4c2c421b79fccc8787521e6e85810eebffbb4aa43b309f",
+      "id": "Qwen3.5-4B",
+      "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+      "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+      "weight_files": [
+        {
+          "bytes": 5329398688,
+          "path": "model.safetensors-00001-of-00002.safetensors",
+          "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+        },
+        {
+          "bytes": 3990429408,
+          "path": "model.safetensors-00002-of-00002.safetensors",
+          "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+        }
+      ]
+    },
+    "name": "kiln",
+    "reported_version": null,
+    "runtime_artifact": {
+      "bytes": 51933848,
+      "path": "/home/ericflo/Development/kiln/target/release/kiln",
+      "sha256": "sha256:425dd6982335b05982e375d23be1d528ed722e252638cc22d6f0def403419648"
+    },
+    "runtime_execution_identity": null,
+    "runtime_identity": "kiln-git:75ae28f54a73ffb8565be18c9ccdefd47b367140",
+    "runtime_manifest": null
+  },
+  "host_thermal": {
+    "evidence": {
+      "errors": [],
+      "host_temperature_end_millicelsius": 42000,
+      "host_temperature_peak_millicelsius": 93500,
+      "host_temperature_sample_count": 70,
+      "host_temperature_start_millicelsius": 39375,
+      "host_thermal_cooldown_active_end": 0,
+      "host_thermal_cooldown_completed_count": 1,
+      "host_thermal_cooldown_peak_millicelsius": 92250,
+      "host_thermal_cooldown_sample_count": 29,
+      "host_thermal_cooldown_seconds": 7.008591330959462,
+      "host_thermal_cooldown_stable_sample_count": 8,
+      "host_thermal_cooldown_timeout_count": 0,
+      "host_thermal_guard_trip_count": 1,
+      "host_thermal_pacing_active_end": 0,
+      "host_thermal_pacing_completed_event_count": 0,
+      "host_thermal_pacing_event_count": 0,
+      "host_thermal_pacing_max_seconds": 0.0,
+      "host_thermal_pacing_max_start_millicelsius": 0,
+      "host_thermal_pacing_seconds": 0.0,
+      "process_alive_at_handoff": false,
+      "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+      "trip_reason": "host k10temp/Tctl reached 93500 millicelsius at or above the 93000-millicelsius safety limit"
+    },
+    "mode": "owned_process_group",
+    "model_fingerprint": {
+      "final": {
+        "phase_settlement_timeout_seconds": 300.0,
+        "policy": {
+          "content_sha256": "sha256:1c8f1fea09898beede339d5b559a1dcd1351e1530ff4fd2f60350684a14f54e1",
+          "id": "strix-halo-serving-benchmark-hard-limit-v1",
+          "limit_millicelsius": 93000,
+          "pacing": {
+            "mode": "hard_limit_only"
+          },
+          "phase_settlement_timeout_seconds": 300.0,
+          "poll_interval_ms": 250,
+          "safe_handoff": {
+            "stable_samples": 8,
+            "target_millicelsius": 45000,
+            "timeout_seconds": 300.0
+          },
+          "schema": "kiln.host-thermal-policy.v1",
+          "sensor": {
+            "hwmon_name": "k10temp",
+            "label": "Tctl"
+          }
+        },
+        "prelaunch_cooldown": {
+          "completed": true,
+          "elapsed_seconds": 1.7519277909887023,
+          "poll_interval_ms": 250,
+          "sample_count": 8,
+          "scope": "host_package_before_process_creation",
+          "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+          "stable_samples_observed": 8,
+          "stable_samples_required": 8,
+          "target_millicelsius": 45000,
+          "temperature_end_millicelsius": 40750,
+          "temperature_peak_millicelsius": 42000,
+          "temperature_start_millicelsius": 42000,
+          "timeout_seconds": 300.0
+        },
+        "runtime": {
+          "host_temperature_end_millicelsius": 38125,
+          "host_temperature_peak_millicelsius": 40875,
+          "host_temperature_start_millicelsius": 40750,
+          "host_thermal_cooldown_active_end": 0,
+          "host_thermal_cooldown_completed_count": 1,
+          "host_thermal_cooldown_peak_millicelsius": 38125,
+          "host_thermal_cooldown_sample_count": 8,
+          "host_thermal_cooldown_seconds": 1.7519249729812145,
+          "host_thermal_cooldown_stable_sample_count": 8,
+          "host_thermal_cooldown_timeout_count": 0,
+          "host_thermal_guard_trip_count": 0,
+          "host_thermal_pacing_active_end": 0,
+          "host_thermal_pacing_completed_event_count": 0,
+          "host_thermal_pacing_event_count": 0,
+          "host_thermal_pacing_max_seconds": 0.0,
+          "host_thermal_pacing_max_start_millicelsius": 0,
+          "host_thermal_pacing_seconds": 0.0
+        },
+        "schema": "kiln.hf-thermal-containment.v1",
+        "worker_exit_code": 0
+      },
+      "implementation_sha256": "sha256:f644577222387e1c4576f40a1e98866c5fb2bb468af3e43baefa4e559185f8d8",
+      "initial": {
+        "phase_settlement_timeout_seconds": 300.0,
+        "policy": {
+          "content_sha256": "sha256:1c8f1fea09898beede339d5b559a1dcd1351e1530ff4fd2f60350684a14f54e1",
+          "id": "strix-halo-serving-benchmark-hard-limit-v1",
+          "limit_millicelsius": 93000,
+          "pacing": {
+            "mode": "hard_limit_only"
+          },
+          "phase_settlement_timeout_seconds": 300.0,
+          "poll_interval_ms": 250,
+          "safe_handoff": {
+            "stable_samples": 8,
+            "target_millicelsius": 45000,
+            "timeout_seconds": 300.0
+          },
+          "schema": "kiln.host-thermal-policy.v1",
+          "sensor": {
+            "hwmon_name": "k10temp",
+            "label": "Tctl"
+          }
+        },
+        "prelaunch_cooldown": {
+          "completed": true,
+          "elapsed_seconds": 1.7520452540484257,
+          "poll_interval_ms": 250,
+          "sample_count": 8,
+          "scope": "host_package_before_process_creation",
+          "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+          "stable_samples_observed": 8,
+          "stable_samples_required": 8,
+          "target_millicelsius": 45000,
+          "temperature_end_millicelsius": 38125,
+          "temperature_peak_millicelsius": 38500,
+          "temperature_start_millicelsius": 38500,
+          "timeout_seconds": 300.0
+        },
+        "runtime": {
+          "host_temperature_end_millicelsius": 39250,
+          "host_temperature_peak_millicelsius": 39250,
+          "host_temperature_start_millicelsius": 38125,
+          "host_thermal_cooldown_active_end": 0,
+          "host_thermal_cooldown_completed_count": 1,
+          "host_thermal_cooldown_peak_millicelsius": 39250,
+          "host_thermal_cooldown_sample_count": 8,
+          "host_thermal_cooldown_seconds": 1.7522563060047105,
+          "host_thermal_cooldown_stable_sample_count": 8,
+          "host_thermal_cooldown_timeout_count": 0,
+          "host_thermal_guard_trip_count": 0,
+          "host_thermal_pacing_active_end": 0,
+          "host_thermal_pacing_completed_event_count": 0,
+          "host_thermal_pacing_event_count": 0,
+          "host_thermal_pacing_max_seconds": 0.0,
+          "host_thermal_pacing_max_start_millicelsius": 0,
+          "host_thermal_pacing_seconds": 0.0
+        },
+        "schema": "kiln.hf-thermal-containment.v1",
+        "worker_exit_code": 0
+      },
+      "python_sha256": "sha256:2700be1aabe3687bd597f21b0eac3b9bbdf7417e93035255a9286c67935b59bd",
+      "read_mib_per_second": 256,
+      "schema": "kiln.serving-model-fingerprint-thermal.v2"
+    },
+    "policy": {
+      "content_sha256": "sha256:1c8f1fea09898beede339d5b559a1dcd1351e1530ff4fd2f60350684a14f54e1",
+      "id": "strix-halo-serving-benchmark-hard-limit-v1",
+      "limit_millicelsius": 93000,
+      "pacing": {
+        "mode": "hard_limit_only"
+      },
+      "phase_settlement_timeout_seconds": 300.0,
+      "poll_interval_ms": 250,
+      "safe_handoff": {
+        "stable_samples": 8,
+        "target_millicelsius": 45000,
+        "timeout_seconds": 300.0
+      },
+      "schema": "kiln.host-thermal-policy.v1",
+      "sensor": {
+        "hwmon_name": "k10temp",
+        "label": "Tctl"
+      }
+    },
+    "process_group": {
+      "boot_id": "bcc09655-13db-403b-8dda-b814222c1313",
+      "cmdline_sha256": "sha256:548452dd2c056c7119f1bfabfa343d682a7b78f88a4142dcf09e76ff5395c9c1",
+      "executable": "/home/ericflo/Development/kiln/target/release/kiln",
+      "pid": 2344128,
+      "process_group_id": 2344128,
+      "start_time_ticks": 42615852
+    },
+    "unsafe_no_guard_acknowledged": false
+  },
+  "memory_sampler": {
+    "interval_ms": 50,
+    "path": "/sys/devices/pci0000:00/0000:00:08.1/0000:c6:00.0/mem_info_vram_used",
+    "source": "drm_vram_used"
+  },
+  "receipt_sha256": "sha256:ae7963ee1e2c06a081fd3b829b64933ae62bb81b28a839406dd68d41ff14235d",
+  "runs": [],
+  "schema": "kiln.serving-benchmark.v1",
+  "server_lifecycle": {
+    "launch_config": {
+      "acceptable_exit_codes": [
+        0
+      ],
+      "command": [
+        "./target/release/kiln",
+        "serve",
+        "--config",
+        "qualification/server-config/kiln-rocm-strix-halo-serving-comparison-decode-batch-4-v1.toml"
+      ],
+      "content_sha256": "sha256:f4c73e7f927d10e826d3a4517ccab1c7f9781f10910542eb9cdc2402b35b4106",
+      "id": "kiln-rocm-strix-halo-serving-comparison-decode-batch-4-v1",
+      "log_directory": "../../.qualification/kiln-serving/logs/decode-batch-4-v1",
+      "readiness_poll_interval_ms": 250,
+      "schema": "kiln.serving-benchmark-server-launch.v1",
+      "shutdown_timeout_seconds": 65.0,
+      "startup_timeout_seconds": 600.0,
+      "working_directory": "../.."
+    },
+    "log": {
+      "bytes": 3888,
+      "path": "/home/ericflo/Development/kiln/.qualification/kiln-serving/logs/decode-batch-4-v1/rocm-strix-halo-prefill-layer-pacing-c8-v1-greedy-short.server.log",
+      "sha256": "sha256:ef1cad43135b6041b0d3219c3c8b677c3bf44c2a261f0a96413c9f48b22850c3"
+    },
+    "mode": "owned_process_group",
+    "prelaunch_cooldown": {
+      "completed": true,
+      "elapsed_seconds": 1.751840604993049,
+      "poll_interval_ms": 250,
+      "sample_count": 8,
+      "scope": "host_package_before_process_creation",
+      "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+      "stable_samples_observed": 8,
+      "stable_samples_required": 8,
+      "target_millicelsius": 45000,
+      "temperature_end_millicelsius": 39375,
+      "temperature_peak_millicelsius": 39375,
+      "temperature_start_millicelsius": 39250,
+      "timeout_seconds": 300.0
+    },
+    "shutdown": {
+      "acceptable_exit_codes": [
+        0
+      ],
+      "elapsed_seconds": 0.31402764696395025,
+      "forced": false,
+      "process_group_alive_end": false,
+      "returncode": 0,
+      "signal": "SIGTERM",
+      "signal_sent": true
+    }
+  },
+  "verdict": "failed",
+  "warmup": null,
+  "workload": {
+    "arrival_pattern": "thread_barrier_all_at_once",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "comparison_mode": "exact_output",
+    "concurrency": [
+      8
+    ],
+    "endpoint": "/v1/chat/completions",
+    "max_dispatch_spread_ms": 250.0,
+    "max_tokens": 32,
+    "memory_limit_bytes": 50000000000,
+    "model": "Qwen3.5-4B",
+    "profile": "greedy-short",
+    "prompt_template_version": "fixed-serving-profiles-v1",
+    "repeats": 1,
+    "require_max_tokens": true,
+    "require_uniform_prompt_tokens": true,
+    "run_id": "rocm-strix-halo-prefill-layer-pacing-c8-v1-greedy-short",
+    "sampling": {
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.0,
+      "seed": 17,
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "schema": "kiln.serving-benchmark-workload.v1",
+    "slo": {
+      "client_visible_itl_ms": 250.0,
+      "e2e_ms": 60000.0,
+      "ttft_ms": 5000.0
+    },
+    "stream": true,
+    "stream_include_usage": true,
+    "warmup_requests": 1
+  },
+  "workload_fingerprint": "sha256:4258b4290421a4b983783ad387bbfbbd1384d5359272554077cf709b45e3a848"
+}

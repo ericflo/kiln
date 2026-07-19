@@ -1597,9 +1597,20 @@ second full content read that detects same-length concurrent mutation; an 8 MiB
 read can be followed by sleeps of at most 25 ms. The v2 fingerprint thermal
 record binds `read_mib_per_second`, the exact worker implementation and Python,
 and both guarded lifecycles. This pacing is outside request timing and does not
-alter server upload or inference. A new source-bound arm must first prove both
-fingerprints stay below the unchanged 93 C hard limit before its decode-width
-result can be interpreted.
+alter server upload or inference. The exact source-bound replay from
+`75ae28f54` proved that isolation: the initial and final double-pass workers
+peaked at 39.25 C and 40.875 C, respectively, with zero trip and complete stable
+cooldown. The owned server then failed independently before readiness. Starting
+at 39.375 C, it copied the 9,319,828,096-byte private snapshot in 2.662 seconds,
+loaded 8,022 MB of CPU weights in another 4.708 seconds, and reached 93.5 C
+2.156 seconds after entering the first accelerator upload group. The guard
+terminated it cleanly, removed the snapshot, cooled to 42 C, and left no process
+or listener. No warmup, request, or width-four decode occurred. This rejects the
+startup lifecycle, not provenance pacing or decode width. Do not repeat it
+unchanged: first introduce source-bound cooperative boundaries and phase
+evidence across snapshot materialization, CPU checkpoint loading, and the first
+base-weight upload quantum without weakening model immutability or the 93 C
+ceiling.
 
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
