@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Produce a pinned full-vocabulary Qwen3.5-4B Hugging Face reference."""
+"""Produce pinned Qwen3.5-4B Hugging Face logits and optional layer rows."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ from hf_next_token_contract import (
 
 
 SCHEMA = "kiln.qwen35-hf-full-logits.v1"
+LAYER_SCHEMA = "kiln.qwen35-hf-layer-last-rows.v1"
+LAYER_PASS_PREFIX = "KILN_HF_LAYER_LAST_ROWS_REFERENCE_PASS "
 INPUT_TOKEN_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 100]
 TORCH_VERSION = "2.13.0"
 TORCH_COMMIT = "cf30153c4c131c8164ee7798e5022d810682e2cb"
@@ -176,6 +178,7 @@ def generate(
     *,
     request_path: Path | None = None,
     start_gate: Path | None = None,
+    capture_layer_last_rows: bool = False,
 ) -> tuple[dict[str, object], bool]:
     model_path, output_path = _validate_paths(model_path, output_path)
     request: dict[str, object] | None = None
@@ -225,6 +228,8 @@ def generate(
                     f"request records {item['text']!r}"
                 )
         input_token_ids = request["input_token_ids"]
+    if capture_layer_last_rows and request is None:
+        raise OracleError("--capture-layer-last-rows requires --request")
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         dtype=torch.bfloat16,
@@ -233,8 +238,42 @@ def generate(
         attn_implementation="eager",
     ).eval().to("cuda")
     input_ids = torch.tensor([input_token_ids], dtype=torch.long, device="cuda")
-    with torch.inference_mode():
-        logits = model(input_ids=input_ids, use_cache=False).logits[0, -1].float().cpu()
+    captured_rows = []
+    boundary_names: list[str] = []
+    handles = []
+    if capture_layer_last_rows:
+        try:
+            text_model = model.model.language_model
+            layer_types = list(text_model.config.layer_types)
+            layers = list(text_model.layers)
+        except (AttributeError, TypeError) as exc:
+            raise OracleError("pinned Qwen3.5 text model structure changed") from exc
+        if len(layers) != 32 or len(layer_types) != len(layers):
+            raise OracleError("pinned Qwen3.5 layer inventory changed")
+        modules = [("embedding", text_model.embed_tokens)]
+        modules.extend(
+            (f"layer_{index:02}_{layer_types[index]}", layer)
+            for index, layer in enumerate(layers)
+        )
+        modules.append(("final_norm", text_model.norm))
+        boundary_names = [name for name, _ in modules]
+
+        def capture_last_row(_module, _inputs, output):
+            if not isinstance(output, torch.Tensor) or output.ndim != 3:
+                raise OracleError("HF layer boundary did not return a rank-three tensor")
+            if output.shape[0] != 1 or output.shape[2] != 2560:
+                raise OracleError(
+                    f"unexpected HF layer boundary shape {tuple(output.shape)}"
+                )
+            captured_rows.append(output[:, -1, :].detach().clone())
+
+        handles = [module.register_forward_hook(capture_last_row) for _, module in modules]
+    try:
+        with torch.inference_mode():
+            logits = model(input_ids=input_ids, use_cache=False).logits[0, -1].float().cpu()
+    finally:
+        for handle in handles:
+            handle.remove()
     if logits.ndim != 1 or logits.numel() != 248_320:
         raise OracleError(f"unexpected HF logit shape {tuple(logits.shape)}")
     if not bool(torch.isfinite(logits).all()):
@@ -243,25 +282,42 @@ def generate(
         logits.contiguous().numpy().tobytes(order="C")
     ).hexdigest()
 
+    layer_last_rows = None
+    if capture_layer_last_rows:
+        if len(captured_rows) != len(boundary_names):
+            raise OracleError(
+                f"captured {len(captured_rows)} HF boundaries; expected {len(boundary_names)}"
+            )
+        layer_last_rows = torch.cat(captured_rows, dim=0).float().cpu().contiguous()
+        if tuple(layer_last_rows.shape) != (34, 2560):
+            raise OracleError(
+                f"unexpected HF layer-last-row shape {tuple(layer_last_rows.shape)}"
+            )
+        if not bool(torch.isfinite(layer_last_rows).all()):
+            raise OracleError("HF layer-last-row reference contains non-finite values")
+
     metadata = {
         "attention_implementation": "eager",
         "device_name": torch.cuda.get_device_name(0),
         "input_token_ids": json.dumps(input_token_ids, separators=(",", ":")),
         "linear_attention_implementation": "transformers_torch_fallback",
-        "schema": SCHEMA,
+        "schema": LAYER_SCHEMA if capture_layer_last_rows else SCHEMA,
         "torch_commit": TORCH_COMMIT,
         "torch_hip_version": str(torch.version.hip),
         "torch_version": torch.__version__,
         "transformers_version": TRANSFORMERS_VERSION,
     }
+    if capture_layer_last_rows:
+        metadata["boundary_names"] = json.dumps(
+            boundary_names, ensure_ascii=True, separators=(",", ":")
+        )
     temporary = output_path.with_name(output_path.name + ".tmp")
     if temporary.exists() or temporary.is_symlink():
         raise OracleError(f"refusing stale temporary oracle output {temporary}")
-    save_file(
-        {"input_ids": input_ids.cpu(), "logits": logits.contiguous()},
-        temporary,
-        metadata=metadata,
-    )
+    tensors = {"input_ids": input_ids.cpu(), "logits": logits.contiguous()}
+    if layer_last_rows is not None:
+        tensors["layer_last_rows"] = layer_last_rows
+    save_file(tensors, temporary, metadata=metadata)
     os.replace(temporary, output_path)
     output_path.chmod(0o600)
     evidence = {
@@ -276,6 +332,18 @@ def generate(
         "vocab": int(logits.numel()),
     }
     evidence.update(_current_cgroup_memory())
+    if layer_last_rows is not None:
+        evidence.update(
+            {
+                "boundary_count": len(boundary_names),
+                "boundary_names": boundary_names,
+                "hidden_size": int(layer_last_rows.shape[1]),
+                "layer_last_rows_sha256": "sha256:"
+                + hashlib.sha256(
+                    layer_last_rows.numpy().tobytes(order="C")
+                ).hexdigest(),
+            }
+        )
     if request is not None:
         top_values, top_indices = torch.topk(logits, k=10, largest=True, sorted=True)
         top_tokens = [
@@ -332,6 +400,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--request", type=Path)
     parser.add_argument("--start-gate", type=Path)
+    parser.add_argument("--capture-layer-last-rows", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -343,12 +412,19 @@ def main(argv: list[str] | None = None) -> int:
             args.output,
             request_path=args.request,
             start_gate=args.start_gate,
+            capture_layer_last_rows=args.capture_layer_last_rows,
         )
     except BaseException as exc:
         print(f"HF full-logit oracle failed: {exc}", file=sys.stderr)
         return 1
     print(
-        (NEXT_TOKEN_PASS_PREFIX if is_next_token else "KILN_HF_FULL_LOGIT_REFERENCE_PASS ")
+        (
+            LAYER_PASS_PREFIX
+            if args.capture_layer_last_rows
+            else NEXT_TOKEN_PASS_PREFIX
+            if is_next_token
+            else "KILN_HF_FULL_LOGIT_REFERENCE_PASS "
+        )
         + json.dumps(evidence, allow_nan=False, separators=(",", ":"), sort_keys=True),
         flush=True,
     )

@@ -23012,6 +23012,93 @@ pub fn model_forward_paged_last_token(
     Ok(logits.expect("LmHeadMode::LastRowOnly always produces logits"))
 }
 
+/// Qualification-only eager forward that retains the final row at the
+/// embedding, every transformer-layer output, and the final RMSNorm.
+///
+/// The returned snapshots are F32 device tensors ordered as
+/// `embedding`, `layer_0` through `layer_N-1`, then `final_norm`. Production
+/// serving does not call this synchronization-free diagnostic surface.
+#[cfg(feature = "rocm")]
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_last_token_with_layer_snapshots(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<(Tensor, Vec<Tensor>)> {
+    let mut snapshots = Vec::with_capacity(weights.layers.len() + 2);
+    let embedding = embedding_lookup_from_weights(token_ids, weights)?.unsqueeze(0)?;
+    snapshots.push(qualification_layer_last_row(&embedding, token_ids.len())?);
+    let mut resume = None;
+    let mut final_hidden = None;
+    for layer_index in 0..weights.layers.len() {
+        let final_layer = layer_index + 1 == weights.layers.len();
+        let progress = model_forward_paged_inner_bounded(
+            backend,
+            token_ids,
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            start_pos,
+            linear_state.as_deref_mut(),
+            lora,
+            None,
+            None,
+            None,
+            if final_layer {
+                LmHeadMode::HiddenOnly
+            } else {
+                LmHeadMode::LastRowOnly
+            },
+            resume.take(),
+            1,
+        )?;
+        if final_layer {
+            final_hidden = progress.hidden;
+        } else {
+            let state = progress
+                .state
+                .context("layer snapshot forward did not retain its next layer")?;
+            snapshots.push(qualification_layer_last_row(
+                &state.hidden,
+                token_ids.len(),
+            )?);
+            resume = Some(state);
+        }
+    }
+    let final_hidden = final_hidden.context("layer snapshot forward returned no final hidden")?;
+    snapshots.push(qualification_layer_last_row(
+        &final_hidden,
+        token_ids.len(),
+    )?);
+    let last = final_hidden.narrow(1, token_ids.len() - 1, 1)?;
+    let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
+    snapshots.push(qualification_layer_last_row(&normed, 1)?);
+    let logits =
+        lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?;
+    anyhow::ensure!(
+        snapshots.len() == weights.layers.len() + 2,
+        "layer snapshot count is inconsistent"
+    );
+    Ok((logits, snapshots))
+}
+
+#[cfg(feature = "rocm")]
+fn qualification_layer_last_row(hidden: &Tensor, seq_len: usize) -> Result<Tensor> {
+    hidden
+        .narrow(1, seq_len - 1, 1)?
+        .to_dtype(DType::F32)?
+        .contiguous()
+        .context("qualification layer last row contiguous")
+}
+
 /// Vulkan-resident decode entry-point. Same signature as
 /// [`model_forward_paged_last_token`]; routes through the Vulkan-resident
 /// dispatchers when the backend supports it AND the per-step buffer pool
@@ -25674,6 +25761,19 @@ mod tests {
     /// `cfg(test)`-gated and only visible inside kiln-core's own test
     /// build — from another crate's tests it appears unresolved.
     static RESIDENCY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn layer_snapshot_captures_only_the_final_row_as_f32() -> Result<()> {
+        let hidden = Tensor::from_vec(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], (1, 2, 3))?
+            .to_dtype(DType::BF16)?;
+        let row = qualification_layer_last_row(&hidden, 2)?;
+
+        assert_eq!(row.shape(), &[1, 1, 3]);
+        assert_eq!(row.dtype(), DType::F32);
+        assert_eq!(row.flatten_all()?.to_vec1::<f32>()?, vec![4.0, 5.0, 6.0]);
+        Ok(())
+    }
 
     #[test]
     fn frozen_gdn_gated_rmsnorm_backward_matches_finite_difference() -> Result<()> {

@@ -1,0 +1,350 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/schemas/rocm-hf-layer-attribution-v1.schema.json",
+  "title": "Kiln ROCm/HF Layer Attribution Result v1",
+  "description": "Source-bound sequential HF and Kiln evidence comparing the final hidden row after embedding, every Qwen3.5 transformer layer, and final RMSNorm for the exact serving divergence state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "binary",
+    "containment",
+    "created_at_utc",
+    "duration_seconds",
+    "implementation",
+    "model_identity",
+    "reference",
+    "request",
+    "result_sha256",
+    "schema",
+    "source",
+    "worker"
+  ],
+  "properties": {
+    "schema": { "const": "kiln.rocm-hf-layer-attribution-result.v1" },
+    "result_sha256": { "$ref": "#/$defs/sha256" },
+    "created_at_utc": { "type": "string", "format": "date-time" },
+    "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+    "source": { "$ref": "#/$defs/source" },
+    "binary": { "$ref": "#/$defs/binary" },
+    "implementation": { "$ref": "#/$defs/implementation" },
+    "model_identity": {
+      "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/modelIdentity"
+    },
+    "request": { "$ref": "#/$defs/request" },
+    "reference": { "$ref": "#/$defs/reference" },
+    "containment": { "$ref": "#/$defs/containment" },
+    "worker": { "$ref": "#/$defs/worker" }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "gitObject": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "tokenId": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 248319
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "origin_main", "tree"],
+      "properties": {
+        "commit": { "$ref": "#/$defs/gitObject" },
+        "origin_main": { "$ref": "#/$defs/gitObject" },
+        "tree": { "$ref": "#/$defs/gitObject" }
+      }
+    },
+    "binary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "build_duration_seconds",
+        "build_environment_policy",
+        "path",
+        "rocm_archs",
+        "sha256"
+      ],
+      "properties": {
+        "build_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "build_environment_policy": { "const": "closed-source-build-v1" },
+        "path": { "const": "target/release/examples/rocm_hf_path_attribution" },
+        "rocm_archs": {
+          "type": "array",
+          "prefixItems": [{ "const": "gfx1151" }],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "guarded_exec_sha256",
+        "hf_worker_sha256",
+        "python_sha256",
+        "runner_sha256",
+        "supervisor_sha256"
+      ],
+      "properties": {
+        "guarded_exec_sha256": { "$ref": "#/$defs/sha256" },
+        "hf_worker_sha256": { "$ref": "#/$defs/sha256" },
+        "python_sha256": { "$ref": "#/$defs/sha256" },
+        "runner_sha256": { "$ref": "#/$defs/sha256" },
+        "supervisor_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "hfEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attention_implementation",
+        "argmax",
+        "argmax_text",
+        "boundary_count",
+        "boundary_names",
+        "candidate_tokens",
+        "configuration_sha256",
+        "deterministic_algorithms",
+        "device",
+        "dtype",
+        "duration_seconds",
+        "hidden_size",
+        "input_token_count",
+        "input_token_ids_sha256",
+        "layer_last_rows_sha256",
+        "linear_attention_implementation",
+        "logits_sha256",
+        "memory_high_events",
+        "memory_max_events",
+        "memory_oom_events",
+        "memory_oom_kill_events",
+        "memory_peak_bytes",
+        "memory_swap_bytes",
+        "modeling_sha256",
+        "output_bytes",
+        "request_id",
+        "request_sha256",
+        "tf32_allowed",
+        "top_logit_margin",
+        "top_tokens",
+        "torch_commit",
+        "torch_hip_version",
+        "torch_version",
+        "transformers_version",
+        "vocab"
+      ],
+      "properties": {
+        "attention_implementation": { "const": "eager" },
+        "argmax": { "$ref": "#/$defs/tokenId" },
+        "argmax_text": { "type": "string", "minLength": 1 },
+        "boundary_count": { "const": 34 },
+        "boundary_names": {
+          "type": "array",
+          "minItems": 34,
+          "maxItems": 34,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "candidate_tokens": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/candidateToken"
+          }
+        },
+        "configuration_sha256": { "$ref": "#/$defs/sha256" },
+        "deterministic_algorithms": { "const": true },
+        "device": { "type": "string", "minLength": 1 },
+        "dtype": { "const": "bfloat16" },
+        "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "hidden_size": { "const": 2560 },
+        "input_token_count": { "const": 166 },
+        "input_token_ids_sha256": { "$ref": "#/$defs/sha256" },
+        "layer_last_rows_sha256": { "$ref": "#/$defs/sha256" },
+        "linear_attention_implementation": {
+          "const": "transformers_torch_fallback"
+        },
+        "logits_sha256": { "$ref": "#/$defs/sha256" },
+        "memory_high_events": { "const": 0 },
+        "memory_max_events": { "const": 0 },
+        "memory_oom_events": { "const": 0 },
+        "memory_oom_kill_events": { "const": 0 },
+        "memory_peak_bytes": { "type": "integer", "minimum": 1 },
+        "memory_swap_bytes": { "const": 0 },
+        "modeling_sha256": { "$ref": "#/$defs/sha256" },
+        "output_bytes": { "type": "integer", "minimum": 1 },
+        "request_id": { "type": "string", "minLength": 1 },
+        "request_sha256": { "$ref": "#/$defs/sha256" },
+        "tf32_allowed": { "const": false },
+        "top_logit_margin": { "type": "number", "exclusiveMinimum": 0 },
+        "top_tokens": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "items": {
+            "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/topToken"
+          }
+        },
+        "torch_commit": { "$ref": "#/$defs/gitObject" },
+        "torch_hip_version": { "type": "string", "minLength": 1 },
+        "torch_version": { "const": "2.13.0+rocm7.2" },
+        "transformers_version": { "const": "5.13.1" },
+        "vocab": { "const": 248320 }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "evidence", "location", "sha256"],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 1 },
+        "evidence": { "$ref": "#/$defs/hfEvidence" },
+        "location": { "const": "local_ignored" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "containmentArm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host_available_before_gib", "memory_max_gib", "network", "thermal"],
+      "properties": {
+        "host_available_before_gib": { "type": "integer", "minimum": 23 },
+        "memory_max_gib": { "enum": [16, 48] },
+        "network": { "const": "forbidden" },
+        "thermal": {
+          "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/thermalEvidence"
+        }
+      }
+    },
+    "containment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hf", "kiln"],
+      "properties": {
+        "hf": { "$ref": "#/$defs/containmentArm" },
+        "kiln": { "$ref": "#/$defs/containmentArm" }
+      }
+    },
+    "cgroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memory_current_bytes",
+        "memory_high_events",
+        "memory_max_bytes",
+        "memory_max_events",
+        "memory_oom_events",
+        "memory_oom_kill_events",
+        "memory_peak_bytes",
+        "memory_swap_bytes",
+        "memory_swap_max_bytes"
+      ],
+      "properties": {
+        "memory_current_bytes": { "type": "integer", "minimum": 0 },
+        "memory_high_events": { "const": 0 },
+        "memory_max_bytes": { "const": 51539607552 },
+        "memory_max_events": { "const": 0 },
+        "memory_oom_events": { "const": 0 },
+        "memory_oom_kill_events": { "const": 0 },
+        "memory_peak_bytes": { "type": "integer", "minimum": 0 },
+        "memory_swap_bytes": { "const": 0 },
+        "memory_swap_max_bytes": { "const": 0 }
+      }
+    },
+    "boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cosine_similarity",
+        "hf_sha256",
+        "index",
+        "kiln_sha256",
+        "max_abs_error",
+        "mean_abs_error",
+        "name",
+        "reference_root_mean_square",
+        "relative_root_mean_square_error",
+        "root_mean_square_error"
+      ],
+      "properties": {
+        "cosine_similarity": { "type": "number", "minimum": -1, "maximum": 1 },
+        "hf_sha256": { "$ref": "#/$defs/sha256" },
+        "index": { "type": "integer", "minimum": 0, "maximum": 33 },
+        "kiln_sha256": { "$ref": "#/$defs/sha256" },
+        "max_abs_error": { "type": "number", "minimum": 0 },
+        "mean_abs_error": { "type": "number", "minimum": 0 },
+        "name": { "type": "string", "minLength": 1 },
+        "reference_root_mean_square": { "type": "number", "exclusiveMinimum": 0 },
+        "relative_root_mean_square_error": { "type": "number", "minimum": 0 },
+        "root_mean_square_error": { "type": "number", "minimum": 0 }
+      }
+    },
+    "errorGrowth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "name", "relative_root_mean_square_error_delta"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 33 },
+        "name": { "type": "string", "minLength": 1 },
+        "relative_root_mean_square_error_delta": { "type": "number" }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boundaries",
+        "containment",
+        "final_logits_sha256",
+        "hf_layer_last_rows_sha256",
+        "input_token_count",
+        "input_token_ids_sha256",
+        "kernel_policy",
+        "largest_relative_error_growth",
+        "observed_next_tokens",
+        "request_id",
+        "schema"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.rocm-hf-layer-attribution.v1" },
+        "boundaries": {
+          "type": "array",
+          "minItems": 34,
+          "maxItems": 34,
+          "items": { "$ref": "#/$defs/boundary" }
+        },
+        "containment": { "$ref": "#/$defs/cgroup" },
+        "final_logits_sha256": { "$ref": "#/$defs/sha256" },
+        "hf_layer_last_rows_sha256": { "$ref": "#/$defs/sha256" },
+        "input_token_count": { "const": 166 },
+        "input_token_ids_sha256": { "$ref": "#/$defs/sha256" },
+        "kernel_policy": { "const": "qualified" },
+        "largest_relative_error_growth": { "$ref": "#/$defs/errorGrowth" },
+        "observed_next_tokens": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/tokenId" }
+        },
+        "request_id": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

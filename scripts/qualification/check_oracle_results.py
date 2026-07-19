@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import rocm_hf_next_token_oracle as hf_next_token
+import rocm_hf_layer_attribution as layer_attribution
 import rocm_hf_path_attribution as path_attribution
 from strict_json import loads as strict_json_loads
 
@@ -20,6 +21,7 @@ class OracleResultError(RuntimeError):
 Validator = Callable[..., dict[str, Any]]
 VALIDATORS: dict[str, Validator] = {
     hf_next_token.SCHEMA: hf_next_token.validate_result,
+    layer_attribution.SCHEMA: layer_attribution.validate_result,
     path_attribution.SCHEMA: path_attribution.validate_result,
 }
 

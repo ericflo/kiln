@@ -815,6 +815,65 @@ layer or kernel. The next bounded probe must compare layer-boundary outputs for
 this exact 166-token state before changing serving configuration or repeating
 the concurrency matrix.
 
+#### ROCm layer-boundary attribution
+
+Use the layer-attribution runner only after a retained path result reports
+`eager_full_logits`. It executes two sequential, independently contained model
+loads for the same 166-token state. The pinned eager Transformers worker first
+captures the F32 final hidden row after the token embedding, each of the 32
+decoder layers, and final RMSNorm. After that process exits and host memory
+recovers, the Kiln worker prefills the 163-token prompt, advances the first two
+known continuation tokens normally, and captures the same 34 boundaries while
+processing the third continuation token. This preserves the production paged
+KV and recurrent-state route instead of substituting a monolithic Kiln
+forward.
+
+```bash
+python3 scripts/qualification/rocm_hf_layer_attribution.py run \
+  --model "$(pwd)/Qwen3.5-4B" \
+  --request "$(pwd)/qualification/oracles/rocm-strix-halo-greedy-c1-first-divergence-v1.json" \
+  --host-thermal-policy "$(pwd)/qualification/host-policies/strix-halo-hf-oracle-v1.json" \
+  --python "$(pwd)/target/qualification/hf-trl-roundtrip/.venv/bin/python" \
+  --out "$(pwd)/.qualification/rocm-hf-layer-attribution-result.json"
+```
+
+The HF arm uses the pinned PyTorch/Transformers fallback implementation,
+BF16 weights, eager full attention, deterministic algorithms, TF32 disabled,
+a private-network 16 GiB zero-swap service, and the same closed thermal
+supervisor as the next-token oracle. Forward hooks retain only one cloned last
+row per boundary; the ignored safetensors artifact contains the 34-by-2,560
+F32 matrix, the exact input IDs, and final logits. The marker and compact result
+bind its aggregate row hash, ordered names, model/request identity, installed
+source hashes, cgroup events, and complete thermal lifecycle.
+
+The Kiln arm rebuilds the shared attribution example through the offline
+`gfx1151` closed-source build service. Its exact-argv open-inode gate then runs
+the qualified model/tensor policy in a private-network 48 GiB zero-swap
+service. Snapshot tensors remain on the device until the ordinary forward is
+complete; each captured BF16 row is explicitly converted to F32 before host
+readback. The worker must reproduce the three common predictions, retain the
+final Kiln logit hash, bind the HF matrix hash, observe clean cgroup counters,
+and complete cooldown without process or service residue.
+
+For every boundary the result records the HF and Kiln row hashes, cosine
+similarity, maximum and mean absolute error, RMSE, HF RMS magnitude, and
+relative RMSE. It also mechanically selects the boundary with the largest
+increase in relative RMSE over its predecessor, with earliest-index tie
+breaking. This is an error-growth locator, not an assertion that normal BF16
+rounding must be bit-identical or that the selected layer's entire block is the
+root cause. A result narrows the next probe to that block's pre-norm, mixer,
+residual, post-norm, and MLP boundaries; it does not itself authorize a repair.
+The published schema is
+[ROCm/HF Layer Attribution Result Schema](https://ericflo.github.io/kiln/docs/rocm-hf-layer-attribution-result-schema/).
+
+Validate a retained compact result and its current-source binding with:
+
+```bash
+python3 scripts/qualification/rocm_hf_layer_attribution.py check \
+  .qualification/rocm-hf-layer-attribution-result.json \
+  --require-current-source
+```
+
 Portable repository gates discover heterogeneous files under
 `qualification/oracle-results` and dispatch each declared schema through
 `scripts/qualification/check_oracle_results.py`. Unknown schemas fail instead

@@ -14,6 +14,7 @@ if str(QUALIFICATION_DIR) not in sys.path:
     sys.path.insert(0, str(QUALIFICATION_DIR))
 
 import check_oracle_results as checker
+import rocm_hf_layer_attribution as layer_attribution
 import rocm_hf_next_token_oracle as hf_next_token
 import rocm_hf_path_attribution as path_attribution
 
@@ -29,6 +30,7 @@ class CheckOracleResultsTests(unittest.TestCase):
     def test_dispatches_each_known_schema_and_forwards_source_requirement(self) -> None:
         cases = (
             (hf_next_token.SCHEMA, hf_next_token),
+            (layer_attribution.SCHEMA, layer_attribution),
             (path_attribution.SCHEMA, path_attribution),
         )
         with tempfile.TemporaryDirectory() as directory:

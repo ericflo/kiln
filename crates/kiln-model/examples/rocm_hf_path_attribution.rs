@@ -18,7 +18,8 @@ mod rocm {
     use kiln_model::backend::{self, LinearBackend};
     use kiln_model::forward::{
         GpuWeights, LinearAttentionState, model_forward_paged_last_token,
-        model_forward_paged_last_token_greedy, model_forward_paged_next_token_greedy,
+        model_forward_paged_last_token_greedy, model_forward_paged_last_token_with_layer_snapshots,
+        model_forward_paged_next_token_greedy,
     };
     use kiln_model::rocm_graph::RocmGraphRunner;
     use kiln_model::{
@@ -36,8 +37,11 @@ mod rocm {
     use sha2::{Digest, Sha256};
 
     const MARKER: &str = "KILN_ROCM_HF_PATH_ATTRIBUTION ";
+    const LAYER_MARKER: &str = "KILN_ROCM_HF_LAYER_ATTRIBUTION ";
     const RESULT_SCHEMA: &str = "kiln.rocm-hf-path-attribution.v1";
+    const LAYER_RESULT_SCHEMA: &str = "kiln.rocm-hf-layer-attribution.v1";
     const HF_SCHEMA: &str = "kiln.qwen35-hf-full-logits.v1";
+    const HF_LAYER_SCHEMA: &str = "kiln.qwen35-hf-layer-last-rows.v1";
     const BLOCK_SIZE: usize = 16;
     const NUM_BLOCKS: usize = 32;
     const GRAPH_ROW_PRIME: u64 = 1;
@@ -46,6 +50,7 @@ mod rocm {
 
     #[derive(Debug)]
     struct Args {
+        layer_attribution: bool,
         model: PathBuf,
         request: PathBuf,
         reference: PathBuf,
@@ -62,6 +67,8 @@ mod rocm {
 
     #[derive(Debug)]
     struct Reference {
+        boundary_names: Option<Vec<String>>,
+        layer_last_rows: Option<Vec<Vec<f32>>>,
         logits: Vec<f32>,
     }
 
@@ -139,10 +146,46 @@ mod rocm {
         schema: &'static str,
     }
 
+    #[derive(Debug, Serialize)]
+    struct BoundaryComparison {
+        cosine_similarity: f64,
+        hf_sha256: String,
+        index: usize,
+        kiln_sha256: String,
+        max_abs_error: f64,
+        mean_abs_error: f64,
+        name: String,
+        reference_root_mean_square: f64,
+        relative_root_mean_square_error: f64,
+        root_mean_square_error: f64,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ErrorGrowthBoundary {
+        index: usize,
+        name: String,
+        relative_root_mean_square_error_delta: f64,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct LayerResultMarker {
+        boundaries: Vec<BoundaryComparison>,
+        containment: CgroupEvidence,
+        final_logits_sha256: String,
+        hf_layer_last_rows_sha256: String,
+        input_token_count: usize,
+        input_token_ids_sha256: String,
+        kernel_policy: &'static str,
+        largest_relative_error_growth: ErrorGrowthBoundary,
+        observed_next_tokens: Vec<u32>,
+        request_id: String,
+        schema: &'static str,
+    }
+
     pub fn main() -> Result<()> {
         let args = parse_args()?;
         let request = load_request(&args.request)?;
-        let reference = load_reference(&args.reference, &request)?;
+        let reference = load_reference(&args.reference, &request, args.layer_attribution)?;
         let hf_argmax = argmax(&reference.logits)?;
 
         install_kt_api_mode(KtApiMode::Auto).context("install qualified kt API mode")?;
@@ -182,6 +225,19 @@ mod rocm {
         let runtime = backend::for_device_kt(&device);
         LinearBackend::runtime_prewarm_decode_weights(runtime.as_ref(), &weights)
             .context("prewarm qualified ROCm decode weights")?;
+
+        if args.layer_attribution {
+            let result = run_layer_attribution(
+                runtime.as_ref(),
+                &weights,
+                &config,
+                &device,
+                &request,
+                &reference,
+            )?;
+            println!("{LAYER_MARKER}{}", serde_json::to_string(&result)?);
+            return Ok(());
+        }
 
         let eager_full = run_eager_full(
             runtime.as_ref(),
@@ -246,10 +302,16 @@ mod rocm {
     fn parse_args() -> Result<Args> {
         let mut values = std::env::args_os().skip(1);
         let mut parsed = BTreeMap::new();
+        let mut layer_attribution = false;
         while let Some(flag) = values.next() {
             let flag = flag
                 .into_string()
                 .map_err(|_| anyhow::anyhow!("arguments must be UTF-8"))?;
+            if flag == "--layer-attribution" {
+                anyhow::ensure!(!layer_attribution, "duplicate --layer-attribution");
+                layer_attribution = true;
+                continue;
+            }
             anyhow::ensure!(
                 matches!(flag.as_str(), "--model" | "--request" | "--hf-reference"),
                 "unknown argument {flag}"
@@ -278,6 +340,7 @@ mod rocm {
             "--model must be an absolute directory"
         );
         Ok(Args {
+            layer_attribution,
             model,
             request: take("--request")?,
             reference: take("--hf-reference")?,
@@ -412,7 +475,11 @@ mod rocm {
             .collect()
     }
 
-    fn load_reference(path: &Path, request: &Request) -> Result<Reference> {
+    fn load_reference(
+        path: &Path,
+        request: &Request,
+        layer_attribution: bool,
+    ) -> Result<Reference> {
         let data =
             std::fs::read(path).with_context(|| format!("read HF reference {}", path.display()))?;
         let (_, metadata) = SafeTensors::read_metadata(&data).context("read HF metadata")?;
@@ -420,8 +487,13 @@ mod rocm {
             .metadata()
             .as_ref()
             .context("HF metadata is absent")?;
+        let expected_schema = if layer_attribution {
+            HF_LAYER_SCHEMA
+        } else {
+            HF_SCHEMA
+        };
         anyhow::ensure!(
-            user.get("schema").map(String::as_str) == Some(HF_SCHEMA),
+            user.get("schema").map(String::as_str) == Some(expected_schema),
             "HF reference schema mismatch"
         );
         anyhow::ensure!(
@@ -433,11 +505,17 @@ mod rocm {
             "HF reference implementation mismatch"
         );
         let tensors = SafeTensors::deserialize(&data).context("deserialize HF reference")?;
+        let expected_names: Vec<&str> = if layer_attribution {
+            vec!["input_ids", "layer_last_rows", "logits"]
+        } else {
+            vec!["input_ids", "logits"]
+        };
         anyhow::ensure!(
-            tensors.names().len() == 2
-                && tensors.names().contains(&"input_ids")
-                && tensors.names().contains(&"logits"),
-            "HF reference must contain exactly input_ids and logits"
+            tensors.names().len() == expected_names.len()
+                && expected_names
+                    .iter()
+                    .all(|name| tensors.names().contains(name)),
+            "HF reference tensor inventory is inconsistent"
         );
         let input = tensors.tensor("input_ids")?;
         anyhow::ensure!(
@@ -473,7 +551,41 @@ mod rocm {
             tensor.shape() == [logits.len()] && logits.iter().all(|value| value.is_finite()),
             "HF logits are malformed or non-finite"
         );
-        Ok(Reference { logits })
+        let (boundary_names, layer_last_rows) = if layer_attribution {
+            let names: Vec<String> = serde_json::from_str(
+                user.get("boundary_names")
+                    .context("HF layer reference omits boundary_names")?,
+            )
+            .context("parse HF boundary_names")?;
+            let layer_tensor = tensors.tensor("layer_last_rows")?;
+            anyhow::ensure!(
+                layer_tensor.dtype() == safetensors::Dtype::F32,
+                "HF layer_last_rows must be F32"
+            );
+            let shape = layer_tensor.shape();
+            anyhow::ensure!(
+                shape.len() == 2 && shape[0] == names.len() && shape[1] > 0 && names.len() == 34,
+                "HF layer_last_rows shape or boundary count is invalid"
+            );
+            let values: Vec<f32> = layer_tensor
+                .data()
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("F32 chunk")))
+                .collect();
+            anyhow::ensure!(
+                values.len() == shape[0] * shape[1] && values.iter().all(|value| value.is_finite()),
+                "HF layer_last_rows are malformed or non-finite"
+            );
+            let rows = values.chunks_exact(shape[1]).map(<[f32]>::to_vec).collect();
+            (Some(names), Some(rows))
+        } else {
+            (None, None)
+        };
+        Ok(Reference {
+            boundary_names,
+            layer_last_rows,
+            logits,
+        })
     }
 
     fn new_cache(config: &ModelConfig, device: Device) -> Result<PagedKvCacheKt> {
@@ -564,6 +676,172 @@ mod rocm {
         Ok(FullPathResult {
             comparison: compare_logits(&values, &reference.logits, &request.candidates)?,
             observed_next_tokens: observed,
+        })
+    }
+
+    fn run_layer_attribution(
+        runtime: &dyn kiln_model::BackendRuntime,
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        device: &Device,
+        request: &Request,
+        reference: &Reference,
+    ) -> Result<LayerResultMarker> {
+        let reference_rows = reference
+            .layer_last_rows
+            .as_ref()
+            .context("HF layer reference rows are absent")?;
+        let boundary_names = reference
+            .boundary_names
+            .as_ref()
+            .context("HF layer boundary names are absent")?;
+        let mut expected_names = vec!["embedding".to_owned()];
+        expected_names.extend((0..config.num_layers).map(|index| {
+            let layer_type = if config.is_full_attention_layer(index) {
+                "full_attention"
+            } else {
+                "linear_attention"
+            };
+            format!("layer_{index:02}_{layer_type}")
+        }));
+        expected_names.push("final_norm".to_owned());
+        anyhow::ensure!(
+            boundary_names == &expected_names && reference_rows.len() == expected_names.len(),
+            "HF layer boundaries do not match the Qwen3.5 model configuration"
+        );
+
+        let cache = new_cache(config, *device)?;
+        let table = block_table(request.prompt.len() + request.continuation.len() + 1);
+        let mut state = LinearAttentionState::new_for_inference(config, device)?;
+        let (_, first) = prefill_full(
+            runtime,
+            weights,
+            config,
+            &cache,
+            &table,
+            &mut state,
+            &request.prompt,
+        )?;
+        let mut observed = vec![first];
+        for (offset, &token) in request.continuation[..2].iter().enumerate() {
+            let logits = model_forward_paged_last_token(
+                runtime,
+                &[token],
+                weights,
+                config,
+                &cache,
+                &table,
+                request.prompt.len() + offset,
+                Some(&mut state),
+                None,
+                None,
+            )?;
+            observed.push(tensor_argmax(&logits)?);
+        }
+        let (logits, snapshots) = model_forward_paged_last_token_with_layer_snapshots(
+            runtime,
+            &request.continuation[2..],
+            weights,
+            config,
+            &cache,
+            &table,
+            request.prompt.len() + 2,
+            Some(&mut state),
+            None,
+        )?;
+        observed.push(tensor_argmax(&logits)?);
+        anyhow::ensure!(
+            snapshots.len() == reference_rows.len(),
+            "Kiln and HF layer snapshot counts differ"
+        );
+
+        let mut boundaries = Vec::with_capacity(snapshots.len());
+        for (index, ((snapshot, expected), name)) in snapshots
+            .iter()
+            .zip(reference_rows)
+            .zip(boundary_names)
+            .enumerate()
+        {
+            let actual = tensor_logits(snapshot)?;
+            boundaries.push(compare_boundary(index, name, &actual, expected)?);
+        }
+        let mut previous = 0.0_f64;
+        let mut largest_index = 0;
+        let mut largest_delta = f64::NEG_INFINITY;
+        for boundary in &boundaries {
+            let delta = boundary.relative_root_mean_square_error - previous;
+            if delta > largest_delta {
+                largest_delta = delta;
+                largest_index = boundary.index;
+            }
+            previous = boundary.relative_root_mean_square_error;
+        }
+        let final_values = tensor_logits(&logits)?;
+        Ok(LayerResultMarker {
+            boundaries,
+            containment: read_cgroup_evidence()?,
+            final_logits_sha256: vector_sha256(&final_values),
+            hf_layer_last_rows_sha256: matrix_sha256(reference_rows),
+            input_token_count: request.prompt.len() + request.continuation.len(),
+            input_token_ids_sha256: request.input_token_ids_sha256.clone(),
+            kernel_policy: "qualified",
+            largest_relative_error_growth: ErrorGrowthBoundary {
+                index: largest_index,
+                name: boundary_names[largest_index].clone(),
+                relative_root_mean_square_error_delta: largest_delta,
+            },
+            observed_next_tokens: observed,
+            request_id: request.id.clone(),
+            schema: LAYER_RESULT_SCHEMA,
+        })
+    }
+
+    fn compare_boundary(
+        index: usize,
+        name: &str,
+        actual: &[f32],
+        reference: &[f32],
+    ) -> Result<BoundaryComparison> {
+        anyhow::ensure!(
+            actual.len() == reference.len() && !actual.is_empty(),
+            "layer boundary width mismatch"
+        );
+        let mut max_abs = 0.0_f64;
+        let mut abs_sum = 0.0_f64;
+        let mut squared_error = 0.0_f64;
+        let mut dot = 0.0_f64;
+        let mut actual_squared = 0.0_f64;
+        let mut reference_squared = 0.0_f64;
+        for (&observed, &expected) in actual.iter().zip(reference) {
+            let observed = f64::from(observed);
+            let expected = f64::from(expected);
+            let error = observed - expected;
+            let abs = error.abs();
+            max_abs = max_abs.max(abs);
+            abs_sum += abs;
+            squared_error += error * error;
+            dot += observed * expected;
+            actual_squared += observed * observed;
+            reference_squared += expected * expected;
+        }
+        let count = actual.len() as f64;
+        let root_mean_square_error = (squared_error / count).sqrt();
+        let reference_root_mean_square = (reference_squared / count).sqrt();
+        anyhow::ensure!(
+            reference_root_mean_square > 0.0 && actual_squared > 0.0,
+            "layer boundary has zero RMS magnitude"
+        );
+        Ok(BoundaryComparison {
+            cosine_similarity: dot / (actual_squared.sqrt() * reference_squared.sqrt()),
+            hf_sha256: vector_sha256(reference),
+            index,
+            kiln_sha256: vector_sha256(actual),
+            max_abs_error: max_abs,
+            mean_abs_error: abs_sum / count,
+            name: name.to_owned(),
+            reference_root_mean_square,
+            relative_root_mean_square_error: root_mean_square_error / reference_root_mean_square,
+            root_mean_square_error,
         })
     }
 
@@ -806,6 +1084,31 @@ mod rocm {
         indices
     }
 
+    fn vector_sha256(values: &[f32]) -> String {
+        let mut hasher = Sha256::new();
+        for value in values {
+            hasher.update(value.to_le_bytes());
+        }
+        sha256_hex(hasher)
+    }
+
+    fn matrix_sha256(rows: &[Vec<f32>]) -> String {
+        let mut hasher = Sha256::new();
+        for value in rows.iter().flatten() {
+            hasher.update(value.to_le_bytes());
+        }
+        sha256_hex(hasher)
+    }
+
+    fn sha256_hex(hasher: Sha256) -> String {
+        let digest = hasher.finalize();
+        let hex = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("sha256:{hex}")
+    }
+
     fn compare_logits(
         actual: &[f32],
         reference: &[f32],
@@ -854,21 +1157,12 @@ mod rocm {
                 token_id,
             });
         }
-        let mut hasher = Sha256::new();
-        for value in actual {
-            hasher.update(value.to_le_bytes());
-        }
-        let digest = hasher.finalize();
-        let logits_sha256 = digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
         Ok(LogitComparison {
             argmax: actual_argmax,
             argmax_equal: actual_argmax == reference_argmax,
             candidate_tokens,
             cosine_similarity: dot / (actual_norm.sqrt() * reference_norm.sqrt()),
-            logits_sha256: format!("sha256:{logits_sha256}"),
+            logits_sha256: vector_sha256(actual),
             max_abs_error: max_abs,
             mean_abs_error: abs_sum / actual.len() as f64,
             top10_overlap: actual_top10
