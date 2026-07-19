@@ -50,6 +50,8 @@ mod rocm {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum KernelProfile {
+        FusedNormMlpFallback,
+        FusedNormMlpOnly,
         GdnFallback,
         ModelFallback,
         NonGdnFallback,
@@ -63,6 +65,8 @@ mod rocm {
     impl KernelProfile {
         fn parse(value: &str) -> Result<Self> {
             match value {
+                "fused_norm_mlp_fallback" => Ok(Self::FusedNormMlpFallback),
+                "fused_norm_mlp_only" => Ok(Self::FusedNormMlpOnly),
                 "gdn_fallback" => Ok(Self::GdnFallback),
                 "model_fallback" => Ok(Self::ModelFallback),
                 "non_gdn_fallback" => Ok(Self::NonGdnFallback),
@@ -72,13 +76,15 @@ mod rocm {
                 "split_q_gate_only" => Ok(Self::SplitQGateOnly),
                 "tensor_fallback" => Ok(Self::TensorFallback),
                 _ => anyhow::bail!(
-                    "--kernel-profile must be gdn_fallback, model_fallback, non_gdn_fallback, qualified, portable_fallback, split_q_gate_fallback, split_q_gate_only, or tensor_fallback, got {value}"
+                    "--kernel-profile must be fused_norm_mlp_fallback, fused_norm_mlp_only, gdn_fallback, model_fallback, non_gdn_fallback, qualified, portable_fallback, split_q_gate_fallback, split_q_gate_only, or tensor_fallback, got {value}"
                 ),
             }
         }
 
         const fn label(self) -> &'static str {
             match self {
+                Self::FusedNormMlpFallback => "fused_norm_mlp_fallback",
+                Self::FusedNormMlpOnly => "fused_norm_mlp_only",
                 Self::GdnFallback => "gdn_fallback",
                 Self::ModelFallback => "model_fallback",
                 Self::NonGdnFallback => "non_gdn_fallback",
@@ -92,6 +98,8 @@ mod rocm {
 
         const fn model_policy(self) -> RocmKernelPolicy {
             match self {
+                Self::FusedNormMlpFallback => RocmKernelPolicy::fused_norm_mlp_fallback(),
+                Self::FusedNormMlpOnly => RocmKernelPolicy::fused_norm_mlp_only(),
                 Self::GdnFallback => RocmKernelPolicy::gdn_fallback(),
                 Self::ModelFallback => RocmKernelPolicy::portable_fallback(),
                 Self::NonGdnFallback => RocmKernelPolicy::non_gdn_fallback(),
@@ -105,6 +113,8 @@ mod rocm {
 
         const fn tensor_policy(self) -> RocmTensorKernelPolicy {
             match self {
+                Self::FusedNormMlpFallback => RocmTensorKernelPolicy::qualified(),
+                Self::FusedNormMlpOnly => RocmTensorKernelPolicy::qualified(),
                 Self::GdnFallback => RocmTensorKernelPolicy::qualified(),
                 Self::ModelFallback => RocmTensorKernelPolicy::qualified(),
                 Self::NonGdnFallback => RocmTensorKernelPolicy::qualified(),
@@ -1281,6 +1291,28 @@ mod rocm {
                 RocmTensorKernelPolicy::portable_fallback()
             );
             assert_eq!(tensor.label(), "tensor_fallback");
+
+            let fused_fallback = KernelProfile::parse("fused_norm_mlp_fallback").unwrap();
+            assert_eq!(
+                fused_fallback.model_policy(),
+                RocmKernelPolicy::fused_norm_mlp_fallback()
+            );
+            assert_eq!(
+                fused_fallback.tensor_policy(),
+                RocmTensorKernelPolicy::qualified()
+            );
+            assert_eq!(fused_fallback.label(), "fused_norm_mlp_fallback");
+
+            let fused_only = KernelProfile::parse("fused_norm_mlp_only").unwrap();
+            assert_eq!(
+                fused_only.model_policy(),
+                RocmKernelPolicy::fused_norm_mlp_only()
+            );
+            assert_eq!(
+                fused_only.tensor_policy(),
+                RocmTensorKernelPolicy::qualified()
+            );
+            assert_eq!(fused_only.label(), "fused_norm_mlp_only");
 
             let gdn = KernelProfile::parse("gdn_fallback").unwrap();
             assert_eq!(gdn.model_policy(), RocmKernelPolicy::gdn_fallback());

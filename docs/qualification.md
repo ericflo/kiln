@@ -873,7 +873,7 @@ python3 scripts/qualification/rocm_hf_layer_attribution.py run \
 ```
 
 `--kernel-profile` is a closed typed choice. `qualified` is the production
-model/tensor policy and remains the default. Seven layer-only diagnostic
+model/tensor policy and remains the default. Nine layer-only diagnostic
 profiles preserve the same ROCm device, BF16 weights, paged state, prompt, and
 layer capture:
 
@@ -890,6 +890,11 @@ layer capture:
 - `non_gdn_fallback` is the exact model-policy inverse: it retains the qualified
   GDN/recurrent family, including the default-off multiblock value, declines
   the other 18 model leaves, and retains qualified tensor policy.
+- `fused_norm_mlp_fallback` declines fused RMSNorm and both fused MLP routes
+  while preserving every other qualified model route and qualified tensor
+  policy.
+- `fused_norm_mlp_only` is its exact inverse: it enables only those three model
+  routes on portable model policy and retains qualified tensor policy.
 - `split_q_gate_fallback` changes only the split q/gate F32-output projection
   leaf from the qualified model policy and retains qualified tensor policy.
 - `split_q_gate_only` is its exact inverse: it enables only that model leaf on
@@ -919,6 +924,11 @@ run both split q/gate profiles. Correct fallback plus incorrect split-only
 evidence makes that leaf causal. The inverse excludes it. Matching verdicts
 again require reporting an interaction instead of claiming single-route
 causality.
+
+If the split q/gate pair excludes that route, run both fused norm/MLP profiles.
+Correct fallback plus incorrect fused-only evidence localizes the defect to the
+three-route group. The inverse excludes the group. Matching verdicts require an
+interaction claim before any member is disabled in the qualified policy.
 
 The HF arm uses the pinned PyTorch/Transformers fallback implementation,
 BF16 weights, eager full attention, deterministic algorithms, TF32 disabled,

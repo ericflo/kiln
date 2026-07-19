@@ -40,6 +40,8 @@ KERNEL_PROFILES = (
     "portable_fallback",
     "model_fallback",
     "tensor_fallback",
+    "fused_norm_mlp_fallback",
+    "fused_norm_mlp_only",
     "gdn_fallback",
     "non_gdn_fallback",
     "split_q_gate_fallback",

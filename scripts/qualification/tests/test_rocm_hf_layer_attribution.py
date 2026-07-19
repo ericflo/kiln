@@ -213,6 +213,8 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             self.assertFalse(any(name.startswith("KILN_") for name in spec["environment"]))
 
             for profile in (
+                "fused_norm_mlp_fallback",
+                "fused_norm_mlp_only",
                 "model_fallback",
                 "tensor_fallback",
                 "gdn_fallback",
@@ -334,6 +336,8 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
         )
         self.assertEqual(attribution.validate_worker_marker(fallback["worker"]), fallback["worker"])
         for profile in (
+            "fused_norm_mlp_fallback",
+            "fused_norm_mlp_only",
             "model_fallback",
             "tensor_fallback",
             "gdn_fallback",
