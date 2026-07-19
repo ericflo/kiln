@@ -372,6 +372,10 @@ class ServingBenchmarkTests(unittest.TestCase):
         diagnostic_name = (
             "kiln-rocm-strix-halo-serving-comparison-graph-disabled-v1"
         )
+        no_prefix_name = (
+            "kiln-rocm-strix-halo-serving-comparison-graph-disabled-"
+            "no-prefix-cache-v1"
+        )
 
         base = tomllib.loads((config_root / f"{base_name}.toml").read_text())
         diagnostic = tomllib.loads(
@@ -384,7 +388,17 @@ class ServingBenchmarkTests(unittest.TestCase):
         diagnostic["accelerator"]["rocm_graph_mode"] = "profile"
         self.assertEqual(diagnostic, base)
 
-        for name in (base_name, diagnostic_name):
+        no_prefix = tomllib.loads(
+            (config_root / f"{no_prefix_name}.toml").read_text()
+        )
+        self.assertFalse(no_prefix["prefix_cache"]["enabled"])
+        no_prefix["prefix_cache"]["enabled"] = True
+        graph_disabled = tomllib.loads(
+            (config_root / f"{diagnostic_name}.toml").read_text()
+        )
+        self.assertEqual(no_prefix, graph_disabled)
+
+        for name in (base_name, diagnostic_name, no_prefix_name):
             path = launch_root / f"{name}.json"
             raw = bench.strict_json_loads(path.read_bytes())
             parsed = bench.validate_server_launch_config_value(

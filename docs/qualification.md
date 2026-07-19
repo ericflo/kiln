@@ -1243,6 +1243,33 @@ unchanged. The expected fourth token is the HF/vLLM token `15787`
 defect outside graph replay. This run is source-bound diagnostic evidence and
 cannot satisfy output parity, performance, graph, soak, or ROCm acceptance.
 
+That graph-disabled discriminator is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t060940-rocm-strix-halo-greedy-c1-graph-disabled-counterevidence-v1.kiln.json`
+from exact clean pushed source `357403724843ae6c0f07349747d8b37d64e9c527`.
+The measured request reproduces the exact 163-token prompt-set hash
+`sha256:faf24ebb93fc7e75a2e78111b921a32aece716d56d9b67d2907ae251217a8d9e`
+from both prior engine arms and still emits `To establish a baseline`.
+Therefore HIP graph execution is not the cause of the pinned first divergence.
+The warmup emitted `foundation`, but its prompt had 160 tokens and a distinct
+hash; do not interpret it as repeated-request evidence.
+
+Driver v8 kept provenance hashing and server execution inside the typed thermal
+contract. The initial fingerprint, server, and final fingerprint peaked at
+59.625 C, 60 C, and 60 C, respectively, with zero hard trips and complete
+cooldowns. The measured request peaked at 51.625 C without pacing, the server
+shut down normally, and no listener, process, or snapshot remained. Its 6.608
+output tokens/second and 6.562 thermally sustainable output tokens/second are
+diagnostic-only.
+
+The next one-field discriminator launches
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-no-prefix-cache-v1.json`.
+Relative to the graph-disabled arm it changes only
+`prefix_cache.enabled = false`, retaining the same batching actor, repaired
+kernel profile, memory policy, model, prompt, and four-token bound. A
+`foundation` result attributes the defect to prefix-cache KV/recurrent-state
+reuse; `baseline` excludes that subsystem and advances the comparison to the
+batching/direct serving boundary.
+
 Serving benchmark driver v8 closes the exposed provenance gap before another
 ROCm request is allowed. It runs both the initial and final model fingerprints
 as start-gated child process groups under the same typed host thermal policy,

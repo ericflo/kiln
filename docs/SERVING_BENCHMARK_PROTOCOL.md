@@ -307,6 +307,25 @@ a correctness discriminator, not throughput evidence. Do not compare its
 four-token workload to the retained 64-token vLLM receipt, and do not use the
 result to qualify graph execution, concurrency, or endurance.
 
+The graph-disabled result is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t060940-rocm-strix-halo-greedy-c1-graph-disabled-counterevidence-v1.kiln.json`.
+Its measured prompt has the same 163-token count and
+`sha256:faf24ebb93fc7e75a2e78111b921a32aece716d56d9b67d2907ae251217a8d9e`
+prompt-set hash as both 64-token arms. It still emits `To establish a baseline`
+instead of vLLM's `To establish a foundation`, excluding ROCm graph execution
+as the cause of this first divergence. The warmup emitted `foundation`, but it
+was a distinct 160-token prompt with a different prompt hash; it is not
+same-request statefulness evidence.
+
+Driver v8 contained the complete lifecycle: the server guard and both model
+fingerprints recorded zero trips, the server lifecycle peaked at 60 C, every
+cooldown completed, and no process, listener, or snapshot remained. The 6.61
+output tokens/second request window remains diagnostic-only. The next tracked
+arm keeps graphs disabled and changes only `prefix_cache.enabled` to `false`:
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-no-prefix-cache-v1.json`.
+It tests whether cross-request KV/recurrent-state reuse explains the remaining
+public-serving divergence.
+
 ## Running One Profile
 
 ```bash
