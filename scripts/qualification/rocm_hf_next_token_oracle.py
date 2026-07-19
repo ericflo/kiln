@@ -482,7 +482,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run.add_argument("--host-thermal-policy", required=True, type=Path)
     run.add_argument("--out", required=True, type=Path)
     check = commands.add_parser("check", help="strictly validate a retained result")
-    check.add_argument("result", type=Path)
+    check.add_argument("result", nargs="+", type=Path)
     check.add_argument("--require-current-source", action="store_true")
     return parser.parse_args(argv)
 
@@ -490,15 +490,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.command == "check":
-        try:
-            result = validate_result(
-                args.result,
-                require_current_source=args.require_current_source,
-            )
-        except BaseException as exc:
-            print(f"ROCm HF next-token oracle result is invalid: {exc}", file=sys.stderr)
-            return 1
-        print(f"OK {args.result} {result['result_sha256']}")
+        for result_path in args.result:
+            try:
+                result = validate_result(
+                    result_path,
+                    require_current_source=args.require_current_source,
+                )
+            except BaseException as exc:
+                print(
+                    f"ROCm HF next-token oracle result is invalid: "
+                    f"{result_path}: {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"OK {result_path} {result['result_sha256']}")
         return 0
     try:
         result = execute(

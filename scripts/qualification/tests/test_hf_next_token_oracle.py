@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 QUALIFICATION_DIR = Path(__file__).resolve().parents[1]
@@ -324,6 +325,23 @@ class HfNextTokenOracleTests(unittest.TestCase):
             path.write_text(json.dumps(result))
             with self.assertRaisesRegex(runner.OracleRunError, "result_sha256"):
                 runner.validate_result(path)
+
+    def test_check_command_validates_every_retained_result(self) -> None:
+        first = Path("qualification/oracle-results/first.json")
+        second = Path("qualification/oracle-results/second.json")
+        validated = [
+            {"result_sha256": "sha256:" + "1" * 64},
+            {"result_sha256": "sha256:" + "2" * 64},
+        ]
+        with mock.patch.object(runner, "validate_result", side_effect=validated) as check:
+            self.assertEqual(runner.main(["check", str(first), str(second)]), 0)
+        self.assertEqual(
+            check.call_args_list,
+            [
+                mock.call(first, require_current_source=False),
+                mock.call(second, require_current_source=False),
+            ],
+        )
 
 
 if __name__ == "__main__":

@@ -672,6 +672,24 @@ python3 scripts/qualification/rocm_hf_next_token_oracle.py check \
   --require-current-source
 ```
 
+Specialized oracle results live under `qualification/oracle-results`, separate
+from generic qualification receipts and serving-benchmark receipts because
+each family has a different closed schema and validator. Both portable
+workflows discover and check every JSON result in that tree without running an
+accelerator. The current retained Strix Halo result is
+`qualification/oracle-results/rocm/strix-halo/20260719t003452-rocm-strix-halo-hf-next-token-first-divergence-v1.json`,
+executed from clean pushed source `c5640c090f295cd50a73aae63ef48d403fd13d98`.
+The eager HF reference selects vLLM's token `15787` (` foundation`) at rank one
+with logit `18.5`; Kiln's token `25045` (` baseline`) is rank two with logit
+`18.25`, a `0.25` top-logit margin. The full F32 logit vector has canonical
+hash `sha256:d4bc2aeb7d6bef608dfe500f6b9759b1fd4ca5eeb924b55b9e63b2e49a0e96d0`.
+The guarded forward completed without memory, swap, OOM, thermal-trip, or
+cooldown residue: the cgroup peaked at 9,529,192,448 bytes, runtime temperature
+peaked at 60 C, and four completed pacing events occupied 9.381 seconds. This
+closes the candidate attribution at that exact first divergence: vLLM matches
+the independent reference and Kiln does not. It does not yet locate Kiln's
+numerical error or establish broader sequence parity.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for
