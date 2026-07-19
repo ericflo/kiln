@@ -39,6 +39,27 @@ that orchestrator is responsible for containment and its starting host state
 before the benchmark starts. Its server is returned after safe handoff before
 the final guarded fingerprint; it must remain quiescent during that recheck.
 
+### Model-fingerprint read pacing
+
+Driver v12 keeps the v8 double-read integrity contract but makes its I/O rate
+explicit and bounded. Each model input is opened without following symlinks,
+hashed once for identity, rechecked by file and directory stat identity, and
+hashed a second time to detect a concurrent same-length rewrite even where
+filesystem timestamps are too coarse. One monotonic cumulative limiter covers
+every byte in both passes. It accounts after each read and sleeps in at most
+25 ms increments; it does not reset at a shard or pass boundary.
+
+`--model-fingerprint-read-mib-per-second` accepts `64..=16384` and defaults to
+256 for measured direct and campaign runs. The worker receives the value as an
+argv field in its closed environment. Receipt schema
+`kiln.serving-model-fingerprint-thermal.v2` records it as
+`host_thermal.model_fingerprint.read_mib_per_second` beside the exact worker
+implementation and Python hashes plus initial/final thermal lifecycles.
+Campaign v5 records and forwards the same value to every profile. The setting
+applies only to provenance reads; it cannot pace server startup or inference
+and is outside every request-timing window. Standalone `model_fingerprint.py`
+remains unlimited when its optional `--max-read-mib-per-second` is omitted.
+
 Owned mode accepts only an origin-only loopback HTTP base URL. On Linux it
 matches the listening TCP/TCP6 socket inode with descriptors held by the leader
 or another member of the launched process group. An old listener on the port,
@@ -203,7 +224,7 @@ latency, request throughput, output-token throughput, SLO goodput, dispatch
 spread, prompt/output hashes, DRM memory, failures, and Kiln server-route
 diagnostics.
 
-Driver v7 through v11 retain one ordered `output_evidence` row for every successful
+Driver v7 through v12 retain one ordered `output_evidence` row for every successful
 request. Hash-only evidence is the default and includes the combined semantic
 output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
 tokens, and finish reason. The validator requires these rows to cover exactly
@@ -691,6 +712,15 @@ discriminator, not a production default or a throughput acceptance run. A trip,
 incomplete response, output mismatch, graph/route error, forced shutdown, or
 residue rejects it and prohibits an unchanged retry.
 
+The first invocation from `f3189b703` did not test decode width: the historical
+unlimited initial model-fingerprint worker rose from 41.875 C to 93.125 C and
+tripped before server creation. Its guard terminated the worker, cooled for
+7.509 seconds to 43 C, and left no process, listener, receipt, or workspace
+residue. The width-4 arm remains pending. Its next invocation must use driver
+v12's 256 MiB/s model-fingerprint bound and prove both guarded provenance
+lifecycles remain below the unchanged hard limit before the inference result is
+interpreted.
+
 ## Running One Profile
 
 ```bash
@@ -707,6 +737,7 @@ python3 scripts/bench-concurrent-batch.py \
   --max-tokens 64 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
+  --model-fingerprint-read-mib-per-second 256 \
   --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json \
   --server-launch-config qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v1.json \
   --output-evidence hashes \
@@ -741,13 +772,14 @@ an output directory inside the repository cannot make later profiles reject the
 source as dirty. After execution, every staged receipt is published through an
 atomic rename and the self-hashing campaign summary is published last.
 
-Campaign summary v4 records the selected output-evidence mode and forwards it
+Campaign summary v5 records the selected output-evidence mode and forwards it
 unchanged to every profile. It also records `execution_policy`, and every
 expected profile has a closed `status`: `completed` or
 `not_run_after_failure`. A completed row records its exit code and receipt hash;
 a skipped row records the earlier `blocked_by_profile` and has null exit and
 receipt-hash fields. Missing receipts count as failures even when the child exits
-zero.
+zero. `model_fingerprint_read_mib_per_second` records the bounded provenance
+read rate forwarded to every child.
 
 The default execution policy is fail-fast. The first nonzero child exit or
 missing receipt prevents every later profile from starting, while preserving
@@ -769,6 +801,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --out-dir .qualification/serving/rocm-qualified-v1 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
+  --model-fingerprint-read-mib-per-second 256 \
   --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json \
   --server-launch-config qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v1.json \
   --output-evidence hashes
@@ -791,15 +824,18 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v11 is the current contract. It adds typed idle-boundary cooldown
-evidence to v10 without changing the request workload or output contract.
-Driver v10 added closed ROCm graph execution evidence; v9 added route-aware
+Driver v12 is the current contract. It adds a bounded, receipt-recorded model
+fingerprint read rate without changing the double-read integrity contract,
+request workload, or output contract. Driver v11 added typed idle-boundary
+cooldown evidence to v10. Driver v10 added closed ROCm graph execution evidence;
+v9 added route-aware
 batching-actor and direct-rendezvous diagnostics; and v8 added mandatory initial
-and final guarded model-fingerprint lifecycles. A v11 exact-output run may use a
-strict-valid v7 through v11 reference because the model, thermal-policy,
+and final guarded model-fingerprint lifecycles. A v12 exact-output run may use a
+strict-valid v7 through v12 reference because the model, thermal-policy,
 prompt, and output contracts remain comparison-compatible; the current arm
-must still satisfy v11 idle cooling, v10 graph accounting, v9 routing, and v8
-containment. Driver v7 added mandatory ordered per-request output evidence and
+must still satisfy v12 fingerprint pacing, v11 idle cooling, v10 graph
+accounting, v9 routing, and v8 containment. Driver v7 added mandatory ordered
+per-request output evidence and
 structured mismatch localization to the v6 lifecycle contract.
 
 Driver v6 retains the v5 mandatory post-provenance, pre-process cooldown and
@@ -810,6 +846,6 @@ identity semantics. Owned evidence contains the content-hashed launch document,
 absolute server-log fingerprint, shutdown signal/status/timing,
 forced-shutdown flag, and process-group liveness. Attached and explicitly
 unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
-from missing fields. Historical driver v2 through v10 receipts remain valid
-under their original contracts, but do not satisfy current v11 performance
+from missing fields. Historical driver v2 through v11 receipts remain valid
+under their original contracts, but do not satisfy current v12 performance
 acceptance.

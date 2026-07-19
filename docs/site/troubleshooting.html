@@ -786,6 +786,14 @@ kiln serve --config rocm-graph-eager.toml
           already-stopped group, but the current serving policy never initiates that state.
         </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Driver v12 also bounds each guarded model-fingerprint worker with one cumulative
+          <code>model_fingerprint_read_mib_per_second</code> schedule across both full integrity passes.
+          Measured runs default to 256 MiB/s and accept 64 through 16,384 MiB/s; each limiter wait is at most
+          25 ms. The second read remains mandatory because it detects a concurrent same-length rewrite. The
+          v2 thermal record binds the selected rate, worker implementation, Python executable, and both
+          lifecycles. This protects provenance hashing only; it does not pace model upload or inference.
+        </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           The first clean 256-token route-invariant development soak passed correctness and lifecycle gates but is
           retained as a performance counterexample: output throughput fell from 13.194 to 7.108 tokens/second
           versus the immediately prior accepted run. This is not explained by cooling; measured thermal pacing fell

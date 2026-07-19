@@ -1345,6 +1345,10 @@ function validateSftLossRouteDocumentationSourceContract() {
     'Low SCLK correlation supports a device-wide clock-state hypothesis',
     'runtime setup clock starts only after the exact source-bound build succeeds',
     'outer containment timeout is derived from all phase limits',
+    'Driver v12 also bounds each guarded model-fingerprint worker',
+    'model_fingerprint_read_mib_per_second',
+    '256 MiB/s and accept 64 through 16,384 MiB/s',
+    'second read remains mandatory',
   ]);
   if (missingRocmSafetyTerms.length > 0) {
     fail(`docs/site/troubleshooting.html: Strix Halo qualification safety contract missing terms: ${missingRocmSafetyTerms.join(', ')}`);
@@ -1365,6 +1369,10 @@ function validateSftLossRouteDocumentationSourceContract() {
     'bounded to 180 seconds',
     'cooldown active/completed/timeout counts',
     'a timeout or missing completion fails qualification',
+    'Serving benchmark driver v12 exposes',
+    '--model-fingerprint-read-mib-per-second',
+    'kiln.serving-model-fingerprint-thermal.v2',
+    'host_thermal.model_fingerprint.read_mib_per_second',
     'variant_invariant_fixed_output_v5',
     'exactly 64 ascending six-digit integers',
     'server truncation before the target is expected',

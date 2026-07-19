@@ -1850,6 +1850,15 @@ kiln serve --config kiln.toml</code></pre>
           driver a bounded cleanup window before hard containment and removes incomplete run evidence
           rather than leaving copied model shards behind.
         </p>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          Serving benchmark driver v12 exposes
+          <code>--model-fingerprint-read-mib-per-second</code> for guarded provenance work. Its measured default
+          is 256 MiB/s, its closed range is 64 through 16,384, and campaign v5 records and forwards the value.
+          Receipt schema <code>kiln.serving-model-fingerprint-thermal.v2</code> stores it at
+          <code>host_thermal.model_fingerprint.read_mib_per_second</code>. One monotonic cumulative schedule
+          covers both content-integrity passes without changing request timing, server startup pacing, or
+          inference.
+        </p>
         <h3 id="prompt-logprobs" class="text-xl font-semibold mt-6 mb-3">Score prompt tokens</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           Set <code>max_tokens</code> to <code>0</code> or <code>1</code> and request

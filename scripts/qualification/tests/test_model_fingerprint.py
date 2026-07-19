@@ -49,6 +49,65 @@ class ModelFingerprintTests(unittest.TestCase):
             (json.dumps({"weight_map": weight_map}) + "\n").encode(),
         )
 
+    def test_read_rate_limiter_uses_one_cumulative_bounded_schedule(self) -> None:
+        now = [10.0]
+        sleeps: list[float] = []
+
+        def sleeper(duration: float) -> None:
+            self.assertGreater(duration, 0.0)
+            self.assertLessEqual(
+                duration, model_fingerprint.MAX_RATE_LIMIT_SLEEP_SECONDS
+            )
+            sleeps.append(duration)
+            now[0] += duration
+
+        limiter = model_fingerprint._ReadRateLimiter(
+            1,
+            clock=lambda: now[0],
+            sleeper=sleeper,
+        )
+        limiter.account(model_fingerprint.MIB // 2)
+        self.assertAlmostEqual(now[0], 10.5)
+        limiter.account(model_fingerprint.MIB // 2)
+        self.assertAlmostEqual(now[0], 11.0)
+        self.assertEqual(limiter.total_bytes, model_fingerprint.MIB)
+        self.assertGreater(len(sleeps), 2)
+
+        unlimited_sleeps: list[float] = []
+        unlimited = model_fingerprint._ReadRateLimiter(
+            None,
+            clock=lambda: now[0],
+            sleeper=unlimited_sleeps.append,
+        )
+        unlimited.account(model_fingerprint.MIB)
+        self.assertEqual(unlimited.total_bytes, model_fingerprint.MIB)
+        self.assertEqual(unlimited_sleeps, [])
+
+    def test_fingerprint_uses_one_limiter_for_both_integrity_passes(self) -> None:
+        weight = self._write("model.safetensors", b"weight-bytes")
+        inputs = (
+            weight,
+            self.root / "config.json",
+            self.root / "tokenizer.json",
+            self.root / "chat_template.jinja",
+        )
+        limiter = mock.Mock()
+        with mock.patch.object(
+            model_fingerprint,
+            "_ReadRateLimiter",
+            return_value=limiter,
+        ) as limiter_factory:
+            model_fingerprint.fingerprint_model(
+                self.root,
+                max_read_mib_per_second=256,
+            )
+
+        limiter_factory.assert_called_once_with(256)
+        self.assertEqual(
+            sum(call.args[0] for call in limiter.account.call_args_list),
+            2 * sum(path.stat().st_size for path in inputs),
+        )
+
     def test_single_file_fingerprint_matches_receipt_model_shape(self) -> None:
         weight = b"single checkpoint bytes"
         self._write("model.safetensors", weight)
@@ -283,7 +342,48 @@ class ModelFingerprintTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(return_code, 0)
-        fingerprint.assert_called_once_with(self.root, None)
+        fingerprint.assert_called_once_with(
+            self.root,
+            None,
+            max_read_mib_per_second=None,
+        )
+
+    def test_cli_forwards_and_bounds_the_read_rate(self) -> None:
+        self._write("model.safetensors", b"weight")
+        stdout = io.StringIO()
+        with mock.patch.object(
+            model_fingerprint,
+            "fingerprint_model",
+            wraps=model_fingerprint.fingerprint_model,
+        ) as fingerprint, contextlib.redirect_stdout(stdout):
+            self.assertEqual(
+                model_fingerprint.main(
+                    [
+                        "--model-path",
+                        str(self.root),
+                        "--json",
+                        "--max-read-mib-per-second",
+                        "256",
+                    ]
+                ),
+                0,
+            )
+        fingerprint.assert_called_once_with(
+            self.root,
+            None,
+            max_read_mib_per_second=256,
+        )
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(
+            SystemExit
+        ):
+            model_fingerprint.parse_args(
+                [
+                    "--model-path",
+                    str(self.root),
+                    "--max-read-mib-per-second",
+                    "0",
+                ]
+            )
 
     def test_tokenizer_config_template_fallback_hashes_decoded_string_bytes(self) -> None:
         self._write("model.safetensors", b"weight")

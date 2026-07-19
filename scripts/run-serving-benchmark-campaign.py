@@ -19,7 +19,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "scripts" / "bench-concurrent-batch.py"
-SCHEMA = "kiln.serving-benchmark-campaign.v4"
+SCHEMA = "kiln.serving-benchmark-campaign.v5"
+DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 256
 PROFILES = (
     "greedy-short",
     "api-default-sampled",
@@ -104,6 +105,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--memory-path", type=Path, required=True)
     parser.add_argument("--memory-limit-bytes", type=int, required=True)
     parser.add_argument("--memory-sample-ms", type=int, default=50)
+    parser.add_argument(
+        "--model-fingerprint-read-mib-per-second",
+        type=int,
+        default=DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND,
+        help="cumulative read-rate limit across both model-integrity passes",
+    )
     parser.add_argument("--host-thermal-policy", type=Path, required=True)
     server_owner = parser.add_mutually_exclusive_group(required=True)
     server_owner.add_argument("--server-pid", type=int)
@@ -133,6 +140,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--reference-dir is only valid for a vLLM campaign")
     if args.server_pid is not None and args.server_pid <= 1:
         parser.error("--server-pid must be greater than one")
+    if not 64 <= args.model_fingerprint_read_mib_per_second <= 16_384:
+        parser.error("--model-fingerprint-read-mib-per-second must be in 64..=16384")
     if args.host_thermal_policy.is_symlink() or not args.host_thermal_policy.is_file():
         parser.error("--host-thermal-policy must name a regular file")
     if args.server_launch_config is not None and (
@@ -183,6 +192,8 @@ def benchmark_command(
         str(args.memory_limit_bytes),
         "--memory-sample-ms",
         str(args.memory_sample_ms),
+        "--model-fingerprint-read-mib-per-second",
+        str(args.model_fingerprint_read_mib_per_second),
         "--host-thermal-policy",
         str(args.host_thermal_policy),
         "--slo-ttft-ms",
@@ -224,6 +235,9 @@ def build_summary(
         "campaign_id": args.campaign_id,
         "engine": args.engine,
         "output_evidence": args.output_evidence,
+        "model_fingerprint_read_mib_per_second": (
+            args.model_fingerprint_read_mib_per_second
+        ),
         "execution_policy": (
             "continue_after_failure"
             if args.continue_after_failure

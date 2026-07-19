@@ -39,7 +39,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "11"
+DRIVER_VERSION = "12"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -50,21 +50,29 @@ SUPPORTED_DRIVER_VERSIONS = {
     "8",
     "9",
     "10",
+    "11",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
-    "3", "4", "5", "6", "7", "8", "9", "10", DRIVER_VERSION
+    "3", "4", "5", "6", "7", "8", "9", "10", "11", DRIVER_VERSION
 }
 LIFECYCLE_DRIVER_VERSIONS = {
-    "4", "5", "6", "7", "8", "9", "10", DRIVER_VERSION
+    "4", "5", "6", "7", "8", "9", "10", "11", DRIVER_VERSION
 }
-PRELAUNCH_DRIVER_VERSIONS = {"5", "6", "7", "8", "9", "10", DRIVER_VERSION}
-OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", "8", "9", "10", DRIVER_VERSION}
-MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {"8", "9", "10", DRIVER_VERSION}
-ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {"9", "10", DRIVER_VERSION}
-ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {"10", DRIVER_VERSION}
-REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {"7", "8", "9", "10", DRIVER_VERSION}
-IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {DRIVER_VERSION}
+PRELAUNCH_DRIVER_VERSIONS = {
+    "5", "6", "7", "8", "9", "10", "11", DRIVER_VERSION
+}
+OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", "8", "9", "10", "11", DRIVER_VERSION}
+MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
+    "8", "9", "10", "11", DRIVER_VERSION
+}
+RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {DRIVER_VERSION}
+ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {"9", "10", "11", DRIVER_VERSION}
+ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {"10", "11", DRIVER_VERSION}
+REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
+    "7", "8", "9", "10", "11", DRIVER_VERSION
+}
+IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {"11", DRIVER_VERSION}
 OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
@@ -84,7 +92,11 @@ from strict_json import loads as strict_json_loads  # noqa: E402
 
 HOST_THERMAL_POLICY_SCHEMA = thermal_policy_file.SCHEMA
 MODEL_FINGERPRINT_SCRIPT = QUALIFICATION_DIR / "model_fingerprint.py"
-MODEL_FINGERPRINT_THERMAL_SCHEMA = "kiln.serving-model-fingerprint-thermal.v1"
+MODEL_FINGERPRINT_THERMAL_SCHEMA_V1 = "kiln.serving-model-fingerprint-thermal.v1"
+MODEL_FINGERPRINT_THERMAL_SCHEMA = "kiln.serving-model-fingerprint-thermal.v2"
+DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 256
+MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 64
+MAX_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 16_384
 
 PROFILE_CONTRACTS = {
     "greedy-short": {
@@ -980,9 +992,17 @@ def fingerprint_model_with_thermal_containment(
     *,
     policy_path: Path | None,
     phase: str,
+    read_mib_per_second: int = DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     if policy_path is None:
-        return fingerprint_model(model_path, model_id), None
+        return (
+            fingerprint_model(
+                model_path,
+                model_id,
+                max_read_mib_per_second=read_mib_per_second,
+            ),
+            None,
+        )
     try:
         resolved_policy = policy_path.expanduser().resolve(strict=True)
         python = Path(sys.executable).resolve(strict=True)
@@ -1010,6 +1030,8 @@ def fingerprint_model_with_thermal_containment(
                     str(model_path),
                     "--model-id",
                     model_id,
+                    "--max-read-mib-per-second",
+                    str(read_mib_per_second),
                     "--json",
                 ],
                 worker_environment=environment,
@@ -2137,17 +2159,43 @@ HOST_THERMAL_EVIDENCE_KEYS = {
 def validate_model_fingerprint_thermal_record(
     value: Any,
     *,
+    driver_version: str,
     policy_record: dict[str, Any],
 ) -> bool:
     label = "receipt.host_thermal.model_fingerprint"
     record = _object(value, label)
-    _exact_keys(
-        record,
-        {"schema", "implementation_sha256", "python_sha256", "initial", "final"},
-        label,
+    expected_keys = {
+        "schema",
+        "implementation_sha256",
+        "python_sha256",
+        "initial",
+        "final",
+    }
+    if driver_version in RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS:
+        expected_keys.add("read_mib_per_second")
+    _exact_keys(record, expected_keys, label)
+    expected_schema = (
+        MODEL_FINGERPRINT_THERMAL_SCHEMA
+        if driver_version in RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS
+        else MODEL_FINGERPRINT_THERMAL_SCHEMA_V1
     )
-    if record["schema"] != MODEL_FINGERPRINT_THERMAL_SCHEMA:
-        raise BenchmarkError(f"{label}.schema is unsupported")
+    if record["schema"] != expected_schema:
+        raise BenchmarkError(f"{label}.schema is unsupported for driver v{driver_version}")
+    if driver_version in RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS:
+        read_rate = _positive_int(
+            record["read_mib_per_second"],
+            f"{label}.read_mib_per_second",
+        )
+        if not (
+            MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
+            <= read_rate
+            <= MAX_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
+        ):
+            raise BenchmarkError(
+                f"{label}.read_mib_per_second must be in "
+                f"{MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND}..="
+                f"{MAX_MODEL_FINGERPRINT_READ_MIB_PER_SECOND}"
+            )
     _sha256(record["implementation_sha256"], f"{label}.implementation_sha256")
     _sha256(record["python_sha256"], f"{label}.python_sha256")
     for phase in ("initial", "final"):
@@ -2230,6 +2278,7 @@ def validate_host_thermal_receipt(
     if driver_version in MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS:
         model_fingerprint_final_present = validate_model_fingerprint_thermal_record(
             host_thermal["model_fingerprint"],
+            driver_version=driver_version,
             policy_record=policy_record,
         )
     process = _object(
@@ -4929,6 +4978,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--diagnostics-url", default="auto")
     parser.add_argument("--memory-path", default="auto")
     parser.add_argument("--memory-sample-ms", type=int, default=50)
+    parser.add_argument(
+        "--model-fingerprint-read-mib-per-second",
+        type=int,
+        default=DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND,
+        help=(
+            "cumulative read-rate limit across both model-integrity passes "
+            f"(default: {DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND} MiB/s)"
+        ),
+    )
     parser.add_argument("--require-memory", action="store_true")
     parser.add_argument("--memory-limit-bytes", type=int)
     host_safety = parser.add_mutually_exclusive_group()
@@ -5020,6 +5078,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("timeouts, dispatch limit, and SLO thresholds must be finite and positive")
     if args.memory_sample_ms <= 0:
         parser.error("memory sampling cadence must be positive")
+    if not (
+        MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
+        <= args.model_fingerprint_read_mib_per_second
+        <= MAX_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
+    ):
+        parser.error(
+            "model-fingerprint-read-mib-per-second must be in "
+            f"{MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND}..="
+            f"{MAX_MODEL_FINGERPRINT_READ_MIB_PER_SECOND}"
+        )
     if args.memory_limit_bytes is not None and args.memory_limit_bytes <= 0:
         parser.error("memory-limit-bytes must be positive")
     if not 0 <= args.seed <= 2**64 - 1:
@@ -5107,6 +5175,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.model,
                     policy_path=args.host_thermal_policy,
                     phase="model-fingerprint-initial",
+                    read_mib_per_second=args.model_fingerprint_read_mib_per_second,
                 )
             )
             model_identity = bind_model_identity(initial_model_identity)
@@ -5121,6 +5190,7 @@ def main(argv: list[str] | None = None) -> int:
                 "python_sha256": fingerprint_runtime_artifact(
                     Path(sys.executable).resolve(strict=True)
                 )["sha256"],
+                "read_mib_per_second": args.model_fingerprint_read_mib_per_second,
                 "initial": initial_fingerprint_thermal,
                 "final": None,
             }
@@ -5550,6 +5620,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.model,
                         policy_path=args.host_thermal_policy,
                         phase="model-fingerprint-final",
+                        read_mib_per_second=args.model_fingerprint_read_mib_per_second,
                     )
                 )
                 model_after = bind_model_identity(model_after_raw)

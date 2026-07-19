@@ -12,7 +12,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 
 INDEX_FILENAME = "model.safetensors.index.json"
@@ -22,10 +22,60 @@ TOKENIZER_FILENAME = "tokenizer.json"
 CHAT_TEMPLATE_FILENAME = "chat_template.jinja"
 TOKENIZER_CONFIG_FILENAME = "tokenizer_config.json"
 READ_CHUNK_BYTES = 8 * 1024 * 1024
+MIB = 1024 * 1024
+MIN_READ_MIB_PER_SECOND = 1
+MAX_READ_MIB_PER_SECOND = 16_384
+MAX_RATE_LIMIT_SLEEP_SECONDS = 0.025
 
 
 class ModelFingerprintError(RuntimeError):
     """Raised when a model directory cannot be fingerprinted safely."""
+
+
+class _ReadRateLimiter:
+    def __init__(
+        self,
+        max_mib_per_second: int | None,
+        *,
+        clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> None:
+        if max_mib_per_second is not None and (
+            isinstance(max_mib_per_second, bool)
+            or not isinstance(max_mib_per_second, int)
+            or not MIN_READ_MIB_PER_SECOND
+            <= max_mib_per_second
+            <= MAX_READ_MIB_PER_SECOND
+        ):
+            raise ModelFingerprintError(
+                "max read rate must be an integer in "
+                f"{MIN_READ_MIB_PER_SECOND}..={MAX_READ_MIB_PER_SECOND} MiB/s"
+            )
+        self.max_mib_per_second = max_mib_per_second
+        self.total_bytes = 0
+        self._bytes_per_second = (
+            max_mib_per_second * MIB
+            if max_mib_per_second is not None
+            else None
+        )
+        self._clock = clock or time.monotonic
+        self._sleeper = sleeper or time.sleep
+        self._started: float | None = None
+
+    def account(self, byte_count: int) -> None:
+        if byte_count < 0:
+            raise ModelFingerprintError("fingerprint read byte count must not be negative")
+        self.total_bytes += byte_count
+        if self._bytes_per_second is None:
+            return
+        if self._started is None:
+            self._started = self._clock()
+        deadline = self._started + self.total_bytes / self._bytes_per_second
+        while True:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return
+            self._sleeper(min(remaining, MAX_RATE_LIMIT_SLEEP_SECONDS))
 
 
 def _wait_for_start_gate(path: Path | None, timeout_seconds: float = 60.0) -> None:
@@ -60,6 +110,7 @@ class _OpenInput:
     relative_path: str
     fd: int
     initial_stat: os.stat_result
+    read_rate_limiter: _ReadRateLimiter
     observed_hash: str | None = None
 
     def read_bytes(self) -> bytes:
@@ -71,6 +122,7 @@ class _OpenInput:
                 payload = b"".join(chunks)
                 self.observed_hash = f"sha256:{hashlib.sha256(payload).hexdigest()}"
                 return payload
+            self.read_rate_limiter.account(len(chunk))
             chunks.append(chunk)
 
     def _current_hash(self) -> str:
@@ -80,6 +132,7 @@ class _OpenInput:
             chunk = os.read(self.fd, READ_CHUNK_BYTES)
             if not chunk:
                 return f"sha256:{digest.hexdigest()}"
+            self.read_rate_limiter.account(len(chunk))
             digest.update(chunk)
 
     def hash(self) -> str:
@@ -202,7 +255,11 @@ def _path_exists_without_following(root: Path, relative_path: str) -> bool:
         ) from exc
 
 
-def _open_regular(root: Path, relative_path: str) -> _OpenInput:
+def _open_regular(
+    root: Path,
+    relative_path: str,
+    read_rate_limiter: _ReadRateLimiter | None = None,
+) -> _OpenInput:
     relative_path = _safe_relative_path(relative_path, context="model input path")
     path = _assert_path_components(root, relative_path)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -216,7 +273,13 @@ def _open_regular(root: Path, relative_path: str) -> _OpenInput:
             raise ModelFingerprintError(
                 f"model input is not a regular file: {relative_path!r}"
             )
-        return _OpenInput(path, relative_path, fd, initial_stat)
+        return _OpenInput(
+            path,
+            relative_path,
+            fd,
+            initial_stat,
+            read_rate_limiter or _ReadRateLimiter(None),
+        )
     except BaseException:
         os.close(fd)
         raise
@@ -306,9 +369,15 @@ def _verify_unchanged(root: Path, root_initial: os.stat_result, inputs: list[_Op
             )
 
 
-def fingerprint_model(model_path: Path, model_id: str | None = None) -> dict[str, Any]:
+def fingerprint_model(
+    model_path: Path,
+    model_id: str | None = None,
+    *,
+    max_read_mib_per_second: int | None = None,
+) -> dict[str, Any]:
     """Return the strict receipt ``model`` object for a local checkpoint."""
 
+    read_rate_limiter = _ReadRateLimiter(max_read_mib_per_second)
     root = _absolute_model_root(model_path)
     resolved_id = root.name if model_id is None else model_id
     if not isinstance(resolved_id, str) or not resolved_id:
@@ -330,7 +399,7 @@ def fingerprint_model(model_path: Path, model_id: str | None = None) -> dict[str
         root_initial = os.fstat(root_fd)
         index_input: _OpenInput | None = None
         if _path_exists_without_following(root, INDEX_FILENAME):
-            index_input = _open_regular(root, INDEX_FILENAME)
+            index_input = _open_regular(root, INDEX_FILENAME, read_rate_limiter)
             opened.append(index_input)
             shard_paths = _discover_index_shards(
                 _parse_json_object(index_input.read_bytes(), INDEX_FILENAME)
@@ -344,7 +413,7 @@ def fingerprint_model(model_path: Path, model_id: str | None = None) -> dict[str
         weight_identities: dict[tuple[int, int], str] = {}
         for relative_path in shard_paths:
             try:
-                weight = _open_regular(root, relative_path)
+                weight = _open_regular(root, relative_path, read_rate_limiter)
             except ModelFingerprintError as exc:
                 if index_input is not None:
                     raise ModelFingerprintError(
@@ -365,21 +434,25 @@ def fingerprint_model(model_path: Path, model_id: str | None = None) -> dict[str
             opened.append(weight)
             weight_inputs.append(weight)
 
-        config = _open_regular(root, CONFIG_FILENAME)
+        config = _open_regular(root, CONFIG_FILENAME, read_rate_limiter)
         opened.append(config)
-        tokenizer = _open_regular(root, TOKENIZER_FILENAME)
+        tokenizer = _open_regular(root, TOKENIZER_FILENAME, read_rate_limiter)
         opened.append(tokenizer)
 
         template: _OpenInput | None = None
         template_hash: str | None = None
         if _path_exists_without_following(root, CHAT_TEMPLATE_FILENAME):
-            template = _open_regular(root, CHAT_TEMPLATE_FILENAME)
+            template = _open_regular(
+                root, CHAT_TEMPLATE_FILENAME, read_rate_limiter
+            )
             opened.append(template)
             template_bytes = template.read_bytes()
             _decode_utf8(template_bytes, CHAT_TEMPLATE_FILENAME)
             template_hash = f"sha256:{hashlib.sha256(template_bytes).hexdigest()}"
         elif _path_exists_without_following(root, TOKENIZER_CONFIG_FILENAME):
-            tokenizer_config = _open_regular(root, TOKENIZER_CONFIG_FILENAME)
+            tokenizer_config = _open_regular(
+                root, TOKENIZER_CONFIG_FILENAME, read_rate_limiter
+            )
             opened.append(tokenizer_config)
             tokenizer_config_value = _parse_json_object(
                 tokenizer_config.read_bytes(), TOKENIZER_CONFIG_FILENAME
@@ -428,8 +501,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--model-path", required=True, type=Path, help="local model directory")
     parser.add_argument("--model-id", help="receipt model ID (default: model directory name)")
     parser.add_argument("--json", action="store_true", help="emit the receipt model object as JSON")
+    parser.add_argument(
+        "--max-read-mib-per-second",
+        type=int,
+        help="optional cumulative read-rate limit across both integrity passes",
+    )
     parser.add_argument("--start-gate", type=Path, help=argparse.SUPPRESS)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.max_read_mib_per_second is not None and not (
+        MIN_READ_MIB_PER_SECOND
+        <= args.max_read_mib_per_second
+        <= MAX_READ_MIB_PER_SECOND
+    ):
+        parser.error(
+            "max-read-mib-per-second must be in "
+            f"{MIN_READ_MIB_PER_SECOND}..={MAX_READ_MIB_PER_SECOND}"
+        )
+    return args
 
 
 def _print_human(value: dict[str, Any]) -> None:
@@ -446,7 +534,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
         _wait_for_start_gate(args.start_gate)
-        value = fingerprint_model(args.model_path, args.model_id)
+        value = fingerprint_model(
+            args.model_path,
+            args.model_id,
+            max_read_mib_per_second=args.max_read_mib_per_second,
+        )
     except ModelFingerprintError as exc:
         print(f"model fingerprint failed: {exc}", file=sys.stderr)
         return 1

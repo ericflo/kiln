@@ -1579,6 +1579,28 @@ packing is causal. It is not an accepted default, does not weaken the thermal
 ceiling, and must stop after any guard, lifecycle, route, graph, output, or
 receipt failure.
 
+The first attempt from clean pushed source `f3189b703` never reached that arm.
+Its initial provenance worker started after eight stable samples at 41.875 C,
+performed the required double content read at the historical unlimited cached
+I/O rate, and reached 93.125 C. The independent guard terminated it, completed
+7.509 seconds of post-exit cooldown to 43 C, and the driver rejected the run
+before server creation. No Kiln process, listener, receipt, or workspace residue
+remained. Because guarded model fingerprinting is classified as pre-process
+validation, no formal benchmark receipt exists; the exact console evidence is
+recorded in the hardening ledger. Do not retry that unbounded path.
+
+Serving driver v12 adds the typed
+`--model-fingerprint-read-mib-per-second` bound, accepts `64..=16384`, and
+defaults to 256. Campaign v5 records and forwards the same value. One monotonic
+cumulative schedule covers both integrity passes and every input, including the
+second full content read that detects same-length concurrent mutation; an 8 MiB
+read can be followed by sleeps of at most 25 ms. The v2 fingerprint thermal
+record binds `read_mib_per_second`, the exact worker implementation and Python,
+and both guarded lifecycles. This pacing is outside request timing and does not
+alter server upload or inference. A new source-bound arm must first prove both
+fingerprints stay below the unchanged 93 C hard limit before its decode-width
+result can be interpreted.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package

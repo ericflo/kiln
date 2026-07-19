@@ -674,6 +674,24 @@ class ServingBenchmarkTests(unittest.TestCase):
             "../../.qualification/kiln-serving/logs/decode-batch-4-v1",
         )
 
+    def test_model_fingerprint_read_rate_is_bounded(self) -> None:
+        for value in (64, 256, 16_384):
+            with self.subTest(value=value):
+                args = bench.parse_args(
+                    [f"--model-fingerprint-read-mib-per-second={value}"]
+                )
+                self.assertEqual(
+                    args.model_fingerprint_read_mib_per_second,
+                    value,
+                )
+        for value in (63, 16_385):
+            with self.subTest(value=value), redirect_stderr(
+                io.StringIO()
+            ), self.assertRaises(SystemExit):
+                bench.parse_args(
+                    [f"--model-fingerprint-read-mib-per-second={value}"]
+                )
+
     def _run_cli_fixture(
         self,
         fake: FakeServer,
@@ -729,7 +747,9 @@ class ServingBenchmarkTests(unittest.TestCase):
             *,
             policy_path: Path | None,
             phase: str,
+            read_mib_per_second: int,
         ) -> tuple[dict, dict | None]:
+            self.assertEqual(read_mib_per_second, 256)
             self.assertIn(
                 phase,
                 {"model-fingerprint-initial", "model-fingerprint-final"},
@@ -1361,6 +1381,12 @@ class ServingBenchmarkTests(unittest.TestCase):
         call = supervise.call_args.kwargs
         self.assertEqual(call["worker_phase"], "model-fingerprint-initial")
         self.assertEqual(call["worker_command"][1], str(bench.MODEL_FINGERPRINT_SCRIPT))
+        self.assertEqual(
+            call["worker_command"][
+                call["worker_command"].index("--max-read-mib-per-second") + 1
+            ],
+            "256",
+        )
         self.assertNotIn("--start-gate", call["worker_command"])
         self.assertEqual(
             set(call["worker_environment"]),
@@ -1944,6 +1970,35 @@ class ServingBenchmarkTests(unittest.TestCase):
             return_code, output = self._run_cli_fixture(fake, directory)
             receipt = bench.strict_json_loads(output.read_bytes())
             self.assertEqual(bench.main(["--validate-receipt", str(output)]), 0)
+            self.assertEqual(receipt["driver_version"], "12")
+            self.assertEqual(
+                receipt["host_thermal"]["model_fingerprint"]["schema"],
+                bench.MODEL_FINGERPRINT_THERMAL_SCHEMA,
+            )
+            self.assertEqual(
+                receipt["host_thermal"]["model_fingerprint"][
+                    "read_mib_per_second"
+                ],
+                256,
+            )
+
+            legacy = json.loads(json.dumps(receipt))
+            legacy["driver_version"] = "11"
+            legacy_fingerprint = legacy["host_thermal"]["model_fingerprint"]
+            legacy_fingerprint["schema"] = bench.MODEL_FINGERPRINT_THERMAL_SCHEMA_V1
+            legacy_fingerprint.pop("read_mib_per_second")
+            legacy.pop("receipt_sha256")
+            legacy["receipt_sha256"] = bench.canonical_sha256(legacy)
+            bench.validate_benchmark_receipt(legacy)
+
+            tampered = json.loads(json.dumps(receipt))
+            tampered["host_thermal"]["model_fingerprint"][
+                "read_mib_per_second"
+            ] = 63
+            tampered.pop("receipt_sha256")
+            tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+            with self.assertRaisesRegex(bench.BenchmarkError, "must be in 64"):
+                bench.validate_benchmark_receipt(tampered)
 
             tampered = json.loads(json.dumps(receipt))
             tampered["unexpected"] = True

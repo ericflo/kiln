@@ -13,10 +13,12 @@ streaming `POST /v1/chat/completions` API. Kiln `/health` snapshots are taken
 before and after a run when available, outside the timed request path; they do
 not alter request bodies or scheduling.
 
-New measurements use driver version 11. The driver:
+New measurements use driver version 12. The driver:
 
 - fingerprints every weight shard plus the model config, tokenizer, and chat
   template before traffic and rechecks the complete identity after traffic;
+  both guarded integrity passes keep the correctness-preserving second content
+  read but use one explicit cumulative read-rate limit, 256 MiB/s by default;
 - hashes the exact Kiln binary or immutable vLLM runtime manifest before and
   after traffic; for Kiln, the hash must also equal the running process's
   `/health.execution_identity.executable_sha256`;
@@ -54,11 +56,11 @@ New measurements use driver version 11. The driver:
   runtime artifact, and engine-specific live-runtime identity after traffic;
 - hashes the exclusive server log and retains typed launch, readiness,
   shutdown-status, forced-shutdown, and final process-liveness evidence;
-- requires a comparison-compatible v7 through v11 reference receipt with
+- requires a comparison-compatible v7 through v12 reference receipt with
   identical workload, model, policy, prompts, and outputs for exact-output
   cross-engine runs.
 
-A partial v11 receipt is diagnostic counterevidence, never performance
+A partial v12 receipt is diagnostic counterevidence, never performance
 acceptance. Its top-level verdict is `failed`, `completion.completed_run_count`
 names the retained prefix, `completion.expected_run_count` names the complete
 declared matrix, and `completion.failures` explains why execution stopped. Kiln
@@ -68,7 +70,7 @@ model, and runtime-artifact checks are never optional. A process crash or host
 loss can still prevent any file from being written, so raw logs remain required
 for catastrophic failures.
 
-Driver versions 2 through 10 remain accepted only so historical checked-in
+Driver versions 2 through 11 remain accepted only so historical checked-in
 receipts continue to validate. They cannot produce new receipts and do not
 satisfy the current acceptance protocol. The complete field and lifecycle
 reference is in [Serving Benchmark Protocol](docs/SERVING_BENCHMARK_PROTOCOL.md).
@@ -211,6 +213,12 @@ python3 scripts/run-serving-benchmark-campaign.py \
 `--continue-after-failure` is an explicit diagnostic override for a known
 non-safety failure. Never use it after a thermal trip, guard failure, forced
 shutdown, process residue, OOM, or device error.
+
+Both direct and campaign runs accept
+`--model-fingerprint-read-mib-per-second` in `64..=16384`; the measured default
+is 256. Campaign v5 records the selected value and forwards it to every child.
+This setting limits only the guarded provenance worker. It does not change
+server model loading, request traffic, or timed throughput.
 
 Run vLLM with the same campaign ID, model alias, checkpoint, sizes, limits, and
 SLOs. `--runtime-artifact` must name the immutable launcher/runtime manifest

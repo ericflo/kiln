@@ -62,6 +62,14 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 campaign.parse_args(args)
 
+    def test_campaign_bounds_model_fingerprint_read_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            args = required_args(Path(directory))
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                campaign.parse_args(
+                    [*args, "--model-fingerprint-read-mib-per-second", "63"]
+                )
+
     def test_command_pairs_profile_with_matching_kiln_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -81,6 +89,12 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
         self.assertEqual(command[command.index("--server-pid") + 1], "4321")
         self.assertEqual(
             command[command.index("--output-evidence") + 1], "hashes"
+        )
+        self.assertEqual(
+            command[
+                command.index("--model-fingerprint-read-mib-per-second") + 1
+            ],
+            "256",
         )
 
     def test_campaign_runs_every_profile_and_self_hashes_summary(self) -> None:
@@ -111,6 +125,9 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             self.assertEqual(summary["verdict"], "passed")
             self.assertEqual(summary["schema"], campaign.SCHEMA)
             self.assertEqual(summary["execution_policy"], "fail_fast")
+            self.assertEqual(
+                summary["model_fingerprint_read_mib_per_second"], 256
+            )
             self.assertEqual(summary["server_owner"]["server_pid"], 4321)
             self.assertEqual(summary["output_evidence"], "hashes")
             self.assertEqual(
