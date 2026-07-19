@@ -197,6 +197,7 @@
           },
           "fallbacks": {
             "total": 0,
+            "multi_row_batch_unsupported": 0,
             "cold_cache_host_round_trip": 0,
             "persistent_host_round_trip": 0,
             "shape_dependent_attention": 0,
@@ -1153,6 +1154,7 @@
             },
             "fallbacks": {
               "total": 0,
+              "multi_row_batch_unsupported": 0,
               "cold_cache_host_round_trip": 0,
               "persistent_host_round_trip": 0,
               "shape_dependent_attention": 0,
@@ -1709,6 +1711,7 @@
           },
           "fallbacks": {
             "total": 0,
+            "multi_row_batch_unsupported": 0,
             "cold_cache_host_round_trip": 0,
             "persistent_host_round_trip": 0,
             "shape_dependent_attention": 0,
@@ -7751,6 +7754,7 @@
       "additionalProperties": false,
       "required": [
         "total",
+        "multi_row_batch_unsupported",
         "cold_cache_host_round_trip",
         "persistent_host_round_trip",
         "shape_dependent_attention",
@@ -7770,6 +7774,9 @@
       ],
       "properties": {
         "total": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "multi_row_batch_unsupported": {
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "cold_cache_host_round_trip": {

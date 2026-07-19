@@ -640,6 +640,7 @@ def build_definitions() -> None:
     )
     fallback_fields = [
         "total",
+        "multi_row_batch_unsupported",
         "cold_cache_host_round_trip",
         "persistent_host_round_trip",
         "shape_dependent_attention",

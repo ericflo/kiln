@@ -937,6 +937,10 @@ impl Metrics {
             out.push_str("# TYPE kiln_rocm_graph_fallbacks_total counter\n");
             for (reason, count) in [
                 (
+                    "multi_row_batch_unsupported",
+                    graph.fallbacks.multi_row_batch_unsupported,
+                ),
+                (
                     "cold_cache_host_round_trip",
                     graph.fallbacks.cold_cache_host_round_trip,
                 ),
@@ -3628,7 +3632,8 @@ mod tests {
                 last_transient_candidate_bytes: 100_663_296,
                 peak_transient_candidate_bytes: 167_772_160,
                 fallbacks: kiln_model::RocmGraphFallbackStats {
-                    total: 9,
+                    total: 11,
+                    multi_row_batch_unsupported: 2,
                     graph_cache_byte_budget: 2,
                     graph_accounting_incomplete: 1,
                     moderate_memory_pressure: 1,
@@ -4005,6 +4010,11 @@ mod tests {
         assert!(output.contains("kiln_rocm_graph_capture_attempts_total 8"));
         assert!(output.contains("kiln_rocm_graph_capture_outcomes_total{outcome=\"deferred\"} 1"));
         assert!(output.contains("kiln_rocm_graph_replay_attempts_total 11"));
+        assert!(
+            output.contains(
+                "kiln_rocm_graph_fallbacks_total{reason=\"multi_row_batch_unsupported\"} 2"
+            )
+        );
         assert!(
             output
                 .contains("kiln_rocm_graph_fallbacks_total{reason=\"graph_cache_byte_budget\"} 2")

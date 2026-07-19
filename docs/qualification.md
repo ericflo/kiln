@@ -1689,6 +1689,15 @@ another performance arm, the multi-row eager route must report why the requested
 single-row ROCm graph runner was inapplicable, and the evidence gate must
 distinguish explicit inapplicability from silent zero activity.
 
+Driver v14 makes that distinction explicit. A successful eager contiguous
+decode with more than one row now increments
+`multi_row_batch_unsupported` once per completed forward and records its
+duration. Diagnostics v5 requires that counter to agree with requested graph
+capture and an observed multi-row batching route. The receipt remains
+structurally valid, but `rocm_graph_execution_accounted` stays failed because
+the measured row did not execute a graph. This is route evidence, not a waiver
+for the graph-performance gate.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package
@@ -1882,7 +1891,8 @@ unexplained ITL outlier fails the stable arm.
 
 Experimental ROCm graph runs expose a closed fallback contract at
 `/health.decode_runtime.rocm_graphs.fallbacks`. It reports the total and the
-thirteen reason counts (`cold_cache_host_round_trip`,
+fourteen reason counts (`multi_row_batch_unsupported`,
+`cold_cache_host_round_trip`,
 `persistent_host_round_trip`, `shape_dependent_attention`, `graph_cache_capacity`,
 `graph_cache_byte_budget`, `graph_accounting_incomplete`,
 `moderate_memory_pressure`, `tight_memory_pressure`, `critical_memory_pressure`,

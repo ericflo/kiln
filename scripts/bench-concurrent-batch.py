@@ -39,7 +39,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "13"
+DRIVER_VERSION = "14"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -52,29 +52,37 @@ SUPPORTED_DRIVER_VERSIONS = {
     "10",
     "11",
     "12",
+    "13",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
-    "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", DRIVER_VERSION
+    "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", DRIVER_VERSION
 }
 LIFECYCLE_DRIVER_VERSIONS = {
-    "4", "5", "6", "7", "8", "9", "10", "11", "12", DRIVER_VERSION
+    "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", DRIVER_VERSION
 }
 PRELAUNCH_DRIVER_VERSIONS = {
-    "5", "6", "7", "8", "9", "10", "11", "12", DRIVER_VERSION
+    "5", "6", "7", "8", "9", "10", "11", "12", "13", DRIVER_VERSION
 }
-OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", "8", "9", "10", "11", "12", DRIVER_VERSION}
+OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
+    "7", "8", "9", "10", "11", "12", "13", DRIVER_VERSION
+}
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", DRIVER_VERSION
+    "8", "9", "10", "11", "12", "13", DRIVER_VERSION
 }
-RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {"12", DRIVER_VERSION}
-ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {"9", "10", "11", "12", DRIVER_VERSION}
-ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {"10", "11", "12", DRIVER_VERSION}
+RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {"12", "13", DRIVER_VERSION}
+ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
+    "9", "10", "11", "12", "13", DRIVER_VERSION
+}
+ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
+    "10", "11", "12", "13", DRIVER_VERSION
+}
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", DRIVER_VERSION
+    "7", "8", "9", "10", "11", "12", "13", DRIVER_VERSION
 }
-IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {"11", "12", DRIVER_VERSION}
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {DRIVER_VERSION}
+IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {"11", "12", "13", DRIVER_VERSION}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {DRIVER_VERSION}
 OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
@@ -209,10 +217,12 @@ DIRECT_RENDEZVOUS_FIELDS = (
 )
 SERVER_DIAGNOSTICS_SCHEMA_V2 = "kiln.serving-benchmark-server-diagnostics.v2"
 SERVER_DIAGNOSTICS_SCHEMA_V3 = "kiln.serving-benchmark-server-diagnostics.v3"
-SERVER_DIAGNOSTICS_SCHEMA = "kiln.serving-benchmark-server-diagnostics.v4"
+SERVER_DIAGNOSTICS_SCHEMA_V4 = "kiln.serving-benchmark-server-diagnostics.v4"
+SERVER_DIAGNOSTICS_SCHEMA = "kiln.serving-benchmark-server-diagnostics.v5"
 SERVER_DIAGNOSTICS_SCHEMAS = {
     SERVER_DIAGNOSTICS_SCHEMA_V2,
     SERVER_DIAGNOSTICS_SCHEMA_V3,
+    SERVER_DIAGNOSTICS_SCHEMA_V4,
     SERVER_DIAGNOSTICS_SCHEMA,
 }
 ROCM_GRAPH_COUNTER_FIELDS = (
@@ -234,7 +244,7 @@ ROCM_GRAPH_GAUGE_FIELDS = (
     "active_graph_slot_count",
     "idle_graph_slot_count",
 )
-ROCM_GRAPH_FALLBACK_REASON_FIELDS = (
+ROCM_GRAPH_FALLBACK_REASON_FIELDS_V4 = (
     "cold_cache_host_round_trip",
     "persistent_host_round_trip",
     "shape_dependent_attention",
@@ -248,6 +258,10 @@ ROCM_GRAPH_FALLBACK_REASON_FIELDS = (
     "memory_governor_selector_mismatch",
     "capture_failure",
     "replay_failure",
+)
+ROCM_GRAPH_FALLBACK_REASON_FIELDS = (
+    "multi_row_batch_unsupported",
+    *ROCM_GRAPH_FALLBACK_REASON_FIELDS_V4,
 )
 ROCM_GRAPH_FALLBACK_COUNTER_FIELDS = (
     "total",
@@ -1750,6 +1764,7 @@ def validate_rocm_graph_record(
     *,
     gauge_suffixes: tuple[str, ...],
     fallback_max_field: str,
+    fallback_reason_fields: tuple[str, ...],
 ) -> dict[str, Any]:
     graph = _object(value, label)
     configuration_fields = {
@@ -1820,15 +1835,21 @@ def validate_rocm_graph_record(
                     f"{label} graph-slot gauges disagree at {suffix or 'snapshot'}"
                 )
         fallbacks = _object(graph["fallbacks"], f"{label}.fallbacks")
+        fallback_counter_fields = {
+            "total",
+            *fallback_reason_fields,
+            "slow",
+            "total_duration_micros",
+        }
         _exact_keys(
             fallbacks,
-            {*ROCM_GRAPH_FALLBACK_COUNTER_FIELDS, fallback_max_field},
+            {*fallback_counter_fields, fallback_max_field},
             f"{label}.fallbacks",
         )
         for field, item in fallbacks.items():
             _nonnegative_int(item, f"{label}.fallbacks.{field}")
         if fallbacks["total"] != sum(
-            fallbacks[field] for field in ROCM_GRAPH_FALLBACK_REASON_FIELDS
+            fallbacks[field] for field in fallback_reason_fields
         ):
             raise BenchmarkError(f"{label}.fallback reason accounting disagrees")
     else:
@@ -1842,12 +1863,23 @@ def validate_rocm_graph_record(
     return graph
 
 
+def validate_rocm_graph_diagnostics_v4(value: Any, label: str) -> dict[str, Any]:
+    return validate_rocm_graph_record(
+        value,
+        label,
+        gauge_suffixes=("_start", "_end"),
+        fallback_max_field="process_max_duration_micros",
+        fallback_reason_fields=ROCM_GRAPH_FALLBACK_REASON_FIELDS_V4,
+    )
+
+
 def validate_rocm_graph_diagnostics(value: Any, label: str) -> dict[str, Any]:
     return validate_rocm_graph_record(
         value,
         label,
         gauge_suffixes=("_start", "_end"),
         fallback_max_field="process_max_duration_micros",
+        fallback_reason_fields=ROCM_GRAPH_FALLBACK_REASON_FIELDS,
     )
 
 
@@ -1871,13 +1903,13 @@ def validate_server_diagnostics_v3(value: Any, label: str) -> dict[str, Any]:
     route_record = {key: value for key, value in server.items() if key != "rocm_graphs"}
     route_record["schema"] = SERVER_DIAGNOSTICS_SCHEMA_V2
     validate_server_diagnostics_v2(route_record, label)
-    validate_rocm_graph_diagnostics(server["rocm_graphs"], f"{label}.rocm_graphs")
+    validate_rocm_graph_diagnostics_v4(server["rocm_graphs"], f"{label}.rocm_graphs")
     return server
 
 
 def validate_server_diagnostics_v4(value: Any, label: str) -> dict[str, Any]:
     server = _object(value, label)
-    if server.get("schema") != SERVER_DIAGNOSTICS_SCHEMA:
+    if server.get("schema") != SERVER_DIAGNOSTICS_SCHEMA_V4:
         raise BenchmarkError(f"{label}.schema is unsupported")
     batching = server.get("batching_engine")
     if batching is not None:
@@ -1940,6 +1972,44 @@ def validate_server_diagnostics_v4(value: Any, label: str) -> dict[str, Any]:
         legacy = dict(server)
         legacy["schema"] = SERVER_DIAGNOSTICS_SCHEMA_V3
         validate_server_diagnostics_v3(legacy, label)
+    return server
+
+
+def validate_server_diagnostics_v5(value: Any, label: str) -> dict[str, Any]:
+    server = _object(value, label)
+    if server.get("schema") != SERVER_DIAGNOSTICS_SCHEMA:
+        raise BenchmarkError(f"{label}.schema is unsupported")
+    validate_rocm_graph_diagnostics(server.get("rocm_graphs"), f"{label}.rocm_graphs")
+
+    graph = server["rocm_graphs"]
+    if graph["fallbacks"] is not None:
+        multi_row_count = graph["fallbacks"]["multi_row_batch_unsupported"]
+        if multi_row_count > 0:
+            if not graph["capture_requested"]:
+                raise BenchmarkError(
+                    f"{label}.rocm_graphs reports a multi-row graph fallback "
+                    "without requested capture"
+                )
+            batching = server.get("batching_engine")
+            if (
+                batching is None
+                or batching.get("total_batched_decode_forwards", 0) == 0
+            ):
+                raise BenchmarkError(
+                    f"{label}.rocm_graphs reports a multi-row graph fallback "
+                    "without a measured multi-row batching route"
+                )
+
+    legacy = dict(server)
+    legacy["schema"] = SERVER_DIAGNOSTICS_SCHEMA_V4
+    if graph["fallbacks"] is not None:
+        legacy_graph = dict(graph)
+        legacy_fallbacks = dict(graph["fallbacks"])
+        multi_row_count = legacy_fallbacks.pop("multi_row_batch_unsupported")
+        legacy_fallbacks["total"] -= multi_row_count
+        legacy_graph["fallbacks"] = legacy_fallbacks
+        legacy["rocm_graphs"] = legacy_graph
+    validate_server_diagnostics_v4(legacy, label)
     return server
 
 
@@ -2129,7 +2199,11 @@ def validate_benchmark_run(
     if row["server"] is not None:
         if driver_version in ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS:
             server = (
-                validate_server_diagnostics_v4(row["server"], f"{label}.server")
+                validate_server_diagnostics_v5(row["server"], f"{label}.server")
+                if driver_version in MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS
+                else validate_server_diagnostics_v4(
+                    row["server"], f"{label}.server"
+                )
                 if driver_version in COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS
                 else validate_server_diagnostics_v3(
                     row["server"], f"{label}.server"
@@ -3952,6 +4026,7 @@ def validate_rocm_graph_snapshot(value: Any) -> dict[str, Any]:
         label,
         gauge_suffixes=("",),
         fallback_max_field="max_duration_micros",
+        fallback_reason_fields=ROCM_GRAPH_FALLBACK_REASON_FIELDS,
     )
 
 
@@ -4573,6 +4648,11 @@ def summarize_run(
                     if graph["fallbacks"] is None
                     else graph["fallbacks"]["total"]
                 )
+                multi_row_fallback_count = (
+                    None
+                    if graph["fallbacks"] is None
+                    else graph["fallbacks"]["multi_row_batch_unsupported"]
+                )
                 gates.append(
                     gate(
                         "rocm_graph_execution_accounted",
@@ -4583,7 +4663,9 @@ def summarize_run(
                             f"capture_successes={graph['capture_successes']}; "
                             f"replay_successes={graph['replay_successes']}; "
                             f"failures={graph['failures']}; "
-                            f"fallbacks={fallback_count}"
+                            f"fallbacks={fallback_count}; "
+                            "multi_row_batch_unsupported="
+                            f"{multi_row_fallback_count}"
                         ),
                     )
                 )

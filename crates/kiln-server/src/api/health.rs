@@ -1620,7 +1620,8 @@ mod tests {
             last_transient_candidate_bytes: 96 * 1024 * 1024,
             peak_transient_candidate_bytes: 160 * 1024 * 1024,
             fallbacks: kiln_model::RocmGraphFallbackStats {
-                total: 16,
+                total: 17,
+                multi_row_batch_unsupported: 1,
                 cold_cache_host_round_trip: 1,
                 persistent_host_round_trip: 1,
                 shape_dependent_attention: 1,
@@ -1725,7 +1726,8 @@ mod tests {
         assert_eq!(json["rejected_candidate_cleanup_phase"]["calls"], 2);
         assert_eq!(json["last_transient_candidate_bytes"], 96 * 1024 * 1024);
         assert_eq!(json["peak_transient_candidate_bytes"], 160 * 1024 * 1024);
-        assert_eq!(json["fallbacks"]["total"], 16);
+        assert_eq!(json["fallbacks"]["total"], 17);
+        assert_eq!(json["fallbacks"]["multi_row_batch_unsupported"], 1);
         assert_eq!(json["fallbacks"]["shape_dependent_attention"], 1);
         assert_eq!(json["fallbacks"]["graph_cache_byte_budget"], 2);
         assert_eq!(json["fallbacks"]["graph_accounting_incomplete"], 1);

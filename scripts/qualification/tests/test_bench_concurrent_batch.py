@@ -360,7 +360,7 @@ class FakeState:
                     "unavailable_reason": None,
                     **self.rocm_graph_counters,
                     **self.rocm_graph_gauges,
-                    "fallbacks": self.rocm_graph_fallbacks,
+                    "fallbacks": dict(self.rocm_graph_fallbacks),
                 },
             },
         }
@@ -1131,7 +1131,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(bench.server_diagnostics_has_no_errors(server))
         self.assertTrue(bench.server_request_accounting_matches(server, 1))
-        bench.validate_server_diagnostics_v4(server, "direct fixture")
+        bench.validate_server_diagnostics_v5(server, "direct fixture")
 
     def test_driver_v9_server_diagnostics_remain_strict_valid(self) -> None:
         state = FakeState()
@@ -1177,7 +1177,12 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertAlmostEqual(batching["actor_cycle_idle_seconds"], 0.4015)
         self.assertEqual(batching["process_max_actor_cycle_idle_ms"], 101.25)
         self.assertTrue(bench.server_actor_cycle_idle_accounted(server))
-        bench.validate_server_diagnostics_v4(server, "driver-v13 fixture")
+        legacy = json.loads(json.dumps(server))
+        legacy["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V4
+        legacy_fallbacks = legacy["rocm_graphs"]["fallbacks"]
+        multi_row_count = legacy_fallbacks.pop("multi_row_batch_unsupported")
+        legacy_fallbacks["total"] -= multi_row_count
+        bench.validate_server_diagnostics_v4(legacy, "driver-v13 fixture")
 
     def test_rocm_graph_diagnostics_reject_regressed_counters(self) -> None:
         state = FakeState()
@@ -1201,8 +1206,47 @@ class ServingBenchmarkTests(unittest.TestCase):
         after = bench.server_diagnostics_snapshot(state.health())
         server = bench.server_diagnostics_delta(before, after)
 
-        bench.validate_server_diagnostics_v4(server, "fallback fixture")
+        bench.validate_server_diagnostics_v5(server, "fallback fixture")
         self.assertFalse(bench.server_rocm_graph_execution_accounted(server))
+
+    def test_multi_row_graph_bypass_is_explicit_and_fails_execution_gate(self) -> None:
+        state = FakeState()
+        before = bench.server_diagnostics_snapshot(state.health())
+        state.max_active = 4
+        state.counters["total_decode_forwards"] = 1
+        state.counters["total_batched_decode_forwards"] = 1
+        state.counters["total_decode_rows"] = 4
+        state.counters["total_decode_tokens"] = 4
+        state.rocm_graph_fallbacks["total"] = 1
+        state.rocm_graph_fallbacks["multi_row_batch_unsupported"] = 1
+        state.rocm_graph_fallbacks["slow"] = 1
+        state.rocm_graph_fallbacks["total_duration_micros"] = 130_000
+        state.rocm_graph_fallbacks["max_duration_micros"] = 130_000
+        after = bench.server_diagnostics_snapshot(state.health())
+        server = bench.server_diagnostics_delta(before, after)
+
+        bench.validate_server_diagnostics_v5(server, "multi-row fixture")
+        self.assertEqual(
+            server["rocm_graphs"]["fallbacks"][
+                "multi_row_batch_unsupported"
+            ],
+            1,
+        )
+        self.assertFalse(bench.server_rocm_graph_execution_accounted(server))
+
+    def test_multi_row_graph_fallback_requires_measured_batched_forward(self) -> None:
+        state = FakeState()
+        before = bench.server_diagnostics_snapshot(state.health())
+        state.max_active = 4
+        state.rocm_graph_fallbacks["total"] = 1
+        state.rocm_graph_fallbacks["multi_row_batch_unsupported"] = 1
+        after = bench.server_diagnostics_snapshot(state.health())
+        server = bench.server_diagnostics_delta(before, after)
+
+        with self.assertRaisesRegex(
+            bench.BenchmarkError, "without a measured multi-row batching route"
+        ):
+            bench.validate_server_diagnostics_v5(server, "contradictory fixture")
 
     def test_backend_without_rocm_graph_runner_is_explicitly_unavailable(self) -> None:
         state = FakeState()
@@ -1224,13 +1268,13 @@ class ServingBenchmarkTests(unittest.TestCase):
         before = bench.server_diagnostics_snapshot(health)
         server = bench.server_diagnostics_delta(before, before)
 
-        bench.validate_server_diagnostics_v4(server, "unavailable fixture")
+        bench.validate_server_diagnostics_v5(server, "unavailable fixture")
         self.assertTrue(bench.server_rocm_graph_execution_accounted(server))
         self.assertIsNone(server["rocm_graphs"]["replay_successes"])
 
         server["rocm_graphs"]["state"] = "busy"
         server["rocm_graphs"]["unavailable_reason"] = "graph_runner_busy"
-        bench.validate_server_diagnostics_v4(server, "busy fixture")
+        bench.validate_server_diagnostics_v5(server, "busy fixture")
         self.assertFalse(bench.server_rocm_graph_execution_accounted(server))
 
     def test_zero_token_success_is_rejected(self) -> None:
@@ -2090,7 +2134,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             return_code, output = self._run_cli_fixture(fake, directory)
             receipt = bench.strict_json_loads(output.read_bytes())
             self.assertEqual(bench.main(["--validate-receipt", str(output)]), 0)
-            self.assertEqual(receipt["driver_version"], "13")
+            self.assertEqual(receipt["driver_version"], "14")
             self.assertEqual(
                 receipt["host_thermal"]["model_fingerprint"]["schema"],
                 bench.MODEL_FINGERPRINT_THERMAL_SCHEMA,
@@ -2101,6 +2145,25 @@ class ServingBenchmarkTests(unittest.TestCase):
                 ],
                 256,
             )
+
+            driver_v13 = json.loads(json.dumps(receipt))
+            driver_v13["driver_version"] = "13"
+            for row in [driver_v13["warmup"], *driver_v13["runs"]]:
+                if row is None:
+                    continue
+                server = row.get("server")
+                if server is None:
+                    continue
+                server["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V4
+                fallbacks = server["rocm_graphs"].get("fallbacks")
+                if fallbacks is not None:
+                    multi_row_count = fallbacks.pop(
+                        "multi_row_batch_unsupported"
+                    )
+                    fallbacks["total"] -= multi_row_count
+            driver_v13.pop("receipt_sha256")
+            driver_v13["receipt_sha256"] = bench.canonical_sha256(driver_v13)
+            bench.validate_benchmark_receipt(driver_v13)
 
             legacy = json.loads(json.dumps(receipt))
             legacy["driver_version"] = "11"
@@ -2114,6 +2177,12 @@ class ServingBenchmarkTests(unittest.TestCase):
                 if server is None:
                     continue
                 server["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V3
+                fallbacks = server["rocm_graphs"].get("fallbacks")
+                if fallbacks is not None:
+                    multi_row_count = fallbacks.pop(
+                        "multi_row_batch_unsupported"
+                    )
+                    fallbacks["total"] -= multi_row_count
                 batching = server.get("batching_engine")
                 if batching is not None:
                     for field in (

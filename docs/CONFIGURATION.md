@@ -685,7 +685,15 @@ allocated by the measured pre-admission candidate, excluding already-owned
 recurrent slot state and opaque native objects. They are not retained-cache
 bytes and are not governed as if they were already published.
 
-The eager-fallback reasons are exactly `cold_cache_host_round_trip`,
+Native ROCm HIP-graph capture currently supports only single-row decode. When
+capture is requested and a successful contiguous eager forward contains more
+than one row, the runner records that completed forward as
+`multi_row_batch_unsupported`, including its elapsed time. It does not claim a
+capture attempt or replay. This makes a configured graph policy distinguishable
+from actual graph execution under batching.
+
+The eager-fallback reasons are exactly `multi_row_batch_unsupported`,
+`cold_cache_host_round_trip`,
 `persistent_host_round_trip`, `shape_dependent_attention`,
 `graph_cache_capacity`, `graph_cache_byte_budget`,
 `graph_accounting_incomplete`, `moderate_memory_pressure`,
@@ -707,7 +715,7 @@ or poison. Full
 families cover state; cache, slot, owner, retained-byte and opaque-object
 gauges; admissions, evictions and their four causes; three post-capture
 rejection reasons; five pre-capture skip reasons; capture/replay outcomes; and
-all 13 fallback reasons and latency. Live families cover the one-hot current
+all 14 fallback reasons and latency. Live families cover the one-hot current
 phase, active elapsed seconds, calls/slow/total/max duration for all five
 phases, and last/peak transient bytes. Every label set is closed; request,
 shape, allocation, and configured-byte values never become labels.

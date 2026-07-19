@@ -50,8 +50,8 @@ use crate::forward::{
 };
 use crate::metal_graph::MetalGraphRunner;
 use crate::rocm_graph::{
-    RocmGraphExecutionPolicy, RocmGraphLiveTelemetry, RocmGraphRunner, RocmGraphStatsUnavailable,
-    RocmGraphTelemetryHandle,
+    RocmGraphExecutionMode, RocmGraphExecutionPolicy, RocmGraphLiveTelemetry, RocmGraphRunner,
+    RocmGraphStatsUnavailable, RocmGraphTelemetryHandle,
 };
 // (#1082) Native single-submit Vulkan-resident decode entry — only referenced
 // from the `#[cfg(feature = "vulkan")]` single-row fast path below.
@@ -305,6 +305,10 @@ pub struct ModelRunner {
     /// `cuda_graph`; its immutable policy is installed at construction. Same
     /// per-step interior-mutability pattern.
     rocm_graph: Mutex<RocmGraphRunner>,
+    /// Immutable construction-time gate for multi-row ROCm fallback timing.
+    /// Other backends and graphs-off ROCm avoid a clock read and mutex on the
+    /// successful batched eager hot path.
+    rocm_graph_capture_requested: bool,
     /// Capture-phase telemetry deliberately lives outside `rocm_graph`, so a
     /// slow native capture cannot make health reporting look unavailable.
     rocm_graph_telemetry: RocmGraphTelemetryHandle,
@@ -2906,6 +2910,8 @@ impl ModelRunner {
     ) -> Self {
         let eos_token_ids = tokenizer.eos_token_ids();
         let cuda_graph = CudaGraphRunner::new(&execution_device, options.cuda_graph);
+        let rocm_graph_capture_requested = matches!(execution_device, kiln_tensor::Device::Rocm(_))
+            && options.rocm_graph.mode() == RocmGraphExecutionMode::LazyCaptureReplay;
         let rocm_graph = RocmGraphRunner::new(&execution_device, options.rocm_graph);
         let rocm_graph_telemetry = rocm_graph.telemetry_handle();
         let metal_graph = MetalGraphRunner::new(&execution_device, options.metal_graphs);
@@ -2941,6 +2947,7 @@ impl ModelRunner {
             active_lora: None,
             cuda_graph: Mutex::new(cuda_graph),
             rocm_graph: Mutex::new(rocm_graph),
+            rocm_graph_capture_requested,
             rocm_graph_telemetry,
             metal_graph: Mutex::new(metal_graph),
             packed_weight_registry: OnceLock::new(),
@@ -5588,30 +5595,42 @@ impl ModelRunner {
 
         if sampled.is_none() && try_contiguous_batched {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
-            let result = if has_linear_layers {
+            let (result, eager_duration) = if has_linear_layers {
                 let mut linear_state_refs: Vec<&mut LinearAttentionState> =
                     linear_states.iter_mut().map(|s| &mut **s).collect();
-                self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
+                let eager_started = self.rocm_graph_capture_requested.then(Instant::now);
+                let result = self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
                     &sequence_lengths,
                     &mut linear_state_refs,
                     Some(&row_ids),
-                )
+                );
+                (result, eager_started.map(|started| started.elapsed()))
             } else {
                 let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
-                self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
+                let eager_started = self.rocm_graph_capture_requested.then(Instant::now);
+                let result = self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
                     &sequence_lengths,
                     &mut no_linear_states,
                     Some(&row_ids),
-                )
+                );
+                (result, eager_started.map(|started| started.elapsed()))
             };
             match result {
-                Ok(tokens) => sampled = Some(tokens),
+                Ok(tokens) => {
+                    if let Some(eager_duration) = eager_duration {
+                        self.rocm_graph
+                            .lock()
+                            .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?
+                            .record_multi_row_eager_fallback(row_count, eager_duration);
+                    }
+                    sampled = Some(tokens);
+                }
                 Err(err)
                     if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) =>
                 {

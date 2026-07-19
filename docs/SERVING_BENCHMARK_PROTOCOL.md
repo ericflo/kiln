@@ -337,7 +337,15 @@ The graph record is a before/after measurement-window contract. It retains:
   count, accumulated fallback duration, and the process-wide maximum fallback
   duration observed by the end boundary.
 
-The closed fallback reason keys are `cold_cache_host_round_trip`,
+Driver v14 advances this graph record to
+`kiln.serving-benchmark-server-diagnostics.v5`. Its only graph-shape addition
+is the required `multi_row_batch_unsupported` fallback counter. A positive
+value is valid only when graph capture was requested and the measured batching
+route observed more than one row. Driver v13 retains diagnostics v4 without
+this key and remains strict-valid under its original contract.
+
+The closed fallback reason keys are `multi_row_batch_unsupported`,
+`cold_cache_host_round_trip`,
 `persistent_host_round_trip`, `shape_dependent_attention`,
 `graph_cache_capacity`, `graph_cache_byte_budget`,
 `graph_accounting_incomplete`, `moderate_memory_pressure`,
@@ -367,6 +375,11 @@ capture remains enabled, at least one capture or replay succeeds, graph failures
 are zero, and the complete eager-fallback delta is zero. This prevents a
 nominally graph-enabled performance row from passing after executing only the
 eager path. Graph failures also participate in `server_reported_no_errors`.
+Native ROCm capture is currently single-row only. A successful multi-row eager
+forward therefore increments `multi_row_batch_unsupported`, its fallback
+duration, and the total. The receipt remains evidence-valid but
+`rocm_graph_execution_accounted` fails, preventing that eager batch from being
+reported as qualified graph performance.
 
 ### Cooperative actor-cycle idle evidence
 
@@ -904,18 +917,20 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v13 is the current contract. It adds closed cooperative actor-cycle idle
-policy and measured-window accounting without changing the request workload,
-output contract, or thermal limits. Driver v12 added a bounded,
+Driver v14 is the current contract. It adds explicit multi-row ROCm graph
+fallback accounting and diagnostics v5 without changing the request workload,
+output contract, or thermal limits. Driver v13 added closed cooperative
+actor-cycle idle policy and measured-window accounting. Driver v12 added a bounded,
 receipt-recorded model-fingerprint read rate without changing the double-read
 integrity contract. Driver v11 added typed idle-boundary
 cooldown evidence to v10. Driver v10 added closed ROCm graph execution evidence;
 v9 added route-aware
 batching-actor and direct-rendezvous diagnostics; and v8 added mandatory initial
-and final guarded model-fingerprint lifecycles. A v13 exact-output run may use a
-strict-valid v7 through v13 reference because the model, thermal-policy,
+and final guarded model-fingerprint lifecycles. A v14 exact-output run may use a
+strict-valid v7 through v14 reference because the model, thermal-policy,
 prompt, and output contracts remain comparison-compatible; the current arm
-must still satisfy v13 actor-cycle idle accounting, v12 fingerprint pacing, v11
+must still satisfy v14 multi-row graph-route accounting, v13 actor-cycle idle
+accounting, v12 fingerprint pacing, v11
 idle cooling, v10 graph accounting, v9 routing, and v8 containment. Driver v7 added mandatory ordered
 per-request output evidence and
 structured mismatch localization to the v6 lifecycle contract.
@@ -928,6 +943,6 @@ identity semantics. Owned evidence contains the content-hashed launch document,
 absolute server-log fingerprint, shutdown signal/status/timing,
 forced-shutdown flag, and process-group liveness. Attached and explicitly
 unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
-from missing fields. Historical driver v2 through v12 receipts remain valid
-under their original contracts, but do not satisfy current v13 performance
+from missing fields. Historical driver v2 through v13 receipts remain valid
+under their original contracts, but do not satisfy current v14 performance
 acceptance.

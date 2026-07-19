@@ -1044,6 +1044,7 @@ fn fair_active_geometry_eviction_order<'a>(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RocmGraphFallbackReason {
+    MultiRowBatchUnsupported,
     ColdCacheHostRoundTrip,
     PersistentHostRoundTrip,
     ShapeDependentAttention,
@@ -1062,6 +1063,7 @@ enum RocmGraphFallbackReason {
 impl RocmGraphFallbackReason {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::MultiRowBatchUnsupported => "multi_row_batch_unsupported",
             Self::ColdCacheHostRoundTrip => "cold_cache_host_round_trip",
             Self::PersistentHostRoundTrip => "persistent_host_round_trip",
             Self::ShapeDependentAttention => "shape_dependent_attention",
@@ -1083,6 +1085,7 @@ impl RocmGraphFallbackReason {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct RocmGraphFallbackStats {
     pub total: u64,
+    pub multi_row_batch_unsupported: u64,
     pub cold_cache_host_round_trip: u64,
     pub persistent_host_round_trip: u64,
     pub shape_dependent_attention: u64,
@@ -1107,6 +1110,9 @@ impl RocmGraphFallbackStats {
     fn record(&mut self, reason: RocmGraphFallbackReason, duration: std::time::Duration) -> u64 {
         self.total = self.total.saturating_add(1);
         let reason_count = match reason {
+            RocmGraphFallbackReason::MultiRowBatchUnsupported => {
+                &mut self.multi_row_batch_unsupported
+            }
             RocmGraphFallbackReason::ColdCacheHostRoundTrip => &mut self.cold_cache_host_round_trip,
             RocmGraphFallbackReason::PersistentHostRoundTrip => {
                 &mut self.persistent_host_round_trip
@@ -3360,6 +3366,46 @@ impl RocmGraphRunner {
             ),
         }
         result
+    }
+
+    /// Account a successful multi-row eager decode when lazy HIP-graph capture
+    /// was requested. Native ROCm capture is currently single-row only, so a
+    /// batched forward is an explicit route fallback rather than graph activity.
+    pub fn record_multi_row_eager_fallback(
+        &mut self,
+        batch_rows: usize,
+        duration: std::time::Duration,
+    ) {
+        if !self.capture_requested || batch_rows <= 1 {
+            return;
+        }
+        let reason = RocmGraphFallbackReason::MultiRowBatchUnsupported;
+        let occurrence = self.counters.record_fallback(reason, duration);
+        let duration_ms = duration.as_secs_f64() * 1000.0;
+        let slow = duration >= RocmGraphFallbackStats::SLOW_DURATION;
+        if occurrence == 1 {
+            tracing::warn!(
+                event = "rocm_graph_fallback",
+                reason = reason.as_str(),
+                outcome = "eager_completed",
+                occurrence,
+                batch_rows,
+                duration_ms,
+                slow,
+                "ROCm graph capture is single-row; accounting multi-row eager decode"
+            );
+        } else {
+            tracing::debug!(
+                event = "rocm_graph_fallback",
+                reason = reason.as_str(),
+                outcome = "eager_completed",
+                occurrence,
+                batch_rows,
+                duration_ms,
+                slow,
+                "ROCm multi-row eager graph fallback completed"
+            );
+        }
     }
 
     /// Run one bs=1 paged decode step, returning kt logits `[1, 1, vocab]`.
@@ -7474,6 +7520,10 @@ mod tests {
             RocmGraphFallbackReason::ReplayFailure,
             std::time::Duration::from_millis(10),
         );
+        counters.record_fallback(
+            RocmGraphFallbackReason::MultiRowBatchUnsupported,
+            std::time::Duration::from_millis(130),
+        );
 
         assert_eq!(counters.capture_attempts, 4);
         assert_eq!(counters.capture_successes, 2);
@@ -7484,12 +7534,35 @@ mod tests {
         assert_eq!(counters.replay_failures, 1);
         assert_eq!(counters.decode_owner_release_count, 2);
         assert_eq!(counters.decode_owner_graph_release_count, 3);
-        assert_eq!(counters.fallbacks.total, 3);
+        assert_eq!(counters.fallbacks.total, 4);
+        assert_eq!(counters.fallbacks.multi_row_batch_unsupported, 1);
         assert_eq!(counters.fallbacks.capture_failure, 1);
         assert_eq!(counters.fallbacks.replay_failure, 2);
-        assert_eq!(counters.fallbacks.slow, 1);
-        assert_eq!(counters.fallbacks.total_duration_micros, 180_000);
-        assert_eq!(counters.fallbacks.max_duration_micros, 120_000);
+        assert_eq!(counters.fallbacks.slow, 2);
+        assert_eq!(counters.fallbacks.total_duration_micros, 310_000);
+        assert_eq!(counters.fallbacks.max_duration_micros, 130_000);
+    }
+
+    #[test]
+    fn multi_row_eager_fallback_requires_requested_capture_and_batch() {
+        let mut runner = RocmGraphRunner::new(
+            &Device::Cpu,
+            RocmGraphExecutionPolicy::lazy_capture_replay(),
+        );
+
+        runner.record_multi_row_eager_fallback(4, std::time::Duration::from_millis(130));
+        assert_eq!(runner.counters.fallbacks.total, 0);
+
+        runner.capture_requested = true;
+        runner.record_multi_row_eager_fallback(1, std::time::Duration::from_millis(130));
+        assert_eq!(runner.counters.fallbacks.total, 0);
+
+        runner.record_multi_row_eager_fallback(4, std::time::Duration::from_millis(130));
+        assert_eq!(runner.counters.fallbacks.total, 1);
+        assert_eq!(runner.counters.fallbacks.multi_row_batch_unsupported, 1);
+        assert_eq!(runner.counters.fallbacks.slow, 1);
+        assert_eq!(runner.counters.fallbacks.total_duration_micros, 130_000);
+        assert_eq!(runner.counters.fallbacks.max_duration_micros, 130_000);
     }
 
     #[cfg(feature = "rocm")]
