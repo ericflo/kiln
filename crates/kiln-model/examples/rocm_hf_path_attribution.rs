@@ -52,6 +52,9 @@ mod rocm {
     enum KernelProfile {
         FusedNormMlpFallback,
         FusedNormMlpOnly,
+        FusedRmsnormFallback,
+        FusedMlpSiluMulFallback,
+        FusedMlpGateUpPrefillFallback,
         GdnFallback,
         ModelFallback,
         NonGdnFallback,
@@ -67,6 +70,9 @@ mod rocm {
             match value {
                 "fused_norm_mlp_fallback" => Ok(Self::FusedNormMlpFallback),
                 "fused_norm_mlp_only" => Ok(Self::FusedNormMlpOnly),
+                "fused_rmsnorm_fallback" => Ok(Self::FusedRmsnormFallback),
+                "fused_mlp_silu_mul_fallback" => Ok(Self::FusedMlpSiluMulFallback),
+                "fused_mlp_gate_up_prefill_fallback" => Ok(Self::FusedMlpGateUpPrefillFallback),
                 "gdn_fallback" => Ok(Self::GdnFallback),
                 "model_fallback" => Ok(Self::ModelFallback),
                 "non_gdn_fallback" => Ok(Self::NonGdnFallback),
@@ -76,7 +82,7 @@ mod rocm {
                 "split_q_gate_only" => Ok(Self::SplitQGateOnly),
                 "tensor_fallback" => Ok(Self::TensorFallback),
                 _ => anyhow::bail!(
-                    "--kernel-profile must be fused_norm_mlp_fallback, fused_norm_mlp_only, gdn_fallback, model_fallback, non_gdn_fallback, qualified, portable_fallback, split_q_gate_fallback, split_q_gate_only, or tensor_fallback, got {value}"
+                    "--kernel-profile must be fused_mlp_gate_up_prefill_fallback, fused_mlp_silu_mul_fallback, fused_norm_mlp_fallback, fused_norm_mlp_only, fused_rmsnorm_fallback, gdn_fallback, model_fallback, non_gdn_fallback, qualified, portable_fallback, split_q_gate_fallback, split_q_gate_only, or tensor_fallback, got {value}"
                 ),
             }
         }
@@ -85,6 +91,9 @@ mod rocm {
             match self {
                 Self::FusedNormMlpFallback => "fused_norm_mlp_fallback",
                 Self::FusedNormMlpOnly => "fused_norm_mlp_only",
+                Self::FusedRmsnormFallback => "fused_rmsnorm_fallback",
+                Self::FusedMlpSiluMulFallback => "fused_mlp_silu_mul_fallback",
+                Self::FusedMlpGateUpPrefillFallback => "fused_mlp_gate_up_prefill_fallback",
                 Self::GdnFallback => "gdn_fallback",
                 Self::ModelFallback => "model_fallback",
                 Self::NonGdnFallback => "non_gdn_fallback",
@@ -100,6 +109,11 @@ mod rocm {
             match self {
                 Self::FusedNormMlpFallback => RocmKernelPolicy::fused_norm_mlp_fallback(),
                 Self::FusedNormMlpOnly => RocmKernelPolicy::fused_norm_mlp_only(),
+                Self::FusedRmsnormFallback => RocmKernelPolicy::fused_rmsnorm_fallback(),
+                Self::FusedMlpSiluMulFallback => RocmKernelPolicy::fused_mlp_silu_mul_fallback(),
+                Self::FusedMlpGateUpPrefillFallback => {
+                    RocmKernelPolicy::fused_mlp_gate_up_prefill_fallback()
+                }
                 Self::GdnFallback => RocmKernelPolicy::gdn_fallback(),
                 Self::ModelFallback => RocmKernelPolicy::portable_fallback(),
                 Self::NonGdnFallback => RocmKernelPolicy::non_gdn_fallback(),
@@ -115,6 +129,9 @@ mod rocm {
             match self {
                 Self::FusedNormMlpFallback => RocmTensorKernelPolicy::qualified(),
                 Self::FusedNormMlpOnly => RocmTensorKernelPolicy::qualified(),
+                Self::FusedRmsnormFallback => RocmTensorKernelPolicy::qualified(),
+                Self::FusedMlpSiluMulFallback => RocmTensorKernelPolicy::qualified(),
+                Self::FusedMlpGateUpPrefillFallback => RocmTensorKernelPolicy::qualified(),
                 Self::GdnFallback => RocmTensorKernelPolicy::qualified(),
                 Self::ModelFallback => RocmTensorKernelPolicy::qualified(),
                 Self::NonGdnFallback => RocmTensorKernelPolicy::qualified(),
@@ -1313,6 +1330,39 @@ mod rocm {
                 RocmTensorKernelPolicy::qualified()
             );
             assert_eq!(fused_only.label(), "fused_norm_mlp_only");
+
+            let fused_rmsnorm = KernelProfile::parse("fused_rmsnorm_fallback").unwrap();
+            assert_eq!(
+                fused_rmsnorm.model_policy(),
+                RocmKernelPolicy::fused_rmsnorm_fallback()
+            );
+            assert_eq!(
+                fused_rmsnorm.tensor_policy(),
+                RocmTensorKernelPolicy::qualified()
+            );
+            assert_eq!(fused_rmsnorm.label(), "fused_rmsnorm_fallback");
+
+            let fused_silu = KernelProfile::parse("fused_mlp_silu_mul_fallback").unwrap();
+            assert_eq!(
+                fused_silu.model_policy(),
+                RocmKernelPolicy::fused_mlp_silu_mul_fallback()
+            );
+            assert_eq!(
+                fused_silu.tensor_policy(),
+                RocmTensorKernelPolicy::qualified()
+            );
+            assert_eq!(fused_silu.label(), "fused_mlp_silu_mul_fallback");
+
+            let fused_gate_up = KernelProfile::parse("fused_mlp_gate_up_prefill_fallback").unwrap();
+            assert_eq!(
+                fused_gate_up.model_policy(),
+                RocmKernelPolicy::fused_mlp_gate_up_prefill_fallback()
+            );
+            assert_eq!(
+                fused_gate_up.tensor_policy(),
+                RocmTensorKernelPolicy::qualified()
+            );
+            assert_eq!(fused_gate_up.label(), "fused_mlp_gate_up_prefill_fallback");
 
             let gdn = KernelProfile::parse("gdn_fallback").unwrap();
             assert_eq!(gdn.model_policy(), RocmKernelPolicy::gdn_fallback());

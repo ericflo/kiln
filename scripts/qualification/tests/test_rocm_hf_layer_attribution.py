@@ -215,6 +215,9 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             for profile in (
                 "fused_norm_mlp_fallback",
                 "fused_norm_mlp_only",
+                "fused_rmsnorm_fallback",
+                "fused_mlp_silu_mul_fallback",
+                "fused_mlp_gate_up_prefill_fallback",
                 "model_fallback",
                 "tensor_fallback",
                 "gdn_fallback",
@@ -338,6 +341,9 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
         for profile in (
             "fused_norm_mlp_fallback",
             "fused_norm_mlp_only",
+            "fused_rmsnorm_fallback",
+            "fused_mlp_silu_mul_fallback",
+            "fused_mlp_gate_up_prefill_fallback",
             "model_fallback",
             "tensor_fallback",
             "gdn_fallback",

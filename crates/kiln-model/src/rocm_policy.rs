@@ -195,6 +195,33 @@ impl RocmKernelPolicy {
         }
     }
 
+    /// Diagnostic policy that changes only fused RMSNorm dispatch from the
+    /// qualified model policy.
+    pub const fn fused_rmsnorm_fallback() -> Self {
+        Self {
+            fused_rmsnorm: false,
+            ..Self::qualified()
+        }
+    }
+
+    /// Diagnostic policy that changes only fused SiLU-multiply MLP dispatch
+    /// from the qualified model policy.
+    pub const fn fused_mlp_silu_mul_fallback() -> Self {
+        Self {
+            fused_mlp_silu_mul: false,
+            ..Self::qualified()
+        }
+    }
+
+    /// Diagnostic policy that changes only fused gate/up prefill MLP dispatch
+    /// from the qualified model policy.
+    pub const fn fused_mlp_gate_up_prefill_fallback() -> Self {
+        Self {
+            fused_mlp_gate_up_prefill: false,
+            ..Self::qualified()
+        }
+    }
+
     /// Diagnostic policy that changes only the split q/gate F32-output
     /// projection route from the qualified model policy.
     pub const fn split_q_gate_fallback() -> Self {
@@ -291,6 +318,10 @@ mod tests {
         let non_gdn_fallback = RocmKernelPolicy::non_gdn_fallback();
         let fused_norm_mlp_fallback = RocmKernelPolicy::fused_norm_mlp_fallback();
         let fused_norm_mlp_only = RocmKernelPolicy::fused_norm_mlp_only();
+        let fused_rmsnorm_fallback = RocmKernelPolicy::fused_rmsnorm_fallback();
+        let fused_mlp_silu_mul_fallback = RocmKernelPolicy::fused_mlp_silu_mul_fallback();
+        let fused_mlp_gate_up_prefill_fallback =
+            RocmKernelPolicy::fused_mlp_gate_up_prefill_fallback();
         let split_q_gate_fallback = RocmKernelPolicy::split_q_gate_fallback();
         let split_q_gate_only = RocmKernelPolicy::split_q_gate_only();
         let experimental = RocmKernelPolicy::experimental_multiblock();
@@ -337,6 +368,30 @@ mod tests {
             ]
         );
         assert_eq!(
+            fused_rmsnorm_fallback.accelerated_routes(),
+            [
+                true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+                false, true, true, true, true, true, false, true, true, true, true, true, true,
+                true, true, true,
+            ]
+        );
+        assert_eq!(
+            fused_mlp_silu_mul_fallback.accelerated_routes(),
+            [
+                true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+                false, true, true, true, false, true, true, true, true, true, true, true, true,
+                true, true, true,
+            ]
+        );
+        assert_eq!(
+            fused_mlp_gate_up_prefill_fallback.accelerated_routes(),
+            [
+                true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+                false, true, true, true, true, false, true, true, true, true, true, true, true,
+                true, true, true,
+            ]
+        );
+        assert_eq!(
             split_q_gate_fallback.accelerated_routes(),
             [
                 true, true, true, true, true, true, true, true, true, true, true, true, true, true,
@@ -361,6 +416,9 @@ mod tests {
             non_gdn_fallback,
             fused_norm_mlp_fallback,
             fused_norm_mlp_only,
+            fused_rmsnorm_fallback,
+            fused_mlp_silu_mul_fallback,
+            fused_mlp_gate_up_prefill_fallback,
             split_q_gate_fallback,
             split_q_gate_only,
             experimental,
