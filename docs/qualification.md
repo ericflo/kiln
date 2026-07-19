@@ -1761,6 +1761,14 @@ state exactly at every turn, with zero fallback or failure. A rebuilt
 fixed-source c8 graph/eager pair remains required before accepting output
 parity or throughput.
 
+That pair is source-controlled rather than assembled with environment
+overrides. The graph arm uses
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-decode-batch-4-actor-cycle-idle-100ms-prefill-layers-32-v1.json`;
+the eager oracle uses the adjacent `-graph-disabled-v1.json` launch record.
+Their parsed TOML documents differ only at typed
+`accelerator.rocm_graph_mode`, from `profile` to `disabled`. Run the eager arm
+first, then bind the graph arm's exact-output comparison to that new receipt.
+
 Serving benchmark driver v15 closes the next attribution gap before another
 ROCm arm. Each successful Kiln stream now retains its exact terminal
 `metadata.performance` object, including the request-local latency phases and

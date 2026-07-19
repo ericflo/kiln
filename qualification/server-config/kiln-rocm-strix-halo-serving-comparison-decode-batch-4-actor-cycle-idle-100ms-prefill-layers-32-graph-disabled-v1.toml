@@ -1,0 +1,76 @@
+# Strix Halo ROCm fixed-source eager oracle. This differs from the paired
+# native-graph c8 profile only by disabling accelerator.rocm_graph_mode.
+
+[server]
+serving_profile = "experimental"
+deterministic = false
+host = "127.0.0.1"
+port = 8420
+request_timeout_secs = 600
+terminal_access = "disabled"
+shutdown_timeout_secs = 5
+http_send_buffer_bytes = 1048576
+stream_stall_grace_ms = 2000
+max_batch_tokens = 512
+max_prefill_tokens_per_cycle = 256
+max_prefill_layers_per_cycle = 32
+max_decode_batch = 4
+debug_model_state = true
+default_thinking_enabled = false
+chat_performance_metadata = true
+chat_config_hash_metadata = true
+slow_request_warn_secs = 30
+
+[accelerator]
+kt_api_mode = "auto"
+full_attention_score_budget_mib = 2048
+vulkan_device_index = "auto"
+vulkan_validation = false
+cuda_kernel_profile = "native_default"
+rocm_synchronization_mode = "legacy_host_barriers"
+rocm_strided_batched_matmul_mode = "auto"
+rocm_bf16_matmul_output_mode = "auto"
+rocm_kernel_profile = "qualified"
+rocm_graph_mode = "disabled"
+rocm_graph_cache_entries = 12
+rocm_graph_cache_max_bytes = 1073741824
+
+[batching]
+mode = "enabled"
+rowwise_decode = false
+prefix_aware_admission = true
+prefill_admission_quantum = "auto"
+actor_cycle_idle_ms = 100
+direct_decode_rendezvous_mode = "auto"
+direct_decode_rendezvous_max_batch = "auto"
+direct_decode_rendezvous_wait_us = "auto"
+direct_decode_rendezvous_mixed_seq_lens = "auto"
+
+[model]
+path = "/home/ericflo/Development/kiln/Qwen3.5-4B"
+model_id = "Qwen/Qwen3.5-4B"
+served_model_id = "Qwen3.5-4B"
+adapter_dir = ".qualification/callsite/adapters"
+snapshot_dir = ".qualification/callsite/snapshots"
+checkpoint_read_mib_per_second = 256
+accelerator_weight_upload_mib_per_second = 256
+vulkan_decode_weight_prewarm = true
+vulkan_decode_weight_prewarm_mib_per_second = 512
+
+[memory]
+inference_memory_fraction = 0.7
+vulkan_buffer_pool_gb = 3.0
+floor_gb = 1.0
+probe_ms = 500
+reclaim_mode = "off"
+kv_autoscale = false
+kv_force_blocks = 0
+cuda_graphs = false
+cuda_graph_cache_entries = 8
+
+[prefix_cache]
+enabled = true
+
+[logging]
+format = "json"
+level = "info"

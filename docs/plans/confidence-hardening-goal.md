@@ -1071,7 +1071,9 @@ and exact resume. Cross-backend agreement alone is insufficient.
     hidden, recurrent, convolution, and K/V parity across one capture and 15
     replays. The same explicit-copy repair covers the legacy eager batched GDN
     splitter. Do not update the performance ranking or accept the apparent
-    graph gain until a rebuilt fixed-source graph/eager c8 pair passes.
+    graph gain until a rebuilt fixed-source graph/eager c8 pair passes. The
+    tracked paired launch records now differ only at typed
+    `accelerator.rocm_graph_mode`; run the eager oracle first.
 - [ ] Implement fused ROCm batched LM head, penalties, top-k/top-p, and sampling
   with one token readback if profiling confirms the current serialization.
 - [ ] Replace prompt-logprob full-vocabulary host readback with a device-side

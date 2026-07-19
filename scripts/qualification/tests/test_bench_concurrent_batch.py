@@ -815,6 +815,43 @@ class ServingBenchmarkTests(unittest.TestCase):
             "decode-batch-4-actor-cycle-idle-100ms-prefill-layers-32-v1",
         )
 
+    def test_rocm_fixed_source_eager_oracle_changes_only_graph_mode(self) -> None:
+        config_root = ROOT / "qualification" / "server-config"
+        launch_root = ROOT / "qualification" / "server-launch"
+        graph_name = (
+            "kiln-rocm-strix-halo-serving-comparison-decode-batch-4-"
+            "actor-cycle-idle-100ms-prefill-layers-32-v1"
+        )
+        eager_name = (
+            "kiln-rocm-strix-halo-serving-comparison-decode-batch-4-"
+            "actor-cycle-idle-100ms-prefill-layers-32-graph-disabled-v1"
+        )
+        graph = self._parse_server_config(config_root / f"{graph_name}.toml")
+        eager = self._parse_server_config(config_root / f"{eager_name}.toml")
+        self.assertEqual(graph["accelerator"]["rocm_graph_mode"], "profile")
+        self.assertEqual(eager["accelerator"]["rocm_graph_mode"], "disabled")
+        eager["accelerator"]["rocm_graph_mode"] = "profile"
+        self.assertEqual(eager, graph)
+
+        launch_path = launch_root / f"{eager_name}.json"
+        parsed = bench.validate_server_launch_config_value(
+            bench.strict_json_loads(launch_path.read_bytes()),
+            config_directory=launch_path.parent,
+            label=eager_name,
+            require_local_paths=False,
+        )
+        self.assertEqual(parsed.record["id"], eager_name)
+        self.assertEqual(
+            parsed.record["command"][-1],
+            f"qualification/server-config/{eager_name}.toml",
+        )
+        self.assertEqual(
+            parsed.record["log_directory"],
+            "../../.qualification/kiln-serving/logs/"
+            "decode-batch-4-actor-cycle-idle-100ms-prefill-layers-32-"
+            "graph-disabled-v1",
+        )
+
     def test_model_fingerprint_read_rate_is_bounded(self) -> None:
         for value in (64, 256, 16_384):
             with self.subTest(value=value):
