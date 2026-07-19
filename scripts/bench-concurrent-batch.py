@@ -39,7 +39,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "10"
+DRIVER_VERSION = "11"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -49,16 +49,22 @@ SUPPORTED_DRIVER_VERSIONS = {
     "7",
     "8",
     "9",
+    "10",
     DRIVER_VERSION,
 }
-THERMAL_DRIVER_VERSIONS = {"3", "4", "5", "6", "7", "8", "9", DRIVER_VERSION}
-LIFECYCLE_DRIVER_VERSIONS = {"4", "5", "6", "7", "8", "9", DRIVER_VERSION}
-PRELAUNCH_DRIVER_VERSIONS = {"5", "6", "7", "8", "9", DRIVER_VERSION}
-OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", "8", "9", DRIVER_VERSION}
-MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {"8", "9", DRIVER_VERSION}
-ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {"9", DRIVER_VERSION}
-ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {DRIVER_VERSION}
-REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {"7", "8", "9", DRIVER_VERSION}
+THERMAL_DRIVER_VERSIONS = {
+    "3", "4", "5", "6", "7", "8", "9", "10", DRIVER_VERSION
+}
+LIFECYCLE_DRIVER_VERSIONS = {
+    "4", "5", "6", "7", "8", "9", "10", DRIVER_VERSION
+}
+PRELAUNCH_DRIVER_VERSIONS = {"5", "6", "7", "8", "9", "10", DRIVER_VERSION}
+OUTPUT_EVIDENCE_DRIVER_VERSIONS = {"7", "8", "9", "10", DRIVER_VERSION}
+MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {"8", "9", "10", DRIVER_VERSION}
+ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {"9", "10", DRIVER_VERSION}
+ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {"10", DRIVER_VERSION}
+REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {"7", "8", "9", "10", DRIVER_VERSION}
+IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {DRIVER_VERSION}
 OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
@@ -1203,6 +1209,23 @@ RUN_HOST_THERMAL_KEYS = {
     "host_thermal_pacing_completed_event_count",
     "host_thermal_pacing_seconds",
 }
+RUN_HOST_THERMAL_KEYS_V11 = RUN_HOST_THERMAL_KEYS | {"idle_boundary_cooldowns"}
+IDLE_BOUNDARY_COOLDOWN_KEYS = {
+    "completed",
+    "elapsed_seconds",
+    "poll_interval_ms",
+    "position",
+    "sample_count",
+    "scope",
+    "sensor_path",
+    "stable_samples_observed",
+    "stable_samples_required",
+    "target_millicelsius",
+    "temperature_end_millicelsius",
+    "temperature_peak_millicelsius",
+    "temperature_start_millicelsius",
+    "timeout_seconds",
+}
 
 
 def validate_run_host_thermal(
@@ -1211,11 +1234,18 @@ def validate_run_host_thermal(
     label: str,
     phase: str,
     completion_tokens: int,
+    driver_version: str,
+    policy_record: dict[str, Any] | None,
 ) -> None:
     if value is None:
         return
     evidence = _object(value, label)
-    _exact_keys(evidence, RUN_HOST_THERMAL_KEYS, label)
+    expected_keys = (
+        RUN_HOST_THERMAL_KEYS_V11
+        if driver_version in IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS
+        else RUN_HOST_THERMAL_KEYS
+    )
+    _exact_keys(evidence, expected_keys, label)
     if evidence["phase"] != phase:
         raise BenchmarkError(f"{label}.phase disagrees with its run")
     wall_seconds = _nonnegative_number(
@@ -1234,6 +1264,128 @@ def validate_run_host_thermal(
         abs_tol=1e-12,
     ):
         raise BenchmarkError(f"{label} has inconsistent sustainable throughput")
+    if driver_version in IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS:
+        if policy_record is None:
+            raise BenchmarkError(f"{label} requires its host thermal policy")
+        cooldowns = evidence["idle_boundary_cooldowns"]
+        if not isinstance(cooldowns, list):
+            raise BenchmarkError(f"{label}.idle_boundary_cooldowns must be an array")
+        pacing_mode = policy_record["pacing"].get("mode")
+        if pacing_mode not in {"hard_limit_only", "process_group_stop"}:
+            raise BenchmarkError(f"{label} requires a tagged host thermal pacing mode")
+        expected_positions = (
+            ["pre_run", "post_run"]
+            if pacing_mode == "hard_limit_only"
+            else []
+        )
+        positions: list[str] = []
+        elapsed_total = 0.0
+        for index, cooldown in enumerate(cooldowns):
+            cooldown_label = f"{label}.idle_boundary_cooldowns[{index}]"
+            cooldown = _object(cooldown, cooldown_label)
+            _exact_keys(cooldown, IDLE_BOUNDARY_COOLDOWN_KEYS, cooldown_label)
+            positions.append(cooldown["position"])
+            if cooldown["scope"] != "live_server_idle_phase_boundary":
+                raise BenchmarkError(f"{cooldown_label}.scope is unsupported")
+            if cooldown["completed"] is not True:
+                raise BenchmarkError(f"{cooldown_label} must be complete")
+            poll_interval_ms = _positive_int(
+                cooldown["poll_interval_ms"],
+                f"{cooldown_label}.poll_interval_ms",
+            )
+            target_millicelsius = cooldown["target_millicelsius"]
+            if (
+                isinstance(target_millicelsius, bool)
+                or not isinstance(target_millicelsius, int)
+                or not -100_000 <= target_millicelsius <= 250_000
+            ):
+                raise BenchmarkError(
+                    f"{cooldown_label}.target_millicelsius is invalid"
+                )
+            stable_samples_required = _positive_int(
+                cooldown["stable_samples_required"],
+                f"{cooldown_label}.stable_samples_required",
+            )
+            timeout_seconds = _nonnegative_number(
+                cooldown["timeout_seconds"],
+                f"{cooldown_label}.timeout_seconds",
+            )
+            if timeout_seconds <= 0:
+                raise BenchmarkError(
+                    f"{cooldown_label}.timeout_seconds must be positive"
+                )
+            if (
+                poll_interval_ms != policy_record["poll_interval_ms"]
+                or target_millicelsius
+                != policy_record["safe_handoff"]["target_millicelsius"]
+                or stable_samples_required
+                != policy_record["safe_handoff"]["stable_samples"]
+                or timeout_seconds
+                != policy_record["phase_settlement_timeout_seconds"]
+            ):
+                raise BenchmarkError(
+                    f"{cooldown_label} disagrees with the host thermal policy"
+                )
+            sample_count = _positive_int(
+                cooldown["sample_count"], f"{cooldown_label}.sample_count"
+            )
+            stable_samples = _positive_int(
+                cooldown["stable_samples_observed"],
+                f"{cooldown_label}.stable_samples_observed",
+            )
+            if stable_samples != stable_samples_required:
+                raise BenchmarkError(f"{cooldown_label} did not reach stable cooldown")
+            if sample_count < stable_samples:
+                raise BenchmarkError(
+                    f"{cooldown_label}.sample_count is below its stable sample count"
+                )
+            elapsed = _nonnegative_number(
+                cooldown["elapsed_seconds"], f"{cooldown_label}.elapsed_seconds"
+            )
+            elapsed_total += elapsed
+            if (
+                not isinstance(cooldown["sensor_path"], str)
+                or not Path(cooldown["sensor_path"]).is_absolute()
+            ):
+                raise BenchmarkError(f"{cooldown_label}.sensor_path must be absolute")
+            for name in (
+                "temperature_start_millicelsius",
+                "temperature_peak_millicelsius",
+                "temperature_end_millicelsius",
+            ):
+                temperature = cooldown[name]
+                if (
+                    isinstance(temperature, bool)
+                    or not isinstance(temperature, int)
+                    or not -100_000 <= temperature <= 250_000
+                ):
+                    raise BenchmarkError(f"{cooldown_label}.{name} is invalid")
+            if cooldown["temperature_peak_millicelsius"] < max(
+                cooldown["temperature_start_millicelsius"],
+                cooldown["temperature_end_millicelsius"],
+            ):
+                raise BenchmarkError(f"{cooldown_label} peak is below a boundary")
+            if (
+                cooldown["temperature_end_millicelsius"]
+                > cooldown["target_millicelsius"]
+            ):
+                raise BenchmarkError(f"{cooldown_label} ended above its target")
+        allowed_positions = (
+            [expected_positions]
+            if evidence["host_thermal_guard_trip_count"] == 0
+            else [
+                expected_positions[:count]
+                for count in range(len(expected_positions) + 1)
+            ]
+        )
+        if positions not in allowed_positions:
+            raise BenchmarkError(
+                f"{label}.idle_boundary_cooldowns positions must be "
+                f"{expected_positions} unless a hard-limit trip interrupts the phase, "
+                f"got {positions}"
+            )
+        if elapsed_total > wall_seconds + 1e-9:
+            raise BenchmarkError(f"{label} idle cooldown exceeds phase wall time")
     for name in (
         "host_temperature_start_millicelsius",
         "host_temperature_end_millicelsius",
@@ -1265,10 +1417,22 @@ def validate_run_host_thermal(
         > evidence["host_thermal_pacing_event_count"]
     ):
         raise BenchmarkError(f"{label} completed more pacing events than it started")
-    _nonnegative_number(
+    pacing_seconds = _nonnegative_number(
         evidence["host_thermal_pacing_seconds"],
         f"{label}.host_thermal_pacing_seconds",
     )
+    if (
+        policy_record is not None
+        and policy_record["pacing"].get("mode") == "hard_limit_only"
+    ):
+        if any(
+            evidence[name] != 0
+            for name in (
+                "host_thermal_pacing_event_count",
+                "host_thermal_pacing_completed_event_count",
+            )
+        ) or pacing_seconds != 0:
+            raise BenchmarkError(f"{label} hard-limit-only policy recorded pacing")
 
 
 def _decode_canonical_base64_text(value: Any, label: str) -> str:
@@ -1695,6 +1859,7 @@ def validate_benchmark_run(
     driver_version: str,
     memory_limit_bytes: int | None,
     workload_profile: str | None,
+    host_thermal_policy: dict[str, Any] | None = None,
 ) -> None:
     row = _object(value, label)
     run_keys = RUN_KEYS
@@ -1737,6 +1902,8 @@ def validate_benchmark_run(
             label=f"{label}.host_thermal",
             phase=phase,
             completion_tokens=row["completion_tokens"],
+            driver_version=driver_version,
+            policy_record=host_thermal_policy,
         )
     for name in (
         "ttft_ms_p50",
@@ -1993,6 +2160,17 @@ def validate_model_fingerprint_thermal_record(
             raise BenchmarkError(f"{label}.{phase} is invalid: {exc}") from exc
         if validated["policy"] != policy_record:
             raise BenchmarkError(f"{label}.{phase} policy disagrees with server guard")
+        if policy_record["pacing"].get("mode") == "hard_limit_only" and any(
+            validated["runtime"][name] != 0
+            for name in (
+                "host_thermal_pacing_active_end",
+                "host_thermal_pacing_completed_event_count",
+                "host_thermal_pacing_event_count",
+            )
+        ):
+            raise BenchmarkError(
+                f"{label}.{phase} hard-limit-only policy recorded pacing"
+            )
     return record["final"] is not None
 
 
@@ -2140,6 +2318,15 @@ def validate_host_thermal_receipt(
         > evidence["host_thermal_pacing_event_count"]
     ):
         raise BenchmarkError("receipt completed more thermal pacing events than it began")
+    if policy_record["pacing"].get("mode") == "hard_limit_only" and any(
+        evidence[name] != 0
+        for name in (
+            "host_thermal_pacing_active_end",
+            "host_thermal_pacing_completed_event_count",
+            "host_thermal_pacing_event_count",
+        )
+    ):
+        raise BenchmarkError("receipt hard-limit-only policy recorded pacing")
     if evidence["host_temperature_peak_millicelsius"] < max(
         evidence["host_temperature_start_millicelsius"],
         evidence["host_temperature_end_millicelsius"],
@@ -2814,6 +3001,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 driver_version=driver_version,
                 memory_limit_bytes=memory_limit_bytes,
                 workload_profile=workload.get("profile"),
+                host_thermal_policy=receipt.get("host_thermal", {}).get("policy"),
             )
     elif receipt["warmup"] is not None:
         raise BenchmarkError("receipt has an undeclared warmup")
@@ -2837,6 +3025,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 driver_version=driver_version,
                 memory_limit_bytes=memory_limit_bytes,
                 workload_profile=workload.get("profile"),
+                host_thermal_policy=receipt.get("host_thermal", {}).get("policy"),
             )
     if driver_version in THERMAL_DRIVER_VERSIONS:
         thermal_rows = list(runs)
@@ -5110,6 +5299,11 @@ def main(argv: list[str] | None = None) -> int:
 
             thermal_guard.set_phase(phase)
             phase_started = time.perf_counter()
+            idle_boundary_cooldowns: list[dict[str, Any]] = []
+            hard_limit_only = (
+                thermal_policy_record is not None
+                and thermal_policy_record["pacing"]["mode"] == "hard_limit_only"
+            )
             thermal_guard.sample_now()
             pre_run_settled = thermal_guard.wait_for_pacing_settlement(
                 thermal_settlement_timeout
@@ -5120,14 +5314,38 @@ def main(argv: list[str] | None = None) -> int:
                     thermal_guard.trip_reason
                     or f"host thermal pacing failed before {phase}"
                 )
+            if hard_limit_only:
+                idle_boundary_cooldowns.append(
+                    thermal_guard.wait_for_idle_boundary_cooldown(
+                        position="pre_run",
+                        timeout_seconds=thermal_settlement_timeout,
+                    )
+                )
             row = run_once(phase=phase, **run_kwargs)
             thermal_guard.sample_now()
             post_run_settled = thermal_guard.wait_for_pacing_settlement(
                 thermal_settlement_timeout
             )
             thermal_guard.sample_now()
+            post_run_error: BenchmarkError | None = None
+            if (
+                hard_limit_only
+                and post_run_settled
+                and thermal_guard.trip_reason is None
+            ):
+                try:
+                    idle_boundary_cooldowns.append(
+                        thermal_guard.wait_for_idle_boundary_cooldown(
+                            position="post_run",
+                            timeout_seconds=thermal_settlement_timeout,
+                        )
+                    )
+                except BenchmarkError as exc:
+                    post_run_error = exc
             phase_wall_seconds = time.perf_counter() - phase_started
             phase_metrics = thermal_guard.phase_metric_values(phase_started)
+            if DRIVER_VERSION in IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS:
+                phase_metrics["idle_boundary_cooldowns"] = idle_boundary_cooldowns
             phase_metrics.update(
                 {
                     "phase": phase,
@@ -5138,9 +5356,14 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             row["host_thermal"] = phase_metrics
-            if not post_run_settled or thermal_guard.trip_reason is not None:
+            if (
+                not post_run_settled
+                or thermal_guard.trip_reason is not None
+                or post_run_error is not None
+            ):
                 return row, BenchmarkError(
                     thermal_guard.trip_reason
+                    or (str(post_run_error) if post_run_error is not None else None)
                     or f"host thermal pacing failed after {phase}"
                 )
             return row, None

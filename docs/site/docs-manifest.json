@@ -175,7 +175,7 @@
       "slug": "serving-benchmark-protocol",
       "title": "Serving Benchmark Protocol",
       "section": "serving",
-      "description": "Complete Kiln/vLLM workload, process ownership, thermal containment, lifecycle evidence, comparison, campaign, and receipt-validation protocol."
+      "description": "Complete Kiln/vLLM workload, process ownership, hard-limit and idle-boundary thermal containment, lifecycle evidence, comparison, campaign, and receipt-validation protocol."
     },
     {
       "source": "docs/SERVING_PROFILES.md",

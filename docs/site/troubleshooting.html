@@ -776,7 +776,9 @@ kiln serve --config rocm-graph-eager.toml
           <code>host_thermal_pacing_event_count</code> now fails source-bound serving qualification. The
           mixed-load client and server share a 180-second request bound and separately count thermal-paced,
           non-thermal attributed, and unexplained ITL gaps; all three populations must be zero under the current
-          policy. Teardown preserves hard-limit monitoring through process exit. The runner returns only after
+          policy. Driver v11 requires a typed stable cooldown at a live-server idle boundary before and after
+          every warmup or measured row and charges both waits to thermally sustainable phase time. Teardown
+          preserves hard-limit monitoring through process exit. The runner returns only after
           eight consecutive 250 ms readings are at or below
           75,000 millicelsius; the cooldown has a 180-second bound, explicit receipt metrics, and fails closed on
           timeout. A memory

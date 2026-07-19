@@ -1528,9 +1528,13 @@ measurement immediately after an 88.25 C warmup and reached the 93 C ceiling
 before all streams finished. The guard observed 94 C at its next 250 ms sample,
 terminated the server, completed graceful shutdown and stable cooldown, and
 recorded zero pacing events. This validates fail-closed containment but rejects
-the warmup-to-measurement handoff. A rerun requires explicit idle-boundary
-cooldown charged to thermally sustainable phase time; raising the hard limit is
-not an accepted correction.
+the warmup-to-measurement handoff. Serving benchmark driver v11 now requires
+two content-hashed idle-boundary cooldown records for every hard-limit-only
+row: one before requests and one after all request workers drain. Each wait
+requires the policy's consecutive stable samples, is bounded by its phase
+settlement timeout, leaves the hard limit active, and cannot arm `SIGSTOP`.
+Both waits remain inside thermally sustainable phase time. Raising the hard
+limit is not an accepted correction.
 
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading

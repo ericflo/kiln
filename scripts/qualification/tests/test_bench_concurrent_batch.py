@@ -91,10 +91,13 @@ def valid_prelaunch_cooldown() -> dict:
     }
 
 
-def valid_fingerprint_thermal_evidence() -> dict:
+def valid_fingerprint_thermal_evidence(
+    policy_value: dict | None = None,
+) -> dict:
     policy_record, policy, settlement = bench.validate_host_thermal_policy_value(
-        valid_host_thermal_policy(), "fixture policy"
+        policy_value or valid_host_thermal_policy(), "fixture policy"
     )
+    pacing_enabled = policy.pacing_start_millicelsius is not None
     return {
         "phase_settlement_timeout_seconds": settlement,
         "policy": policy_record,
@@ -112,13 +115,13 @@ def valid_fingerprint_thermal_evidence() -> dict:
             "host_thermal_cooldown_timeout_count": 0,
             "host_thermal_guard_trip_count": 0,
             "host_thermal_pacing_active_end": 0,
-            "host_thermal_pacing_completed_event_count": 1,
-            "host_thermal_pacing_event_count": 1,
-            "host_thermal_pacing_max_seconds": 0.1,
+            "host_thermal_pacing_completed_event_count": int(pacing_enabled),
+            "host_thermal_pacing_event_count": int(pacing_enabled),
+            "host_thermal_pacing_max_seconds": 0.1 if pacing_enabled else 0.0,
             "host_thermal_pacing_max_start_millicelsius": (
                 policy.pacing_start_millicelsius or 0
             ),
-            "host_thermal_pacing_seconds": 0.1,
+            "host_thermal_pacing_seconds": 0.1 if pacing_enabled else 0.0,
         },
         "schema": bench.fingerprint_supervisor.SCHEMA,
         "worker_exit_code": 0,
@@ -164,6 +167,27 @@ class FakeThermalGuard:
 
     def wait_for_pacing_settlement(self, _timeout_seconds: float) -> bool:
         return True
+
+    def wait_for_idle_boundary_cooldown(
+        self, *, position: str, timeout_seconds: float
+    ) -> dict:
+        time.sleep(0.001)
+        return {
+            "completed": True,
+            "elapsed_seconds": 0.001,
+            "poll_interval_ms": 250,
+            "position": position,
+            "sample_count": 2,
+            "scope": "live_server_idle_phase_boundary",
+            "sensor_path": "/fixture/temp1_input",
+            "stable_samples_observed": 2,
+            "stable_samples_required": 2,
+            "target_millicelsius": 65_000,
+            "temperature_end_millicelsius": 50_000,
+            "temperature_peak_millicelsius": 50_000,
+            "temperature_start_millicelsius": 50_000,
+            "timeout_seconds": timeout_seconds,
+        }
 
     def sample_now(self) -> int:
         self.samples.append(50_000)
@@ -625,6 +649,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         guarded: bool = True,
         thermal_guard_factory: object = FakeThermalGuard,
         engine: str = "kiln",
+        hard_limit_only: bool = False,
         extra_args: list[str] | None = None,
     ) -> tuple[int, Path]:
         output = Path(directory) / "receipt.json"
@@ -639,7 +664,10 @@ class ServingBenchmarkTests(unittest.TestCase):
         memory_counter = Path(directory) / "vram-used"
         memory_counter.write_text("1024")
         thermal_policy = Path(directory) / "host-thermal-policy.json"
-        thermal_policy.write_text(json.dumps(valid_host_thermal_policy()))
+        thermal_policy_value = valid_host_thermal_policy()
+        if hard_limit_only:
+            thermal_policy_value["pacing"] = {"mode": "hard_limit_only"}
+        thermal_policy.write_text(json.dumps(thermal_policy_value))
         model_path = Path(directory) / "model"
         model_fingerprint = {
             "id": "test-model",
@@ -674,7 +702,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             )
             return (
                 model_fingerprint,
-                valid_fingerprint_thermal_evidence()
+                valid_fingerprint_thermal_evidence(thermal_policy_value)
                 if policy_path is not None
                 else None,
             )
@@ -1443,6 +1471,40 @@ class ServingBenchmarkTests(unittest.TestCase):
                 bench.validate_host_thermal_policy_value(legacy_record, "legacy")
             )
             self.assertEqual(legacy_policy.pacing_resume_stable_samples, 1)
+            legacy_run_evidence = {
+                "phase": "fixture",
+                "phase_wall_seconds": 2.0,
+                "thermally_sustainable_output_token_throughput_per_s": 1.0,
+                "host_temperature_start_millicelsius": 50_000,
+                "host_temperature_end_millicelsius": 50_000,
+                "host_temperature_peak_millicelsius": 50_000,
+                "host_temperature_sample_count": 2,
+                "host_thermal_guard_trip_count": 0,
+                "host_thermal_pacing_event_count": 1,
+                "host_thermal_pacing_completed_event_count": 1,
+                "host_thermal_pacing_seconds": 0.1,
+            }
+            bench.validate_run_host_thermal(
+                legacy_run_evidence,
+                label="legacy run",
+                phase="fixture",
+                completion_tokens=2,
+                driver_version="10",
+                policy_record=legacy_record,
+            )
+            current_run_evidence = {
+                **legacy_run_evidence,
+                "idle_boundary_cooldowns": [],
+            }
+            with self.assertRaisesRegex(bench.BenchmarkError, "tagged"):
+                bench.validate_run_host_thermal(
+                    current_run_evidence,
+                    label="current run",
+                    phase="fixture",
+                    completion_tokens=2,
+                    driver_version=bench.DRIVER_VERSION,
+                    policy_record=legacy_record,
+                )
 
             legacy_input = json.loads(json.dumps(value))
             legacy_input["pacing"].pop("mode")
@@ -1920,6 +1982,72 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(receipt["runs"][0]["success_count"], 1)
         recorded_hash = receipt.pop("receipt_sha256")
         self.assertEqual(recorded_hash, bench.canonical_sha256(receipt))
+
+    def test_hard_limit_only_receipt_binds_idle_boundary_cooldowns(self) -> None:
+        with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
+            return_code, output = self._run_cli_fixture(
+                fake,
+                directory,
+                hard_limit_only=True,
+            )
+            receipt = bench.strict_json_loads(output.read_bytes())
+
+        self.assertEqual(return_code, 0)
+        bench.validate_benchmark_receipt(receipt)
+        cooldowns = receipt["runs"][0]["host_thermal"][
+            "idle_boundary_cooldowns"
+        ]
+        self.assertEqual(
+            [cooldown["position"] for cooldown in cooldowns],
+            ["pre_run", "post_run"],
+        )
+        self.assertGreaterEqual(
+            receipt["runs"][0]["host_thermal"]["phase_wall_seconds"],
+            sum(cooldown["elapsed_seconds"] for cooldown in cooldowns),
+        )
+
+        tampered = json.loads(json.dumps(receipt))
+        tampered["runs"][0]["host_thermal"]["idle_boundary_cooldowns"][0][
+            "target_millicelsius"
+        ] += 1
+        tampered.pop("receipt_sha256")
+        tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+        with self.assertRaisesRegex(bench.BenchmarkError, "disagrees"):
+            bench.validate_benchmark_receipt(tampered)
+
+        tampered = json.loads(json.dumps(receipt))
+        tampered["runs"][0]["host_thermal"]["idle_boundary_cooldowns"].pop()
+        tampered.pop("receipt_sha256")
+        tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+        with self.assertRaisesRegex(bench.BenchmarkError, "positions"):
+            bench.validate_benchmark_receipt(tampered)
+
+        tampered = json.loads(json.dumps(receipt))
+        tampered["runs"][0]["host_thermal"]["host_thermal_pacing_event_count"] = 1
+        tampered.pop("receipt_sha256")
+        tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+        with self.assertRaisesRegex(bench.BenchmarkError, "recorded pacing"):
+            bench.validate_benchmark_receipt(tampered)
+
+        tampered = json.loads(json.dumps(receipt))
+        tampered["runs"][0]["host_thermal"]["idle_boundary_cooldowns"][0][
+            "sample_count"
+        ] = True
+        tampered.pop("receipt_sha256")
+        tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+        with self.assertRaisesRegex(bench.BenchmarkError, "positive integer"):
+            bench.validate_benchmark_receipt(tampered)
+
+        tampered = json.loads(json.dumps(receipt))
+        wall_seconds = tampered["runs"][0]["host_thermal"]["phase_wall_seconds"]
+        for cooldown in tampered["runs"][0]["host_thermal"][
+            "idle_boundary_cooldowns"
+        ]:
+            cooldown["elapsed_seconds"] = wall_seconds
+        tampered.pop("receipt_sha256")
+        tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
+        with self.assertRaisesRegex(bench.BenchmarkError, "exceeds phase wall"):
+            bench.validate_benchmark_receipt(tampered)
 
     def test_cli_preserves_completed_rows_when_final_health_probe_fails(self) -> None:
         with (

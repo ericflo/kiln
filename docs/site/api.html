@@ -1839,7 +1839,10 @@ kiln serve --config kiln.toml</code></pre>
           nonzero <code>host_thermal_pacing_event_count</code> fails the current source-bound serving
           policy. The mixed-load client and server share a 180-second request bound. Receipts still
           partition attributed ITL gaps into thermal-paced and non-thermal counts, but both counts
-          and unexplained gaps must be zero. Teardown keeps the hard limit active. After
+          and unexplained gaps must be zero. Driver v11 also requires typed pre-run and post-run
+          cooldown evidence at a live-server idle boundary for every hard-limit-only row. Those
+          waits cannot send <code>SIGSTOP</code>, and both remain inside thermally sustainable phase
+          time. Teardown keeps the hard limit active. After
           process exit, the runner requires eight consecutive 250 ms readings at or below 75 C,
           bounded to 180 seconds. Cooldown active/completed/timeout counts, duration, sample count,
           stable count, and post-exit peak are receipt metrics; a timeout or missing completion fails

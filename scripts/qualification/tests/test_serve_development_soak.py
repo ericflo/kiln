@@ -1901,6 +1901,70 @@ class ServeRocmSoakTests(unittest.TestCase):
             },
         )
 
+    def test_idle_boundary_cooldown_requires_stable_live_process_samples(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sensor = root / "hwmon3"
+            sensor.mkdir()
+            (sensor / "name").write_text("k10temp\n", encoding="utf-8")
+            (sensor / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            (sensor / "temp1_input").write_text("44000\n", encoding="utf-8")
+            guard = soak.HostThermalGuard(
+                process,
+                hwmon_name="k10temp",
+                label="Tctl",
+                limit_millicelsius=93_000,
+                poll_interval_seconds=0.001,
+                cooldown_target_millicelsius=45_000,
+                cooldown_stable_samples=2,
+                cooldown_timeout_seconds=1.0,
+                hwmon_root=root,
+            )
+            with mock.patch.object(soak.os, "killpg") as killpg:
+                evidence = guard.wait_for_idle_boundary_cooldown(
+                    position="pre_run", timeout_seconds=1.0
+                )
+
+        killpg.assert_not_called()
+        self.assertTrue(evidence["completed"])
+        self.assertEqual(evidence["position"], "pre_run")
+        self.assertEqual(evidence["scope"], "live_server_idle_phase_boundary")
+        self.assertEqual(evidence["sample_count"], 2)
+        self.assertEqual(evidence["stable_samples_observed"], 2)
+        self.assertEqual(evidence["temperature_end_millicelsius"], 44_000)
+
+    def test_idle_boundary_cooldown_timeout_fails_closed(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sensor = root / "hwmon3"
+            sensor.mkdir()
+            (sensor / "name").write_text("k10temp\n", encoding="utf-8")
+            (sensor / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            (sensor / "temp1_input").write_text("60000\n", encoding="utf-8")
+            guard = soak.HostThermalGuard(
+                process,
+                hwmon_name="k10temp",
+                label="Tctl",
+                limit_millicelsius=93_000,
+                poll_interval_seconds=0.001,
+                cooldown_target_millicelsius=45_000,
+                cooldown_stable_samples=2,
+                cooldown_timeout_seconds=1.0,
+                hwmon_root=root,
+            )
+            with mock.patch.object(soak.os, "killpg") as killpg:
+                with self.assertRaisesRegex(soak.SoakError, "timed out"):
+                    guard.wait_for_idle_boundary_cooldown(
+                        position="post_run", timeout_seconds=1e-9
+                    )
+
+        killpg.assert_called_once_with(4321, signal.SIGTERM)
+        self.assertIn("idle-boundary cooldown timed out", guard.trip_reason or "")
+
     def test_thermal_pacing_stops_and_resumes_the_process_group(self) -> None:
         process = mock.Mock(pid=4321)
         process.poll.return_value = None

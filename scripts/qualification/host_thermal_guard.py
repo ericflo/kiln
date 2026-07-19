@@ -612,10 +612,134 @@ class HostThermalGuard:
                 return False
             self.stop.wait(min(self.poll_interval_seconds, remaining))
 
+    def wait_for_idle_boundary_cooldown(
+        self,
+        *,
+        position: str,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        """Require a stable package temperature while the caller owns an idle boundary."""
+
+        if position not in {"pre_run", "post_run"}:
+            raise self.error_type(
+                "host thermal idle-boundary position must be pre_run or post_run"
+            )
+        if self.cooldown_target_millicelsius is None:
+            raise self.error_type(
+                "host thermal idle-boundary cooldown requires a target"
+            )
+        if not _is_positive_finite_number(timeout_seconds):
+            raise self.error_type(
+                "host thermal idle-boundary timeout must be positive and finite"
+            )
+        with self._pacing_lock:
+            if self._pacing_started_at is not None:
+                raise self.error_type(
+                    "host thermal idle-boundary cooldown cannot start while pacing is active"
+                )
+            phase = self._pacing_phase
+
+        started = time.monotonic()
+        sample_count = 0
+        stable_samples = 0
+        start_temperature: int | None = None
+        peak_temperature: int | None = None
+        end_temperature: int | None = None
+        self._trace(
+            "host_thermal_idle_boundary_cooldown_started",
+            phase=phase,
+            position=position,
+            target_millicelsius=self.cooldown_target_millicelsius,
+            stable_samples=self.cooldown_stable_samples,
+            timeout_seconds=timeout_seconds,
+        )
+
+        while True:
+            if self.process.poll() is not None:
+                message = (
+                    "protected process exited during host thermal idle-boundary cooldown"
+                )
+                if len(self.errors) < 8:
+                    self.errors.append(message)
+                self._trip(message)
+                raise self.error_type(message)
+            temperature = self._sample(allow_pacing=False)
+            if temperature is None or self.trip_reason is not None:
+                raise self.error_type(
+                    self.trip_reason
+                    or "host thermal idle-boundary cooldown could not sample temperature"
+                )
+            sample_count += 1
+            if start_temperature is None:
+                start_temperature = temperature
+                peak_temperature = temperature
+            assert peak_temperature is not None
+            peak_temperature = max(peak_temperature, temperature)
+            end_temperature = temperature
+            stable_samples = (
+                stable_samples + 1
+                if temperature <= self.cooldown_target_millicelsius
+                else 0
+            )
+            elapsed = time.monotonic() - started
+            if stable_samples >= self.cooldown_stable_samples:
+                assert self.input_path is not None
+                evidence = {
+                    "completed": True,
+                    "elapsed_seconds": elapsed,
+                    "poll_interval_ms": int(self.poll_interval_seconds * 1000),
+                    "position": position,
+                    "sample_count": sample_count,
+                    "scope": "live_server_idle_phase_boundary",
+                    "sensor_path": str(self.input_path),
+                    "stable_samples_observed": stable_samples,
+                    "stable_samples_required": self.cooldown_stable_samples,
+                    "target_millicelsius": self.cooldown_target_millicelsius,
+                    "temperature_end_millicelsius": end_temperature,
+                    "temperature_peak_millicelsius": peak_temperature,
+                    "temperature_start_millicelsius": start_temperature,
+                    "timeout_seconds": float(timeout_seconds),
+                }
+                self._trace(
+                    "host_thermal_idle_boundary_cooldown_completed",
+                    phase=phase,
+                    position=position,
+                    duration_seconds=elapsed,
+                    peak_millicelsius=peak_temperature,
+                    sample_count=sample_count,
+                    stable_sample_count=stable_samples,
+                    target_millicelsius=self.cooldown_target_millicelsius,
+                    temperature_millicelsius=end_temperature,
+                )
+                return evidence
+            if elapsed >= timeout_seconds:
+                message = (
+                    "host thermal idle-boundary cooldown timed out after "
+                    f"{elapsed:.3f} seconds without {self.cooldown_stable_samples} "
+                    "consecutive samples at or below "
+                    f"{self.cooldown_target_millicelsius} millicelsius"
+                )
+                if len(self.errors) < 8:
+                    self.errors.append(message)
+                self._trip(message)
+                self._trace(
+                    "host_thermal_idle_boundary_cooldown_timed_out",
+                    phase=phase,
+                    position=position,
+                    duration_seconds=elapsed,
+                    peak_millicelsius=peak_temperature,
+                    sample_count=sample_count,
+                    stable_sample_count=stable_samples,
+                    target_millicelsius=self.cooldown_target_millicelsius,
+                    temperature_millicelsius=end_temperature,
+                )
+                raise self.error_type(message)
+            time.sleep(min(self.poll_interval_seconds, timeout_seconds - elapsed))
+
     def sample_now(self) -> int | None:
         return self._sample()
 
-    def phase_metric_values(self, started: float) -> dict[str, float | int]:
+    def phase_metric_values(self, started: float) -> dict[str, Any]:
         with self._sample_lock:
             temperatures = [
                 temperature

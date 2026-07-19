@@ -131,7 +131,8 @@ is blocked while already-submitted accelerator work prevents the package from
 reaching the resume gate, the monitor sends `SIGTERM`, releases the stopped
 group with `SIGCONT`, and fails closed. `hard_limit_only` has no stopped
 interval, so the field remains a receipt-compatible phase bound but never arms
-`SIGSTOP`.
+`SIGSTOP`. Driver v11 instead uses it as the maximum duration of each verified
+idle-boundary cooldown before and after a warmup or measured row.
 
 The closed policy fields are:
 
@@ -147,10 +148,10 @@ The closed policy fields are:
 | `pacing.start_millicelsius` | Required only for `process_group_stop`; temperature at which the complete process group is stopped. |
 | `pacing.resume_millicelsius` | Required only for `process_group_stop`; lower temperature at which resume becomes eligible. |
 | `pacing.resume_stable_samples` | Required only for `process_group_stop`; consecutive eligible samples required before `SIGCONT`. |
-| `safe_handoff.target_millicelsius` | Maximum temperature accepted before owned process creation and after shutdown, or before returning an attached live process. Under process-stop pacing it cannot exceed the pacing-resume temperature. |
-| `safe_handoff.stable_samples` | Consecutive samples required at or below the target. |
+| `safe_handoff.target_millicelsius` | Maximum temperature accepted before owned process creation, at each driver-v11 hard-limit-only idle row boundary, and after shutdown or before returning an attached live process. Under process-stop pacing it cannot exceed the pacing-resume temperature. |
+| `safe_handoff.stable_samples` | Consecutive samples required at or below the target at every applicable boundary. |
 | `safe_handoff.timeout_seconds` | Positive deadline for each boundary cooldown. |
-| `phase_settlement_timeout_seconds` | Positive phase bound. Under `process_group_stop`, it is also the independently enforced maximum active pacing interval; under `hard_limit_only`, no stop interval exists. |
+| `phase_settlement_timeout_seconds` | Positive phase bound. Under `process_group_stop`, it is also the independently enforced maximum active pacing interval. Under `hard_limit_only`, it bounds each live-server idle cooldown; no stop interval exists. |
 
 Driver v8 resolves the selected sensor before model hashing. Each initial and
 final fingerprint worker starts blocked on a private gate; the supervisor first
@@ -202,13 +203,38 @@ latency, request throughput, output-token throughput, SLO goodput, dispatch
 spread, prompt/output hashes, DRM memory, failures, and Kiln server-route
 diagnostics.
 
-Driver v7 through v10 retain one ordered `output_evidence` row for every successful
+Driver v7 through v11 retain one ordered `output_evidence` row for every successful
 request. Hash-only evidence is the default and includes the combined semantic
 output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
 tokens, and finish reason. The validator requires these rows to cover exactly
 the successful request indices, reproduce the aggregate output-set hash, and
 reproduce the run's completion-token total. An aggregate mismatch can therefore
 no longer hide whether one request or the entire row diverged.
+
+### Idle-boundary cooldown evidence
+
+Driver v11 adds `idle_boundary_cooldowns` to every guarded row. Under
+`hard_limit_only`, it contains exactly two ordered records: `pre_run` and
+`post_run`. The caller enters these waits only after it owns a boundary with no
+live request wave. The thermal guard samples with pacing disabled, so the wait
+cannot send `SIGSTOP`; the independent hard limit remains active and still
+terminates the complete process group on a trip, sensor error, process exit, or
+timeout.
+
+Each record binds its sensor path, poll interval, target, stable-sample
+requirement, timeout, sample count, elapsed time, start/peak/end temperature,
+scope, position, and completion status to the content-hashed policy. The
+validator requires both records for a non-tripped row, permits only the ordered
+prefix when a hard-limit trip interrupts a row, and rejects a combined cooldown
+duration greater than the phase wall time. Because the phase clock starts
+before `pre_run` and ends after `post_run`,
+`thermally_sustainable_output_token_throughput_per_s` charges both cooling
+waits while request-window throughput remains separately observable.
+
+For a retained `process_group_stop` policy, the v11 array is empty and the
+historical pacing fields retain their original meaning. New serving
+qualification on Strix Halo uses `hard_limit_only`; this compatibility path
+does not re-authorize active-work suspension there.
 
 ### Server route diagnostics
 
@@ -726,14 +752,17 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v9 is the current contract. It adds route-aware batching-actor and
-direct-rendezvous diagnostics to v8 without changing the workload or output
-contract. Driver v8 added mandatory initial and final guarded model-fingerprint
-lifecycles to v7. A v9 exact-output run may use a strict-valid v7, v8, or v9
-reference because the model, thermal-policy, prompt, and output contracts are
-unchanged; the current arm must still satisfy v9 routing and v8 containment.
-Driver v7 added mandatory ordered per-request
-output evidence and structured mismatch localization to the v6 lifecycle contract.
+Driver v11 is the current contract. It adds typed idle-boundary cooldown
+evidence to v10 without changing the request workload or output contract.
+Driver v10 added closed ROCm graph execution evidence; v9 added route-aware
+batching-actor and direct-rendezvous diagnostics; and v8 added mandatory initial
+and final guarded model-fingerprint lifecycles. A v11 exact-output run may use a
+strict-valid v7 through v11 reference because the model, thermal-policy,
+prompt, and output contracts remain comparison-compatible; the current arm
+must still satisfy v11 idle cooling, v10 graph accounting, v9 routing, and v8
+containment. Driver v7 added mandatory ordered per-request output evidence and
+structured mismatch localization to the v6 lifecycle contract.
+
 Driver v6 retains the v5 mandatory post-provenance, pre-process cooldown and
 adds the structured startup-failure evidence described above. It also validates
 embedded vLLM identity objects by JSON value while continuing to bind the
@@ -742,6 +771,6 @@ identity semantics. Owned evidence contains the content-hashed launch document,
 absolute server-log fingerprint, shutdown signal/status/timing,
 forced-shutdown flag, and process-group liveness. Attached and explicitly
 unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
-from missing fields. Historical driver v2 through v7 receipts remain valid
-under their original contracts, but do not satisfy the current v8 provenance
-containment or current performance acceptance.
+from missing fields. Historical driver v2 through v10 receipts remain valid
+under their original contracts, but do not satisfy current v11 performance
+acceptance.
