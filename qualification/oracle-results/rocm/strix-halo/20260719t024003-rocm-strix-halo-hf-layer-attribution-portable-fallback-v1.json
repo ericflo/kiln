@@ -1,0 +1,768 @@
+{
+  "binary": {
+    "build_duration_seconds": 6.577422999951523,
+    "build_environment_policy": "closed-source-build-v1",
+    "path": "target/release/examples/rocm_hf_path_attribution",
+    "rocm_archs": [
+      "gfx1151"
+    ],
+    "sha256": "sha256:e24b2a0701f080856aa7de834cdd04a31c2297097f9d2cc00b4a9aa20d32795e"
+  },
+  "containment": {
+    "hf": {
+      "host_available_before_gib": 24,
+      "memory_max_gib": 16,
+      "network": "forbidden",
+      "thermal": {
+        "phase_settlement_timeout_seconds": 300.0,
+        "policy": {
+          "content_sha256": "sha256:e7347f6c698b33bf3fd6a1a76483118c61d3e5d8b19b64d45609014da40f7620",
+          "id": "strix-halo-hf-oracle-v1",
+          "limit_millicelsius": 93000,
+          "pacing": {
+            "resume_millicelsius": 50000,
+            "resume_stable_samples": 20,
+            "start_millicelsius": 58000
+          },
+          "phase_settlement_timeout_seconds": 300.0,
+          "poll_interval_ms": 50,
+          "safe_handoff": {
+            "stable_samples": 20,
+            "target_millicelsius": 45000,
+            "timeout_seconds": 300.0
+          },
+          "schema": "kiln.host-thermal-policy.v1",
+          "sensor": {
+            "hwmon_name": "k10temp",
+            "label": "Tctl"
+          }
+        },
+        "prelaunch_cooldown": {
+          "completed": true,
+          "elapsed_seconds": 5.7207226200262085,
+          "poll_interval_ms": 50,
+          "sample_count": 115,
+          "scope": "host_package_before_process_creation",
+          "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+          "stable_samples_observed": 20,
+          "stable_samples_required": 20,
+          "target_millicelsius": 45000,
+          "temperature_end_millicelsius": 43000,
+          "temperature_peak_millicelsius": 93500,
+          "temperature_start_millicelsius": 93500,
+          "timeout_seconds": 300.0
+        },
+        "runtime": {
+          "host_temperature_end_millicelsius": 43125,
+          "host_temperature_peak_millicelsius": 59875,
+          "host_temperature_start_millicelsius": 43000,
+          "host_thermal_cooldown_active_end": 0,
+          "host_thermal_cooldown_completed_count": 1,
+          "host_thermal_cooldown_peak_millicelsius": 45000,
+          "host_thermal_cooldown_sample_count": 20,
+          "host_thermal_cooldown_seconds": 0.953308783005923,
+          "host_thermal_cooldown_stable_sample_count": 20,
+          "host_thermal_cooldown_timeout_count": 0,
+          "host_thermal_guard_trip_count": 0,
+          "host_thermal_pacing_active_end": 0,
+          "host_thermal_pacing_completed_event_count": 5,
+          "host_thermal_pacing_event_count": 5,
+          "host_thermal_pacing_max_seconds": 2.4643788100220263,
+          "host_thermal_pacing_max_start_millicelsius": 59625,
+          "host_thermal_pacing_seconds": 11.696672209131066
+        },
+        "schema": "kiln.hf-thermal-containment.v1",
+        "worker_exit_code": 0
+      }
+    },
+    "kiln": {
+      "host_available_before_gib": 24,
+      "memory_max_gib": 48,
+      "network": "forbidden",
+      "thermal": {
+        "phase_settlement_timeout_seconds": 300.0,
+        "policy": {
+          "content_sha256": "sha256:e7347f6c698b33bf3fd6a1a76483118c61d3e5d8b19b64d45609014da40f7620",
+          "id": "strix-halo-hf-oracle-v1",
+          "limit_millicelsius": 93000,
+          "pacing": {
+            "resume_millicelsius": 50000,
+            "resume_stable_samples": 20,
+            "start_millicelsius": 58000
+          },
+          "phase_settlement_timeout_seconds": 300.0,
+          "poll_interval_ms": 50,
+          "safe_handoff": {
+            "stable_samples": 20,
+            "target_millicelsius": 45000,
+            "timeout_seconds": 300.0
+          },
+          "schema": "kiln.host-thermal-policy.v1",
+          "sensor": {
+            "hwmon_name": "k10temp",
+            "label": "Tctl"
+          }
+        },
+        "prelaunch_cooldown": {
+          "completed": true,
+          "elapsed_seconds": 0.9520024380180985,
+          "poll_interval_ms": 50,
+          "sample_count": 20,
+          "scope": "host_package_before_process_creation",
+          "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+          "stable_samples_observed": 20,
+          "stable_samples_required": 20,
+          "target_millicelsius": 45000,
+          "temperature_end_millicelsius": 41000,
+          "temperature_peak_millicelsius": 41875,
+          "temperature_start_millicelsius": 41875,
+          "timeout_seconds": 300.0
+        },
+        "runtime": {
+          "host_temperature_end_millicelsius": 43250,
+          "host_temperature_peak_millicelsius": 59750,
+          "host_temperature_start_millicelsius": 41000,
+          "host_thermal_cooldown_active_end": 0,
+          "host_thermal_cooldown_completed_count": 1,
+          "host_thermal_cooldown_peak_millicelsius": 46875,
+          "host_thermal_cooldown_sample_count": 38,
+          "host_thermal_cooldown_seconds": 1.8569051200174727,
+          "host_thermal_cooldown_stable_sample_count": 20,
+          "host_thermal_cooldown_timeout_count": 0,
+          "host_thermal_guard_trip_count": 0,
+          "host_thermal_pacing_active_end": 0,
+          "host_thermal_pacing_completed_event_count": 7,
+          "host_thermal_pacing_event_count": 7,
+          "host_thermal_pacing_max_seconds": 2.5610214070184156,
+          "host_thermal_pacing_max_start_millicelsius": 59500,
+          "host_thermal_pacing_seconds": 17.017845156020485
+        },
+        "schema": "kiln.hf-thermal-containment.v1",
+        "worker_exit_code": 0
+      }
+    }
+  },
+  "created_at_utc": "2026-07-19T02:40:03.124166Z",
+  "duration_seconds": 80.81232662999537,
+  "implementation": {
+    "guarded_exec_sha256": "sha256:8298e674b268aac3e20c8f5d45a56244bad413625ca346f79671f0578580f8f4",
+    "hf_worker_sha256": "sha256:b3f313c2f0ba9893dacbb145efccd1587a94fd1ebb0d555686f8130fea33c069",
+    "python_sha256": "sha256:2700be1aabe3687bd597f21b0eac3b9bbdf7417e93035255a9286c67935b59bd",
+    "runner_sha256": "sha256:da1f5c7c5532c4d3529d70076bc1bb4959bc538d474cc045c93b3b5d20015695",
+    "supervisor_sha256": "sha256:589c61a4920343bc03f6b56cd7905d500d8cb08f0dce5e0bab264617882fbf0a"
+  },
+  "model_identity": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "content_sha256": "sha256:b1f2cce5baf9e662fc4c2c421b79fccc8787521e6e85810eebffbb4aa43b309f",
+    "id": "Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "reference": {
+    "bytes": 1345144,
+    "evidence": {
+      "argmax": 15787,
+      "argmax_text": " foundation",
+      "attention_implementation": "eager",
+      "boundary_count": 34,
+      "boundary_names": [
+        "embedding",
+        "layer_00_linear_attention",
+        "layer_01_linear_attention",
+        "layer_02_linear_attention",
+        "layer_03_full_attention",
+        "layer_04_linear_attention",
+        "layer_05_linear_attention",
+        "layer_06_linear_attention",
+        "layer_07_full_attention",
+        "layer_08_linear_attention",
+        "layer_09_linear_attention",
+        "layer_10_linear_attention",
+        "layer_11_full_attention",
+        "layer_12_linear_attention",
+        "layer_13_linear_attention",
+        "layer_14_linear_attention",
+        "layer_15_full_attention",
+        "layer_16_linear_attention",
+        "layer_17_linear_attention",
+        "layer_18_linear_attention",
+        "layer_19_full_attention",
+        "layer_20_linear_attention",
+        "layer_21_linear_attention",
+        "layer_22_linear_attention",
+        "layer_23_full_attention",
+        "layer_24_linear_attention",
+        "layer_25_linear_attention",
+        "layer_26_linear_attention",
+        "layer_27_full_attention",
+        "layer_28_linear_attention",
+        "layer_29_linear_attention",
+        "layer_30_linear_attention",
+        "layer_31_full_attention",
+        "final_norm"
+      ],
+      "candidate_tokens": [
+        {
+          "engine": "kiln",
+          "logit": 18.25,
+          "rank": 2,
+          "text": " baseline",
+          "token_id": 25045
+        },
+        {
+          "engine": "vllm",
+          "logit": 18.5,
+          "rank": 1,
+          "text": " foundation",
+          "token_id": 15787
+        }
+      ],
+      "configuration_sha256": "sha256:3c01b3cdcff8d77cbafac9841bc48c41e5a5b38637231f1bde3d843cd198dbaf",
+      "deterministic_algorithms": true,
+      "device": "AMD Radeon 8060S Graphics",
+      "dtype": "bfloat16",
+      "duration_seconds": 9.909804049995728,
+      "hidden_size": 2560,
+      "input_token_count": 166,
+      "input_token_ids_sha256": "sha256:709d0a314cde9072ac79b0752e795f1b76bfaea5b553ccdf26f7fbd5ac44b1a0",
+      "layer_last_rows_sha256": "sha256:b4a908f25e8c6d077b113107b94a75735a00056aeac51e51f182e7f9b1ae38fd",
+      "linear_attention_implementation": "transformers_torch_fallback",
+      "logits_sha256": "sha256:d4bc2aeb7d6bef608dfe500f6b9759b1fd4ca5eeb924b55b9e63b2e49a0e96d0",
+      "memory_high_events": 0,
+      "memory_max_events": 0,
+      "memory_oom_events": 0,
+      "memory_oom_kill_events": 0,
+      "memory_peak_bytes": 9461100544,
+      "memory_swap_bytes": 0,
+      "modeling_sha256": "sha256:cf085792cb59e5bdf9b88a3d20bd353892289d054662a9c2b662221b97caefba",
+      "output_bytes": 1345144,
+      "request_id": "rocm-strix-halo-greedy-c1-first-divergence-v1",
+      "request_sha256": "sha256:fbe61941ebc147d50141a04bb8541e7ccb5bc16d6c893285ec9a2660f51336c4",
+      "tf32_allowed": false,
+      "top_logit_margin": 0.25,
+      "top_tokens": [
+        {
+          "logit": 18.5,
+          "text": " foundation",
+          "token_id": 15787
+        },
+        {
+          "logit": 18.25,
+          "text": " baseline",
+          "token_id": 25045
+        },
+        {
+          "logit": 18.0,
+          "text": " scientifically",
+          "token_id": 71047
+        },
+        {
+          "logit": 17.875,
+          "text": " rigorous",
+          "token_id": 45332
+        },
+        {
+          "logit": 17.125,
+          "text": " deterministic",
+          "token_id": 69892
+        },
+        {
+          "logit": 17.125,
+          "text": " valid",
+          "token_id": 2610
+        },
+        {
+          "logit": 17.0,
+          "text": " robust",
+          "token_id": 21094
+        },
+        {
+          "logit": 16.625,
+          "text": " trustworthy",
+          "token_id": 54067
+        },
+        {
+          "logit": 16.125,
+          "text": " definitive",
+          "token_id": 43230
+        },
+        {
+          "logit": 16.125,
+          "text": " statistically",
+          "token_id": 45287
+        }
+      ],
+      "torch_commit": "cf30153c4c131c8164ee7798e5022d810682e2cb",
+      "torch_hip_version": "7.2.53211",
+      "torch_version": "2.13.0+rocm7.2",
+      "transformers_version": "5.13.1",
+      "vocab": 248320
+    },
+    "location": "local_ignored",
+    "sha256": "sha256:32fc4f2de1a600ffba027a2e218719a46449857699c26833c7f3a4eaa6561743"
+  },
+  "request": {
+    "path": "qualification/oracles/rocm-strix-halo-greedy-c1-first-divergence-v1.json",
+    "sha256": "sha256:fbe61941ebc147d50141a04bb8541e7ccb5bc16d6c893285ec9a2660f51336c4"
+  },
+  "result_sha256": "sha256:f14ca700b0df823b8c8e6d3f592b7ed876c0345482aa7b57079dc6a439dba372",
+  "schema": "kiln.rocm-hf-layer-attribution-result.v1",
+  "source": {
+    "commit": "e2316e7bb4e58e08777e66a45bec1f306352964a",
+    "origin_main": "e2316e7bb4e58e08777e66a45bec1f306352964a",
+    "tree": "33aa5d2ca2dc44f6775fbe773bf3159c55b7adb6"
+  },
+  "worker": {
+    "boundaries": [
+      {
+        "cosine_similarity": 1.0,
+        "hf_sha256": "sha256:d154059991dfc4c220a9628e5bf720827bd31faad5f2a235409e7131f41c0767",
+        "index": 0,
+        "kiln_sha256": "sha256:d154059991dfc4c220a9628e5bf720827bd31faad5f2a235409e7131f41c0767",
+        "max_abs_error": 0.0,
+        "mean_abs_error": 0.0,
+        "name": "embedding",
+        "reference_root_mean_square": 0.014327768160923833,
+        "relative_root_mean_square_error": 0.0,
+        "root_mean_square_error": 0.0
+      },
+      {
+        "cosine_similarity": 0.9999967035024863,
+        "hf_sha256": "sha256:7bc9a66978b556a72ad3f40b4b3ffe061b4f4c9374df07035b0d934722c043aa",
+        "index": 1,
+        "kiln_sha256": "sha256:05fda92814c1a979b413cc7c00d57883d78970682797013ae6b8903e94d64c8b",
+        "max_abs_error": 0.0009765625,
+        "mean_abs_error": 8.184518665075303e-05,
+        "name": "layer_00_linear_attention",
+        "reference_root_mean_square": 0.04375274934435377,
+        "relative_root_mean_square_error": 0.0025751947970479396,
+        "root_mean_square_error": 0.00011267185246812248
+      },
+      {
+        "cosine_similarity": 0.9999912734979126,
+        "hf_sha256": "sha256:e9df7226123a9b9bbf120e46a1507794e7effefbabd84e43e44fcd915489f3e8",
+        "index": 2,
+        "kiln_sha256": "sha256:c682e33d9768e4ce4d8fb2e691915002cb6073a8d46803e46160c6fde6cc1988",
+        "max_abs_error": 0.0009765625,
+        "mean_abs_error": 0.00017344653606414794,
+        "name": "layer_01_linear_attention",
+        "reference_root_mean_square": 0.054111621546131854,
+        "relative_root_mean_square_error": 0.00421065333795181,
+        "root_mean_square_error": 0.00022784527988520517
+      },
+      {
+        "cosine_similarity": 0.9999750845063238,
+        "hf_sha256": "sha256:22df38661b8af418fa8b5ea0c84692227d9fa1fab86fdf0f5d0dc35bebbcacc2",
+        "index": 3,
+        "kiln_sha256": "sha256:2300cc7b02cb2c93279f0ae5624235d9557e26a7732c470d219f211fd1af9735",
+        "max_abs_error": 0.001953125,
+        "mean_abs_error": 0.00030491575598716735,
+        "name": "layer_02_linear_attention",
+        "reference_root_mean_square": 0.05610779120270541,
+        "relative_root_mean_square_error": 0.007065247538312885,
+        "root_mean_square_error": 0.00039641543367508776
+      },
+      {
+        "cosine_similarity": 0.9999526396263186,
+        "hf_sha256": "sha256:fe09e68fc549c9c81f2200385fea8d60afd6753d1cd8cbd233ffd15039cae1a3",
+        "index": 4,
+        "kiln_sha256": "sha256:6df652f55225f48b1d3dff5261a4bdcc9efaf7c277c20f82a7923a8548f9a213",
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0005116727203130722,
+        "name": "layer_03_full_attention",
+        "reference_root_mean_square": 0.07769298217038098,
+        "relative_root_mean_square_error": 0.011470522021837968,
+        "root_mean_square_error": 0.0008911790629276196
+      },
+      {
+        "cosine_similarity": 0.9999522208765586,
+        "hf_sha256": "sha256:aac633017df7c66099eb17f61f2957a9c624b560f99ea1dfec1a2558ee5fbda7",
+        "index": 5,
+        "kiln_sha256": "sha256:8f4496d5204717b9e4c4694c3d0854851daeffcfe91fb2018d48037e63c92f96",
+        "max_abs_error": 0.015625,
+        "mean_abs_error": 0.0006626076996326446,
+        "name": "layer_04_linear_attention",
+        "reference_root_mean_square": 0.09030168195805642,
+        "relative_root_mean_square_error": 0.009940797205620976,
+        "root_mean_square_error": 0.0008976707076715215
+      },
+      {
+        "cosine_similarity": 0.9999411009225506,
+        "hf_sha256": "sha256:deaa3a98fe63a5d5abeee93a89e70398412305d6d7efb243e767e749b2c4bdcc",
+        "index": 6,
+        "kiln_sha256": "sha256:024bc59a0246f862ee7e9f8daed53589c668554c7c61e9daa16ef6b68992b12d",
+        "max_abs_error": 0.015625,
+        "mean_abs_error": 0.000814850628376007,
+        "name": "layer_05_linear_attention",
+        "reference_root_mean_square": 0.09870334325818891,
+        "relative_root_mean_square_error": 0.010855899184780186,
+        "root_mean_square_error": 0.0010715135436116519
+      },
+      {
+        "cosine_similarity": 0.9999444349886231,
+        "hf_sha256": "sha256:3efef4f02365b91829e88d07f7afb4d90429651907b04eb35f581e686daf1c1c",
+        "index": 7,
+        "kiln_sha256": "sha256:8858a53b865f129ecf93aa9ea5c5140adfd2e2892b746de104243246e0978553",
+        "max_abs_error": 0.0048828125,
+        "mean_abs_error": 0.0009692192077636718,
+        "name": "layer_06_linear_attention",
+        "reference_root_mean_square": 0.11714136617520765,
+        "relative_root_mean_square_error": 0.01059216720461707,
+        "root_mean_square_error": 0.0012407809371050738
+      },
+      {
+        "cosine_similarity": 0.9999203335901177,
+        "hf_sha256": "sha256:7071743edfeea607a4c5c01c59e9f81d5496eb1d011d83a96ea2697948d9c13d",
+        "index": 8,
+        "kiln_sha256": "sha256:2fb427b02f2012d93a4eb46da78ebfbb3a81ee5079cef1cbd3318f3facfb6537",
+        "max_abs_error": 0.0068359375,
+        "mean_abs_error": 0.0013918578624725342,
+        "name": "layer_07_full_attention",
+        "reference_root_mean_square": 0.1385318308370969,
+        "relative_root_mean_square_error": 0.012723179443975744,
+        "root_mean_square_error": 0.0017625653424428761
+      },
+      {
+        "cosine_similarity": 0.999912849698363,
+        "hf_sha256": "sha256:6eca646e2cb1c8234246b9c0b6efd37a467750066afffdfb9f98bc39df38a396",
+        "index": 9,
+        "kiln_sha256": "sha256:fa946ceb523ec05124ed5369b473b064874ff37dd4df39e4b1cc1a9ebe5003bf",
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0013108853250741958,
+        "name": "layer_08_linear_attention",
+        "reference_root_mean_square": 0.13342418666543907,
+        "relative_root_mean_square_error": 0.013372919872302942,
+        "root_mean_square_error": 0.0017842709573041072
+      },
+      {
+        "cosine_similarity": 0.9999136618349644,
+        "hf_sha256": "sha256:a3325db8083b8502fc6e444ad9a475ad2787232087e125c20e73b9fd57362c0f",
+        "index": 10,
+        "kiln_sha256": "sha256:9e79ca8e2d17896976657a851f9964df3096a533e95dfbede3c776d28185289f",
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.001408413052558899,
+        "name": "layer_09_linear_attention",
+        "reference_root_mean_square": 0.14050819913609822,
+        "relative_root_mean_square_error": 0.01332794817285431,
+        "root_mean_square_error": 0.0018726859959470098
+      },
+      {
+        "cosine_similarity": 0.9999262897477881,
+        "hf_sha256": "sha256:534c42e4b64c6712eba24ba5b9e2c4cb62cf192b1cc52431d298be8497c92ce3",
+        "index": 11,
+        "kiln_sha256": "sha256:fedd2883b1051a9da572dcad46ba5df1a44879a68649d9b92b1a87209460ead4",
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0014374077320098877,
+        "name": "layer_10_linear_attention",
+        "reference_root_mean_square": 0.15764355261845917,
+        "relative_root_mean_square_error": 0.012297686663904874,
+        "root_mean_square_error": 0.0019386510146866115
+      },
+      {
+        "cosine_similarity": 0.9999129153484602,
+        "hf_sha256": "sha256:a450d703146a97053f2c622722c17e08b96060736ce7a33c9e827d4c618dba66",
+        "index": 12,
+        "kiln_sha256": "sha256:925a929fbaf40ac21c1396f71036b1a1194edf18169890d13597f1e92bc54184",
+        "max_abs_error": 0.015625,
+        "mean_abs_error": 0.0017881035804748536,
+        "name": "layer_11_full_attention",
+        "reference_root_mean_square": 0.1739445920084093,
+        "relative_root_mean_square_error": 0.01324131382711899,
+        "root_mean_square_error": 0.0023032549313135218
+      },
+      {
+        "cosine_similarity": 0.9999226169021113,
+        "hf_sha256": "sha256:c017aa5220928bc455459505459e0d59e218e60c800cab2d6f9563281fc03c7b",
+        "index": 13,
+        "kiln_sha256": "sha256:bd30bbec06a9e230c0af56c268381100f0014593f0c672910b36c7c257ee13ba",
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0017471432685852051,
+        "name": "layer_12_linear_attention",
+        "reference_root_mean_square": 0.17953465940951538,
+        "relative_root_mean_square_error": 0.01293133467046534,
+        "root_mean_square_error": 0.0023216227657724526
+      },
+      {
+        "cosine_similarity": 0.9999258184609271,
+        "hf_sha256": "sha256:3c996649cad893bfbc96d2d45e4b54074d03dadab09869acebfa18df3263db98",
+        "index": 14,
+        "kiln_sha256": "sha256:da2b3b7ba0020f29b3c17ab3a78e5666453d8f61caf62758fab5f2dad1c7e728",
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0017048478126525878,
+        "name": "layer_13_linear_attention",
+        "reference_root_mean_square": 0.18154653636465762,
+        "relative_root_mean_square_error": 0.012632390825308268,
+        "root_mean_square_error": 0.002293366800339395
+      },
+      {
+        "cosine_similarity": 0.999930916006436,
+        "hf_sha256": "sha256:a6abd81162a95fc59dc9598ce6db7dc74a6a2f74c7bbfb73ac817450d782d973",
+        "index": 15,
+        "kiln_sha256": "sha256:cf71d5076dc8b143c4cab61efd857c575418026370da222f61e0164ab147fe19",
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0017322808504104613,
+        "name": "layer_14_linear_attention",
+        "reference_root_mean_square": 0.1939684930528328,
+        "relative_root_mean_square_error": 0.011996555474775454,
+        "root_mean_square_error": 0.0023269537872669063
+      },
+      {
+        "cosine_similarity": 0.9999156936885154,
+        "hf_sha256": "sha256:5b694fce639d940904df9cd2405e4a4532b3ca0f8c30be17ed7e499dedbe5236",
+        "index": 16,
+        "kiln_sha256": "sha256:c618072d50f45988b1b3dca1688fd5ac69a52cd1d030e28f1fb5adb377970a20",
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0019780963659286497,
+        "name": "layer_15_full_attention",
+        "reference_root_mean_square": 0.197571112786783,
+        "relative_root_mean_square_error": 0.013206438358609861,
+        "root_mean_square_error": 0.0026092107224606064
+      },
+      {
+        "cosine_similarity": 0.9999179090017803,
+        "hf_sha256": "sha256:dce3c15f57a0d0c0d16c061a8a5b6f1e97e6fddca61b593999aab265df4c7c94",
+        "index": 17,
+        "kiln_sha256": "sha256:482b9d34e1ba4e3d2a6bdae1f64a39d115c4a99a87565607175370aa911edf28",
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0020730361342430116,
+        "name": "layer_16_linear_attention",
+        "reference_root_mean_square": 0.21268470727562572,
+        "relative_root_mean_square_error": 0.012877604438218086,
+        "root_mean_square_error": 0.002738869530353712
+      },
+      {
+        "cosine_similarity": 0.9999305022512971,
+        "hf_sha256": "sha256:bc10edf45483058a07a69d12f59c59b7a4ca88aa2b132547788f11d7f7590030",
+        "index": 18,
+        "kiln_sha256": "sha256:919a28295f27b4c98bb018ea177b7053147cdc5c6593b31b654389db58db047a",
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0020067691802978516,
+        "name": "layer_17_linear_attention",
+        "reference_root_mean_square": 0.22557090074266598,
+        "relative_root_mean_square_error": 0.011796502418795082,
+        "root_mean_square_error": 0.0026609476762206445
+      },
+      {
+        "cosine_similarity": 0.9999474324849553,
+        "hf_sha256": "sha256:ff2750783e71df065959fac72e8955becc2e50051d9661999faa8b78d8717dfe",
+        "index": 19,
+        "kiln_sha256": "sha256:c2a98530b258d02797136520314c5c6da82a03c4dc44facaf0a961044651e474",
+        "max_abs_error": 0.03125,
+        "mean_abs_error": 0.0021298050880432127,
+        "name": "layer_18_linear_attention",
+        "reference_root_mean_square": 0.2773505395522884,
+        "relative_root_mean_square_error": 0.010253879622941255,
+        "root_mean_square_error": 0.0028439190459269726
+      },
+      {
+        "cosine_similarity": 0.9999314872513535,
+        "hf_sha256": "sha256:bc16006f5a8c145227feac5f0deac49e5bdbf0c559718f5306711a69c9c71f0b",
+        "index": 20,
+        "kiln_sha256": "sha256:7480dfad9d1a3e7986a88f5f90342ff4d663f70cc6489742303e89760b1e4fab",
+        "max_abs_error": 0.0625,
+        "mean_abs_error": 0.002803224325180054,
+        "name": "layer_19_full_attention",
+        "reference_root_mean_square": 0.32814519595002106,
+        "relative_root_mean_square_error": 0.011710118829689437,
+        "root_mean_square_error": 0.003842619237966472
+      },
+      {
+        "cosine_similarity": 0.9999438943165551,
+        "hf_sha256": "sha256:d0568ec63d3c9ec131ccd2be9323e21d5591e29d22ceaee276c275550d4d59d1",
+        "index": 21,
+        "kiln_sha256": "sha256:0af2903b92d675891f256c13cab8440494d327bc9732ab20e5c23e4c84dd635d",
+        "max_abs_error": 0.0625,
+        "mean_abs_error": 0.0030314981937408446,
+        "name": "layer_20_linear_attention",
+        "reference_root_mean_square": 0.3820280690729063,
+        "relative_root_mean_square_error": 0.01064530278581179,
+        "root_mean_square_error": 0.004066804467960108
+      },
+      {
+        "cosine_similarity": 0.9999392569923686,
+        "hf_sha256": "sha256:4c5e20d2260cae440133e95e912e7249579ab3ca07441cdd80ca801405a1ee12",
+        "index": 22,
+        "kiln_sha256": "sha256:261246a317d86d1d5f4d9f3b9ce6c58cec78896c1dcaca139ccfb65bdb13d48b",
+        "max_abs_error": 0.09375,
+        "mean_abs_error": 0.0034218579530715942,
+        "name": "layer_21_linear_attention",
+        "reference_root_mean_square": 0.43317335534677204,
+        "relative_root_mean_square_error": 0.011095008016816227,
+        "root_mean_square_error": 0.00480606185024362
+      },
+      {
+        "cosine_similarity": 0.9999458019505644,
+        "hf_sha256": "sha256:a2f0aa01b93dac97e4eae25cd10bff037464f58503a6cc4556eb7d19ee7873a9",
+        "index": 23,
+        "kiln_sha256": "sha256:5dd13c11479cb8ddeb4c9400b4c62e883ca021bd003fe718a795ba8df2feed0a",
+        "max_abs_error": 0.09375,
+        "mean_abs_error": 0.0037750482559204103,
+        "name": "layer_22_linear_attention",
+        "reference_root_mean_square": 0.5011398352392418,
+        "relative_root_mean_square_error": 0.010561054826111652,
+        "root_mean_square_error": 0.005292565275510192
+      },
+      {
+        "cosine_similarity": 0.999942002396713,
+        "hf_sha256": "sha256:59ddd3d12489308e8878778e3f2d89a1825e8b60515618325ad3f24a1921a806",
+        "index": 24,
+        "kiln_sha256": "sha256:1642e90721b283f6dca624ae2061f87544b30340774e845f698404912e4c92bb",
+        "max_abs_error": 0.09375,
+        "mean_abs_error": 0.0042807936668396,
+        "name": "layer_23_full_attention",
+        "reference_root_mean_square": 0.5450043804124624,
+        "relative_root_mean_square_error": 0.010812970648886167,
+        "root_mean_square_error": 0.0058931163689143464
+      },
+      {
+        "cosine_similarity": 0.9999426333526182,
+        "hf_sha256": "sha256:235187cb00db1a0a74c4d5a86bf2c3b2e70d3eaf5d482d6c4923e1e6ccc1b9a6",
+        "index": 25,
+        "kiln_sha256": "sha256:a233979d480666588bd902d9621dab0759fd95ae55534b44daef01ed4219d45f",
+        "max_abs_error": 0.09375,
+        "mean_abs_error": 0.0049633622169494625,
+        "name": "layer_24_linear_attention",
+        "reference_root_mean_square": 0.6257642971309308,
+        "relative_root_mean_square_error": 0.01082561354969176,
+        "root_mean_square_error": 0.0067742824539339455
+      },
+      {
+        "cosine_similarity": 0.9999422876849889,
+        "hf_sha256": "sha256:afcba62f727548a51cd2a60157ab782620bca5e89499aefcaf5f6b32d38144b3",
+        "index": 26,
+        "kiln_sha256": "sha256:6bf513adceacbe835490335fae03ef67198d5b2bb46cd53847d5718ee4d73b12",
+        "max_abs_error": 0.0625,
+        "mean_abs_error": 0.005428797006607056,
+        "name": "layer_25_linear_attention",
+        "reference_root_mean_square": 0.6752550660990329,
+        "relative_root_mean_square_error": 0.010787802702680555,
+        "root_mean_square_error": 0.0072845184270618835
+      },
+      {
+        "cosine_similarity": 0.9999438569196857,
+        "hf_sha256": "sha256:91e79d139c681dd7e361f57404a0e8a06e1e9430c2c8a45fb8b1a52eedc957e1",
+        "index": 27,
+        "kiln_sha256": "sha256:8693c9fd62d683460605db2ff07c096175ed79764cb817f4d3c462aa686ede28",
+        "max_abs_error": 0.0625,
+        "mean_abs_error": 0.006079173088073731,
+        "name": "layer_26_linear_attention",
+        "reference_root_mean_square": 0.7611597070878533,
+        "relative_root_mean_square_error": 0.010612020049671348,
+        "root_mean_square_error": 0.00807744207261827
+      },
+      {
+        "cosine_similarity": 0.9999148488736572,
+        "hf_sha256": "sha256:9ee925e3878aec00d39b5827e7e79bba9e97a5dd9dea0d394961156597277dc3",
+        "index": 28,
+        "kiln_sha256": "sha256:59e61bdedcaa6050461d611c9cda232d243f1c619e6994758d8e7c2521e77167",
+        "max_abs_error": 0.125,
+        "mean_abs_error": 0.0076512575149536135,
+        "name": "layer_27_full_attention",
+        "reference_root_mean_square": 0.7825278396145219,
+        "relative_root_mean_square_error": 0.013072282158033783,
+        "root_mean_square_error": 0.010229424715957636
+      },
+      {
+        "cosine_similarity": 0.999920116854928,
+        "hf_sha256": "sha256:b2205c4616f95db0116a9ad2a03f729e83ee37ca0b756cece2be829d75852f92",
+        "index": 29,
+        "kiln_sha256": "sha256:e48684baec6821bee20c51444dd1efebcca8bdcd0ccfcdc1f848c56eb5e8a4f0",
+        "max_abs_error": 0.125,
+        "mean_abs_error": 0.00872575044631958,
+        "name": "layer_28_linear_attention",
+        "reference_root_mean_square": 0.9091876700906335,
+        "relative_root_mean_square_error": 0.012667897699155621,
+        "root_mean_square_error": 0.011517496394041796
+      },
+      {
+        "cosine_similarity": 0.9999075517270686,
+        "hf_sha256": "sha256:def25d6a34aea4a1435a6b31f10b8a8797f57a3c3b4beb6127cac46bc0b51d52",
+        "index": 30,
+        "kiln_sha256": "sha256:0de30e401076a8974a0a4b34327cf27f0eb577fe0ea0027a24e365ede60ec46f",
+        "max_abs_error": 0.125,
+        "mean_abs_error": 0.010079717636108399,
+        "name": "layer_29_linear_attention",
+        "reference_root_mean_square": 0.9665391231746129,
+        "relative_root_mean_square_error": 0.013605650433632207,
+        "root_mean_square_error": 0.013150393440343165
+      },
+      {
+        "cosine_similarity": 0.9999043011366672,
+        "hf_sha256": "sha256:ba543910da0adeb28ea5ac9d4c80543c83354641faa188eaa18764c640910042",
+        "index": 31,
+        "kiln_sha256": "sha256:195339577dc29191d6d8466a73ff3ad987ddf2d5729275c8fcc62642c07f8ac7",
+        "max_abs_error": 0.09375,
+        "mean_abs_error": 0.010959768295288086,
+        "name": "layer_30_linear_attention",
+        "reference_root_mean_square": 1.0215170611228965,
+        "relative_root_mean_square_error": 0.013841681376202335,
+        "root_mean_square_error": 0.014139513680417739
+      },
+      {
+        "cosine_similarity": 0.9998783951591869,
+        "hf_sha256": "sha256:5f396821e1f07d573032fd611e9746e6a6bb422319464d4f16f03e5e4b3087d6",
+        "index": 32,
+        "kiln_sha256": "sha256:70beb109bdd549e9f7c5b08e24166c08b42ba9f806c449c3094b28446c25649c",
+        "max_abs_error": 0.09375,
+        "mean_abs_error": 0.012718117237091065,
+        "name": "layer_31_full_attention",
+        "reference_root_mean_square": 1.0441123876701974,
+        "relative_root_mean_square_error": 0.015631427506097913,
+        "root_mean_square_error": 0.016320967096085492
+      },
+      {
+        "cosine_similarity": 0.9998739723628624,
+        "hf_sha256": "sha256:ea89da9fecc6c7b6a7ab6277f89b483e6d25c0785fc6fabf456663c421427c68",
+        "index": 33,
+        "kiln_sha256": "sha256:b6bc2d54c29df313c18e24398808ab92f19a20bed9e3abc17824cd3b798691e0",
+        "max_abs_error": 0.25,
+        "mean_abs_error": 0.03948256969451904,
+        "name": "final_norm",
+        "reference_root_mean_square": 3.1986613538896678,
+        "relative_root_mean_square_error": 0.015876121235249625,
+        "root_mean_square_error": 0.05078233544486007
+      }
+    ],
+    "containment": {
+      "memory_current_bytes": 9641885696,
+      "memory_high_events": 0,
+      "memory_max_bytes": 51539607552,
+      "memory_max_events": 0,
+      "memory_oom_events": 0,
+      "memory_oom_kill_events": 0,
+      "memory_peak_bytes": 12110475264,
+      "memory_swap_bytes": 0,
+      "memory_swap_max_bytes": 0
+    },
+    "final_logits_sha256": "sha256:649c9d8f1c12ce10b7a396218eebdbbd032ec4d8fe4d45a50a4a80876622fc8a",
+    "hf_layer_last_rows_sha256": "sha256:b4a908f25e8c6d077b113107b94a75735a00056aeac51e51f182e7f9b1ae38fd",
+    "input_token_count": 166,
+    "input_token_ids_sha256": "sha256:709d0a314cde9072ac79b0752e795f1b76bfaea5b553ccdf26f7fbd5ac44b1a0",
+    "kernel_policy": "portable_fallback",
+    "largest_relative_error_growth": {
+      "index": 4,
+      "name": "layer_03_full_attention",
+      "relative_root_mean_square_error_delta": 0.004405274483525083
+    },
+    "observed_next_tokens": [
+      1206,
+      5517,
+      264,
+      15787
+    ],
+    "request_id": "rocm-strix-halo-greedy-c1-first-divergence-v1",
+    "schema": "kiln.rocm-hf-layer-attribution.v1"
+  }
+}

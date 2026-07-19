@@ -915,6 +915,31 @@ with zero high, limit, OOM, OOM-kill, or swap events. Both runtime arms peaked
 at 59.875 C, all 4 HF and 28 Kiln pacing events completed, both cooldowns
 settled, and no owned process or service remained.
 
+The source-bound portable-fallback comparison is retained at
+`qualification/oracle-results/rocm/strix-halo/20260719t024003-rocm-strix-halo-hf-layer-attribution-portable-fallback-v1.json`,
+from clean pushed source `e2316e7bb4e58e08777e66a45bec1f306352964a`.
+It restores the independent HF/vLLM argmax: the observed sequence is `1206,
+5517, 264, 15787` instead of the qualified result's final token `25045`.
+Relative RMSE falls from `0.014871503` to `0.002575195` at layer 0, from
+`0.065551177` to `0.007065248` at layer 2, and from `0.085119899` to
+`0.015876121` after final RMSNorm. The qualified accelerated ROCm policy is
+therefore the causal policy group for this first-token correctness defect; the
+remaining work is to bisect its model routes and repair or disable the failing
+route. Portable fallback is diagnostic evidence, not a performance-qualified
+replacement policy.
+
+The portable lifecycle completed in 80.812 seconds, including a 6.577-second
+build. The Kiln cgroup peaked at 12,110,475,264 bytes with zero high, limit,
+OOM, OOM-kill, or swap events; runtime peaked at 59.75 C, seven pacing events
+completed in 17.018 seconds, and cooldown returned the host at 43.25 C with no
+owned residue. Model provenance hashing immediately before HF supervision
+heated the package to 93.5 C, above the runtime policy's 93 C limit but below
+the outer source-build guard's 97 C ceiling. The prelaunch gate then waited
+5.721 seconds and required 20 stable samples at or below 45 C before creating
+the process, so inference was contained, but hashing itself was not. No wider
+workload should follow until provenance hashing is covered by the same
+continuous thermal policy.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for
