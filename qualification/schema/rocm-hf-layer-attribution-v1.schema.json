@@ -346,7 +346,9 @@
             "model_fallback",
             "tensor_fallback",
             "gdn_fallback",
-            "non_gdn_fallback"
+            "non_gdn_fallback",
+            "split_q_gate_fallback",
+            "split_q_gate_only"
           ]
         },
         "largest_relative_error_growth": { "$ref": "#/$defs/errorGrowth" },

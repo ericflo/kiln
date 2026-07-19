@@ -173,6 +173,24 @@ impl RocmKernelPolicy {
         }
     }
 
+    /// Diagnostic policy that changes only the split q/gate F32-output
+    /// projection route from the qualified model policy.
+    pub const fn split_q_gate_fallback() -> Self {
+        Self {
+            split_q_gate_f32_output: false,
+            ..Self::qualified()
+        }
+    }
+
+    /// Diagnostic inverse of [`Self::split_q_gate_fallback`]: enable only the
+    /// split q/gate F32-output projection route on the portable model policy.
+    pub const fn split_q_gate_only() -> Self {
+        Self {
+            split_q_gate_f32_output: true,
+            ..Self::portable_fallback()
+        }
+    }
+
     /// Qualified policy plus the unqualified multi-block GDN prefill route.
     pub const fn experimental_multiblock() -> Self {
         Self {
@@ -249,6 +267,8 @@ mod tests {
         let fallback = RocmKernelPolicy::portable_fallback();
         let gdn_fallback = RocmKernelPolicy::gdn_fallback();
         let non_gdn_fallback = RocmKernelPolicy::non_gdn_fallback();
+        let split_q_gate_fallback = RocmKernelPolicy::split_q_gate_fallback();
+        let split_q_gate_only = RocmKernelPolicy::split_q_gate_only();
         let experimental = RocmKernelPolicy::experimental_multiblock();
 
         assert_eq!(
@@ -276,6 +296,22 @@ mod tests {
                 false, false, false, false, false,
             ]
         );
+        assert_eq!(
+            split_q_gate_fallback.accelerated_routes(),
+            [
+                true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+                false, true, true, true, true, true, true, true, true, true, true, true, true,
+                true, true, false,
+            ]
+        );
+        assert_eq!(
+            split_q_gate_only.accelerated_routes(),
+            [
+                false, false, false, false, false, false, false, false, false, false, false, false,
+                false, false, false, false, false, false, false, false, false, false, false, false,
+                false, false, false, false, false, true,
+            ]
+        );
         assert_eq!(experimental.accelerated_routes(), [true; 30]);
 
         for policy in [
@@ -283,6 +319,8 @@ mod tests {
             fallback,
             gdn_fallback,
             non_gdn_fallback,
+            split_q_gate_fallback,
+            split_q_gate_only,
             experimental,
         ] {
             assert!(policy.training_mlp_chunking);

@@ -217,6 +217,8 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
                 "tensor_fallback",
                 "gdn_fallback",
                 "non_gdn_fallback",
+                "split_q_gate_fallback",
+                "split_q_gate_only",
             ):
                 profile_workspace = workspace / profile
                 profile_workspace.mkdir()
@@ -336,6 +338,8 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             "tensor_fallback",
             "gdn_fallback",
             "non_gdn_fallback",
+            "split_q_gate_fallback",
+            "split_q_gate_only",
         ):
             diagnostic = copy.deepcopy(fallback["worker"])
             diagnostic["kernel_policy"] = profile

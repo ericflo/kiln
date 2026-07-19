@@ -42,6 +42,8 @@ KERNEL_PROFILES = (
     "tensor_fallback",
     "gdn_fallback",
     "non_gdn_fallback",
+    "split_q_gate_fallback",
+    "split_q_gate_only",
 )
 
 

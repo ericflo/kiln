@@ -55,6 +55,8 @@ mod rocm {
         NonGdnFallback,
         Qualified,
         PortableFallback,
+        SplitQGateFallback,
+        SplitQGateOnly,
         TensorFallback,
     }
 
@@ -66,9 +68,11 @@ mod rocm {
                 "non_gdn_fallback" => Ok(Self::NonGdnFallback),
                 "qualified" => Ok(Self::Qualified),
                 "portable_fallback" => Ok(Self::PortableFallback),
+                "split_q_gate_fallback" => Ok(Self::SplitQGateFallback),
+                "split_q_gate_only" => Ok(Self::SplitQGateOnly),
                 "tensor_fallback" => Ok(Self::TensorFallback),
                 _ => anyhow::bail!(
-                    "--kernel-profile must be gdn_fallback, model_fallback, non_gdn_fallback, qualified, portable_fallback, or tensor_fallback, got {value}"
+                    "--kernel-profile must be gdn_fallback, model_fallback, non_gdn_fallback, qualified, portable_fallback, split_q_gate_fallback, split_q_gate_only, or tensor_fallback, got {value}"
                 ),
             }
         }
@@ -80,6 +84,8 @@ mod rocm {
                 Self::NonGdnFallback => "non_gdn_fallback",
                 Self::Qualified => "qualified",
                 Self::PortableFallback => "portable_fallback",
+                Self::SplitQGateFallback => "split_q_gate_fallback",
+                Self::SplitQGateOnly => "split_q_gate_only",
                 Self::TensorFallback => "tensor_fallback",
             }
         }
@@ -91,6 +97,8 @@ mod rocm {
                 Self::NonGdnFallback => RocmKernelPolicy::non_gdn_fallback(),
                 Self::Qualified => RocmKernelPolicy::qualified(),
                 Self::PortableFallback => RocmKernelPolicy::portable_fallback(),
+                Self::SplitQGateFallback => RocmKernelPolicy::split_q_gate_fallback(),
+                Self::SplitQGateOnly => RocmKernelPolicy::split_q_gate_only(),
                 Self::TensorFallback => RocmKernelPolicy::qualified(),
             }
         }
@@ -102,6 +110,8 @@ mod rocm {
                 Self::NonGdnFallback => RocmTensorKernelPolicy::qualified(),
                 Self::Qualified => RocmTensorKernelPolicy::qualified(),
                 Self::PortableFallback => RocmTensorKernelPolicy::portable_fallback(),
+                Self::SplitQGateFallback => RocmTensorKernelPolicy::qualified(),
+                Self::SplitQGateOnly => RocmTensorKernelPolicy::qualified(),
                 Self::TensorFallback => RocmTensorKernelPolicy::portable_fallback(),
             }
         }
@@ -1281,6 +1291,28 @@ mod rocm {
             assert_eq!(non_gdn.model_policy(), RocmKernelPolicy::non_gdn_fallback());
             assert_eq!(non_gdn.tensor_policy(), RocmTensorKernelPolicy::qualified());
             assert_eq!(non_gdn.label(), "non_gdn_fallback");
+
+            let split_fallback = KernelProfile::parse("split_q_gate_fallback").unwrap();
+            assert_eq!(
+                split_fallback.model_policy(),
+                RocmKernelPolicy::split_q_gate_fallback()
+            );
+            assert_eq!(
+                split_fallback.tensor_policy(),
+                RocmTensorKernelPolicy::qualified()
+            );
+            assert_eq!(split_fallback.label(), "split_q_gate_fallback");
+
+            let split_only = KernelProfile::parse("split_q_gate_only").unwrap();
+            assert_eq!(
+                split_only.model_policy(),
+                RocmKernelPolicy::split_q_gate_only()
+            );
+            assert_eq!(
+                split_only.tensor_policy(),
+                RocmTensorKernelPolicy::qualified()
+            );
+            assert_eq!(split_only.label(), "split_q_gate_only");
 
             assert!(KernelProfile::parse("individual_switches").is_err());
         }

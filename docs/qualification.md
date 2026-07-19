@@ -873,7 +873,7 @@ python3 scripts/qualification/rocm_hf_layer_attribution.py run \
 ```
 
 `--kernel-profile` is a closed typed choice. `qualified` is the production
-model/tensor policy and remains the default. Three layer-only diagnostic
+model/tensor policy and remains the default. Seven layer-only diagnostic
 profiles preserve the same ROCm device, BF16 weights, paged state, prompt, and
 layer capture:
 
@@ -890,6 +890,10 @@ layer capture:
 - `non_gdn_fallback` is the exact model-policy inverse: it retains the qualified
   GDN/recurrent family, including the default-off multiblock value, declines
   the other 18 model leaves, and retains qualified tensor policy.
+- `split_q_gate_fallback` changes only the split q/gate F32-output projection
+  leaf from the qualified model policy and retains qualified tensor policy.
+- `split_q_gate_only` is its exact inverse: it enables only that model leaf on
+  the portable model policy and retains qualified tensor policy.
 
 Use the source-paired portable profile first to determine whether acceleration
 as a group changes the error curve. If it does, run both mixed profiles: a
@@ -909,6 +913,12 @@ localizes it to the other model routes. As with the broader pair, two matching
 verdicts establish an interaction or non-exclusive cause and must not be forced
 into a single subgroup. These profile names are selectable only by the guarded
 layer-attribution binary and are not server configuration values.
+
+After the GDN subgroup pair localizes the defect to the remaining model leaves,
+run both split q/gate profiles. Correct fallback plus incorrect split-only
+evidence makes that leaf causal. The inverse excludes it. Matching verdicts
+again require reporting an interaction instead of claiming single-route
+causality.
 
 The HF arm uses the pinned PyTorch/Transformers fallback implementation,
 BF16 weights, eager full attention, deterministic algorithms, TF32 disabled,
