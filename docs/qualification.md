@@ -1179,8 +1179,9 @@ first includes a 67-second cold release build. All nine arms stayed at or below
 counters remained zero, and no owned residue remained. Kiln cgroups peaked at
 14,658,228,224, 14,657,458,176, and 14,658,273,280 bytes. This evidence permits
 disabling fused RMSNorm in the qualified profile for a source-bound repair
-candidate. The changed profile must still pass fresh next-token, multi-token,
-serving, throughput, and endurance qualification before release acceptance.
+candidate. The changed profile must still pass a fresh production next-token
+boundary plus multi-token serving, throughput, and endurance qualification
+before release acceptance.
 
 The repaired production `qualified` profile is requalified at
 `qualification/oracle-results/rocm/strix-halo/20260719t050322-rocm-strix-halo-hf-layer-attribution-qualified-rmsnorm-repair-v1.json`
@@ -1200,8 +1201,11 @@ including a 68.615-second cold release build. The HF and Kiln arms peaked at
 OOM, OOM-kill, swap, and thermal-guard counter remained zero. HF and Kiln
 peaked at 59.375 C and 60.375 C, completed all pacing and cooldown intervals,
 and left no process or service residue. The result uses the current 20 GiB
-layer-reference containment contract; its independent 16 GiB next-token
-requalification remains the next gate.
+layer-reference containment contract and closes the production next-token
+boundary. The independent 16 GiB next-token runner is an HF-only reference arm:
+it never starts Kiln or installs a ROCm kernel profile, so rerunning it cannot
+requalify the repaired production composition. Exact multi-token public serving
+parity is the next correctness gate.
 
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain

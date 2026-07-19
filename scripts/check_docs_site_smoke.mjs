@@ -798,6 +798,8 @@ const generatedDocsPages = [
       'current 20 GiB contract',
       '20260719t050322-rocm-strix-halo-hf-layer-attribution-qualified-rmsnorm-repair-v1.json',
       'typed production profile installs the intended repaired composition',
+      'HF-only reference arm',
+      'Exact multi-token public serving parity is the next correctness gate',
       'Missing devices and skipped tests are failures',
       'Vulkan serving baseline',
       'serving-vulkan-baseline-v1.json',
