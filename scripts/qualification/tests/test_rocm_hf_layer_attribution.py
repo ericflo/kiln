@@ -4,6 +4,7 @@ import copy
 import json
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -134,6 +135,30 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             ]
         )
         self.assertTrue(args.capture_layer_last_rows)
+
+    def test_hf_worker_requires_the_pinned_text_only_wrapper_depth(self) -> None:
+        text_type = type("Qwen3_5TextModel", (), {})
+        model_type = type("Qwen3_5ForCausalLM", (), {})
+        text_model = text_type()
+        text_model.config = types.SimpleNamespace(
+            layer_types=[
+                "full_attention" if (index + 1) % 4 == 0 else "linear_attention"
+                for index in range(32)
+            ]
+        )
+        text_model.layers = [object() for _ in range(32)]
+        text_model.embed_tokens = object()
+        text_model.norm = object()
+        model = model_type()
+        model.model = text_model
+
+        names, modules = attribution.hf_worker._layer_capture_modules(model)
+        self.assertEqual(names, attribution._expected_boundary_names())
+        self.assertEqual(len(modules), 34)
+
+        conditional_type = type("Qwen3_5ForConditionalGeneration", (), {})
+        with self.assertRaisesRegex(attribution.hf_worker.OracleError, "CausalLM"):
+            attribution.hf_worker._layer_capture_modules(conditional_type())
 
     def test_worker_recomputes_largest_relative_error_growth(self) -> None:
         marker = worker_marker()

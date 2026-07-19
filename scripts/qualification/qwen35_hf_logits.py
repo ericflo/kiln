@@ -172,6 +172,35 @@ def _validate_paths(model_path: Path, output_path: Path) -> tuple[Path, Path]:
     return model, output
 
 
+def _layer_capture_modules(model: object) -> tuple[list[str], list[object]]:
+    if type(model).__name__ != "Qwen3_5ForCausalLM":
+        raise OracleError(
+            f"layer capture requires Qwen3_5ForCausalLM, got {type(model).__name__}"
+        )
+    try:
+        text_model = model.model
+    except AttributeError as exc:
+        raise OracleError("pinned Qwen3.5 causal LM omits its text model") from exc
+    if type(text_model).__name__ != "Qwen3_5TextModel":
+        raise OracleError(
+            f"layer capture requires Qwen3_5TextModel, got {type(text_model).__name__}"
+        )
+    try:
+        layer_types = list(text_model.config.layer_types)
+        layers = list(text_model.layers)
+        modules = [("embedding", text_model.embed_tokens)]
+        modules.extend(
+            (f"layer_{index:02}_{layer_types[index]}", layer)
+            for index, layer in enumerate(layers)
+        )
+        modules.append(("final_norm", text_model.norm))
+    except (AttributeError, IndexError, TypeError) as exc:
+        raise OracleError("pinned Qwen3.5 text model structure changed") from exc
+    if len(layers) != 32 or len(layer_types) != len(layers):
+        raise OracleError("pinned Qwen3.5 layer inventory changed")
+    return [name for name, _ in modules], [module for _, module in modules]
+
+
 def generate(
     model_path: Path,
     output_path: Path,
@@ -242,21 +271,7 @@ def generate(
     boundary_names: list[str] = []
     handles = []
     if capture_layer_last_rows:
-        try:
-            text_model = model.model.language_model
-            layer_types = list(text_model.config.layer_types)
-            layers = list(text_model.layers)
-        except (AttributeError, TypeError) as exc:
-            raise OracleError("pinned Qwen3.5 text model structure changed") from exc
-        if len(layers) != 32 or len(layer_types) != len(layers):
-            raise OracleError("pinned Qwen3.5 layer inventory changed")
-        modules = [("embedding", text_model.embed_tokens)]
-        modules.extend(
-            (f"layer_{index:02}_{layer_types[index]}", layer)
-            for index, layer in enumerate(layers)
-        )
-        modules.append(("final_norm", text_model.norm))
-        boundary_names = [name for name, _ in modules]
+        boundary_names, modules = _layer_capture_modules(model)
 
         def capture_last_row(_module, _inputs, output):
             if not isinstance(output, torch.Tensor) or output.ndim != 3:
@@ -267,7 +282,7 @@ def generate(
                 )
             captured_rows.append(output[:, -1, :].detach().clone())
 
-        handles = [module.register_forward_hook(capture_last_row) for _, module in modules]
+        handles = [module.register_forward_hook(capture_last_row) for module in modules]
     try:
         with torch.inference_mode():
             logits = model(input_ids=input_ids, use_cache=False).logits[0, -1].float().cpu()
