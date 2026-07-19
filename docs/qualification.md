@@ -883,6 +883,25 @@ execution workspace ignored. A route attribution is sufficient to choose the
 next narrower numerical probe or repair, but it does not satisfy multi-token
 parity, throughput, soak, or final common-tree acceptance.
 
+The current retained Strix Halo result is
+`qualification/oracle-results/rocm/strix-halo/20260719t022838-rocm-strix-halo-hf-layer-attribution-v1.json`,
+executed from clean pushed source `3df1365ea3fd67955e36e640cdaed2f72703cc2d`.
+The embedding rows are bit-identical. Relative RMSE then rises from `0` to
+`0.014871503`, `0.036848969`, and `0.065551177` across linear-attention layers
+0, 1, and 2. Layer 2 is the mechanically selected largest sequential increase,
+with delta `0.028702207`; the following full-attention layer increases relative
+RMSE by only `0.000543160` to `0.066094336`. This localizes the next comparison
+to the pre-norm, recurrent mixer, residual, post-norm, and MLP boundaries inside
+the early linear-attention blocks. It does not yet distinguish a kernel defect
+from expected BF16 implementation drift that later changes the close argmax.
+The final norm has `0.996377129` cosine similarity, `1.08203125` maximum
+absolute error, `0.213972354` mean absolute error, and `0.085119899` relative
+RMSE. The 192.563-second guarded lifecycle included a 68.109-second build; HF
+and Kiln peaked at 9,459,863,552 and 14,658,502,656 cgroup bytes, respectively,
+with zero high, limit, OOM, OOM-kill, or swap events. Both runtime arms peaked
+at 59.875 C, all 4 HF and 28 Kiln pacing events completed, both cooldowns
+settled, and no owned process or service remained.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for
