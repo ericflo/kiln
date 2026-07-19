@@ -1320,6 +1320,32 @@ inventing zero actor counters. Strict-valid driver-v7 and driver-v8 references
 remain comparison-compatible, so the retained vLLM arm does not need an
 expensive rerun merely to exercise either safety repair.
 
+The driver-v9 retry is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t065243-rocm-strix-halo-greedy-c1-direct-rendezvous-actor-exclusion-v1.kiln.json`
+from exact clean pushed source `b9af5eecd35b7c9a64f6a977eaa71bec9b55831b`.
+The measured prompt has the exact 163-token count and
+`sha256:faf24ebb93fc7e75a2e78111b921a32aece716d56d9b67d2907ae251217a8d9e`
+prompt-set hash used by the actor-enabled counterexamples, and it emits
+`To establish a foundation`, matching HF/vLLM at generated token index three.
+Both warmup and measurement route through `direct_streaming`; each reports
+three submitted/executed direct-rendezvous rows, three runner calls, width one,
+zero busy/failure jobs, no runner-call-budget violation, one server `ok`, and
+zero request errors, timeouts, rejections, or active requests at the boundary.
+The batching-engine record is correctly null.
+
+Graphs and prefix caching remain disabled in both sides of this one-field
+comparison. The actor-enabled arm emits `baseline`; changing only
+`batching.mode` to `disabled` emits `foundation`. This causally localizes the
+pinned serving divergence to the batching actor's prefill/decode path and
+excludes the direct streaming/rendezvous/model path under this request. It does
+not yet distinguish actor prefill from actor decode/state assembly, establish
+64-token parity, or qualify concurrency, performance, or endurance. The
+four-token measurement reported 9.396 output tokens/second and 9.292 thermally
+sustainable output tokens/second without request-window pacing; both are
+diagnostic-only. Initial fingerprint, server, and final fingerprint peaks were
+59.5, 60.0, and 59.875 C, every lifecycle and cooldown completed without a
+trip, and no listener, process, or snapshot remained.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for

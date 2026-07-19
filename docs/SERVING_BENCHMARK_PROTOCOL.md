@@ -379,6 +379,25 @@ The direct streaming rendezvous retains its typed `auto` backend policy. This
 isolates actor-owned prefill/decode scheduling before any lower-level direct
 route is disabled.
 
+The strict-valid driver-v9 result is retained at
+`benchmarks/receipts/rocm/strix-halo/20260719t065243-rocm-strix-halo-greedy-c1-direct-rendezvous-actor-exclusion-v1.kiln.json`.
+Its exact 163-token prompt emits `To establish a foundation`, matching HF/vLLM
+where the actor-enabled arm emits `To establish a baseline`. The v9 route
+record proves the batching actor absent and the direct rendezvous available:
+one server `ok`, no request or worker error, three submitted and executed
+decode rows, three runner calls, width one, and no runner-call-budget violation.
+Graphs and prefix caching remain disabled, so the single changed field makes
+the batching actor's prefill/decode path causal for the pinned fourth-token
+divergence and excludes the corresponding direct path.
+
+This four-token c1 result is localization evidence only. It does not separate
+actor prefill from actor decode/state assembly, prove 64-token parity, qualify
+the actor-disabled configuration for production, or support concurrency,
+throughput, latency, or endurance claims. Its 9.40 output tokens/second is
+diagnostic-only. The next correction must repair or disable the divergent actor
+subpath, then repeat source-paired multi-token parity before returning to the
+serving matrix.
+
 ## Running One Profile
 
 ```bash
