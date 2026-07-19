@@ -1231,6 +1231,18 @@ localizing the new first-token divergence with the guarded layer oracle.
 Reference comparison is independent of lifecycle acceptance: a complete
 output comparison must remain visible even when the thermal verdict fails.
 
+The next bounded discriminator changes one typed field rather than repeating
+the 64-token attempt. Launch
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-v1.json`
+with the same pinned prompt and stop after four generated tokens. Its TOML is
+the ordinary Strix Halo comparison profile with only
+`accelerator.rocm_graph_mode = "disabled"`; the repaired `qualified` kernel
+profile, batching policy, memory policy, model, and server settings remain
+unchanged. The expected fourth token is the HF/vLLM token `15787`
+(` foundation`); token `25045` (` baseline`) reproduces the public-serving
+defect outside graph replay. This run is source-bound diagnostic evidence and
+cannot satisfy output parity, performance, graph, soak, or ROCm acceptance.
+
 Serving benchmark driver v8 closes the exposed provenance gap before another
 ROCm request is allowed. It runs both the initial and final model fingerprints
 as start-gated child process groups under the same typed host thermal policy,

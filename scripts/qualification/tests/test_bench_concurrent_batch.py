@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 from contextlib import ExitStack, redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -364,6 +365,40 @@ class FakeServer:
 
 
 class ServingBenchmarkTests(unittest.TestCase):
+    def test_rocm_graph_disabled_discriminator_changes_one_typed_field(self) -> None:
+        config_root = ROOT / "qualification" / "server-config"
+        launch_root = ROOT / "qualification" / "server-launch"
+        base_name = "kiln-rocm-strix-halo-serving-comparison-v1"
+        diagnostic_name = (
+            "kiln-rocm-strix-halo-serving-comparison-graph-disabled-v1"
+        )
+
+        base = tomllib.loads((config_root / f"{base_name}.toml").read_text())
+        diagnostic = tomllib.loads(
+            (config_root / f"{diagnostic_name}.toml").read_text()
+        )
+        self.assertEqual(base["accelerator"]["rocm_graph_mode"], "profile")
+        self.assertEqual(
+            diagnostic["accelerator"]["rocm_graph_mode"], "disabled"
+        )
+        diagnostic["accelerator"]["rocm_graph_mode"] = "profile"
+        self.assertEqual(diagnostic, base)
+
+        for name in (base_name, diagnostic_name):
+            path = launch_root / f"{name}.json"
+            raw = bench.strict_json_loads(path.read_bytes())
+            parsed = bench.validate_server_launch_config_value(
+                raw,
+                config_directory=path.parent,
+                label=name,
+                require_local_paths=False,
+            )
+            self.assertEqual(parsed.record["id"], name)
+            self.assertEqual(
+                parsed.record["command"][-1],
+                f"qualification/server-config/{name}.toml",
+            )
+
     def _run_cli_fixture(
         self,
         fake: FakeServer,

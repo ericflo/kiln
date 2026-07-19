@@ -294,6 +294,19 @@ limit and the guard terminated the owned server. Its 4.26 output tokens/second
 is diagnostic-only. A complete request does not override either an output
 mismatch or a failed thermal lifecycle.
 
+Before repeating a long request, isolate the only known execution-policy
+difference between the correct eager layer oracle and the failed public server.
+The tracked launch contract
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-v1.json`
+is equivalent in operator intent to the ordinary Kiln comparison arm except
+that its source-bound TOML sets
+`accelerator.rocm_graph_mode = "disabled"`. Run only the first four greedy
+tokens for the pinned request. Token index three must be `15787`
+(` foundation`); `25045` (` baseline`) reproduces the serving defect. This is
+a correctness discriminator, not throughput evidence. Do not compare its
+four-token workload to the retained 64-token vLLM receipt, and do not use the
+result to qualify graph execution, concurrency, or endurance.
+
 ## Running One Profile
 
 ```bash
