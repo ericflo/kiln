@@ -721,6 +721,44 @@ class ServingBenchmarkTests(unittest.TestCase):
             "decode-batch-4-actor-cycle-idle-100ms-v1",
         )
 
+    def test_rocm_prefill_amortization_discriminator_changes_one_typed_field(self) -> None:
+        config_root = ROOT / "qualification" / "server-config"
+        launch_root = ROOT / "qualification" / "server-launch"
+        parent_name = (
+            "kiln-rocm-strix-halo-serving-comparison-decode-batch-4-"
+            "actor-cycle-idle-100ms-v1"
+        )
+        candidate_name = (
+            "kiln-rocm-strix-halo-serving-comparison-decode-batch-4-"
+            "actor-cycle-idle-100ms-prefill-layers-32-v1"
+        )
+        parent = self._parse_server_config(config_root / f"{parent_name}.toml")
+        candidate = self._parse_server_config(
+            config_root / f"{candidate_name}.toml"
+        )
+        self.assertEqual(parent["server"]["max_prefill_layers_per_cycle"], 4)
+        self.assertEqual(candidate["server"]["max_prefill_layers_per_cycle"], 32)
+        candidate["server"]["max_prefill_layers_per_cycle"] = 4
+        self.assertEqual(candidate, parent)
+
+        launch_path = launch_root / f"{candidate_name}.json"
+        parsed = bench.validate_server_launch_config_value(
+            bench.strict_json_loads(launch_path.read_bytes()),
+            config_directory=launch_path.parent,
+            label=candidate_name,
+            require_local_paths=False,
+        )
+        self.assertEqual(parsed.record["id"], candidate_name)
+        self.assertEqual(
+            parsed.record["command"][-1],
+            f"qualification/server-config/{candidate_name}.toml",
+        )
+        self.assertEqual(
+            parsed.record["log_directory"],
+            "../../.qualification/kiln-serving/logs/"
+            "decode-batch-4-actor-cycle-idle-100ms-prefill-layers-32-v1",
+        )
+
     def test_model_fingerprint_read_rate_is_bounded(self) -> None:
         for value in (64, 256, 16_384):
             with self.subTest(value=value):
