@@ -784,6 +784,15 @@ kiln serve --config rocm-graph-eager.toml
           shutdown immediately.
         </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          The first clean 256-token route-invariant development soak passed correctness and lifecycle gates but is
+          retained as a performance counterexample: output throughput fell from 13.194 to 7.108 tokens/second
+          versus the immediately prior accepted run. This is not explained by cooling; measured thermal pacing fell
+          from 666.690 to 98.179 seconds and active p50 SCLK rose, while p50 GPU busy fell from 43 to 30 percent.
+          Actor-prefill slow-phase events increased from 612 to 3,548 despite fewer requests. Treat that signature as
+          a layer-yield/dispatch utilization investigation, keep the correct 256-token boundary, and run a
+          same-binary A/B before any final ROCm endurance promotion.
+        </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           For a source-bound soak, use the receipt&rsquo;s accelerator telemetry before attributing a broad slowdown.
           The independent 250 ms sampler resolves one AMD <code>0x1002</code> DRM device and labeled
           <code>amdgpu</code> <code>sclk</code>, <code>PPT</code>, and edge-temperature inputs. Samples at or above

@@ -2216,6 +2216,24 @@ what the machine can deliver at a controlled concurrency or against vLLM. Use
 the serving benchmark protocol for those claims. The 30-minute receipt also
 does not replace the final 24-hour ROCm phase soak.
 
+The first clean pushed-source run after enforcing the route-invariant
+256-token ROCm boundary is retained as
+`20260719t113118927919z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1`.
+It passed the soak's correctness, graph, memory, thermal, and lifecycle gates,
+but its diagnostic rate was only 7.108 output tokens/second: 12,992 tokens over
+1,827.870 measured seconds. The immediately prior accepted 64-token-route run
+delivered 13.194 tokens/second from 23,872 tokens over 1,809.362 seconds. This
+46.1 percent drop is a release-blocking performance counterexample, not a
+failed safety receipt and not a vLLM comparison. Thermal pacing does not explain
+the direction: it fell from 666.690 to 98.179 seconds, while active p50 SCLK
+rose from 2.507 to 2.621 GHz and p50 GPU busy fell from 43 to 30 percent.
+Actor-prefill slow-phase events rose from 612 to 3,548 despite fewer requests;
+per-request prefill residence rose 1.76x and per-token decode residence rose
+2.28x, while per-request actor-queue and synchronization time stayed nearly
+flat. Keep the receipt, investigate the correct-route layer-yield/dispatch cost
+with a same-binary A/B, and do not promote the final ROCm endurance run from
+this result.
+
 Build, runtime setup, and measurement use independent absolute deadlines. The
 exact source-bound build has its own 900-second limit from the checked build
 specification. A successful build starts a fresh 1,200-second runtime setup
