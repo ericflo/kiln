@@ -13,7 +13,7 @@ streaming `POST /v1/chat/completions` API. Kiln `/health` snapshots are taken
 before and after a run when available, outside the timed request path; they do
 not alter request bodies or scheduling.
 
-New measurements use driver version 12. The driver:
+New measurements use driver version 16. The driver:
 
 - fingerprints every weight shard plus the model config, tokenizer, and chat
   template before traffic and rechecks the complete identity after traffic;
@@ -24,6 +24,9 @@ New measurements use driver version 12. The driver:
   `/health.execution_identity.executable_sha256`;
 - uses one of five fixed workload profiles instead of accepting an arbitrary
   prompt/sampling combination;
+- requires a unique operational run ID and a separate stable prompt-set ID,
+  derives every model-visible prompt only from the latter, and proves the
+  recorded prompt hashes still match it;
 - records every request's observed prompt-token count and requires the same
   ordered counts from the reference engine, not only the same prompt text;
 - pins template thinking mode, output length, neutral penalties, seeds,
@@ -56,11 +59,11 @@ New measurements use driver version 12. The driver:
   runtime artifact, and engine-specific live-runtime identity after traffic;
 - hashes the exclusive server log and retains typed launch, readiness,
   shutdown-status, forced-shutdown, and final process-liveness evidence;
-- requires a comparison-compatible v7 through v12 reference receipt with
+- requires a comparison-compatible v7 through v16 reference receipt with
   identical workload, model, policy, prompts, and outputs for exact-output
   cross-engine runs.
 
-A partial v12 receipt is diagnostic counterevidence, never performance
+A partial v16 receipt is diagnostic counterevidence, never performance
 acceptance. Its top-level verdict is `failed`, `completion.completed_run_count`
 names the retained prefix, `completion.expected_run_count` names the complete
 declared matrix, and `completion.failures` explains why execution stopped. Kiln
@@ -70,7 +73,7 @@ model, and runtime-artifact checks are never optional. A process crash or host
 loss can still prevent any file from being written, so raw logs remain required
 for catastrophic failures.
 
-Driver versions 2 through 11 remain accepted only so historical checked-in
+Driver versions 2 through 15 remain accepted only so historical checked-in
 receipts continue to validate. They cannot produce new receipts and do not
 satisfy the current acceptance protocol. The complete field and lifecycle
 reference is in [Serving Benchmark Protocol](docs/SERVING_BENCHMARK_PROTOCOL.md).
@@ -189,7 +192,7 @@ and 128. It stages profile receipts outside the output tree and publishes them
 only after execution, so checked-in output paths cannot dirty the source seen by
 later profiles. The default policy stops after the first failed profile or
 missing receipt, preserves that counterevidence, marks the remaining profiles
-`not_run_after_failure`, and publishes the self-hashing v4 summary last:
+`not_run_after_failure`, and publishes the self-hashing v6 summary last:
 
 ```bash
 python3 scripts/run-serving-benchmark-campaign.py \
@@ -199,7 +202,8 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --model-path ./Qwen3.5-4B \
   --runtime-identity "kiln-git:$(git rev-parse HEAD)" \
   --runtime-artifact ./target/release/kiln \
-  --campaign-id qwen35-4b-rocm-20260713 \
+  --campaign-id qwen35-4b-rocm-kiln-20260713 \
+  --prompt-set-id qwen35-4b-rocm-comparison-v1 \
   --sizes 1,8,16,32,64,128 \
   --repeats 3 \
   --max-tokens 64 \
@@ -216,12 +220,13 @@ shutdown, process residue, OOM, or device error.
 
 Both direct and campaign runs accept
 `--model-fingerprint-read-mib-per-second` in `64..=16384`; the measured default
-is 256. Campaign v5 records the selected value and forwards it to every child.
+is 256. Campaign v6 records the selected value and forwards it to every child.
 This setting limits only the guarded provenance worker. It does not change
 server model loading, request traffic, or timed throughput.
 
-Run vLLM with the same campaign ID, model alias, checkpoint, sizes, limits, and
-SLOs. `--runtime-artifact` must name the immutable launcher/runtime manifest
+Run vLLM with the same prompt-set ID, model alias, checkpoint, sizes, limits,
+and SLOs, but give the campaign attempt a new campaign ID. `--runtime-artifact`
+must name the immutable launcher/runtime manifest
 that fingerprints the installed vLLM, Torch, Transformers, tokenizer, launch
 configuration, and accelerator; a version string alone is not sufficient.
 Generate it with the exact model, limits, and vLLM arguments used by the real
@@ -252,7 +257,8 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --model-path ./Qwen3.5-4B \
   --runtime-identity vllm:VERSION+RUNTIME-CONTENT-SHA256 \
   --runtime-artifact /tmp/vllm-runtime-manifest.json \
-  --campaign-id qwen35-4b-rocm-20260713 \
+  --campaign-id qwen35-4b-rocm-vllm-20260713 \
+  --prompt-set-id qwen35-4b-rocm-comparison-v1 \
   --sizes 1,8,16,32,64,128 \
   --repeats 3 \
   --max-tokens 64 \
@@ -272,8 +278,12 @@ requirements are optional.
 
 An official receipt must not use `--allow-dirty`, disable fixed output, omit
 runtime/model/memory identity, or include failed/zero-token requests in
-throughput. Use a shared run ID for both engines and restart the engine between
-implementations so device-memory baselines are independent.
+throughput. Use a unique `--run-id` for every attempt and the same explicit
+`--prompt-set-id` for comparable engines or implementation arms. The run ID
+owns receipt/log lifecycle identity and never changes a request body. The
+prompt-set ID owns prompt ordering and the model-visible benchmark label; do
+not put a timestamp, engine, candidate name, or retry number into it. Restart
+the engine between implementations so device-memory baselines are independent.
 Authenticated endpoints must opt in with `--api-key-env VARIABLE` (preferred)
 or `--api-key VALUE`. The driver never inherits `OPENAI_API_KEY` implicitly and
 never writes the credential or environment-variable name into a receipt.
@@ -320,11 +330,14 @@ profiles, prompt shape, memory, and structured partial-run checks. V4 added
 owned lifecycle and post-exit evidence; v5 added post-provenance pre-launch
 cooldown; v7 added ordered per-request output evidence; v8 added guarded
 initial/final model fingerprints; v9 added route-aware request accounting; and
-v10 added closed ROCm graph execution evidence. V11 adds typed pre/post
+v10 added closed ROCm graph execution evidence. V11 added typed pre/post
 idle-boundary cooldown evidence for every hard-limit-only row and requires both
 waits to match the content-hashed policy and fit inside phase wall time.
-Historical v2 through v10 validation is compatibility, not current performance
-evidence.
+V12 bounded model-fingerprint I/O; v13 accounted cooperative actor idle; v14
+closed multi-row ROCm graph fallback accounting; v15 retained request-local
+terminal performance; and v16 separated unique lifecycle identity from stable,
+strictly verified prompt identity. Historical v2 through v15 validation is
+compatibility, not current performance evidence.
 
 ## Historical CUDA setup
 

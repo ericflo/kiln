@@ -958,6 +958,8 @@ class ServingBenchmarkTests(unittest.TestCase):
                     str(model_path),
                     "--run-id",
                     "cli-fixture-v1",
+                    "--prompt-set-id",
+                    "cli-prompt-set-v1",
                     "--sizes",
                     "1",
                     "--max-tokens",
@@ -989,6 +991,151 @@ class ServingBenchmarkTests(unittest.TestCase):
         expected = sorted(bench.PROMPT_MARKERS)
         for row in marker_rows:
             self.assertEqual(sorted(row.split(" | ")), expected)
+
+    def test_prompt_set_identity_is_stable_across_unique_run_ids(self) -> None:
+        left = bench.parse_args(
+            [
+                "--run-id",
+                "candidate-a-v1",
+                "--prompt-set-id",
+                "shared-prompts-v1",
+                "--sizes",
+                "8",
+            ]
+        )
+        right = bench.parse_args(
+            [
+                "--run-id",
+                "candidate-b-v1",
+                "--prompt-set-id",
+                "shared-prompts-v1",
+                "--sizes",
+                "8",
+            ]
+        )
+        phase = "measure-c008-r000"
+        left_prompts = [
+            bench.deterministic_prompt(left.prompt_set_id, phase, index)
+            for index in range(8)
+        ]
+        right_prompts = [
+            bench.deterministic_prompt(right.prompt_set_id, phase, index)
+            for index in range(8)
+        ]
+        self.assertNotEqual(left.run_id, right.run_id)
+        self.assertEqual(left_prompts, right_prompts)
+        self.assertEqual(
+            bench.deterministic_prompt_set_sha256(
+                left.prompt_set_id, phase, 8, "greedy-short"
+            ),
+            bench.deterministic_prompt_set_sha256(
+                right.prompt_set_id, phase, 8, "greedy-short"
+            ),
+        )
+        left_workload = bench.workload_contract(left, [8])
+        right_workload = bench.workload_contract(right, [8])
+        self.assertNotEqual(
+            bench.canonical_sha256(left_workload),
+            bench.canonical_sha256(right_workload),
+        )
+        self.assertEqual(
+            bench.workload_fingerprint(left_workload),
+            bench.workload_fingerprint(right_workload),
+        )
+        self.assertNotEqual(
+            bench.owned_server_log_path(Path("logs"), left.run_id),
+            bench.owned_server_log_path(Path("logs"), right.run_id),
+        )
+
+    def test_unique_run_ids_emit_identical_prompt_and_token_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            left_root = root / "left"
+            right_root = root / "right"
+            left_root.mkdir()
+            right_root.mkdir()
+            with FakeServer() as left_server:
+                left_code, left_path = self._run_cli_fixture(
+                    left_server,
+                    left_root,
+                    extra_args=[
+                        "--run-id",
+                        "candidate-left-v1",
+                        "--prompt-set-id",
+                        "shared-evidence-v1",
+                    ],
+                )
+                left_prompts = [
+                    body["messages"][0]["content"] for body in left_server.state.bodies
+                ]
+            with FakeServer() as right_server:
+                right_code, right_path = self._run_cli_fixture(
+                    right_server,
+                    right_root,
+                    extra_args=[
+                        "--run-id",
+                        "candidate-right-v1",
+                        "--prompt-set-id",
+                        "shared-evidence-v1",
+                    ],
+                )
+                right_prompts = [
+                    body["messages"][0]["content"] for body in right_server.state.bodies
+                ]
+            left = bench.strict_json_loads(left_path.read_bytes())
+            right = bench.strict_json_loads(right_path.read_bytes())
+
+        self.assertEqual((left_code, right_code), (0, 0))
+        self.assertNotEqual(
+            left["workload"]["run_id"], right["workload"]["run_id"]
+        )
+        self.assertEqual(left_prompts, right_prompts)
+        self.assertEqual(
+            left["runs"][0]["prompt_set_sha256"],
+            right["runs"][0]["prompt_set_sha256"],
+        )
+        self.assertEqual(
+            left["runs"][0]["prompt_token_counts"],
+            right["runs"][0]["prompt_token_counts"],
+        )
+        self.assertEqual(left["workload_fingerprint"], right["workload_fingerprint"])
+
+    def test_prompt_set_identity_alone_changes_prompts(self) -> None:
+        left = bench.parse_args(
+            ["--run-id", "same-run-v1", "--prompt-set-id", "prompts-a-v1"]
+        )
+        right = bench.parse_args(
+            ["--run-id", "same-run-v1", "--prompt-set-id", "prompts-b-v1"]
+        )
+        self.assertEqual(left.run_id, right.run_id)
+        self.assertNotEqual(
+            bench.deterministic_prompt(left.prompt_set_id, "phase", 0),
+            bench.deterministic_prompt(right.prompt_set_id, "phase", 0),
+        )
+
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            bench.parse_args(["--prompt-set-id", "not portable"])
+
+    def test_measured_cli_requires_explicit_prompt_set_identity(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            return_code = bench.main(["--unsafe-no-host-thermal-guard"])
+        self.assertEqual(return_code, 2)
+        self.assertIn("explicit --run-id and --prompt-set-id", stderr.getvalue())
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            return_code = bench.main(
+                [
+                    "--unsafe-no-host-thermal-guard",
+                    "--run-id",
+                    "coupled-identity-v1",
+                    "--prompt-set-id",
+                    "coupled-identity-v1",
+                ]
+            )
+        self.assertEqual(return_code, 2)
+        self.assertIn("must be distinct", stderr.getvalue())
 
     def test_fixed_workload_profiles_pin_sampling_and_prompt_shapes(self) -> None:
         expected = {
@@ -1057,6 +1204,8 @@ class ServingBenchmarkTests(unittest.TestCase):
                     "test-runtime",
                     "--run-id",
                     "fixture-v1",
+                    "--prompt-set-id",
+                    "fixture-prompts-v1",
                     "--sizes",
                     "4",
                     "--max-tokens",
@@ -1126,6 +1275,8 @@ class ServingBenchmarkTests(unittest.TestCase):
                     "test-runtime",
                     "--run-id",
                     "direct-fixture-v1",
+                    "--prompt-set-id",
+                    "direct-fixture-prompts-v1",
                     "--sizes",
                     "1",
                     "--max-tokens",
@@ -2185,6 +2336,7 @@ class ServingBenchmarkTests(unittest.TestCase):
                         "--runtime-identity=test-vllm-runtime",
                         f"--runtime-artifact={runtime_artifact}",
                         "--run-id=owned-startup-failure-v1",
+                        "--prompt-set-id=owned-startup-prompts-v1",
                         "--sizes=1",
                         "--max-tokens=1",
                         "--warmup-requests=0",
@@ -2217,7 +2369,10 @@ class ServingBenchmarkTests(unittest.TestCase):
             return_code, output = self._run_cli_fixture(fake, directory)
             receipt = bench.strict_json_loads(output.read_bytes())
             self.assertEqual(bench.main(["--validate-receipt", str(output)]), 0)
-            self.assertEqual(receipt["driver_version"], "15")
+            self.assertEqual(receipt["driver_version"], "16")
+            self.assertEqual(
+                receipt["workload"]["prompt_set_id"], "cli-prompt-set-v1"
+            )
             run = receipt["runs"][0]
             self.assertEqual(len(run["request_performance"]), 1)
             self.assertEqual(
@@ -2248,7 +2403,62 @@ class ServingBenchmarkTests(unittest.TestCase):
                 256,
             )
 
-            driver_v14 = json.loads(json.dumps(receipt))
+            stale_identity = json.loads(json.dumps(receipt))
+            stale_identity["workload"]["prompt_set_id"] = "stale-prompts-v1"
+            stale_identity["workload_fingerprint"] = bench.workload_fingerprint(
+                stale_identity["workload"]
+            )
+            stale_identity.pop("receipt_sha256")
+            stale_identity["receipt_sha256"] = bench.canonical_sha256(stale_identity)
+            with self.assertRaisesRegex(bench.BenchmarkError, "stale"):
+                bench.validate_benchmark_receipt(stale_identity)
+
+            missing_identity = json.loads(json.dumps(receipt))
+            missing_identity["workload"].pop("prompt_set_id")
+            missing_identity.pop("receipt_sha256")
+            missing_identity["receipt_sha256"] = bench.canonical_sha256(
+                missing_identity
+            )
+            with self.assertRaisesRegex(bench.BenchmarkError, "keys"):
+                bench.validate_benchmark_receipt(missing_identity)
+
+            malformed_identity = json.loads(json.dumps(receipt))
+            malformed_identity["workload"]["prompt_set_id"] = "not portable"
+            malformed_identity["workload_fingerprint"] = bench.workload_fingerprint(
+                malformed_identity["workload"]
+            )
+            malformed_identity.pop("receipt_sha256")
+            malformed_identity["receipt_sha256"] = bench.canonical_sha256(
+                malformed_identity
+            )
+            with self.assertRaisesRegex(bench.BenchmarkError, "portable identifier"):
+                bench.validate_benchmark_receipt(malformed_identity)
+
+            coupled_identity = json.loads(json.dumps(receipt))
+            coupled_identity["workload"]["prompt_set_id"] = coupled_identity[
+                "workload"
+            ]["run_id"]
+            coupled_identity["workload_fingerprint"] = bench.workload_fingerprint(
+                coupled_identity["workload"]
+            )
+            coupled_identity.pop("receipt_sha256")
+            coupled_identity["receipt_sha256"] = bench.canonical_sha256(
+                coupled_identity
+            )
+            with self.assertRaisesRegex(bench.BenchmarkError, "must be distinct"):
+                bench.validate_benchmark_receipt(coupled_identity)
+
+            driver_v15 = json.loads(json.dumps(receipt))
+            driver_v15["driver_version"] = "15"
+            driver_v15["workload"].pop("prompt_set_id")
+            driver_v15["workload_fingerprint"] = bench.canonical_sha256(
+                driver_v15["workload"]
+            )
+            driver_v15.pop("receipt_sha256")
+            driver_v15["receipt_sha256"] = bench.canonical_sha256(driver_v15)
+            bench.validate_benchmark_receipt(driver_v15)
+
+            driver_v14 = json.loads(json.dumps(driver_v15))
             driver_v14["driver_version"] = "14"
             for row in [driver_v14["warmup"], *driver_v14["runs"]]:
                 if row is None:

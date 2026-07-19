@@ -19,7 +19,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "scripts" / "bench-concurrent-batch.py"
-SCHEMA = "kiln.serving-benchmark-campaign.v5"
+SCHEMA = "kiln.serving-benchmark-campaign.v6"
 DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 256
 PROFILES = (
     "greedy-short",
@@ -91,6 +91,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--runtime-identity", required=True)
     parser.add_argument("--runtime-artifact", type=Path, required=True)
     parser.add_argument("--campaign-id", required=True)
+    parser.add_argument(
+        "--prompt-set-id",
+        required=True,
+        help="stable model-visible identity shared by comparable campaigns",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument(
         "--reference-dir",
@@ -134,6 +139,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}", args.campaign_id) is None:
         parser.error("campaign-id must be 3..64 portable identifier characters")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}", args.prompt_set_id) is None:
+        parser.error("prompt-set-id must be 3..64 portable identifier characters")
     if args.engine == "vllm" and args.reference_dir is None:
         parser.error("--reference-dir is required for a vLLM campaign")
     if args.engine == "kiln" and args.reference_dir is not None:
@@ -173,7 +180,9 @@ def benchmark_command(
         "--runtime-artifact",
         str(args.runtime_artifact),
         "--run-id",
-        f"{args.campaign_id}-{profile}",
+        f"{args.campaign_id}-{args.engine}-{profile}",
+        "--prompt-set-id",
+        f"{args.prompt_set_id}-{profile}",
         "--workload-profile",
         profile,
         "--sizes",
@@ -233,6 +242,7 @@ def build_summary(
         "schema": SCHEMA,
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "campaign_id": args.campaign_id,
+        "prompt_set_id": args.prompt_set_id,
         "engine": args.engine,
         "output_evidence": args.output_evidence,
         "model_fingerprint_read_mib_per_second": (

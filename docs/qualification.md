@@ -1598,7 +1598,7 @@ recorded in the hardening ledger. Do not retry that unbounded path.
 
 Serving driver v12 adds the typed
 `--model-fingerprint-read-mib-per-second` bound, accepts `64..=16384`, and
-defaults to 256. Campaign v5 records and forwards the same value. One monotonic
+defaults to 256. Campaign v5 and later record and forward the same value. One monotonic
 cumulative schedule covers both integrity passes and every input, including the
 second full content read that detects same-length concurrent mutation; an 8 MiB
 read can be followed by sleeps of at most 25 ms. The v2 fingerprint thermal
@@ -1784,6 +1784,27 @@ as a candidate correctness and thermal receipt but incomparable to the prior
 overwrite the earlier external server log. The benchmark protocol must first
 separate stable prompt-set identity from unique run/artifact identity and bind
 both into strict validation.
+
+Serving benchmark driver v16 implements that repair without changing the
+prompt template. Every measured invocation must now provide both a unique
+`--run-id` and an explicit stable `--prompt-set-id`. Only the prompt-set ID is
+used for marker ordering and the model-visible `Benchmark run:` value, so using
+`rocm-strix-halo-request-phase-attribution-v15-c8-greedy-short` as the new
+prompt-set ID reconstructs the v15 baseline prompts byte for byte while a new
+run ID selects a collision-free receipt and server log. The v16 validator
+reconstructs the expected prompt-set hash for warmup and every measured row;
+editing the identity and recomputing both receipt hashes still fails as stale
+evidence.
+
+For v16, `workload_fingerprint` covers the entire comparable contract except
+the operational run ID. It still covers prompt-set identity, profile, prompt
+shape, sampling, seeds, concurrency, repeats, output length, template mode,
+arrival policy, SLOs, and memory ceiling. The canonical receipt hash covers
+both identities. This permits separate A/B and Kiln/vLLM lifecycle artifacts
+without weakening workload equality. Historical v2-v15 receipts continue to
+validate with their original exact-workload fingerprint rule and schemas. The
+KV-scatter candidate must be rerun from clean pushed source with the baseline
+prompt-set ID before its performance disposition can change.
 
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading

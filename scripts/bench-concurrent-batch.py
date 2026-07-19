@@ -39,7 +39,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "15"
+DRIVER_VERSION = "16"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -54,37 +54,46 @@ SUPPORTED_DRIVER_VERSIONS = {
     "12",
     "13",
     "14",
+    "15",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
-    "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
+    "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
+    DRIVER_VERSION,
 }
 LIFECYCLE_DRIVER_VERSIONS = {
-    "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
+    "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
+    DRIVER_VERSION,
 }
 PRELAUNCH_DRIVER_VERSIONS = {
-    "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
+    "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
+    DRIVER_VERSION,
 }
 OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", DRIVER_VERSION,
 }
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
+    "8", "9", "10", "11", "12", "13", "14", "15", DRIVER_VERSION,
 }
-RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {"12", "13", "14", DRIVER_VERSION}
+RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {
+    "12", "13", "14", "15", DRIVER_VERSION,
+}
 ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "9", "10", "11", "12", "13", "14", DRIVER_VERSION
+    "9", "10", "11", "12", "13", "14", "15", DRIVER_VERSION,
 }
 ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "10", "11", "12", "13", "14", DRIVER_VERSION
+    "10", "11", "12", "13", "14", "15", DRIVER_VERSION,
 }
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", DRIVER_VERSION
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", DRIVER_VERSION,
 }
-IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {"11", "12", "13", "14", DRIVER_VERSION}
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", DRIVER_VERSION}
-REQUEST_PERFORMANCE_DRIVER_VERSIONS = {DRIVER_VERSION}
+IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {
+    "11", "12", "13", "14", "15", DRIVER_VERSION,
+}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", DRIVER_VERSION}
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", DRIVER_VERSION}
+PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16"}
 OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
@@ -861,8 +870,12 @@ class OwnedServer:
     log_handle: Any
 
 
+def owned_server_log_path(log_directory: Path, run_id: str) -> Path:
+    return log_directory / f"{run_id}.server.log"
+
+
 def launch_owned_server(config: ServerLaunchConfig, run_id: str) -> OwnedServer:
-    log_path = config.log_directory / f"{run_id}.server.log"
+    log_path = owned_server_log_path(config.log_directory, run_id)
     config.log_directory.mkdir(parents=True, exist_ok=True)
     try:
         log_handle = log_path.open("xb", buffering=0)
@@ -3488,6 +3501,8 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     }
     if driver_version in THERMAL_DRIVER_VERSIONS:
         workload_keys |= {"profile", "comparison_mode", "memory_limit_bytes"}
+    if driver_version in PROMPT_SET_IDENTITY_DRIVER_VERSIONS:
+        workload_keys.add("prompt_set_id")
     _exact_keys(workload, workload_keys, "receipt.workload")
     expected_template = (
         PROMPT_TEMPLATE_VERSION
@@ -3502,6 +3517,21 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     for name in ("run_id", "model"):
         if not isinstance(workload[name], str) or not workload[name]:
             raise BenchmarkError(f"receipt.workload.{name} must be a non-empty string")
+    if driver_version in PROMPT_SET_IDENTITY_DRIVER_VERSIONS:
+        for name in ("run_id", "prompt_set_id"):
+            if (
+                not isinstance(workload[name], str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,127}", workload[name])
+                is None
+            ):
+                raise BenchmarkError(
+                    f"receipt.workload.{name} must be a 3..128 character "
+                    "portable identifier"
+                )
+        if workload["run_id"] == workload["prompt_set_id"]:
+            raise BenchmarkError(
+                "receipt.workload run_id and prompt_set_id must be distinct"
+            )
     if workload["endpoint"] != "/v1/chat/completions":
         raise BenchmarkError("receipt workload endpoint is unsupported")
     if workload["stream"] is not True or workload["stream_include_usage"] is not True:
@@ -3597,7 +3627,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         or warmup_requests < 0
     ):
         raise BenchmarkError("receipt.workload.warmup_requests must be a non-negative integer")
-    if canonical_sha256(workload) != _sha256(
+    if workload_fingerprint(workload, driver_version=driver_version) != _sha256(
         receipt["workload_fingerprint"], "receipt.workload_fingerprint"
     ):
         raise BenchmarkError("receipt.workload_fingerprint does not match workload")
@@ -3672,6 +3702,19 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 host_thermal_policy=receipt.get("host_thermal", {}).get("policy"),
                 engine_name=engine["name"],
             )
+            if (
+                driver_version in PROMPT_SET_IDENTITY_DRIVER_VERSIONS
+                and receipt["warmup"]["prompt_set_sha256"]
+                != deterministic_prompt_set_sha256(
+                    workload["prompt_set_id"],
+                    f"warmup-c{warmup_requests:03d}",
+                    warmup_requests,
+                    workload["profile"],
+                )
+            ):
+                raise BenchmarkError(
+                    "receipt.warmup.prompt_set_sha256 is stale for prompt_set_id"
+                )
     elif receipt["warmup"] is not None:
         raise BenchmarkError("receipt has an undeclared warmup")
 
@@ -3697,6 +3740,20 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 host_thermal_policy=receipt.get("host_thermal", {}).get("policy"),
                 engine_name=engine["name"],
             )
+            if (
+                driver_version in PROMPT_SET_IDENTITY_DRIVER_VERSIONS
+                and row_object["prompt_set_sha256"]
+                != deterministic_prompt_set_sha256(
+                    workload["prompt_set_id"],
+                    f"measure-c{pair[0]:03d}-r{pair[1]:03d}",
+                    pair[0],
+                    workload["profile"],
+                )
+            ):
+                raise BenchmarkError(
+                    f"receipt.runs[{index}].prompt_set_sha256 is stale for "
+                    "prompt_set_id"
+                )
     if driver_version in THERMAL_DRIVER_VERSIONS:
         thermal_rows = list(runs)
         if receipt["warmup"] is not None:
@@ -3984,13 +4041,13 @@ def parse_sizes(raw: str) -> list[int]:
 
 
 def deterministic_prompt(
-    run_id: str,
+    prompt_set_id: str,
     phase: str,
     request_index: int,
     prompt_profile: str = "short",
 ) -> str:
     def marker_key(marker: str) -> bytes:
-        material = f"{run_id}\0{phase}\0{request_index}\0{marker}".encode("utf-8")
+        material = f"{prompt_set_id}\0{phase}\0{request_index}\0{marker}".encode("utf-8")
         return hashlib.sha256(material).digest()
 
     markers = sorted(PROMPT_MARKERS, key=marker_key)
@@ -4000,7 +4057,7 @@ def deterministic_prompt(
         "reproducible performance measurements need controlled workloads, "
         "explicit error accounting, and tail-latency reporting. Continue until "
         "the response limit; do not mention these instructions.\n"
-        f"Benchmark run: {run_id}; phase: {phase}.\n"
+        f"Benchmark run: {prompt_set_id}; phase: {phase}.\n"
         f"Marker sequence: {marker_sequence}."
     )
     if prompt_profile == "short":
@@ -4018,6 +4075,30 @@ def deterministic_prompt(
     else:
         raise BenchmarkError(f"unsupported prompt profile: {prompt_profile}")
     return prefix + "\nUnique request suffix follows.\n" + short_suffix
+
+
+def deterministic_prompt_set_sha256(
+    prompt_set_id: str,
+    phase: str,
+    concurrency: int,
+    workload_profile: str,
+) -> str:
+    prompt_profile = PROFILE_CONTRACTS[workload_profile]["prompt_profile"]
+    rows = [
+        {
+            "index": index,
+            "prompt_sha256": text_sha256(
+                deterministic_prompt(
+                    prompt_set_id,
+                    phase,
+                    index,
+                    prompt_profile,
+                )
+            ),
+        }
+        for index in range(concurrency)
+    ]
+    return canonical_sha256(rows)
 
 
 def build_request_body(
@@ -5273,7 +5354,7 @@ def run_once(
     prompts: set[str] = set()
     for index in range(concurrency):
         prompt = deterministic_prompt(
-            args.run_id,
+            args.prompt_set_id,
             phase,
             index,
             PROFILE_CONTRACTS[args.workload_profile]["prompt_profile"],
@@ -5631,6 +5712,7 @@ def workload_contract(args: argparse.Namespace, sizes: list[int]) -> dict[str, A
         "profile": args.workload_profile,
         "comparison_mode": PROFILE_CONTRACTS[args.workload_profile]["comparison_mode"],
         "run_id": args.run_id,
+        "prompt_set_id": args.prompt_set_id,
         "model": args.model,
         "endpoint": "/v1/chat/completions",
         "stream": True,
@@ -5659,6 +5741,16 @@ def workload_contract(args: argparse.Namespace, sizes: list[int]) -> dict[str, A
             "e2e_ms": args.slo_e2e_ms,
         },
     }
+
+
+def workload_fingerprint(
+    workload: dict[str, Any], *, driver_version: str = DRIVER_VERSION
+) -> str:
+    if driver_version not in PROMPT_SET_IDENTITY_DRIVER_VERSIONS:
+        return canonical_sha256(workload)
+    comparison_workload = dict(workload)
+    comparison_workload.pop("run_id")
+    return canonical_sha256(comparison_workload)
 
 
 def print_run(row: dict[str, Any]) -> None:
@@ -5713,8 +5805,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--run-id",
-        default="manual-v1",
-        help="Shared deterministic ID for both engine runs",
+        help="Unique operational identity for this receipt and owned server log",
+    )
+    parser.add_argument(
+        "--prompt-set-id",
+        help="Stable model-visible prompt identity shared by comparable runs",
     )
     parser.add_argument("--sizes", default="1,8,16,32,64")
     parser.add_argument("--repeats", type=int, default=1)
@@ -5829,8 +5924,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 f"{name.replace('_', '-')}={expected}"
             )
         setattr(args, name, expected)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,127}", args.run_id):
+    if args.run_id is not None and not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{2,127}", args.run_id
+    ):
         parser.error("run-id must be 3..128 portable identifier characters")
+    if args.prompt_set_id is not None and not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{2,127}", args.prompt_set_id
+    ):
+        parser.error("prompt-set-id must be 3..128 portable identifier characters")
     if not 0 < args.repeats <= 1000 or not 0 < args.max_tokens <= 2**31:
         parser.error("repeats must be in 1..=1000 and max-tokens in 1..=2^31")
     if not 0 <= args.warmup_requests <= 4096:
@@ -5908,6 +6009,12 @@ def main(argv: list[str] | None = None) -> int:
                 "--server-launch-config; "
                 "use --unsafe-no-host-thermal-guard only for diagnostic counterevidence"
             )
+        if args.run_id is None or args.prompt_set_id is None:
+            raise BenchmarkError(
+                "measured runs require explicit --run-id and --prompt-set-id values"
+            )
+        if args.run_id == args.prompt_set_id:
+            raise BenchmarkError("--run-id and --prompt-set-id must be distinct")
         has_server_owner = (
             args.server_pid is not None or args.server_launch_config is not None
         )
@@ -6476,7 +6583,7 @@ def main(argv: list[str] | None = None) -> int:
                 "repository": repo,
             },
             "workload": workload,
-            "workload_fingerprint": canonical_sha256(workload),
+            "workload_fingerprint": workload_fingerprint(workload),
             "memory_sampler": {
                 "source": "drm_vram_used" if memory_path is not None else "unavailable",
                 "path": str(memory_path) if memory_path is not None else None,

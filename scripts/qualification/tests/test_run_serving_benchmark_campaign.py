@@ -37,6 +37,8 @@ def required_args(directory: Path, engine: str = "kiln") -> list[str]:
         str(directory / "runtime"),
         "--campaign-id",
         "fixture-v1",
+        "--prompt-set-id",
+        "shared-prompts-v1",
         "--out-dir",
         str(directory / "out"),
         "--memory-path",
@@ -79,6 +81,14 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             )
         self.assertEqual(command[command.index("--workload-profile") + 1], "mixed")
         self.assertEqual(
+            command[command.index("--run-id") + 1],
+            "fixture-v1-vllm-mixed",
+        )
+        self.assertEqual(
+            command[command.index("--prompt-set-id") + 1],
+            "shared-prompts-v1-mixed",
+        )
+        self.assertEqual(
             command[command.index("--reference-receipt") + 1],
             str(root / "kiln" / "mixed.kiln.json"),
         )
@@ -95,6 +105,27 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
                 command.index("--model-fingerprint-read-mib-per-second") + 1
             ],
             "256",
+        )
+
+    def test_campaigns_keep_prompt_identity_stable_and_run_identity_unique(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            kiln_args = campaign.parse_args(required_args(root, "kiln"))
+            vllm_args = campaign.parse_args(required_args(root, "vllm"))
+            kiln_command = campaign.benchmark_command(
+                kiln_args, "greedy-short", root / "kiln.json"
+            )
+            vllm_command = campaign.benchmark_command(
+                vllm_args, "greedy-short", root / "vllm.json"
+            )
+
+        self.assertNotEqual(
+            kiln_command[kiln_command.index("--run-id") + 1],
+            vllm_command[vllm_command.index("--run-id") + 1],
+        )
+        self.assertEqual(
+            kiln_command[kiln_command.index("--prompt-set-id") + 1],
+            vllm_command[vllm_command.index("--prompt-set-id") + 1],
         )
 
     def test_campaign_runs_every_profile_and_self_hashes_summary(self) -> None:
@@ -124,6 +155,7 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             )
             self.assertEqual(summary["verdict"], "passed")
             self.assertEqual(summary["schema"], campaign.SCHEMA)
+            self.assertEqual(summary["prompt_set_id"], "shared-prompts-v1")
             self.assertEqual(summary["execution_policy"], "fail_fast")
             self.assertEqual(
                 summary["model_fingerprint_read_mib_per_second"], 256

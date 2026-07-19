@@ -55,7 +55,7 @@ argv field in its closed environment. Receipt schema
 `kiln.serving-model-fingerprint-thermal.v2` records it as
 `host_thermal.model_fingerprint.read_mib_per_second` beside the exact worker
 implementation and Python hashes plus initial/final thermal lifecycles.
-Campaign v5 records and forwards the same value to every profile. The setting
+Campaign v6 records and forwards the same value to every profile. The setting
 applies only to provenance reads; it cannot pace server startup or inference
 and is outside every request-timing window. Standalone `model_fingerprint.py`
 remains unlimited when its optional `--max-read-mib-per-second` is omitted.
@@ -246,7 +246,35 @@ latency, request throughput, output-token throughput, SLO goodput, dispatch
 spread, prompt/output hashes, DRM memory, failures, and Kiln server-route
 diagnostics.
 
-Driver v7 through v15 retain one ordered `output_evidence` row for every successful
+### Run and prompt identity
+
+Driver v16 separates two identities that earlier receipts coupled:
+
+- `workload.run_id` is unique to one execution. It selects the owned server-log
+  path and distinguishes the receipt, candidate, engine, and retry. It is never
+  included in a request body or prompt hash.
+- `workload.prompt_set_id` is stable across runs intended for comparison. It
+  seeds marker ordering and replaces the old run-ID value in the unchanged
+  model-visible `Benchmark run:` line. Use the old run ID as this value when a
+  v16 arm must reproduce a v15 prompt byte for byte.
+
+Both are required 3-to-128-character portable identifiers for measured runs,
+and their values must differ; there is no fallback from one to the other.
+Distinct run IDs with one prompt-set ID produce identical prompt text and
+prompt-set hashes. Changing only the
+prompt-set ID changes the prompts. Strict validation reconstructs every warmup
+and measured prompt hash from the recorded prompt-set ID, phase, row width, and
+profile, rejecting missing, malformed, or stale identity even when the receipt
+self-hash has been recomputed.
+
+The v16 `workload_fingerprint` hashes the complete model-visible and scheduling
+contract except `run_id`; `prompt_set_id` remains included. The receipt's
+canonical self-hash still covers `run_id`. Consequently reference comparison
+accepts unique lifecycle identities while rejecting any prompt, sampling,
+shape, seed, model alias, SLO, or memory-limit drift. V2-v15 validators retain
+their original exact-workload fingerprint semantics.
+
+Driver v7 through v16 retain one ordered `output_evidence` row for every successful
 request. Hash-only evidence is the default and includes the combined semantic
 output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
 tokens, and finish reason. The validator requires these rows to cover exactly
@@ -664,9 +692,10 @@ resumption is causal:
 
 The control launches the production-v2 TOML. The other three TOMLs differ
 from it in exactly that one typed field, enforced by a qualification-tooling
-test. Their separate log directories allow every arm to reuse one `--run-id`;
-because the run ID seeds prompt construction, this makes request bodies and
-sampling seeds identical across arms. Run them serially from one clean pushed
+test. The historical driver-v10 arms reused one run ID because that version
+coupled prompt and log identity. New v16 arms use a distinct `--run-id` per arm
+and one shared `--prompt-set-id`, making request bodies and sampling seeds
+identical without risking a log collision. Run them serially from one clean pushed
 source and one immutable runtime artifact with the same model fingerprint,
 `mixed` profile, concurrency rows, output length, thermal policy, and memory
 limit.
@@ -851,7 +880,8 @@ python3 scripts/bench-concurrent-batch.py \
   --model Qwen3.5-4B \
   --model-path /absolute/path/to/Qwen3.5-4B \
   --runtime-artifact target/release/kiln \
-  --run-id rocm-greedy-short-v1 \
+  --run-id rocm-greedy-short-kiln-attempt-001 \
+  --prompt-set-id rocm-greedy-short-comparison-v1 \
   --workload-profile greedy-short \
   --sizes 1,8,16,32,64,128 \
   --repeats 3 \
@@ -893,8 +923,11 @@ an output directory inside the repository cannot make later profiles reject the
 source as dirty. After execution, every staged receipt is published through an
 atomic rename and the self-hashing campaign summary is published last.
 
-Campaign summary v5 records the selected output-evidence mode and forwards it
-unchanged to every profile. It also records `execution_policy`, and every
+Campaign summary v6 records the campaign's stable prompt-set base and selected
+output-evidence mode. Each child receives an engine-qualified unique run ID and
+a profile-qualified prompt-set ID; Kiln and vLLM children for the same profile
+therefore share prompts but never a log identity. It also records
+`execution_policy`, and every
 expected profile has a closed `status`: `completed` or
 `not_run_after_failure`. A completed row records its exit code and receipt hash;
 a skipped row records the earlier `blocked_by_profile` and has null exit and
@@ -918,7 +951,8 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --model-path /absolute/path/to/Qwen3.5-4B \
   --runtime-identity kiln-git:$(git rev-parse HEAD) \
   --runtime-artifact target/release/kiln \
-  --campaign-id rocm-qualified-v1 \
+  --campaign-id rocm-qualified-kiln-attempt-001 \
+  --prompt-set-id rocm-qualified-comparison-v1 \
   --out-dir .qualification/serving/rocm-qualified-v1 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
@@ -945,9 +979,12 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v15 is the current contract. It adds strict per-request Kiln terminal
-performance evidence and derived phase distributions without changing the
-common request body, workload, output contract, or thermal limits. Driver v14
+Driver v16 is the current contract. It separates unique run/log identity from
+stable prompt-set identity, verifies every retained prompt-set hash against the
+latter, and excludes only the operational run ID from the workload comparison
+fingerprint. Driver v15 added strict per-request Kiln terminal performance
+evidence and derived phase distributions without changing the common request
+body, workload, output contract, or thermal limits. Driver v14
 added explicit multi-row ROCm graph fallback accounting and diagnostics v5.
 Driver v13 added closed cooperative
 actor-cycle idle policy and measured-window accounting. Driver v12 added a bounded,
@@ -956,10 +993,11 @@ integrity contract. Driver v11 added typed idle-boundary
 cooldown evidence to v10. Driver v10 added closed ROCm graph execution evidence;
 v9 added route-aware
 batching-actor and direct-rendezvous diagnostics; and v8 added mandatory initial
-and final guarded model-fingerprint lifecycles. A v15 exact-output run may use a
-strict-valid v7 through v15 reference because the model, thermal-policy,
-prompt, and output contracts remain comparison-compatible; the current arm
-must still satisfy v15 request-performance accounting, v14 multi-row
+and final guarded model-fingerprint lifecycles. A v16 exact-output run requires
+a v16 reference with the same prompt-set ID and model-visible workload; v7-v15
+receipts remain mutually comparison-compatible when their historical exact
+workload fingerprints match. The current arm must still satisfy v15
+request-performance accounting, v14 multi-row
 graph-route accounting, v13 actor-cycle idle accounting, v12 fingerprint pacing, v11
 idle cooling, v10 graph accounting, v9 routing, and v8 containment. Driver v7 added mandatory ordered
 per-request output evidence and
@@ -973,6 +1011,6 @@ identity semantics. Owned evidence contains the content-hashed launch document,
 absolute server-log fingerprint, shutdown signal/status/timing,
 forced-shutdown flag, and process-group liveness. Attached and explicitly
 unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
-from missing fields. Historical driver v2 through v14 receipts remain valid
-under their original contracts, but do not satisfy current v15 performance
+from missing fields. Historical driver v2 through v15 receipts remain valid
+under their original contracts, but do not satisfy current v16 performance
 acceptance.
