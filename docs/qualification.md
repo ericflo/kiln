@@ -1536,6 +1536,18 @@ settlement timeout, leaves the hard limit active, and cannot arm `SIGSTOP`.
 Both waits remain inside thermally sustainable phase time. Raising the hard
 limit is not an accepted correction.
 
+The first exact driver-v11 replay from clean pushed source did not reach a row
+boundary. Although the initial fingerprint and owned server both started after
+eight samples below 45 C, ROCm model startup reached 93.25 C while uploading
+accelerator weights and the hard-limit-only guard terminated it before
+readiness. The server exited zero without force, removed its private snapshot,
+cooled stably, and left no process or listener residue. This is a distinct
+startup-load counterexample: idle-boundary cooling fixes hot handoff between
+request waves, but cannot bound one uninterrupted startup stage. Do not retry
+unchanged or raise the ceiling. Pace or partition accelerator-weight startup at
+cooperative product boundaries, with typed configuration and explicit progress
+evidence, before repeating the c8 control.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package
