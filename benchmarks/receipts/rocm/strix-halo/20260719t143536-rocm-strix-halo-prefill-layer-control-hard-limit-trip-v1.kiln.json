@@ -1,0 +1,799 @@
+{
+  "completion": {
+    "completed_run_count": 1,
+    "expected_run_count": 1,
+    "failures": [
+      {
+        "detail": "BenchmarkError: host k10temp/Tctl reached 94000 millicelsius at or above the 93000-millicelsius safety limit",
+        "phase": "measurement"
+      },
+      {
+        "detail": "BenchmarkError: GET http://127.0.0.1:8420/health failed: URLError: <urlopen error [Errno 111] Connection refused>",
+        "phase": "execution_identity_unchanged"
+      },
+      {
+        "detail": "BenchmarkError: host k10temp/Tctl reached 94000 millicelsius at or above the 93000-millicelsius safety limit",
+        "phase": "host_thermal_handoff"
+      }
+    ],
+    "finalization_checks": {
+      "execution_identity_unchanged": "failed",
+      "host_thermal_handoff": "failed",
+      "model_identity_unchanged": "passed",
+      "repository_unchanged": "passed",
+      "runtime_artifact_unchanged": "passed",
+      "runtime_manifest_unchanged": "not_applicable",
+      "server_shutdown": "passed"
+    }
+  },
+  "created_at": "2026-07-19T14:35:36.333661+00:00",
+  "diagnostics": {
+    "timed_request_path_affected": false,
+    "url": "http://127.0.0.1:8420/health"
+  },
+  "driver_environment": {
+    "hostname": "llmbox",
+    "machine": "x86_64",
+    "platform": "Linux-7.0.14-arch1-1-x86_64-with-glibc2.43",
+    "python": "3.14.6",
+    "repository": {
+      "commit": "61c61f7d34e57ff6e5dcd106e9056f2400a4c973",
+      "dirty": false,
+      "source_tree_sha256": "sha256:b1376c8540f33edf9140a7b36b4f306600853bcd4112add5148d60ef8aed5aae"
+    }
+  },
+  "driver_version": "10",
+  "engine": {
+    "authentication_configured": false,
+    "authentication_source": "none",
+    "available_models": [
+      "Qwen3.5-4B"
+    ],
+    "base_url": "http://127.0.0.1:8420",
+    "model": "Qwen3.5-4B",
+    "model_identity": {
+      "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+      "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+      "content_sha256": "sha256:b1f2cce5baf9e662fc4c2c421b79fccc8787521e6e85810eebffbb4aa43b309f",
+      "id": "Qwen3.5-4B",
+      "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+      "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+      "weight_files": [
+        {
+          "bytes": 5329398688,
+          "path": "model.safetensors-00001-of-00002.safetensors",
+          "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+        },
+        {
+          "bytes": 3990429408,
+          "path": "model.safetensors-00002-of-00002.safetensors",
+          "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+        }
+      ]
+    },
+    "name": "kiln",
+    "reported_version": "0.4.1",
+    "runtime_artifact": {
+      "bytes": 51927008,
+      "path": "/home/ericflo/Development/kiln/target/release/kiln",
+      "sha256": "sha256:99c3bb5cf565ec4ebf60ab7d5489d990b29290d41d70c51d979b8a5e0ba7fbe6"
+    },
+    "runtime_execution_identity": {
+      "backend": "rocm",
+      "device": "rocm:0",
+      "effective_environment_sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "effective_server_config_sha256": "sha256:6a09f5296dcfa2d6fbe3de2ca4fbece8bc6479e7bd67e6bd45fe7da276ff00ad",
+      "executable_sha256": "sha256:99c3bb5cf565ec4ebf60ab7d5489d990b29290d41d70c51d979b8a5e0ba7fbe6",
+      "inference_dtype": "bf16",
+      "kernel_contract_sha256": "sha256:64d45f6ffaa7811b2080261a08c65246f9bc88e152b6a571d7f716c4a79fe439",
+      "numerical_runtime_sha256": "sha256:606a95cde3acc3ea478ceff66da3d789d712ee5cb1b905aea0ca225e74d6cbc5",
+      "provenance_sha256": "sha256:17ac853e1ac6065f4e85c4d04d1e19d8a1031c41fd26d6c83590a565a83bc0a2",
+      "provenance_type": "kiln.execution-provenance.v1",
+      "training_policy": "rocm_native_float"
+    },
+    "runtime_identity": "kiln-git:61c61f7d34e57ff6e5dcd106e9056f2400a4c973",
+    "runtime_manifest": null
+  },
+  "host_thermal": {
+    "evidence": {
+      "errors": [],
+      "host_temperature_end_millicelsius": 43375,
+      "host_temperature_peak_millicelsius": 94000,
+      "host_temperature_sample_count": 255,
+      "host_temperature_start_millicelsius": 37750,
+      "host_thermal_cooldown_active_end": 0,
+      "host_thermal_cooldown_completed_count": 1,
+      "host_thermal_cooldown_peak_millicelsius": 92500,
+      "host_thermal_cooldown_sample_count": 33,
+      "host_thermal_cooldown_seconds": 8.009923926030751,
+      "host_thermal_cooldown_stable_sample_count": 8,
+      "host_thermal_cooldown_timeout_count": 0,
+      "host_thermal_guard_trip_count": 1,
+      "host_thermal_pacing_active_end": 0,
+      "host_thermal_pacing_completed_event_count": 0,
+      "host_thermal_pacing_event_count": 0,
+      "host_thermal_pacing_max_seconds": 0.0,
+      "host_thermal_pacing_max_start_millicelsius": 0,
+      "host_thermal_pacing_seconds": 0.0,
+      "process_alive_at_handoff": false,
+      "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+      "trip_reason": "host k10temp/Tctl reached 94000 millicelsius at or above the 93000-millicelsius safety limit"
+    },
+    "mode": "owned_process_group",
+    "model_fingerprint": {
+      "final": {
+        "phase_settlement_timeout_seconds": 300.0,
+        "policy": {
+          "content_sha256": "sha256:1c8f1fea09898beede339d5b559a1dcd1351e1530ff4fd2f60350684a14f54e1",
+          "id": "strix-halo-serving-benchmark-hard-limit-v1",
+          "limit_millicelsius": 93000,
+          "pacing": {
+            "mode": "hard_limit_only"
+          },
+          "phase_settlement_timeout_seconds": 300.0,
+          "poll_interval_ms": 250,
+          "safe_handoff": {
+            "stable_samples": 8,
+            "target_millicelsius": 45000,
+            "timeout_seconds": 300.0
+          },
+          "schema": "kiln.host-thermal-policy.v1",
+          "sensor": {
+            "hwmon_name": "k10temp",
+            "label": "Tctl"
+          }
+        },
+        "prelaunch_cooldown": {
+          "completed": true,
+          "elapsed_seconds": 1.7536118249990977,
+          "poll_interval_ms": 250,
+          "sample_count": 8,
+          "scope": "host_package_before_process_creation",
+          "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+          "stable_samples_observed": 8,
+          "stable_samples_required": 8,
+          "target_millicelsius": 45000,
+          "temperature_end_millicelsius": 42500,
+          "temperature_peak_millicelsius": 43375,
+          "temperature_start_millicelsius": 43375,
+          "timeout_seconds": 300.0
+        },
+        "runtime": {
+          "host_temperature_end_millicelsius": 42625,
+          "host_temperature_peak_millicelsius": 88750,
+          "host_temperature_start_millicelsius": 42500,
+          "host_thermal_cooldown_active_end": 0,
+          "host_thermal_cooldown_completed_count": 1,
+          "host_thermal_cooldown_peak_millicelsius": 88500,
+          "host_thermal_cooldown_sample_count": 29,
+          "host_thermal_cooldown_seconds": 7.007837490993552,
+          "host_thermal_cooldown_stable_sample_count": 8,
+          "host_thermal_cooldown_timeout_count": 0,
+          "host_thermal_guard_trip_count": 0,
+          "host_thermal_pacing_active_end": 0,
+          "host_thermal_pacing_completed_event_count": 0,
+          "host_thermal_pacing_event_count": 0,
+          "host_thermal_pacing_max_seconds": 0.0,
+          "host_thermal_pacing_max_start_millicelsius": 0,
+          "host_thermal_pacing_seconds": 0.0
+        },
+        "schema": "kiln.hf-thermal-containment.v1",
+        "worker_exit_code": 0
+      },
+      "implementation_sha256": "sha256:ad48f1cada7134cd52568a300425e0c291144a80a0465f55a43e7e54a764cf10",
+      "initial": {
+        "phase_settlement_timeout_seconds": 300.0,
+        "policy": {
+          "content_sha256": "sha256:1c8f1fea09898beede339d5b559a1dcd1351e1530ff4fd2f60350684a14f54e1",
+          "id": "strix-halo-serving-benchmark-hard-limit-v1",
+          "limit_millicelsius": 93000,
+          "pacing": {
+            "mode": "hard_limit_only"
+          },
+          "phase_settlement_timeout_seconds": 300.0,
+          "poll_interval_ms": 250,
+          "safe_handoff": {
+            "stable_samples": 8,
+            "target_millicelsius": 45000,
+            "timeout_seconds": 300.0
+          },
+          "schema": "kiln.host-thermal-policy.v1",
+          "sensor": {
+            "hwmon_name": "k10temp",
+            "label": "Tctl"
+          }
+        },
+        "prelaunch_cooldown": {
+          "completed": true,
+          "elapsed_seconds": 1.7521077109850012,
+          "poll_interval_ms": 250,
+          "sample_count": 8,
+          "scope": "host_package_before_process_creation",
+          "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+          "stable_samples_observed": 8,
+          "stable_samples_required": 8,
+          "target_millicelsius": 45000,
+          "temperature_end_millicelsius": 36500,
+          "temperature_peak_millicelsius": 37000,
+          "temperature_start_millicelsius": 37000,
+          "timeout_seconds": 300.0
+        },
+        "runtime": {
+          "host_temperature_end_millicelsius": 39750,
+          "host_temperature_peak_millicelsius": 88875,
+          "host_temperature_start_millicelsius": 36500,
+          "host_thermal_cooldown_active_end": 0,
+          "host_thermal_cooldown_completed_count": 1,
+          "host_thermal_cooldown_peak_millicelsius": 88875,
+          "host_thermal_cooldown_sample_count": 24,
+          "host_thermal_cooldown_seconds": 5.755937225010712,
+          "host_thermal_cooldown_stable_sample_count": 8,
+          "host_thermal_cooldown_timeout_count": 0,
+          "host_thermal_guard_trip_count": 0,
+          "host_thermal_pacing_active_end": 0,
+          "host_thermal_pacing_completed_event_count": 0,
+          "host_thermal_pacing_event_count": 0,
+          "host_thermal_pacing_max_seconds": 0.0,
+          "host_thermal_pacing_max_start_millicelsius": 0,
+          "host_thermal_pacing_seconds": 0.0
+        },
+        "schema": "kiln.hf-thermal-containment.v1",
+        "worker_exit_code": 0
+      },
+      "python_sha256": "sha256:2700be1aabe3687bd597f21b0eac3b9bbdf7417e93035255a9286c67935b59bd",
+      "schema": "kiln.serving-model-fingerprint-thermal.v1"
+    },
+    "policy": {
+      "content_sha256": "sha256:1c8f1fea09898beede339d5b559a1dcd1351e1530ff4fd2f60350684a14f54e1",
+      "id": "strix-halo-serving-benchmark-hard-limit-v1",
+      "limit_millicelsius": 93000,
+      "pacing": {
+        "mode": "hard_limit_only"
+      },
+      "phase_settlement_timeout_seconds": 300.0,
+      "poll_interval_ms": 250,
+      "safe_handoff": {
+        "stable_samples": 8,
+        "target_millicelsius": 45000,
+        "timeout_seconds": 300.0
+      },
+      "schema": "kiln.host-thermal-policy.v1",
+      "sensor": {
+        "hwmon_name": "k10temp",
+        "label": "Tctl"
+      }
+    },
+    "process_group": {
+      "boot_id": "bcc09655-13db-403b-8dda-b814222c1313",
+      "cmdline_sha256": "sha256:cd11966d38a90e7a8099af33e87a35dd263518f5c5359f5e39428439dfb4cc35",
+      "executable": "/home/ericflo/Development/kiln/target/release/kiln",
+      "pid": 2288816,
+      "process_group_id": 2288816,
+      "start_time_ticks": 41788858
+    },
+    "unsafe_no_guard_acknowledged": false
+  },
+  "memory_sampler": {
+    "interval_ms": 50,
+    "path": "/sys/devices/pci0000:00/0000:00:08.1/0000:c6:00.0/mem_info_vram_used",
+    "source": "drm_vram_used"
+  },
+  "receipt_sha256": "sha256:64cbc2fda0e9b470852b98939fbf38d30dfb85b35d9e5b8da8227f913541a7a0",
+  "runs": [
+    {
+      "client_visible_itl_ms_p50": 76.44027302740142,
+      "client_visible_itl_ms_p99": 157.1545062266523,
+      "client_visible_itl_ms_p999": 174.76296817767428,
+      "client_visible_stream_event_count": 192,
+      "completion_tokens": 192,
+      "concurrency": 8,
+      "dispatch_spread_ms": 1.849328982643783,
+      "e2e_ms_p50": 6862.760357995285,
+      "e2e_ms_p99": 13715.460704444558,
+      "e2e_ms_p999": 13844.02381408523,
+      "elapsed_s": 24.17559653898934,
+      "error_count": 2,
+      "errors": [
+        {
+          "error": "BenchmarkError: stream did not emit exactly one usage record",
+          "index": 3
+        },
+        {
+          "error": "BenchmarkError: stream did not emit exactly one usage record",
+          "index": 7
+        }
+      ],
+      "gates": [
+        {
+          "detail": "6/8 requests succeeded",
+          "name": "all_requests_succeeded",
+          "passed": false
+        },
+        {
+          "detail": "every measured request must contribute positive completion usage",
+          "name": "positive_completion_usage",
+          "passed": false
+        },
+        {
+          "detail": "1.849 ms <= 250.000 ms",
+          "name": "dispatch_spread",
+          "passed": true
+        },
+        {
+          "detail": "after run: BenchmarkError: GET http://127.0.0.1:8420/health failed: URLError: <urlopen error [Errno 111] Connection refused>",
+          "name": "diagnostics_readable",
+          "passed": false
+        },
+        {
+          "detail": "every request must finish by length with exactly 32 tokens",
+          "name": "fixed_output_length",
+          "passed": false
+        },
+        {
+          "detail": "observed prompt-token counts: [0, 153, 398, 1130]",
+          "name": "mixed_prompt_tokens",
+          "passed": true
+        },
+        {
+          "detail": "a local device-memory counter must be sampled during the run",
+          "name": "memory_measured",
+          "passed": true
+        },
+        {
+          "detail": "35784802304 bytes <= 50000000000 bytes",
+          "name": "absolute_memory_limit",
+          "passed": true
+        }
+      ],
+      "host_thermal": {
+        "host_temperature_end_millicelsius": 94000,
+        "host_temperature_peak_millicelsius": 94000,
+        "host_temperature_sample_count": 101,
+        "host_temperature_start_millicelsius": 88250,
+        "host_thermal_guard_trip_count": 1,
+        "host_thermal_pacing_completed_event_count": 0,
+        "host_thermal_pacing_event_count": 0,
+        "host_thermal_pacing_seconds": 0,
+        "phase": "measure-c008-r000",
+        "phase_wall_seconds": 24.179297628987115,
+        "thermally_sustainable_output_token_throughput_per_s": 7.940677307756975
+      },
+      "memory": {
+        "baseline_bytes": 35345629184,
+        "peak_bytes": 35784802304,
+        "peak_delta_bytes": 439173120,
+        "samples": 484
+      },
+      "output_evidence": [
+        {
+          "completion_tokens": 32,
+          "content_sha256": "sha256:e12a4a58b5e1ea2406cb94aee824bbe3a1d598b5d25d9f8c63d6fb0c0737aebb",
+          "content_utf8_bytes": 225,
+          "exact_output": {
+            "content_base64": "QWNoaWV2aW5nIGRldGVybWluaXN0aWMgYW5kIHJlcHJvZHVjaWJsZSBwZXJmb3JtYW5jZSBtZWFzdXJlbWVudHMgaW4gaGlnaC10aHJvdWdocHV0IGNvbXB1dGluZyBlbnZpcm9ubWVudHMsIHBhcnRpY3VsYXJseSB3aXRoaW4gaGV0ZXJvZ2VuZW91cyBhcmNoaXRlY3R1cmVzIGxpa2UgdGhvc2UgdXRpbGl6aW5nIFJPQ20sIG5lY2Vzc2l0YXRlcyB0aGUgc3RyaWN0IGlzb2xhdGlvbiBvZiB3b3Jr",
+            "reasoning_content_base64": ""
+          },
+          "finish_reason": "length",
+          "index": 0,
+          "output_sha256": "sha256:1e0491649829a909a5d6209992ddd641779d45b439fcf8f20dd7e3985e52d862",
+          "reasoning_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_utf8_bytes": 0
+        },
+        {
+          "completion_tokens": 32,
+          "content_sha256": "sha256:13981bb134f9bee679f03102252bfb901597b3cf4f895f08d8c7d4c2fb726015",
+          "content_utf8_bytes": 221,
+          "exact_output": {
+            "content_base64": "VG8gYWNoaWV2ZSBkZXRlcm1pbmlzdGljLCByZXByb2R1Y2libGUgcGVyZm9ybWFuY2UgbWVhc3VyZW1lbnRzIGluIGEgcHJvZHVjdGlvbiBpbmZlcmVuY2Ugc3lzdGVtLCBjb250cm9sbGVkIHdvcmtsb2FkcyBhcmUgZXNzZW50aWFsIGJlY2F1c2UgdGhleSBlbGltaW5hdGUgdGhlIHN0b2NoYXN0aWMgdmFyaWFuY2UgaW50cm9kdWNlZCBieSBkeW5hbWljIHN5c3RlbSBzdGF0ZXMsIHN1Y2g=",
+            "reasoning_content_base64": ""
+          },
+          "finish_reason": "length",
+          "index": 1,
+          "output_sha256": "sha256:3667fbc6d884156e660a7406e1b39adb233fbc1b03f058656dd4e74a4f1965d9",
+          "reasoning_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_utf8_bytes": 0
+        },
+        {
+          "completion_tokens": 32,
+          "content_sha256": "sha256:9d8bbe1dbf87754abd904f7b483cf864c4fa07521ba2706f5435ea3522e07596",
+          "content_utf8_bytes": 226,
+          "exact_output": {
+            "content_base64": "VG8gYWNoaWV2ZSBkZXRlcm1pbmlzdGljLCByZXByb2R1Y2libGUgcGVyZm9ybWFuY2UgbWVhc3VyZW1lbnRzIGluIGEgcHJvZHVjdGlvbiBpbmZlcmVuY2Ugc3lzdGVtLCBjb250cm9sbGVkIHdvcmtsb2FkcyBhcmUgZXNzZW50aWFsIGJlY2F1c2UgdGhleSBlbGltaW5hdGUgc3RvY2hhc3RpYyBub2lzZSBmcm9tIG5ldHdvcmsgaml0dGVyLCB2YXJpYWJsZSBoYXJkd2FyZSB0aGVybWFsIHN0YXRlcw==",
+            "reasoning_content_base64": ""
+          },
+          "finish_reason": "length",
+          "index": 2,
+          "output_sha256": "sha256:3dbbe2d214c8b53f8f9f5410f30343ba1fc2d9c20757aaf6919c658ac8b12bb6",
+          "reasoning_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_utf8_bytes": 0
+        },
+        {
+          "completion_tokens": 32,
+          "content_sha256": "sha256:e12a4a58b5e1ea2406cb94aee824bbe3a1d598b5d25d9f8c63d6fb0c0737aebb",
+          "content_utf8_bytes": 225,
+          "exact_output": {
+            "content_base64": "QWNoaWV2aW5nIGRldGVybWluaXN0aWMgYW5kIHJlcHJvZHVjaWJsZSBwZXJmb3JtYW5jZSBtZWFzdXJlbWVudHMgaW4gaGlnaC10aHJvdWdocHV0IGNvbXB1dGluZyBlbnZpcm9ubWVudHMsIHBhcnRpY3VsYXJseSB3aXRoaW4gaGV0ZXJvZ2VuZW91cyBhcmNoaXRlY3R1cmVzIGxpa2UgdGhvc2UgdXRpbGl6aW5nIFJPQ20sIG5lY2Vzc2l0YXRlcyB0aGUgc3RyaWN0IGlzb2xhdGlvbiBvZiB3b3Jr",
+            "reasoning_content_base64": ""
+          },
+          "finish_reason": "length",
+          "index": 4,
+          "output_sha256": "sha256:1e0491649829a909a5d6209992ddd641779d45b439fcf8f20dd7e3985e52d862",
+          "reasoning_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_utf8_bytes": 0
+        },
+        {
+          "completion_tokens": 32,
+          "content_sha256": "sha256:de2cf88f9f35f8b60db4575a5efaf70ee0eb21f273c63d4a6ff1f6c751efbd86",
+          "content_utf8_bytes": 223,
+          "exact_output": {
+            "content_base64": "VG8gYWNoaWV2ZSBkZXRlcm1pbmlzdGljLCByZXByb2R1Y2libGUgcGVyZm9ybWFuY2UgbWVhc3VyZW1lbnRzIGluIGEgcHJvZHVjdGlvbiBpbmZlcmVuY2Ugc3lzdGVtLCBjb250cm9sbGVkIHdvcmtsb2FkcyBhcmUgZXNzZW50aWFsIGJlY2F1c2UgdGhleSBlbGltaW5hdGUgdGhlIHN0b2NoYXN0aWMgdmFyaWFiaWxpdHkgaW5oZXJlbnQgaW4gcmVhbC13b3JsZCB0cmFmZmljIHBhdHRlcm5zLA==",
+            "reasoning_content_base64": ""
+          },
+          "finish_reason": "length",
+          "index": 5,
+          "output_sha256": "sha256:7d8962ccf6b24e2a13dfd7433aa22b68fd0511cf4a1c6c88c08b1afcc80d3284",
+          "reasoning_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_utf8_bytes": 0
+        },
+        {
+          "completion_tokens": 32,
+          "content_sha256": "sha256:8ed3ec55aff43ab4ffc11f334f8e355d3152e4588f08afa874a08d8a1fbd49f0",
+          "content_utf8_bytes": 213,
+          "exact_output": {
+            "content_base64": "VG8gYWNoaWV2ZSBkZXRlcm1pbmlzdGljLCByZXByb2R1Y2libGUgcGVyZm9ybWFuY2UgbWVhc3VyZW1lbnRzIGluIGEgcHJvZHVjdGlvbiBpbmZlcmVuY2Ugc3lzdGVtLCBvbmUgbXVzdCBmaXJzdCBlc3RhYmxpc2ggYSBjb250cm9sbGVkIHdvcmtsb2FkIHRoYXQgc3RyaWN0bHkgYWRoZXJlcyB0byB0aGUgcHJpbmNpcGxlIG9mIGJvdW5kZWQgcmVzb3VyY2Ugb3duZXJzaGlw",
+            "reasoning_content_base64": ""
+          },
+          "finish_reason": "length",
+          "index": 6,
+          "output_sha256": "sha256:03bc9a9e13ac72d25399d12775ec8a885e5548f739b11e9a2b770c6a86636cf2",
+          "reasoning_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_utf8_bytes": 0
+        }
+      ],
+      "output_set_sha256": "sha256:0355bd7d446536fdfd967a7dee1e54f98a690e901ca1206a8b7ba83c9b701fc7",
+      "output_token_throughput_per_s": 7.941892961786935,
+      "prompt_set_sha256": "sha256:55c8728324cbf956d6253229875b9b7c7fc6275993004b0c33c5b32efe6aac1f",
+      "prompt_token_counts": [
+        153,
+        398,
+        1130,
+        0,
+        153,
+        398,
+        1130,
+        0
+      ],
+      "prompt_tokens_max": 1130,
+      "prompt_tokens_min": 0,
+      "repeat": 0,
+      "request_count": 8,
+      "request_throughput_per_s": 0.2481841550558417,
+      "server": null,
+      "slo_good_request_count": 3,
+      "slo_goodput_requests_per_s": 0.12409207752792085,
+      "slo_goodput_tokens_per_s": 3.9709464808934674,
+      "success_count": 6,
+      "ttft_ms_p50": 4452.20515402616,
+      "ttft_ms_p99": 11266.41693385609,
+      "ttft_ms_p999": 11396.005665092089,
+      "verdict": "failed"
+    }
+  ],
+  "schema": "kiln.serving-benchmark.v1",
+  "server_lifecycle": {
+    "launch_config": {
+      "acceptable_exit_codes": [
+        0
+      ],
+      "command": [
+        "./target/release/kiln",
+        "serve",
+        "--config",
+        "qualification/server-config/kiln-rocm-strix-halo-serving-comparison-v2.toml"
+      ],
+      "content_sha256": "sha256:c5ad05b3e9a516391ce7568e930fb9bb500d7c2601d54e039dddb534626af266",
+      "id": "kiln-rocm-strix-halo-serving-comparison-prefill-layers-4-v1",
+      "log_directory": "../../.qualification/kiln-serving/logs/prefill-layers-4-v1",
+      "readiness_poll_interval_ms": 250,
+      "schema": "kiln.serving-benchmark-server-launch.v1",
+      "shutdown_timeout_seconds": 65.0,
+      "startup_timeout_seconds": 600.0,
+      "working_directory": "../.."
+    },
+    "log": {
+      "bytes": 43267,
+      "path": "/home/ericflo/Development/kiln/.qualification/kiln-serving/logs/prefill-layers-4-v1/rocm-prefill-layer-yield-repro-hard-limit-c8-v1.server.log",
+      "sha256": "sha256:5f14764227534b754e1d4db1ea95096ec4a084ceb4762fb3eebaa43296ed8504"
+    },
+    "mode": "owned_process_group",
+    "prelaunch_cooldown": {
+      "completed": true,
+      "elapsed_seconds": 1.7517501069814898,
+      "poll_interval_ms": 250,
+      "sample_count": 8,
+      "scope": "host_package_before_process_creation",
+      "sensor_path": "/sys/class/hwmon/hwmon3/temp1_input",
+      "stable_samples_observed": 8,
+      "stable_samples_required": 8,
+      "target_millicelsius": 45000,
+      "temperature_end_millicelsius": 37750,
+      "temperature_peak_millicelsius": 39625,
+      "temperature_start_millicelsius": 39625,
+      "timeout_seconds": 300.0
+    },
+    "shutdown": {
+      "acceptable_exit_codes": [
+        0
+      ],
+      "elapsed_seconds": 0.2637919520493597,
+      "forced": false,
+      "process_group_alive_end": false,
+      "returncode": 0,
+      "signal": "SIGTERM",
+      "signal_sent": true
+    }
+  },
+  "verdict": "failed",
+  "warmup": {
+    "client_visible_itl_ms_p50": 33.001770032569766,
+    "client_visible_itl_ms_p99": 75.93258405220692,
+    "client_visible_itl_ms_p999": 82.10203721432484,
+    "client_visible_stream_event_count": 16,
+    "completion_tokens": 16,
+    "concurrency": 1,
+    "dispatch_spread_ms": 0.0,
+    "e2e_ms_p50": 1068.2616099948063,
+    "e2e_ms_p99": 1068.2616099948063,
+    "e2e_ms_p999": 1068.2616099948063,
+    "elapsed_s": 1.0683913069660775,
+    "error_count": 0,
+    "errors": [],
+    "gates": [
+      {
+        "detail": "1/1 requests succeeded",
+        "name": "all_requests_succeeded",
+        "passed": true
+      },
+      {
+        "detail": "every measured request must contribute positive completion usage",
+        "name": "positive_completion_usage",
+        "passed": true
+      },
+      {
+        "detail": "0.000 ms <= 250.000 ms",
+        "name": "dispatch_spread",
+        "passed": true
+      },
+      {
+        "detail": "not requested or parsed successfully",
+        "name": "diagnostics_readable",
+        "passed": true
+      },
+      {
+        "detail": "every request must finish by length with exactly 16 tokens",
+        "name": "fixed_output_length",
+        "passed": true
+      },
+      {
+        "detail": "a local device-memory counter must be sampled during the run",
+        "name": "memory_measured",
+        "passed": true
+      },
+      {
+        "detail": "35345629184 bytes <= 50000000000 bytes",
+        "name": "absolute_memory_limit",
+        "passed": true
+      },
+      {
+        "detail": "route=batching_engine; request={'error': 0, 'timeout': 0, 'rejected': 0}; batching_engine=0; decode_batcher=0; rocm_graph_failures=0",
+        "name": "server_reported_no_errors",
+        "passed": true
+      },
+      {
+        "detail": "total=1, ok=1, active_end=0; expected=1",
+        "name": "server_request_accounting",
+        "passed": true
+      },
+      {
+        "detail": "state=enabled; capture_requested=True; capture_successes=2; replay_successes=14; failures=0; fallbacks=0",
+        "name": "rocm_graph_execution_accounted",
+        "passed": true
+      }
+    ],
+    "host_thermal": {
+      "host_temperature_end_millicelsius": 88250,
+      "host_temperature_peak_millicelsius": 88250,
+      "host_temperature_sample_count": 8,
+      "host_temperature_start_millicelsius": 83375,
+      "host_thermal_guard_trip_count": 0,
+      "host_thermal_pacing_completed_event_count": 0,
+      "host_thermal_pacing_event_count": 0,
+      "host_thermal_pacing_seconds": 0,
+      "phase": "warmup-c001",
+      "phase_wall_seconds": 1.0717646849807352,
+      "thermally_sustainable_output_token_throughput_per_s": 14.928650126485179
+    },
+    "memory": {
+      "baseline_bytes": 35216703488,
+      "peak_bytes": 35345629184,
+      "peak_delta_bytes": 128925696,
+      "samples": 23
+    },
+    "output_evidence": [
+      {
+        "completion_tokens": 16,
+        "content_sha256": "sha256:9c599184bca38165e0b20c4aca5a2b3328f0b89d2d6c7442f1c153f2adfe91ee",
+        "content_utf8_bytes": 121,
+        "exact_output": {
+          "content_base64": "QWNoaWV2aW5nIGRldGVybWluaXN0aWMgYW5kIHJlcHJvZHVjaWJsZSBwZXJmb3JtYW5jZSBtZWFzdXJlbWVudHMgaW4gaGlnaC10aHJvdWdocHV0IGNvbXB1dGluZyBlbnZpcm9ubWVudHMsIHBhcnRpY3VsYXJseQ==",
+          "reasoning_content_base64": ""
+        },
+        "finish_reason": "length",
+        "index": 0,
+        "output_sha256": "sha256:cde6ac12b011e282632c4eb5dcead677e84959cdfcefe761fef1eeaf453d8238",
+        "reasoning_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "reasoning_utf8_bytes": 0
+      }
+    ],
+    "output_set_sha256": "sha256:a5ca7f8bfec8fd36f2755d88eda6713524341be8a4f53bb3c94dec14bfe89ec6",
+    "output_token_throughput_per_s": 14.975786395562666,
+    "prompt_set_sha256": "sha256:5655281bbeb839b8ee0b0abab1ab552b6f49c30e244783f00791116c08058520",
+    "prompt_token_counts": [
+      150
+    ],
+    "prompt_tokens_max": 150,
+    "prompt_tokens_min": 150,
+    "repeat": -1,
+    "request_count": 1,
+    "request_throughput_per_s": 0.9359866497226667,
+    "server": {
+      "batching_engine": {
+        "batched_decode_forward_fraction": 0.0,
+        "effective_max_decode_batch": 8,
+        "mean_decode_rows_per_forward": 1.0,
+        "process_max_observed_batch": 1,
+        "total_admission_calls": 1,
+        "total_admission_ms": 243.82979799999998,
+        "total_batched_decode_forwards": 0,
+        "total_decode_forward_ms": 544.253032,
+        "total_decode_forwards": 15,
+        "total_decode_rows": 15,
+        "total_decode_tokens": 16,
+        "total_errors": 0,
+        "total_prefill_forward_ms": 276.13637600000004,
+        "total_prefill_forwards": 16,
+        "total_prefill_layer_yields": 14,
+        "total_prefill_layers": 64,
+        "total_prefill_tokens": 150
+      },
+      "decode_batcher": {
+        "executed_batches": 0,
+        "executed_rows": 0,
+        "failed_jobs": 0,
+        "mean_runner_calls_per_executed_row": null,
+        "process_max_observed_batch": 0,
+        "process_max_runner_calls_per_token": 0,
+        "runner_busy_jobs": 0,
+        "runner_call_budget_exceeded": false,
+        "runner_call_budget_per_token": 2,
+        "runner_calls": 0,
+        "submitted_jobs": 0
+      },
+      "request_route": "batching_engine",
+      "requests": {
+        "active_end": 0,
+        "error": 0,
+        "ok": 1,
+        "process_active_peak": 1,
+        "rejected": 0,
+        "timeout": 0,
+        "total": 1
+      },
+      "rocm_graphs": {
+        "active_graph_slot_count_end": 0,
+        "active_graph_slot_count_start": 0,
+        "cache_admission_successes": 2,
+        "capture_attempts": 2,
+        "capture_deferrals": 0,
+        "capture_enabled": true,
+        "capture_failures": 0,
+        "capture_requested": true,
+        "capture_successes": 2,
+        "captured_graph_count_end": 2,
+        "captured_graph_count_start": 0,
+        "enabled": true,
+        "failures": 0,
+        "fallbacks": {
+          "capture_failure": 0,
+          "cold_cache_host_round_trip": 0,
+          "critical_memory_pressure": 0,
+          "graph_accounting_incomplete": 0,
+          "graph_cache_byte_budget": 0,
+          "graph_cache_capacity": 0,
+          "memory_governor_selector_mismatch": 0,
+          "memory_reservation_denied": 0,
+          "moderate_memory_pressure": 0,
+          "persistent_host_round_trip": 0,
+          "process_max_duration_micros": 0,
+          "replay_failure": 0,
+          "shape_dependent_attention": 0,
+          "slow": 0,
+          "tight_memory_pressure": 0,
+          "total": 0,
+          "total_duration_micros": 0
+        },
+        "graph_slot_count_end": 1,
+        "graph_slot_count_start": 0,
+        "graph_slot_create_count": 1,
+        "graph_slot_reuse_count": 1,
+        "idle_graph_slot_count_end": 1,
+        "idle_graph_slot_count_start": 0,
+        "replay_attempts": 14,
+        "replay_failures": 0,
+        "replay_successes": 14,
+        "requested": true,
+        "state": "enabled",
+        "unavailable_reason": null
+      },
+      "routing": {
+        "batching_actor_effective": true,
+        "direct_decode_rendezvous": {
+          "actor_active": true,
+          "backend_available": true,
+          "backend_unavailable_reason": null,
+          "route_available": false,
+          "scope": "direct_streaming_greedy_only",
+          "worker_active": true
+        }
+      },
+      "schema": "kiln.serving-benchmark-server-diagnostics.v3"
+    },
+    "slo_good_request_count": 1,
+    "slo_goodput_requests_per_s": 0.9359866497226667,
+    "slo_goodput_tokens_per_s": 14.975786395562666,
+    "success_count": 1,
+    "ttft_ms_p50": 523.2157279970124,
+    "ttft_ms_p99": 523.2157279970124,
+    "ttft_ms_p999": 523.2157279970124,
+    "verdict": "passed"
+  },
+  "workload": {
+    "arrival_pattern": "thread_barrier_all_at_once",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "comparison_mode": "exact_output",
+    "concurrency": [
+      8
+    ],
+    "endpoint": "/v1/chat/completions",
+    "max_dispatch_spread_ms": 250.0,
+    "max_tokens": 32,
+    "memory_limit_bytes": 50000000000,
+    "model": "Qwen3.5-4B",
+    "profile": "mixed",
+    "prompt_template_version": "fixed-serving-profiles-v1",
+    "repeats": 1,
+    "require_max_tokens": true,
+    "require_uniform_prompt_tokens": false,
+    "run_id": "rocm-prefill-layer-yield-repro-hard-limit-c8-v1",
+    "sampling": {
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.0,
+      "seed": 17,
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "schema": "kiln.serving-benchmark-workload.v1",
+    "slo": {
+      "client_visible_itl_ms": 250.0,
+      "e2e_ms": 60000.0,
+      "ttft_ms": 5000.0
+    },
+    "stream": true,
+    "stream_include_usage": true,
+    "warmup_requests": 1
+  },
+  "workload_fingerprint": "sha256:88cc5fb7a0e7825b34bab96c613c1089b4ddaca0a618cc43eaf967761eed08ea"
+}

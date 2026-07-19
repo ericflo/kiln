@@ -1523,6 +1523,15 @@ valid pacing mechanism. Source-bound ROCm and Vulkan serving qualification
 therefore prohibits process-stop pacing. A future cooperative mechanism must
 first prove that the backend has reached an idle ownership boundary.
 
+The first standalone c8 replay under the replacement policy started its
+measurement immediately after an 88.25 C warmup and reached the 93 C ceiling
+before all streams finished. The guard observed 94 C at its next 250 ms sample,
+terminated the server, completed graceful shutdown and stable cooldown, and
+recorded zero pacing events. This validates fail-closed containment but rejects
+the warmup-to-measurement handoff. A rerun requires explicit idle-boundary
+cooldown charged to thermally sustainable phase time; raising the hard limit is
+not an accepted correction.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package

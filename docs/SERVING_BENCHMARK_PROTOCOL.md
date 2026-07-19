@@ -630,6 +630,21 @@ post-exit stable handoff before resuming the full-output comparison. A future
 cooperative idle-boundary pacing mechanism may be qualified separately; it
 must never suspend a host process while ROCm work is outstanding.
 
+The first hard-limit-only replay from clean pushed source `61c61f7d3` removed
+the pause but exposed a second contract defect. The warmup ended at 88.25 C and
+the c8 measurement started immediately, leaving only 4.75 C below the 93 C
+ceiling. Six requests completed 192 tokens before the 250 ms sampler observed
+94 C and terminated the server; the other two streams ended without usage.
+There were zero pacing events, shutdown was graceful in 264 ms, the package
+cooled to 43.375 C, and no process remained. The strict failed receipt is
+`benchmarks/receipts/rocm/strix-halo/20260719t143536-rocm-strix-halo-prefill-layer-control-hard-limit-trip-v1.kiln.json`.
+
+Do not raise the ceiling or interpret the partial 7.94 output tokens/second as
+a completed performance result. The driver must reuse the typed stable
+temperature target at a verified idle boundary after warmup and around each
+measured row, while keeping that cooling time inside thermally sustainable
+throughput. Only then may the same c8 full-output control be repeated.
+
 ## Running One Profile
 
 ```bash
