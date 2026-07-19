@@ -604,6 +604,27 @@ HF/vLLM reference. This must distinguish harmless near-tie numerical variation
 from request-state or batching corruption. Only a correctness-stable 32-layer
 candidate may advance to a longer mixed-load confirmation.
 
+The first full-output control replay from clean pushed source `a4bb04cc0` is a
+thermal-controller counterexample, not output evidence. Its strict failed
+receipt is
+`benchmarks/receipts/rocm/strix-halo/20260719t140336-rocm-strix-halo-prefill-layer-control-full-thermal-trip-v1.kiln.json`.
+During the c8 row, process-group `SIGSTOP` left the ROCm device reporting 100
+percent busy while Tctl held near 49--51 C instead of reaching the 45 C resume
+gate. The independent watchdog fired after 300.24 seconds, sent `SIGTERM` and
+`SIGCONT`, and completed owned shutdown and cooldown with no process residue.
+Only two of eight requests completed, so the run cannot compare outputs or
+throughput.
+
+This reproduces the same active-GPU stop failure as the preliminary c12 arm and
+invalidates `continuous_process_group_stop` as a serving-qualification pacing
+mechanism on this ROCm device. The timeout is retained as necessary
+containment, but successful containment does not make the pacing policy valid.
+Do not run another serving row under the c32 policy. Replace active-work
+`SIGSTOP` pacing with a typed hard-limit-only policy plus pre-launch and
+post-exit stable handoff before resuming the full-output comparison. A future
+cooperative idle-boundary pacing mechanism may be qualified separately; it
+must never suspend a host process while ROCm work is outstanding.
+
 ## Running One Profile
 
 ```bash
