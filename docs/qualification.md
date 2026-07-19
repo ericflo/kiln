@@ -789,6 +789,32 @@ python3 scripts/qualification/rocm_hf_path_attribution.py check \
   --require-current-source
 ```
 
+The current retained Strix Halo result is
+`qualification/oracle-results/rocm/strix-halo/20260719t014807-rocm-strix-halo-hf-path-attribution-v1.json`,
+executed from clean pushed source `034e548e86910c08080d43c7c4196103fce2f9f3`.
+It reports `eager_full_logits`: eager and retained-graph full logits are
+bit-identical with canonical vector hash
+`sha256:b5acbda785044ca46d6cddb9aea03258dd4f99fb1904dcb5983be49ef68fd603`,
+and the eager and graph greedy routes select that vector's argmax. All four
+routes emit the common prefix `1206, 5517, 264` followed by Kiln token `25045`.
+At the disputed position, Kiln ranks token `25045` first at `18.625` and HF's
+token `15787` second at `18.5`; the independent HF vector instead ranks token
+`15787` first at `18.5`. Relative to HF, Kiln has `0.998147822` cosine
+similarity, `0.84375` maximum absolute error, `0.140939553` mean absolute
+error, and nine of ten top tokens in common.
+
+The retained graph evidence is one successful capture and seven successful
+replays with zero capture failure, replay failure, or fallback. This rules out
+HIP-graph replay and greedy selection as the first tested divergence boundary;
+the defect is already present in the ordinary eager full-logit forward. The
+112.012-second guarded lifecycle peaked at 14,657,327,104 cgroup bytes and
+59.75 C, recorded zero memory-limit, OOM, swap, or thermal-trip events,
+completed 28 thermal pacing events totaling 64.109 seconds, and handed the
+host back at 42.75 C. The result does not identify the first divergent model
+layer or kernel. The next bounded probe must compare layer-boundary outputs for
+this exact 166-token state before changing serving configuration or repeating
+the concurrency matrix.
+
 Portable repository gates discover heterogeneous files under
 `qualification/oracle-results` and dispatch each declared schema through
 `scripts/qualification/check_oracle_results.py`. Unknown schemas fail instead
