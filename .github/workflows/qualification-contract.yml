@@ -73,5 +73,5 @@ jobs:
           fi
           mapfile -d '' oracle_results < <(find qualification/oracle-results -type f -name '*.json' -print0 | sort -z)
           if [ "${#oracle_results[@]}" -gt 0 ]; then
-            python3 scripts/qualification/rocm_hf_next_token_oracle.py check "${oracle_results[@]}"
+            python3 scripts/qualification/check_oracle_results.py "${oracle_results[@]}"
           fi

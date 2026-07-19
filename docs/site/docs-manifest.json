@@ -147,6 +147,14 @@
       "description": "Compact source, implementation, full-vocabulary logit, cgroup-memory, thermal-lifecycle, artifact, and candidate-attribution evidence."
     },
     {
+      "source": "qualification/schema/rocm-hf-path-attribution-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "rocm-hf-path-attribution-result-schema",
+      "title": "ROCm/HF Path Attribution Result Schema",
+      "section": "serving",
+      "description": "Source-bound eager, greedy-selection, retained-HIP-graph, full-logit, cgroup, thermal, request, oracle, and implementation evidence for one localized ROCm numerical defect."
+    },
+    {
       "source": "qualification/schema/serving-benchmark-server-launch-v1.schema.json",
       "kind": "json_schema",
       "slug": "serving-benchmark-launch-schema",

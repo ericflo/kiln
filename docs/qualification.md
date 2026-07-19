@@ -628,8 +628,9 @@ input has canonical hash
 The two declared candidates are Kiln token `25045` (` baseline`) and vLLM token
 `15787` (` foundation`).
 The machine-readable field references are published as
-[HF Next-Token Request Schema](site:docs/hf-next-token-request-schema/) and
-[ROCm HF Next-Token Result Schema](site:docs/rocm-hf-next-token-result-schema/).
+[HF Next-Token Request Schema](https://ericflo.github.io/kiln/docs/hf-next-token-request-schema/)
+and
+[ROCm HF Next-Token Result Schema](https://ericflo.github.io/kiln/docs/rocm-hf-next-token-result-schema/).
 Both close every object to unknown fields; the executable validator additionally
 enforces cross-field hashes, token concatenation, source-receipt contents,
 candidate ranks, thermal reconciliation, and the canonical result self-hash.
@@ -689,6 +690,113 @@ peaked at 60 C, and four completed pacing events occupied 9.381 seconds. This
 closes the candidate attribution at that exact first divergence: vLLM matches
 the independent reference and Kiln does not. It does not yet locate Kiln's
 numerical error or establish broader sequence parity.
+
+#### ROCm numerical-path attribution
+
+Use the path-attribution runner after the independent HF result above has been
+retained and its ignored raw safetensors artifact is still available. This is a
+Kiln defect-localization workload, not a new oracle and not a performance
+benchmark. It loads the model once and evaluates four distinct routes against
+the same 248,320-element F32 HF logit vector:
+
+1. `eager_full` uses the ordinary paged prefill/decode path and reads back the
+   complete final logit vector.
+2. `eager_greedy` uses the production eager greedy-selection API, isolating
+   selection from full-logit readback.
+3. `graph_full` primes one retained HIP-graph slot, releases its logical row,
+   and requires all three exact continuation steps to replay before comparing
+   the complete final logit vector.
+4. `graph_greedy` uses a separate recurrent state and logical row and requires
+   the same three retained replays through the production graph greedy API.
+
+Each route starts from an independent KV cache and linear-attention state. The
+worker forces the request's three known-common continuation tokens rather than
+feeding one route's prediction into the next step. Therefore, all four final
+comparisons describe the same 166-token state immediately before the disputed
+fourth generated token. The graph prime reproduces the retained-slot condition
+of the source serving process; a warmup-only call or a capture without replay
+does not pass.
+
+Run only from a clean commit already present at `origin/main`. The raw HF
+reference from the accepted run currently lives at
+`.qualification/.rocm-hf-next-token-result.artifacts/hf-reference.safetensors`
+and is deliberately ignored; the runner accepts it only when its size and hash
+match the retained compact oracle result. All paths are intentionally absolute:
+
+```bash
+python3 scripts/qualification/rocm_hf_path_attribution.py run \
+  --model "$(pwd)/Qwen3.5-4B" \
+  --request "$(pwd)/qualification/oracles/rocm-strix-halo-greedy-c1-first-divergence-v1.json" \
+  --oracle-result "$(pwd)/qualification/oracle-results/rocm/strix-halo/20260719t003452-rocm-strix-halo-hf-next-token-first-divergence-v1.json" \
+  --hf-reference "$(pwd)/.qualification/.rocm-hf-next-token-result.artifacts/hf-reference.safetensors" \
+  --host-thermal-policy "$(pwd)/qualification/host-policies/strix-halo-hf-oracle-v1.json" \
+  --python "$(pwd)/target/qualification/hf-trl-roundtrip/.venv/bin/python" \
+  --out "$(pwd)/.qualification/rocm-hf-path-attribution-result.json"
+```
+
+Before device execution, the runner revalidates the request, both source
+receipts, retained HF result, full model content, raw reference, interpreter,
+clean source identity, and at least 23 GiB of host-available memory. It performs
+an offline locked `gfx1151` release build through `scripts/cargo-bounded.sh`
+with a 15 GiB build floor, 50 percent CPU quota, zero swap, private networking,
+and the versioned `closed-source-build-v1` environment policy. Ambient
+`KILN_*`, compiler flags, credentials, and target paths cannot enter that
+service; only the runner-owned build controls and `KILN_ROCM_ARCHS=gfx1151`
+do. The result records both the architecture and build-policy identity. The
+worker itself receives a closed six-variable environment with no product
+configuration variables and installs the qualified model/tensor policy,
+`auto` kiln-tensor API mode, and legacy host barriers explicitly before the
+primary ROCm context exists.
+
+Execution is a private-network systemd user service with `MemoryMax=48G`, zero
+swap, control-group kill semantics, and a 900-second outer lifetime. The
+existing thermal supervisor completes the stable prelaunch boundary, starts a
+new worker process group blocked on a private file gate, attaches the thermal
+guard, and only then releases execution. The generic guarded-exec shim validates
+the exact argv, working directory, complete environment, executable path, and
+SHA-256. It holds an open descriptor across the gate and executes
+`/proc/self/fd/<n>`, so replacing the build pathname after validation cannot
+change the admitted inode. A pass additionally requires worker-observed cgroup
+v2 limit/peak/current counters, zero high/limit/OOM/OOM-kill events, zero swap,
+complete thermal settlement, and no graph fallback or replay failure.
+
+The compact result schema is published as
+[ROCm/HF Path Attribution Result Schema](https://ericflo.github.io/kiln/docs/rocm-hf-path-attribution-result-schema/).
+It retains source/tree identity, binary and implementation hashes, request and
+oracle references, model identity, full containment evidence, both full-logit
+hashes and error summaries, both candidate logits/ranks, all four observed
+token sequences, graph capture/replay counters, and one mechanically derived
+attribution:
+
+- `eager_full_logits`: the ordinary eager numerical path already disagrees.
+- `hip_graph_full_logits`: eager full logits agree, but retained graph logits do
+  not.
+- `eager_greedy_selection`: full logits agree, but eager selection does not.
+- `hip_graph_greedy_selection`: graph full logits agree, but graph selection
+  does not.
+- `serving_only_or_not_reproduced`: all isolated routes agree; the serving-only
+  composition or a non-reproduced condition remains.
+
+These labels identify the first tested boundary that disagrees; they do not by
+themselves identify a layer or kernel. The executable checker recomputes the
+label and canonical self-hash and cross-binds the observed prefix, candidates,
+input hash/count, model, original receipts, retained HF result, and raw-artifact
+identity. Check one result directly with:
+
+```bash
+python3 scripts/qualification/rocm_hf_path_attribution.py check \
+  .qualification/rocm-hf-path-attribution-result.json \
+  --require-current-source
+```
+
+Portable repository gates discover heterogeneous files under
+`qualification/oracle-results` and dispatch each declared schema through
+`scripts/qualification/check_oracle_results.py`. Unknown schemas fail instead
+of being interpreted as a different result family. After a passing local run,
+retain only the compact JSON result in that tree; keep the raw logits and
+execution workspace ignored. A route attribution is sufficient to choose the
+next narrower numerical probe or repair, but it does not satisfy multi-token
+parity, throughput, soak, or final common-tree acceptance.
 
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain

@@ -1,0 +1,299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/schemas/rocm-hf-path-attribution-v1.schema.json",
+  "title": "Kiln ROCm/HF Numerical Path Attribution Result v1",
+  "description": "Source-bound evidence comparing Kiln eager-full, eager-greedy, retained-HIP-graph-full, and retained-HIP-graph-greedy paths with one retained eager Hugging Face full-vocabulary reference.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "binary",
+    "containment",
+    "created_at_utc",
+    "duration_seconds",
+    "implementation",
+    "model_identity",
+    "oracle_reference",
+    "request",
+    "result_sha256",
+    "schema",
+    "source",
+    "worker"
+  ],
+  "properties": {
+    "schema": { "const": "kiln.rocm-hf-path-attribution-result.v1" },
+    "result_sha256": { "$ref": "#/$defs/sha256" },
+    "created_at_utc": { "type": "string", "format": "date-time" },
+    "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+    "source": {
+      "description": "The exact clean commit, origin/main commit, and Git tree used to build and execute the worker.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "origin_main", "tree"],
+      "properties": {
+        "commit": { "$ref": "#/$defs/gitObject" },
+        "origin_main": { "$ref": "#/$defs/gitObject" },
+        "tree": { "$ref": "#/$defs/gitObject" }
+      }
+    },
+    "binary": {
+      "description": "The bounded offline release build admitted by the hash-bound execution shim.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "build_duration_seconds",
+        "build_environment_policy",
+        "path",
+        "rocm_archs",
+        "sha256"
+      ],
+      "properties": {
+        "build_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "build_environment_policy": { "const": "closed-source-build-v1" },
+        "path": { "const": "target/release/examples/rocm_hf_path_attribution" },
+        "rocm_archs": {
+          "type": "array",
+          "prefixItems": [{ "const": "gfx1151" }],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "implementation": {
+      "description": "Content identities for the source-bound runner, exact-argv gate, and thermal supervisor.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["guarded_exec_sha256", "runner_sha256", "supervisor_sha256"],
+      "properties": {
+        "guarded_exec_sha256": { "$ref": "#/$defs/sha256" },
+        "runner_sha256": { "$ref": "#/$defs/sha256" },
+        "supervisor_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "request": {
+      "description": "Repository-local first-divergence request and its canonical content identity.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "model_identity": {
+      "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/modelIdentity"
+    },
+    "oracle_reference": {
+      "description": "The retained HF oracle result and ignored raw safetensors reference consumed by the Kiln worker.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bytes",
+        "oracle_result_path",
+        "oracle_result_sha256",
+        "raw_location",
+        "raw_sha256"
+      ],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 1 },
+        "oracle_result_path": { "type": "string", "minLength": 1 },
+        "oracle_result_sha256": { "$ref": "#/$defs/sha256" },
+        "raw_location": { "const": "local_ignored" },
+        "raw_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "containment": {
+      "description": "Host admission, systemd cgroup/network policy, and complete thermal lifecycle.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host_available_before_gib", "memory_max_gib", "network", "thermal"],
+      "properties": {
+        "host_available_before_gib": { "type": "integer", "minimum": 23 },
+        "memory_max_gib": { "const": 48 },
+        "network": { "const": "forbidden" },
+        "thermal": {
+          "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/thermalEvidence"
+        }
+      }
+    },
+    "worker": { "$ref": "#/$defs/worker" }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "gitObject": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "tokenId": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 248319
+    },
+    "tokenSequence": {
+      "description": "The predicted token after the prompt and after each of the three forced common continuation tokens.",
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/tokenId" }
+    },
+    "candidateLogit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logit", "rank", "token_id"],
+      "properties": {
+        "logit": { "type": "number" },
+        "rank": { "type": "integer", "minimum": 1, "maximum": 248320 },
+        "token_id": { "$ref": "#/$defs/tokenId" }
+      }
+    },
+    "comparison": {
+      "description": "Full-vocabulary F32 comparison with the retained HF logits after the third continuation token.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "argmax",
+        "argmax_equal",
+        "candidate_tokens",
+        "cosine_similarity",
+        "logits_sha256",
+        "max_abs_error",
+        "mean_abs_error",
+        "top10_overlap"
+      ],
+      "properties": {
+        "argmax": { "$ref": "#/$defs/tokenId" },
+        "argmax_equal": { "type": "boolean" },
+        "candidate_tokens": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/candidateLogit" }
+        },
+        "cosine_similarity": { "type": "number", "minimum": -1, "maximum": 1 },
+        "logits_sha256": { "$ref": "#/$defs/sha256" },
+        "max_abs_error": { "type": "number", "minimum": 0 },
+        "mean_abs_error": { "type": "number", "minimum": 0 },
+        "top10_overlap": { "type": "integer", "minimum": 0, "maximum": 10 }
+      }
+    },
+    "fullPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["comparison", "observed_next_tokens"],
+      "properties": {
+        "comparison": { "$ref": "#/$defs/comparison" },
+        "observed_next_tokens": { "$ref": "#/$defs/tokenSequence" }
+      }
+    },
+    "greedyPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["final_token_matches_reference", "observed_next_tokens"],
+      "properties": {
+        "final_token_matches_reference": { "type": "boolean" },
+        "observed_next_tokens": { "$ref": "#/$defs/tokenSequence" }
+      }
+    },
+    "graph": {
+      "description": "Cumulative graph evidence after one retained-slot prime and exact full and greedy replay rows.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cache_admission_successes",
+        "capture_attempts",
+        "capture_failures",
+        "capture_successes",
+        "enabled",
+        "fallbacks",
+        "replay_attempts",
+        "replay_failures",
+        "replay_successes"
+      ],
+      "properties": {
+        "cache_admission_successes": { "type": "integer", "minimum": 1 },
+        "capture_attempts": { "type": "integer", "minimum": 1 },
+        "capture_failures": { "const": 0 },
+        "capture_successes": { "type": "integer", "minimum": 1 },
+        "enabled": { "const": true },
+        "fallbacks": { "const": 0 },
+        "replay_attempts": { "type": "integer", "minimum": 7 },
+        "replay_failures": { "const": 0 },
+        "replay_successes": { "type": "integer", "minimum": 7 }
+      }
+    },
+    "cgroup": {
+      "description": "Worker-observed cgroup v2 memory accounting at successful exit.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memory_current_bytes",
+        "memory_high_events",
+        "memory_max_bytes",
+        "memory_max_events",
+        "memory_oom_events",
+        "memory_oom_kill_events",
+        "memory_peak_bytes",
+        "memory_swap_bytes",
+        "memory_swap_max_bytes"
+      ],
+      "properties": {
+        "memory_current_bytes": { "type": "integer", "minimum": 0 },
+        "memory_high_events": { "const": 0 },
+        "memory_max_bytes": { "const": 51539607552 },
+        "memory_max_events": { "const": 0 },
+        "memory_oom_events": { "const": 0 },
+        "memory_oom_kill_events": { "const": 0 },
+        "memory_peak_bytes": { "type": "integer", "minimum": 0 },
+        "memory_swap_bytes": { "const": 0 },
+        "memory_swap_max_bytes": { "const": 0 }
+      }
+    },
+    "worker": {
+      "description": "One-model-load comparison across the four production-relevant numerical and selection paths.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attribution",
+        "containment",
+        "eager_full",
+        "eager_greedy",
+        "graph",
+        "graph_full",
+        "graph_greedy",
+        "hf_argmax",
+        "input_token_count",
+        "input_token_ids_sha256",
+        "kernel_policy",
+        "request_id",
+        "schema"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.rocm-hf-path-attribution.v1" },
+        "attribution": {
+          "enum": [
+            "eager_full_logits",
+            "hip_graph_full_logits",
+            "eager_greedy_selection",
+            "hip_graph_greedy_selection",
+            "serving_only_or_not_reproduced"
+          ]
+        },
+        "containment": { "$ref": "#/$defs/cgroup" },
+        "eager_full": { "$ref": "#/$defs/fullPath" },
+        "eager_greedy": { "$ref": "#/$defs/greedyPath" },
+        "graph": { "$ref": "#/$defs/graph" },
+        "graph_full": { "$ref": "#/$defs/fullPath" },
+        "graph_greedy": { "$ref": "#/$defs/greedyPath" },
+        "hf_argmax": { "$ref": "#/$defs/tokenId" },
+        "input_token_count": { "const": 166 },
+        "input_token_ids_sha256": { "$ref": "#/$defs/sha256" },
+        "kernel_policy": { "const": "qualified" },
+        "request_id": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
