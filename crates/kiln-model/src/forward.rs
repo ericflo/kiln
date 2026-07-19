@@ -4316,13 +4316,16 @@ fn marlin_bf16_drop_disabled() -> bool {
 /// device-specific default. Must be a multiple of `GDN_CHUNK_SIZE` (64) so the
 /// chunkwise kernel never sees a partial tail chunk from a tile boundary.
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
-pub const STREAMING_PREFILL_CUDA_DEFAULT_TILE: usize = 1024;
-pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 2048;
-pub const STREAMING_PREFILL_ROCM_DEFAULT_TILE: usize = STREAMING_PREFILL_CUDA_DEFAULT_TILE;
+pub const STREAMING_PREFILL_CUDA_DEFAULT_TILE: usize =
+    StreamingPrefillBackendPolicy::CUDA_TILE_TOKENS;
+pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize =
+    StreamingPrefillBackendPolicy::AUTO_MIN_PROMPT_TOKENS;
+pub const STREAMING_PREFILL_ROCM_DEFAULT_TILE: usize =
+    StreamingPrefillBackendPolicy::ROCM_TILE_TOKENS;
 pub const STREAMING_PREFILL_ROCM_MEDIUM_TILE: usize = STREAMING_PREFILL_ROCM_DEFAULT_TILE;
 pub const STREAMING_PREFILL_ROCM_MEDIUM_TILE_MAX_TOKENS: usize = 20_000;
 pub const STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD: usize =
-    STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD;
+    StreamingPrefillBackendPolicy::ROCM_AUTO_MIN_PROMPT_TOKENS;
 pub const DETACHED_FULL_ATTN_CUDA_DEFAULT_TILE: usize = 8192;
 // Materialized-score full-attention backends still run exact causal attention,
 // but their score/scratch tensors scale with query_tile * key_prefix. Keep the
@@ -4344,7 +4347,7 @@ pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 2048;
 pub const STREAMING_PREFILL_VULKAN_DEFAULT_TILE: usize = STREAMING_PREFILL_METAL_DEFAULT_TILE;
 pub const STREAMING_PREFILL_CUDA_TAPE_DEFAULT_TILE: usize = STREAMING_PREFILL_CUDA_DEFAULT_TILE;
 pub const STREAMING_PREFILL_ROCM_TAPE_DEFAULT_TILE: usize =
-    STREAMING_PREFILL_CUDA_TAPE_DEFAULT_TILE;
+    StreamingPrefillBackendPolicy::ROCM_TILE_TOKENS;
 pub const STREAMING_PREFILL_METAL_TAPE_DEFAULT_TILE: usize = STREAMING_PREFILL_METAL_DEFAULT_TILE;
 pub const STREAMING_PREFILL_VULKAN_TAPE_DEFAULT_TILE: usize = STREAMING_PREFILL_VULKAN_DEFAULT_TILE;
 const PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS: usize = 1024;
@@ -34391,8 +34394,17 @@ mod tests {
         assert!(cuda_default.enabled_for(STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD));
         assert!(cuda_default.enabled_for(12_000));
         assert!(cuda_default.enabled_for(43_814));
-        assert!(!rocm_default.enabled_for(STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD - 1));
-        assert!(rocm_default.enabled_for(STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD));
+        assert_eq!(
+            rocm_default.threshold_tokens(),
+            Some(StreamingPrefillBackendPolicy::ROCM_AUTO_MIN_PROMPT_TOKENS)
+        );
+        assert!(
+            !rocm_default
+                .enabled_for(StreamingPrefillBackendPolicy::ROCM_AUTO_MIN_PROMPT_TOKENS - 1)
+        );
+        assert!(
+            rocm_default.enabled_for(StreamingPrefillBackendPolicy::ROCM_AUTO_MIN_PROMPT_TOKENS)
+        );
         assert!(!metal_default.enabled_for(STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD - 1));
         assert!(metal_default.enabled_for(STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD));
         assert!(!vulkan_default.enabled_for(43_814));

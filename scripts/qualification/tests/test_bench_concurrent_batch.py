@@ -12,12 +12,13 @@ import sys
 import tempfile
 import threading
 import time
-import tomllib
 import unittest
 from contextlib import ExitStack, redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+
+from scripts.qualification.tests.generated_toml import parse_generated_toml
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -461,6 +462,15 @@ class FakeServer:
 
 
 class ServingBenchmarkTests(unittest.TestCase):
+    @staticmethod
+    def _parse_server_config(path: Path) -> dict:
+        source = "\n".join(
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        return parse_generated_toml(source)
+
     def test_rocm_graph_disabled_discriminator_changes_one_typed_field(self) -> None:
         config_root = ROOT / "qualification" / "server-config"
         launch_root = ROOT / "qualification" / "server-launch"
@@ -482,9 +492,9 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         repaired_name = "kiln-rocm-strix-halo-serving-comparison-v2"
 
-        base = tomllib.loads((config_root / f"{base_name}.toml").read_text())
-        diagnostic = tomllib.loads(
-            (config_root / f"{diagnostic_name}.toml").read_text()
+        base = self._parse_server_config(config_root / f"{base_name}.toml")
+        diagnostic = self._parse_server_config(
+            config_root / f"{diagnostic_name}.toml"
         )
         self.assertEqual(base["accelerator"]["rocm_graph_mode"], "profile")
         self.assertEqual(
@@ -493,40 +503,40 @@ class ServingBenchmarkTests(unittest.TestCase):
         diagnostic["accelerator"]["rocm_graph_mode"] = "profile"
         self.assertEqual(diagnostic, base)
 
-        no_prefix = tomllib.loads(
-            (config_root / f"{no_prefix_name}.toml").read_text()
+        no_prefix = self._parse_server_config(
+            config_root / f"{no_prefix_name}.toml"
         )
         self.assertFalse(no_prefix["prefix_cache"]["enabled"])
         no_prefix["prefix_cache"]["enabled"] = True
-        graph_disabled = tomllib.loads(
-            (config_root / f"{diagnostic_name}.toml").read_text()
+        graph_disabled = self._parse_server_config(
+            config_root / f"{diagnostic_name}.toml"
         )
         self.assertEqual(no_prefix, graph_disabled)
 
-        no_batching = tomllib.loads(
-            (config_root / f"{no_batching_name}.toml").read_text()
+        no_batching = self._parse_server_config(
+            config_root / f"{no_batching_name}.toml"
         )
         self.assertEqual(no_batching["batching"]["mode"], "disabled")
         no_batching["batching"]["mode"] = "enabled"
-        no_prefix = tomllib.loads(
-            (config_root / f"{no_prefix_name}.toml").read_text()
+        no_prefix = self._parse_server_config(
+            config_root / f"{no_prefix_name}.toml"
         )
         self.assertEqual(no_batching, no_prefix)
 
-        prefill_256 = tomllib.loads(
-            (config_root / f"{prefill_256_name}.toml").read_text()
+        prefill_256 = self._parse_server_config(
+            config_root / f"{prefill_256_name}.toml"
         )
         self.assertEqual(
             prefill_256["server"]["max_prefill_tokens_per_cycle"], 256
         )
         prefill_256["server"]["max_prefill_tokens_per_cycle"] = 64
-        no_prefix = tomllib.loads(
-            (config_root / f"{no_prefix_name}.toml").read_text()
+        no_prefix = self._parse_server_config(
+            config_root / f"{no_prefix_name}.toml"
         )
         self.assertEqual(prefill_256, no_prefix)
 
-        repaired = tomllib.loads(
-            (config_root / f"{repaired_name}.toml").read_text()
+        repaired = self._parse_server_config(
+            config_root / f"{repaired_name}.toml"
         )
         self.assertEqual(
             repaired["server"]["max_prefill_tokens_per_cycle"], 256
