@@ -1135,6 +1135,34 @@ zero, and no owned residue remained. Kiln cgroups peaked at 14,658,469,888 and
 individually as a qualified-policy fallback. This evidence does not authorize a
 qualified-policy change by itself.
 
+The three individual fused-route fallbacks are retained at
+`qualification/oracle-results/rocm/strix-halo/20260719t042441-rocm-strix-halo-hf-layer-attribution-fused-rmsnorm-fallback-v1.json`,
+`qualification/oracle-results/rocm/strix-halo/20260719t042746-rocm-strix-halo-hf-layer-attribution-fused-mlp-silu-mul-fallback-v1.json`,
+and
+`qualification/oracle-results/rocm/strix-halo/20260719t043056-rocm-strix-halo-hf-layer-attribution-fused-mlp-gate-up-prefill-fallback-v1.json`,
+all from clean pushed source `d956487224dcef59b4a78c4459a2cbc020cadc7b`.
+Declining fused RMSNorm alone is bit-for-bit identical to the three-route
+fallback: it restores token `15787`, final logit hash
+`sha256:f2dee0a6c8ef4514ed5759ad5d92c9d6e6ae012db8c87a98cd6ad49ceb13ba62`,
+and relative RMSE `0.014672443`, `0.036750649`, `0.072686307`, and
+`0.085907010` at layers 0 through 2 and final RMSNorm. Declining either fused
+MLP route alone is bit-for-bit identical to qualified: both emit token `25045`,
+retain final logit hash
+`sha256:b5acbda785044ca46d6cddb9aea03258dd4f99fb1904dcb5983be49ef68fd603`,
+and reproduce qualified relative RMSE `0.014871503`, `0.036848969`,
+`0.065551177`, and `0.085119899`. Within this complete three-route set, fused
+RMSNorm is the only necessary route for the observed qualified-composition
+failure; the two fused MLP routes are excluded.
+
+The complete lifecycles lasted 221.965, 165.417, and 169.198 seconds; only the
+first includes a 67-second cold release build. All nine arms stayed at or below
+60.25 C, every pacing and cooldown interval completed, cgroup event and swap
+counters remained zero, and no owned residue remained. Kiln cgroups peaked at
+14,658,228,224, 14,657,458,176, and 14,658,273,280 bytes. This evidence permits
+disabling fused RMSNorm in the qualified profile for a source-bound repair
+candidate. The changed profile must still pass fresh next-token, multi-token,
+serving, throughput, and endurance qualification before release acceptance.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for
