@@ -796,6 +796,8 @@ const generatedDocsPages = [
       'private-network 20 GiB zero-swap service',
       'cold unified-memory load',
       'current 20 GiB contract',
+      '20260719t050322-rocm-strix-halo-hf-layer-attribution-qualified-rmsnorm-repair-v1.json',
+      'typed production profile installs the intended repaired composition',
       'Missing devices and skipped tests are failures',
       'Vulkan serving baseline',
       'serving-vulkan-baseline-v1.json',

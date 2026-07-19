@@ -1182,6 +1182,27 @@ disabling fused RMSNorm in the qualified profile for a source-bound repair
 candidate. The changed profile must still pass fresh next-token, multi-token,
 serving, throughput, and endurance qualification before release acceptance.
 
+The repaired production `qualified` profile is requalified at
+`qualification/oracle-results/rocm/strix-halo/20260719t050322-rocm-strix-halo-hf-layer-attribution-qualified-rmsnorm-repair-v1.json`
+from exact clean pushed source `62a9a0c243567768c5f583cd9009a431f2054b09`.
+It restores the HF/vLLM token `15787` and reproduces the isolated RMSNorm
+fallback's final logit hash
+`sha256:f2dee0a6c8ef4514ed5759ad5d92c9d6e6ae012db8c87a98cd6ad49ceb13ba62`
+plus relative RMSE `0.014672443`, `0.036750649`, `0.072686307`, and
+`0.085907010` at layers 0 through 2 and final RMSNorm. This proves that the
+typed production profile installs the intended repaired composition at the
+known 166-token boundary. It does not show a general reduction in numerical
+error and does not replace multi-token or serving parity.
+
+The complete fingerprint, HF, and Kiln lifecycle lasted 226.804 seconds,
+including a 68.615-second cold release build. The HF and Kiln arms peaked at
+9,487,720,448 and 14,658,351,104 cgroup bytes, respectively; every high, max,
+OOM, OOM-kill, swap, and thermal-guard counter remained zero. HF and Kiln
+peaked at 59.375 C and 60.375 C, completed all pacing and cooldown intervals,
+and left no process or service residue. The result uses the current 20 GiB
+layer-reference containment contract; its independent 16 GiB next-token
+requalification remains the next gate.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for
