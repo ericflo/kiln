@@ -102,6 +102,7 @@
           "warmup_max_tokens": 4
         },
         "model": {
+          "accelerator_weight_upload_mib_per_second": 256,
           "vulkan_decode_weight_prewarm": true,
           "vulkan_decode_weight_prewarm_mib_per_second": 256
         },

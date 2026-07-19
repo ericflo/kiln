@@ -45,6 +45,9 @@
           "rocm_archs": "gfx1151",
           "rocm_path": "/opt/rocm"
         },
+        "model": {
+          "accelerator_weight_upload_mib_per_second": 256
+        },
         "runtime": {
           "serving_profile": "experimental",
           "kv_autoscale_requested": false,

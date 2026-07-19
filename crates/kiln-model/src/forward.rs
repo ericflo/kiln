@@ -42,6 +42,7 @@ use crate::transposed_weight_cache::{
     CachedTransposedWeightBytes, TransposedWeightCacheMissPolicy,
     transposed_weight_bytes_2d_cached_bytes,
 };
+use crate::weight_upload::{AcceleratorWeightUploadPacer, AcceleratorWeightUploadPolicy};
 use crate::weights::{DeferredMtpSource, ModelWeights, MtpWeights, TensorDType, WeightTensor};
 
 use kiln_core::block::{BlockTable, contiguous_slot_run_start};
@@ -5070,6 +5071,68 @@ fn install_marlin_packed(
     Ok(())
 }
 
+fn flush_marlin_pack_inputs(
+    marlin_pack_inputs: &mut Vec<(Tensor, i32)>,
+    marlin_pack_meta: &mut Vec<MarlinPackEntry>,
+    layers: &mut [GpuLayerWeights],
+    device: &Device,
+    scope: &'static str,
+) -> Result<()> {
+    if marlin_pack_inputs.is_empty() {
+        return Ok(());
+    }
+
+    let pack_start = std::time::Instant::now();
+    let inputs = std::mem::take(marlin_pack_inputs);
+    let metadata = std::mem::take(marlin_pack_meta);
+    anyhow::ensure!(
+        inputs.len() == metadata.len(),
+        "marlin pack input and metadata counts disagree"
+    );
+    let packed = crate::marlin_proj::pack_from_bf16_batch(&inputs)
+        .with_context(|| format!("marlin {scope} batch pack"))?;
+    anyhow::ensure!(
+        packed.len() == metadata.len(),
+        "marlin packed result and metadata counts disagree"
+    );
+    let pack_elapsed_ms = pack_start.elapsed().as_millis();
+    let parallel = !crate::marlin_proj::parallel_pack_disabled();
+    let n_inputs = inputs.len();
+    let n_packed = packed.iter().filter(|p| p.is_some()).count();
+    tracing::info!(
+        scope,
+        n_inputs,
+        n_packed,
+        pack_elapsed_ms = pack_elapsed_ms as u64,
+        parallel,
+        "marlin batch pack complete"
+    );
+    eprintln!(
+        "[kiln] marlin {scope} batch pack: {n_packed}/{n_inputs} projections in {pack_elapsed_ms} ms ({})",
+        if parallel { "parallel" } else { "serial" }
+    );
+
+    let drop_disabled = marlin_bf16_drop_disabled();
+    for (entry, maybe_packed) in metadata.into_iter().zip(packed.into_iter()) {
+        if let Some(packed) = maybe_packed {
+            install_marlin_packed(
+                &mut layers[entry.layer_idx],
+                entry.kind,
+                packed,
+                device,
+                drop_disabled,
+            )
+            .with_context(|| {
+                format!(
+                    "install marlin {:?} on layer {}",
+                    entry.kind, entry.layer_idx
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
 impl GpuWeights {
     pub fn has_mtp(&self) -> bool {
         self.mtp.is_some()
@@ -5283,6 +5346,27 @@ impl GpuWeights {
         config: &kiln_core::config::ModelConfig,
         device: &Device,
     ) -> Result<Self> {
+        Self::from_model_weights_with_upload_policy(
+            weights,
+            config,
+            device,
+            &AcceleratorWeightUploadPolicy::unlimited(),
+        )
+    }
+
+    pub fn from_model_weights_with_upload_policy(
+        weights: &ModelWeights,
+        config: &kiln_core::config::ModelConfig,
+        device: &Device,
+        upload_policy: &AcceleratorWeightUploadPolicy,
+    ) -> Result<Self> {
+        let source_bytes_total = weights.base_model_total_bytes();
+        let mut source_bytes_completed = 0usize;
+        let mut upload_pacer = AcceleratorWeightUploadPacer::new(
+            upload_policy,
+            source_bytes_total,
+            weights.layers.len(),
+        )?;
         #[cfg(feature = "vulkan")]
         let _durable_vulkan_allocations = matches!(device, Device::Vulkan(_))
             .then(kiln_vulkan_kernel::buffer_pool::durable_allocation_scope);
@@ -5342,6 +5426,10 @@ impl GpuWeights {
         let rotary_inv_freq =
             compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
                 .context("rotary_inv_freq")?;
+        source_bytes_completed = source_bytes_completed
+            .saturating_add(weights.embedding.embed_tokens.size_bytes())
+            .saturating_add(weights.final_norm.size_bytes());
+        upload_pacer.checkpoint("base", source_bytes_completed, 0)?;
         // Base weights are uploaded before the server declares readiness, so
         // already-computed cache misses may be persisted synchronously here.
         let projection_load_cache =
@@ -5359,7 +5447,9 @@ impl GpuWeights {
         // a single thread. At ~58s cold load on the Qwen3.5-4B A6000 build
         // this is a significant fraction of server startup. Sidecar the
         // pack inputs here, batch-pack via rayon after the layer loop, and
-        // install results into the per-layer slots.
+        // install results into the per-layer slots. A configured upload pace
+        // instead flushes each layer before its cooperative checkpoint so a
+        // CUDA W4A16 load cannot hide a whole-model upload in finalization.
         let w4a16_enabled = crate::marlin_proj::env_enabled();
         let mut marlin_pack_inputs: Vec<(Tensor, i32)> = Vec::new();
         let mut marlin_pack_meta: Vec<MarlinPackEntry> = Vec::new();
@@ -5714,6 +5804,18 @@ impl GpuWeights {
                 attention,
                 mlp,
             });
+            if w4a16_enabled && upload_policy.max_bytes_per_second().is_some() {
+                flush_marlin_pack_inputs(
+                    &mut marlin_pack_inputs,
+                    &mut marlin_pack_meta,
+                    &mut layers,
+                    device,
+                    "layer",
+                )
+                .context(ctx("paced marlin pack"))?;
+            }
+            source_bytes_completed = source_bytes_completed.saturating_add(lw.total_bytes());
+            upload_pacer.checkpoint("layer", source_bytes_completed, i + 1)?;
         }
 
         // Batch-pack the queued Marlin projections in parallel. On
@@ -5723,46 +5825,16 @@ impl GpuWeights {
         // GPU↔CPU copies stay sequential inside
         // `pack_from_bf16_batch`. Set `KILN_DISABLE_PARALLEL_PACK=1` to
         // force the legacy serial pack for A/B measurements or rollback.
-        if w4a16_enabled && !marlin_pack_inputs.is_empty() {
-            let pack_start = std::time::Instant::now();
-            // (#1082) `pack_from_bf16_batch` is kt-native now — `marlin_pack_inputs`
-            // (kt weights) goes straight in, no kt->candle bridge.
-            let packed = crate::marlin_proj::pack_from_bf16_batch(&marlin_pack_inputs)
-                .context("marlin batch pack")?;
-            let pack_elapsed_ms = pack_start.elapsed().as_millis();
-            let parallel = !crate::marlin_proj::parallel_pack_disabled();
-            let n_inputs = marlin_pack_inputs.len();
-            let n_packed = packed.iter().filter(|p| p.is_some()).count();
-            tracing::info!(
-                n_inputs,
-                n_packed,
-                pack_elapsed_ms = pack_elapsed_ms as u64,
-                parallel,
-                "marlin batch pack complete"
-            );
-            eprintln!(
-                "[kiln] marlin batch pack: {n_packed}/{n_inputs} projections in {pack_elapsed_ms} ms ({})",
-                if parallel { "parallel" } else { "serial" }
-            );
-
-            let drop_disabled = marlin_bf16_drop_disabled();
-            for (entry, maybe_packed) in marlin_pack_meta.into_iter().zip(packed.into_iter()) {
-                if let Some(p) = maybe_packed {
-                    install_marlin_packed(
-                        &mut layers[entry.layer_idx],
-                        entry.kind,
-                        p,
-                        device,
-                        drop_disabled,
-                    )
-                    .with_context(|| {
-                        format!(
-                            "install marlin {:?} on layer {}",
-                            entry.kind, entry.layer_idx
-                        )
-                    })?;
-                }
-            }
+        if w4a16_enabled {
+            // (#1082) `pack_from_bf16_batch` is kt-native now: the kt weights
+            // go straight in, with no kt-to-candle bridge.
+            flush_marlin_pack_inputs(
+                &mut marlin_pack_inputs,
+                &mut marlin_pack_meta,
+                &mut layers,
+                device,
+                "model",
+            )?;
         }
 
         // Preserve native MTP tensors for explicit model-library and offline
@@ -5796,6 +5868,8 @@ impl GpuWeights {
             }
             tracing::info!("Metal projection original buffer cache swept after load");
         }
+
+        upload_pacer.checkpoint("complete", source_bytes_completed, weights.layers.len())?;
 
         Ok(Self {
             source_content_sha256: weights.source_content_sha256.clone(),
@@ -5837,6 +5911,15 @@ impl GpuWeights {
         // and bridges to candle internally where needed, so this kt entry is
         // now a straight passthrough (kept for the kiln-server call site).
         Self::from_model_weights(weights, config, device)
+    }
+
+    pub fn from_model_weights_kt_with_upload_policy(
+        weights: &ModelWeights,
+        config: &kiln_core::config::ModelConfig,
+        device: &kiln_tensor::Device,
+        upload_policy: &AcceleratorWeightUploadPolicy,
+    ) -> Result<Self> {
+        Self::from_model_weights_with_upload_policy(weights, config, device, upload_policy)
     }
 }
 

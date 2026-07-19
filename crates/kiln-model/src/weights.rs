@@ -237,6 +237,39 @@ pub struct LayerWeights {
     pub mlp: FfnWeights,
 }
 
+impl LayerWeights {
+    /// Source bytes consumed when this layer is materialized on an accelerator.
+    pub fn total_bytes(&self) -> usize {
+        let mut total = self.input_layernorm.size_bytes();
+        total += self.post_attention_layernorm.size_bytes();
+        total += self.mlp.gate_proj.size_bytes();
+        total += self.mlp.up_proj.size_bytes();
+        total += self.mlp.down_proj.size_bytes();
+        match &self.attention {
+            AttentionWeights::Full(attn) => {
+                total += attn.q_proj.size_bytes();
+                total += attn.k_proj.size_bytes();
+                total += attn.v_proj.size_bytes();
+                total += attn.o_proj.size_bytes();
+                total += attn.q_norm.size_bytes();
+                total += attn.k_norm.size_bytes();
+            }
+            AttentionWeights::Linear(attn) => {
+                total += attn.in_proj_qkv.size_bytes();
+                total += attn.in_proj_z.size_bytes();
+                total += attn.out_proj.size_bytes();
+                total += attn.in_proj_a.size_bytes();
+                total += attn.in_proj_b.size_bytes();
+                total += attn.conv1d.size_bytes();
+                total += attn.norm.size_bytes();
+                total += attn.a_log.size_bytes();
+                total += attn.dt_bias.size_bytes();
+            }
+        }
+        total
+    }
+}
+
 /// Native MTP (Multi-Token Prediction) head weights for Qwen3.5-4B.
 ///
 /// The pretrained Qwen3.5-4B checkpoint ships 15 MTP-prefixed tensors
@@ -274,32 +307,7 @@ impl MtpWeights {
         total += self.pre_fc_norm_embedding.size_bytes();
         total += self.pre_fc_norm_hidden.size_bytes();
         total += self.final_layernorm.size_bytes();
-        total += self.layer.input_layernorm.size_bytes();
-        total += self.layer.post_attention_layernorm.size_bytes();
-        total += self.layer.mlp.gate_proj.size_bytes();
-        total += self.layer.mlp.up_proj.size_bytes();
-        total += self.layer.mlp.down_proj.size_bytes();
-        match &self.layer.attention {
-            AttentionWeights::Full(attn) => {
-                total += attn.q_proj.size_bytes();
-                total += attn.k_proj.size_bytes();
-                total += attn.v_proj.size_bytes();
-                total += attn.o_proj.size_bytes();
-                total += attn.q_norm.size_bytes();
-                total += attn.k_norm.size_bytes();
-            }
-            AttentionWeights::Linear(attn) => {
-                total += attn.in_proj_qkv.size_bytes();
-                total += attn.in_proj_z.size_bytes();
-                total += attn.out_proj.size_bytes();
-                total += attn.in_proj_a.size_bytes();
-                total += attn.in_proj_b.size_bytes();
-                total += attn.conv1d.size_bytes();
-                total += attn.norm.size_bytes();
-                total += attn.a_log.size_bytes();
-                total += attn.dt_bias.size_bytes();
-            }
-        }
+        total += self.layer.total_bytes();
         total
     }
 
@@ -765,38 +773,19 @@ impl ModelWeights {
 
     /// Total size of all loaded weights in bytes.
     pub fn total_bytes(&self) -> usize {
-        let mut total = self.embedding.embed_tokens.size_bytes();
-        total += self.final_norm.size_bytes();
+        let mut total = self.base_model_total_bytes();
         if let Some(mtp) = &self.mtp {
             total += mtp.total_bytes();
         }
+        total
+    }
+
+    /// Source bytes materialized by the eager base-model accelerator upload.
+    pub fn base_model_total_bytes(&self) -> usize {
+        let mut total = self.embedding.embed_tokens.size_bytes();
+        total += self.final_norm.size_bytes();
         for layer in &self.layers {
-            total += layer.input_layernorm.size_bytes();
-            total += layer.post_attention_layernorm.size_bytes();
-            total += layer.mlp.gate_proj.size_bytes();
-            total += layer.mlp.up_proj.size_bytes();
-            total += layer.mlp.down_proj.size_bytes();
-            match &layer.attention {
-                AttentionWeights::Full(attn) => {
-                    total += attn.q_proj.size_bytes();
-                    total += attn.k_proj.size_bytes();
-                    total += attn.v_proj.size_bytes();
-                    total += attn.o_proj.size_bytes();
-                    total += attn.q_norm.size_bytes();
-                    total += attn.k_norm.size_bytes();
-                }
-                AttentionWeights::Linear(attn) => {
-                    total += attn.in_proj_qkv.size_bytes();
-                    total += attn.in_proj_z.size_bytes();
-                    total += attn.out_proj.size_bytes();
-                    total += attn.in_proj_a.size_bytes();
-                    total += attn.in_proj_b.size_bytes();
-                    total += attn.conv1d.size_bytes();
-                    total += attn.norm.size_bytes();
-                    total += attn.a_log.size_bytes();
-                    total += attn.dt_bias.size_bytes();
-                }
-            }
+            total += layer.total_bytes();
         }
         total
     }

@@ -50,6 +50,9 @@
           "rocm_path": "/opt/rocm",
           "test_threads": 1
         },
+        "model": {
+          "accelerator_weight_upload_mib_per_second": 256
+        },
         "runtime": {
           "qualification_opt_in": true,
           "required_backend": "rocm",

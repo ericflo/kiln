@@ -75,10 +75,12 @@ EFFECTIVE_CONFIG = {
     "build": MODE_CONFIGS["graph"]["build"],
     "comparison": MODE_CONFIGS["graph"]["workload"],
     "eager": {
+        "model": MODE_CONFIGS["eager"]["model"],
         "runtime": MODE_CONFIGS["eager"]["runtime"],
         "server": MODE_CONFIGS["eager"]["server"],
     },
     "graph": {
+        "model": MODE_CONFIGS["graph"]["model"],
         "runtime": MODE_CONFIGS["graph"]["runtime"],
         "server": MODE_CONFIGS["graph"]["server"],
     },

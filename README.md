@@ -672,7 +672,7 @@ open inputs and include validated examples for every public entrypoint.
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
 | POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
 | GET | `/v1/models` | List available models |
-| GET | `/v1/config` | Current server configuration, including serving-profile source, typed batching/streaming-prefill policy, SFT checkpoint boundaries, and the versioned optimizer implementation/native-device-hook versus server-execution contract |
+| GET | `/v1/config` | Current server configuration, including serving-profile source, typed model-startup upload policy and completed observation, batching/streaming-prefill policy, SFT checkpoint boundaries, and the versioned optimizer implementation/native-device-hook versus server-execution contract |
 | GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest and execution-provenance record, active model/adapters, config hashes, env flags, batching, thinking defaults, SFT checkpoint-boundary policy, cache counts, and batched recurrent-state ownership/lifecycle counters; enabled only with typed `server.debug_model_state=true` or `server.eval_mode=true` |
 | GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
@@ -751,6 +751,20 @@ Mutating the original checkpoint after startup cannot change loaded bytes or
 their revision. A user
 with the same UID (or root) can still discover and rewrite process-owned files;
 Kiln treats that as part of the trusted host boundary.
+
+On hosts where eager accelerator materialization creates unacceptable thermal
+or memory pressure, set `model.accelerator_weight_upload_mib_per_second` to a
+rate in `1..=16384`. Kiln schedules against base-model source bytes and yields
+after the embedding/final-norm group and each complete transformer layer;
+backend transforms can add work, so this is pressure shaping rather than an
+exact interconnect cap. The current upload quantum is not interruptible, but
+shutdown is checked at each boundary and every 25 ms during pacing waits.
+Omitting the field removes rate limiting without removing boundary
+cancellation. Mock and CPU-only execution report the field as inapplicable and
+do not pace. This policy ends before readiness and cannot cause an
+inference-time pause. `GET /v1/config` reports the configured rate and exact
+completed byte/layer observation under
+`model_startup.accelerator_weight_upload`.
 
 Vulkan startup populates its backend-private decode-weight caches by default,
 but materialization is paced at 256 MiB/s rather than uploaded as an unbounded

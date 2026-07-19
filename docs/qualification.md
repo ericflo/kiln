@@ -1548,6 +1548,22 @@ unchanged or raise the ceiling. Pace or partition accelerator-weight startup at
 cooperative product boundaries, with typed configuration and explicit progress
 evidence, before repeating the c8 control.
 
+The source-bound Strix Halo ROCm and Vulkan serving profiles set
+`model.accelerator_weight_upload_mib_per_second = 256`; this is a named-host
+GPU qualification policy, not the product-wide default; mock and CPU-only
+execution report it as inapplicable and do not pace. Generated server TOML and
+each checked workload `effective_config.model` must agree exactly. Upload
+progress is accounted in base-model source bytes after the base tensor group
+and every complete transformer layer. Backend conversions can perform more
+work than that byte count implies, and the current group or layer remains the
+largest non-interruptible quantum. Pacing waits poll shutdown every 25 ms.
+Once ready, `GET /v1/config.model_startup.accelerator_weight_upload` must show
+the configured rate, `active_during_inference=false`, matching completed and
+total byte/layer counts, and `complete=true`; the exclusive server log remains
+content-hashed evidence for intermediate progress. A replay is not accepted
+merely because startup survives: the unchanged host thermal, memory, swap,
+cleanup, output, and throughput gates still apply.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package

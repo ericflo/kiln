@@ -1169,6 +1169,19 @@ def build_definitions() -> None:
         "configuration": ref("BatchingRuntimeConfig"), "actor_active": ref("Boolean"),
         "direct_decode_rendezvous": ref("DirectDecodeRendezvousRuntimeState"),
     }, "Resolved batching policy plus live actor and fallback-route state.")
+    add_object("PrefixCacheConfig", "config::PrefixCacheConfig", {
+        "enabled": ref("Boolean"),
+        "max_blocks": nullable(ref("PositiveInteger")),
+        "max_entries": nullable(ref("PositiveInteger")),
+    }, "Requested startup prefix-cache policy.")
+    add_object("PrefixCacheConfigResponse", "PrefixCacheConfigResponse", {
+        "configuration": ref("PrefixCacheConfig"),
+        "effective_enabled": ref("Boolean"),
+        "effective_reason": ref("String"),
+        "effective_max_blocks": ref("NonNegativeInteger"),
+        "effective_max_entries": ref("NonNegativeInteger"),
+        "effective_max_state_bytes": ref("NonNegativeInteger"),
+    }, "Requested prefix-cache policy plus backend-qualified live limits.")
     add_object("MemoryTierConfig", "MemoryTierConfig", {
         **{field: ref("NonNegativeInteger") for field in ["total_bytes", "used_bytes", "free_bytes"]},
         **{field: ref("NonNegativeNumber") for field in ["total_gib", "used_gib", "free_gib"]},
@@ -1285,6 +1298,33 @@ def build_definitions() -> None:
         "default_thinking_budget_ms": nullable(ref("NonNegativeInteger")),
         "fold_reasoning_into_content": ref("Boolean"),
     }, "Resolved server-wide thinking and reasoning-content defaults.")
+    add_object("AcceleratorWeightUploadReport", "kiln_model::AcceleratorWeightUploadReport", {
+        "stage": ref("NonEmptyString"),
+        "configured_bytes_per_second": nullable(ref("PositiveInteger")),
+        "source_bytes_completed": ref("PositiveInteger"),
+        "source_bytes_total": ref("PositiveInteger"),
+        "completed_layers": ref("PositiveInteger"),
+        "total_layers": ref("PositiveInteger"),
+        "elapsed_milliseconds": ref("NonNegativeInteger"),
+        "paced_milliseconds": ref("NonNegativeInteger"),
+        "complete": {"const": True},
+    }, "Exact completed source-byte, layer, elapsed-time, and pacing accounting for eager base-model accelerator upload.")
+    add_object("AcceleratorWeightUploadConfigResponse", "AcceleratorWeightUploadConfigResponse", {
+        "configured_mib_per_second": nullable(ref("PositiveInteger")),
+        "rate_limited": ref("Boolean"),
+        "applicable": ref("Boolean"),
+        "not_applicable_reason": nullable({"enum": ["mock_mode", "cpu_device"]}),
+        "source_byte_accounting": {"const": "base_model_source_bytes"},
+        "cancellation_boundary": {"const": "base_then_each_layer"},
+        "cancellation_poll_milliseconds": {"const": 25},
+        "current_work_quantum_interruptible": {"const": False},
+        "active_during_inference": {"const": False},
+        "restart_required_to_change": {"const": True},
+        "observed": nullable(ref("AcceleratorWeightUploadReport")),
+    }, "Resolved startup-only accelerator-weight upload policy and completed real-model observation.")
+    add_object("ModelStartupConfigResponse", "ModelStartupConfigResponse", {
+        "accelerator_weight_upload": ref("AcceleratorWeightUploadConfigResponse"),
+    }, "Resolved model-startup resource policy and observations.")
     add_object("SpeculativeBackendMtpConfig", "SpeculativeBackendMtpConfig", {
         "support": ref("String"), "native": ref("Boolean"),
     }, "Selected backend's native MTP capability.")
@@ -1325,7 +1365,9 @@ def build_definitions() -> None:
         "rocm_graph_telemetry_unavailable_reason": nullable(ref("RocmGraphUnavailableReason")),
         "cuda_graphs": ref("CudaGraphConfigResponse"),
         "decode_runtime": ref("DecodeRuntimeConfig"), "batching": ref("BatchingConfigResponse"),
+        "prefix_cache": ref("PrefixCacheConfigResponse"),
         "streaming_prefill": ref("StreamingPrefillRuntimeConfig"), "speculative": ref("SpeculativeConfig"),
+        "model_startup": ref("ModelStartupConfigResponse"),
         "vram": ref("VramConfig"), "kv_cache": ref("KvCacheConfig"),
         "training": ref("TrainingConfigResponse"), "memory_budget": ref("MemoryBudgetConfig"),
         "generation": ref("GenerationConfig"), "operational": ref("OperationalRuntimeConfig"),

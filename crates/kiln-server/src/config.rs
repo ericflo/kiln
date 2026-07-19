@@ -3414,6 +3414,10 @@ pub struct ModelConfig {
     /// directory. `KILN_MODEL_SNAPSHOT_DIR` is the explicit environment
     /// override.
     pub snapshot_dir: Option<String>,
+    /// Optional average source-weight rate for eager accelerator upload.
+    /// Omission leaves startup unlimited. A configured rate bounds sustained
+    /// pressure and checks shutdown at least every 25 ms between layer uploads.
+    pub accelerator_weight_upload_mib_per_second: Option<u64>,
     /// Populate Vulkan's backend-private decode-weight caches during startup.
     /// Disable only when startup latency matters more than first-request
     /// latency; ordinary serving keeps this enabled.
@@ -6005,6 +6009,7 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     public_env_field!(some_text, model.tokenizer_path, "KILN_TOKENIZER_PATH"),
     public_env_field!(some_text, model.adapter_dir, "KILN_ADAPTER_DIR"),
     public_env_field!(snapshot_dir, model.snapshot_dir, "KILN_MODEL_SNAPSHOT_DIR"),
+    public_env_field!(optional_u64, model.accelerator_weight_upload_mib_per_second),
     public_env_field!(bool, model.vulkan_decode_weight_prewarm),
     public_env_field!(u64, model.vulkan_decode_weight_prewarm_mib_per_second),
     public_env_field!(some_text, model.served_model_id, "KILN_SERVED_MODEL_ID"),
@@ -6263,6 +6268,7 @@ impl Default for ModelConfig {
             tokenizer_path: None,
             adapter_dir: None,
             snapshot_dir: None,
+            accelerator_weight_upload_mib_per_second: None,
             vulkan_decode_weight_prewarm: true,
             vulkan_decode_weight_prewarm_mib_per_second: 256,
             served_model_id: None,
@@ -6771,6 +6777,13 @@ impl KilnConfig {
             if value.is_some_and(|value| value.trim().is_empty()) {
                 anyhow::bail!("{field} must be non-empty when set, got {value:?}");
             }
+        }
+        if let Some(rate) = self.model.accelerator_weight_upload_mib_per_second
+            && !(1..=16_384).contains(&rate)
+        {
+            anyhow::bail!(
+                "model.accelerator_weight_upload_mib_per_second must be in 1..=16384 when set, got {rate}"
+            );
         }
         if !(1..=16_384).contains(&self.model.vulkan_decode_weight_prewarm_mib_per_second) {
             anyhow::bail!(
@@ -7286,6 +7299,7 @@ mod tests {
         "KILN_MEMORY_RECLAIM_MODE",
         "KILN_MEMORY_TRAINING_MEMORY_GB",
         "KILN_MEMORY_VULKAN_BUFFER_POOL_GB",
+        "KILN_MODEL_ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND",
         "KILN_MODEL_ADAPTER_DIR",
         "KILN_MODEL_MODEL_ID",
         "KILN_MODEL_PATH",
@@ -8576,7 +8590,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 106);
+        assert_eq!(original_len, 107);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -8647,7 +8661,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 111);
+        assert_eq!(serialized_leaves.len(), 112);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -13077,8 +13091,26 @@ level = "warn"
     fn test_served_model_id_default_derivation() {
         let config = ModelConfig::default();
         assert_eq!(config.effective_served_model_id(), "Qwen3.5-4B");
+        assert_eq!(config.accelerator_weight_upload_mib_per_second, None);
         assert!(config.vulkan_decode_weight_prewarm);
         assert_eq!(config.vulkan_decode_weight_prewarm_mib_per_second, 256);
+    }
+
+    #[test]
+    fn accelerator_weight_upload_rate_is_optional_and_bounded() {
+        for invalid in [0, 16_385] {
+            let mut config = KilnConfig::default();
+            config.model.accelerator_weight_upload_mib_per_second = Some(invalid);
+            let error = config.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("model.accelerator_weight_upload_mib_per_second"),
+                "{error}"
+            );
+        }
+
+        let mut config = KilnConfig::default();
+        config.model.accelerator_weight_upload_mib_per_second = Some(256);
+        config.validate().unwrap();
     }
 
     #[test]

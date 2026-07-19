@@ -2470,6 +2470,17 @@ pub struct AppState {
     /// Immutable operational policy consumed by request handlers without
     /// rereading process environment.
     pub operational_runtime: Arc<crate::config::OperationalRuntimeConfig>,
+    /// Typed startup-only accelerator-weight upload setting retained for
+    /// resolved configuration diagnostics.
+    pub accelerator_weight_upload_mib_per_second: Option<u64>,
+    /// Whether the selected real-model device can apply accelerator upload
+    /// pacing. False for mock mode and CPU-only real-model execution.
+    pub accelerator_weight_upload_applicable: bool,
+    /// Stable public explanation when accelerator upload pacing is inapplicable.
+    pub accelerator_weight_upload_not_applicable_reason: Option<&'static str>,
+    /// Exact completed upload accounting for a real model. Mock mode has no
+    /// accelerator upload and leaves this absent.
+    pub accelerator_weight_upload_report: Option<kiln_model::AcceleratorWeightUploadReport>,
     pub model_config: ModelConfig,
     /// Configured model directory path for real inference mode. `None` in mock mode.
     pub model_path: Option<PathBuf>,
@@ -3309,6 +3320,10 @@ impl AppState {
             speculative_config,
             speculative_runtime_policy: SpeculativeRuntimePolicy::default(),
             operational_runtime: Arc::new(crate::config::OperationalRuntimeConfig::default()),
+            accelerator_weight_upload_mib_per_second: None,
+            accelerator_weight_upload_applicable: false,
+            accelerator_weight_upload_not_applicable_reason: Some("mock_mode"),
+            accelerator_weight_upload_report: None,
             model_config,
             model_path: None,
             base_teacher_identity: None,
@@ -4463,6 +4478,12 @@ impl AppState {
             speculative_config,
             speculative_runtime_policy,
             operational_runtime: Arc::new(crate::config::OperationalRuntimeConfig::default()),
+            accelerator_weight_upload_mib_per_second: None,
+            accelerator_weight_upload_applicable: device_kt.is_gpu(),
+            accelerator_weight_upload_not_applicable_reason: device_kt
+                .is_cpu()
+                .then_some("cpu_device"),
+            accelerator_weight_upload_report: None,
             model_config,
             model_path: None,
             base_teacher_identity,

@@ -49,6 +49,7 @@ mod transposed_weight_cache;
 pub mod vk_bwd_adapter;
 #[cfg(feature = "vulkan")]
 pub mod vk_decode_resident;
+mod weight_upload;
 pub mod weights;
 
 pub use backend::capability::{
@@ -118,6 +119,11 @@ pub use rocm_graph::{
 #[cfg(feature = "rocm")]
 pub use rocm_policy::{RocmKernelPolicy, install_rocm_kernel_policy};
 pub use speculative::SpeculativeConfig;
+pub use weight_upload::{
+    ACCELERATOR_WEIGHT_UPLOAD_CANCELLATION_BOUNDARY,
+    ACCELERATOR_WEIGHT_UPLOAD_CANCELLATION_POLL_MILLISECONDS, AcceleratorWeightUploadCancelled,
+    AcceleratorWeightUploadPolicy, AcceleratorWeightUploadReport,
+};
 pub use weights::{ModelSnapshotCleanup, ModelWeights};
 
 #[cfg(feature = "vulkan")]

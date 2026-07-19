@@ -67,6 +67,9 @@ def _effective_config() -> dict[str, Any]:
         VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE
     )
     value["model"] = {
+        "accelerator_weight_upload_mib_per_second": (
+            mixed.ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND
+        ),
         "vulkan_decode_weight_prewarm": mixed.VULKAN_DECODE_WEIGHT_PREWARM,
         "vulkan_decode_weight_prewarm_mib_per_second": (
             mixed.VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND

@@ -60,6 +60,9 @@
           "warm_then_measure": true
         },
         "eager": {
+          "model": {
+            "accelerator_weight_upload_mib_per_second": 256
+          },
           "runtime": {
             "kv_autoscale_enabled": false,
             "kv_autoscale_requested": false,
@@ -88,6 +91,9 @@
           }
         },
         "graph": {
+          "model": {
+            "accelerator_weight_upload_mib_per_second": 256
+          },
           "runtime": {
             "kv_autoscale_enabled": false,
             "kv_autoscale_requested": false,

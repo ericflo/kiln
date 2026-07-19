@@ -78,6 +78,7 @@ mixed.VARIANT_CONFIGS[MAINTENANCE_VARIANT_ID] = MAINTENANCE_CONFIG
 
 EFFECTIVE_CONFIG: dict[str, Any] = {
     "build": dict(ADAPTER_CONFIG["build"]),
+    "model": dict(ADAPTER_CONFIG["model"]),
     "runtime": {
         "adapter_arm": dict(ADAPTER_CONFIG["runtime"]),
         "maintenance_resize_arm": {

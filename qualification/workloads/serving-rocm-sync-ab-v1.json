@@ -88,6 +88,9 @@
           }
         },
         "legacy_host_barriers": {
+          "model": {
+            "accelerator_weight_upload_mib_per_second": 256
+          },
           "runtime": {
             "serving_profile": "experimental",
             "kv_autoscale_requested": false,
@@ -117,6 +120,9 @@
           }
         },
         "stream_ordered": {
+          "model": {
+            "accelerator_weight_upload_mib_per_second": 256
+          },
           "runtime": {
             "serving_profile": "experimental",
             "kv_autoscale_requested": false,

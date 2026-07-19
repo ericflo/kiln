@@ -125,10 +125,12 @@ EFFECTIVE_CONFIG = {
     "build": MODE_CONFIGS[MODES[0]]["build"],
     "comparison": MODE_CONFIGS[MODES[0]]["workload"],
     "legacy_host_barriers": {
+        "model": MODE_CONFIGS["legacy_host_barriers"]["model"],
         "runtime": MODE_CONFIGS["legacy_host_barriers"]["runtime"],
         "server": MODE_CONFIGS["legacy_host_barriers"]["server"],
     },
     "stream_ordered": {
+        "model": MODE_CONFIGS["stream_ordered"]["model"],
         "runtime": MODE_CONFIGS["stream_ordered"]["runtime"],
         "server": MODE_CONFIGS["stream_ordered"]["server"],
     },

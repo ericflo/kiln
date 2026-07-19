@@ -67,6 +67,11 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
         "test_threads": 1,
         "timeout_seconds": TIMEOUT_SECONDS,
     },
+    "model": {
+        "accelerator_weight_upload_mib_per_second": (
+            mixed.ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND
+        ),
+    },
     "runtime": {
         "qualification_opt_in": True,
         "required_backend": "rocm",

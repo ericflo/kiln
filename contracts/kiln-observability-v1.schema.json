@@ -341,6 +341,18 @@
             "route_available": false
           }
         },
+        "prefix_cache": {
+          "configuration": {
+            "enabled": false,
+            "max_blocks": 1,
+            "max_entries": 1
+          },
+          "effective_enabled": false,
+          "effective_reason": "value",
+          "effective_max_blocks": 0,
+          "effective_max_entries": 0,
+          "effective_max_state_bytes": 0
+        },
         "streaming_prefill": {
           "dispatch": {
             "configured_mode": "auto",
@@ -414,6 +426,31 @@
           "backend_mtp": {
             "support": "value",
             "native": false
+          }
+        },
+        "model_startup": {
+          "accelerator_weight_upload": {
+            "configured_mib_per_second": 1,
+            "rate_limited": false,
+            "applicable": false,
+            "not_applicable_reason": "mock_mode",
+            "source_byte_accounting": "base_model_source_bytes",
+            "cancellation_boundary": "base_then_each_layer",
+            "cancellation_poll_milliseconds": 25,
+            "current_work_quantum_interruptible": false,
+            "active_during_inference": false,
+            "restart_required_to_change": true,
+            "observed": {
+              "stage": "value",
+              "configured_bytes_per_second": 1,
+              "source_bytes_completed": 1,
+              "source_bytes_total": 1,
+              "completed_layers": 1,
+              "total_layers": 1,
+              "elapsed_milliseconds": 0,
+              "paced_milliseconds": 0,
+              "complete": true
+            }
           }
         },
         "vram": {
@@ -2202,6 +2239,139 @@
     }
   ],
   "$defs": {
+    "AcceleratorWeightUploadConfigResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured_mib_per_second",
+        "rate_limited",
+        "applicable",
+        "not_applicable_reason",
+        "source_byte_accounting",
+        "cancellation_boundary",
+        "cancellation_poll_milliseconds",
+        "current_work_quantum_interruptible",
+        "active_during_inference",
+        "restart_required_to_change",
+        "observed"
+      ],
+      "properties": {
+        "configured_mib_per_second": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rate_limited": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "applicable": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "not_applicable_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "mock_mode",
+                "cpu_device"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_byte_accounting": {
+          "const": "base_model_source_bytes"
+        },
+        "cancellation_boundary": {
+          "const": "base_then_each_layer"
+        },
+        "cancellation_poll_milliseconds": {
+          "const": 25
+        },
+        "current_work_quantum_interruptible": {
+          "const": false
+        },
+        "active_during_inference": {
+          "const": false
+        },
+        "restart_required_to_change": {
+          "const": true
+        },
+        "observed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AcceleratorWeightUploadReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Resolved startup-only accelerator-weight upload policy and completed real-model observation.",
+      "x-kiln-rust-type": "AcceleratorWeightUploadConfigResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "AcceleratorWeightUploadReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "configured_bytes_per_second",
+        "source_bytes_completed",
+        "source_bytes_total",
+        "completed_layers",
+        "total_layers",
+        "elapsed_milliseconds",
+        "paced_milliseconds",
+        "complete"
+      ],
+      "properties": {
+        "stage": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "configured_bytes_per_second": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_bytes_completed": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "source_bytes_total": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "completed_layers": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "total_layers": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "elapsed_milliseconds": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "paced_milliseconds": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "complete": {
+          "const": true
+        }
+      },
+      "description": "Exact completed source-byte, layer, elapsed-time, and pacing accounting for eager base-model accelerator upload.",
+      "x-kiln-rust-type": "kiln_model::AcceleratorWeightUploadReport",
+      "x-kiln-field-schema-status": "complete"
+    },
     "ActiveJobInfo": {
       "type": "object",
       "additionalProperties": false,
@@ -3194,8 +3364,10 @@
         "cuda_graphs",
         "decode_runtime",
         "batching",
+        "prefix_cache",
         "streaming_prefill",
         "speculative",
+        "model_startup",
         "vram",
         "kv_cache",
         "training",
@@ -3259,11 +3431,17 @@
         "batching": {
           "$ref": "#/$defs/BatchingConfigResponse"
         },
+        "prefix_cache": {
+          "$ref": "#/$defs/PrefixCacheConfigResponse"
+        },
         "streaming_prefill": {
           "$ref": "#/$defs/StreamingPrefillRuntimeConfig"
         },
         "speculative": {
           "$ref": "#/$defs/SpeculativeConfig"
+        },
+        "model_startup": {
+          "$ref": "#/$defs/ModelStartupConfigResponse"
         },
         "vram": {
           "$ref": "#/$defs/VramConfig"
@@ -5864,6 +6042,21 @@
       "x-kiln-rust-type": "ModelInfo",
       "x-kiln-field-schema-status": "complete"
     },
+    "ModelStartupConfigResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accelerator_weight_upload"
+      ],
+      "properties": {
+        "accelerator_weight_upload": {
+          "$ref": "#/$defs/AcceleratorWeightUploadConfigResponse"
+        }
+      },
+      "description": "Resolved model-startup resource policy and observations.",
+      "x-kiln-rust-type": "ModelStartupConfigResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
     "ModelStateResponse": {
       "type": "object",
       "additionalProperties": false,
@@ -6139,6 +6332,78 @@
       },
       "description": "Resolved prefill execution state.",
       "x-kiln-rust-type": "PrefillRuntimeInfo",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PrefixCacheConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "max_blocks",
+        "max_entries"
+      ],
+      "properties": {
+        "enabled": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "max_blocks": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_entries": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Requested startup prefix-cache policy.",
+      "x-kiln-rust-type": "config::PrefixCacheConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "PrefixCacheConfigResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configuration",
+        "effective_enabled",
+        "effective_reason",
+        "effective_max_blocks",
+        "effective_max_entries",
+        "effective_max_state_bytes"
+      ],
+      "properties": {
+        "configuration": {
+          "$ref": "#/$defs/PrefixCacheConfig"
+        },
+        "effective_enabled": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "effective_reason": {
+          "$ref": "#/$defs/String"
+        },
+        "effective_max_blocks": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "effective_max_entries": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "effective_max_state_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Requested prefix-cache policy plus backend-qualified live limits.",
+      "x-kiln-rust-type": "PrefixCacheConfigResponse",
       "x-kiln-field-schema-status": "complete"
     },
     "PrefixCacheHealthInfo": {

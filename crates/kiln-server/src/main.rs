@@ -758,6 +758,7 @@ async fn main() -> Result<()> {
         config.server.stream_stall_grace_ms,
     );
     let mut model_snapshot_cleanup = None;
+    let mut accelerator_weight_upload_report = None;
     let mut state = if let Some(mp) = model_path {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::debug!("loading model weights from {mp}");
@@ -865,8 +866,66 @@ async fn main() -> Result<()> {
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message("uploading weights to GPU");
         }
-        let gpu_weights =
-            GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)?;
+        let accelerator_weight_upload_applicable = device_kt.is_gpu();
+        let effective_weight_upload_rate = config
+            .model
+            .accelerator_weight_upload_mib_per_second
+            .filter(|_| accelerator_weight_upload_applicable);
+        let weight_upload_policy = match effective_weight_upload_rate {
+            Some(rate_mib_per_second) => kiln_model::AcceleratorWeightUploadPolicy::paced(
+                rate_mib_per_second.saturating_mul(1024 * 1024),
+                Arc::clone(&process_shutdown.requested),
+            )?,
+            None => kiln_model::AcceleratorWeightUploadPolicy::cancellable(Arc::clone(
+                &process_shutdown.requested,
+            )),
+        };
+        tracing::info!(
+            configured_mib_per_second = ?config
+                .model
+                .accelerator_weight_upload_mib_per_second,
+            effective_mib_per_second = ?effective_weight_upload_rate,
+            applicable = accelerator_weight_upload_applicable,
+            not_applicable_reason = if accelerator_weight_upload_applicable {
+                None
+            } else {
+                Some("cpu_device")
+            },
+            cancellation_boundary = kiln_model::ACCELERATOR_WEIGHT_UPLOAD_CANCELLATION_BOUNDARY,
+            cancellation_poll_ms =
+                kiln_model::ACCELERATOR_WEIGHT_UPLOAD_CANCELLATION_POLL_MILLISECONDS,
+            source_byte_accounting = true,
+            active_during_inference = false,
+            "accelerator weight upload policy resolved"
+        );
+        let gpu_weights = match GpuWeights::from_model_weights_kt_with_upload_policy(
+            &model_weights,
+            &model_config,
+            &device_kt,
+            &weight_upload_policy,
+        ) {
+            Ok(weights) => weights,
+            Err(error)
+                if error
+                    .downcast_ref::<kiln_model::AcceleratorWeightUploadCancelled>()
+                    .is_some() =>
+            {
+                process_shutdown.requested_during_startup("accelerator_weight_upload_cancelled");
+                return Ok(());
+            }
+            Err(error) => return Err(error).context("accelerator weight upload failed"),
+        };
+        let completed_weight_upload = weight_upload_policy.report();
+        anyhow::ensure!(
+            completed_weight_upload.complete
+                && completed_weight_upload.source_bytes_completed
+                    == completed_weight_upload.source_bytes_total
+                && completed_weight_upload.completed_layers == completed_weight_upload.total_layers,
+            "accelerator weight upload returned without complete progress accounting"
+        );
+        if accelerator_weight_upload_applicable {
+            accelerator_weight_upload_report = Some(completed_weight_upload);
+        }
         if process_shutdown.requested_during_startup("accelerator_weights_uploaded") {
             return Ok(());
         }
@@ -1050,6 +1109,9 @@ async fn main() -> Result<()> {
             .resolve_operational_runtime(&state.adapter_dir)
             .context("failed to resolve immutable operational runtime configuration")?,
     );
+    state.accelerator_weight_upload_mib_per_second =
+        config.model.accelerator_weight_upload_mib_per_second;
+    state.accelerator_weight_upload_report = accelerator_weight_upload_report;
 
     let decode_runtime = state.decode_runtime_config;
     tracing::info!(

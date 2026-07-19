@@ -230,6 +230,12 @@ model_id = "Qwen/Qwen3.5-4B"
                                       # overrides this value. The snapshot remains
                                       # leased by the running model and is cleaned
                                       # when that lease ends.
+# accelerator_weight_upload_mib_per_second = 256 # Optional startup-only rate based
+                                      # on source-weight bytes. Use on thermally or
+                                      # memory-pressure-sensitive hosts. Omission is
+                                      # unlimited; cancellation still occurs after
+                                      # base tensors and each complete model layer.
+                                      # Inapplicable to mock and CPU-only execution.
 vulkan_decode_weight_prewarm = true # Populate private Vulkan decode caches at startup.
 vulkan_decode_weight_prewarm_mib_per_second = 256 # Sustained materialization rate.
 # served_model_id = "Qwen3.5-4B" # ID exposed at /v1/models and echoed in chat completion

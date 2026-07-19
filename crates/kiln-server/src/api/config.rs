@@ -52,12 +52,33 @@ struct ConfigResponse {
     prefix_cache: PrefixCacheConfigResponse,
     streaming_prefill: StreamingPrefillRuntimeConfig,
     speculative: SpeculativeConfig,
+    model_startup: ModelStartupConfigResponse,
     operational: OperationalRuntimeConfig,
     vram: VramConfig,
     kv_cache: KvCacheConfig,
     training: TrainingConfig,
     memory_budget: MemoryBudgetConfig,
     generation: GenerationConfig,
+}
+
+#[derive(Serialize)]
+struct ModelStartupConfigResponse {
+    accelerator_weight_upload: AcceleratorWeightUploadConfigResponse,
+}
+
+#[derive(Serialize)]
+struct AcceleratorWeightUploadConfigResponse {
+    configured_mib_per_second: Option<u64>,
+    rate_limited: bool,
+    applicable: bool,
+    not_applicable_reason: Option<&'static str>,
+    source_byte_accounting: &'static str,
+    cancellation_boundary: &'static str,
+    cancellation_poll_milliseconds: u64,
+    current_work_quantum_interruptible: bool,
+    active_during_inference: bool,
+    restart_required_to_change: bool,
+    observed: Option<kiln_model::AcceleratorWeightUploadReport>,
 }
 
 #[derive(Serialize)]
@@ -459,6 +480,23 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         },
         streaming_prefill: state.streaming_prefill_runtime_config,
         speculative: build_speculative_config(&state),
+        model_startup: ModelStartupConfigResponse {
+            accelerator_weight_upload: AcceleratorWeightUploadConfigResponse {
+                configured_mib_per_second: state.accelerator_weight_upload_mib_per_second,
+                rate_limited: state.accelerator_weight_upload_applicable
+                    && state.accelerator_weight_upload_mib_per_second.is_some(),
+                applicable: state.accelerator_weight_upload_applicable,
+                not_applicable_reason: state.accelerator_weight_upload_not_applicable_reason,
+                source_byte_accounting: "base_model_source_bytes",
+                cancellation_boundary: kiln_model::ACCELERATOR_WEIGHT_UPLOAD_CANCELLATION_BOUNDARY,
+                cancellation_poll_milliseconds:
+                    kiln_model::ACCELERATOR_WEIGHT_UPLOAD_CANCELLATION_POLL_MILLISECONDS,
+                current_work_quantum_interruptible: false,
+                active_during_inference: false,
+                restart_required_to_change: true,
+                observed: state.accelerator_weight_upload_report.clone(),
+            },
+        },
         operational: state.operational_runtime.as_ref().clone(),
         vram: build_vram_config(&state, memory_observation),
         kv_cache: KvCacheConfig {
@@ -923,6 +961,7 @@ mod tests {
             "Qwen3.5-4B".to_string(),
         );
         state.inference_device = kiln_tensor::Device::Vulkan(0);
+        state.accelerator_weight_upload_mib_per_second = Some(256);
         assert_eq!(state.model_weight_device, kiln_tensor::Device::Cpu);
 
         let response = routes()
@@ -950,6 +989,12 @@ mod tests {
         assert_eq!(json["prefix_cache"]["effective_max_blocks"], 0);
         assert_eq!(json["prefix_cache"]["effective_max_entries"], 0);
         assert_eq!(json["prefix_cache"]["effective_max_state_bytes"], 0);
+        let upload = &json["model_startup"]["accelerator_weight_upload"];
+        assert_eq!(upload["configured_mib_per_second"], 256);
+        assert_eq!(upload["rate_limited"], false);
+        assert_eq!(upload["applicable"], false);
+        assert_eq!(upload["not_applicable_reason"], "mock_mode");
+        assert!(upload["observed"].is_null());
     }
 
     #[tokio::test]
@@ -963,6 +1008,20 @@ mod tests {
             .resolved_policy(state.serving_profile);
         state.default_thinking_budget_tokens = Some(64);
         state.default_thinking_budget_ms = Some(1_500);
+        state.accelerator_weight_upload_mib_per_second = Some(256);
+        state.accelerator_weight_upload_applicable = true;
+        state.accelerator_weight_upload_not_applicable_reason = None;
+        state.accelerator_weight_upload_report = Some(kiln_model::AcceleratorWeightUploadReport {
+            stage: "complete",
+            configured_bytes_per_second: Some(256 * 1024 * 1024),
+            source_bytes_completed: 8_000_000_000,
+            source_bytes_total: 8_000_000_000,
+            completed_layers: 32,
+            total_layers: 32,
+            elapsed_milliseconds: 31_250,
+            paced_milliseconds: 20_000,
+            complete: true,
+        });
         let checkpoint_boundary_policy = kiln_train::CheckpointBoundaryPolicy::from_parts(
             kiln_train::CheckpointBoundaryRecomputeMode::Enabled,
             4096,
@@ -1075,6 +1134,20 @@ mod tests {
         );
         assert_eq!(json["generation"]["default_thinking_budget_tokens"], 64);
         assert_eq!(json["generation"]["default_thinking_budget_ms"], 1_500);
+        let upload = &json["model_startup"]["accelerator_weight_upload"];
+        assert_eq!(upload["configured_mib_per_second"], 256);
+        assert_eq!(upload["rate_limited"], true);
+        assert_eq!(upload["applicable"], true);
+        assert!(upload["not_applicable_reason"].is_null());
+        assert_eq!(upload["source_byte_accounting"], "base_model_source_bytes");
+        assert_eq!(upload["cancellation_boundary"], "base_then_each_layer");
+        assert_eq!(upload["cancellation_poll_milliseconds"], 25);
+        assert_eq!(upload["current_work_quantum_interruptible"], false);
+        assert_eq!(upload["active_during_inference"], false);
+        assert_eq!(upload["restart_required_to_change"], true);
+        assert_eq!(upload["observed"]["source_bytes_total"], 8_000_000_000_u64);
+        assert_eq!(upload["observed"]["completed_layers"], 32);
+        assert_eq!(upload["observed"]["complete"], true);
         assert_eq!(json["decode_runtime"]["deterministic"]["enabled"], false);
         assert_eq!(json["decode_runtime"]["deterministic"]["source"], "default");
         assert!(json["decode_runtime"]["max_decode_batch"]["configured"].is_null());
