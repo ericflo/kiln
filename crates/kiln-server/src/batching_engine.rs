@@ -1839,6 +1839,8 @@ impl BatchingEngineHandle {
                     .is_some_and(|policy| policy.use_decode_width_prefill_admission),
                 burst_prefill_admission: policy
                     .is_some_and(|policy| policy.burst_prefill_admission),
+                actor_prefill_tile_alignment_required: policy
+                    .is_some_and(|policy| policy.actor_prefill_tile_alignment_required),
                 direct_decode_rendezvous: policy.map_or(
                     DirectDecodeRendezvousBackendPolicy {
                         enabled: false,
@@ -6135,6 +6137,7 @@ mod tests {
                 batching_engine_default_enabled: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
+                actor_prefill_tile_alignment_required: false,
                 direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
                     enabled: false,
                     max_batch: 1,

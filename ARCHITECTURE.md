@@ -1047,14 +1047,22 @@ forwards, tape forwards, and detached full-attention forwards consume that
 value; none reads public streaming environment variables while work is in
 flight. A restart is required to change it.
 
-`auto` dispatches at 2048 prompt tokens on CUDA, ROCm, and Metal, and never on
-CPU or Vulkan. The base/tape defaults are 1024/1024 on CUDA and ROCm,
-2048/2048 on Metal and Vulkan, and 8192/8192 on CPU. Detached full-attention
+`auto` dispatches at 256 prompt tokens on ROCm, 2048 on CUDA and Metal, and
+never on CPU or Vulkan. The base/tape defaults are 1024/1024 on CUDA,
+256/256 on ROCm, 2048/2048 on Metal and Vulkan, and 8192/8192 on CPU. Detached full-attention
 defaults to 8192 everywhere; CUDA alone raises its boundary and tape-replay
 variants to 65536. An explicit base tile is inherited by any `auto` tape or
 detached field, including detached boundary/replay variants. A separate
 detached value overrides all three detached variants. Every concrete tile is a
 positive multiple of the 64-token GDN chunk size.
+
+ROCm also owns a cross-subsystem numerical contract: when its production
+batching actor is effective, the actor prefill ceiling must equal the 256-token
+streaming tile, direct streaming must become eligible no later than that first
+split, and the combined actor budget must fit one full tile beside every
+effective decode row. Startup rejects violations before serving traffic. This
+keeps actor and direct routes from silently applying different deterministic
+prompt partitions.
 
 The resolved structure is intentionally richer than one enabled flag. It
 retains configured source, backend policy, effective dispatch rule, threshold

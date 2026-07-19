@@ -1383,6 +1383,21 @@ diagnostic-only. Initial fingerprint, server, and final fingerprint lifecycles
 peaked at 59.875, 60.125, and 59.75 C with zero trips, complete cooldowns,
 normal shutdown, and no listener, process, or snapshot residue.
 
+The repaired production input is now
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v2.json`.
+Its TOML differs from the preserved v1 production profile only by changing the
+actor prefill ceiling from 64 to 256. The backend policy simultaneously makes
+256 the ROCm direct-streaming threshold and base/tape tile. A typed
+`actor_prefill_tile_alignment_required=true` diagnostic explains the
+fail-closed startup checks: the actor ceiling must equal the effective tile,
+direct streaming must cover the first split, and `max_batch_tokens` must fit
+the tile plus the effective decode width. This prevents configuration drift
+from reintroducing route-dependent deterministic output. Historical 64-token
+actor profiles remain receipt-bound evidence and are not rewritten; a repaired
+binary rejects them when the actor is effective. The v2 profile is not accepted
+until exact rebuilt-source c1 parity, longer output parity, and concurrent
+mixed-prompt qualification pass on this Strix Halo.
+
 An attributed argmax identifies which engine selected the eager HF reference's
 top token at the first divergence. It does not prove multi-token parity, explain
 the losing engine's numerical defect, accept either thermal pacing policy for

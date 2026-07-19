@@ -3275,6 +3275,7 @@ impl AppState {
                 batching_engine_default_enabled: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
+                actor_prefill_tile_alignment_required: false,
                 direct_decode_rendezvous: crate::config::DirectDecodeRendezvousBackendPolicy {
                     enabled: false,
                     max_batch: 1,
@@ -4134,21 +4135,16 @@ impl AppState {
         );
         let max_decode_batch = decode_runtime_config.max_decode_batch.effective;
         let batching_runtime_config = batching_config.resolve(
-            crate::config::BatchingBackendPolicy {
-                batching_engine_default_enabled: decode_batcher_policy
-                    .batching_engine_default_enabled,
-                use_decode_width_prefill_admission: decode_batcher_policy
-                    .use_decode_width_prefill_admission,
-                burst_prefill_admission: decode_batcher_policy.burst_prefill_admission,
-                direct_decode_rendezvous: crate::config::DirectDecodeRendezvousBackendPolicy {
-                    enabled: decode_batcher_policy.rendezvous_default_enabled,
-                    max_batch: decode_batcher_policy.max_batch,
-                    wait_us: decode_batcher_policy.wait_micros,
-                    mixed_seq_lens: decode_batcher_policy.allow_mixed_seq_lens,
-                },
-            },
+            crate::config::BatchingBackendPolicy::from_decode_batcher_policy(decode_batcher_policy),
             max_decode_batch,
         );
+        crate::config::validate_actor_prefill_tile_contract(
+            batching_runtime_config,
+            streaming_prefill_runtime_config,
+            max_batch_tokens,
+            max_prefill_tokens_per_cycle,
+            max_decode_batch,
+        )?;
         tracing::info!(
             backend = backend_name,
             mode_configured = %batching_runtime_config.mode.configured,
@@ -4156,6 +4152,8 @@ impl AppState {
             mode_backend_policy_enabled = batching_runtime_config.mode.backend_policy_enabled,
             mode_effective_enabled = batching_runtime_config.mode.effective_enabled,
             mode_effective_source = %batching_runtime_config.mode.effective_source,
+            actor_prefill_tile_alignment_required = batching_runtime_config
+                .actor_prefill_tile_alignment_required,
             rowwise_decode = batching_runtime_config.rowwise_decode.enabled,
             rowwise_decode_source = %batching_runtime_config.rowwise_decode.source,
             prefix_aware_admission = batching_runtime_config.prefix_aware_admission.enabled,

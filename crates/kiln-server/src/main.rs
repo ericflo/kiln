@@ -822,6 +822,20 @@ async fn main() -> Result<()> {
             Some(decode_batcher_policy),
             config.server.max_batch_tokens,
         );
+        let startup_batching_runtime = config.batching.resolve(
+            kiln_server::config::BatchingBackendPolicy::from_decode_batcher_policy(
+                decode_batcher_policy,
+            ),
+            startup_decode_runtime.max_decode_batch.effective,
+        );
+        kiln_server::config::validate_actor_prefill_tile_contract(
+            startup_batching_runtime,
+            streaming_prefill_runtime_config,
+            config.server.max_batch_tokens,
+            config.server.max_prefill_tokens_per_cycle,
+            startup_decode_runtime.max_decode_batch.effective,
+        )
+        .context("invalid batching/streaming-prefill startup contract")?;
         graph_options.max_decode_batch = Some(startup_decode_runtime.max_decode_batch.effective);
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message(format!("loading model weights from {mp}"));
@@ -1014,6 +1028,7 @@ async fn main() -> Result<()> {
                 batching_engine_default_enabled: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
+                actor_prefill_tile_alignment_required: false,
                 direct_decode_rendezvous:
                     kiln_server::config::DirectDecodeRendezvousBackendPolicy {
                         enabled: false,

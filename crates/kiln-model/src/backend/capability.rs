@@ -1073,6 +1073,11 @@ pub struct DecodeBatcherPolicy {
     pub use_decode_width_prefill_admission: bool,
     pub burst_prefill_admission: bool,
     pub batching_engine_default_enabled: bool,
+    /// Require the production batching actor to use the same numerical prompt
+    /// partition as direct streaming prefill. Backends set this after
+    /// qualification proves that changing a prompt chunk boundary can change
+    /// deterministic output.
+    pub actor_prefill_tile_alignment_required: bool,
     pub warm_resident_decode_pool_on_startup: bool,
 }
 
@@ -1916,8 +1921,10 @@ impl StartupCapabilities {
 
 impl StreamingPrefillBackendPolicy {
     pub const AUTO_MIN_PROMPT_TOKENS: usize = 2_048;
+    pub const ROCM_AUTO_MIN_PROMPT_TOKENS: usize = 256;
     pub const PORTABLE_TILE_TOKENS: usize = 8_192;
-    pub const CUDA_ROCM_TILE_TOKENS: usize = 1_024;
+    pub const CUDA_TILE_TOKENS: usize = 1_024;
+    pub const ROCM_TILE_TOKENS: usize = 256;
     pub const METAL_VULKAN_TILE_TOKENS: usize = 2_048;
     pub const MATERIALIZED_FULL_ATTN_TILE_TOKENS: usize = 8_192;
     pub const FLASH_FULL_ATTN_TILE_TOKENS: usize = 65_536;
@@ -1933,18 +1940,18 @@ impl StreamingPrefillBackendPolicy {
                 auto_dispatch: StreamingPrefillAutoDispatch::PromptTokensAtLeast(
                     Self::AUTO_MIN_PROMPT_TOKENS,
                 ),
-                base_tile_tokens: Self::CUDA_ROCM_TILE_TOKENS,
-                tape_tile_tokens: Self::CUDA_ROCM_TILE_TOKENS,
+                base_tile_tokens: Self::CUDA_TILE_TOKENS,
+                tape_tile_tokens: Self::CUDA_TILE_TOKENS,
                 detached_full_attn_tile_tokens: Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
                 detached_full_attn_boundary_tile_tokens: Self::FLASH_FULL_ATTN_TILE_TOKENS,
                 detached_full_attn_tape_replay_tile_tokens: Self::FLASH_FULL_ATTN_TILE_TOKENS,
             },
             kiln_tensor::Backend::Rocm => Self {
                 auto_dispatch: StreamingPrefillAutoDispatch::PromptTokensAtLeast(
-                    Self::AUTO_MIN_PROMPT_TOKENS,
+                    Self::ROCM_AUTO_MIN_PROMPT_TOKENS,
                 ),
-                base_tile_tokens: Self::CUDA_ROCM_TILE_TOKENS,
-                tape_tile_tokens: Self::CUDA_ROCM_TILE_TOKENS,
+                base_tile_tokens: Self::ROCM_TILE_TOKENS,
+                tape_tile_tokens: Self::ROCM_TILE_TOKENS,
                 detached_full_attn_tile_tokens: Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
                 detached_full_attn_boundary_tile_tokens: Self::MATERIALIZED_FULL_ATTN_TILE_TOKENS,
                 detached_full_attn_tape_replay_tile_tokens:
@@ -2101,6 +2108,7 @@ impl DecodeBatcherPolicy {
                 use_decode_width_prefill_admission: true,
                 burst_prefill_admission: true,
                 batching_engine_default_enabled: true,
+                actor_prefill_tile_alignment_required: false,
                 warm_resident_decode_pool_on_startup: false,
             },
             kiln_tensor::Backend::Metal => Self {
@@ -2123,6 +2131,7 @@ impl DecodeBatcherPolicy {
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
                 batching_engine_default_enabled: false,
+                actor_prefill_tile_alignment_required: false,
                 warm_resident_decode_pool_on_startup: false,
             },
             kiln_tensor::Backend::Vulkan => Self {
@@ -2145,6 +2154,7 @@ impl DecodeBatcherPolicy {
                 use_decode_width_prefill_admission: true,
                 burst_prefill_admission: false,
                 batching_engine_default_enabled: true,
+                actor_prefill_tile_alignment_required: false,
                 warm_resident_decode_pool_on_startup: true,
             },
             kiln_tensor::Backend::Rocm => Self {
@@ -2178,6 +2188,7 @@ impl DecodeBatcherPolicy {
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
                 batching_engine_default_enabled: true,
+                actor_prefill_tile_alignment_required: true,
                 warm_resident_decode_pool_on_startup: false,
             },
             _ => Self {
@@ -2200,6 +2211,7 @@ impl DecodeBatcherPolicy {
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
                 batching_engine_default_enabled: true,
+                actor_prefill_tile_alignment_required: false,
                 warm_resident_decode_pool_on_startup: false,
             },
         }
@@ -2798,9 +2810,9 @@ mod tests {
             (
                 "rocm",
                 kiln_tensor::Device::Rocm(0),
-                StreamingPrefillAutoDispatch::PromptTokensAtLeast(2_048),
-                1_024,
-                1_024,
+                StreamingPrefillAutoDispatch::PromptTokensAtLeast(256),
+                256,
+                256,
                 8_192,
                 8_192,
                 8_192,
@@ -2864,6 +2876,24 @@ mod tests {
         assert_eq!(long_prompt.minimum_prompt_tokens(), Some(2_048));
         assert!(!long_prompt.enabled_for_prompt_tokens(2_047));
         assert!(long_prompt.enabled_for_prompt_tokens(2_048));
+    }
+
+    #[test]
+    fn actor_prefill_tile_alignment_is_owned_only_by_rocm() {
+        for (name, device, required) in [
+            ("cpu", kiln_tensor::Device::Cpu, false),
+            ("cuda", kiln_tensor::Device::Cuda(0), false),
+            ("metal", kiln_tensor::Device::Metal(0), false),
+            ("vulkan", kiln_tensor::Device::Vulkan(0), false),
+            ("rocm", kiln_tensor::Device::Rocm(0), true),
+        ] {
+            assert_eq!(
+                DecodeBatcherPolicy::for_backend(name, device)
+                    .actor_prefill_tile_alignment_required,
+                required,
+                "{name}"
+            );
+        }
     }
 
     #[test]

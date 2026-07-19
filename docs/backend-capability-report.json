@@ -1424,7 +1424,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeBatcherPolicy": {
-      "field_count": 20,
+      "field_count": 21,
       "fields": [
         {
           "name": "rendezvous_default_enabled",
@@ -1500,6 +1500,10 @@
         },
         {
           "name": "batching_engine_default_enabled",
+          "type": "bool"
+        },
+        {
+          "name": "actor_prefill_tile_alignment_required",
           "type": "bool"
         },
         {

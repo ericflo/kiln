@@ -147,7 +147,7 @@ The schema additionally records the accepted deprecated TOML-only
 | `server.http_send_buffer_bytes` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_HTTP_SEND_BUFFER_BYTES` (implemented) | `KILN_HTTP_SEND_BUFFER_BYTES` (deprecated compatibility) | When set, `1024..=16777216`. Applied to accepted sockets. Startup preflights the listener and rejects an OS read-back smaller than requested. |
 | `server.stream_stall_grace_ms` | unsigned integer; `2000` | `KILN_SERVER_STREAM_STALL_GRACE_MS` (implemented) | `KILN_STREAM_STALL_GRACE_MS` (deprecated compatibility) | `10..=2000`. A request retaining KV state with no streaming delivery progress is selected for cancellation after this grace. |
 | `server.max_batch_tokens` | unsigned integer; `512` | `KILN_SERVER_MAX_BATCH_TOKENS` (implemented) | `KILN_MAX_BATCH_TOKENS` (deprecated compatibility) | `2..=65536`. Combined decode-plus-prefill token budget for one batching-actor cycle. |
-| `server.max_prefill_tokens_per_cycle` | unsigned integer; `64` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` (implemented) | `KILN_MAX_PREFILL_TOKENS_PER_CYCLE` (deprecated compatibility) | `1..=65536`. Independent new-prompt-token ceiling within the combined actor budget. The checked Strix Halo Vulkan development profile pins `128`; `256` is not qualified for concurrent Vulkan serving. |
+| `server.max_prefill_tokens_per_cycle` | unsigned integer; `256` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` (implemented) | `KILN_MAX_PREFILL_TOKENS_PER_CYCLE` (deprecated compatibility) | `1..=65536`. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, direct streaming dispatch no later than that boundary, and `server.max_batch_tokens >= tile + effective max_decode_batch`; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins `128`; concurrent Vulkan serving at `256` is not qualified. |
 | `server.max_prefill_layers_per_cycle` | unsigned integer; `4` | `KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE` (implemented) | `KILN_MAX_PREFILL_LAYERS_PER_CYCLE` (deprecated compatibility) | `1..=1024`. Number of transformer layers an in-flight prefill chunk may execute before yielding to decode. |
 | `server.max_decode_batch` | `"auto"` or unsigned integer; `"auto"` | `KILN_SERVER_MAX_DECODE_BATCH` (implemented) | `KILN_MAX_DECODE_BATCH` (deprecated compatibility) | `auto`, `backend`, and `backend_policy` all delegate to backend policy; an integer must be `1..=65536`. Deterministic mode and `max_batch_tokens` may lower the final width. The Strix Halo Vulkan development-soak candidate sets `2`; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together. |
 | `server.eval_mode` | boolean; `false` | `KILN_SERVER_EVAL_MODE` (implemented) | `KILN_EVAL_MODE` (deprecated compatibility) | Enables deterministic eval-serving defaults, headers, adapter warnings, and transient-cache cleanup behavior. `serve --eval-mode` applies a typed override after environment resolution and wins without mutating process environment. |
@@ -740,18 +740,23 @@ requires a process restart; none is a live tuning control.
 default. The matrix is evaluated against the final effective decode width, not
 the unconstrained backend maximum.
 
-| Backend | `batching.mode = "auto"` | Backend decode width before server constraints | `prefill_admission_quantum = "auto"` | `burst_prefill_admission` diagnostic |
-|---|---:|---:|---:|---:|
-| CUDA | enabled | 8 | effective decode width | true |
-| ROCm | enabled | 8 | 4, clamped to effective width | false |
-| Vulkan | enabled | 64 | effective decode width | false |
-| Metal | disabled | 8 | 4, clamped to effective width | false |
-| CPU/other | enabled | 8 | 4, clamped to effective width | false |
+| Backend | `batching.mode = "auto"` | Backend decode width before server constraints | `prefill_admission_quantum = "auto"` | `burst_prefill_admission` diagnostic | `actor_prefill_tile_alignment_required` diagnostic |
+|---|---:|---:|---:|---:|---:|
+| CUDA | enabled | 8 | effective decode width | true | false |
+| ROCm | enabled | 8 | 4, clamped to effective width | false | true |
+| Vulkan | enabled | 64 | effective decode width | false | false |
+| Metal | disabled | 8 | 4, clamped to effective width | false | false |
+| CPU/other | enabled | 8 | 4, clamped to effective width | false | false |
 
 `burst_prefill_admission` is backend-owned and intentionally has no TOML or
 public environment field. On CUDA it lets admission refill the decode width in
 one actor turn. It is reported with the four primary-actor settings so an observed
 CUDA/Vulkan/ROCm difference is not mistaken for a hidden runtime override.
+`actor_prefill_tile_alignment_required` is also backend-owned. ROCm sets it
+because local deterministic parity proved that a 64-token actor partition and
+monolithic direct prefill could select different greedy tokens. Startup now
+requires the actor ceiling, direct streaming crossover, combined token budget,
+and effective decode width to preserve one 256-token numerical partition.
 
 The fallback direct-stream rendezvous has a separate backend-owned `auto`
 matrix. Its mode is enabled on every real backend, but a live worker is not the
@@ -831,7 +836,8 @@ disabling the actor can make the route available on another real backend.
           "effective_source": "backend_policy"
         }
       },
-      "burst_prefill_admission": false
+      "burst_prefill_admission": false,
+      "actor_prefill_tile_alignment_required": true
     },
     "actor_active": true,
     "direct_decode_rendezvous": {
@@ -1517,9 +1523,9 @@ and conclusions remain labeled as such in `PROFILING.md`.
 
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
 |---|---|---|---|---|
-| `streaming_prefill.mode` | string enum; `"auto"` | `KILN_STREAMING_PREFILL_MODE` (implemented) | `KILN_STREAMING_PREFILL` and `KILN_STREAMING_PREFILL_ENABLED` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive with surrounding whitespace ignored. `auto` delegates dispatch to backend policy, `enabled` selects every non-empty prompt, and `disabled` selects none. The canonical environment name accepts only those three words. Deprecated aliases also accept the strict boolean forms listed above, mapping true to `enabled` and false to `disabled`. Legacy TOML `enabled = true` or `enabled = false` remains accepted; if `mode` is also present, both must express the same non-auto intent or startup fails. |
-| `streaming_prefill.threshold_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` (implemented) | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` | In `auto` mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. `0`, negative values, and strings other than `auto` fail startup. `enabled` and `disabled` modes ignore this crossover for dispatch while retaining it in diagnostics. |
-| `streaming_prefill.tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_TILE_TOKENS` (implemented) | `KILN_STREAMING_TILE_TOKENS` (deprecated compatibility) | Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. When this field is concrete and either specialized tile below is `auto`, that specialized route inherits this base value rather than its backend default. |
+| `streaming_prefill.mode` | string enum; `"auto"` | `KILN_STREAMING_PREFILL_MODE` (implemented) | `KILN_STREAMING_PREFILL` and `KILN_STREAMING_PREFILL_ENABLED` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive with surrounding whitespace ignored. `auto` delegates dispatch to backend policy, `enabled` selects every non-empty prompt, and `disabled` selects none. When the ROCm batching actor is effective, dispatch must cover its first effective tile; disabling streaming therefore also requires disabling the actor. The canonical environment name accepts only those three words. Deprecated aliases also accept the strict boolean forms listed above, mapping true to `enabled` and false to `disabled`. Legacy TOML `enabled = true` or `enabled = false` remains accepted; if `mode` is also present, both must express the same non-auto intent or startup fails. |
+| `streaming_prefill.threshold_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` (implemented) | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` | In `auto` mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. With the ROCm batching actor effective, the crossover cannot be later than the effective tile. `0`, negative values, and strings other than `auto` fail startup. `enabled` and `disabled` modes ignore this crossover for dispatch while retaining it in diagnostics. |
+| `streaming_prefill.tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_TILE_TOKENS` (implemented) | `KILN_STREAMING_TILE_TOKENS` (deprecated compatibility) | Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. With the ROCm batching actor effective, this tile must equal `server.max_prefill_tokens_per_cycle` and fit beside effective decode width in `server.max_batch_tokens`. When this field is concrete and either specialized tile below is `auto`, that specialized route inherits this base value rather than its backend default. |
 | `streaming_prefill.tape_tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` (implemented) | `KILN_TAPE_STREAMING_TILE_TOKENS` (deprecated compatibility) | Tile used by tape-authoritative training forward paths. Concrete values must be positive multiples of 64. `auto` inherits an explicit `tile_tokens`; when both are `auto`, backend policy owns the value. |
 | `streaming_prefill.detached_full_attn_tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS` (implemented) | `KILN_DETACHED_FULL_ATTN_TILE_TOKENS` (deprecated compatibility) | Tile for detached materialized full-attention training work. A concrete value also controls its derived boundary-forward and tape-replay variants. `auto` inherits an explicit `tile_tokens`; when both are `auto`, each variant keeps its backend default. Every concrete value must be a positive multiple of 64. |
 | `streaming_prefill.last_token_lm_head` | boolean; `true` | `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` (implemented) | `KILN_STREAMING_LAST_TOKEN_LM_HEAD` (deprecated compatibility) | When true, the final inference streaming tile computes the LM head only for its last row. All centralized strict boolean spellings, including `on` and `off`, work identically. |
@@ -1540,7 +1546,7 @@ are inclusive. Tile counts are tokens:
 |---|---:|---:|---:|---:|---:|---:|
 | CPU | never | 8192 | 8192 | 8192 | 8192 | 8192 |
 | CUDA | prompt tokens >= 2048 | 1024 | 1024 | 8192 | 65536 | 65536 |
-| ROCm | prompt tokens >= 2048 | 1024 | 1024 | 8192 | 8192 | 8192 |
+| ROCm | prompt tokens >= 256 | 256 | 256 | 8192 | 8192 | 8192 |
 | Metal | prompt tokens >= 2048 | 2048 | 2048 | 8192 | 8192 | 8192 |
 | Vulkan | never | 2048 | 2048 | 8192 | 8192 | 8192 |
 
@@ -1658,14 +1664,22 @@ last_token_lm_head = true
 ```
 
 ```toml
-# Isolate a suspected tiled-prefill pause.
+# Isolate a suspected tiled-prefill pause through the direct route. ROCm must
+# disable the actor as well because actor/direct tile alignment is mandatory.
+[batching]
+mode = "disabled"
+
 [streaming_prefill]
 mode = "disabled"
 ```
 
 ```toml
-# ROCm tuning experiment: stream from 4096 tokens, use one base tile for all
-# ordinary, tape, detached, boundary, and replay routes through inheritance.
+# ROCm actor-disabled tuning experiment: stream from 4096 tokens and use one
+# base tile for all ordinary, tape, detached, boundary, and replay routes.
+# This is an isolation control, not a production actor configuration.
+[batching]
+mode = "disabled"
+
 [streaming_prefill]
 mode = "auto"
 threshold_tokens = 4096

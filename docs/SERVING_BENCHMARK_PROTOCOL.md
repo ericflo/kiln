@@ -429,6 +429,21 @@ diagnostic-only. The complete guarded lifecycle had zero trips or errors,
 peaked at 60.125 C, shut down without force, cooled completely, and left no
 process, listener, or snapshot residue.
 
+The product repair is the source-bound
+`qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v2.json`
+candidate. Relative to the historical v1 production input, its only TOML
+change is `server.max_prefill_tokens_per_cycle = 256`. The implementation also
+makes 256 the ROCm direct-streaming crossover and base/tape tile, then exposes
+and enforces the backend-owned
+`actor_prefill_tile_alignment_required` contract. With the actor effective,
+startup rejects a mismatched actor ceiling, a direct-streaming crossover later
+than the first tile, or a combined budget smaller than the tile plus effective
+decode width. The historical 64-token actor profiles and receipts remain
+immutable counterevidence; they are expected to fail startup with a repaired
+binary unless their actor is disabled. V2 is a static candidate until an exact
+rebuilt-binary hardware arm reproduces `foundation`, followed by multi-token
+and concurrent parity.
+
 ## Running One Profile
 
 ```bash

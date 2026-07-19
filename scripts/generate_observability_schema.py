@@ -376,6 +376,7 @@ def build_definitions() -> None:
             "prefill_admission_quantum": ref("PrefillAdmissionQuantumDiagnostics"),
             "direct_decode_rendezvous": ref("DirectDecodeRendezvousDiagnostics"),
             "burst_prefill_admission": ref("Boolean"),
+            "actor_prefill_tile_alignment_required": ref("Boolean"),
         },
         "Runtime-ready batching policy resolved once after backend selection.",
     )

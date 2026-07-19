@@ -171,13 +171,13 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 65536,
-          "default": 64,
-          "description": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. The checked Strix Halo Vulkan development profile pins 128; 256 is not qualified for concurrent Vulkan serving.",
+          "default": 256,
+          "description": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires this value to equal the effective streaming-prefill tile (256 by default), requires direct streaming dispatch no later than that boundary, and requires max_batch_tokens to fit the tile plus effective decode width; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins 128; concurrent Vulkan serving at 256 is not qualified.",
           "x-kiln-path": "server.max_prefill_tokens_per_cycle",
-          "x-kiln-type-and-default": "unsigned integer; 64",
+          "x-kiln-type-and-default": "unsigned integer; 256",
           "x-kiln-canonical-env": "KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE (implemented)",
           "x-kiln-environment": "KILN_MAX_PREFILL_TOKENS_PER_CYCLE (deprecated compatibility)",
-          "x-kiln-validation": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. The checked Strix Halo Vulkan development profile pins 128; 256 is not qualified for concurrent Vulkan serving."
+          "x-kiln-validation": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, direct streaming dispatch no later than that boundary, and server.max_batch_tokens >= tile + effective max_decode_batch; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins 128; concurrent Vulkan serving at 256 is not qualified."
         },
         "max_prefill_layers_per_cycle": {
           "type": "integer",
@@ -1159,12 +1159,12 @@
             "disabled"
           ],
           "default": "auto",
-          "description": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto delegates dispatch to backend policy, enabled selects every non-empty prompt, and disabled selects none. The canonical environment name accepts only those three words. Deprecated aliases also accept the strict boolean forms listed above, mapping true to enabled and false to disabled. Legacy TOML enabled = true or enabled = false remains accepted; if mode is also present, both must express the same non-auto intent or startup fails.",
+          "description": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto delegates dispatch to backend policy, enabled selects every non-empty prompt, and disabled selects none. When the ROCm batching actor is effective, dispatch must cover the first effective tile; disabling streaming therefore also requires disabling the actor. The canonical environment name accepts only those three words. Deprecated aliases also accept the strict boolean forms listed above, mapping true to enabled and false to disabled. Legacy TOML enabled = true or enabled = false remains accepted; if mode is also present, both must express the same non-auto intent or startup fails.",
           "x-kiln-path": "streaming_prefill.mode",
           "x-kiln-type-and-default": "string enum; \"auto\"",
           "x-kiln-canonical-env": "KILN_STREAMING_PREFILL_MODE (implemented)",
           "x-kiln-environment": "KILN_STREAMING_PREFILL and KILN_STREAMING_PREFILL_ENABLED (deprecated compatibility)",
-          "x-kiln-validation": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto delegates dispatch to backend policy, enabled selects every non-empty prompt, and disabled selects none. The canonical environment name accepts only those three words. Deprecated aliases also accept the strict boolean forms listed above, mapping true to enabled and false to disabled. Legacy TOML enabled = true or enabled = false remains accepted; if mode is also present, both must express the same non-auto intent or startup fails."
+          "x-kiln-validation": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto delegates dispatch to backend policy, enabled selects every non-empty prompt, and disabled selects none. When the ROCm batching actor is effective, dispatch must cover its first effective tile; disabling streaming therefore also requires disabling the actor. The canonical environment name accepts only those three words. Deprecated aliases also accept the strict boolean forms listed above, mapping true to enabled and false to disabled. Legacy TOML enabled = true or enabled = false remains accepted; if mode is also present, both must express the same non-auto intent or startup fails."
         },
         "threshold_tokens": {
           "oneOf": [
@@ -1177,12 +1177,12 @@
             }
           ],
           "default": "auto",
-          "description": "In auto mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. 0, negative values, and strings other than auto fail startup. enabled and disabled modes ignore this crossover for dispatch while retaining it in diagnostics.",
+          "description": "In auto mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. With the ROCm batching actor effective, the crossover cannot be later than the effective tile. 0, negative values, and strings other than auto fail startup. enabled and disabled modes ignore this crossover for dispatch while retaining it in diagnostics.",
           "x-kiln-path": "streaming_prefill.threshold_tokens",
           "x-kiln-type-and-default": "\"auto\" or positive unsigned integer; \"auto\"",
           "x-kiln-canonical-env": "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS (implemented)",
           "x-kiln-environment": "KILN_STREAMING_PREFILL_THRESHOLD_TOKENS",
-          "x-kiln-validation": "In auto mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. 0, negative values, and strings other than auto fail startup. enabled and disabled modes ignore this crossover for dispatch while retaining it in diagnostics."
+          "x-kiln-validation": "In auto mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. With the ROCm batching actor effective, the crossover cannot be later than the effective tile. 0, negative values, and strings other than auto fail startup. enabled and disabled modes ignore this crossover for dispatch while retaining it in diagnostics."
         },
         "tile_tokens": {
           "oneOf": [
@@ -1196,12 +1196,12 @@
             }
           ],
           "default": "auto",
-          "description": "Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. When this field is concrete and either specialized tile below is auto, that specialized route inherits this base value rather than its backend default.",
+          "description": "Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. With the ROCm batching actor effective, this tile must equal server.max_prefill_tokens_per_cycle and fit beside the effective decode width in server.max_batch_tokens. When this field is concrete and either specialized tile below is auto, that specialized route inherits this base value rather than its backend default.",
           "x-kiln-path": "streaming_prefill.tile_tokens",
           "x-kiln-type-and-default": "\"auto\" or positive unsigned integer; \"auto\"",
           "x-kiln-canonical-env": "KILN_STREAMING_PREFILL_TILE_TOKENS (implemented)",
           "x-kiln-environment": "KILN_STREAMING_TILE_TOKENS (deprecated compatibility)",
-          "x-kiln-validation": "Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. When this field is concrete and either specialized tile below is auto, that specialized route inherits this base value rather than its backend default."
+          "x-kiln-validation": "Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. With the ROCm batching actor effective, this tile must equal server.max_prefill_tokens_per_cycle and fit beside effective decode width in server.max_batch_tokens. When this field is concrete and either specialized tile below is auto, that specialized route inherits this base value rather than its backend default."
         },
         "tape_tile_tokens": {
           "oneOf": [

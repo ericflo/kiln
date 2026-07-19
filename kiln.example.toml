@@ -69,12 +69,17 @@ max_batch_tokens = 512                   # Combined decode-plus-prefill token bu
                                         # Valid range:
                                         # 2..=65536. KILN_SERVER_MAX_BATCH_TOKENS overrides this strictly;
                                         # the effective value and source are in health/debug state.
-max_prefill_tokens_per_cycle = 64        # Independent prompt-token ceiling inside the combined
+max_prefill_tokens_per_cycle = 256       # Independent prompt-token ceiling inside the combined
                                         # budget. Decode reserves its rows first, then prompt work
                                         # advances round-robin by at most this many tokens before the
-                                        # next decode cohort. Lower values favor ITL; higher values
-                                        # favor prompt throughput. Valid range: 1..=65536. Override
-                                        # strictly with KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE.
+                                        # next decode cohort. On ROCm this must equal the effective
+                                        # streaming-prefill tile (256 by default), direct streaming
+                                        # must begin no later than that boundary, and max_batch_tokens
+                                        # must fit the tile plus effective decode width. Startup rejects
+                                        # an unsafe combination. Other backends retain their qualified
+                                        # policy; the Vulkan development profile pins 128. Valid range:
+                                        # 1..=65536. Override strictly with
+                                        # KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE.
 max_prefill_layers_per_cycle = 4         # Transformer layers processed before a retained prompt
                                         # chunk yields to the next decode cohort. Its token width is
                                         # charged once when selected; the same hidden state and width

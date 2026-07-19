@@ -57,10 +57,10 @@ pub const STREAM_STALL_GRACE_MAX_MS: u64 = DEFAULT_STREAM_STALL_GRACE_MS;
 /// the remainder.
 pub const MAX_BATCH_TOKENS_MIN: usize = 2;
 pub const MAX_BATCH_TOKENS_MAX: usize = 65_536;
-/// Default prompt-token work allowed between decode cohorts. The stable
-/// serving default is intentionally lower than the combined batch budget so a
-/// long prompt cannot turn one actor cycle into a visible decode pause.
-pub const DEFAULT_MAX_PREFILL_TOKENS_PER_CYCLE: usize = 64;
+/// Default prompt-token work allowed between decode cohorts. This matches the
+/// ROCm numerical prefill tile; backends that require route-invariant prompt
+/// partitioning validate the relationship after backend selection.
+pub const DEFAULT_MAX_PREFILL_TOKENS_PER_CYCLE: usize = 256;
 pub const MAX_PREFILL_TOKENS_PER_CYCLE_MIN: usize = 1;
 pub const MAX_PREFILL_TOKENS_PER_CYCLE_MAX: usize = MAX_BATCH_TOKENS_MAX;
 /// Default transformer-layer work allowed before a partial prefill yields to
@@ -937,7 +937,27 @@ pub struct BatchingBackendPolicy {
     pub batching_engine_default_enabled: bool,
     pub use_decode_width_prefill_admission: bool,
     pub burst_prefill_admission: bool,
+    pub actor_prefill_tile_alignment_required: bool,
     pub direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy,
+}
+
+impl BatchingBackendPolicy {
+    /// Project the model backend's complete decode-batcher policy onto the
+    /// narrower server-owned settings needed for startup resolution.
+    pub const fn from_decode_batcher_policy(policy: kiln_model::DecodeBatcherPolicy) -> Self {
+        Self {
+            batching_engine_default_enabled: policy.batching_engine_default_enabled,
+            use_decode_width_prefill_admission: policy.use_decode_width_prefill_admission,
+            burst_prefill_admission: policy.burst_prefill_admission,
+            actor_prefill_tile_alignment_required: policy.actor_prefill_tile_alignment_required,
+            direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
+                enabled: policy.rendezvous_default_enabled,
+                max_batch: policy.max_batch,
+                wait_us: policy.wait_micros,
+                mixed_seq_lens: policy.allow_mixed_seq_lens,
+            },
+        }
+    }
 }
 
 /// Backend-owned defaults for the fallback direct-stream greedy decode
@@ -961,6 +981,9 @@ pub struct BatchingRuntimeConfig {
     /// Backend-owned refill behavior, carried here so actor construction does
     /// not retain a second copy of the backend decode policy.
     pub burst_prefill_admission: bool,
+    /// Whether startup must prove that actor prompt chunks and direct
+    /// streaming-prefill tiles have the same numerical boundary.
+    pub actor_prefill_tile_alignment_required: bool,
 }
 
 impl BatchingRuntimeConfig {
@@ -4143,6 +4166,8 @@ impl BatchingConfig {
                 },
             },
             burst_prefill_admission: backend_policy.burst_prefill_admission,
+            actor_prefill_tile_alignment_required: backend_policy
+                .actor_prefill_tile_alignment_required,
         }
     }
 }
@@ -4688,6 +4713,52 @@ impl StreamingPrefillRuntimeConfig {
     pub const fn execution_policy(self) -> kiln_model::StreamingPrefillExecutionPolicy {
         self.execution_policy
     }
+}
+
+/// Reject batching-actor settings that can partition the same prompt
+/// differently from direct streaming prefill on a backend whose deterministic
+/// output is sensitive to that boundary.
+pub fn validate_actor_prefill_tile_contract(
+    batching: BatchingRuntimeConfig,
+    streaming_prefill: StreamingPrefillRuntimeConfig,
+    max_batch_tokens: BatchTokenBudget,
+    max_prefill_tokens_per_cycle: PrefillTokenBudget,
+    max_decode_batch: usize,
+) -> Result<()> {
+    if !batching.mode.effective_enabled || !batching.actor_prefill_tile_alignment_required {
+        return Ok(());
+    }
+
+    let tile_tokens = streaming_prefill.tile_tokens.effective;
+    anyhow::ensure!(
+        max_prefill_tokens_per_cycle.tokens() == tile_tokens,
+        "server.max_prefill_tokens_per_cycle={} must equal the backend's effective streaming_prefill.tile_tokens={tile_tokens} because the batching actor requires route-invariant prefill chunks",
+        max_prefill_tokens_per_cycle.tokens()
+    );
+
+    let dispatch_covers_first_split = match streaming_prefill.dispatch.effective.policy {
+        StreamingPrefillDispatchPolicy::AllNonEmpty => true,
+        StreamingPrefillDispatchPolicy::PromptTokensAtLeast => streaming_prefill
+            .dispatch
+            .effective
+            .minimum_prompt_tokens
+            .is_some_and(|minimum| minimum <= tile_tokens),
+        StreamingPrefillDispatchPolicy::Never => false,
+    };
+    anyhow::ensure!(
+        dispatch_covers_first_split,
+        "streaming_prefill.mode and streaming_prefill.threshold_tokens must enable direct streaming prefill no later than the first {tile_tokens}-token actor chunk because the batching actor requires route-invariant prefill chunks"
+    );
+
+    let required_batch_tokens = tile_tokens
+        .checked_add(max_decode_batch)
+        .context("actor prefill tile plus decode width overflowed usize")?;
+    anyhow::ensure!(
+        max_batch_tokens.tokens() >= required_batch_tokens,
+        "server.max_batch_tokens={} must be at least {required_batch_tokens} (streaming prefill tile {tile_tokens} + effective decode width {max_decode_batch}) because the batching actor requires one full route-invariant prefill chunk beside ready decode rows",
+        max_batch_tokens.tokens()
+    );
+    Ok(())
 }
 
 impl StreamingPrefillConfig {
@@ -7445,6 +7516,15 @@ mod tests {
             config.server.stream_stall_grace_ms.source(),
             ConfigValueSource::Default
         );
+        assert_eq!(
+            config.server.max_batch_tokens.tokens(),
+            DEFAULT_MAX_BATCH_TOKENS
+        );
+        assert_eq!(
+            config.server.max_prefill_tokens_per_cycle.tokens(),
+            DEFAULT_MAX_PREFILL_TOKENS_PER_CYCLE
+        );
+        assert_eq!(config.server.max_prefill_tokens_per_cycle.tokens(), 256);
         assert!(!config.server.eval_mode);
         assert!(!config.server.debug_model_state);
         assert_eq!(config.server.default_thinking_enabled, None);
@@ -9737,6 +9817,7 @@ direct_decode_rendezvous_mixed_seq_lens = false
                 batching_engine_default_enabled: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
+                actor_prefill_tile_alignment_required: false,
                 direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
                     enabled: true,
                     max_batch: 8,
@@ -9763,6 +9844,7 @@ direct_decode_rendezvous_mixed_seq_lens = false
                 batching_engine_default_enabled: true,
                 use_decode_width_prefill_admission: true,
                 burst_prefill_admission: true,
+                actor_prefill_tile_alignment_required: false,
                 direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
                     enabled: true,
                     max_batch: 64,
@@ -9793,6 +9875,7 @@ direct_decode_rendezvous_mixed_seq_lens = false
                 batching_engine_default_enabled: true,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
+                actor_prefill_tile_alignment_required: false,
                 direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
                     enabled: true,
                     max_batch: 8,
@@ -9824,6 +9907,7 @@ prefill_admission_quantum = 100
                 batching_engine_default_enabled: true,
                 use_decode_width_prefill_admission: true,
                 burst_prefill_admission: true,
+                actor_prefill_tile_alignment_required: false,
                 direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
                     enabled: true,
                     max_batch: 8,
@@ -9862,6 +9946,7 @@ prefill_admission_quantum = 100
                 batching_engine_default_enabled: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
+                actor_prefill_tile_alignment_required: false,
                 direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
                     enabled: true,
                     max_batch: 8,
@@ -9942,6 +10027,7 @@ prefill_admission_quantum = 100
                     batching_engine_default_enabled: true,
                     use_decode_width_prefill_admission: false,
                     burst_prefill_admission: false,
+                    actor_prefill_tile_alignment_required: false,
                     direct_decode_rendezvous: policy,
                 },
                 effective_decode_width,
@@ -10031,6 +10117,7 @@ direct_decode_rendezvous_mixed_seq_lens = false
                     batching_engine_default_enabled: true,
                     use_decode_width_prefill_admission: false,
                     burst_prefill_admission: false,
+                    actor_prefill_tile_alignment_required: false,
                     direct_decode_rendezvous: backend,
                 },
                 8,
@@ -10071,6 +10158,7 @@ direct_decode_rendezvous_mixed_seq_lens = false
                     batching_engine_default_enabled: true,
                     use_decode_width_prefill_admission: false,
                     burst_prefill_admission: false,
+                    actor_prefill_tile_alignment_required: false,
                     direct_decode_rendezvous: backend,
                 },
                 8,
@@ -10092,6 +10180,7 @@ direct_decode_rendezvous_mixed_seq_lens = false
                     batching_engine_default_enabled: true,
                     use_decode_width_prefill_admission: false,
                     burst_prefill_admission: false,
+                    actor_prefill_tile_alignment_required: false,
                     direct_decode_rendezvous: backend,
                 },
                 0,
@@ -10128,6 +10217,7 @@ direct_decode_rendezvous_mixed_seq_lens = false
                 batching_engine_default_enabled: true,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
+                actor_prefill_tile_alignment_required: false,
                 direct_decode_rendezvous: backend,
             },
             8,
@@ -10183,6 +10273,7 @@ direct_decode_rendezvous_mixed_seq_lens = false
                     batching_engine_default_enabled: true,
                     use_decode_width_prefill_admission: false,
                     burst_prefill_admission: false,
+                    actor_prefill_tile_alignment_required: false,
                     direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
                         enabled: true,
                         max_batch: 64,
@@ -11653,6 +11744,120 @@ mode = "enabled"
         );
         assert!(!runtime.execution_policy().enabled_for(0));
         assert!(runtime.execution_policy().enabled_for(1));
+    }
+
+    #[test]
+    fn rocm_actor_prefill_contract_accepts_only_route_invariant_chunking() {
+        let decode =
+            kiln_model::DecodeBatcherPolicy::for_backend("rocm", kiln_tensor::Device::Rocm(0));
+        let backend_policy = BatchingBackendPolicy::from_decode_batcher_policy(decode);
+        let batching = BatchingConfig::default().resolve(backend_policy, 8);
+        let streaming = StreamingPrefillConfig::default().resolve(
+            kiln_model::StreamingPrefillBackendPolicy::for_backend(
+                "rocm",
+                kiln_tensor::Device::Rocm(0),
+            ),
+        );
+        let max_batch = BatchTokenBudget::new(512, ConfigValueSource::Default).unwrap();
+        let aligned_prefill = PrefillTokenBudget::new(256, ConfigValueSource::Default).unwrap();
+
+        validate_actor_prefill_tile_contract(batching, streaming, max_batch, aligned_prefill, 8)
+            .unwrap();
+        assert!(batching.actor_prefill_tile_alignment_required);
+        assert_eq!(streaming.tile_tokens.effective, 256);
+        assert_eq!(
+            streaming.threshold_tokens.effective_for_auto_mode,
+            Some(256)
+        );
+
+        let error = validate_actor_prefill_tile_contract(
+            batching,
+            streaming,
+            max_batch,
+            PrefillTokenBudget::new(64, ConfigValueSource::ConfigFile).unwrap(),
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("server.max_prefill_tokens_per_cycle=64 must equal")
+        );
+
+        let delayed_streaming = StreamingPrefillConfig {
+            threshold_tokens: StreamingPrefillThresholdTokens::new(
+                Some(512),
+                ConfigValueSource::ConfigFile,
+            )
+            .unwrap(),
+            ..StreamingPrefillConfig::default()
+        }
+        .resolve(kiln_model::StreamingPrefillBackendPolicy::for_backend(
+            "rocm",
+            kiln_tensor::Device::Rocm(0),
+        ));
+        let error = validate_actor_prefill_tile_contract(
+            batching,
+            delayed_streaming,
+            max_batch,
+            aligned_prefill,
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("enable direct streaming prefill")
+        );
+
+        let narrow_batch = BatchTokenBudget::new(263, ConfigValueSource::ConfigFile).unwrap();
+        let error = validate_actor_prefill_tile_contract(
+            batching,
+            streaming,
+            narrow_batch,
+            aligned_prefill,
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("server.max_batch_tokens=263 must be at least 264")
+        );
+    }
+
+    #[test]
+    fn actor_prefill_contract_is_inert_when_actor_or_backend_requirement_is_off() {
+        let disabled = BatchingConfig {
+            mode: BatchingModeSetting::new(BatchingMode::Disabled, ConfigValueSource::ConfigFile),
+            ..BatchingConfig::default()
+        }
+        .resolve(
+            BatchingBackendPolicy {
+                batching_engine_default_enabled: true,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+                actor_prefill_tile_alignment_required: true,
+                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
+                    enabled: true,
+                    max_batch: 8,
+                    wait_us: 0,
+                    mixed_seq_lens: false,
+                },
+            },
+            8,
+        );
+        let never_streaming = StreamingPrefillConfig::default().resolve(
+            kiln_model::StreamingPrefillBackendPolicy::for_backend("cpu", kiln_tensor::Device::Cpu),
+        );
+        validate_actor_prefill_tile_contract(
+            disabled,
+            never_streaming,
+            BatchTokenBudget::new(2, ConfigValueSource::ConfigFile).unwrap(),
+            PrefillTokenBudget::new(1, ConfigValueSource::ConfigFile).unwrap(),
+            8,
+        )
+        .unwrap();
     }
 
     #[test]

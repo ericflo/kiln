@@ -157,6 +157,7 @@ function checkRuntimeConfigSchemaContract(source) {
     'prefillAdmissionQuantum.effective',
     'prefillAdmissionQuantum.effective_source',
     'batchingConfiguration.burst_prefill_admission',
+    'batchingConfiguration.actor_prefill_tile_alignment_required',
     'batchingConfiguration.direct_decode_rendezvous',
     'directRendezvousMode.configured',
     'directRendezvousMode.configured_source',
@@ -1740,6 +1741,7 @@ async function startServer({
               },
             },
             burst_prefill_admission: true,
+            actor_prefill_tile_alignment_required: false,
           },
           actor_active: true,
           direct_decode_rendezvous: {

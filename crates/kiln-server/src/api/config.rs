@@ -1173,6 +1173,10 @@ mod tests {
             false
         );
         assert_eq!(
+            json["batching"]["configuration"]["actor_prefill_tile_alignment_required"],
+            false
+        );
+        assert_eq!(
             json["streaming_prefill"]["dispatch"]["configured_mode"],
             "auto"
         );

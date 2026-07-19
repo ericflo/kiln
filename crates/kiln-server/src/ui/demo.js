@@ -343,6 +343,7 @@
             },
           },
           burst_prefill_admission: true,
+          actor_prefill_tile_alignment_required: false,
         },
         actor_active: true,
         direct_decode_rendezvous: {

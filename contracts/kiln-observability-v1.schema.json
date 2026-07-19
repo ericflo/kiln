@@ -329,7 +329,8 @@
                 "effective_source": "default"
               }
             },
-            "burst_prefill_admission": false
+            "burst_prefill_admission": false,
+            "actor_prefill_tile_alignment_required": false
           },
           "actor_active": false,
           "direct_decode_rendezvous": {
@@ -947,7 +948,8 @@
                 "effective_source": "default"
               }
             },
-            "burst_prefill_admission": false
+            "burst_prefill_admission": false,
+            "actor_prefill_tile_alignment_required": false
           },
           "direct_decode_rendezvous": {
             "scope": "value",
@@ -1796,7 +1798,8 @@
                 "effective_source": "default"
               }
             },
-            "burst_prefill_admission": false
+            "burst_prefill_admission": false,
+            "actor_prefill_tile_alignment_required": false
           },
           "direct_decode_rendezvous": {
             "scope": "value",
@@ -2961,7 +2964,8 @@
         "prefix_aware_admission",
         "prefill_admission_quantum",
         "direct_decode_rendezvous",
-        "burst_prefill_admission"
+        "burst_prefill_admission",
+        "actor_prefill_tile_alignment_required"
       ],
       "properties": {
         "mode": {
@@ -2980,6 +2984,9 @@
           "$ref": "#/$defs/DirectDecodeRendezvousDiagnostics"
         },
         "burst_prefill_admission": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "actor_prefill_tile_alignment_required": {
           "$ref": "#/$defs/Boolean"
         }
       },

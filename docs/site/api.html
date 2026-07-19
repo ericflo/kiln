@@ -781,7 +781,8 @@
           "effective_source": "backend_policy"
         }
       },
-      "burst_prefill_admission": false
+      "burst_prefill_admission": false,
+      "actor_prefill_tile_alignment_required": true
     },
     "actor_active": true,
     "direct_decode_rendezvous": {
@@ -818,7 +819,13 @@
                 <code>default</code> is reachable only for an explicit programmatic value carrying default
                 provenance; normal built-in <code>auto</code> reports <code>backend_policy</code>. CUDA alone
                 currently reports <code>burst_prefill_admission=true</code>; this value is backend-owned and
-                has no operator field. Every batching setting is startup-only and requires restart.
+                has no operator field. ROCm alone reports
+                <code>actor_prefill_tile_alignment_required=true</code>. Its startup contract requires
+                route-invariant prefill chunks: the actor ceiling must equal the effective 256-token
+                streaming tile, direct streaming must begin no later than that boundary, and the combined
+                token budget must fit the tile plus effective decode width. Unsafe combinations fail startup
+                instead of silently changing deterministic output by route. Every batching setting is
+                startup-only and requires restart.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 <code>configuration.direct_decode_rendezvous</code> is the immutable fallback policy.
@@ -969,33 +976,33 @@
       "configured_source": "default",
       "backend_policy": {
         "policy": "prompt_tokens_at_least",
-        "minimum_prompt_tokens": 2048
+        "minimum_prompt_tokens": 256
       },
       "effective": {
         "policy": "prompt_tokens_at_least",
-        "minimum_prompt_tokens": 2048
+        "minimum_prompt_tokens": 256
       },
       "effective_source": "backend_policy"
     },
     "threshold_tokens": {
       "configured": null,
       "configured_source": "default",
-      "backend_policy": 2048,
-      "effective_for_auto_mode": 2048,
+      "backend_policy": 256,
+      "effective_for_auto_mode": 256,
       "override_applied_to_backend_auto_policy": false
     },
     "tile_tokens": {
       "configured": null,
       "configured_source": "default",
-      "backend_policy": 1024,
-      "effective": 1024,
+      "backend_policy": 256,
+      "effective": 256,
       "effective_source": "backend_policy"
     },
     "tape_tile_tokens": {
       "configured": null,
       "configured_source": "default",
-      "backend_policy": 1024,
-      "effective": 1024,
+      "backend_policy": 256,
+      "effective": 256,
       "effective_source": "backend_policy"
     },
     "detached_full_attn_tile_tokens": {
@@ -1040,7 +1047,7 @@
                 Backend defaults for <code>(base, tape, detached, boundary, replay)</code> are CPU
                 <code>(8192,8192,8192,8192,8192)</code>, CUDA
                 <code>(1024,1024,8192,65536,65536)</code>, ROCm
-                <code>(1024,1024,8192,8192,8192)</code>, Metal
+                <code>(256,256,8192,8192,8192)</code>, Metal
                 <code>(2048,2048,8192,8192,8192)</code>, and Vulkan
                 <code>(2048,2048,8192,8192,8192)</code>. Base tiles cover ordinary inference and
                 non-tape GDN segments; tape tiles cover tape-authoritative native training; detached

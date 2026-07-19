@@ -340,7 +340,7 @@ training request
         <div class="grid md:grid-cols-3 gap-5 check-list mt-5" style="color: var(--fg-dim);">
           <div>
             <h3 class="font-semibold mb-2" style="color: var(--fg);">Dispatch</h3>
-            <p><code>auto</code> starts at 2048 prompt tokens on CUDA, ROCm, and Metal, and remains off on CPU/Vulkan. <code>enabled</code> selects every non-empty prompt; <code>disabled</code> is the monolithic A/B control. A threshold override adjusts only an existing automatic crossover; eligible work physically splits only when its sequence exceeds the route tile.</p>
+            <p><code>auto</code> starts at 256 prompt tokens on ROCm, 2048 on CUDA/Metal, and remains off on CPU/Vulkan. <code>enabled</code> selects every non-empty prompt; <code>disabled</code> is the monolithic A/B control. A threshold override adjusts only an existing automatic crossover; eligible work physically splits only when its sequence exceeds the route tile.</p>
           </div>
           <div>
             <h3 class="font-semibold mb-2" style="color: var(--fg);">Route-specific tiles</h3>
@@ -357,12 +357,13 @@ training request
             <tbody>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">CPU</td><td class="p-2">never</td><td class="p-2">8192 / 8192</td><td class="p-2">8192 / 8192 / 8192</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">CUDA</td><td class="p-2">&ge; 2048</td><td class="p-2">1024 / 1024</td><td class="p-2">8192 / 65536 / 65536</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">ROCm</td><td class="p-2">&ge; 2048</td><td class="p-2">1024 / 1024</td><td class="p-2">8192 / 8192 / 8192</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">ROCm</td><td class="p-2">&ge; 256</td><td class="p-2">256 / 256</td><td class="p-2">8192 / 8192 / 8192</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Metal</td><td class="p-2">&ge; 2048</td><td class="p-2">2048 / 2048</td><td class="p-2">8192 / 8192 / 8192</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Vulkan</td><td class="p-2">never</td><td class="p-2">2048 / 2048</td><td class="p-2">8192 / 8192 / 8192</td></tr>
             </tbody>
           </table>
         </div>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">ROCm batching also enforces route-invariant prefill chunks at startup: the actor ceiling must equal the effective 256-token streaming tile, automatic or forced streaming must cover the first split, and the combined actor budget must fit that tile plus the effective decode width. A violation stops startup before traffic instead of allowing actor and direct routes to partition a deterministic prompt differently.</p>
         <p class="mt-5 text-sm leading-relaxed" style="color: var(--fg-mute);">
           The complete resolved object appears at <code>/v1/config.streaming_prefill</code>,
           health <code>prefill_runtime.streaming_prefill</code>, and trusted-debug top-level
