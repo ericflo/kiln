@@ -562,6 +562,48 @@ the corrected clean pushed source; c12 is not retried until the c8 arms identify
 a viable candidate and the watchdog behavior is retained in a failed receipt
 if another resume gate becomes unreachable.
 
+The corrected `587fb31ee` c8 screen and its control/candidate repeats are
+retained as driver-v10 receipts:
+
+| Layers/run | Receipt verdict | Requests/tokens | Request-window / sustainable tok/s | p99 TTFT / ITL | Prefill forwards / yields | Decode mean / max |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 4 A | passed | 8/8, 256 | 2.075 / 1.971 | 107.978 / 6.549 s | 448 / 392 | 1.09 / 2 |
+| 4 B | passed | 8/8, 256 | 2.001 / 2.001 | 105.805 / 6.574 s | 448 / 392 | 1.11 / 2 |
+| 8 | passed locally | 8/8, 256 | 2.056 / 2.056 | 103.396 / 6.309 s | 224 / 168 | 1.36 / 3 |
+| 16 | failed | 7/8, 224 | 2.037 / 2.037 | 88.568 / 6.317 s | 111 / 55 | 1.55 / 3 |
+| 32 A | passed locally | 8/8, 256 | 2.460 / 2.460 | 88.441 / 6.690 s | 60 / 0 | 2.38 / 6 |
+| 32 B | passed locally | 8/8, 256 | 2.321 / 2.321 | 89.025 / 6.560 s | 60 / 0 | 2.43 / 6 |
+
+Every run binds source tree
+`sha256:055ea6a94998d43a7aec55c98bbfb163bccfb7fd2d8111c57c872929fdf364f1`,
+runtime
+`sha256:99c3bb5cf565ec4ebf60ab7d5489d990b29290d41d70c51d979b8a5e0ba7fbe6`,
+model content
+`sha256:b1f2cce5baf9e662fc4c2c421b79fccc8787521e6e85810eebffbb4aa43b309f`,
+and prompt set
+`sha256:d5217da422b553e6488a46f917af8ee82773e69a67a19adf6a7ecc525bdf4223`.
+All six validate strictly. The 16-layer arm lost one usage record, reported one
+batching error, and recorded one `critical_memory_pressure` graph fallback, so
+it is unconditionally rejected.
+
+The two 32-layer runs average 17.3 percent more request-window throughput and
+20.3 percent more thermally sustainable throughput than the two controls.
+Their mean p99 TTFT is 17.0 percent lower, mean p99 ITL is 1.0 percent higher,
+and both have zero request, graph, thermal, or lifecycle failure. This is a
+repeatable performance signal, but not a production promotion. The two
+unchanged four-layer controls reproduce only two of eight greedy output hashes;
+the two 32-layer repeats reproduce only three of eight. Cross-arm output drift
+therefore cannot be attributed to the layer quantum, and the locally passed
+candidate receipts do not constitute a correctness comparison.
+
+The experiment-level verdict keeps four layers as the production input and
+promotes 32 layers only to a diagnostic candidate. Before another throughput
+matrix, retain full synthetic outputs for repeated controls, locate the first
+divergent token and its prompt/batch route, and compare it with an independent
+HF/vLLM reference. This must distinguish harmless near-tie numerical variation
+from request-state or batching corruption. Only a correctness-stable 32-layer
+candidate may advance to a longer mixed-load confirmation.
+
 ## Running One Profile
 
 ```bash
