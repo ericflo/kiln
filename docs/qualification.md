@@ -1619,6 +1619,31 @@ evidence across snapshot materialization, CPU checkpoint loading, and the first
 base-weight upload quantum without weakening model immutability or the 93 C
 ceiling.
 
+The corrected replay from clean pushed source `2058849e2` closed that startup
+blocker and finally exercised width four. Snapshot copy, initial verification,
+accelerator upload, and post-upload verification completed in 35.311, 34.719,
+31.718, and 34.719 seconds. Their paced waits were 32.107, 27.338, 16.919, and
+28.777 seconds, all 9,319,828,096 checkpoint bytes were accounted in every read
+phase, and all 8,411,510,272 upload source bytes plus 32 layers completed. The
+server reached readiness with a 59.125 C startup peak; the c1 warmup passed and
+peaked at 60.375 C. This is the required hardware proof that bounded checkpoint
+materialization and leading upload reservations solve the pre-readiness trip.
+
+Width four is not sufficient for c8. The measured row began from 41.75 C, the
+actor admitted all eight requests with effective decode width four, and the
+guard sampled 93.25 C during the 8.288-second request window. Four requests
+finished all 32 tokens; the other four correctly rejected streams without a
+terminal usage record after `SIGTERM`. The 15.44 partial output tokens/second
+and 12.74 thermally sustainable partial tokens/second are diagnostic only.
+Device memory peaked at 35,346,485,248 bytes below the 50 GB gate. Shutdown was
+unforced, returned zero in 214 ms, removed the snapshot, cooled stably, and left
+no process or listener; both bounded fingerprint lifecycles remained below
+42.625 C. The strict failed receipt is
+`benchmarks/receipts/rocm/strix-halo/20260719t175109-rocm-strix-halo-greedy-c8-decode-batch-4-checkpoint-paced-v12.kiln.json`.
+This rejects width four as the thermal correction. Do not retry it unchanged or
+run the mixed/longer matrix; the next source-bound arm must further reduce or
+cooperatively bound concurrent decode work without weakening the 93 C ceiling.
+
 After the server exits, the controller keeps sampling until eight consecutive
 250 ms observations are at or below 75,000 millicelsius. The first cool reading
 does not suffice: the consecutive-sample condition protects against the package

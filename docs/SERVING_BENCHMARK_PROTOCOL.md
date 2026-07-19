@@ -758,6 +758,23 @@ change must bound and identify snapshot materialization, CPU checkpoint load,
 and the first accelerator upload quantum while preserving the immutable private
 snapshot and full checkpoint integrity contract.
 
+The exact corrected-source replay from `2058849e2` proves the startup change
+and rejects the width-four inference arm. The three checkpoint-read phases
+completed all 9,319,828,096 logical/read bytes, accelerator upload completed all
+8,411,510,272 source bytes and 32 layers, and the server reached readiness with
+a 59.125 C peak. The c1 warmup passed with a 60.375 C peak. The c8 row then
+started from 41.75 C with effective decode width four, reached 93.25 C, and
+tripped the unchanged guard. Four requests completed 128 tokens; four rejected
+missing terminal usage after the guard's `SIGTERM`. The partial 15.44 output
+tokens/second is not performance evidence. Memory remained below the 50 GB
+gate, shutdown was unforced with exit zero, cooldown and both fingerprints
+completed, and no process, listener, or snapshot remained. The strict failed
+receipt is
+`benchmarks/receipts/rocm/strix-halo/20260719t175109-rocm-strix-halo-greedy-c8-decode-batch-4-checkpoint-paced-v12.kiln.json`.
+Do not repeat width four unchanged. A new source-bound discriminator must lower
+or cooperatively regulate concurrent decode work before any mixed or longer
+campaign is allowed.
+
 ## Running One Profile
 
 ```bash
