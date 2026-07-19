@@ -834,8 +834,21 @@ python3 scripts/qualification/rocm_hf_layer_attribution.py run \
   --request "$(pwd)/qualification/oracles/rocm-strix-halo-greedy-c1-first-divergence-v1.json" \
   --host-thermal-policy "$(pwd)/qualification/host-policies/strix-halo-hf-oracle-v1.json" \
   --python "$(pwd)/target/qualification/hf-trl-roundtrip/.venv/bin/python" \
+  --kernel-profile qualified \
   --out "$(pwd)/.qualification/rocm-hf-layer-attribution-result.json"
 ```
+
+`--kernel-profile` is a closed typed choice. `qualified` is the production
+model/tensor policy and remains the default. `portable_fallback` preserves the
+same ROCm device, BF16 weights, paged state, prompt, and layer capture while
+declining every accelerated model route and every optional accelerated tensor
+route. Use a source-paired portable-fallback rerun after a qualified result has
+localized an early numerical difference: improvement isolates the defect to
+the accelerated policy as a group, while an unchanged curve rules that group
+out. The worker marker, compact result, JSON Schema, and checker bind the chosen
+profile; the closed worker environment never translates it through an ambient
+environment variable. The path-attribution mode remains qualified-only because
+its graph route is itself the object under test.
 
 The HF arm uses the pinned PyTorch/Transformers fallback implementation,
 BF16 weights, eager full attention, deterministic algorithms, TF32 disabled,

@@ -204,11 +204,24 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
                 model=model,
                 request=request,
                 reference=reference,
+                kernel_profile="portable_fallback",
             )
             spec = json.loads(spec_path.read_text())
             self.assertEqual(spec["argv"][1], "--layer-attribution")
+            self.assertEqual(spec["argv"][-2:], ["--kernel-profile", "portable_fallback"])
             self.assertEqual(len(spec["environment"]), 6)
             self.assertFalse(any(name.startswith("KILN_") for name in spec["environment"]))
+
+            with self.assertRaisesRegex(attribution.LayerAttributionError, "unsupported"):
+                attribution._layer_worker_spec(
+                    workspace=workspace / "invalid",
+                    binary=binary,
+                    binary_sha256="sha256:" + "1" * 64,
+                    model=model,
+                    request=request,
+                    reference=reference,
+                    kernel_profile="individual_switches",
+                )
 
     def test_result_schema_and_checker_bind_request_reference_and_growth(self) -> None:
         request, request_sha256 = contract.load_request(REQUEST_PATH)
@@ -276,6 +289,25 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             ),
             [],
         )
+        fallback = copy.deepcopy(result)
+        fallback["worker"]["kernel_policy"] = "portable_fallback"
+        fallback["result_sha256"] = contract.canonical_sha256(
+            {name: value for name, value in fallback.items() if name != "result_sha256"}
+        )
+        self.assertEqual(
+            schema_subset.validate_instance(
+                fallback,
+                schema,
+                schema,
+                registry={"rocm-hf-next-token-oracle-v1.schema.json": oracle_schema},
+            ),
+            [],
+        )
+        self.assertEqual(attribution.validate_worker_marker(fallback["worker"]), fallback["worker"])
+        invalid = copy.deepcopy(fallback["worker"])
+        invalid["kernel_policy"] = "individual_switches"
+        with self.assertRaisesRegex(attribution.LayerAttributionError, "request or output"):
+            attribution.validate_worker_marker(invalid)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "result.json"
             path.write_text(json.dumps(result), encoding="ascii")

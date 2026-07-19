@@ -48,8 +48,48 @@ mod rocm {
     const GRAPH_ROW_FULL: u64 = 2;
     const GRAPH_ROW_GREEDY: u64 = 3;
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum KernelProfile {
+        Qualified,
+        PortableFallback,
+    }
+
+    impl KernelProfile {
+        fn parse(value: &str) -> Result<Self> {
+            match value {
+                "qualified" => Ok(Self::Qualified),
+                "portable_fallback" => Ok(Self::PortableFallback),
+                _ => anyhow::bail!(
+                    "--kernel-profile must be qualified or portable_fallback, got {value}"
+                ),
+            }
+        }
+
+        const fn label(self) -> &'static str {
+            match self {
+                Self::Qualified => "qualified",
+                Self::PortableFallback => "portable_fallback",
+            }
+        }
+
+        const fn model_policy(self) -> RocmKernelPolicy {
+            match self {
+                Self::Qualified => RocmKernelPolicy::qualified(),
+                Self::PortableFallback => RocmKernelPolicy::portable_fallback(),
+            }
+        }
+
+        const fn tensor_policy(self) -> RocmTensorKernelPolicy {
+            match self {
+                Self::Qualified => RocmTensorKernelPolicy::qualified(),
+                Self::PortableFallback => RocmTensorKernelPolicy::portable_fallback(),
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct Args {
+        kernel_profile: KernelProfile,
         layer_attribution: bool,
         model: PathBuf,
         request: PathBuf,
@@ -187,16 +227,17 @@ mod rocm {
         let request = load_request(&args.request)?;
         let reference = load_reference(&args.reference, &request, args.layer_attribution)?;
         let hf_argmax = argmax(&reference.logits)?;
+        let kernel_policy = args.kernel_profile.label();
 
         install_kt_api_mode(KtApiMode::Auto).context("install qualified kt API mode")?;
-        install_rocm_kernel_policy(RocmKernelPolicy::qualified())
-            .context("install qualified ROCm model policy")?;
+        install_rocm_kernel_policy(args.kernel_profile.model_policy())
+            .with_context(|| format!("install {kernel_policy} ROCm model policy"))?;
         primary_rocm_context_with_execution_policy(
             0,
             RocmExecutionPolicy::new(RocmSynchronizationMode::LegacyHostBarriers)
-                .with_tensor_kernel_policy(RocmTensorKernelPolicy::qualified()),
+                .with_tensor_kernel_policy(args.kernel_profile.tensor_policy()),
         )
-        .context("install qualified ROCm tensor policy")?;
+        .with_context(|| format!("install {kernel_policy} ROCm tensor policy"))?;
 
         anyhow::ensure!(
             kiln_tensor::rocm_is_available(),
@@ -224,7 +265,7 @@ mod rocm {
         drop(raw_weights);
         let runtime = backend::for_device_kt(&device);
         LinearBackend::runtime_prewarm_decode_weights(runtime.as_ref(), &weights)
-            .context("prewarm qualified ROCm decode weights")?;
+            .with_context(|| format!("prewarm {kernel_policy} ROCm decode weights"))?;
 
         if args.layer_attribution {
             let result = run_layer_attribution(
@@ -234,6 +275,7 @@ mod rocm {
                 &device,
                 &request,
                 &reference,
+                kernel_policy,
             )?;
             println!("{LAYER_MARKER}{}", serde_json::to_string(&result)?);
             return Ok(());
@@ -291,7 +333,7 @@ mod rocm {
             hf_argmax,
             input_token_count: request.prompt.len() + request.continuation.len(),
             input_token_ids_sha256: request.input_token_ids_sha256,
-            kernel_policy: "qualified",
+            kernel_policy,
             request_id: request.id,
             schema: RESULT_SCHEMA,
         };
@@ -313,7 +355,10 @@ mod rocm {
                 continue;
             }
             anyhow::ensure!(
-                matches!(flag.as_str(), "--model" | "--request" | "--hf-reference"),
+                matches!(
+                    flag.as_str(),
+                    "--model" | "--request" | "--hf-reference" | "--kernel-profile"
+                ),
                 "unknown argument {flag}"
             );
             let value = values
@@ -339,7 +384,22 @@ mod rocm {
             model.is_absolute() && model.is_dir(),
             "--model must be an absolute directory"
         );
+        let kernel_profile = parsed
+            .get("--kernel-profile")
+            .map(|value| {
+                value
+                    .to_str()
+                    .context("--kernel-profile must be UTF-8")
+                    .and_then(KernelProfile::parse)
+            })
+            .transpose()?
+            .unwrap_or(KernelProfile::Qualified);
+        anyhow::ensure!(
+            layer_attribution || kernel_profile == KernelProfile::Qualified,
+            "portable_fallback is supported only with --layer-attribution"
+        );
         Ok(Args {
+            kernel_profile,
             layer_attribution,
             model,
             request: take("--request")?,
@@ -686,6 +746,7 @@ mod rocm {
         device: &Device,
         request: &Request,
         reference: &Reference,
+        kernel_policy: &'static str,
     ) -> Result<LayerResultMarker> {
         let reference_rows = reference
             .layer_last_rows
@@ -784,7 +845,7 @@ mod rocm {
             hf_layer_last_rows_sha256: matrix_sha256(reference_rows),
             input_token_count: request.prompt.len() + request.continuation.len(),
             input_token_ids_sha256: request.input_token_ids_sha256.clone(),
-            kernel_policy: "qualified",
+            kernel_policy,
             largest_relative_error_growth: ErrorGrowthBoundary {
                 index: largest_index,
                 name: boundary_names[largest_index].clone(),

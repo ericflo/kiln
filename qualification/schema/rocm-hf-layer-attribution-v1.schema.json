@@ -335,7 +335,10 @@
         "hf_layer_last_rows_sha256": { "$ref": "#/$defs/sha256" },
         "input_token_count": { "const": 166 },
         "input_token_ids_sha256": { "$ref": "#/$defs/sha256" },
-        "kernel_policy": { "const": "qualified" },
+        "kernel_policy": {
+          "type": "string",
+          "enum": ["qualified", "portable_fallback"]
+        },
         "largest_relative_error_growth": { "$ref": "#/$defs/errorGrowth" },
         "observed_next_tokens": {
           "type": "array",

@@ -31,6 +31,7 @@ WORKER_PREFIX = "KILN_ROCM_HF_LAYER_ATTRIBUTION "
 HF_MEMORY_MAX_GIB = 16
 HF_RUNTIME_MAX_SECONDS = 600
 RECOVERY_TIMEOUT_SECONDS = 300
+KERNEL_PROFILES = ("qualified", "portable_fallback")
 
 
 class LayerAttributionError(RuntimeError):
@@ -129,7 +130,10 @@ def _layer_worker_spec(
     model: Path,
     request: Path,
     reference: Path,
+    kernel_profile: str,
 ) -> Path:
+    if kernel_profile not in KERNEL_PROFILES:
+        raise LayerAttributionError(f"unsupported ROCm kernel profile {kernel_profile}")
     home = workspace / "home"
     temporary = workspace / "tmp"
     home.mkdir(mode=0o700)
@@ -144,6 +148,8 @@ def _layer_worker_spec(
             str(request),
             "--hf-reference",
             str(reference),
+            "--kernel-profile",
+            kernel_profile,
         ],
         "cwd": str(ROOT),
         "environment": {
@@ -296,7 +302,7 @@ def validate_worker_marker(value: Any) -> dict[str, Any]:
         is None
         or re.fullmatch(r"sha256:[0-9a-f]{64}", value["hf_layer_last_rows_sha256"])
         is None
-        or value["kernel_policy"] != "qualified"
+        or value["kernel_policy"] not in KERNEL_PROFILES
         or not isinstance(value["request_id"], str)
         or not value["request_id"]
     ):
@@ -342,6 +348,7 @@ def execute(
     policy_path: Path,
     python_path: Path,
     result_path: Path,
+    kernel_profile: str,
 ) -> dict[str, Any]:
     started = time.monotonic()
     for path, label in (
@@ -355,6 +362,8 @@ def execute(
             raise LayerAttributionError(f"--{label} must be absolute")
     if result_path.exists() or result_path.is_symlink():
         raise LayerAttributionError(f"refusing to overwrite {result_path}")
+    if kernel_profile not in KERNEL_PROFILES:
+        raise LayerAttributionError(f"unsupported ROCm kernel profile {kernel_profile}")
     source = hf_oracle._repository_identity()
     request_path = request_path.resolve(strict=True)
     request, request_sha256 = contract.load_request(request_path)
@@ -433,6 +442,7 @@ def execute(
         model=model,
         request=request_path,
         reference=reference,
+        kernel_profile=kernel_profile,
     )
     kiln_command = path_attribution._service_command(
         python=python,
@@ -465,6 +475,7 @@ def execute(
         or worker["input_token_count"] != len(request["input_token_ids"])
         or worker["hf_layer_last_rows_sha256"]
         != hf_evidence["layer_last_rows_sha256"]
+        or worker["kernel_policy"] != kernel_profile
     ):
         raise LayerAttributionError("Kiln layer evidence does not bind the request")
     if hf_oracle._repository_identity() != source:
@@ -678,6 +689,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run.add_argument("--host-thermal-policy", required=True, type=Path)
     run.add_argument("--python", required=True, type=Path)
     run.add_argument("--out", required=True, type=Path)
+    run.add_argument(
+        "--kernel-profile",
+        choices=KERNEL_PROFILES,
+        default="qualified",
+        help="immutable ROCm model/tensor profile for the Kiln arm",
+    )
     check = commands.add_parser("check", help="strictly validate retained layer results")
     check.add_argument("result", nargs="+", type=Path)
     check.add_argument("--require-current-source", action="store_true")
@@ -702,6 +719,7 @@ def main(argv: list[str] | None = None) -> int:
             policy_path=args.host_thermal_policy,
             python_path=args.python,
             result_path=args.out,
+            kernel_profile=args.kernel_profile,
         )
     except BaseException as exc:
         print(f"ROCm HF layer attribution failed: {exc}", file=sys.stderr)
