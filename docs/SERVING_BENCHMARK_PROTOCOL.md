@@ -713,11 +713,30 @@ failures still return without a receipt because no measured lifecycle began.
 
 ## Running the Five-Profile Campaign
 
-`scripts/run-serving-benchmark-campaign.py` runs all five profiles. In owned
-mode each profile gets a fresh process group and a run-specific log. This avoids
-cross-profile allocator/cache state and keeps startup and teardown independently
-auditable. Campaign summary v3 records the selected output-evidence mode and
-forwards it unchanged to every profile.
+`scripts/run-serving-benchmark-campaign.py` defines all five profiles. In owned
+mode each runnable profile gets a fresh process group and a run-specific log.
+This avoids cross-profile allocator/cache state and keeps startup and teardown
+independently auditable. Profile receipts are staged outside the output tree, so
+an output directory inside the repository cannot make later profiles reject the
+source as dirty. After execution, every staged receipt is published through an
+atomic rename and the self-hashing campaign summary is published last.
+
+Campaign summary v4 records the selected output-evidence mode and forwards it
+unchanged to every profile. It also records `execution_policy`, and every
+expected profile has a closed `status`: `completed` or
+`not_run_after_failure`. A completed row records its exit code and receipt hash;
+a skipped row records the earlier `blocked_by_profile` and has null exit and
+receipt-hash fields. Missing receipts count as failures even when the child exits
+zero.
+
+The default execution policy is fail-fast. The first nonzero child exit or
+missing receipt prevents every later profile from starting, while preserving
+the failed counterexample and a complete summary of what was not run. This is
+the required policy for unattended campaigns and for any accelerator run where
+a failure may represent a thermal, memory, process-lifecycle, or device-safety
+event. `--continue-after-failure` is an explicit diagnostic override for a
+known non-safety failure; do not use it after a thermal trip, guard failure,
+forced shutdown, process residue, OOM, or device error.
 
 ```bash
 python3 scripts/run-serving-benchmark-campaign.py \

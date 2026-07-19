@@ -86,10 +86,14 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
     def test_campaign_runs_every_profile_and_self_hashes_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            invoked_outputs: list[Path] = []
 
             def fake_run(command: list[str], check: bool) -> SimpleNamespace:
                 self.assertFalse(check)
                 output = Path(command[command.index("--out") + 1])
+                invoked_outputs.append(output)
+                self.assertNotEqual(output.parent, root / "out")
+                self.assertEqual(list((root / "out").glob("*.json")), [])
                 output.write_text('{"fixture":true}\n')
                 return SimpleNamespace(returncode=0)
 
@@ -105,6 +109,8 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
                 list(campaign.PROFILES),
             )
             self.assertEqual(summary["verdict"], "passed")
+            self.assertEqual(summary["schema"], campaign.SCHEMA)
+            self.assertEqual(summary["execution_policy"], "fail_fast")
             self.assertEqual(summary["server_owner"]["server_pid"], 4321)
             self.assertEqual(summary["output_evidence"], "hashes")
             self.assertEqual(
@@ -112,6 +118,80 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             )
             self.assertTrue(
                 summary["host_thermal_policy"]["sha256"].startswith("sha256:")
+            )
+            self.assertEqual(len(invoked_outputs), len(campaign.PROFILES))
+            for row in summary["profiles"]:
+                self.assertEqual(row["status"], "completed")
+                self.assertIsNone(row["blocked_by_profile"])
+                self.assertTrue(Path(row["receipt"]).is_file())
+
+    def test_campaign_stops_after_first_failed_profile_and_publishes_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls: list[str] = []
+
+            def fake_run(command: list[str], check: bool) -> SimpleNamespace:
+                self.assertFalse(check)
+                profile = command[command.index("--workload-profile") + 1]
+                calls.append(profile)
+                output = Path(command[command.index("--out") + 1])
+                output.write_text('{"failed_counterexample":true}\n')
+                return SimpleNamespace(returncode=2)
+
+            with mock.patch.object(campaign.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(campaign.main(required_args(root)), 2)
+
+            self.assertEqual(calls, [campaign.PROFILES[0]])
+            summary = json.loads(
+                (root / "out" / "campaign.kiln.json").read_text()
+            )
+            first, *skipped = summary["profiles"]
+            self.assertEqual(first["status"], "completed")
+            self.assertEqual(first["exit_code"], 2)
+            self.assertTrue(first["receipt_sha256"].startswith("sha256:"))
+            self.assertTrue(Path(first["receipt"]).is_file())
+            self.assertEqual(summary["verdict"], "failed")
+            for row in skipped:
+                self.assertEqual(row["status"], "not_run_after_failure")
+                self.assertIsNone(row["exit_code"])
+                self.assertIsNone(row["receipt_sha256"])
+                self.assertEqual(row["blocked_by_profile"], campaign.PROFILES[0])
+                self.assertFalse(Path(row["receipt"]).exists())
+
+    def test_campaign_can_explicitly_continue_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls: list[str] = []
+
+            def fake_run(command: list[str], check: bool) -> SimpleNamespace:
+                self.assertFalse(check)
+                profile = command[command.index("--workload-profile") + 1]
+                calls.append(profile)
+                output = Path(command[command.index("--out") + 1])
+                output.write_text('{"fixture":true}\n')
+                return SimpleNamespace(returncode=2 if len(calls) == 1 else 0)
+
+            with mock.patch.object(campaign.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(
+                    campaign.main(
+                        [*required_args(root), "--continue-after-failure"]
+                    ),
+                    2,
+                )
+
+            self.assertEqual(calls, list(campaign.PROFILES))
+            summary = json.loads(
+                (root / "out" / "campaign.kiln.json").read_text()
+            )
+            self.assertEqual(summary["execution_policy"], "continue_after_failure")
+            self.assertEqual(summary["verdict"], "failed")
+            self.assertTrue(
+                all(row["status"] == "completed" for row in summary["profiles"])
+            )
+            self.assertTrue(
+                all(Path(row["receipt"]).is_file() for row in summary["profiles"])
             )
 
     def test_campaign_can_forward_owned_server_launch_config(self) -> None:

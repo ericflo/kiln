@@ -182,9 +182,12 @@ mode, maximum batch, wait, and mixed-sequence values. Do not infer routing from
 `(1,0,false)`, ROCm `(8,0,false)`, Metal `(8,100,true)`, and Vulkan
 `(64,5000,true)`, with maximum batch clamped to effective decode width.
 
-The campaign command runs all five profiles at concurrency 1, 8, 16, 32, 64,
-and 128, continues after a failed profile so counterevidence is retained, and
-writes five detailed receipts plus an atomic self-hashing campaign summary:
+The campaign command defines all five profiles at concurrency 1, 8, 16, 32, 64,
+and 128. It stages profile receipts outside the output tree and publishes them
+only after execution, so checked-in output paths cannot dirty the source seen by
+later profiles. The default policy stops after the first failed profile or
+missing receipt, preserves that counterevidence, marks the remaining profiles
+`not_run_after_failure`, and publishes the self-hashing v4 summary last:
 
 ```bash
 python3 scripts/run-serving-benchmark-campaign.py \
@@ -204,6 +207,10 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --server-launch-config .qualification/serving/rocm-kiln-launch.json \
   --out-dir /tmp/kiln-serving-campaign
 ```
+
+`--continue-after-failure` is an explicit diagnostic override for a known
+non-safety failure. Never use it after a thermal trip, guard failure, forced
+shutdown, process residue, OOM, or device error.
 
 Run vLLM with the same campaign ID, model alias, checkpoint, sizes, limits, and
 SLOs. `--runtime-artifact` must name the immutable launcher/runtime manifest

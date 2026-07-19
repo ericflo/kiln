@@ -9,15 +9,17 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "scripts" / "bench-concurrent-batch.py"
-SCHEMA = "kiln.serving-benchmark-campaign.v3"
+SCHEMA = "kiln.serving-benchmark-campaign.v4"
 PROFILES = (
     "greedy-short",
     "api-default-sampled",
@@ -65,6 +67,20 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def atomic_publish_file(source: Path, destination: Path) -> None:
+    if destination.exists():
+        raise CampaignError(f"refusing to overwrite campaign artifact: {destination}")
+    temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+    try:
+        with source.open("rb") as reader, temporary.open("xb") as writer:
+            shutil.copyfileobj(reader, writer, length=8 * 1024 * 1024)
+            writer.flush()
+            os.fsync(writer.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", choices=("kiln", "vllm"), required=True)
@@ -102,6 +118,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("hashes", "full"),
         default="hashes",
         help="per-request hash evidence or bounded full output diagnostics",
+    )
+    parser.add_argument(
+        "--continue-after-failure",
+        action="store_true",
+        help="run later profiles after a failed profile; default stops at the first failure",
     )
     args = parser.parse_args(argv)
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}", args.campaign_id) is None:
@@ -193,6 +214,57 @@ def benchmark_command(
     return command
 
 
+def build_summary(
+    args: argparse.Namespace,
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "schema": SCHEMA,
+        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "campaign_id": args.campaign_id,
+        "engine": args.engine,
+        "output_evidence": args.output_evidence,
+        "execution_policy": (
+            "continue_after_failure"
+            if args.continue_after_failure
+            else "fail_fast"
+        ),
+        "host_thermal_policy": {
+            "path": str(args.host_thermal_policy.resolve()),
+            "sha256": file_sha256(args.host_thermal_policy),
+        },
+        "server_owner": (
+            {
+                "mode": "owned_process_group",
+                "launch_config": {
+                    "path": str(args.server_launch_config.resolve()),
+                    "sha256": file_sha256(args.server_launch_config),
+                },
+                "server_pid": None,
+            }
+            if args.server_launch_config is not None
+            else {
+                "mode": "attached_process_group",
+                "launch_config": None,
+                "server_pid": args.server_pid,
+            }
+        ),
+        "profiles": rows,
+        "verdict": (
+            "passed"
+            if all(
+                row["status"] == "completed"
+                and row["exit_code"] == 0
+                and row["receipt_sha256"]
+                for row in rows
+            )
+            else "failed"
+        ),
+    }
+    summary["summary_sha256"] = canonical_sha256(summary)
+    return summary
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
@@ -209,51 +281,51 @@ def main(argv: list[str] | None = None) -> int:
                 + ", ".join(str(path) for path in conflicts)
             )
         rows: list[dict[str, Any]] = []
-        for profile in PROFILES:
-            output = outputs[profile]
-            result = subprocess.run(benchmark_command(args, profile, output), check=False)
-            row: dict[str, Any] = {
-                "profile": profile,
-                "exit_code": result.returncode,
-                "receipt": str(output),
-                "receipt_sha256": file_sha256(output) if output.is_file() else None,
-            }
-            rows.append(row)
-        summary: dict[str, Any] = {
-            "schema": SCHEMA,
-            "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "campaign_id": args.campaign_id,
-            "engine": args.engine,
-            "output_evidence": args.output_evidence,
-            "host_thermal_policy": {
-                "path": str(args.host_thermal_policy.resolve()),
-                "sha256": file_sha256(args.host_thermal_policy),
-            },
-            "server_owner": (
-                {
-                    "mode": "owned_process_group",
-                    "launch_config": {
-                        "path": str(args.server_launch_config.resolve()),
-                        "sha256": file_sha256(args.server_launch_config),
-                    },
-                    "server_pid": None,
-                }
-                if args.server_launch_config is not None
-                else {
-                    "mode": "attached_process_group",
-                    "launch_config": None,
-                    "server_pid": args.server_pid,
-                }
-            ),
-            "profiles": rows,
-            "verdict": (
-                "passed"
-                if all(row["exit_code"] == 0 and row["receipt_sha256"] for row in rows)
-                else "failed"
-            ),
-        }
-        summary["summary_sha256"] = canonical_sha256(summary)
-        atomic_write_json(summary_path, summary)
+        staged_outputs: dict[str, Path] = {}
+        failed_profile: str | None = None
+        with tempfile.TemporaryDirectory(prefix="kiln-serving-campaign-") as staging:
+            staging_dir = Path(staging)
+            for profile in PROFILES:
+                final_output = outputs[profile]
+                if failed_profile is not None and not args.continue_after_failure:
+                    rows.append(
+                        {
+                            "profile": profile,
+                            "status": "not_run_after_failure",
+                            "exit_code": None,
+                            "receipt": str(final_output),
+                            "receipt_sha256": None,
+                            "blocked_by_profile": failed_profile,
+                        }
+                    )
+                    continue
+
+                staged_output = staging_dir / final_output.name
+                result = subprocess.run(
+                    benchmark_command(args, profile, staged_output), check=False
+                )
+                receipt_sha256 = (
+                    file_sha256(staged_output) if staged_output.is_file() else None
+                )
+                rows.append(
+                    {
+                        "profile": profile,
+                        "status": "completed",
+                        "exit_code": result.returncode,
+                        "receipt": str(final_output),
+                        "receipt_sha256": receipt_sha256,
+                        "blocked_by_profile": None,
+                    }
+                )
+                if staged_output.is_file():
+                    staged_outputs[profile] = staged_output
+                if result.returncode != 0 or receipt_sha256 is None:
+                    failed_profile = profile
+            summary = build_summary(args, rows)
+            for profile in PROFILES:
+                if staged_output := staged_outputs.get(profile):
+                    atomic_publish_file(staged_output, outputs[profile])
+            atomic_write_json(summary_path, summary)
         print(f"wrote {summary_path}")
         return 0 if summary["verdict"] == "passed" else 2
     except (CampaignError, OSError) as exc:
