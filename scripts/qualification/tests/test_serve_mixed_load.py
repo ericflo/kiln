@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import concurrent.futures
+import dataclasses
 import importlib.util
 import json
 import subprocess
@@ -3355,6 +3357,119 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
 
         with self.assertRaises(serve.QualificationError):
             serve.counter_delta({"counter": 2}, {"counter": 1}, "counter")
+
+    def test_partial_metrics_retain_returned_requests_and_runtime_deltas(self) -> None:
+        completed = stream_result_with_text("000000", name="normal-00")
+        interrupted = serve.StreamResult(
+            name="normal-01",
+            marker="QUAL-7-normal-01",
+            started=1.0,
+            finished=3.0,
+            semantic_times=[1.1, 1.2, 1.3],
+            token_ready_times=[1.1, 1.2, 1.3, 1.4],
+            token_queue_delays_ms=[0.0, 0.0, 0.0, 0.0],
+            prompt_tokens=0,
+            completion_tokens=0,
+            usage_records=0,
+            finish_reason=None,
+            done=False,
+            cancelled=False,
+            error="ConnectionRefusedError: server stopped by thermal guard",
+            semantic_deltas=[
+                {"choices": [{"index": 0, "delta": {"content": "000000"}}]}
+            ],
+        )
+        health_start = health_fixture(kv_autoscale=False, rocm_graphs=False)
+        health_end = json.loads(json.dumps(health_start))
+        health_end["decode_runtime"]["batching_engine"].update(
+            {
+                "total_decode_forwards": 4,
+                "total_batched_decode_forwards": 2,
+                "total_decode_rows": 6,
+                "total_decode_forward_ms": 420.0,
+                "max_decode_forward_ms": 120.0,
+            }
+        )
+        health_end["decode_runtime"]["rocm_w8_lm_head"].update(
+            {"argmax_dispatches": 4, "argmax_rows": 6, "max_batch_rows": 2}
+        )
+        evidence = serve.MixedLoadRunEvidence()
+        evidence.warmup = completed
+        evidence.begin_measurement(1.0, health_start)
+        for name in ("normal-00", "normal-01", "long-prefill"):
+            evidence.record_measured_attempt(name)
+        evidence.record_measured_result(completed)
+        evidence.record_measured_result(interrupted)
+        evidence.record_health(health_end)
+        evidence.finish_measurement(3.0)
+
+        values, runtime_failure = serve.partial_metric_values(
+            evidence, peak_memory=1234, events=[]
+        )
+
+        self.assertIsNone(runtime_failure)
+        self.assertEqual(values["request_count"], 3)
+        self.assertEqual(values["request_failure_count"], 2)
+        self.assertEqual(values["completion_token_count"], 2)
+        self.assertEqual(values["observed_completion_token_count"], 6)
+        self.assertEqual(values["measurement_duration_seconds"], 2.0)
+        self.assertEqual(values["output_token_throughput_per_second"], 1.0)
+        self.assertEqual(
+            values["observed_output_token_throughput_per_second"], 3.0
+        )
+        self.assertEqual(values["batching_decode_forward_count"], 4)
+        self.assertEqual(values["batching_batched_decode_forward_count"], 2)
+        self.assertEqual(values["batching_decode_row_count"], 6)
+        self.assertEqual(values["rocm_w8_lm_head_argmax_dispatch_count"], 4)
+        self.assertEqual(values["rocm_w8_lm_head_argmax_row_count"], 6)
+        self.assertEqual(values["peak_gpu_memory_used_bytes"], 1234)
+        self.assertEqual(set(values), set(serve.METRIC_DEFINITIONS))
+
+        evidence.record_measured_result(completed)
+        contradictory = dataclasses.replace(completed, completion_tokens=1)
+        with self.assertRaises(serve.QualificationError):
+            evidence.record_measured_result(contradictory)
+
+        evidence.health_latest = {"malformed": True}
+        degraded, runtime_failure = serve.partial_metric_values(
+            evidence, peak_memory=1234, events=[]
+        )
+        self.assertEqual(degraded["observed_completion_token_count"], 6)
+        self.assertEqual(degraded["request_count"], 3)
+        self.assertIn("runtime-snapshot serialization failed", runtime_failure or "")
+
+    def test_worker_cleanup_harvests_each_finished_future_independently(self) -> None:
+        first = stream_result_with_text("000000", name="normal-00")
+        second = stream_result_with_text("000000", name="normal-01")
+        cancellation = dataclasses.replace(
+            second, name="cancellation", cancelled=True, done=False
+        )
+        evidence = serve.MixedLoadRunEvidence()
+        evidence.record_measured_attempt("normal-00")
+        evidence.record_measured_attempt("normal-01")
+        first_future: concurrent.futures.Future[object] = concurrent.futures.Future()
+        failed_future: concurrent.futures.Future[object] = concurrent.futures.Future()
+        second_future: concurrent.futures.Future[object] = concurrent.futures.Future()
+        pending_future: concurrent.futures.Future[object] = concurrent.futures.Future()
+        cancellation_future: concurrent.futures.Future[object] = (
+            concurrent.futures.Future()
+        )
+        first_future.set_result(first)
+        failed_future.set_exception(RuntimeError("worker wrapper failed"))
+        second_future.set_result(second)
+        cancellation_future.set_result(cancellation)
+
+        serve.retain_finished_worker_evidence(
+            evidence,
+            [first_future, failed_future, pending_future, second_future],
+            cancellation_future,
+        )
+
+        self.assertEqual(
+            [result.name for result in evidence.ordered_measured_results()],
+            ["normal-00", "normal-01"],
+        )
+        self.assertIs(evidence.cancellation, cancellation)
 
     def test_staging_contract_requires_exact_capacity_and_measured_execution(self) -> None:
         good = {

@@ -630,7 +630,10 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "length_terminated_request_count": ("count", "sum", False),
     "long_prefill_prompt_tokens": ("tokens", "exact", False),
     "memory_reclaim_event_count": ("count", "sum", True),
+    "measurement_duration_seconds": ("s", "exact", True),
     "non_thermal_attributed_itl_outlier_count": ("count", "sum", True),
+    "observed_completion_token_count": ("tokens", "sum", False),
+    "observed_output_token_throughput_per_second": ("tokens/s", "rate", False),
     "output_token_throughput_per_second": ("tokens/s", "rate", False),
     "peak_gpu_memory_used_bytes": ("bytes", "max", True),
     "prefix_cache_active_leases_end": ("leases", "exact", True),
@@ -1555,6 +1558,28 @@ def token_id_diagnostic(result: StreamResult) -> str:
     return f"token_ids_sha256=sha256:{digest}; token_ids={rendered}"
 
 
+def trace_request_result(result: StreamResult, *, event: str = "request_result") -> None:
+    trace(
+        event,
+        cancelled=result.cancelled,
+        completion_tokens=result.completion_tokens,
+        done=result.done,
+        e2e_ms=result.e2e_ms,
+        error=result.error,
+        finish_reason=result.finish_reason,
+        name=result.name,
+        actor_admission_ms=result.actor_admission_ms,
+        actor_prefill_wall_ms=result.actor_prefill_wall_ms,
+        actor_queue_ms=result.actor_queue_ms,
+        prompt_tokens=result.prompt_tokens,
+        semantic_events=len(result.semantic_times),
+        response_oracle_failure=deterministic_response_oracle_failure(result),
+        response_text=bounded_response_text(result),
+        token_ids=result.token_ids,
+        ttft_ms=result.ttft_ms,
+    )
+
+
 def post_sampled_determinism_canary_failures(
     baseline: StreamResult, canary: StreamResult
 ) -> list[str]:
@@ -2165,6 +2190,95 @@ class ShutdownOutcome:
     returncode: int
     forced: bool
     elapsed_ms: float
+
+
+@dataclasses.dataclass
+class MixedLoadRunEvidence:
+    """Monotonic evidence retained even when a measured run fails."""
+
+    warmup: StreamResult | None = None
+    measurement_started: float | None = None
+    measurement_finished: float | None = None
+    health_measurement_start: dict[str, Any] | None = None
+    health_latest: dict[str, Any] | None = None
+    measured_attempts: list[str] = dataclasses.field(default_factory=list)
+    measured_results: dict[str, StreamResult] = dataclasses.field(default_factory=dict)
+    cancellation: StreamResult | None = None
+    cancellation_confirmed: bool = False
+    pressure_window: DeliveryPressureWindow | None = None
+
+    def begin_measurement(self, started: float, health: dict[str, Any]) -> None:
+        if self.measurement_started is not None:
+            raise QualificationError("mixed-load measurement started more than once")
+        self.measurement_started = started
+        self.health_measurement_start = health
+        self.health_latest = health
+
+    def finish_measurement(self, finished: float) -> None:
+        if self.measurement_started is None:
+            return
+        if finished < self.measurement_started:
+            raise QualificationError("mixed-load measurement finished before it started")
+        if self.measurement_finished is None:
+            self.measurement_finished = finished
+
+    def record_health(self, health: dict[str, Any]) -> None:
+        if self.measurement_started is not None and self.measurement_finished is None:
+            self.health_latest = health
+
+    def record_measured_attempt(self, name: str) -> None:
+        if name in self.measured_attempts:
+            raise QualificationError(f"measured request {name!r} was attempted twice")
+        self.measured_attempts.append(name)
+
+    def record_measured_result(self, result: StreamResult) -> None:
+        if result.name not in self.measured_attempts:
+            raise QualificationError(
+                f"unattempted measured request {result.name!r} produced a result"
+            )
+        previous = self.measured_results.get(result.name)
+        if previous is not None and previous != result:
+            raise QualificationError(
+                f"measured request {result.name!r} produced contradictory results"
+            )
+        self.measured_results[result.name] = result
+
+    def ordered_measured_results(self) -> list[StreamResult]:
+        return [
+            self.measured_results[name]
+            for name in self.measured_attempts
+            if name in self.measured_results
+        ]
+
+
+def retain_finished_worker_evidence(
+    evidence: MixedLoadRunEvidence,
+    measured_futures: Iterable[concurrent.futures.Future[StreamResult]],
+    cancellation_future: concurrent.futures.Future[StreamResult] | None,
+) -> None:
+    """Harvest finished workers without allowing one bad future to hide its peers."""
+    for future in measured_futures:
+        if not future.done() or future.cancelled():
+            continue
+        try:
+            evidence.record_measured_result(future.result())
+        except Exception as exc:
+            trace(
+                "request_worker_result_error",
+                details=f"{type(exc).__name__}: {exc}",
+            )
+    if (
+        cancellation_future is not None
+        and cancellation_future.done()
+        and not cancellation_future.cancelled()
+    ):
+        try:
+            evidence.cancellation = cancellation_future.result()
+        except Exception as exc:
+            trace(
+                "cancellation_worker_result_error",
+                details=f"{type(exc).__name__}: {exc}",
+            )
 
 
 def parse_server_log_line(line: str) -> tuple[str, dict[str, Any]]:
@@ -4128,6 +4242,7 @@ def wait_for_delivery_pressure(
     expected_client: str,
     observed_since: float,
     absolute_deadline: float,
+    evidence: MixedLoadRunEvidence | None = None,
 ) -> tuple[DeliveryPressureWindow | None, bool, dict[str, Any]]:
     deadline = min(time.monotonic() + 45.0, absolute_deadline)
     latest: dict[str, Any] = {}
@@ -4135,6 +4250,8 @@ def wait_for_delivery_pressure(
     while time.monotonic() < deadline:
         latest = json_request(port, "GET", "/health")
         snapshot = batching_snapshot(latest)
+        if evidence is not None:
+            evidence.record_health(latest)
         pressure = attributed_delivery_pressure_window(
             server_log.events_since(observed_since), expected_client
         )
@@ -4649,6 +4766,401 @@ def itl_outlier_gate_failures(values: dict[str, float | int]) -> list[str]:
     return failures
 
 
+def partial_metric_values(
+    evidence: MixedLoadRunEvidence,
+    *,
+    peak_memory: int,
+    events: list[ObservedEvent],
+) -> tuple[dict[str, float | int], str | None]:
+    """Serialize only evidence actually observed before a failed run stopped."""
+    values: dict[str, float | int] = {name: 0 for name in METRIC_DEFINITIONS}
+    measured = evidence.ordered_measured_results()
+    successes = [result for result in measured if qualified_stream_success(result)]
+    attempted = len(evidence.measured_attempts)
+    observed_tokens = sum(len(result.token_ready_times) for result in measured)
+    completion_tokens = sum(result.completion_tokens for result in successes)
+    prompt_tokens = sum(result.prompt_tokens for result in successes)
+    ttfts = [result.ttft_ms for result in successes]
+    e2es = [result.e2e_ms for result in successes]
+    itls = [gap for result in successes for gap in result.itl_ms]
+    queue_delays = [
+        delay for result in successes for delay in result.token_queue_delays_ms
+    ]
+
+    window_start = evidence.measurement_started
+    if measured:
+        result_start = min(result.started for result in measured)
+        window_start = (
+            result_start if window_start is None else min(window_start, result_start)
+        )
+    window_end = evidence.measurement_finished
+    if measured:
+        result_end = max(result.finished for result in measured)
+        window_end = result_end if window_end is None else max(window_end, result_end)
+    window = (
+        max(window_end - window_start, 0.0)
+        if window_start is not None and window_end is not None
+        else 0.0
+    )
+
+    warmup_gaps = evidence.warmup.itl_ms if evidence.warmup is not None else []
+    outliers = classify_itl_outliers(warmup_gaps, successes, events)
+    values.update(
+        {
+            "attributed_itl_outlier_count": outliers.attributed,
+            "cancellation_confirmed_count": int(evidence.cancellation_confirmed),
+            "completion_token_count": completion_tokens,
+            "e2e_latency_ms_p50": percentile_r7(e2es, 0.5),
+            "e2e_latency_ms_p99": percentile_r7(e2es, 0.99),
+            "e2e_latency_ms_p999": percentile_r7(e2es, 0.999),
+            "host_thermal_pacing_itl_outlier_count": outliers.host_thermal_pacing,
+            "itl_ms_p50": percentile_r7(itls, 0.5),
+            "itl_ms_p99": percentile_r7(itls, 0.99),
+            "itl_ms_p999": percentile_r7(itls, 0.999),
+            "length_terminated_request_count": sum(
+                result.finish_reason == "length" for result in successes
+            ),
+            "measurement_duration_seconds": window,
+            "non_thermal_attributed_itl_outlier_count": (
+                outliers.non_thermal_attributed
+            ),
+            "observed_completion_token_count": observed_tokens,
+            "observed_output_token_throughput_per_second": (
+                observed_tokens / window if window > 0 else 0.0
+            ),
+            "output_token_throughput_per_second": (
+                completion_tokens / window if window > 0 else 0.0
+            ),
+            "peak_gpu_memory_used_bytes": peak_memory,
+            "prompt_token_count": prompt_tokens,
+            "request_count": attempted,
+            "request_failure_count": (
+                attempted - len(successes) if attempted > 0 else 1
+            ),
+            "request_throughput_per_second": (
+                len(successes) / window if window > 0 else 0.0
+            ),
+            "response_queue_delay_ms_p50": percentile_r7(queue_delays, 0.5),
+            "response_queue_delay_ms_p99": percentile_r7(queue_delays, 0.99),
+            "response_queue_delay_ms_p999": percentile_r7(queue_delays, 0.999),
+            "slo_goodput_requests_per_second": (
+                sum(
+                    result.ttft_ms <= SLO_TTFT_MS
+                    and result.e2e_ms <= SLO_E2E_MS
+                    for result in successes
+                )
+                / window
+                if window > 0
+                else 0.0
+            ),
+            "ttft_ms_p50": percentile_r7(ttfts, 0.5),
+            "ttft_ms_p99": percentile_r7(ttfts, 0.99),
+            "ttft_ms_p999": percentile_r7(ttfts, 0.999),
+            "unexplained_itl_outlier_count": outliers.unexplained,
+            "zero_token_response_count": sum(
+                not result.token_ready_times for result in measured
+            ),
+        }
+    )
+    values.update(latency_phase_metric_values(successes))
+
+    long_prefill = evidence.measured_results.get("long-prefill")
+    if long_prefill is not None:
+        values["long_prefill_prompt_tokens"] = long_prefill.prompt_tokens
+    pressure_peer = evidence.measured_results.get("pressure-peer")
+    if pressure_peer is not None:
+        values.update(
+            pressure_peer_timing_values(pressure_peer, evidence.pressure_window)
+        )
+        values["slow_consumer_peer_success_count"] = int(
+            healthy_peer_overlaps_pressure(pressure_peer, evidence.pressure_window)
+        )
+
+    health_start = evidence.health_measurement_start
+    health_end = evidence.health_latest
+    runtime_failure: str | None = None
+    if health_start is not None:
+        if health_end is None:
+            raise AssertionError("measurement start did not retain its health snapshot")
+        try:
+            values.update(
+                runtime_snapshot_metric_values(health_start, health_end, events)
+            )
+        except Exception as exc:
+            runtime_failure = (
+                "partial runtime-snapshot serialization failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+    return values, runtime_failure
+
+
+def runtime_snapshot_metric_values(
+    health_start: dict[str, Any],
+    health_end: dict[str, Any],
+    events: list[ObservedEvent],
+    *,
+    graph_start_health: dict[str, Any] | None = None,
+    health_final: dict[str, Any] | None = None,
+) -> dict[str, float | int]:
+    """Return the shared measured-window metrics from two valid snapshots."""
+    values: dict[str, float | int] = {}
+    categories = [event.category for event in events]
+    values["kv_resize_event_count"] = categories.count("kv_resize")
+    values["memory_reclaim_event_count"] = categories.count("memory_reclaim")
+
+    batching_start = batching_snapshot(health_start)
+    values.update(
+        {
+            "batching_max_active_requests": batching_start["max_active_requests"],
+            "batching_max_decode_batch": batching_start["max_decode_batch"],
+            "batching_max_observed_active_requests": batching_start[
+                "max_observed_active_requests"
+            ],
+            "batching_max_observed_batch_size": batching_start[
+                "max_observed_batch_size"
+            ],
+            "batching_max_prefill_tokens_per_cycle": batching_start[
+                "max_prefill_tokens_per_cycle"
+            ],
+            "batching_max_prefill_layers_per_cycle": batching_start[
+                "max_prefill_layers_per_cycle"
+            ],
+            "batching_prefill_staging_priority_burst": batching_start[
+                "max_prefill_staging_priority_burst"
+            ],
+            "batching_prefill_staging_slot_count": batching_start[
+                "max_prefill_staging_slots"
+            ],
+            "kv_blocks_start": batching_start["blocks_total"],
+        }
+    )
+
+    graph_start = graph_snapshot(
+        health_start if graph_start_health is None else graph_start_health
+    )
+    values.update(
+        {
+            "graph_pre_measurement_capture_success_count": graph_start[
+                "capture_successes"
+            ],
+            "graph_pre_measurement_failure_count": graph_start["failures"],
+            "graph_pre_measurement_replay_success_count": graph_start[
+                "replay_successes"
+            ],
+        }
+    )
+    prefix_start = prefix_cache_snapshot(health_start)
+    values.update(
+        {
+            "prefix_cache_baseline_cached_entries": prefix_start["cached_entries"],
+            "prefix_cache_baseline_state_bytes": prefix_start["cached_state_bytes"],
+            "prefix_cache_enabled": int(prefix_start["enabled"]),
+        }
+    )
+    batching_end = batching_snapshot(health_end)
+    decode_forwards = counter_delta(
+        batching_start, batching_end, "total_decode_forwards"
+    )
+    decode_rows = counter_delta(batching_start, batching_end, "total_decode_rows")
+    values.update(
+        {
+            "batching_admission_call_count": counter_delta(
+                batching_start, batching_end, "total_admission_calls"
+            ),
+            "batching_admission_ms_max": batching_end["max_admission_ms"],
+            "batching_admission_ms_total": counter_delta(
+                batching_start, batching_end, "total_admission_ms"
+            ),
+            "batching_batched_decode_forward_count": counter_delta(
+                batching_start, batching_end, "total_batched_decode_forwards"
+            ),
+            "batching_decode_forward_count": decode_forwards,
+            "batching_decode_forward_ms_max": batching_end[
+                "max_decode_forward_ms"
+            ],
+            "batching_decode_forward_ms_total": counter_delta(
+                batching_start, batching_end, "total_decode_forward_ms"
+            ),
+            "batching_decode_row_count": decode_rows,
+            "batching_max_active_requests": batching_end["max_active_requests"],
+            "batching_max_decode_batch": batching_end["max_decode_batch"],
+            "batching_max_observed_active_requests": max(
+                batching_start["max_observed_active_requests"],
+                batching_end["max_observed_active_requests"],
+            ),
+            "batching_max_observed_batch_size": max(
+                batching_start["max_observed_batch_size"],
+                batching_end["max_observed_batch_size"],
+            ),
+            "batching_max_prefill_tokens_per_cycle": batching_end[
+                "max_prefill_tokens_per_cycle"
+            ],
+            "batching_max_prefill_layers_per_cycle": batching_end[
+                "max_prefill_layers_per_cycle"
+            ],
+            "batching_mean_rows_per_forward": decode_rows
+            / max(decode_forwards, 1),
+            "batching_prefill_forward_count": counter_delta(
+                batching_start, batching_end, "total_prefill_forwards"
+            ),
+            "batching_prefill_forward_ms_max": batching_end[
+                "max_prefill_forward_ms"
+            ],
+            "batching_prefill_forward_ms_total": counter_delta(
+                batching_start, batching_end, "total_prefill_forward_ms"
+            ),
+            "batching_prefill_layer_count": counter_delta(
+                batching_start, batching_end, "total_prefill_layers"
+            ),
+            "batching_prefill_layer_yield_count": counter_delta(
+                batching_start, batching_end, "total_prefill_layer_yields"
+            ),
+            "batching_prefill_staging_admission_count": counter_delta(
+                batching_start, batching_end, "total_prefill_staging_admissions"
+            ),
+            "batching_prefill_staging_priority_burst": batching_end[
+                "max_prefill_staging_priority_burst"
+            ],
+            "batching_prefill_staging_priority_forward_count": counter_delta(
+                batching_start,
+                batching_end,
+                "total_prefill_staging_priority_forwards",
+            ),
+            "batching_prefill_staging_slot_count": batching_end[
+                "max_prefill_staging_slots"
+            ],
+            "batching_short_prefill_priority_forward_count": counter_delta(
+                batching_start, batching_end, "total_short_prefill_priority_forwards"
+            ),
+            "batching_slow_admission_count": counter_delta(
+                batching_start, batching_end, "slow_admission_count"
+            ),
+            "batching_slow_decode_forward_count": counter_delta(
+                batching_start, batching_end, "slow_decode_forward_count"
+            ),
+            "batching_slow_prefill_forward_count": counter_delta(
+                batching_start, batching_end, "slow_prefill_forward_count"
+            ),
+            "batching_total_errors": counter_delta(
+                batching_start, batching_end, "total_errors"
+            ),
+            "client_backpressure_event_count": counter_delta(
+                batching_start, batching_end, "response_backpressure_events"
+            ),
+            "client_backpressure_wait_ms": counter_delta(
+                batching_start, batching_end, "response_backpressure_wait_ms"
+            ),
+            "client_stall_eviction_count": counter_delta(
+                batching_start, batching_end, "response_stall_evictions"
+            ),
+            "kv_blocks_end": batching_end["blocks_total"],
+        }
+    )
+
+    graph_end = graph_snapshot(health_end)
+    values.update(
+        {
+            "graph_measured_capture_attempt_count": counter_delta(
+                graph_start, graph_end, "capture_attempts"
+            ),
+            "graph_measured_capture_deferral_count": counter_delta(
+                graph_start, graph_end, "capture_deferrals"
+            ),
+            "graph_measured_capture_failure_count": counter_delta(
+                graph_start, graph_end, "capture_failures"
+            ),
+            "graph_measured_capture_success_count": counter_delta(
+                graph_start, graph_end, "capture_successes"
+            ),
+            "graph_measured_live_count_end": graph_end["captured_graph_count"],
+            "graph_measured_replay_attempt_count": counter_delta(
+                graph_start, graph_end, "replay_attempts"
+            ),
+            "graph_measured_replay_failure_count": counter_delta(
+                graph_start, graph_end, "replay_failures"
+            ),
+            "graph_measured_replay_success_count": counter_delta(
+                graph_start, graph_end, "replay_successes"
+            ),
+            "graph_transient_candidate_bytes_peak_end": graph_end[
+                "peak_transient_candidate_bytes"
+            ],
+        }
+    )
+    for phase_name in GRAPH_PHASE_NAMES:
+        values[f"graph_{phase_name}_call_count"] = counter_delta(
+            graph_start, graph_end, f"phase_{phase_name}_calls"
+        )
+        values[f"graph_{phase_name}_slow_count"] = counter_delta(
+            graph_start, graph_end, f"phase_{phase_name}_slow"
+        )
+        values[f"graph_{phase_name}_duration_ms_total"] = counter_delta(
+            graph_start,
+            graph_end,
+            f"phase_{phase_name}_total_duration_micros",
+        ) / 1_000.0
+        values[f"graph_{phase_name}_duration_ms_max_end"] = (
+            graph_end[f"phase_{phase_name}_max_duration_micros"] / 1_000.0
+        )
+
+    prefix_end = prefix_cache_snapshot(
+        health_end if health_final is None else health_final
+    )
+    if prefix_start["enabled"] is not prefix_end["enabled"]:
+        raise QualificationError(
+            "prefix-cache effective capability changed during mixed load"
+        )
+    values.update(
+        {
+            "prefix_cache_active_leases_end": prefix_end["active_leases"],
+            "prefix_cache_cached_blocks_end": prefix_end["cached_blocks"],
+            "prefix_cache_cached_entries_end": prefix_end["cached_entries"],
+            "prefix_cache_hit_blocks": counter_delta(
+                prefix_start, prefix_end, "hit_blocks"
+            ),
+            "prefix_cache_hit_tokens": counter_delta(
+                prefix_start, prefix_end, "hit_tokens"
+            ),
+            "prefix_cache_lookup_hit_count": counter_delta(
+                prefix_start, prefix_end, "lookup_hits"
+            ),
+            "prefix_cache_lookup_miss_count": counter_delta(
+                prefix_start, prefix_end, "lookup_misses"
+            ),
+            "prefix_cache_pending_release_entries_end": prefix_end[
+                "pending_release_entries"
+            ],
+            "prefix_cache_state_bytes_end": prefix_end["cached_state_bytes"],
+        }
+    )
+    values.update(external_yield_sync_metric_values(health_start, health_end))
+
+    lm_head_start = rocm_w8_lm_head_snapshot(health_start)
+    lm_head_end = rocm_w8_lm_head_snapshot(health_end)
+    for field in (*ROCM_W8_LM_HEAD_COUNTER_FIELDS, *ROCM_W8_LM_HEAD_GAUGE_FIELDS):
+        counter_delta(lm_head_start, lm_head_end, field)
+    values.update(
+        {
+            "rocm_w8_lm_head_argmax_dispatch_count": counter_delta(
+                lm_head_start, lm_head_end, "argmax_dispatches"
+            ),
+            "rocm_w8_lm_head_argmax_row_count": counter_delta(
+                lm_head_start, lm_head_end, "argmax_rows"
+            ),
+            "rocm_w8_lm_head_dispatch_failure_count": counter_delta(
+                lm_head_start, lm_head_end, "dispatch_failures"
+            ),
+            "rocm_w8_lm_head_sample_dispatch_count": counter_delta(
+                lm_head_start, lm_head_end, "sample_dispatches"
+            ),
+            "rocm_w8_lm_head_sample_row_count": counter_delta(
+                lm_head_start, lm_head_end, "sample_rows"
+            ),
+        }
+    )
+    return values
+
+
 def metric_values(
     *,
     measured: list[StreamResult],
@@ -4683,6 +5195,9 @@ def metric_values(
     finish = max((result.finished for result in measured), default=start)
     window = max(finish - start, 1e-9)
     completion_tokens = sum(result.completion_tokens for result in successes)
+    observed_completion_tokens = sum(
+        len(result.token_ready_times) for result in measured
+    )
     length_terminated_requests = sum(
         result.finish_reason == "length" for result in successes
     )
@@ -4706,187 +5221,29 @@ def metric_values(
         for result in successes
     )
     outliers = classify_itl_outliers(warmup.itl_ms, successes, events)
-    batching_start = batching_snapshot(health_measurement_start)
-    batching_end = batching_snapshot(health_end)
-    lm_head_start = rocm_w8_lm_head_snapshot(health_measurement_start)
-    lm_head_end = rocm_w8_lm_head_snapshot(health_end)
-    for field in (
-        *ROCM_W8_LM_HEAD_COUNTER_FIELDS,
-        *ROCM_W8_LM_HEAD_GAUGE_FIELDS,
-    ):
-        counter_delta(lm_head_start, lm_head_end, field)
-    prefix_start = prefix_cache_snapshot(health_measurement_start)
-    prefix_end = prefix_cache_snapshot(health_final)
-    if prefix_start["enabled"] is not prefix_end["enabled"]:
-        raise QualificationError(
-            "prefix-cache effective capability changed during mixed load"
-        )
-    graph_start = graph_snapshot(health_after_warmup)
-    graph_end = graph_snapshot(health_end)
-    external_yield_sync = external_yield_sync_metric_values(
-        health_measurement_start, health_end
-    )
-    decode_forwards = counter_delta(
-        batching_start, batching_end, "total_decode_forwards"
-    )
-    batched_decode_forwards = counter_delta(
-        batching_start, batching_end, "total_batched_decode_forwards"
-    )
-    decode_rows = counter_delta(batching_start, batching_end, "total_decode_rows")
-    admission_calls = counter_delta(
-        batching_start, batching_end, "total_admission_calls"
-    )
-    prefill_forwards = counter_delta(
-        batching_start, batching_end, "total_prefill_forwards"
-    )
-    categories = [event.category for event in events]
     values: dict[str, float | int] = {
         "attributed_itl_outlier_count": outliers.attributed,
-        "batching_admission_call_count": admission_calls,
-        "batching_admission_ms_max": batching_end["max_admission_ms"],
-        "batching_admission_ms_total": counter_delta(
-            batching_start, batching_end, "total_admission_ms"
-        ),
-        "batching_batched_decode_forward_count": batched_decode_forwards,
-        "batching_decode_forward_count": decode_forwards,
-        "batching_decode_forward_ms_max": batching_end["max_decode_forward_ms"],
-        "batching_decode_forward_ms_total": counter_delta(
-            batching_start, batching_end, "total_decode_forward_ms"
-        ),
-        "batching_decode_row_count": decode_rows,
-        "batching_max_active_requests": batching_end["max_active_requests"],
-        "batching_max_decode_batch": batching_end["max_decode_batch"],
-        "batching_max_observed_active_requests": max(
-            batching_start["max_observed_active_requests"],
-            batching_end["max_observed_active_requests"],
-        ),
-        "batching_max_observed_batch_size": max(
-            batching_start["max_observed_batch_size"],
-            batching_end["max_observed_batch_size"],
-        ),
-        "batching_max_prefill_tokens_per_cycle": batching_end[
-            "max_prefill_tokens_per_cycle"
-        ],
-        "batching_max_prefill_layers_per_cycle": batching_end[
-            "max_prefill_layers_per_cycle"
-        ],
-        "batching_mean_rows_per_forward": decode_rows / max(decode_forwards, 1),
-        "batching_prefill_forward_count": prefill_forwards,
-        "batching_prefill_forward_ms_max": batching_end["max_prefill_forward_ms"],
-        "batching_prefill_forward_ms_total": counter_delta(
-            batching_start, batching_end, "total_prefill_forward_ms"
-        ),
-        "batching_prefill_layer_count": counter_delta(
-            batching_start, batching_end, "total_prefill_layers"
-        ),
-        "batching_prefill_layer_yield_count": counter_delta(
-            batching_start, batching_end, "total_prefill_layer_yields"
-        ),
-        "batching_prefill_staging_admission_count": counter_delta(
-            batching_start, batching_end, "total_prefill_staging_admissions"
-        ),
-        "batching_prefill_staging_priority_burst": batching_end[
-            "max_prefill_staging_priority_burst"
-        ],
-        "batching_prefill_staging_priority_forward_count": counter_delta(
-            batching_start,
-            batching_end,
-            "total_prefill_staging_priority_forwards",
-        ),
-        "batching_prefill_staging_slot_count": batching_end[
-            "max_prefill_staging_slots"
-        ],
-        "batching_short_prefill_priority_forward_count": counter_delta(
-            batching_start, batching_end, "total_short_prefill_priority_forwards"
-        ),
-        "batching_slow_admission_count": counter_delta(
-            batching_start, batching_end, "slow_admission_count"
-        ),
-        "batching_slow_decode_forward_count": counter_delta(
-            batching_start, batching_end, "slow_decode_forward_count"
-        ),
-        "batching_slow_prefill_forward_count": counter_delta(
-            batching_start, batching_end, "slow_prefill_forward_count"
-        ),
-        "batching_total_errors": counter_delta(
-            batching_start, batching_end, "total_errors"
-        ),
         "cancellation_confirmed_count": int(cancellation_confirmed),
-        "client_backpressure_event_count": counter_delta(
-            batching_start, batching_end, "response_backpressure_events"
-        ),
-        "client_backpressure_wait_ms": counter_delta(
-            batching_start, batching_end, "response_backpressure_wait_ms"
-        ),
-        "client_stall_eviction_count": counter_delta(
-            batching_start, batching_end, "response_stall_evictions"
-        ),
         "completion_token_count": completion_tokens,
         "e2e_latency_ms_p50": percentile_r7(e2es, 0.5),
         "e2e_latency_ms_p99": percentile_r7(e2es, 0.99),
         "e2e_latency_ms_p999": percentile_r7(e2es, 0.999),
-        "graph_measured_capture_attempt_count": counter_delta(
-            graph_start, graph_end, "capture_attempts"
-        ),
-        "graph_measured_capture_deferral_count": counter_delta(
-            graph_start, graph_end, "capture_deferrals"
-        ),
-        "graph_measured_capture_failure_count": counter_delta(
-            graph_start, graph_end, "capture_failures"
-        ),
-        "graph_measured_capture_success_count": counter_delta(
-            graph_start, graph_end, "capture_successes"
-        ),
-        "graph_measured_live_count_end": graph_end["captured_graph_count"],
-        "graph_measured_replay_attempt_count": counter_delta(
-            graph_start, graph_end, "replay_attempts"
-        ),
-        "graph_measured_replay_failure_count": counter_delta(
-            graph_start, graph_end, "replay_failures"
-        ),
-        "graph_measured_replay_success_count": counter_delta(
-            graph_start, graph_end, "replay_successes"
-        ),
-        "graph_pre_measurement_capture_success_count": graph_start["capture_successes"],
-        "graph_pre_measurement_failure_count": graph_start["failures"],
-        "graph_pre_measurement_replay_success_count": graph_start["replay_successes"],
         "host_thermal_pacing_itl_outlier_count": outliers.host_thermal_pacing,
         "itl_ms_p50": percentile_r7(itls, 0.5),
         "itl_ms_p99": percentile_r7(itls, 0.99),
         "itl_ms_p999": percentile_r7(itls, 0.999),
-        "kv_blocks_end": batching_end["blocks_total"],
-        "kv_blocks_start": batching_start["blocks_total"],
-        "kv_resize_event_count": categories.count("kv_resize"),
         "length_terminated_request_count": length_terminated_requests,
         "long_prefill_prompt_tokens": long_prefill.prompt_tokens,
-        "memory_reclaim_event_count": categories.count("memory_reclaim"),
+        "measurement_duration_seconds": window,
         "non_thermal_attributed_itl_outlier_count": (
             outliers.non_thermal_attributed
         ),
+        "observed_completion_token_count": observed_completion_tokens,
+        "observed_output_token_throughput_per_second": (
+            observed_completion_tokens / window
+        ),
         "output_token_throughput_per_second": completion_tokens / window,
         "peak_gpu_memory_used_bytes": peak_memory,
-        "prefix_cache_active_leases_end": prefix_end["active_leases"],
-        "prefix_cache_baseline_cached_entries": prefix_start["cached_entries"],
-        "prefix_cache_baseline_state_bytes": prefix_start["cached_state_bytes"],
-        "prefix_cache_cached_blocks_end": prefix_end["cached_blocks"],
-        "prefix_cache_cached_entries_end": prefix_end["cached_entries"],
-        "prefix_cache_enabled": int(prefix_end["enabled"]),
-        "prefix_cache_hit_blocks": counter_delta(
-            prefix_start, prefix_end, "hit_blocks"
-        ),
-        "prefix_cache_hit_tokens": counter_delta(
-            prefix_start, prefix_end, "hit_tokens"
-        ),
-        "prefix_cache_lookup_hit_count": counter_delta(
-            prefix_start, prefix_end, "lookup_hits"
-        ),
-        "prefix_cache_lookup_miss_count": counter_delta(
-            prefix_start, prefix_end, "lookup_misses"
-        ),
-        "prefix_cache_pending_release_entries_end": prefix_end[
-            "pending_release_entries"
-        ],
-        "prefix_cache_state_bytes_end": prefix_end["cached_state_bytes"],
         "prompt_token_count": prompt_tokens,
         "request_count": len(measured),
         "request_failure_count": failures,
@@ -4894,21 +5251,6 @@ def metric_values(
         "response_queue_delay_ms_p50": percentile_r7(queue_delays, 0.5),
         "response_queue_delay_ms_p99": percentile_r7(queue_delays, 0.99),
         "response_queue_delay_ms_p999": percentile_r7(queue_delays, 0.999),
-        "rocm_w8_lm_head_argmax_dispatch_count": counter_delta(
-            lm_head_start, lm_head_end, "argmax_dispatches"
-        ),
-        "rocm_w8_lm_head_argmax_row_count": counter_delta(
-            lm_head_start, lm_head_end, "argmax_rows"
-        ),
-        "rocm_w8_lm_head_dispatch_failure_count": counter_delta(
-            lm_head_start, lm_head_end, "dispatch_failures"
-        ),
-        "rocm_w8_lm_head_sample_dispatch_count": counter_delta(
-            lm_head_start, lm_head_end, "sample_dispatches"
-        ),
-        "rocm_w8_lm_head_sample_row_count": counter_delta(
-            lm_head_start, lm_head_end, "sample_rows"
-        ),
         "sampled_profile_post_determinism_canary_completion_token_count": (
             post_sampled_determinism_canary.completion_tokens
         ),
@@ -4926,7 +5268,15 @@ def metric_values(
         "unexplained_itl_outlier_count": outliers.unexplained,
         "zero_token_response_count": zero_tokens,
     }
-    values.update(external_yield_sync)
+    values.update(
+        runtime_snapshot_metric_values(
+            health_measurement_start,
+            health_end,
+            events,
+            graph_start_health=health_after_warmup,
+            health_final=health_final,
+        )
+    )
     values.update(pressure_peer_timing_values(pressure_peer, pressure_window))
     values.update(latency_phase_metric_values(successes))
     values.update(
@@ -4936,24 +5286,6 @@ def metric_values(
             health_after_sampled_profile,
         )
     )
-    for phase_name in GRAPH_PHASE_NAMES:
-        values[f"graph_{phase_name}_call_count"] = counter_delta(
-            graph_start, graph_end, f"phase_{phase_name}_calls"
-        )
-        values[f"graph_{phase_name}_slow_count"] = counter_delta(
-            graph_start, graph_end, f"phase_{phase_name}_slow"
-        )
-        values[f"graph_{phase_name}_duration_ms_total"] = counter_delta(
-            graph_start,
-            graph_end,
-            f"phase_{phase_name}_total_duration_micros",
-        ) / 1_000.0
-        values[f"graph_{phase_name}_duration_ms_max_end"] = (
-            graph_end[f"phase_{phase_name}_max_duration_micros"] / 1_000.0
-        )
-    values["graph_transient_candidate_bytes_peak_end"] = graph_end[
-        "peak_transient_candidate_bytes"
-    ]
     return values
 
 
@@ -5131,6 +5463,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         error_type=QualificationError,
     )
     sampler = MemorySampler(port)
+    evidence = MixedLoadRunEvidence()
     slow: SlowConsumer | None = None
     result: tuple[list[dict[str, Any]], str | None] | None = None
     execution_failure: str | None = None
@@ -5163,6 +5496,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 seed=seed + attempt,
                 absolute_deadline=overall_deadline,
             )
+            evidence.warmup = warmup
             warmup_oracle_failure = deterministic_response_oracle_failure(warmup)
             if (
                 not warmup.success
@@ -5204,6 +5538,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         assert warmup is not None
         health_after_warmup = health_measurement_start
         measurement_started = time.monotonic()
+        evidence.begin_measurement(measurement_started, health_measurement_start)
         thermal_guard.set_phase("measurement")
         sampler.start()
         first_token = threading.Event()
@@ -5215,10 +5550,13 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
         delivery_pressure_observed = False
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=12)
         submitted: list[concurrent.futures.Future[StreamResult]] = []
+        measured_futures: list[concurrent.futures.Future[StreamResult]] = []
+        cancel_future: concurrent.futures.Future[StreamResult] | None = None
         abort_workers = threading.Event()
         try:
-            normal_futures = [
-                pool.submit(
+            normal_futures: list[concurrent.futures.Future[StreamResult]] = []
+            for index in range(NORMAL_REQUESTS):
+                future = pool.submit(
                     run_stream,
                     port,
                     name=f"normal-{index:02d}",
@@ -5230,9 +5568,10 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                     absolute_deadline=overall_deadline,
                     abort_event=abort_workers,
                 )
-                for index in range(NORMAL_REQUESTS)
-            ]
-            submitted.extend(normal_futures)
+                evidence.record_measured_attempt(f"normal-{index:02d}")
+                normal_futures.append(future)
+                submitted.append(future)
+                measured_futures.append(future)
             if not first_token.wait(
                 timeout=remaining_until(
                     overall_deadline, "normal first token", REQUEST_TIMEOUT_SECONDS
@@ -5250,6 +5589,9 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 absolute_deadline=overall_deadline,
                 abort_event=abort_workers,
             )
+            evidence.record_measured_attempt("long-prefill")
+            submitted.append(long_future)
+            measured_futures.append(long_future)
             cancel_future = pool.submit(
                 run_stream,
                 port,
@@ -5262,7 +5604,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 absolute_deadline=overall_deadline,
                 abort_event=abort_workers,
             )
-            submitted.extend((long_future, cancel_future))
+            submitted.append(cancel_future)
             pressure_peer_first_token = threading.Event()
             pressure_peer_future = pool.submit(
                 run_stream,
@@ -5276,7 +5618,9 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 absolute_deadline=overall_deadline,
                 abort_event=abort_workers,
             )
+            evidence.record_measured_attempt("pressure-peer")
             submitted.append(pressure_peer_future)
+            measured_futures.append(pressure_peer_future)
             if not pressure_peer_first_token.wait(
                 timeout=remaining_until(
                     overall_deadline,
@@ -5288,9 +5632,9 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                     "pressure peer did not produce a token before slow-consumer pressure"
                 )
             pressure_observed_since = time.monotonic()
-            slow_pressure_baseline = batching_snapshot(
-                json_request(port, "GET", "/health")
-            )
+            slow_pressure_health = json_request(port, "GET", "/health")
+            slow_pressure_baseline = batching_snapshot(slow_pressure_health)
+            evidence.record_health(slow_pressure_health)
             slow = SlowConsumer(port, slow_marker, seed + 102)
             slow.start()
             if not slow.header_received.wait(
@@ -5306,17 +5650,20 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 f"qualification-{slow_marker}",
                 pressure_observed_since,
                 overall_deadline,
+                evidence,
             )
+            evidence.pressure_window = pressure_window
             futures = [*normal_futures, long_future, pressure_peer_future]
             for future in futures:
-                measured.append(
-                    future.result(
-                        timeout=remaining_until(overall_deadline, "mixed serving load")
-                    )
+                measured_result = future.result(
+                    timeout=remaining_until(overall_deadline, "mixed serving load")
                 )
+                evidence.record_measured_result(measured_result)
+                measured.append(measured_result)
             cancellation = cancel_future.result(
                 timeout=remaining_until(overall_deadline, "cancellation request")
             )
+            evidence.cancellation = cancellation
         finally:
             abort_workers.set()
             for future in submitted:
@@ -5324,6 +5671,9 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             _, unfinished = concurrent.futures.wait(
                 submitted,
                 timeout=max(0.0, min(10.0, overall_deadline - time.monotonic())),
+            )
+            retain_finished_worker_evidence(
+                evidence, measured_futures, cancel_future
             )
             pool.shutdown(wait=False, cancel_futures=True)
             if unfinished:
@@ -5355,10 +5705,14 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 f"{cancellation_oracle_failure}; "
                 f"response_text={bounded_response_text(cancellation)}"
             )
-        cancellation_confirmed, _ = wait_for_cancellation_and_drain(
+        cancellation_confirmed, cancellation_health = wait_for_cancellation_and_drain(
             port, cancellation_marker, overall_deadline
         )
+        evidence.cancellation_confirmed = cancellation_confirmed
+        evidence.record_health(cancellation_health)
         health_end = read_stable_health(port, overall_deadline, "final graph snapshot")
+        evidence.record_health(health_end)
+        evidence.finish_measurement(time.monotonic())
         debug_end = json_request(port, "GET", "/v1/debug/model-state")
         final_attestation = attest_runtime(variant, health_end, debug_end)
         execution_attestation = attest_runtime_execution(
@@ -5644,28 +5998,11 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             cancellation,
             post_sampled_determinism_canary,
         ]:
-            trace(
-                "request_result",
-                cancelled=result.cancelled,
-                completion_tokens=result.completion_tokens,
-                done=result.done,
-                e2e_ms=result.e2e_ms,
-                error=result.error,
-                finish_reason=result.finish_reason,
-                name=result.name,
-                actor_admission_ms=result.actor_admission_ms,
-                actor_prefill_wall_ms=result.actor_prefill_wall_ms,
-                actor_queue_ms=result.actor_queue_ms,
-                prompt_tokens=result.prompt_tokens,
-                semantic_events=len(result.semantic_times),
-                response_oracle_failure=deterministic_response_oracle_failure(result),
-                response_text=bounded_response_text(result),
-                token_ids=result.token_ids,
-                ttft_ms=result.ttft_ms,
-            )
+            trace_request_result(result)
         details = " | ".join(status_failures) if status_failures else None
         result = metrics_from_values(values), details
     except Exception as exc:
+        evidence.finish_measurement(time.monotonic())
         execution_failure = f"{type(exc).__name__}: {exc}"
         trace("qualification_error", details=execution_failure)
     finally:
@@ -5698,8 +6035,58 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
     if result is None:
         if execution_failure is None:
             raise AssertionError("mixed-load execution completed without a result")
-        failed_values = {name: 0 for name in METRIC_DEFINITIONS}
-        failed_values["request_failure_count"] = 1
+        partial_events: list[ObservedEvent] = []
+        if evidence.measurement_started is not None:
+            partial_events = server_log.events_since(evidence.measurement_started)
+            partial_events.extend(
+                thermal_guard.pacing_events_since(evidence.measurement_started)
+            )
+        partial_results = evidence.ordered_measured_results()
+        returned_names = {request.name for request in partial_results}
+        trace(
+            "partial_measurement_evidence",
+            attempted_request_names=evidence.measured_attempts,
+            measurement_duration_seconds=(
+                evidence.measurement_finished - evidence.measurement_started
+                if evidence.measurement_started is not None
+                and evidence.measurement_finished is not None
+                else 0.0
+            ),
+            missing_result_names=[
+                name for name in evidence.measured_attempts if name not in returned_names
+            ],
+            returned_result_names=sorted(returned_names),
+        )
+        for partial_result in partial_results:
+            trace_request_result(partial_result, event="partial_request_result")
+        if evidence.cancellation is not None:
+            trace_request_result(
+                evidence.cancellation, event="partial_cancellation_result"
+            )
+        try:
+            failed_values, runtime_serialization_failure = partial_metric_values(
+                evidence,
+                peak_memory=max(sampler.samples, default=0),
+                events=partial_events,
+            )
+            if runtime_serialization_failure is not None:
+                trace(
+                    "partial_evidence_error",
+                    details=runtime_serialization_failure,
+                )
+                execution_failure = " | ".join(
+                    filter(None, [execution_failure, runtime_serialization_failure])
+                )
+        except Exception as exc:
+            serialization_failure = (
+                f"partial evidence serialization failed: {type(exc).__name__}: {exc}"
+            )
+            trace("partial_evidence_error", details=serialization_failure)
+            execution_failure = " | ".join(
+                filter(None, [execution_failure, serialization_failure])
+            )
+            failed_values = {name: 0 for name in METRIC_DEFINITIONS}
+            failed_values["request_failure_count"] = 1
         failed_values.update(final_thermal_values)
         result = metrics_from_values(failed_values), execution_failure
     metrics, details = result

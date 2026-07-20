@@ -1461,6 +1461,34 @@ does not weaken. Every arm records the prompt identity,
 paths therefore tokenize the same named long request; a wording, denominator,
 fill target, or marker-role change invalidates direct A/B configuration identity.
 
+Mixed-load failure results are cumulative evidence, not a replacement set of
+zeros. The driver records the deterministic measurement boundary before the
+first dispatch, every attempted measured request name, every returned worker
+result regardless of terminal success, and the latest successfully read `/health`
+snapshot obtained while the measured window remains active. Worker cleanup
+harvests completed futures even when an earlier future, health poll, server
+exit, timeout, or thermal trip raised the primary error. Runtime counter deltas
+for batching, graphs, prefix-cache activity, external-yield synchronization,
+and the ROCm W8 LM head are then computed against the post-warmup baseline and
+the last valid snapshot. On failure those deltas are explicit observed lower
+bounds, not an inferred terminal snapshot. Regressing or malformed counters make partial-evidence
+serialization fail explicitly; they are never coerced into plausible values.
+
+`completion_token_count` and `output_token_throughput_per_second` remain the
+strict numerator and rate for fully qualified measured responses only.
+`observed_completion_token_count` instead counts validated per-token timing
+records from every returned measured stream, including an interrupted stream
+that never emitted terminal usage. `observed_output_token_throughput_per_second`
+divides that diagnostic count by `measurement_duration_seconds`, spanning the
+measured start through the failure boundary or last returned result. It is
+useful for a rejected-run bottleneck comparison but cannot satisfy a
+performance or correctness gate. `request_count` records attempted measured
+requests; an attempted request with no qualified result contributes to
+`request_failure_count`. A failure before measurement still uses the explicit
+zero-measurement sentinel and one case-level request failure. Thermal,
+shutdown, cooldown, and residue evidence is merged after teardown in both
+paths, so the causal error and containment result survive together.
+
 After the ordinary mixed-load measurement window, every ROCm arm also runs a
 separate fixed-seed sampled profile at concurrency eight: 32 tokens per request,
 temperature 0.7, top-p 0.9, top-k 40, and min-p 0.0. Those requests disable
