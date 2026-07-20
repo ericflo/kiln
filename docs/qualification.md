@@ -1657,6 +1657,27 @@ inactive autoscaling monitor caused the graph-on pauses. It does not replace
 the separate forced-resize workload, where the autoscaler actually mutates KV
 capacity.
 
+The paired `both-off-prefix-cache-off` arm failed from exact clean source
+`69b687485247cc580a4ec501d564c0e0635ec462`; retain its strict receipt at
+`qualification/receipts/rocm/strix-halo/20260720t075729232030z-rocm-strix-halo-serving-mixed-rocm-v1-66daf29769-v1.json`.
+Nine deterministic requests and all eight sampled requests passed, but the
+2,432-token `normal-07` prompt produced a coherent refusal instead of the
+required ascending sequence. The response completed all 128 requested tokens,
+so this is a semantic route failure rather than a timeout or zero-token result.
+Every prefix-cache state, lookup, hit, lease, entry, block, and byte metric was
+exactly zero, all graph counters were zero, all ITL-outlier populations were
+zero, the package stayed below the hard guard at 90.25 C, and shutdown was
+unforced and residue-free. An older source-bound run of the same variant at
+`qualification/receipts/rocm/strix-halo/20260718t092608589093z-rocm-strix-halo-serving-mixed-rocm-v1-66daf29769-v1.json`
+also failed deterministic correctness. Consequently, disabling the prefix
+cache on the ROCm batching-actor path is not qualified for this workload. Do
+not proceed to the stable arm or a soak, and do not rerun this arm unchanged,
+until the fresh-prefill enabled/disabled route difference has been explained
+and covered by a focused equivalence test. This evidence does not by itself
+attribute the divergence to cached reuse: the failed arm proves the cache was
+inactive, while the enabled arms may still differ in initialization,
+registration, snapshot, or numerical routing before any cache hit.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and
