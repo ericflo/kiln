@@ -2,6 +2,16 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
+- Complete effective configuration: `kiln config --json` and
+  `GET /v1/config` under `effective_configuration` now expose all 118 fixed typed
+  startup leaves plus dynamic teacher-credential leaves in one deterministic
+  source-aware map. Entries report typed post-precedence values, default/file/
+  environment/command-line authority, canonical and compatibility environment
+  names, redaction, and restart requirements; sensitive request, webhook, and
+  credential-provider values remain present only as redacted nulls. The
+  generated observability schema and permanent website publish the same v1
+  contract, while backend-derived and live values remain authoritative sibling
+  diagnostics rather than being confused with startup inputs.
 - Runtime environment boundaries: direct production reads outside typed
   startup configuration, a closed external-driver remap safety snapshot, the
   exact-origin teacher credential provider, and immutable provenance now fail

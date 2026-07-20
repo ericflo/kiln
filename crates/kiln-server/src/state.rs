@@ -2473,6 +2473,8 @@ pub struct AppState {
     /// Process-lifetime filesystem locations resolved and installed before
     /// model or accelerator cache construction.
     pub application_paths: crate::config::ResolvedApplicationPaths,
+    /// Complete post-precedence typed startup object and per-field provenance.
+    pub effective_configuration: Arc<crate::config::EffectiveConfiguration>,
     /// Typed startup-only checkpoint read setting retained for resolved
     /// configuration diagnostics.
     pub checkpoint_read_mib_per_second: Option<u64>,
@@ -3335,6 +3337,11 @@ impl AppState {
             application_paths: crate::config::PathsConfig::default()
                 .resolve()
                 .expect("default application paths resolve"),
+            effective_configuration: Arc::new(
+                crate::config::KilnConfig::default()
+                    .effective_configuration()
+                    .expect("default effective configuration resolves"),
+            ),
             checkpoint_read_mib_per_second: None,
             checkpoint_read_applicable: false,
             checkpoint_read_not_applicable_reason: Some("mock_mode"),
@@ -4505,6 +4512,11 @@ impl AppState {
             application_paths: crate::config::PathsConfig::default()
                 .resolve()
                 .expect("default application paths resolve"),
+            effective_configuration: Arc::new(
+                crate::config::KilnConfig::default()
+                    .effective_configuration()
+                    .expect("default effective configuration resolves"),
+            ),
             checkpoint_read_mib_per_second: None,
             checkpoint_read_applicable: true,
             checkpoint_read_not_applicable_reason: None,

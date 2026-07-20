@@ -11,7 +11,7 @@
 //! 3. `./kiln.toml` in the current working directory (if it exists)
 //! 4. No file — use defaults only
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -148,6 +148,35 @@ pub enum ConfigValueSource {
     Default,
     ConfigFile,
     Environment,
+    CommandLine,
+}
+
+pub const EFFECTIVE_CONFIGURATION_SCHEMA_ID: &str = "kiln.effective-configuration.v1";
+pub const EFFECTIVE_CONFIGURATION_SCHEMA_VERSION: u32 = 1;
+pub const EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT: usize = 118;
+
+/// One post-precedence typed startup value in the complete configuration dump.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EffectiveConfigurationField {
+    /// The typed value used by startup, or `null` when the value is redacted.
+    pub effective_value: serde_json::Value,
+    pub source: ConfigValueSource,
+    pub canonical_environment: Option<String>,
+    pub compatibility_environment: Vec<&'static str>,
+    pub redacted: bool,
+    pub restart_required_to_change: bool,
+}
+
+/// Complete, deterministic, source-aware view of the typed startup object.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EffectiveConfiguration {
+    pub schema_id: &'static str,
+    pub schema_version: u32,
+    pub effective_config_hash: Option<String>,
+    pub fixed_field_count: usize,
+    pub dynamic_field_count: usize,
+    pub all_fields_restart_required_to_change: bool,
+    pub fields: BTreeMap<String, EffectiveConfigurationField>,
 }
 
 /// Source-tracked override for Kiln's shared persistent cache root.
@@ -216,6 +245,7 @@ impl fmt::Display for ConfigValueSource {
             Self::Default => "default",
             Self::ConfigFile => "config_file",
             Self::Environment => "environment",
+            Self::CommandLine => "command_line",
         })
     }
 }
@@ -1050,6 +1080,7 @@ pub enum BatchingEffectiveSource {
     BackendPolicy,
     ConfigFile,
     Environment,
+    CommandLine,
     EffectiveDecodeWidth,
 }
 
@@ -1060,6 +1091,7 @@ impl fmt::Display for BatchingEffectiveSource {
             Self::BackendPolicy => "backend_policy",
             Self::ConfigFile => "config_file",
             Self::Environment => "environment",
+            Self::CommandLine => "command_line",
             Self::EffectiveDecodeWidth => "effective_decode_width",
         })
     }
@@ -1218,6 +1250,7 @@ pub enum DecodeBatchEffectiveSource {
     BackendPolicy,
     ConfigFile,
     Environment,
+    CommandLine,
     Deterministic,
     MaxBatchTokens,
 }
@@ -1228,6 +1261,7 @@ impl fmt::Display for DecodeBatchEffectiveSource {
             Self::BackendPolicy => "backend_policy",
             Self::ConfigFile => "config_file",
             Self::Environment => "environment",
+            Self::CommandLine => "command_line",
             Self::Deterministic => "deterministic",
             Self::MaxBatchTokens => "max_batch_tokens",
         })
@@ -3468,6 +3502,10 @@ pub struct KilnConfig {
     /// the weekly loop stays manual (`kiln self-improve`).
     #[serde(default)]
     pub agent: Option<AgentConfig>,
+    /// Loader-owned provenance is excluded from the typed configuration value
+    /// and its hash. It exists only to produce the complete effective dump.
+    #[serde(skip)]
+    value_sources: BTreeMap<String, ConfigValueSource>,
 }
 
 /// `[paths]` process-lifetime application filesystem policy.
@@ -4694,6 +4732,7 @@ fn effective_source_for_explicit_value(source: ConfigValueSource) -> BatchingEff
         ConfigValueSource::Default => BatchingEffectiveSource::Default,
         ConfigValueSource::ConfigFile => BatchingEffectiveSource::ConfigFile,
         ConfigValueSource::Environment => BatchingEffectiveSource::Environment,
+        ConfigValueSource::CommandLine => BatchingEffectiveSource::CommandLine,
     }
 }
 
@@ -5089,9 +5128,11 @@ pub enum StreamingPrefillEffectiveSource {
     Default,
     ConfigFile,
     Environment,
+    CommandLine,
     InheritedFromTileTokensDefault,
     InheritedFromTileTokensConfigFile,
     InheritedFromTileTokensEnvironment,
+    InheritedFromTileTokensCommandLine,
 }
 
 impl fmt::Display for StreamingPrefillEffectiveSource {
@@ -5101,9 +5142,11 @@ impl fmt::Display for StreamingPrefillEffectiveSource {
             Self::Default => "default",
             Self::ConfigFile => "config_file",
             Self::Environment => "environment",
+            Self::CommandLine => "command_line",
             Self::InheritedFromTileTokensDefault => "inherited_from_tile_tokens_default",
             Self::InheritedFromTileTokensConfigFile => "inherited_from_tile_tokens_config_file",
             Self::InheritedFromTileTokensEnvironment => "inherited_from_tile_tokens_environment",
+            Self::InheritedFromTileTokensCommandLine => "inherited_from_tile_tokens_command_line",
         })
     }
 }
@@ -5115,6 +5158,7 @@ const fn streaming_prefill_explicit_source(
         ConfigValueSource::Default => StreamingPrefillEffectiveSource::Default,
         ConfigValueSource::ConfigFile => StreamingPrefillEffectiveSource::ConfigFile,
         ConfigValueSource::Environment => StreamingPrefillEffectiveSource::Environment,
+        ConfigValueSource::CommandLine => StreamingPrefillEffectiveSource::CommandLine,
     }
 }
 
@@ -5130,6 +5174,9 @@ const fn streaming_prefill_inherited_tile_source(
         }
         ConfigValueSource::Environment => {
             StreamingPrefillEffectiveSource::InheritedFromTileTokensEnvironment
+        }
+        ConfigValueSource::CommandLine => {
+            StreamingPrefillEffectiveSource::InheritedFromTileTokensCommandLine
         }
     }
 }
@@ -6773,6 +6820,20 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     ),
 ];
 
+const CONFIG_FILE_ONLY_FIXED_FIELDS: &[&str] = &[
+    "agent.self_improve",
+    "eval.eval_dir",
+    "eval.max_queued_jobs",
+    "eval.max_tracked_jobs",
+    "eval.webhook_url",
+];
+
+const REDACTED_EFFECTIVE_CONFIGURATION_FIELDS: &[&str] = &[
+    "agent.self_improve",
+    "eval.webhook_url",
+    "training.webhook_url",
+];
+
 // --- Defaults ---
 
 impl Default for KilnConfig {
@@ -6794,6 +6855,7 @@ impl Default for KilnConfig {
             eval: None,
             request_log: crate::request_log::RequestLogConfig::default(),
             agent: None,
+            value_sources: BTreeMap::new(),
         }
     }
 }
@@ -7087,6 +7149,39 @@ impl Default for AdaptersConfig {
 
 // --- Loading and validation ---
 
+fn collect_toml_configuration_paths(
+    prefix: &str,
+    value: &toml::Value,
+    paths: &mut BTreeSet<String>,
+) {
+    // This field is one typed JSON value. Its internal keys are request data,
+    // not additional configuration-schema leaves.
+    if prefix == "agent.self_improve" {
+        paths.insert(prefix.to_owned());
+        return;
+    }
+    if let toml::Value::Table(table) = value {
+        for (name, child) in table {
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}.{name}")
+            };
+            collect_toml_configuration_paths(&path, child, paths);
+        }
+    } else if !prefix.is_empty() {
+        paths.insert(prefix.to_owned());
+    }
+}
+
+fn json_value_at_configuration_path<'a>(
+    root: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
+    path.split('.')
+        .try_fold(root, |value, component| value.as_object()?.get(component))
+}
+
 impl KilnConfig {
     /// Load configuration from an optional file path, then apply env var overrides.
     ///
@@ -7125,9 +7220,17 @@ impl KilnConfig {
     ) -> Result<()> {
         if let Some(served_model_id) = served_model_id {
             self.model.served_model_id = Some(served_model_id.to_owned());
+            self.value_sources.insert(
+                "model.served_model_id".to_owned(),
+                ConfigValueSource::CommandLine,
+            );
         }
         if eval_mode {
             self.server.eval_mode = true;
+            self.value_sources.insert(
+                "server.eval_mode".to_owned(),
+                ConfigValueSource::CommandLine,
+            );
         }
         self.validate()
     }
@@ -7141,12 +7244,12 @@ impl KilnConfig {
         let mut config = if let Some(ref p) = config_path {
             let contents = std::fs::read_to_string(p)
                 .with_context(|| format!("failed to read config file: {p}"))?;
-            toml::from_str(&contents)
+            Self::from_toml_with_sources(&contents)
                 .with_context(|| format!("failed to parse config file: {p}"))?
         } else if Path::new("kiln.toml").exists() {
             let contents =
                 std::fs::read_to_string("kiln.toml").context("failed to read kiln.toml")?;
-            toml::from_str(&contents).context("failed to parse kiln.toml")?
+            Self::from_toml_with_sources(&contents).context("failed to parse kiln.toml")?
         } else {
             Self::default()
         };
@@ -7154,6 +7257,145 @@ impl KilnConfig {
         config.apply_env_overrides()?;
         config.validate()?;
         Ok(config)
+    }
+
+    fn from_toml_with_sources(contents: &str) -> Result<Self> {
+        let document = toml::from_str::<toml::Value>(contents)?;
+        let mut configured_paths = BTreeSet::new();
+        collect_toml_configuration_paths("", &document, &mut configured_paths);
+        if configured_paths.remove("streaming_prefill.enabled") {
+            configured_paths.insert("streaming_prefill.mode".to_owned());
+        }
+        let mut config: Self = document.try_into()?;
+        config.value_sources = configured_paths
+            .into_iter()
+            .map(|path| (path, ConfigValueSource::ConfigFile))
+            .collect();
+        Ok(config)
+    }
+
+    /// Return every typed startup leaf after file, environment, and CLI
+    /// precedence. Runtime-derived backend/capacity adjustments remain beside
+    /// this object in `/v1/config`; this snapshot is their complete input.
+    pub fn effective_configuration(&self) -> Result<EffectiveConfiguration> {
+        let mut serialized = serde_json::to_value(self)
+            .context("failed to serialize the effective typed configuration")?;
+        let root = serialized
+            .as_object_mut()
+            .context("effective typed configuration did not serialize as an object")?;
+        if root.get("eval").is_none_or(serde_json::Value::is_null) {
+            root.insert(
+                "eval".to_owned(),
+                serde_json::to_value(EvalConfig::default())?,
+            );
+        }
+        if root.get("agent").is_none_or(serde_json::Value::is_null) {
+            root.insert(
+                "agent".to_owned(),
+                serde_json::to_value(AgentConfig::default())?,
+            );
+        }
+
+        let mut fixed_paths = PUBLIC_ENV_FIELDS
+            .iter()
+            .map(PublicEnvField::field_path)
+            .chain(
+                CONFIG_FILE_ONLY_FIXED_FIELDS
+                    .iter()
+                    .map(|path| (*path).to_owned()),
+            )
+            .collect::<Vec<_>>();
+        fixed_paths.sort();
+        fixed_paths.dedup();
+        anyhow::ensure!(
+            fixed_paths.len() == EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT,
+            "effective configuration registry expected {} fixed fields, found {}",
+            EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT,
+            fixed_paths.len()
+        );
+
+        let mut fields = BTreeMap::new();
+        for path in fixed_paths {
+            let value = json_value_at_configuration_path(&serialized, &path)
+                .with_context(|| format!("effective configuration is missing typed field {path}"))?
+                .clone();
+            let (section, field_name) = path
+                .split_once('.')
+                .with_context(|| format!("invalid effective configuration field path {path}"))?;
+            let public = PUBLIC_ENV_FIELDS
+                .iter()
+                .find(|field| field.section == section && field.field == field_name);
+            let redacted = REDACTED_EFFECTIVE_CONFIGURATION_FIELDS.contains(&path.as_str());
+            fields.insert(
+                path.clone(),
+                EffectiveConfigurationField {
+                    effective_value: if redacted {
+                        serde_json::Value::Null
+                    } else {
+                        value
+                    },
+                    source: self
+                        .value_sources
+                        .get(&path)
+                        .copied()
+                        .unwrap_or(ConfigValueSource::Default),
+                    canonical_environment: public.map(PublicEnvField::canonical_name),
+                    compatibility_environment: public
+                        .map(|field| {
+                            let canonical_name = field.canonical_name();
+                            field
+                                .supported_aliases
+                                .iter()
+                                .filter(|alias| alias.name != canonical_name)
+                                .map(|alias| alias.name)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    redacted,
+                    restart_required_to_change: true,
+                },
+            );
+        }
+
+        for (credential_id, credential) in &self.teachers.credentials {
+            for (field, value, redacted) in [
+                (
+                    "origin",
+                    serde_json::Value::String(credential.origin.clone()),
+                    false,
+                ),
+                ("api_key_env", serde_json::Value::Null, true),
+            ] {
+                let path = format!("teachers.credentials.{credential_id}.{field}");
+                fields.insert(
+                    path.clone(),
+                    EffectiveConfigurationField {
+                        effective_value: value,
+                        source: self
+                            .value_sources
+                            .get(&path)
+                            .copied()
+                            .unwrap_or(ConfigValueSource::Default),
+                        canonical_environment: None,
+                        compatibility_environment: Vec::new(),
+                        redacted,
+                        restart_required_to_change: true,
+                    },
+                );
+            }
+        }
+
+        Ok(EffectiveConfiguration {
+            schema_id: EFFECTIVE_CONFIGURATION_SCHEMA_ID,
+            schema_version: EFFECTIVE_CONFIGURATION_SCHEMA_VERSION,
+            effective_config_hash: kiln_core::config_hashes::effective_config_hash(self),
+            fixed_field_count: EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT,
+            dynamic_field_count: fields
+                .len()
+                .saturating_sub(EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT),
+            all_fields_restart_required_to_change: true,
+            fields,
+        })
     }
 
     fn apply_serving_profile_env_value(&mut self, raw: Option<&str>) -> Result<()> {
@@ -7176,6 +7418,10 @@ impl KilnConfig {
         let mut legacy_speculative_method_is_present = false;
         for field in PUBLIC_ENV_FIELDS {
             let sources = field.apply_from_environment(self)?;
+            if sources.any() {
+                self.value_sources
+                    .insert(field.field_path(), ConfigValueSource::Environment);
+            }
             if field.section == "speculative" && field.field == "enabled" {
                 speculative_enabled_is_explicit = sources.any();
             } else if field.section == "speculative" && field.field == "method" {
@@ -7188,6 +7434,10 @@ impl KilnConfig {
         // canonical method selection remains the literal typed-field value.
         if legacy_speculative_method_is_present && !speculative_enabled_is_explicit {
             self.speculative.enabled = self.speculative.method != SpecMethod::Off;
+            self.value_sources.insert(
+                "speculative.enabled".to_owned(),
+                ConfigValueSource::Environment,
+            );
         }
         Ok(())
     }
@@ -7970,14 +8220,6 @@ mod tests {
         "KILN_TEACHERS_CREDENTIALS",
     ];
 
-    const CONFIG_FILE_ONLY_FIXED_FIELDS: &[&str] = &[
-        "agent.self_improve",
-        "eval.eval_dir",
-        "eval.max_queued_jobs",
-        "eval.max_tracked_jobs",
-        "eval.webhook_url",
-    ];
-
     const DYNAMIC_CONFIG_FIELDS: &[&str] = &[
         "teachers.credentials.<id>.api_key_env",
         "teachers.credentials.<id>.origin",
@@ -8005,6 +8247,10 @@ mod tests {
 
     impl ScopedConfigEnvironment {
         fn isolated() -> Self {
+            Self::isolated_with(&[])
+        }
+
+        fn isolated_with(additional_names: &[&str]) -> Self {
             let mut names = vec!["KILN_CONFIG".to_owned()];
             for field in PUBLIC_ENV_FIELDS {
                 names.push(field.canonical_name());
@@ -8020,6 +8266,7 @@ mod tests {
                     .iter()
                     .map(|name| (*name).to_owned()),
             );
+            names.extend(additional_names.iter().map(|name| (*name).to_owned()));
             names.sort();
             names.dedup();
 
@@ -9491,6 +9738,135 @@ rocm_graph_cache_max_bytes = 17179869184
                 .map(|path| (*path).to_owned())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn effective_configuration_is_complete_source_aware_and_redacted() {
+        const SECRET_ENV: &str = "KILN_TEST_EFFECTIVE_CONFIG_SECRET";
+
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated_with(&[SECRET_ENV]);
+        environment.set(SECRET_ENV, "must-not-appear-in-the-dump");
+        environment.set("KILN_SERVER_HOST", "127.0.0.9");
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("kiln.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[server]
+port = 9001
+
+[eval]
+max_queued_jobs = 9
+webhook_url = "https://eval.example.invalid/private"
+
+[training]
+webhook_url = "https://training.example.invalid/private"
+
+[agent]
+self_improve = {{ task = "private-task" }}
+
+[teachers.credentials.primary]
+origin = "http://127.0.0.1:8000"
+api_key_env = "{SECRET_ENV}"
+"#
+            ),
+        )
+        .unwrap();
+
+        let mut config = KilnConfig::load(path.to_str()).unwrap();
+        config
+            .apply_serve_cli_overrides(Some("operator-model-id"), false)
+            .unwrap();
+        let effective = config.effective_configuration().unwrap();
+
+        assert_eq!(effective.schema_id, EFFECTIVE_CONFIGURATION_SCHEMA_ID);
+        assert_eq!(effective.schema_version, 1);
+        assert_eq!(effective.fixed_field_count, 118);
+        assert_eq!(effective.dynamic_field_count, 2);
+        assert_eq!(effective.fields.len(), 120);
+        assert!(effective.all_fields_restart_required_to_change);
+        assert!(
+            effective
+                .fields
+                .values()
+                .all(|field| field.restart_required_to_change)
+        );
+        assert_eq!(
+            effective.effective_config_hash,
+            kiln_core::config_hashes::effective_config_hash(&config)
+        );
+        assert_eq!(effective, config.effective_configuration().unwrap());
+        let sources = std::mem::take(&mut config.value_sources);
+        assert_eq!(
+            effective.effective_config_hash,
+            kiln_core::config_hashes::effective_config_hash(&config),
+            "per-field source metadata must not change typed config identity"
+        );
+        config.value_sources = sources;
+
+        let default = &effective.fields["server.request_timeout_secs"];
+        assert_eq!(default.source, ConfigValueSource::Default);
+        assert_eq!(default.effective_value, serde_json::json!(600));
+
+        let file = &effective.fields["server.port"];
+        assert_eq!(file.source, ConfigValueSource::ConfigFile);
+        assert_eq!(file.effective_value, serde_json::json!(9001));
+        assert_eq!(
+            file.canonical_environment.as_deref(),
+            Some("KILN_SERVER_PORT")
+        );
+
+        let environment = &effective.fields["server.host"];
+        assert_eq!(environment.source, ConfigValueSource::Environment);
+        assert_eq!(environment.effective_value, serde_json::json!("127.0.0.9"));
+        assert_eq!(
+            environment.canonical_environment.as_deref(),
+            Some("KILN_SERVER_HOST")
+        );
+        assert!(environment.compatibility_environment.contains(&"KILN_HOST"));
+
+        let command_line = &effective.fields["model.served_model_id"];
+        assert_eq!(command_line.source, ConfigValueSource::CommandLine);
+        assert_eq!(
+            command_line.effective_value,
+            serde_json::json!("operator-model-id")
+        );
+
+        let credential_origin = &effective.fields["teachers.credentials.primary.origin"];
+        assert_eq!(credential_origin.source, ConfigValueSource::ConfigFile);
+        assert_eq!(
+            credential_origin.effective_value,
+            serde_json::json!("http://127.0.0.1:8000")
+        );
+        let credential_secret = &effective.fields["teachers.credentials.primary.api_key_env"];
+        assert_eq!(credential_secret.source, ConfigValueSource::ConfigFile);
+        assert!(credential_secret.redacted);
+        assert!(credential_secret.effective_value.is_null());
+
+        for path in [
+            "agent.self_improve",
+            "eval.webhook_url",
+            "training.webhook_url",
+        ] {
+            let field = &effective.fields[path];
+            assert_eq!(field.source, ConfigValueSource::ConfigFile, "{path}");
+            assert!(field.redacted, "{path}");
+            assert!(field.effective_value.is_null(), "{path}");
+        }
+
+        let serialized = serde_json::to_string(&effective).unwrap();
+        for secret in [
+            "must-not-appear-in-the-dump",
+            SECRET_ENV,
+            "private-task",
+            "eval.example.invalid",
+            "training.example.invalid",
+        ] {
+            assert!(!serialized.contains(secret), "dump leaked {secret:?}");
+        }
     }
 
     #[test]

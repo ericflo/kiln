@@ -347,7 +347,7 @@ const CONFIG_OVERVIEW: &str = r#"Validate a Kiln TOML config file without starti
 
 Use this before `kiln serve` to catch invalid values, confirm resolved model settings, and preview process-lifetime accelerator, cache, and decoding policies.
 
-By default, `kiln config` checks the built-in defaults plus environment overrides. Pass `--file` to validate a specific TOML file and see the effective settings that `kiln serve --config <file>` would use.
+By default, `kiln config` checks the built-in defaults plus environment overrides. Pass `--file` to validate a specific TOML file and see the effective settings that `kiln serve --config <file>` would use. Pass `--json` for the complete source-aware 118-field startup object; sensitive values are present as redacted entries rather than omitted.
 
 Pass `--backend` to resolve and validate the target backend's scheduling policy without probing hardware or loading model weights.
 "#;
@@ -361,6 +361,9 @@ const CONFIG_EXAMPLES: &str = r#"Examples:
 
   kiln config --file kiln.toml --backend rocm
       Resolve ROCm batching and streaming-prefill policy and reject an invalid actor-prefill contract without touching the accelerator.
+
+  kiln config --file kiln.toml --backend rocm --json
+      Emit the complete deterministic effective-configuration document and typed hardware-free ROCm policy preview.
 
   kiln config --file ./config/production.toml
       Check a production config file and print the effective server, model, logging, and feature settings.
@@ -680,6 +683,10 @@ pub enum Commands {
         /// probing hardware or loading model weights.
         #[arg(long, value_enum, value_name = "BACKEND")]
         backend: Option<ConfigCheckBackend>,
+
+        /// Emit the complete source-aware effective configuration as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Configure pi to use this Kiln server as its model backend.
@@ -1798,12 +1805,21 @@ fn format_streaming_prefill_dispatch(
     }
 }
 
-fn format_actor_prefill_backend_config(
+#[derive(Debug, Clone, serde::Serialize)]
+struct ConfigCheckBackendPreview {
+    target_backend: &'static str,
+    hardware_probed: bool,
+    decode_runtime: crate::config::DecodeRuntimeConfig,
+    batching: crate::config::BatchingRuntimeConfig,
+    streaming_prefill: crate::config::StreamingPrefillRuntimeConfig,
+    actor_prefill_contract_valid: bool,
+}
+
+fn resolve_actor_prefill_backend_config(
     config: &crate::config::KilnConfig,
     backend: ConfigCheckBackend,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ConfigCheckBackendPreview> {
     use anyhow::Context as _;
-    use std::fmt::Write as _;
 
     let (backend_name, device) = backend.policy_identity();
     let decode_policy = kiln_model::DecodeBatcherPolicy::for_backend(backend_name, device);
@@ -1833,45 +1849,65 @@ fn format_actor_prefill_backend_config(
     )
     .with_context(|| format!("invalid {backend_name} actor-prefill contract"))?;
 
+    Ok(ConfigCheckBackendPreview {
+        target_backend: backend_name,
+        hardware_probed: false,
+        decode_runtime,
+        batching,
+        streaming_prefill: streaming,
+        actor_prefill_contract_valid: true,
+    })
+}
+
+fn format_actor_prefill_backend_preview(preview: &ConfigCheckBackendPreview) -> String {
+    use std::fmt::Write as _;
+
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "  {} {backend_name} (hardware-free policy preview)",
-        style("Target backend:").dim()
+        "  {} {} (hardware-free policy preview)",
+        style("Target backend:").dim(),
+        preview.target_backend
     );
     let _ = writeln!(
         output,
         "  {} {} (source: {})",
         style("Batching actor effective:").dim(),
-        batching.mode.effective_enabled,
-        batching.mode.effective_source
+        preview.batching.mode.effective_enabled,
+        preview.batching.mode.effective_source
     );
     let _ = writeln!(
         output,
         "  {} {} (source: backend_policy)",
         style("Actor prefill alignment required:").dim(),
-        batching.actor_prefill_tile_alignment_required
+        preview.batching.actor_prefill_tile_alignment_required
     );
     let _ = writeln!(
         output,
         "  {} {} rows (source: {})",
         style("Effective decode width:").dim(),
-        decode_runtime.max_decode_batch.effective,
-        decode_runtime.max_decode_batch.effective_source
+        preview.decode_runtime.max_decode_batch.effective,
+        preview.decode_runtime.max_decode_batch.effective_source
     );
     let _ = writeln!(
         output,
         "  {} {} (source: {})",
         style("Effective streaming dispatch:").dim(),
-        format_streaming_prefill_dispatch(streaming.dispatch.effective),
-        streaming.dispatch.effective_source
+        format_streaming_prefill_dispatch(preview.streaming_prefill.dispatch.effective),
+        preview.streaming_prefill.dispatch.effective_source
     );
     for (label, diagnostics) in [
-        ("Effective streaming base tile:", streaming.tile_tokens),
-        ("Effective streaming tape tile:", streaming.tape_tile_tokens),
+        (
+            "Effective streaming base tile:",
+            preview.streaming_prefill.tile_tokens,
+        ),
+        (
+            "Effective streaming tape tile:",
+            preview.streaming_prefill.tape_tile_tokens,
+        ),
         (
             "Effective detached full-attention tile:",
-            streaming.detached_full_attn_tile_tokens,
+            preview.streaming_prefill.detached_full_attn_tile_tokens,
         ),
     ] {
         let _ = writeln!(
@@ -1887,13 +1923,34 @@ fn format_actor_prefill_backend_config(
         "  {} valid (no hardware probe or model load)",
         style("Actor-prefill backend contract:").dim()
     );
-    Ok(output)
+    output
+}
+
+fn format_actor_prefill_backend_config(
+    config: &crate::config::KilnConfig,
+    backend: ConfigCheckBackend,
+) -> anyhow::Result<String> {
+    resolve_actor_prefill_backend_config(config, backend)
+        .map(|preview| format_actor_prefill_backend_preview(&preview))
+}
+
+#[derive(serde::Serialize)]
+struct ConfigCheckJsonDocument {
+    schema_id: &'static str,
+    schema_version: u32,
+    hardware_probed: bool,
+    effective_configuration: crate::config::EffectiveConfiguration,
+    accelerator_runtime: crate::config::ResolvedAcceleratorRuntimePolicy,
+    application_paths: crate::config::ResolvedApplicationPaths,
+    checkpoint_boundary_policy: kiln_train::CheckpointBoundaryPolicy,
+    backend_preview: Option<ConfigCheckBackendPreview>,
 }
 
 /// Run the `config check` CLI subcommand: validate config without starting.
 pub fn run_config_check(
     file: Option<&str>,
     backend: Option<ConfigCheckBackend>,
+    json: bool,
 ) -> anyhow::Result<()> {
     use crate::config::KilnConfig;
 
@@ -1903,20 +1960,30 @@ pub fn run_config_check(
             .validate_for_model(&kiln_core::config::ModelConfig::qwen3_5_4b())?;
         config.speculative.validate_for_serving()?;
         let checkpoint_boundary_policy = config.training.checkpoint_boundary_policy()?;
-        let actor_prefill_backend_output = backend
-            .map(|target| format_actor_prefill_backend_config(&config, target))
+        let backend_preview = backend
+            .map(|target| resolve_actor_prefill_backend_config(&config, target))
             .transpose()?;
-        Ok((
-            config,
-            checkpoint_boundary_policy,
-            actor_prefill_backend_output,
-        ))
+        Ok((config, checkpoint_boundary_policy, backend_preview))
     }) {
-        Ok((config, checkpoint_boundary_policy, actor_prefill_backend_output)) => {
+        Ok((config, checkpoint_boundary_policy, backend_preview)) => {
             let accelerator_runtime = config
                 .accelerator
                 .resolved_policy(config.server.serving_profile);
             let application_paths = config.paths.resolve()?;
+            if json {
+                let document = ConfigCheckJsonDocument {
+                    schema_id: "kiln.config-check.v1",
+                    schema_version: 1,
+                    hardware_probed: false,
+                    effective_configuration: config.effective_configuration()?,
+                    accelerator_runtime,
+                    application_paths,
+                    checkpoint_boundary_policy,
+                    backend_preview,
+                };
+                println!("{}", serde_json::to_string_pretty(&document)?);
+                return Ok(());
+            }
             println!("{} Configuration is valid", style("✓").green().bold());
             println!();
             println!(
@@ -2083,8 +2150,8 @@ pub fn run_config_check(
                 config.batching.mode.mode()
             );
             print!("{}", format_actor_prefill_config(&config));
-            if let Some(output) = actor_prefill_backend_output {
-                print!("{output}");
+            if let Some(preview) = backend_preview.as_ref() {
+                print!("{}", format_actor_prefill_backend_preview(preview));
             }
             println!(
                 "  {} {}",
@@ -4431,9 +4498,29 @@ mode = "disabled"
             Cli::try_parse_from(["kiln", "config", "--file", "kiln.toml", "--backend", "rocm"])
                 .expect("documented ROCm config preflight should parse");
         match cli.command {
-            Some(Commands::ConfigCheck { file, backend }) => {
+            Some(Commands::ConfigCheck {
+                file,
+                backend,
+                json,
+            }) => {
                 assert_eq!(file.as_deref(), Some("kiln.toml"));
                 assert_eq!(backend, Some(ConfigCheckBackend::Rocm));
+                assert!(!json);
+            }
+            _ => panic!("expected config command"),
+        }
+
+        let cli = Cli::try_parse_from(["kiln", "config", "--json", "--backend", "vulkan"])
+            .expect("machine-readable Vulkan config preflight should parse");
+        match cli.command {
+            Some(Commands::ConfigCheck {
+                file,
+                backend,
+                json,
+            }) => {
+                assert_eq!(file, None);
+                assert_eq!(backend, Some(ConfigCheckBackend::Vulkan));
+                assert!(json);
             }
             _ => panic!("expected config command"),
         }

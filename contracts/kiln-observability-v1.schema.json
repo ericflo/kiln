@@ -31,6 +31,15 @@
     ],
     "ConfigResponse": [
       {
+        "effective_configuration": {
+          "schema_id": "kiln.effective-configuration.v1",
+          "schema_version": 1,
+          "effective_config_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "fixed_field_count": 118,
+          "dynamic_field_count": 0,
+          "all_fields_restart_required_to_change": true,
+          "fields": {}
+        },
         "serving_profile": {
           "profile": "stable",
           "source": "default",
@@ -2907,6 +2916,7 @@
         "backend_policy",
         "config_file",
         "environment",
+        "command_line",
         "effective_decode_width"
       ],
       "description": "The authority that selected an effective batching value.",
@@ -3708,6 +3718,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "effective_configuration",
         "serving_profile",
         "accelerator_runtime",
         "rocm_graphs",
@@ -3730,6 +3741,9 @@
         "operational"
       ],
       "properties": {
+        "effective_configuration": {
+          "$ref": "#/$defs/EffectiveConfiguration"
+        },
         "serving_profile": {
           "$ref": "#/$defs/ServingProfileDiagnostics"
         },
@@ -3828,7 +3842,8 @@
       "enum": [
         "default",
         "config_file",
-        "environment"
+        "environment",
+        "command_line"
       ],
       "description": "The startup authority that supplied a resolved configuration value.",
       "x-kiln-rust-type": "ConfigValueSource",
@@ -4003,6 +4018,7 @@
         "backend_policy",
         "config_file",
         "environment",
+        "command_line",
         "deterministic",
         "max_batch_tokens"
       ],
@@ -4377,6 +4393,106 @@
       },
       "description": "Configured, backend, and effective direct-decode rendezvous value.",
       "x-kiln-rust-type": "DirectDecodeRendezvousValueDiagnostics<usize | u64>",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EffectiveConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "effective_config_hash",
+        "fixed_field_count",
+        "dynamic_field_count",
+        "all_fields_restart_required_to_change",
+        "fields"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "kiln.effective-configuration.v1"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "effective_config_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fixed_field_count": {
+          "const": 118
+        },
+        "dynamic_field_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "all_fields_restart_required_to_change": {
+          "const": true
+        },
+        "fields": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)+$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/EffectiveConfigurationField"
+          },
+          "x-kiln-fixed-field-count": 118,
+          "x-kiln-dynamic-field-templates": [
+            "teachers.credentials.<id>.origin",
+            "teachers.credentials.<id>.api_key_env"
+          ]
+        }
+      },
+      "description": "The deterministic flat map of every typed startup leaf after precedence, plus dynamic teacher-credential leaves.",
+      "x-kiln-rust-type": "config::EffectiveConfiguration",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EffectiveConfigurationField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "effective_value",
+        "source",
+        "canonical_environment",
+        "compatibility_environment",
+        "redacted",
+        "restart_required_to_change"
+      ],
+      "properties": {
+        "effective_value": {},
+        "source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        },
+        "canonical_environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "compatibility_environment": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "redacted": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "restart_required_to_change": {
+          "const": true
+        }
+      },
+      "description": "One post-precedence typed startup value, its authority, environment spellings, redaction state, and lifecycle.",
+      "x-kiln-rust-type": "config::EffectiveConfigurationField",
       "x-kiln-field-schema-status": "complete"
     },
     "ExecutionBackendIdentity": {
@@ -9472,9 +9588,11 @@
         "default",
         "config_file",
         "environment",
+        "command_line",
         "inherited_from_tile_tokens_default",
         "inherited_from_tile_tokens_config_file",
-        "inherited_from_tile_tokens_environment"
+        "inherited_from_tile_tokens_environment",
+        "inherited_from_tile_tokens_command_line"
       ],
       "description": "The final authority for a resolved streaming-prefill value.",
       "x-kiln-rust-type": "StreamingPrefillEffectiveSource",

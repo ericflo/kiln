@@ -176,7 +176,7 @@ CONTROL_ENTRYPOINTS = (
 CONTROL_COMPONENT_TYPES = {name: name for name in CONTROL_ENTRYPOINTS}
 CONTROL_COMPONENT_TYPES["CorrectionRowInput"] = "CorrectionRow"
 CONTROL_COMPONENT_TYPES["Vec_TrainingStatus"] = "Vec<TrainingStatus>"
-EXPECTED_OBSERVABILITY_DEFINITION_COUNT = 174
+EXPECTED_OBSERVABILITY_DEFINITION_COUNT = 176
 EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 118
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
     "complete": 133,
@@ -1090,6 +1090,17 @@ def validate_observability_schema(schema: dict[str, Any]) -> list[str]:
     for name in ("ConfigResponse", "HealthResponse", "ModelStateResponse", "ModelsResponse"):
         if definitions.get(name, {}).get("additionalProperties") is not False:
             errors.append(f"{name} must remain a closed emitted response")
+    effective = definitions.get("EffectiveConfiguration", {}).get("properties", {})
+    if effective.get("fixed_field_count", {}).get("const") != 118:
+        errors.append("EffectiveConfiguration must fix the typed startup field count at 118")
+    fields = effective.get("fields", {})
+    if fields.get("x-kiln-fixed-field-count") != 118:
+        errors.append("EffectiveConfiguration.fields must publish its exact fixed-field count")
+    if fields.get("x-kiln-dynamic-field-templates") != [
+        "teachers.credentials.<id>.origin",
+        "teachers.credentials.<id>.api_key_env",
+    ]:
+        errors.append("EffectiveConfiguration.fields must publish both dynamic credential templates")
     request_record = definitions.get("RequestRecord", {})
     optional_request_fields = {
         "adapter", "temperature", "top_p", "max_tokens", "ttft_ms", "model_prefill_ms",

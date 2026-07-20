@@ -35,6 +35,7 @@ fn prefix_cache_effective_reason(
 
 #[derive(Serialize)]
 struct ConfigResponse {
+    effective_configuration: crate::config::EffectiveConfiguration,
     serving_profile: ServingProfileDiagnostics,
     accelerator_runtime: ResolvedAcceleratorRuntimePolicy,
     /// Nonblocking full graph-cache snapshot governed by the resolved policy.
@@ -466,6 +467,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
     let rocm_graph_observation = crate::rocm_graph_observability::observe_rocm_graphs(&state);
 
     Json(ConfigResponse {
+        effective_configuration: state.effective_configuration.as_ref().clone(),
         serving_profile: state.serving_profile.diagnostics(),
         accelerator_runtime: state.accelerator_runtime_policy,
         rocm_graphs: rocm_graph_observation.stats,
@@ -1126,6 +1128,25 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
+        let effective = &json["effective_configuration"];
+        assert_eq!(effective["schema_id"], "kiln.effective-configuration.v1");
+        assert_eq!(effective["schema_version"], 1);
+        assert_eq!(effective["fixed_field_count"], 118);
+        assert_eq!(effective["dynamic_field_count"], 0);
+        assert_eq!(
+            effective["fields"].as_object().unwrap().len(),
+            118,
+            "the API snapshot must include every fixed typed leaf"
+        );
+        assert_eq!(effective["fields"]["server.port"]["source"], "default");
+        assert_eq!(
+            effective["fields"]["server.port"]["canonical_environment"],
+            "KILN_SERVER_PORT"
+        );
+        assert_eq!(
+            effective["fields"]["server.port"]["restart_required_to_change"],
+            true
+        );
         assert_eq!(json["streaming_prefill"], expected_streaming_prefill);
         assert_eq!(json["serving_profile"]["profile"], "experimental");
         assert_eq!(json["serving_profile"]["source"], "environment");

@@ -169,6 +169,7 @@ pub fn resolve_decode_runtime_config(
     let selected_source = match (configured.limit(), configured.source()) {
         (Some(_), ConfigValueSource::ConfigFile) => DecodeBatchEffectiveSource::ConfigFile,
         (Some(_), ConfigValueSource::Environment) => DecodeBatchEffectiveSource::Environment,
+        (Some(_), ConfigValueSource::CommandLine) => DecodeBatchEffectiveSource::CommandLine,
         _ => DecodeBatchEffectiveSource::BackendPolicy,
     };
     let (selected, selected_source) = if deterministic.enabled() {

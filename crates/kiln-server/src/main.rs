@@ -323,8 +323,16 @@ async fn main() -> Result<()> {
             )
             .await;
         }
-        Some(Commands::ConfigCheck { ref file, backend }) => {
-            return cli::run_config_check(file.as_deref().or(args.config.as_deref()), backend);
+        Some(Commands::ConfigCheck {
+            ref file,
+            backend,
+            json,
+        }) => {
+            return cli::run_config_check(
+                file.as_deref().or(args.config.as_deref()),
+                backend,
+                json,
+            );
         }
         Some(Commands::Train(ref train)) => match train {
             TrainCommands::Sft {
@@ -579,6 +587,9 @@ async fn main() -> Result<()> {
     // --- Server startup ---
     let mut config = KilnConfig::load(args.config.as_deref())?;
     config.apply_serve_cli_overrides(serve_cli_overrides.0.as_deref(), serve_cli_overrides.1)?;
+    let effective_configuration = config
+        .effective_configuration()
+        .context("failed to build complete effective configuration")?;
     let application_paths = config
         .paths
         .resolve()
@@ -1171,6 +1182,7 @@ async fn main() -> Result<()> {
             .context("failed to resolve immutable operational runtime configuration")?,
     );
     state.application_paths = application_paths;
+    state.effective_configuration = Arc::new(effective_configuration);
     state.checkpoint_read_mib_per_second = config.model.checkpoint_read_mib_per_second;
     state.checkpoint_read_applicable = model_path.is_some();
     state.checkpoint_read_not_applicable_reason = model_path.is_none().then_some("mock_mode");

@@ -471,6 +471,7 @@ fn memory_governor_runtime_info(
             crate::config::ConfigValueSource::Default => "default",
             crate::config::ConfigValueSource::ConfigFile => "config_file",
             crate::config::ConfigValueSource::Environment => "environment",
+            crate::config::ConfigValueSource::CommandLine => "command_line",
         },
         disabled_by_serving_profile: !policy.allocator_reclaim,
         automatic_attempts: automatic.attempts,

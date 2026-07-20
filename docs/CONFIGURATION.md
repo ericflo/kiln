@@ -11,6 +11,12 @@ The documentation website renders its complete field reference directly from
 that schema. `python3 scripts/check_config_schema.py --self-test` verifies that
 the schema, these tables, and `kiln.example.toml` agree.
 
+Use `kiln config --file kiln.toml --json` for the complete hardware-free
+effective startup object. A running server publishes its immutable startup
+snapshot in `GET /v1/config` under `effective_configuration`, beside the
+backend-derived and live capacity diagnostics that can only be resolved after
+hardware selection.
+
 Kiln's intended public environment-variable naming rule is mechanical:
 
 ```text
@@ -2204,15 +2210,19 @@ escape hatch. Vulkan-device training fixtures remain valid when their weights
 are genuinely Vulkan-resident. Use the HF/TRL export/import workflow for
 production training while serving through the hybrid Vulkan backend.
 
-Kiln currently exposes several complementary, partial views:
+Kiln exposes complementary startup-input and runtime-derived views:
 
-- `kiln config --file <path>` performs authoritative parsing and validation,
-  then prints a human-oriented subset of resolved fields, including the ROCm
-  synchronization mode and configured/effective graph policy. Adding
+- `kiln config --file <path>` performs authoritative parsing and validation and
+  prints a concise human-oriented summary. `kiln config --file <path> --json`
+  emits `kiln.config-check.v1`: the complete source-aware startup object,
+  resolved accelerator policy, application paths, checkpoint-boundary policy,
+  and optional backend preview. It does not probe hardware or load weights.
+  Adding
   `--backend <target>` resolves hardware-independent scheduling capabilities
   and rejects an invalid actor-prefill contract, but deliberately does not
   claim device availability or live route state.
 - `GET /v1/config` reports runtime diagnostics for serving profile, the
+  complete immutable `effective_configuration` startup snapshot, the
   versioned accelerator runtime policy, effective
   decode width, speculative configuration and availability, VRAM/KV state,
   native-training runtime/weight devices and
@@ -2239,7 +2249,8 @@ Kiln currently exposes several complementary, partial views:
   checkpoint execution is disabled,
   `training.checkpoint_segments` is `0`; an optional segment count retained in
   `training.checkpoint_policy` is provenance, not an active execution plan. The
-  endpoint is not a serialization of all accepted TOML.
+  `effective_configuration` is the complete input object; sibling fields are
+  the authoritative backend-derived, hardware-derived, and live results.
 - `GET /health` and `/v1/health` repeat the accelerator policy and reasoned
   ROCm synchronization counters under `decode_runtime`, and repeat the resolved boundary policy under
   `training.checkpoint_boundary_policy`; trusted `GET /v1/debug/model-state`
@@ -2264,38 +2275,61 @@ Kiln currently exposes several complementary, partial views:
 - Startup logs record serving-profile provenance and configured/backend/final
   decode-width sources.
 
-Explicit source tracking (`default`, `config_file`, or `environment`) currently
-exists for `server.serving_profile`, `server.deterministic`,
-`server.stream_stall_grace_ms`, the three server batching/prefill budgets,
-`server.max_decode_batch`, all nine `[batching]` fields, all six
-`[streaming_prefill]` fields, the source-tracked `[accelerator]` fields,
-`paths.cache_root`, and `memory.reclaim_mode`. Other fields have
-resolved values but do not yet carry per-field source metadata.
+The versioned `kiln.effective-configuration.v1` object is a deterministic flat
+map keyed by canonical TOML paths. It always contains all 118 fixed typed
+leaves, including materialized defaults for optional `[eval]` and `[agent]`
+sections, plus two dynamic leaves for every configured teacher credential:
+`teachers.credentials.<id>.origin` and
+`teachers.credentials.<id>.api_key_env`. Every entry contains:
+
+- `effective_value`: the post-precedence typed JSON value, or `null` when
+  redacted;
+- `source`: exactly `default`, `config_file`, `environment`, or
+  `command_line`;
+- `canonical_environment` and `compatibility_environment`: the mechanically
+  derived supported environment name and any deprecated aliases, or no names
+  for config-file-only/dynamic fields;
+- `redacted`: whether the value is deliberately withheld; and
+- `restart_required_to_change`: always `true` for this startup snapshot.
+
+The object also reports its schema/version, fixed and dynamic field counts,
+the typed effective-config hash, and the invariant that every represented
+value requires restart. Field keys are lexicographically ordered. The loader
+parses the selected TOML document once, validates the typed object, records
+which leaves were explicit, applies centralized environment overrides, then
+applies the two supported serve CLI overrides. Unknown TOML fields and invalid
+values still fail before the dump can be produced.
+
+Secrets and request-bearing values are never serialized into this diagnostic.
+`agent.self_improve`, `eval.webhook_url`, `training.webhook_url`, and every
+`teachers.credentials.<id>.api_key_env` entry are present with their real
+source but `redacted=true` and `effective_value=null`. The named bearer secret
+itself is never part of `KilnConfig`, the effective dump, application state, or
+the config hash.
 
 The `effective_config_hash` binds only the serialized effective typed
-configuration. Execution provenance separately hashes the redacted set of
-present `KILN_*` environment inputs, so ambient process state cannot silently
-change the meaning of the configuration digest. Both are identity digests, not
-human-readable effective-config dumps.
-
-There is not yet one endpoint or CLI mode that dumps every effective field,
-its source, backend-derived adjustment, and restart requirement. Until that
-lands, use the typed validation command plus startup/runtime diagnostics.
+configuration and is repeated in the human-readable dump. Execution provenance
+separately hashes the redacted set of present `KILN_*` environment inputs, so
+ambient process state cannot silently change the meaning of the configuration
+digest. Backend-derived adjustments are intentionally not rewritten into the
+startup map: use `--backend` for a hardware-free scheduling preview and the
+sibling `/v1/config` objects for the actual selected backend, capacity,
+availability, and live state.
 
 ## Known configuration migration limitations
 
 These are current implementation facts, not recommended architecture:
 
-1. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
-   typed object with provenance and backend-derived values. The CLI's optional
-   backend preview is intentionally limited to static scheduling policy.
-2. **Deprecated aliases:** 76 non-canonical spellings across 71 fields remain
+1. **Deprecated aliases:** 76 non-canonical spellings across 71 fields remain
    temporarily for compatibility, including `KILN_DEFAULT_NO_THINK`. Each use
    warns at startup; canonical and compatibility names cannot silently
    disagree.
 
-The intended migration is to resolve every public runtime field exactly once,
-pass immutable typed configuration into its owner, generate the environment
-contract mechanically, and reject direct production environment reads outside
-that boundary. Internal experiment and qualification flags should remain
-separate from this public API rather than being promoted by documentation.
+Every public runtime field now resolves exactly once and is passed as immutable
+typed configuration to its owner; the environment contract is generated
+mechanically, and repository policy rejects direct production environment
+reads outside the closed driver-remap and credential-provider adapters.
+Internal experiment and qualification flags remain separate from this public
+API rather than being promoted by documentation. The remaining migration work
+is removal of deprecated aliases and further consolidation of explicit
+experimental/debug profiles.

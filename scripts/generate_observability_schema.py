@@ -136,7 +136,7 @@ def build_definitions() -> None:
     add_enum(
         "ConfigValueSource",
         "ConfigValueSource",
-        ["default", "config_file", "environment"],
+        ["default", "config_file", "environment", "command_line"],
         "The startup authority that supplied a resolved configuration value.",
     )
     add_enum(
@@ -160,13 +160,27 @@ def build_definitions() -> None:
     add_enum(
         "BatchingEffectiveSource",
         "BatchingEffectiveSource",
-        ["default", "backend_policy", "config_file", "environment", "effective_decode_width"],
+        [
+            "default",
+            "backend_policy",
+            "config_file",
+            "environment",
+            "command_line",
+            "effective_decode_width",
+        ],
         "The authority that selected an effective batching value.",
     )
     add_enum(
         "DecodeBatchEffectiveSource",
         "DecodeBatchEffectiveSource",
-        ["backend_policy", "config_file", "environment", "deterministic", "max_batch_tokens"],
+        [
+            "backend_policy",
+            "config_file",
+            "environment",
+            "command_line",
+            "deterministic",
+            "max_batch_tokens",
+        ],
         "The authority that selected the effective concurrent decode width.",
     )
     add_enum(
@@ -267,9 +281,11 @@ def build_definitions() -> None:
             "default",
             "config_file",
             "environment",
+            "command_line",
             "inherited_from_tile_tokens_default",
             "inherited_from_tile_tokens_config_file",
             "inherited_from_tile_tokens_environment",
+            "inherited_from_tile_tokens_command_line",
         ],
         "The final authority for a resolved streaming-prefill value.",
     )
@@ -1458,7 +1474,36 @@ def build_definitions() -> None:
         "batched_capture_available": {"const": False},
         "restart_required_to_change": {"const": True},
     }, "Startup-resolved CUDA graph request, cache bound, and fixed safety invariants.")
+    add_object("EffectiveConfigurationField", "config::EffectiveConfigurationField", {
+        "effective_value": {},
+        "source": ref("ConfigValueSource"),
+        "canonical_environment": nullable(ref("String")),
+        "compatibility_environment": array(ref("String")),
+        "redacted": ref("Boolean"),
+        "restart_required_to_change": {"const": True},
+    }, "One post-precedence typed startup value, its authority, environment spellings, redaction state, and lifecycle.")
+    add_object("EffectiveConfiguration", "config::EffectiveConfiguration", {
+        "schema_id": {"const": "kiln.effective-configuration.v1"},
+        "schema_version": {"const": 1},
+        "effective_config_hash": nullable(ref("Sha256")),
+        "fixed_field_count": {"const": 118},
+        "dynamic_field_count": ref("NonNegativeInteger"),
+        "all_fields_restart_required_to_change": {"const": True},
+        "fields": {
+            "type": "object",
+            "propertyNames": {
+                "pattern": "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)+$",
+            },
+            "additionalProperties": ref("EffectiveConfigurationField"),
+            "x-kiln-fixed-field-count": 118,
+            "x-kiln-dynamic-field-templates": [
+                "teachers.credentials.<id>.origin",
+                "teachers.credentials.<id>.api_key_env",
+            ],
+        },
+    }, "The deterministic flat map of every typed startup leaf after precedence, plus dynamic teacher-credential leaves.")
     add_object("ConfigResponse", "ConfigResponse", {
+        "effective_configuration": ref("EffectiveConfiguration"),
         "serving_profile": ref("ServingProfileDiagnostics"),
         "accelerator_runtime": ref("ResolvedAcceleratorRuntimePolicy"),
         "rocm_graphs": nullable(ref("RocmGraphStats")),
@@ -1657,6 +1702,8 @@ def build_definitions() -> None:
 
 
 def example_for(schema: dict[str, Any]) -> Any:
+    if not schema:
+        return None
     if "$ref" in schema:
         return example_for(DEFS[schema["$ref"].split("/")[-1]])
     if "const" in schema:
