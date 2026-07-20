@@ -203,12 +203,12 @@
             }
           ],
           "default": "auto",
-          "description": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width. The Strix Halo Vulkan development-soak candidate sets 2; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together.",
+          "description": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width. Do not raise this from a single throughput sample: the machine-local ROCm selector documented in the Qualification guide requires exact-width deterministic and fused-sampled execution, graph correctness, bounded tail/memory regression, restart/cooldown between arms, and follow-up soak/benchmark evidence. It emits a selection receipt but never mutates this field. The Strix Halo Vulkan development-soak candidate sets 2; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together.",
           "x-kiln-path": "server.max_decode_batch",
           "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
           "x-kiln-canonical-env": "KILN_SERVER_MAX_DECODE_BATCH (implemented)",
           "x-kiln-environment": "KILN_MAX_DECODE_BATCH (deprecated compatibility)",
-          "x-kiln-validation": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width. The Strix Halo Vulkan development-soak candidate sets 2; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together."
+          "x-kiln-validation": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width. Do not raise this from a single throughput sample: the machine-local ROCm selector documented in the Qualification guide requires exact-width deterministic and fused-sampled execution, graph correctness, bounded tail/memory regression, restart/cooldown between arms, and follow-up soak/benchmark evidence. It emits a selection receipt but never mutates this field. The Strix Halo Vulkan development-soak candidate sets 2; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together."
         },
         "eval_mode": {
           "type": "boolean",
