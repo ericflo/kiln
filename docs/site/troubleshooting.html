@@ -1066,7 +1066,16 @@ rocm_graph_cache_max_bytes = 1073741824</code></pre>
           batching drain as a resource-ownership boundary, not merely an empty scheduling queue. Measurement and
           accelerator telemetry correctly remain zero when setup fails; this receipt therefore is not throughput
           evidence. The guarded process peaked at 89.875 C, grew no swap, shut down cleanly, removed its snapshot,
-          and left no process. Require conservative terminal cleanup publication and a fresh exact-source soak.
+          and left no process.
+        </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          The exact-source rerun with conservative terminal publication reached the same 29-request, 39-entry
+          boundary and failed closed again. That isolated a second issue: native batched graphs retain reusable
+          width-reserved slots, and the health statistic classified the reservation itself as active even though it
+          owned no live decode row. The documented active count is live logical ownership; retained reusable slots
+          belong in the idle count. The rerun began no measurement, grew no swap, stayed below the 97 C guard,
+          shut down unforced with exit zero, and left no process or snapshot. Correct and regress the slot-liveness
+          classification before another soak; neither rejected receipt is throughput evidence.
         </p>
       </article>
 

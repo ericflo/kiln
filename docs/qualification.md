@@ -1750,16 +1750,16 @@ The first exact-source development-soak attempt after that arm is retained at
 It failed closed before measurement after 29 valid warmup requests across four
 waves filled all 39 prefix-cache entries. A health snapshot reported the
 batching actor drained while one ROCm graph slot or continuity timeline was
-still active. The actor removes a terminal row and publishes its zero-active
-snapshot before the model finish/discard boundary releases graph ownership, so
-the soak observed a real but transient false-drained window rather than a GPU
-fault or dirty teardown. Measurement and accelerator-telemetry counters remain
-zero sentinels because the measurement sampler never started. Host memory stayed
+still active. The actor did remove a terminal row and publish its zero-active
+snapshot before the model finish/discard boundary released graph ownership,
+creating one real transient false-drained window. The later corrected-source
+rerun described below proves that race was not the only cause of this rejection.
+Measurement and accelerator-telemetry counters remain zero sentinels because
+the measurement sampler never started. Host memory stayed
 above 22,550,761,472 bytes, swap did not grow, package temperature peaked at
 89.875 C below the 97 C guard, cooldown completed in 2.506 seconds, shutdown was
 unforced and zero, and no process or snapshot remained. The rejected receipt
-does not qualify the soak; batching drain publication must remain conservative
-through terminal resource cleanup before a clean-source rerun.
+does not qualify the soak.
 
 The correction keeps the last public batching snapshot conservative across both
 normal `finish_request` and error/cancellation `discard_request` cleanup. The
@@ -1770,8 +1770,24 @@ ownership. Deterministic blocked-cleanup tests require `active_decode=1` with an
 otherwise empty actor during each boundary and zero only afterward. A complete
 1,091-test server library run, all 652 qualification-tooling tests, and bounded
 ROCm/gfx1151 and Vulkan all-target checks pass. This is portable causal evidence;
-the failed receipt remains rejected and the exact pushed correction still needs
-the full device soak.
+the failed receipt remains rejected.
+
+The exact pushed correction was rerun at
+`qualification/receipts/rocm/strix-halo/20260720t092808480302z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json`.
+It again completed 29 valid warmup requests, four waves, and full 39-entry prefix
+residency, then rejected the first stabilization drain with the same graph-slot
+message before any measurement sample. The actor-ordering correction was active
+and its conservative terminal boundary completed, isolating a separate telemetry
+contract error introduced with native batched graphs: a persistent slot reserved
+for a batch width has `batch_size=Some(width)` even while it owns no live request,
+but `active_graph_slot_count` counts that reservation as active. The field's
+documented contract is live logical decode-row ownership; reusable retained slots
+belong in the idle count. This was a fail-closed observability rejection, not a
+device fault, request error, leak, or throughput result. Host memory remained
+above 21,735,788,544 bytes, swap growth was zero, package temperature peaked at
+89.5 C below the guard, cooldown completed in 2.757 seconds, shutdown was
+unforced and zero, and no process or snapshot remained. Correct the active/idle
+slot classification and cover retained batched slots before another device run.
 
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
