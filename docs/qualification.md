@@ -1695,6 +1695,18 @@ snapshot. This closes the source-level coupling only. The prefix-cache-off arm
 must pass again on ROCm from the clean pushed corrective source before stable
 or soak execution resumes.
 
+The first clean-source ROCm hardware discriminator for this correction passed
+from pushed commit `e1ea3dc57e2fae8e3584f52c890aee3e247a52e4`. The tiny GDN
+model executed registration-enabled and registration-disabled resumable
+prefill on the Strix Halo ROCm backend. Both routes scheduled and completed
+token quanta `[17,17,17,17,12,1]` across six layer-yield cycles, produced first
+token 13 and following decode token 13, and satisfied recurrent-state parity.
+This is direct device evidence for the corrected route contract, but it is
+deliberately not a substitute for the production Qwen workload: the full
+source-bound `both-off-prefix-cache-off` arm must still reproduce the formerly
+failing 2,432-token request and every cache-zero, thermal, latency, and teardown
+gate.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and
