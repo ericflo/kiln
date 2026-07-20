@@ -1055,7 +1055,7 @@ impl TrainReceipt {
         let config_hashes = ConfigHashes::from_model_tokenizer(
             model_config,
             tokenizer,
-            kiln_core::config_hashes::kiln_env_config_hash(&config),
+            kiln_core::config_hashes::effective_config_hash(&config),
         );
         Self {
             schema_version: TRAIN_RECEIPT_SCHEMA_VERSION,
@@ -1065,7 +1065,7 @@ impl TrainReceipt {
             status: TrainReceiptStatus::Success,
             failure_reason: None,
             failure_message: None,
-            kiln: detect_kiln_source(config_hashes.kiln_env_config_hash.clone()),
+            kiln: detect_kiln_source(config_hashes.effective_config_hash.clone()),
             model: ModelReceipt {
                 path: detect_model_path(),
                 config_hash: config_hashes.model_config_hash.clone(),
@@ -2883,10 +2883,10 @@ mod tests {
             loaded.config_hashes.tokenizer_config_hash
         );
         assert!(loaded.config_hashes.chat_template_hash.is_none());
-        assert!(loaded.config_hashes.kiln_env_config_hash.is_some());
+        assert!(loaded.config_hashes.effective_config_hash.is_some());
         assert_eq!(
             loaded.kiln.env_config_hash,
-            loaded.config_hashes.kiln_env_config_hash
+            loaded.config_hashes.effective_config_hash
         );
         assert!(loaded.lora_grad_norms.is_empty());
         assert!(loaded.adapter_smoke_test.is_none());

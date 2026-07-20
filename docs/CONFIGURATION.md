@@ -2223,9 +2223,11 @@ exists for `server.serving_profile`, `server.deterministic`,
 `memory.reclaim_mode`. Other fields have
 resolved values but do not yet carry per-field source metadata.
 
-The `kiln_env_config_hash` binds the serialized effective typed configuration
-and the process's complete `KILN_*` environment map. It is an identity digest,
-not a human-readable effective-config dump.
+The `effective_config_hash` binds only the serialized effective typed
+configuration. Execution provenance separately hashes the redacted set of
+present `KILN_*` environment inputs, so ambient process state cannot silently
+change the meaning of the configuration digest. Both are identity digests, not
+human-readable effective-config dumps.
 
 There is not yet one endpoint or CLI mode that dumps every effective field,
 its source, backend-derived adjustment, and restart requirement. Until that

@@ -16,7 +16,7 @@ use kiln_server::device::select_device_with_options_kt;
 use kiln_server::state;
 
 use kiln_core::config::ModelConfig;
-use kiln_core::config_hashes::{ConfigHashes, kiln_env_config_hash};
+use kiln_core::config_hashes::{ConfigHashes, effective_config_hash};
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::MockEngine;
@@ -1297,7 +1297,7 @@ async fn main() -> Result<()> {
     state.config_hashes = ConfigHashes::from_model_tokenizer(
         &state.model_config,
         state.tokenizer.as_ref(),
-        kiln_env_config_hash(&config),
+        effective_config_hash(&config),
     );
     state.slow_request_warn_threshold = if config.server.slow_request_warn_secs == 0 {
         None
@@ -1332,7 +1332,7 @@ async fn main() -> Result<()> {
         tokenizer_config_hash = ?state.config_hashes.tokenizer_config_hash,
         chat_template_hash = ?state.config_hashes.chat_template_hash,
         training_chat_template_hash = ?state.config_hashes.training_chat_template_hash,
-        kiln_env_config_hash = ?state.config_hashes.kiln_env_config_hash,
+        effective_config_hash = ?state.config_hashes.effective_config_hash,
         "config hashes initialized"
     );
     tracing::debug!(enabled = state.eval_mode, "eval mode configured");

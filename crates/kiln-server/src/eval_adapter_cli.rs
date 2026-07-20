@@ -771,7 +771,7 @@ mod tests {
                     "tokenizer_config_hash": "sha256:tok",
                     "chat_template_hash": "sha256:tmpl",
                     "model_config_hash": "sha256:model",
-                    "kiln_env_config_hash": "sha256:env"
+                    "effective_config_hash": "sha256:config"
                 },
                 "adapters": {
                     "loaded_adapters": [{

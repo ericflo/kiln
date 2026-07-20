@@ -556,7 +556,7 @@
         "chat_template_hash": { "$ref": "#/$defs/Sha256" },
         "training_chat_template_hash": { "$ref": "#/$defs/Sha256" },
         "model_config_hash": { "$ref": "#/$defs/Sha256" },
-        "kiln_env_config_hash": { "$ref": "#/$defs/Sha256" }
+        "effective_config_hash": { "$ref": "#/$defs/Sha256" }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "ConfigHashes"

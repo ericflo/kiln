@@ -604,28 +604,6 @@ def debug_fixture(
                 ),
             },
         },
-        "env_flags": {
-            "KILN_MEMORY_RECLAIM_MODE": {
-                "present": False,
-                "value": None,
-            },
-            "KILN_HTTP_SEND_BUFFER_BYTES": {
-                "present": False,
-                "value": None,
-            },
-            "KILN_STREAM_STALL_GRACE_MS": {
-                "present": False,
-                "value": None,
-            },
-            "KILN_MAX_PREFILL_TOKENS_PER_CYCLE": {
-                "present": False,
-                "value": None,
-            },
-            "KILN_MAX_PREFILL_LAYERS_PER_CYCLE": {
-                "present": False,
-                "value": None,
-            },
-        }
     }
 
 
@@ -2774,7 +2752,6 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         ] = "default"
         health["decode_runtime"]["batching_engine"]["max_active_requests"] = 99
         debug["batching_engine"]["snapshot"]["max_prefill_staging_slots"] = 0
-        debug["env_flags"]["KILN_STREAM_STALL_GRACE_MS"]["value"] = "10"
         failures = serve.attest_runtime("default", health, debug)
         self.assertTrue(any("ROCm graph enabled" in failure for failure in failures))
         self.assertTrue(any("entry count exceeds" in failure for failure in failures))
@@ -2792,12 +2769,6 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         )
         self.assertTrue(any("disagree exactly" in failure for failure in failures))
         self.assertTrue(any("grace source" in failure for failure in failures))
-        self.assertTrue(
-            any(
-                "stream-stall grace compatibility environment flag" in failure
-                for failure in failures
-            )
-        )
         self.assertTrue(
             any("health batching max_active_requests" in failure for failure in failures)
         )

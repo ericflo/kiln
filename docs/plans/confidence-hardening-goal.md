@@ -2076,6 +2076,41 @@ deterministic-backward matrix remains explicit CUDA-machine handoff work. The
 broad Phase 8.1 checkboxes remain open for the fourteen remaining migration
 reads and other process-state owners.
 
+Residual process-state helper retirement checkpoint (completed 2026-07-20):
+the unused `kiln_core::env_flag` module and its process-global tests are
+deleted after repository-wide call-site proof found no production consumer.
+Python doctest evaluation now uses only its existing per-scorer `python_bin`
+field or the stable `python3` default; `KILN_DOCTEST_PYTHON` is retired without
+an alias. Trusted model-state diagnostics no longer reread or echo a selected
+map of raw process values. Qualification instead attests the already-published
+typed effective values and their source metadata through health and debug
+runtime objects.
+
+Config-hash metadata now publishes `effective_config_hash`, which hashes only
+the serialized typed effective object. Deserialization accepts the former
+`kiln_env_config_hash` field solely as a data migration alias and always emits
+the new name. The independently validated execution-provenance environment
+digest retains the sorted, secret-redacted `KILN_*` input identity at its
+immutable provenance boundary; it can no longer silently change the meaning
+of the configuration digest.
+
+Verification passes 103 active core, 233 active eval, 1,096 server-library,
+and the focused training-receipt tests plus all 661 qualification tests. The
+117-field configuration, 173-definition observability, 55-definition
+inference, 80-definition artifact, 82-definition eval, 118-definition
+control-plane, and 102-path/114-operation HTTP contracts are current. Ten
+documentation-builder tests, the 55-document/5-asset assembled static site,
+and the older 909-call-site preserve-list audit with zero generic-helper users
+are current. Formatting, source-parsing, release, thinking-budget, and diff
+gates pass.
+All-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks pass;
+no accelerator workload ran. Local rendered browser smoke remains unavailable
+because this host has no Chromium executable and is left to the inexpensive
+UI/Pages workflows. The runtime ratchet falls from 455 to 441 reads, from 161
+to 150 process mutations, and from 14 to 9 migration reads; literal `KILN_*`
+read names fall from 36 to 32. The broad Phase 8.1 checkboxes remain open for
+the nine remaining path, device-remap, Pi, and credential boundaries.
+
 ### 8.2 One scheduling model
 
 - [ ] Map ownership and production/test use of batching engine, legacy decode
@@ -3171,6 +3206,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-20 | Immutable typed Metal backend-kernel profile and accelerator policy v14 | this source | this configuration checkpoint | complete 46-leaf Metal backend route authority, typed config/API/CLI/UI/qualification/schema/documentation integration, and portable backend compile matrix; no Apple framework compilation, Metal device execution, parity, memory, pause, throughput, lifecycle, or promotion claim | 356/356 model and 1,094/1,094 server library tests; 83/83 focused mixed-load qualification tests; 115-field/110-canonical-environment/76-alias configuration schema; 170-definition observability schema; current capability and runtime-environment generators; 10/10 docs-builder tests; 55-document/5-asset generated website and assembled static smoke; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting and diff hygiene | portable source/configuration checkpoint passed; direct reads 470 -> 461, process mutations 163 -> 161, migration reads 23 -> 20; M1 execution remains required | `accelerator.metal_kernel_profile` is the only public authority for all SDPA, convolution, GDN, RMSNorm, MLP, attention-gate, QKV, LoRA, LM-head, paged-attention/KV, and transposed cooperative-GEMV routes. `native_default` preserves forty-five enabled routes and the historically opt-in custom LM-head argmax as disabled; `portable_fallback` declines all forty-six. The server installs the source-tracked policy before Metal backend construction, same-value installation is idempotent, conflicts fail, and standalone users retain historical defaults. More than fifty former generic/Metal per-kernel spellings are removed rather than aliases, and Metal graph parity tests cannot silently skip from process state. Config schema, resolved diagnostics, qualification fixtures, complete route/retired-name reference, API/architecture/troubleshooting website, and static ratchets agree on policy v14. Actual Metal feature compilation and native/fallback qualification must be performed on the M1 handoff. |
 
 | 2026-07-20 | Immutable CUDA Marlin and FlashAttention backward policy v15 | this source | this configuration checkpoint | CUDA projection representation, pack implementation, training-backward accumulation, typed config/API/CLI/UI/qualification/schema/documentation integration, portable backend compile matrix, and real ROCm regression parity; no NVIDIA device execution, Marlin quality/performance, deterministic CUDA replay, or promotion claim | 358/358 model and 1,096/1,096 server library tests; 17/17 real-device Strix Halo ROCm FlashAttention parity tests; 661/661 qualification tests; 117-field/112-canonical-environment/76-alias config schema; 174-definition observability and complete HTTP/artifact/eval/control-plane schemas; current runtime-environment and backend-capability reports; 10/10 docs-builder tests; 55-document/5-asset assembled static site; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting and diff hygiene | portable source/configuration checkpoint passed; direct reads 461 -> 455, process mutations remain 161, migration reads 20 -> 14; NVIDIA execution remains required | `accelerator.cuda_marlin_profile` is the sole process-lifetime projection-layout authority: BF16 remains the default, and experimental-only W4A16 profiles add full-attention Q/MLP then quality-sensitive GDN output packing. The packer always uses its established parallel implementation. `accelerator.cuda_flash_backward_mode` selects fast or deterministic split accumulation once; the public FlashAttention crate preserves old fast-default signatures and exposes typed explicit-mode variants. The dead OPD kernel-disable probe is removed and FLCE row tiling is fixed at 4,096. Six former environment spellings are retired without aliases. Config, diagnostics, qualification, example, complete website reference, and generated ratchets agree on policy v15. The ROCm backward regression run passes because ROCm ignores the CUDA accumulation selector and retains its native exact/composite implementation; CUDA route execution, quality, reproducibility, and performance remain NVIDIA handoff work. |
+
+| 2026-07-20 | Residual process-state helper and config-identity cleanup | this source | this portable configuration checkpoint | generic environment helper deletion, Python doctest executable authority, trusted debug response, config/provenance identity, API/schema/qualification/docs integration, and cross-feature compilation; no accelerator execution or performance claim | 103/103 active core, 233/233 active eval, 1,096/1,096 server library, focused training-receipt, and 661/661 qualification tests; current 117-field configuration, 173-definition observability, 55-definition inference, 80-definition artifact, 82-definition eval, 118-definition control-plane, and 102-path/114-operation HTTP contracts; refreshed 909-call-site preserve-list audit with zero generic-helper users; 10/10 docs-builder tests; 55-document/5-asset assembled static site; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting, release, source-parsing, thinking-budget, and diff hygiene | portable source/configuration checkpoint passed; direct reads 455 -> 441, process mutations 161 -> 150, migration reads 14 -> 9, literal `KILN_*` read names 36 -> 32; local rendered browser smoke unavailable without Chromium | The unused generic environment parser and its global-mutation tests are gone. Python doctest execution is controlled only by its typed scorer field or stable default. Trusted debug publishes resolved typed runtime policy rather than rereading and echoing raw process values. `effective_config_hash` now means exactly the serialized effective object; the old field is read-only migration input, while the distinct immutable execution-provenance environment digest remains secret-redacted. Remaining migration owners are cache/home paths, device-remap safety, Pi home discovery, and the named credential adapter; the broad Phase 8.1 gates remain open. |
 
 ## Known Starting Defects
 

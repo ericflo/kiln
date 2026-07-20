@@ -803,12 +803,12 @@ def build_definitions() -> None:
             "chat_template_hash": ref("Sha256"),
             "training_chat_template_hash": ref("Sha256"),
             "model_config_hash": ref("Sha256"),
-            "kiln_env_config_hash": ref("Sha256"),
+            "effective_config_hash": ref("Sha256"),
         },
         "Available hashes of loaded model, tokenizer, template, and effective environment configuration.",
         optional=(
             "tokenizer_config_hash", "chat_template_hash", "training_chat_template_hash",
-            "model_config_hash", "kiln_env_config_hash",
+            "model_config_hash", "effective_config_hash",
         ),
     )
 
@@ -1479,9 +1479,6 @@ def build_definitions() -> None:
         "loaded_adapters": array(ref("LoadedAdapterDebugState")),
         "available_adapter_count": ref("NonNegativeInteger"), "load_errors": mapping(ref("String")),
     }, "Active, loaded, discoverable, and failed adapter state.")
-    add_object("EnvFlagState", "EnvFlagState", {
-        "present": ref("Boolean"), "value": nullable(ref("String")),
-    }, "Presence and raw value of one selected compatibility environment flag.")
     add_object("ModelDebugState", "ModelDebugState", {
         "path": nullable(ref("String")), "served_model_id": ref("String"),
         "defaults_profile": ref("ModelDefaultsProfile"), "num_layers": ref("NonNegativeInteger"),
@@ -1562,10 +1559,10 @@ def build_definitions() -> None:
         "rocm_graph_telemetry": nullable(ref("RocmGraphLiveTelemetry")),
         "rocm_graph_telemetry_unavailable_reason": nullable(ref("RocmGraphUnavailableReason")),
         "kv_autoscaler": ref("KvAutoscalerState"), "streaming_prefill": ref("StreamingPrefillRuntimeConfig"),
-        "training": ref("TrainingDebugState"), "env_flags": mapping(ref("EnvFlagState")),
+        "training": ref("TrainingDebugState"),
         "batching_engine": ref("BatchingEngineDebugState"), "thinking": ref("ThinkingDebugState"),
         "caches": ref("CacheDebugState"),
-    }, "Complete opt-in model, adapter, provenance, runtime, environment, and cache debug state.")
+    }, "Complete opt-in model, adapter, provenance, typed runtime, and cache debug state.")
     add_object("DebugDisabledResponse", "DebugDisabledResponse", {
         "error": {"const": "debug endpoint disabled"},
         "enable_with": {"const": "set server.debug_model_state=true or server.eval_mode=true"},

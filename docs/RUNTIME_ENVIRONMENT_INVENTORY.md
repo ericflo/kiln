@@ -16,19 +16,19 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **455 direct read call sites** and
-**161 process-mutation call sites**. It can
-statically name **36 distinct literal `KILN_*`
-read names** across **118 call sites**.
+The scanner records **441 direct read call sites** and
+**150 process-mutation call sites**. It can
+statically name **32 distinct literal `KILN_*`
+read names** across **113 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 14 | 1 | 0 |
-| Build time/provenance | 325 | 6 | 8 |
-| Test only | 107 | 28 | 153 |
+| Experimental/debug migration | 9 | 0 | 0 |
+| Build time/provenance | 326 | 6 | 8 |
+| Test only | 97 | 25 | 142 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -56,15 +56,11 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-core/src/env_flag.rs` | 2 | 0 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | 2 | 0 |
 | `crates/kiln-server/src/cli.rs` | 2 | 0 |
 | `crates/kiln-blas/src/algo_cache.rs` | 1 | 0 |
-| `crates/kiln-core/src/config_hashes.rs` | 1 | 0 |
-| `crates/kiln-eval/src/scorers/python_doctest.rs` | 1 | 1 |
 | `crates/kiln-memory/src/vram.rs` | 1 | 0 |
 | `crates/kiln-rocblas/src/algo_cache.rs` | 1 | 0 |
-| `crates/kiln-server/src/api/debug_model_state.rs` | 1 | 0 |
 | `crates/kiln-train/src/remote_teacher.rs` | 1 | 0 |
 | `crates/kiln-vulkan-blas/src/pipeline_cache.rs` | 1 | 0 |
 
@@ -81,7 +77,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_CONFIG` | Public stable | 2 | `crates/kiln-server/src/config.rs`, `crates/kiln-server/src/logging.rs` |
 | `KILN_CUDA_ARCHS` | Build time/provenance | 8 | `crates/kiln-blas/build.rs`, `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-marlin-gemm/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-tensor/build.rs` |
 | `KILN_DISABLE_FUSED_PAGED_DECODE` | Test only | 6 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DOCTEST_PYTHON` | Experimental/debug migration | 1 | `crates/kiln-eval/src/scorers/python_doctest.rs` |
 | `KILN_EVAL_MODE` | Test only | 1 | `crates/kiln-server/src/config.rs` |
 | `KILN_METAL_LORA_LINEAR_BENCH_ITERS` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_LINEAR_BENCH_WARMUP` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
@@ -108,9 +103,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_TENSOR_METAL_TEST` | Test only | 2 | `crates/kiln-tensor/src/metal_allocator.rs`, `crates/kiln-tensor/src/metal_storage.rs` |
 | `KILN_TENSOR_ROCM_TEST` | Test only | 1 | `crates/kiln-tensor/src/rocm_allocator.rs` |
 | `KILN_TENSOR_VULKAN_TEST` | Test only | 25 | `crates/kiln-model/src/backend/vulkan_linear.rs`, `crates/kiln-model/src/backend/vulkan_weights.rs`, `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/lora_loader.rs`, `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-model/tests/vk_bwd_adapter_parity.rs`, `crates/kiln-model/tests/vk_sft_step_proof.rs`, `crates/kiln-model/tests/vk_tape_record_proof.rs`, `crates/kiln-tensor/src/device_op.rs`, `crates/kiln-tensor/src/ops/log_softmax.rs`, `crates/kiln-tensor/src/ops/matmul.rs`, `crates/kiln-tensor/src/ops/reduce.rs`, `crates/kiln-tensor/src/ops/scalar.rs`, `crates/kiln-tensor/src/vulkan_allocator.rs`, `crates/kiln-tensor/src/vulkan_storage.rs`, `crates/kiln-train/src/opd.rs`, `crates/kiln-train/src/trainer.rs` |
-| `KILN_TEST_FLAG_FALSY` | Test only | 1 | `crates/kiln-core/src/env_flag.rs` |
-| `KILN_TEST_FLAG_GIBBERISH` | Test only | 2 | `crates/kiln-core/src/env_flag.rs` |
-| `KILN_TEST_FLAG_TRUTHY` | Test only | 1 | `crates/kiln-core/src/env_flag.rs` |
 
 ## Dynamic read catalog
 
@@ -136,11 +128,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-conv1d-kernel/build.rs` | `var` | `HIPCC` | Build time/provenance | 1 |
 | `crates/kiln-conv1d-kernel/build.rs` | `var` | `OUT_DIR` | Build time/provenance | 1 |
 | `crates/kiln-conv1d-kernel/build.rs` | `var_os` | `NVCC` | Build time/provenance | 1 |
-| `crates/kiln-core/src/config_hashes.rs` | `vars` | `<all>` | Experimental/debug migration | 1 |
-| `crates/kiln-core/src/env_flag.rs` | `env_tristate` | `name` | Experimental/debug migration | 1 |
-| `crates/kiln-core/src/env_flag.rs` | `var` | `name` | Experimental/debug migration | 1 |
-| `crates/kiln-core/src/env_flag.rs` | `env_flag` | `name` | Test only | 2 |
-| `crates/kiln-core/src/env_flag.rs` | `env_tristate` | `name` | Test only | 4 |
 | `crates/kiln-eval/examples/trace_api_eval.rs` | `var` | `& args . api_key_env` | Test only | 1 |
 | `crates/kiln-flash-attn/build.rs` | `var` | `var` | Build time/provenance | 2 |
 | `crates/kiln-flash-attn/build.rs` | `var` | `AR` | Build time/provenance | 1 |
@@ -197,7 +184,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-rocblas/build.rs` | `var_os` | `CARGO_PRIMARY_PACKAGE` | Build time/provenance | 1 |
 | `crates/kiln-rocblas/src/algo_cache.rs` | `var` | `HOME` | Experimental/debug migration | 1 |
 | `crates/kiln-rocblas/src/backend_matmul.rs` | `env!` | `CARGO_PKG_VERSION_MAJOR` | Build time/provenance | 1 |
-| `crates/kiln-server/src/api/debug_model_state.rs` | `var` | `name` | Experimental/debug migration | 1 |
 | `crates/kiln-server/src/api/health.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/bench.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/cli.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
@@ -209,6 +195,7 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-server/src/config.rs` | `var_os` | `& name` | Test only | 1 |
 | `crates/kiln-server/src/execution_provenance.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
 | `crates/kiln-server/src/execution_provenance.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 2 |
+| `crates/kiln-server/src/execution_provenance.rs` | `vars` | `<all>` | Build time/provenance | 1 |
 | `crates/kiln-server/src/execution_provenance.rs` | `env!` | `CARGO_PKG_VERSION` | Test only | 2 |
 | `crates/kiln-server/src/logging.rs` | `var` | `name` | Public stable | 1 |
 | `crates/kiln-server/src/logging.rs` | `var` | `RUST_LOG` | Public stable | 1 |

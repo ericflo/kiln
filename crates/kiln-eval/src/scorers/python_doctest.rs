@@ -40,8 +40,7 @@ use crate::suite::EvalExample;
 /// Default execution time budget for a single completion's doctests.
 pub const DEFAULT_TIMEOUT_SECONDS: f32 = 5.0;
 
-/// Default Python interpreter command. Overridable via the scorer config
-/// or the `KILN_DOCTEST_PYTHON` environment variable.
+/// Default Python interpreter command. Overridable via the scorer config.
 pub const DEFAULT_PYTHON_BIN: &str = "python3";
 
 /// One extracted doctest pair: a callable expression and the expected
@@ -380,14 +379,14 @@ pub(super) fn score(
     Ok((score, kind, detail))
 }
 
-/// Resolve the python binary to use, honoring the env override.
+/// Resolve the explicitly configured Python binary or use the stable default.
 pub(crate) fn resolve_python_bin(configured: Option<&str>) -> String {
     if let Some(c) = configured {
         if !c.is_empty() {
             return c.to_string();
         }
     }
-    std::env::var("KILN_DOCTEST_PYTHON").unwrap_or_else(|_| DEFAULT_PYTHON_BIN.to_string())
+    DEFAULT_PYTHON_BIN.to_string()
 }
 
 #[cfg(test)]

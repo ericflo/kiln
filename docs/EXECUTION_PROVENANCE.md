@@ -87,8 +87,9 @@ digest covers its type, version map, and ordered compiled-feature list.
 - Kernel identity records the compiled backend features and the versions of
   Kiln's numerical kernel crates. The executable digest remains the
   authoritative identity for their exact compiled bytes.
-- The configuration digest covers the fully resolved `KilnConfig`. The
-  environment digest covers sorted `KILN_*` names and effective values.
+- The configuration digest covers the fully resolved `KilnConfig`; response
+  config-hash metadata exposes the same concept as `effective_config_hash`.
+  The distinct environment digest covers sorted `KILN_*` names and effective values.
   Secret-bearing name segments such as `KEY`, `TOKEN`, `SECRET`, `PASSWORD`,
   `AUTH`, or `CREDENTIAL` contribute only a `<redacted-present>` marker. Raw
   environment values are not returned by health or debug APIs.

@@ -1893,7 +1893,6 @@
             "cache_target_bytes": 1
           }
         },
-        "env_flags": {},
         "batching_engine": {
           "backend": "value",
           "enabled": false,
@@ -3692,7 +3691,7 @@
         "model_config_hash": {
           "$ref": "#/$defs/Sha256"
         },
-        "kiln_env_config_hash": {
+        "effective_config_hash": {
           "$ref": "#/$defs/Sha256"
         }
       },
@@ -4369,32 +4368,6 @@
       },
       "description": "Configured, backend, and effective direct-decode rendezvous value.",
       "x-kiln-rust-type": "DirectDecodeRendezvousValueDiagnostics<usize | u64>",
-      "x-kiln-field-schema-status": "complete"
-    },
-    "EnvFlagState": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "present",
-        "value"
-      ],
-      "properties": {
-        "present": {
-          "$ref": "#/$defs/Boolean"
-        },
-        "value": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/String"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "description": "Presence and raw value of one selected compatibility environment flag.",
-      "x-kiln-rust-type": "EnvFlagState",
       "x-kiln-field-schema-status": "complete"
     },
     "ExecutionBackendIdentity": {
@@ -6475,7 +6448,6 @@
         "kv_autoscaler",
         "streaming_prefill",
         "training",
-        "env_flags",
         "batching_engine",
         "thinking",
         "caches"
@@ -6554,12 +6526,6 @@
         "training": {
           "$ref": "#/$defs/TrainingDebugState"
         },
-        "env_flags": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/EnvFlagState"
-          }
-        },
         "batching_engine": {
           "$ref": "#/$defs/BatchingEngineDebugState"
         },
@@ -6570,7 +6536,7 @@
           "$ref": "#/$defs/CacheDebugState"
         }
       },
-      "description": "Complete opt-in model, adapter, provenance, runtime, environment, and cache debug state.",
+      "description": "Complete opt-in model, adapter, provenance, typed runtime, and cache debug state.",
       "x-kiln-rust-type": "ModelStateResponse",
       "x-kiln-field-schema-status": "complete"
     },

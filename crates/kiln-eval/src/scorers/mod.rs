@@ -145,8 +145,7 @@ pub enum Scorer {
     ///
     /// This is the "real" verifier for the humaneval / python-algo
     /// datasets — every other built-in scorer is text-similarity based.
-    /// Requires `python3` on PATH (overridable via `python_bin` or the
-    /// `KILN_DOCTEST_PYTHON` env var); each completion runs in an
+    /// Requires `python3` on PATH (overridable via `python_bin`); each completion runs in an
     /// `python3 -I -S` isolated subprocess with a wall-clock timeout
     /// (default 5 s).
     PythonDoctest {

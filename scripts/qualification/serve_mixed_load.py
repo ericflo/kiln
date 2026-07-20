@@ -3720,10 +3720,6 @@ def attest_runtime(
             ):
                 failures.append("debug batching actor-cycle idle does not match config")
 
-    flags = debug.get("env_flags")
-    if not isinstance(flags, dict):
-        failures.append("debug env_flags are missing")
-        return failures
     debug_autoscaler = debug.get("kv_autoscaler")
     if not isinstance(debug_autoscaler, dict):
         failures.append("debug KV autoscaler runtime state is missing")
@@ -3741,34 +3737,6 @@ def attest_runtime(
                 failures.append(
                     f"debug KV autoscaler {field} disagrees with health runtime state"
                 )
-    if "KILN_KV_AUTOSCALE" in flags:
-        failures.append("legacy KV autoscale environment flag remains in debug state")
-    for name, label in (
-        ("KILN_MEMORY_RECLAIM_MODE", "memory reclaim"),
-        ("KILN_HTTP_SEND_BUFFER_BYTES", "HTTP send-buffer"),
-        ("KILN_STREAM_STALL_GRACE_MS", "stream-stall grace"),
-    ):
-        state = flags.get(name)
-        if (
-            not isinstance(state, dict)
-            or state.get("present") is not False
-            or state.get("value") is not None
-        ):
-            failures.append(f"{label} compatibility environment flag must remain absent")
-    prefill_ceiling_flag = flags.get("KILN_MAX_PREFILL_TOKENS_PER_CYCLE")
-    if (
-        not isinstance(prefill_ceiling_flag, dict)
-        or prefill_ceiling_flag.get("present") is not False
-        or prefill_ceiling_flag.get("value") is not None
-    ):
-        failures.append("prefill-token ceiling compatibility environment flag is present")
-    prefill_layer_ceiling_flag = flags.get("KILN_MAX_PREFILL_LAYERS_PER_CYCLE")
-    if (
-        not isinstance(prefill_layer_ceiling_flag, dict)
-        or prefill_layer_ceiling_flag.get("present") is not False
-        or prefill_layer_ceiling_flag.get("value") is not None
-    ):
-        failures.append("prefill-layer ceiling compatibility environment flag is present")
     return failures
 
 

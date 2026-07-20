@@ -15975,7 +15975,7 @@ mod tests {
     #[tokio::test]
     async fn chat_config_hash_metadata_can_be_enabled_by_request_flag() {
         let mut state = make_batch_test_state();
-        state.config_hashes.kiln_env_config_hash = Some(format!("sha256:{}", "a".repeat(64)));
+        state.config_hashes.effective_config_hash = Some(format!("sha256:{}", "a".repeat(64)));
 
         let (status, json) = chat_post(
             state,
@@ -15998,7 +15998,7 @@ mod tests {
         );
         assert!(hashes["chat_template_hash"].is_null());
         assert!(
-            hashes["kiln_env_config_hash"]
+            hashes["effective_config_hash"]
                 .as_str()
                 .unwrap()
                 .starts_with("sha256:")

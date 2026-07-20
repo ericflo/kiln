@@ -2,8 +2,8 @@
 
 Sources of truth:
 
-- `bench-results/preserve-list-nvtx.csv` (242 call sites, 155 distinct range names)
-- `bench-results/preserve-list-env.csv` (1285 call sites, 454 distinct `KILN_*` vars; 14 go through `env_flag` / `env_tristate`)
+- `bench-results/preserve-list-nvtx.csv` (243 call sites, 156 distinct range names)
+- `bench-results/preserve-list-env.csv` (909 call sites, 236 distinct `KILN_*` vars; 0 go through `env_flag` / `env_tristate`)
 - `bench-results/preserve-list-backend-runtime.csv` (0 trait methods whose signature still mentions a candle type)
 
 Regenerate: `scripts/audit-preserve-list.sh`.
@@ -72,6 +72,7 @@ Grouped by `kiln/<prefix>/...`; counts are total call sites.
 | `l2_normalize_kt` | 1 |
 | `lm_head_argmax` | 1 |
 | `lm_head_argmax_eager` | 1 |
+| `lm_head_argmax_eager_batched` | 1 |
 | `lm_head_argmax_kt` | 1 |
 | `lm_head_batch_argmax_decode` | 1 |
 | `lm_head_batch_argmax_decode_stable_buffers` | 1 |
@@ -110,26 +111,26 @@ Grouped by `kiln/<prefix>/...`; counts are total call sites.
 
 | env var | sites | via `env_flag`? | crates touched |
 |---|---:|---:|---|
-| `KILN_QUALIFICATION` | 28 | no | kiln-model;kiln-server;kiln-tensor;kiln-train;kiln-vulkan-kernel |
+| `KILN_QUALIFICATION` | 26 | no | kiln-model;kiln-server;kiln-tensor;kiln-train;kiln-vulkan-kernel |
 | `KILN_TENSOR_VULKAN_TEST` | 25 | no | kiln-model;kiln-tensor;kiln-train |
-| `KILN_FORCE_EAGER_DECODE` | 12 | no | kiln-model |
-| `KILN_KEEP_PROJECTION_ORIGINALS` | 11 | no | kiln-model |
-| `KILN_MODEL_PATH` | 10 | no | kiln-server;kiln-train |
 | `KILN_STREAMING_PREFILL` | 10 | no | kiln-server |
 | `KILN_STREAMING_TILE_TOKENS` | 10 | no | kiln-server |
 | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES` | 9 | no | kiln-server |
 | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES` | 9 | no | kiln-server |
 | `KILN_ADAPTERS_MAX_DISK_BYTES` | 9 | no | kiln-server |
-| `KILN_CUDA_GRAPHS` | 9 | no | kiln-model;kiln-server |
-| `KILN_DETERMINISTIC` | 9 | no | kiln-server;kiln-tensor |
-| `KILN_DISABLE_FUSED_PAGED_DECODE` | 9 | no | kiln-model |
-| `KILN_EVAL_MODE` | 9 | no | kiln-server |
-| `KILN_METAL_GRAPHS` | 9 | no | kiln-model |
-| `KILN_METAL_GRAPH_STABLE_PAGED_METADATA` | 9 | no | kiln-model |
+| `KILN_MODEL_PATH` | 9 | no | kiln-server;kiln-train |
 | `KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES` | 9 | no | kiln-server |
-| `KILN_SPEC_ENABLED` | 9 | no | kiln-server |
 | `KILN_STREAMING_LAST_TOKEN_LM_HEAD` | 9 | no | kiln-server |
 | `KILN_STREAMING_PREFILL_MODE` | 9 | no | kiln-server |
+| `KILN_ACCELERATOR_ROCM_GRAPH_MODE` | 8 | no | kiln-server |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | 8 | no | kiln-server |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | 8 | no | kiln-server |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` | 8 | no | kiln-server |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | 8 | no | kiln-server |
+| `KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` | 8 | no | kiln-server |
+| `KILN_CHECKPOINT_BOUNDARY_CACHE_GB` | 8 | no | kiln-server |
+| `KILN_CONFIG` | 8 | no | kiln-server |
+| `KILN_CUDA_ARCHS` | 8 | no | kiln-blas;kiln-conv1d-kernel;kiln-flash-attn;kiln-gdn-kernel;kiln-marlin-gemm;kiln-opd-loss-kernel;kiln-rmsnorm-kernel;kiln-tensor |
 
 ## `BackendRuntime` candle-typed methods
 

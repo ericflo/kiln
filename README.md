@@ -680,7 +680,7 @@ open inputs and include validated examples for every public entrypoint.
 | POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
 | GET | `/v1/models` | List available models |
 | GET | `/v1/config` | Current server configuration, including serving-profile source, typed model-startup upload policy and completed observation, batching/streaming-prefill policy, SFT checkpoint boundaries, and the versioned optimizer implementation/native-device-hook versus server-execution contract |
-| GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest and execution-provenance record, active model/adapters, config hashes, env flags, batching, thinking defaults, SFT checkpoint-boundary policy, cache counts, and batched recurrent-state ownership/lifecycle counters; enabled only with typed `server.debug_model_state=true` or `server.eval_mode=true` |
+| GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest and execution-provenance record, active model/adapters, typed config hashes and runtime policies, batching, thinking defaults, SFT checkpoint-boundary policy, cache counts, and batched recurrent-state ownership/lifecycle counters; enabled only with typed `server.debug_model_state=true` or `server.eval_mode=true` |
 | GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history, including effective thinking-budget provenance and outcomes, for the dashboard's request panel |

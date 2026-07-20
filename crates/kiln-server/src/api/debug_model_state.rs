@@ -46,7 +46,6 @@ struct ModelStateResponse {
     kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState,
     streaming_prefill: StreamingPrefillRuntimeConfig,
     training: TrainingDebugState,
-    env_flags: BTreeMap<&'static str, EnvFlagState>,
     batching_engine: BatchingEngineDebugState,
     thinking: ThinkingDebugState,
     caches: CacheDebugState,
@@ -96,12 +95,6 @@ struct LoadedAdapterDebugState {
     name: String,
     path: String,
     adapter_model_sha256: Option<String>,
-}
-
-#[derive(Serialize)]
-struct EnvFlagState {
-    present: bool,
-    value: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -327,7 +320,6 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
         training: TrainingDebugState {
             checkpoint_boundary_policy: state.training_runtime.checkpoint_boundary_policy(),
         },
-        env_flags: selected_env_flags(),
         batching_engine: batching_engine_state(state).await,
         thinking: thinking_state(state),
         caches: cache_state(state),
@@ -461,44 +453,6 @@ fn count_adapter_dirs(adapter_dir: &Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
-}
-
-fn selected_env_flags() -> BTreeMap<&'static str, EnvFlagState> {
-    [
-        "KILN_MODEL_PATH",
-        "KILN_MODEL_ID",
-        "KILN_TOKENIZER_PATH",
-        "KILN_ADAPTER_DIR",
-        "KILN_SERVED_MODEL_ID",
-        "KILN_EVAL_MODE",
-        "KILN_DEFAULT_THINKING_ENABLED",
-        "KILN_DEFAULT_NO_THINK",
-        "KILN_CUDA_GRAPHS",
-        "KILN_KV_CACHE_FP8",
-        "KILN_PREFIX_CACHE_ENABLED",
-        "KILN_NUM_BLOCKS",
-        "KILN_INFERENCE_MEMORY_FRACTION",
-        "KILN_MEMORY_RECLAIM_MODE",
-        "KILN_HTTP_SEND_BUFFER_BYTES",
-        "KILN_STREAM_STALL_GRACE_MS",
-        "KILN_MAX_BATCH_TOKENS",
-        "KILN_MAX_PREFILL_TOKENS_PER_CYCLE",
-        "KILN_MAX_PREFILL_LAYERS_PER_CYCLE",
-        "KILN_MAX_DECODE_BATCH",
-        "KILN_DETERMINISTIC",
-    ]
-    .into_iter()
-    .map(|name| {
-        let value = std::env::var(name).ok();
-        (
-            name,
-            EnvFlagState {
-                present: value.is_some(),
-                value,
-            },
-        )
-    })
-    .collect()
 }
 
 async fn batching_engine_state(state: &AppState) -> BatchingEngineDebugState {
@@ -988,20 +942,12 @@ mod tests {
             json["batching_engine"]["configuration"]["actor_cycle_idle"]["command_poll_milliseconds"],
             5
         );
-        assert!(json["env_flags"]["KILN_ROCM_GRAPHS"].is_null());
-        assert!(json["env_flags"]["KILN_KV_AUTOSCALE"].is_null());
-        assert!(json["env_flags"]["KILN_MEMORY_RECLAIM_MODE"].is_object());
         assert_eq!(json["kv_autoscaler"]["requested"], true);
         assert_eq!(json["kv_autoscaler"]["requested_source"], "default");
         assert!(json["kv_autoscaler"]["force_blocks"].is_null());
         assert_eq!(json["kv_autoscaler"]["force_blocks_source"], "default");
         assert_eq!(json["kv_autoscaler"]["state"], "unavailable");
         assert_eq!(json["kv_autoscaler"]["reason"], "mock_backend");
-        assert!(json["env_flags"]["KILN_HTTP_SEND_BUFFER_BYTES"].is_object());
-        assert!(json["env_flags"]["KILN_STREAM_STALL_GRACE_MS"].is_object());
-        assert!(json["env_flags"]["KILN_MAX_BATCH_TOKENS"].is_object());
-        assert!(json["env_flags"]["KILN_MAX_PREFILL_TOKENS_PER_CYCLE"].is_object());
-        assert!(json["env_flags"]["KILN_MAX_PREFILL_LAYERS_PER_CYCLE"].is_object());
         assert_eq!(json["http"]["send_buffer_requested_bytes"], 4096);
         assert_eq!(json["http"]["send_buffer_kernel_readback_bytes"], 8192);
         assert_eq!(json["http"]["send_buffer_effective_bytes"], 4096);

@@ -2,6 +2,13 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
+- Process-state cleanup: removed the unused generic environment-flag helper,
+  retired the undocumented `KILN_DOCTEST_PYTHON` fallback in favor of the
+  existing typed scorer `python_bin`, and stopped trusted debug responses from
+  rereading or echoing raw configuration-like environment values. Config-hash
+  metadata now names and hashes only the resolved typed object as
+  `effective_config_hash`; execution provenance retains its separate redacted
+  environment identity.
 - CUDA projection and training-backward configuration: replaced the Marlin
   layout, pack implementation, and FlashAttention backward environment probes
   with immutable typed `accelerator.cuda_marlin_profile` and

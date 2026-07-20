@@ -2080,7 +2080,7 @@ mod tests {
                 .starts_with("sha256:")
         );
         assert!(json["config_hashes"]["chat_template_hash"].is_null());
-        assert!(json["config_hashes"]["kiln_env_config_hash"].is_null());
+        assert!(json["config_hashes"]["effective_config_hash"].is_null());
         assert_eq!(
             json["base_weight_identity"]["manifest_type"],
             "kiln.base-weight-shards.v1"
