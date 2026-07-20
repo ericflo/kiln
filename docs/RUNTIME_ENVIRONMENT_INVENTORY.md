@@ -16,7 +16,7 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **433 direct read call sites** and
+The scanner records **431 direct read call sites** and
 **150 process-mutation call sites**. It can
 statically name **32 distinct literal `KILN_*`
 read names** across **113 call sites**.
@@ -25,8 +25,10 @@ boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
-| Public stable | 8 | 1 | 0 |
-| Experimental/debug migration | 2 | 0 | 0 |
+| Public stable | 6 | 1 | 0 |
+| Startup safety | 1 | 0 | 0 |
+| Credential provider | 1 | 0 | 0 |
+| Experimental/debug migration | 0 | 0 | 0 |
 | Build time/provenance | 326 | 6 | 8 |
 | Test only | 97 | 25 | 142 |
 
@@ -40,6 +42,8 @@ flags repeatedly even when each name has only one syntactic call site.
 | Class | Meaning and required disposition |
 |---|---|
 | Public stable | Access occurs only in the central typed startup/configuration boundary. Public support still requires an entry in the Configuration Reference. |
+| Startup safety | One dedicated boundary snapshots closed external driver visibility/remapping names at first accelerator identity validation before model upload. These are not Kiln settings; their presence fails device/probe identity closed and cannot become request-time policy. |
+| Credential provider | One dedicated adapter resolves only the secret variable named by typed, exact-origin credential configuration. Secret values must never enter logs, serialization, API state, receipts, or caches. |
 | Experimental/debug migration | Runtime source reads the process environment outside that boundary. Move real policy into typed immutable configuration; put retained diagnostics behind one explicit experimental profile; delete dead controls. |
 | Build time/provenance | A build script, compile-time macro, or immutable build/source provenance boundary owns the read. It must never become request-time policy. |
 | Test only | The access is in a unit-test, integration-test, benchmark, or example surface. Prefer scoped typed fixtures; serialize the few tests that must mutate process-global state. |
@@ -56,8 +60,7 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-memory/src/vram.rs` | 1 | 0 |
-| `crates/kiln-train/src/remote_teacher.rs` | 1 | 0 |
+| None; the migration queue is empty | 0 | 0 |
 
 ## Literal `KILN_*` catalog
 
@@ -102,8 +105,8 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 ## Dynamic read catalog
 
 These direct reads do not expose one literal name at the call site. They include
-central registry loops, configured credential names, helper functions, and whole-
-environment provenance scans. Their exact expression remains ratcheted so a
+central registry loops, the narrow credential adapter, startup safety snapshots,
+helper functions, and whole-environment provenance scans. Their exact expression remains ratcheted so a
 dynamic helper cannot conceal source growth.
 
 | Owner | API | Argument | Class | Call sites |
@@ -145,7 +148,7 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-marlin-gemm/build.rs` | `var` | `CARGO_FEATURE_ROCM` | Build time/provenance | 1 |
 | `crates/kiln-marlin-gemm/build.rs` | `var` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
 | `crates/kiln-marlin-gemm/build.rs` | `var_os` | `NVCC` | Build time/provenance | 1 |
-| `crates/kiln-memory/src/vram.rs` | `var_os` | `name` | Experimental/debug migration | 1 |
+| `crates/kiln-memory/src/startup_environment.rs` | `var_os` | `name` | Startup safety | 1 |
 | `crates/kiln-model/tests/backend_capability_contract.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 1 |
 | `crates/kiln-mps/build.rs` | `var` | `CARGO_CFG_TARGET_OS` | Build time/provenance | 1 |
 | `crates/kiln-mps/build.rs` | `var` | `CARGO_CFG_TARGET_VENDOR` | Build time/provenance | 1 |
@@ -178,7 +181,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-server/src/api/health.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/bench.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/cli.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
-| `crates/kiln-server/src/config.rs` | `var` | `& credential . api_key_env` | Public stable | 2 |
 | `crates/kiln-server/src/config.rs` | `var` | `name` | Public stable | 1 |
 | `crates/kiln-server/src/config.rs` | `var_os` | `PATH` | Public stable | 1 |
 | `crates/kiln-server/src/config.rs` | `var_os` | `& name` | Test only | 1 |
@@ -199,9 +201,9 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-tensor/build.rs` | `var` | `OUT_DIR` | Build time/provenance | 2 |
 | `crates/kiln-tensor/build.rs` | `var_os` | `NVCC` | Build time/provenance | 1 |
 | `crates/kiln-tensor/src/vk_shaders.rs` | `env!` | `OUT_DIR` | Build time/provenance | 1 |
+| `crates/kiln-train/src/credential_provider.rs` | `var` | `name` | Credential provider | 1 |
 | `crates/kiln-train/src/opd.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-train/src/receipt.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 2 |
-| `crates/kiln-train/src/remote_teacher.rs` | `var` | `env_name` | Experimental/debug migration | 1 |
 | `crates/kiln-train/src/remote_teacher.rs` | `var_os` | `& env_name` | Test only | 1 |
 | `crates/kiln-train/src/replay.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-train/src/train_receipt.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
@@ -233,7 +235,10 @@ mutation creates ordering and parallelism hazards even when it is test-only.
 
 ## Migration rule
 
-For each production owner, move a coherent policy family at once: define typed
+The repository check rejects every experimental/debug migration read even if the
+JSON baseline is regenerated. A new production read must instead be removed or
+belong to a reviewed closed boundary above. For each production owner, move a
+coherent policy family at once: define typed
 fields, derive canonical `KILN_<SECTION>_<FIELD>` compatibility inputs
 mechanically, validate once at startup, inject immutable policy, expose effective
 value/source/restart semantics, remove lower rereads, and lower this ratchet in the

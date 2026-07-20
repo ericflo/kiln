@@ -3,6 +3,8 @@
 //! Detects available GPU memory and provides recommended training parameters
 //! so that SFT and GRPO training "just works" on consumer GPUs without manual tuning.
 
+use crate::startup_environment::{DeviceRemapFamily, present_device_remap_variables};
+
 /// Effective GPU memory capacity plus physical-memory topology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuVramInfo {
@@ -101,7 +103,7 @@ pub fn validate_vram_probe_identity(
             "automatic VRAM probe selection is diagnostic-only and cannot prove the identity of an already-selected accelerator; use a backend-derived explicit probe selector",
         )),
         VramProbeSelector::Nvidia(ordinal) => {
-            let remapping = present_environment_variables(NVIDIA_DEVICE_REMAP_ENV);
+            let remapping = present_device_remap_variables(DeviceRemapFamily::Nvidia);
             reject_device_remapping(selector, &remapping)?;
             let candidates = query_nvidia_physical_indices().ok_or_else(|| {
                 unresolved_probe_identity_error(
@@ -114,10 +116,10 @@ pub fn validate_vram_probe_identity(
         VramProbeSelector::LinuxDrm { index, vendor } => {
             #[cfg(target_os = "linux")]
             {
-                let remapping = present_environment_variables(match vendor {
-                    Some(LinuxDrmVendor::Amd) => ROCM_DEVICE_REMAP_ENV,
-                    Some(LinuxDrmVendor::Intel) => INTEL_DEVICE_REMAP_ENV,
-                    None => VULKAN_DEVICE_REMAP_ENV,
+                let remapping = present_device_remap_variables(match vendor {
+                    Some(LinuxDrmVendor::Amd) => DeviceRemapFamily::Rocm,
+                    Some(LinuxDrmVendor::Intel) => DeviceRemapFamily::Intel,
+                    None => DeviceRemapFamily::Vulkan,
                 });
                 reject_device_remapping(selector, &remapping)?;
                 let candidate_count =
@@ -140,37 +142,6 @@ pub fn validate_vram_probe_identity(
             }
         }
     }
-}
-
-const NVIDIA_DEVICE_REMAP_ENV: &[&str] = &[
-    "CUDA_VISIBLE_DEVICES",
-    "NVIDIA_VISIBLE_DEVICES",
-    "CUDA_DEVICE_ORDER",
-];
-const ROCM_DEVICE_REMAP_ENV: &[&str] = &[
-    "ROCR_VISIBLE_DEVICES",
-    "HIP_VISIBLE_DEVICES",
-    "CUDA_VISIBLE_DEVICES",
-    "GPU_DEVICE_ORDINAL",
-];
-const INTEL_DEVICE_REMAP_ENV: &[&str] = &[
-    "ZE_AFFINITY_MASK",
-    "ONEAPI_DEVICE_SELECTOR",
-    "SYCL_DEVICE_FILTER",
-];
-const VULKAN_DEVICE_REMAP_ENV: &[&str] = &[
-    "MESA_VK_DEVICE_SELECT",
-    "DRI_PRIME",
-    "VK_ICD_FILENAMES",
-    "VK_DRIVER_FILES",
-];
-
-fn present_environment_variables(names: &[&'static str]) -> Vec<&'static str> {
-    names
-        .iter()
-        .copied()
-        .filter(|name| std::env::var_os(name).is_some())
-        .collect()
 }
 
 fn validate_nvidia_ordinal_identity(

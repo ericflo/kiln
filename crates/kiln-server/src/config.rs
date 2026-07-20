@@ -3550,9 +3550,7 @@ impl TeachersConfig {
                 "teacher credential_id {credential_id:?} is not authorized for origin {requested_origin:?}"
             ));
         }
-        let secret_available =
-            std::env::var(&credential.api_key_env).is_ok_and(|value| !value.trim().is_empty());
-        if !secret_available {
+        if kiln_train::validate_bearer_secret_environment(&credential.api_key_env).is_err() {
             return Err(format!(
                 "teacher credential_id {credential_id:?} is unavailable because its server-configured secret is missing or empty"
             ));
@@ -3570,16 +3568,17 @@ impl TeachersConfig {
             credential
                 .validate_definition(credential_id)
                 .map_err(anyhow::Error::msg)?;
-            let secret = std::env::var(&credential.api_key_env).with_context(|| {
-                format!(
-                    "teachers.credentials.{credential_id}.api_key_env names an environment variable that is not set"
-                )
-            })?;
-            if secret.trim().is_empty() {
-                anyhow::bail!(
-                    "teachers.credentials.{credential_id}.api_key_env names an environment variable whose value is empty"
-                );
-            }
+            kiln_train::validate_bearer_secret_environment(&credential.api_key_env).map_err(
+                |error| {
+                    let detail = match error {
+                        kiln_train::CredentialLookupError::Unavailable => "is not set",
+                        kiln_train::CredentialLookupError::Empty => "has an empty value",
+                    };
+                    anyhow::anyhow!(
+                        "teachers.credentials.{credential_id}.api_key_env names an environment variable that {detail}"
+                    )
+                },
+            )?;
         }
         Ok(())
     }

@@ -1418,10 +1418,11 @@ Current audit findings and migration order (2026-07-12):
   central registry.
 
 - [x] Inventory every direct `KILN_*` read and classify it as public stable,
-  experimental/debug, build-time, or test-only.
+  startup safety, credential provider, experimental/debug, build-time, or
+  test-only.
 - [ ] Centralize public runtime configuration into typed structures with one
   parser, validation, defaults, source attribution, and effective-config dump.
-- [ ] Prohibit direct runtime environment reads in model kernels, forwarding,
+- [x] Prohibit direct runtime environment reads in model kernels, forwarding,
   scheduling, training, eval, UI, and request handlers via a repository check.
 - [ ] Put experimental/debug knobs behind one explicit namespace and profile.
 - [ ] Delete dead, duplicate, contradictory, and undocumented knobs.
@@ -2144,10 +2145,46 @@ under bounded one-job thermal containment; no accelerator workload ran. Local
 rendered browser smoke remains unavailable without Chromium and is left to the
 inexpensive UI/Pages workflows. The runtime ratchet falls from 441 to 433 reads
 and from 9 to 2 migration reads, with 150 process mutations unchanged. The two
-remaining migration boundaries are the startup/device-remap safety probe and
-the explicitly named credential-provider adapter. The broad Phase 8.1
-checkboxes remain open for those owners, test-only process mutation, and the
-incomplete whole-object effective configuration view.
+remaining direct runtime boundaries are the startup/device-remap safety probe
+and the explicitly named credential-provider adapter. The broad Phase 8.1
+checkboxes remain open for test-only process mutation, experimental-profile
+consolidation, dead/duplicate control auditing, and the incomplete whole-object
+effective configuration view.
+
+Runtime-environment boundary checkpoint (completed 2026-07-20): the final two
+production owners outside typed startup configuration are now explicit closed
+boundaries rather than an indefinite migration queue. The memory crate
+snapshots only the documented NVIDIA, ROCm, Intel, and Vulkan driver visibility
+and ordinal-remap names at first accelerator identity validation, before model
+upload. Presence fails the selected family closed; values are never interpreted
+as Kiln configuration, and the immutable snapshot cannot become request-time
+policy. Remote-teacher startup validation, exact-origin credential-handle
+resolution, and outbound bearer injection now share one narrow adapter. The
+adapter reads only the secret name selected by trusted TOML, never retains or
+serializes the value, and fails missing, non-Unicode, or empty values closed.
+
+The repository policy now rejects every `experimental_debug` production read
+even if a developer regenerates the JSON baseline, as well as retaining the
+existing production process-mutation prohibition. A regression proves a new
+crate-owned runtime read fails policy. The generated inventory reports 431
+direct reads, 150 mutations, zero migration reads, six typed startup/logging
+reads, one startup-safety read, and one credential-provider read. This closes
+the direct-runtime-read checkbox above; it does not close configuration
+completeness, experimental-profile consolidation, dead-control deletion, or
+the 142 test-only mutation call sites.
+
+Verification passes 66 active memory tests with one hardware smoke ignored, 43
+remote-teacher tests, two focused server credential tests, seven server remote-
+identity integration tests, all 1,097 server library tests, and all 662
+qualification tests. The 118-field/113-canonical-environment/76-alias config
+schema and 102-path/114-operation HTTP contract are current. Ten documentation-
+builder tests, 55-document/5-asset validation and assembly, static site smoke,
+desktop UI smoke, formatting, runtime-default, release, source-parsing,
+thinking-budget, repository-artifact, and diff gates pass. All-target default,
+ROCm `gfx1151`, Vulkan, and `CUDARC_CUDA_VERSION=12080` toolkit-free CUDA checks
+pass under bounded one-job thermal containment; no accelerator workload ran.
+Rendered server-UI smoke remains unavailable because this host has no Chromium
+executable and is left to the inexpensive UI workflow.
 
 ### 8.2 One scheduling model
 
@@ -3248,6 +3285,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-20 | Residual process-state helper and config-identity cleanup | this source | this portable configuration checkpoint | generic environment helper deletion, Python doctest executable authority, trusted debug response, config/provenance identity, API/schema/qualification/docs integration, and cross-feature compilation; no accelerator execution or performance claim | 103/103 active core, 233/233 active eval, 1,096/1,096 server library, focused training-receipt, and 661/661 qualification tests; current 117-field configuration, 173-definition observability, 55-definition inference, 80-definition artifact, 82-definition eval, 118-definition control-plane, and 102-path/114-operation HTTP contracts; refreshed 909-call-site preserve-list audit with zero generic-helper users; 10/10 docs-builder tests; 55-document/5-asset assembled static site; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting, release, source-parsing, thinking-budget, and diff hygiene | portable source/configuration checkpoint passed; direct reads 455 -> 441, process mutations 161 -> 150, migration reads 14 -> 9, literal `KILN_*` read names 36 -> 32; local rendered browser smoke unavailable without Chromium | The unused generic environment parser and its global-mutation tests are gone. Python doctest execution is controlled only by its typed scorer field or stable default. Trusted debug publishes resolved typed runtime policy rather than rereading and echoing raw process values. `effective_config_hash` now means exactly the serialized effective object; the old field is read-only migration input, while the distinct immutable execution-provenance environment digest remains secret-redacted. Remaining migration owners are cache/home paths, device-remap safety, Pi home discovery, and the named credential adapter; the broad Phase 8.1 gates remain open. |
 
 | 2026-07-20 | Immutable application cache-root and account-path authority | this source | this portable configuration checkpoint | typed application paths, BLAS/rocBLAS autotune cache, Vulkan pipeline cache, transposed-weight cache, Pi account-home defaults, CLI/API/dashboard/schema/site integration, and cross-feature compilation; no accelerator execution or performance claim | 6/6 resource, focused BLAS/rocBLAS/Vulkan cache-path, 11/11 transposed-weight-cache, 1,097/1,097 server library, and 661/661 qualification tests; current 118-field/113-canonical-environment/76-alias configuration, 174-definition observability, 55-definition inference, 80-definition artifact, 82-definition eval, 118-definition control-plane, and 102-path/114-operation HTTP contracts; 10/10 docs-builder tests; 55-document/5-asset assembled static site; desktop UI smoke; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting, release, runtime-default, repository, source-parsing, thinking-budget, and diff hygiene | portable source/configuration checkpoint passed; direct reads 441 -> 433, process mutations remain 150, migration reads 9 -> 2; local rendered browser smoke unavailable without Chromium | `paths.cache_root` and its mechanically derived `KILN_PATHS_CACHE_ROOT` override resolve one absolute immutable root before device or model construction. BLAS/rocBLAS autotune files, Vulkan pipelines, and transposed weights consume that root without reading `HOME` or `XDG_CACHE_HOME`. Default cache and Pi paths use the OS account database with a portable temporary fallback. CLI, config API, dashboard, generated contracts, example, complete reference, website, and smoke ratchets agree on the path, source, owned caches, and restart requirement. The two remaining migration reads are the device-remap safety probe and the named credential-provider adapter; broad Phase 8.1 remains open. |
+
+| 2026-07-20 | Closed production runtime-environment boundaries | this source | this portable configuration checkpoint | immutable external-driver remap safety snapshot, exact-origin remote-teacher credential provider, hard zero-migration-read repository policy, generated inventory, configuration/teacher references, and permanent website; no accelerator execution or performance claim | 66 active memory tests; 43 remote-teacher tests; two focused server credential tests; seven remote-teacher identity integrations; 1,097/1,097 server library tests; 663/663 qualification tests; runtime inventory at 431 reads/150 mutations/zero migration reads; current 118-field config and 102-path/114-operation HTTP contracts; 10/10 docs-builder tests; 55-document/5-asset assembled static site; desktop UI smoke; default, ROCm `gfx1151`, Vulkan, and `CUDARC_CUDA_VERSION=12080` toolkit-free CUDA all-target checks; formatting, runtime-default, release, source-parsing, thinking-budget, repository-artifact, and diff gates | portable source/configuration checkpoint passed; Phase 8.1 direct-runtime-read prohibition closed; whole-object config, experimental-profile/dead-control audit, and test mutation remain open | The first accelerator identity validation snapshots one closed 13-name NVIDIA/ROCm/Intel/Vulkan visibility set before model upload and fails relevant presence closed without interpreting values. Rust and website ratchets prove that the family lists, unique union, operator reference, and generated page stay complete. Startup secret validation, credential-handle resolution, and outbound bearer injection now use one non-serializing provider selected only by trusted TOML and exact origin. The repository policy rejects every future unclassified production read even after contract regeneration, fixes each privileged boundary to one exact call shape, and continues rejecting production process mutation. Two duplicate server secret reads are removed; the generated migration queue is empty. Complete operator and vLLM identity references plus the generated website document lifecycle, redaction, failure, restart, and unsupported multi-device semantics. No GPU workload ran, and rendered server UI smoke remains unavailable locally without Chromium. |
 
 ## Known Starting Defects
 

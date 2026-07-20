@@ -18,12 +18,6 @@ const runtimeEnvironmentContract = JSON.parse(
 );
 const runtimeEnvironmentSummary = runtimeEnvironmentContract.summary;
 
-function runtimeMigrationReadCount(path) {
-  return runtimeEnvironmentContract.reads
-    .filter((entry) => entry.path === path && entry.classification === 'experimental_debug')
-    .reduce((total, entry) => total + entry.count, 0);
-}
-
 function publishedPath(relativePath) {
   const path = relative(repoRoot, resolve(siteRoot, relativePath)).split(sep).join('/');
   return relativePath.endsWith('/') && !path.endsWith('/') ? `${path}/` : path;
@@ -185,6 +179,24 @@ const generatedDocsPages = [
       'transposed model weights',
       'GET /v1/config.paths',
       'cannot change during the process lifetime',
+      'External accelerator environment safety',
+      'CUDA_VISIBLE_DEVICES',
+      'NVIDIA_VISIBLE_DEVICES',
+      'CUDA_DEVICE_ORDER',
+      'ROCR_VISIBLE_DEVICES',
+      'HIP_VISIBLE_DEVICES',
+      'GPU_DEVICE_ORDINAL',
+      'ZE_AFFINITY_MASK',
+      'ONEAPI_DEVICE_SELECTOR',
+      'SYCL_DEVICE_FILTER',
+      'MESA_VK_DEVICE_SELECT',
+      'DRI_PRIME',
+      'VK_ICD_FILENAMES',
+      'VK_DRIVER_FILES',
+      'presence of this closed set',
+      'before model weights are loaded',
+      'credential-provider adapter performs every process-environment secret lookup',
+      'missing, non-Unicode, or whitespace-only values fail closed',
       'memory.cuda_graph_cache_entries',
       'KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES',
       'model.accelerator_weight_upload_mib_per_second',
@@ -558,12 +570,16 @@ const generatedDocsPages = [
       `${runtimeEnvironmentSummary.read_call_sites} direct read call sites`,
       `${runtimeEnvironmentSummary.process_mutation_call_sites} process-mutation call sites`,
       `${runtimeEnvironmentSummary.literal_kiln_read_names} distinct literal KILN_*`,
+      'Startup safety',
+      'Credential provider',
       'Experimental/debug migration',
       `${runtimeEnvironmentSummary.read_call_sites_by_classification.experimental_debug}`,
       'Production migration owners',
-      'crates/kiln-model/src/forward.rs',
-      `${runtimeMigrationReadCount('crates/kiln-model/src/forward.rs')}`,
+      'the migration queue is empty',
+      'crates/kiln-memory/src/startup_environment.rs',
+      'crates/kiln-train/src/credential_provider.rs',
       'Process-environment mutation is forbidden in production execution',
+      'rejects every experimental/debug migration read',
       'KILN_<SECTION>_<FIELD>',
       'do not edit by hand',
     ],
@@ -1320,6 +1336,50 @@ function normalizedHtmlText(html) {
 function missingNormalizedTerms(text, terms) {
   const normalized = text.toLowerCase();
   return terms.filter((term) => !normalized.includes(term.toLowerCase()));
+}
+
+function validateRuntimeEnvironmentBoundaryDocumentationSourceContract() {
+  const expectedDeviceRemapEnvironmentNames = [
+    'CUDA_VISIBLE_DEVICES',
+    'NVIDIA_VISIBLE_DEVICES',
+    'CUDA_DEVICE_ORDER',
+    'ROCR_VISIBLE_DEVICES',
+    'HIP_VISIBLE_DEVICES',
+    'GPU_DEVICE_ORDINAL',
+    'ZE_AFFINITY_MASK',
+    'ONEAPI_DEVICE_SELECTOR',
+    'SYCL_DEVICE_FILTER',
+    'MESA_VK_DEVICE_SELECT',
+    'DRI_PRIME',
+    'VK_ICD_FILENAMES',
+    'VK_DRIVER_FILES',
+  ];
+  const startupEnvironmentSource = readFileSync(
+    resolve(repoRoot, 'crates/kiln-memory/src/startup_environment.rs'),
+    'utf8',
+  );
+  const unionBody = startupEnvironmentSource.match(
+    /const ALL_DEVICE_REMAP_ENV: &\[&str\] = &\[([\s\S]*?)\];/,
+  )?.[1];
+  if (!unionBody) {
+    fail('startup_environment.rs: missing closed ALL_DEVICE_REMAP_ENV list');
+  }
+  const sourceNames = [...unionBody.matchAll(/"([A-Z0-9_]+)"/g)]
+    .map((match) => match[1]);
+  if (JSON.stringify(sourceNames) !== JSON.stringify(expectedDeviceRemapEnvironmentNames)) {
+    fail(
+      `startup_environment.rs: expected exact closed driver-remap list ${expectedDeviceRemapEnvironmentNames.join(', ')}, got ${sourceNames.join(', ')}`,
+    );
+  }
+
+  const configurationSource = readFileSync(resolve(repoRoot, 'docs/CONFIGURATION.md'), 'utf8');
+  const missingNames = missingNormalizedTerms(
+    configurationSource,
+    expectedDeviceRemapEnvironmentNames,
+  );
+  if (missingNames.length > 0) {
+    fail(`docs/CONFIGURATION.md: incomplete driver-remap safety reference: ${missingNames.join(', ')}`);
+  }
 }
 
 function validateSftLossRouteDocumentationSourceContract() {
@@ -3265,6 +3325,7 @@ async function runSmoke() {
   validateCliHelpOnboardingCopy();
   validateLaunchSentinel();
   validateDemoReadmeInventory();
+  validateRuntimeEnvironmentBoundaryDocumentationSourceContract();
   validateSftLossRouteDocumentationSourceContract();
   const hasGeneratedDocs = validateGeneratedDocsArtifacts();
   validateDocsSiteCanonicalLinks();

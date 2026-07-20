@@ -478,6 +478,14 @@ curl -X POST http://localhost:8420/v1/teachers \
   }'
 ```
 
+The TOML entry contains only the secret variable name and its exact authorized
+origin. Kiln validates the named value at startup, rechecks availability when a
+credential handle is resolved, and reads the bearer value through one narrow
+provider immediately before each outbound request. The secret value is never
+stored in configuration or application state, serialized, logged, cached, or
+written to a receipt. Missing, non-Unicode, and whitespace-only values fail
+closed; authenticated error responses are redacted.
+
 The request cannot set identity, tokenizer hash, vocabulary size, top-K,
 full-vocabulary support, or a secret environment-variable name. Kiln sends two
 operational probes, verifies the complete numeric vocabulary against its

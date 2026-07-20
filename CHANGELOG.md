@@ -2,6 +2,15 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
+- Runtime environment boundaries: direct production reads outside typed
+  startup configuration, a closed external-driver remap safety snapshot, the
+  exact-origin teacher credential provider, and immutable provenance now fail
+  the repository policy even if its generated inventory is refreshed. The
+  policy also fixes both privileged adapters to one exact direct-read call
+  shape. The driver snapshot recognizes the complete source-and-docs-ratcheted
+  NVIDIA, ROCm, Intel, and Vulkan visibility set before model upload; every
+  teacher-secret check and outbound bearer lookup uses one narrow
+  non-serializing provider.
 - Application path authority: added typed `paths.cache_root` with a
   mechanically derived `KILN_PATHS_CACHE_ROOT` startup override, immutable
   absolute resolution, and source reporting in the CLI, config API, and

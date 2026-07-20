@@ -72,6 +72,40 @@ PUBLIC_RUNTIME_BOUNDARIES = frozenset(
         "crates/kiln-server/src/logging.rs",
     }
 )
+STARTUP_SAFETY_BOUNDARIES = frozenset(
+    {
+        "crates/kiln-memory/src/startup_environment.rs",
+    }
+)
+CREDENTIAL_PROVIDER_BOUNDARIES = frozenset(
+    {
+        "crates/kiln-train/src/credential_provider.rs",
+    }
+)
+CLOSED_RUNTIME_READ_BOUNDARY_SHAPES = {
+    "startup_safety": {
+        "path": "crates/kiln-memory/src/startup_environment.rs",
+        "language": "rust",
+        "surface": "source",
+        "phase": "runtime",
+        "api": "var_os",
+        "operation": "read",
+        "argument_kind": "expression",
+        "argument": "name",
+        "count": 1,
+    },
+    "credential_provider": {
+        "path": "crates/kiln-train/src/credential_provider.rs",
+        "language": "rust",
+        "surface": "source",
+        "phase": "runtime",
+        "api": "var",
+        "operation": "read",
+        "argument_kind": "expression",
+        "argument": "name",
+        "count": 1,
+    },
+}
 BUILD_PROVENANCE_BOUNDARIES = frozenset(
     {
         "crates/kiln-server/src/execution_provenance.rs",
@@ -583,6 +617,10 @@ def _classification(entry: dict[str, object]) -> tuple[str, str]:
         return "test_only", f"{surface} source surface"
     if phase in {"build-time", "compile-time"}:
         return "build_time", f"{phase} environment access"
+    if path in STARTUP_SAFETY_BOUNDARIES:
+        return "startup_safety", "immutable external-driver startup safety snapshot"
+    if path in CREDENTIAL_PROVIDER_BOUNDARIES:
+        return "credential_provider", "narrow configured credential-provider adapter"
     if path in BUILD_PROVENANCE_BOUNDARIES:
         return "build_time", "immutable build/source provenance boundary"
     if path in PUBLIC_RUNTIME_BOUNDARIES:
@@ -611,13 +649,21 @@ def build_contract(repo_root: Path) -> dict[str, object]:
     for key, count in sorted(calls.items()):
         destination = reads if key[5] == "read" else mutations
         destination.append(_entry_dict(key, count))
+    classifications = (
+        "public_stable",
+        "startup_safety",
+        "credential_provider",
+        "experimental_debug",
+        "build_time",
+        "test_only",
+    )
     read_classifications = {
         classification: sum(
             int(item["count"])
             for item in reads
             if item["classification"] == classification
         )
-        for classification in sorted({str(item["classification"]) for item in reads})
+        for classification in classifications
     }
     mutation_classifications = {
         classification: sum(
@@ -625,9 +671,7 @@ def build_contract(repo_root: Path) -> dict[str, object]:
             for item in mutations
             if item["classification"] == classification
         )
-        for classification in sorted(
-            {str(item["classification"]) for item in mutations}
-        )
+        for classification in classifications
     }
     literal_kiln_reads = [
         item
@@ -642,9 +686,7 @@ def build_contract(repo_root: Path) -> dict[str, object]:
                 if item["classification"] == classification
             }
         )
-        for classification in sorted(
-            {str(item["classification"]) for item in literal_kiln_reads}
-        )
+        for classification in classifications
     }
     return {
         "schema_version": 2,
@@ -693,6 +735,8 @@ def render_report(contract: dict[str, object]) -> str:
 
     labels = {
         "public_stable": "Public stable",
+        "startup_safety": "Startup safety",
+        "credential_provider": "Credential provider",
         "experimental_debug": "Experimental/debug migration",
         "build_time": "Build time/provenance",
         "test_only": "Test only",
@@ -726,7 +770,14 @@ def render_report(contract: dict[str, object]) -> str:
         "| Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |",
         "|---|---:|---:|---:|",
     ]
-    for classification in ("public_stable", "experimental_debug", "build_time", "test_only"):
+    for classification in (
+        "public_stable",
+        "startup_safety",
+        "credential_provider",
+        "experimental_debug",
+        "build_time",
+        "test_only",
+    ):
         lines.append(
             "| "
             + labels[classification]
@@ -748,6 +799,8 @@ def render_report(contract: dict[str, object]) -> str:
             "| Class | Meaning and required disposition |",
             "|---|---|",
             "| Public stable | Access occurs only in the central typed startup/configuration boundary. Public support still requires an entry in the Configuration Reference. |",
+            "| Startup safety | One dedicated boundary snapshots closed external driver visibility/remapping names at first accelerator identity validation before model upload. These are not Kiln settings; their presence fails device/probe identity closed and cannot become request-time policy. |",
+            "| Credential provider | One dedicated adapter resolves only the secret variable named by typed, exact-origin credential configuration. Secret values must never enter logs, serialization, API state, receipts, or caches. |",
             "| Experimental/debug migration | Runtime source reads the process environment outside that boundary. Move real policy into typed immutable configuration; put retained diagnostics behind one explicit experimental profile; delete dead controls. |",
             "| Build time/provenance | A build script, compile-time macro, or immutable build/source provenance boundary owns the read. It must never become request-time policy. |",
             "| Test only | The access is in a unit-test, integration-test, benchmark, or example surface. Prefer scoped typed fixtures; serialize the few tests that must mutate process-global state. |",
@@ -779,6 +832,8 @@ def render_report(contract: dict[str, object]) -> str:
         lines.append(
             f"| {_markdown_code(path)} | {count} | {len(owner_names.get(path, set()))} |"
         )
+    if not owner_calls:
+        lines.append("| None; the migration queue is empty | 0 | 0 |")
 
     lines.extend(
         [
@@ -825,8 +880,8 @@ def render_report(contract: dict[str, object]) -> str:
             "## Dynamic read catalog",
             "",
             "These direct reads do not expose one literal name at the call site. They include",
-            "central registry loops, configured credential names, helper functions, and whole-",
-            "environment provenance scans. Their exact expression remains ratcheted so a",
+            "central registry loops, the narrow credential adapter, startup safety snapshots,",
+            "helper functions, and whole-environment provenance scans. Their exact expression remains ratcheted so a",
             "dynamic helper cannot conceal source growth.",
             "",
             "| Owner | API | Argument | Class | Call sites |",
@@ -856,7 +911,10 @@ def render_report(contract: dict[str, object]) -> str:
             "",
             "## Migration rule",
             "",
-            "For each production owner, move a coherent policy family at once: define typed",
+            "The repository check rejects every experimental/debug migration read even if the",
+            "JSON baseline is regenerated. A new production read must instead be removed or",
+            "belong to a reviewed closed boundary above. For each production owner, move a",
+            "coherent policy family at once: define typed",
             "fields, derive canonical `KILN_<SECTION>_<FIELD>` compatibility inputs",
             "mechanically, validate once at startup, inject immutable policy, expose effective",
             "value/source/restart semantics, remove lower rereads, and lower this ratchet in the",
@@ -869,6 +927,34 @@ def render_report(contract: dict[str, object]) -> str:
 
 
 def validate_policy(contract: dict[str, object]) -> None:
+    reads = contract.get("reads")
+    if not isinstance(reads, list):
+        raise ScanError("contract field 'reads' must be a list")
+    unclassified_runtime = [
+        entry for entry in reads if entry.get("classification") == "experimental_debug"
+    ]
+    if unclassified_runtime:
+        rendered = ", ".join(
+            f"{entry['path']}:{entry['api']}({entry['argument']})"
+            for entry in unclassified_runtime[:10]
+        )
+        raise ScanError(
+            "direct production runtime environment reads are forbidden outside the "
+            f"typed startup, startup-safety, credential-provider, and provenance boundaries: {rendered}"
+        )
+
+    for classification, expected in CLOSED_RUNTIME_READ_BOUNDARY_SHAPES.items():
+        actual = [
+            {field: entry.get(field) for field in (*ENTRY_FIELDS, "count")}
+            for entry in reads
+            if entry.get("classification") == classification
+        ]
+        if actual != [expected]:
+            raise ScanError(
+                f"{classification.replace('_', '-')} direct-read boundary must remain "
+                f"exactly one closed call shape; expected {expected!r}, got {actual!r}"
+            )
+
     mutations = contract.get("process_mutations")
     if not isinstance(mutations, list):
         raise ScanError("contract field 'process_mutations' must be a list")
@@ -984,7 +1070,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "runtime environment contract matches "
         f"({summary['read_call_sites']} reads, "
         f"{summary['process_mutation_call_sites']} process mutations; "
-        f"{summary['read_call_sites_by_classification']['experimental_debug']} "
+        f"{summary['read_call_sites_by_classification'].get('experimental_debug', 0)} "
         "runtime migration reads)"
     )
     return 0

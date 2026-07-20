@@ -8,6 +8,7 @@
 pub mod adapter_output;
 pub mod adapter_shape;
 pub mod checkpoint;
+mod credential_provider;
 // (#1082) Per-crate candle facade — every `candle_core::` path that
 // `trainer.rs` previously held inline (type aliases, generic constructor
 // helpers, safetensors I/O shims, `cd_bail!` macro) now lives in this
@@ -705,6 +706,7 @@ pub fn ensure_memory_governor_for_runtime(
     Ok(())
 }
 
+pub use credential_provider::{CredentialLookupError, validate_bearer_secret_environment};
 pub use hf_grpo_interop::{
     HF_TRL_GRPO_CORPUS_IDENTITY_V1, HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP,
     HF_TRL_GRPO_MAX_DATASET_BYTES, HF_TRL_GRPO_MAX_GROUPS, HF_TRL_GRPO_MAX_ROW_BYTES,

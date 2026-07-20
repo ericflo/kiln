@@ -1323,6 +1323,28 @@ CPU performs no accelerator probe, and Apple Silicon uses its single unified
 physical memory pool. Multi-device startup remains unavailable until backend
 selection and probing share a typed PCI address or UUID.
 
+### External accelerator environment safety
+
+Driver visibility and ordinal-remapping variables are not Kiln configuration,
+do not have TOML or `KILN_*` aliases, and cannot be changed through the API.
+Kiln snapshots the presence of this closed set at the first accelerator memory-
+probe validation, before model weights are loaded, and reuses that immutable
+snapshot for the lifetime of the process:
+
+| Driver family | Presence-only safety inputs |
+|---|---|
+| NVIDIA | `CUDA_VISIBLE_DEVICES`, `NVIDIA_VISIBLE_DEVICES`, `CUDA_DEVICE_ORDER` |
+| ROCm | `ROCR_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES`, `GPU_DEVICE_ORDINAL` |
+| Intel | `ZE_AFFINITY_MASK`, `ONEAPI_DEVICE_SELECTOR`, `SYCL_DEVICE_FILTER` |
+| Vulkan | `MESA_VK_DEVICE_SELECT`, `DRI_PRIME`, `VK_ICD_FILENAMES`, `VK_DRIVER_FILES` |
+
+If any variable relevant to the selected family is present, device/probe
+identity fails closed rather than interpreting its value or potentially
+budgeting one physical device from another device's memory counters. Unset the
+driver remap and select the device with Kiln's typed accelerator configuration.
+Multi-device support requires a future shared PCI-address or UUID identity; it
+cannot be enabled by adding another environment spelling.
+
 ## `[training]`
 
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
@@ -2068,7 +2090,10 @@ empty value.
 `teachers.credentials` is a dynamic map of server-owned credential handles.
 There is no field-level environment override for the map. Each credential
 points to a separately named secret environment variable; that secret is not
-stored in TOML, `AppState`, API responses, or receipts.
+stored in TOML, `AppState`, API responses, logs, receipts, or caches. One narrow
+credential-provider adapter performs every process-environment secret lookup;
+model, training, request-handler, and configuration code cannot read it
+directly.
 
 ```toml
 [teachers.credentials.primary-vllm]
@@ -2084,8 +2109,13 @@ api_key_env = "VLLM_TEACHER_API_KEY"
 Credential ids must be `1..=64` ASCII letters, digits, `_`, or `-`. A handle is
 accepted only for its exact configured origin. Non-loopback teachers require a
 configured credential handle; credential-free teachers are restricted to
-loopback. Secret availability is checked again when resolving a teacher, but
-operators should still treat secret changes as restart-scoped configuration.
+loopback. Startup validates every configured secret before device or model
+initialization. Availability is checked again when a handle is resolved, and
+the provider reads the bearer value immediately before each outbound request;
+missing, non-Unicode, or whitespace-only values fail closed without exposing
+the configured variable name or remote response body. Operators should still
+treat secret changes as restart-scoped configuration because configuration
+validation and registered-teacher identity are startup-owned.
 
 ## `[eval]`
 

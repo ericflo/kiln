@@ -1982,12 +1982,12 @@
       "api": "var_os",
       "argument": "name",
       "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
+      "classification": "startup_safety",
+      "classification_basis": "immutable external-driver startup safety snapshot",
       "count": 1,
       "language": "rust",
       "operation": "read",
-      "path": "crates/kiln-memory/src/vram.rs",
+      "path": "crates/kiln-memory/src/startup_environment.rs",
       "phase": "runtime",
       "surface": "source"
     },
@@ -2773,19 +2773,6 @@
     },
     {
       "api": "var",
-      "argument": "& credential . api_key_env",
-      "argument_kind": "expression",
-      "classification": "public_stable",
-      "classification_basis": "central typed startup configuration boundary",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "name",
       "argument_kind": "expression",
       "classification": "public_stable",
@@ -3462,6 +3449,19 @@
     },
     {
       "api": "var",
+      "argument": "name",
+      "argument_kind": "expression",
+      "classification": "credential_provider",
+      "classification_basis": "narrow configured credential-provider adapter",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-train/src/credential_provider.rs",
+      "phase": "runtime",
+      "surface": "source"
+    },
+    {
+      "api": "var",
       "argument": "KILN_QUALIFICATION",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -3523,19 +3523,6 @@
       "operation": "read",
       "path": "crates/kiln-train/src/receipt.rs",
       "phase": "compile-time",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "env_name",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-train/src/remote_teacher.rs",
-      "phase": "runtime",
       "surface": "source"
     },
     {
@@ -3933,22 +3920,31 @@
     "literal_kiln_read_names": 32,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
+      "credential_provider": 0,
+      "experimental_debug": 0,
       "public_stable": 1,
+      "startup_safety": 0,
       "test_only": 25
     },
     "process_mutation_call_sites": 150,
     "process_mutation_call_sites_by_classification": {
       "build_time": 8,
+      "credential_provider": 0,
+      "experimental_debug": 0,
+      "public_stable": 0,
+      "startup_safety": 0,
       "test_only": 142
     },
     "process_mutation_entries": 98,
-    "read_call_sites": 433,
+    "read_call_sites": 431,
     "read_call_sites_by_classification": {
       "build_time": 326,
-      "experimental_debug": 2,
-      "public_stable": 8,
+      "credential_provider": 1,
+      "experimental_debug": 0,
+      "public_stable": 6,
+      "startup_safety": 1,
       "test_only": 97
     },
-    "read_entries": 203
+    "read_entries": 202
   }
 }

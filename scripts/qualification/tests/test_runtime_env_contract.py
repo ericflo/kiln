@@ -34,6 +34,16 @@ class RuntimeEnvironmentContractTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
+    def _write_closed_runtime_boundaries(self) -> None:
+        self._write(
+            "crates/kiln-memory/src/startup_environment.rs",
+            "pub fn capture(name: &str) { let _ = std::env::var_os(name); }\n",
+        )
+        self._write(
+            "crates/kiln-train/src/credential_provider.rs",
+            "pub fn resolve(name: &str) { let _ = std::env::var(name); }\n",
+        )
+
     @staticmethod
     def _calls(contract: dict[str, object], section: str) -> set[tuple[str, str, str, int]]:
         entries = contract[section]
@@ -199,6 +209,14 @@ mod tests {
             "crates/demo/tests/device.rs",
             '#[test] fn device() { let _ = std::env::var("KILN_QUALIFICATION"); }\n',
         )
+        self._write(
+            "crates/kiln-memory/src/startup_environment.rs",
+            'pub fn capture(name: &str) { let _ = std::env::var_os(name); }\n',
+        )
+        self._write(
+            "crates/kiln-train/src/credential_provider.rs",
+            'pub fn resolve(name: &str) { let _ = std::env::var(name); }\n',
+        )
         contract = runtime_env.build_contract(self.root)
         self.assertEqual(
             self._entry(contract, "reads", "KILN_SERVER_PORT")["classification"],
@@ -212,14 +230,62 @@ mod tests {
             self._entry(contract, "reads", "KILN_QUALIFICATION")["classification"],
             "test_only",
         )
+        dynamic = {
+            (entry["path"], entry["classification"])
+            for entry in contract["reads"]
+            if entry["argument"] == "name"
+        }
+        self.assertEqual(
+            dynamic,
+            {
+                (
+                    "crates/kiln-memory/src/startup_environment.rs",
+                    "startup_safety",
+                ),
+                (
+                    "crates/kiln-train/src/credential_provider.rs",
+                    "credential_provider",
+                ),
+            },
+        )
 
     def test_production_process_environment_mutation_is_forbidden(self) -> None:
+        self._write_closed_runtime_boundaries()
         self._write(
             "crates/demo/src/lib.rs",
             'pub fn mutate() { unsafe { std::env::set_var("KILN_LIVE", "1"); } }\n',
         )
         with self.assertRaisesRegex(
             runtime_env.ScanError, "production process-environment mutation is forbidden"
+        ):
+            runtime_env.validate_policy(runtime_env.build_contract(self.root))
+
+    def test_unclassified_production_runtime_read_is_forbidden(self) -> None:
+        self._write_closed_runtime_boundaries()
+        self._write(
+            "crates/demo/src/lib.rs",
+            'pub fn read() { let _ = std::env::var("KILN_LIVE"); }\n',
+        )
+        with self.assertRaisesRegex(
+            runtime_env.ScanError,
+            "direct production runtime environment reads are forbidden",
+        ):
+            runtime_env.validate_policy(runtime_env.build_contract(self.root))
+
+    def test_closed_runtime_read_boundary_cannot_expand(self) -> None:
+        self._write_closed_runtime_boundaries()
+        self._write(
+            "crates/kiln-memory/src/startup_environment.rs",
+            '''
+pub fn capture(name: &str, fallback: &str) {
+    let _ = std::env::var_os(name);
+    let _ = std::env::var_os(fallback);
+}
+''',
+        )
+        with self.assertRaisesRegex(
+            runtime_env.ScanError,
+            "startup-safety direct-read boundary must remain exactly one closed call shape",
         ):
             runtime_env.validate_policy(runtime_env.build_contract(self.root))
 

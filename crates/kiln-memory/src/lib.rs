@@ -23,6 +23,7 @@
 //! stays in one place rather than scattered across the server and model crates.
 
 pub mod governor;
+mod startup_environment;
 pub mod vram;
 
 pub use governor::{

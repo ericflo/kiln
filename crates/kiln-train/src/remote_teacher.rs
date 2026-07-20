@@ -650,18 +650,19 @@ fn authenticate_vllm_request(
     mut request: reqwest::blocking::RequestBuilder,
 ) -> Result<reqwest::blocking::RequestBuilder, LogitSourceError> {
     if let Some(env_name) = cfg.api_key_env.as_deref() {
-        let key = std::env::var(env_name).map_err(|_| {
-            LogitSourceError::invalid(
-                &cfg.teacher_id,
-                "configured remote-teacher credential is unavailable",
-            )
-        })?;
-        if key.trim().is_empty() {
-            return Err(LogitSourceError::invalid(
-                &cfg.teacher_id,
-                "configured remote-teacher credential is empty",
-            ));
-        }
+        let key = crate::credential_provider::bearer_secret_from_environment(env_name).map_err(
+            |error| {
+                let detail = match error {
+                    crate::credential_provider::CredentialLookupError::Unavailable => {
+                        "configured remote-teacher credential is unavailable"
+                    }
+                    crate::credential_provider::CredentialLookupError::Empty => {
+                        "configured remote-teacher credential is empty"
+                    }
+                };
+                LogitSourceError::invalid(&cfg.teacher_id, detail)
+            },
+        )?;
         request = request.bearer_auth(key);
     }
     Ok(request)
