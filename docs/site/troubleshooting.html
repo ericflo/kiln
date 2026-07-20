@@ -1059,6 +1059,15 @@ rocm_graph_cache_max_bytes = 1073741824</code></pre>
           tokens/second, with an 88.875 C package peak and clean unforced shutdown. This is source-bound device
           evidence for the mixed-load arm, not a substitute for the 30-minute development soak or final endurance.
         </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          The first following development-soak attempt rejected a false-drained snapshot before measurement:
+          all 29 warmup responses were valid and the prefix cache reached all 39 entries, but batching had already
+          published zero active rows while terminal model cleanup still retained one ROCm graph owner. Treat
+          batching drain as a resource-ownership boundary, not merely an empty scheduling queue. Measurement and
+          accelerator telemetry correctly remain zero when setup fails; this receipt therefore is not throughput
+          evidence. The guarded process peaked at 89.875 C, grew no swap, shut down cleanly, removed its snapshot,
+          and left no process. Require conservative terminal cleanup publication and a fresh exact-source soak.
+        </p>
       </article>
 
       <article class="card p-6">

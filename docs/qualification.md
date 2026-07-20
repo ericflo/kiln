@@ -1745,6 +1745,22 @@ unforced and zero in 263.957 ms, and no residue remained. This qualifies the
 stable mixed-load arm and authorizes the 30-minute development soak from the
 same operating policy; it is not itself soak or endurance evidence.
 
+The first exact-source development-soak attempt after that arm is retained at
+`qualification/receipts/rocm/strix-halo/20260720t090457062502z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json`.
+It failed closed before measurement after 29 valid warmup requests across four
+waves filled all 39 prefix-cache entries. A health snapshot reported the
+batching actor drained while one ROCm graph slot or continuity timeline was
+still active. The actor removes a terminal row and publishes its zero-active
+snapshot before the model finish/discard boundary releases graph ownership, so
+the soak observed a real but transient false-drained window rather than a GPU
+fault or dirty teardown. Measurement and accelerator-telemetry counters remain
+zero sentinels because the measurement sampler never started. Host memory stayed
+above 22,550,761,472 bytes, swap did not grow, package temperature peaked at
+89.875 C below the 97 C guard, cooldown completed in 2.506 seconds, shutdown was
+unforced and zero, and no process or snapshot remained. The rejected receipt
+does not qualify the soak; batching drain publication must remain conservative
+through terminal resource cleanup before a clean-source rerun.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and
