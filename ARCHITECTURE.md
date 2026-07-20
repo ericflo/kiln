@@ -852,11 +852,15 @@ graphs for that runner, and permits only the existing contained eager retry.
 the first mismatching state/K/V layer or comparison error. This guard is
 unconditional; there is no tuning or environment switch that can bypass it.
 
-Health counts a retained width graph as an active slot even though it is shared
-across request cohorts. `multi_row_batch_unsupported` remains a closed legacy
-fallback reason so old receipts remain valid; supported current batch graphs
-must leave it at zero and show successful capture/replay. See
-`crates/kiln-model/src/rocm_graph.rs`.
+Graph-slot liveness is row ownership, not cache residency. Health counts only a
+slot with `assigned_row=Some(id)` as active. A retained single-row slot or a
+slot reserved for a batched width is idle between cohorts even though its
+graphs, recurrent state, and width mapping remain resident and byte-accounted.
+At a drained boundary both the active-slot and tracked-owner counts must be
+zero; positive idle slots are bounded reusable capacity. The
+`multi_row_batch_unsupported` fallback remains a closed legacy reason so old
+receipts remain valid; supported current batch graphs must leave it at zero and
+show successful capture/replay. See `crates/kiln-model/src/rocm_graph.rs`.
 
 ### GPTQ INT4 Quantization
 

@@ -1636,7 +1636,8 @@ pub struct RocmGraphStats {
     pub graph_slot_count: usize,
     /// Retained slots currently assigned to live logical decode rows.
     pub active_graph_slot_count: usize,
-    /// Retained slots available for a later logical decode row.
+    /// Retained slots not assigned to a live logical decode row, including
+    /// reusable slots reserved for a particular batched decode width.
     pub idle_graph_slot_count: usize,
     /// Decode owners whose continuity timeline is currently retained.
     pub tracked_decode_owner_count: usize,
@@ -1873,7 +1874,7 @@ impl RocmGraphRunner {
         let active_graph_slot_count = self
             .graph_slots
             .values()
-            .filter(|slot| slot.assigned_row.is_some() || slot.batch_size.is_some())
+            .filter(|slot| slot.assigned_row.is_some())
             .count();
         #[cfg(not(feature = "rocm"))]
         let active_graph_slot_count = 0;
@@ -9194,8 +9195,9 @@ mod tests {
         let stats = runner.stats();
         assert_eq!(stats.graph_slot_create_count, 1);
         assert_eq!(stats.graph_slot_reuse_count, 0);
-        assert_eq!(stats.active_graph_slot_count, 1);
-        assert_eq!(stats.idle_graph_slot_count, 0);
+        assert_eq!(stats.graph_slot_count, 1);
+        assert_eq!(stats.active_graph_slot_count, 0);
+        assert_eq!(stats.idle_graph_slot_count, 1);
     }
 
     #[cfg(feature = "rocm")]
@@ -9481,8 +9483,8 @@ mod tests {
         );
         anyhow::ensure!(retained_width_four, "width-four graph was not retained");
         anyhow::ensure!(
-            stats.active_graph_slot_count == 1 && stats.idle_graph_slot_count == 0,
-            "retained width-four slot must be reported active: {stats:?}"
+            stats.active_graph_slot_count == 0 && stats.idle_graph_slot_count == 1,
+            "drained retained width-four slot must be reported idle: {stats:?}"
         );
         anyhow::ensure!(
             stats.fallbacks.multi_row_batch_unsupported == 0,
@@ -9632,7 +9634,7 @@ mod tests {
         );
         anyhow::ensure!(stats.failures == 0 && stats.fallbacks.total == 0);
         anyhow::ensure!(stats.retained_slot_state_bytes > 0);
-        anyhow::ensure!(stats.active_graph_slot_count == 1 && stats.idle_graph_slot_count == 0);
+        anyhow::ensure!(stats.active_graph_slot_count == 0 && stats.idle_graph_slot_count == 1);
         Ok(())
     }
 
@@ -9886,7 +9888,7 @@ mod tests {
             "alternating graph did not publish exact parity admission: {stats:?}"
         );
         anyhow::ensure!(stats.failures == 0 && stats.fallbacks.total == 0);
-        anyhow::ensure!(stats.active_graph_slot_count == 1 && stats.idle_graph_slot_count == 0);
+        anyhow::ensure!(stats.active_graph_slot_count == 0 && stats.idle_graph_slot_count == 1);
         Ok(())
     }
 

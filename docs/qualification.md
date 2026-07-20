@@ -1789,6 +1789,20 @@ above 21,735,788,544 bytes, swap growth was zero, package temperature peaked at
 unforced and zero, and no process or snapshot remained. Correct the active/idle
 slot classification and cover retained batched slots before another device run.
 
+The portable correction derives graph-slot liveness solely from
+`assigned_row`: a retained slot reserved by `batch_size` is idle between
+cohorts, while its graph, recurrent state, width mapping, and exact retained
+bytes remain intact. The total remains `active + idle`, and the independent
+tracked-owner counter continues to expose live continuity timelines. The
+width-two retained-slot regression now requires one total, zero active, and one
+idle slot after two unrelated cohorts refresh the same tensor handles. All 405
+enabled ROCm-feature model tests, 1,091 server tests, and 652 qualification tests
+pass; the ROCm/gfx1151 and Vulkan all-target server feature graphs compile.
+Dashboard, architecture, API, qualification, and troubleshooting references use
+the same live-ownership definition. This removes a fail-closed telemetry false
+positive; a clean pushed-source hardware rerun is still required to qualify the
+30-minute measurement.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and
