@@ -1726,6 +1726,25 @@ measurement window was 94.616 seconds. This closes the prefix-cache-disabled
 ROCm arm and unblocks the stable arm; it does not qualify a soak or promote the
 operating point by itself.
 
+The source-bound `stable` arm passed next at
+`qualification/receipts/rocm/strix-halo/20260720t085444578521z-rocm-strix-halo-serving-mixed-rocm-v1-8dd0211c5b-v1.json`.
+The typed profile retained operator requests for KV autoscaling, automatic
+memory reclaim, and ROCm graphs while resolving their effective states to
+false, `off`, and false respectively. KV capacity remained exactly 4,096
+blocks, and resize, reclaim, graph warmup, capture, replay, live graph, and
+transient graph bytes all stayed zero. All deterministic and sampled requests,
+the post-determinism canary, pressure overlap, cancellation, fused routes,
+external synchronization, and terminal actor-idle checks passed. Aggregate
+deterministic output was 13.632 tokens/second, sampled output was 14.240
+tokens/second, p99/p99.9 ITL was 479.783/488.150 ms, p99 TTFT was 82.002
+seconds, and p99 E2E was 95.691 seconds. The cache was active and recorded one
+128-token/two-block hit, 39 final entries, no active lease or pending release,
+and internally consistent 1,073,479,680 bytes of recurrent state. The package
+peaked at 88.875 C without pacing or a trip; cooldown completed, shutdown was
+unforced and zero in 263.957 ms, and no residue remained. This qualifies the
+stable mixed-load arm and authorizes the 30-minute development soak from the
+same operating policy; it is not itself soak or endurance evidence.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and

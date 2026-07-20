@@ -1051,6 +1051,14 @@ rocm_graph_cache_max_bytes = 1073741824</code></pre>
           request. Do not change these process-lifetime fields in the shell or file and assume a running server
           observed them.
         </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          The clean-source Strix Halo ROCm stable arm passed this exact contract: requested autoscaling,
+          automatic reclaim, and graphs resolved effectively off; KV stayed at 4,096 blocks; every resize,
+          reclaim, graph warmup/capture/replay, live-graph, and transient-byte counter remained zero; and all
+          deterministic and sampled requests passed. Its p99/p99.9 ITL was 479.783/488.150 ms at 13.632 output
+          tokens/second, with an 88.875 C package peak and clean unforced shutdown. This is source-bound device
+          evidence for the mixed-load arm, not a substitute for the 30-minute development soak or final endurance.
+        </p>
       </article>
 
       <article class="card p-6">
