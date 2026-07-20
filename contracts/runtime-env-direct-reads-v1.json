@@ -4782,6 +4782,19 @@
       "count": 1,
       "language": "rust",
       "operation": "read",
+      "path": "crates/kiln-tensor/tests/rocm_prompt_logprobs.rs",
+      "phase": "runtime",
+      "surface": "integration-test"
+    },
+    {
+      "api": "var",
+      "argument": "KILN_QUALIFICATION",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "integration-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
       "path": "crates/kiln-tensor/tests/rocm_storage_smoke.rs",
       "phase": "runtime",
       "surface": "integration-test"
@@ -5294,7 +5307,7 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 177,
+    "literal_kiln_read_call_sites": 178,
     "literal_kiln_read_names": 74,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
@@ -5308,13 +5321,13 @@
       "test_only": 211
     },
     "process_mutation_entries": 132,
-    "read_call_sites": 530,
+    "read_call_sites": 531,
     "read_call_sites_by_classification": {
       "build_time": 325,
       "experimental_debug": 71,
       "public_stable": 9,
-      "test_only": 125
+      "test_only": 126
     },
-    "read_entries": 274
+    "read_entries": 275
   }
 }
