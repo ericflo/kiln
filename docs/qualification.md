@@ -1802,7 +1802,7 @@ Dashboard, architecture, API, qualification, and troubleshooting references use
 the same live-ownership definition. This removes a fail-closed telemetry false
 positive.
 
-The exact clean pushed-source hardware rerun then passed from
+The prior exact clean pushed-source hardware rerun passed from
 `a130e975f42e7c98a689bc309cea5f1d6eaa9a28`; retain its strict receipt at
 `qualification/receipts/rocm/strix-halo/20260720t095657771585z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json`.
 After 29 warmup requests and six stabilization cycles, it completed 804 valid
@@ -1818,9 +1818,32 @@ peak delta; RSS grew 59,527,168 bytes; host swap did not grow; and available
 host memory stayed above 21,756,338,176 bytes. Active accelerator samples had
 57-percent median busy and 2.389 GHz median SCLK, with no sample below half the
 advertised maximum. Package temperature peaked at 90.75 C below the 97 C hard
-guard, cooldown completed, and shutdown was unforced and zero. This closes the
-current material-change 30-minute ROCm development gate. It does not replace
-the final 24-hour soak or establish competitive large-batch performance.
+guard, cooldown completed, and shutdown was unforced and zero. This remains a
+retained high-throughput historical row, not the current performance headline.
+
+The current exact clean pushed-source rerun at `3887b640c` also passed. Retain
+`qualification/receipts/rocm/strix-halo/20260720t144932814398z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json`.
+It completed 688 requests, 22,016 output tokens, 95 waves, and 19 cancellations
+over 1,808.128 measured seconds at 12.176 aggregate output tokens/second. P50/p99
+ITL was 194.493/907.601 ms and p50/p99 TTFT was 6.773/25.496 seconds. All 521
+long gaps had runtime-event attribution and none was unexplained. Request,
+batching, graph, device, synchronization, finite-value, ownership, memory,
+thermal, shutdown, and residue gates passed. KV capacity stayed fixed at 4,096
+blocks; GPU allocation grew 13,334,052 bytes with 66,288,624-byte peak growth;
+RSS grew 51,048,448 bytes and swap did not grow. Package temperature peaked at
+89.625 C with zero thermal pacing.
+
+That throughput is 14.66% below the prior row, so the current result was paired
+with the same `autoscale-off` mixed workload on old source `a130e975f` and
+current source. Old/current deterministic throughput was 12.662/12.432 and
+sampled throughput 8.144/7.945 tokens/second, only 1.82%/2.45% apart. This is
+below the 3% material source-regression threshold and does not implicate the
+compact prompt-logprob route, which is inactive for these requests. The public
+number remains the slower 12.176 result, and the larger actor decode/prefill plus
+graph-sync outlier population remains explicit. This closes the current
+material-change correctness, 30-minute development, and benchmark gate. It does
+not replace the final 24-hour soak, characterize the variance distribution, or
+establish competitive large-batch performance.
 
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and

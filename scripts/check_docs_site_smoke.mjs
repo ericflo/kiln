@@ -152,7 +152,8 @@ const generatedDocsPages = [
       'external concurrency 1 through 8',
       'Use vLLM for serving-only capacity',
       'ROCm, Strix Halo development soak',
-      '14.268 aggregate output tok/s',
+      '12.176 aggregate output tok/s',
+      '1.82%/2.45% deltas',
       'Vulkan, Strix Halo development soak',
       '0.455 aggregate output tok/s',
       '0.465x and 0.138x vLLM request-window throughput',
@@ -1410,9 +1411,10 @@ function validateSftLossRouteDocumentationSourceContract() {
     'Driver v13 adds closed accounting for an explicit cooperative actor duty cycle',
     'actor_cycle_idle_ms',
     'actor_cycle_idle_accounted',
-    'Across 1,803.201 measured seconds',
-    '14.268 aggregate output tokens/second',
-    'drained to zero active and three reusable idle slots',
+    'Across 1,808.128 measured seconds',
+    '12.176 aggregate output tokens/second',
+    'drained to zero active and two reusable idle slots',
+    'limiting the source delta to 1.82%/2.45%',
     'not the final 24-hour endurance gate or evidence of vLLM large-batch parity',
   ]);
   if (missingRocmSafetyTerms.length > 0) {
@@ -1563,7 +1565,7 @@ function validateCurrentPerformancePositioning() {
   const index = readFileSync(indexPath, 'utf8');
   const requiredTerms = [
     'Current hardware qualification and performance position',
-    '14.27',
+    '12.18',
     'ROCm mixed soak',
     'Vulkan, stability only',
     'Preferred at high concurrency',

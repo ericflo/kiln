@@ -857,15 +857,18 @@ kiln serve --config rocm-graph-eager.toml
           same-binary A/B before any final ROCm endurance promotion.
         </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          The current clean-source Strix Halo development soak passed after the terminal-drain and retained-slot
-          telemetry corrections. Across 1,803.201 measured seconds it completed 804 requests, 25,728 output tokens,
-          111 mixed-concurrency waves, and 22 cancellations at 14.268 aggregate output tokens/second. All 135 ITL
-          outliers had bounded attribution and none were unexplained; p50/p99/p99.9 ITL was
-          189.397/660.015/884.196 ms. It completed 1,164 graph captures and 7,458 replays without fallback or
-          failure, then drained to zero active and three reusable idle slots. GPU allocation grew 1.31 MiB, RSS
-          grew 56.77 MiB, and host swap did not grow. Package temperature peaked at 90.75 C below the unchanged
-          97 C hard guard, followed by clean cooldown and unforced exit-zero shutdown. This is a passing 30-minute
-          development gate, not the final 24-hour endurance gate or evidence of vLLM large-batch parity.
+          The current clean-source Strix Halo development soak passed after the compact prompt-logprob and
+          decode-width work. Across 1,808.128 measured seconds it completed 688 requests, 22,016 output tokens,
+          95 mixed-concurrency waves, and 19 cancellations at 12.176 aggregate output tokens/second. All 521 ITL
+          outliers had bounded runtime-event attribution and none were unexplained; p50/p99/p99.9 ITL was
+          194.493/907.601/1,255.967 ms. It completed 997 graph captures and 6,350 replays without fallback or
+          failure, then drained to zero active and two reusable idle slots. GPU allocation grew 12.72 MiB with
+          63.22 MiB peak growth, RSS grew 48.68 MiB, and host swap did not grow. Package temperature peaked at
+          89.625 C below the unchanged 97 C hard guard, followed by clean cooldown and unforced exit-zero shutdown.
+          Throughput was 14.66% below the prior accepted soak. A same-machine old/current <code>autoscale-off</code>
+          pair measured 12.662/12.432 deterministic and 8.144/7.945 sampled tokens/second, limiting the source delta
+          to 1.82%/2.45%. Treat the remaining actor decode/prefill plus graph-sync variance as explicit; this is a
+          passing 30-minute development gate, not the final 24-hour endurance gate or evidence of vLLM large-batch parity.
         </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           For a source-bound soak, use the receipt&rsquo;s accelerator telemetry before attributing a broad slowdown.
