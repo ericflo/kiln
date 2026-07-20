@@ -455,7 +455,7 @@ def render_markdown(results: List[ProjectionAuditResult], checkpoint: str, verdi
     lines.append("## Honest limits")
     lines.append("")
     lines.append("1. **Weight-only, not activation-weighted.** A channel that is in-band on weights alone may still amplify drift when multiplied by a large-magnitude activation. We do NOT measure this here. A follow-up audit under the rejected Class B activation distribution would close this gap.")
-    lines.append("2. **No KV cache FP8 coupling.** Kiln optionally runs `KILN_KV_CACHE_FP8=true`; this audit is orthogonal to that path.")
+    lines.append("2. **No KV cache FP8 coupling.** Kiln optionally runs `KILN_MEMORY_KV_CACHE_FP8=true`; this audit is orthogonal to that path.")
     lines.append("3. **MTP layer untouched.** The MTP head is BF16-only in kiln today; this audit has nothing to say about MTP-layer numerics (C10 closed that cleanly with the tap bisect).")
     lines.append("4. **Scale round-trip is deterministic.** We reproduce kiln's f16 round-trip of the scale. The kernel's FP16-only mma (`mma.m16n8k16.f32.f16.f16.f32`) adds an additional bf16->fp16 cast on the activation side, not audited here.")
     lines.append("")

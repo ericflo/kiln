@@ -791,10 +791,11 @@ pub fn normalize_for_platform(mut s: Settings) -> Settings {
 /// server's behavior.
 pub fn apply_desktop_launch_contract(
     app: &AppHandle,
+    settings: &Settings,
     cfg: &mut SupervisorConfig,
 ) -> Result<(), String> {
     let path = desktop_runtime_config_path(app)?;
-    ensure_desktop_runtime_config(&path)?;
+    write_desktop_runtime_config(&path, settings)?;
     upsert_env(&mut cfg.envs, "KILN_CONFIG", path.display().to_string());
     Ok(())
 }
@@ -807,20 +808,130 @@ fn desktop_runtime_config_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join(DESKTOP_RUNTIME_CONFIG_NAME))
 }
 
-fn ensure_desktop_runtime_config(path: &PathBuf) -> Result<(), String> {
+fn write_desktop_runtime_config(path: &Path, settings: &Settings) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create runtime config dir: {}", e))?;
     }
-    if path.exists() {
-        return Ok(());
+    let body = render_desktop_runtime_config(settings)?;
+    let temp = write_settings_temp_file(path, body.as_bytes())?;
+    let previous = sibling_path(path, ".previous");
+    if path_entry_exists(&previous) {
+        std::fs::remove_file(&previous)
+            .map_err(|error| format!("remove stale runtime config backup: {error}"))?;
     }
-    let body = concat!(
-        "# Managed by Kiln Desktop.\n",
-        "# The desktop app injects runtime overrides via KILN_* env vars.\n",
-        "# Keeping this file explicit prevents cwd-local kiln.toml files from\n",
-        "# silently affecting the desktop child process.\n",
+    let displaced = if path_entry_exists(path) {
+        std::fs::rename(path, &previous)
+            .map_err(|error| format!("preserve prior runtime config: {error}"))?;
+        true
+    } else {
+        false
+    };
+    if let Err(error) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        if displaced {
+            let _ = std::fs::rename(&previous, path);
+        }
+        return Err(format!("promote staged runtime config: {error}"));
+    }
+    if displaced {
+        std::fs::remove_file(&previous)
+            .map_err(|error| format!("remove prior runtime config: {error}"))?;
+    }
+    if let Some(parent) = path.parent() {
+        sync_settings_directory(parent);
+    }
+    Ok(())
+}
+
+fn render_desktop_runtime_config(settings: &Settings) -> Result<String, String> {
+    let settings = normalize_for_platform(settings.clone());
+    validate_settings(&settings)?;
+
+    let path_string = |field: &str, value: &Path| {
+        value
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| format!("{field} must be valid UTF-8"))
+    };
+    let mut root = toml::Table::new();
+
+    let mut server = toml::Table::new();
+    server.insert("host".into(), toml::Value::String(settings.host.clone()));
+    server.insert("port".into(), toml::Value::Integer(settings.port.into()));
+    if let Some(tokens) = settings.default_thinking_budget_tokens {
+        server.insert(
+            "default_thinking_budget_tokens".into(),
+            toml::Value::Integer(
+                i64::try_from(tokens)
+                    .map_err(|_| "default_thinking_budget_tokens is too large".to_string())?,
+            ),
+        );
+    }
+    if let Some(milliseconds) = settings.default_thinking_budget_ms {
+        server.insert(
+            "default_thinking_budget_ms".into(),
+            toml::Value::Integer(
+                i64::try_from(milliseconds)
+                    .map_err(|_| "default_thinking_budget_ms is too large".to_string())?,
+            ),
+        );
+    }
+    root.insert("server".into(), toml::Value::Table(server));
+
+    let mut model = toml::Table::new();
+    if let Some(path) = settings.model_path.as_deref() {
+        model.insert(
+            "path".into(),
+            toml::Value::String(path_string("model_path", path)?),
+        );
+    }
+    if let Some(path) = settings.adapter_dir.as_deref() {
+        model.insert(
+            "adapter_dir".into(),
+            toml::Value::String(path_string("adapter_dir", path)?),
+        );
+    }
+    if let Some(id) = settings
+        .served_model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        model.insert("served_model_id".into(), toml::Value::String(id.to_owned()));
+    }
+    if !model.is_empty() {
+        root.insert("model".into(), toml::Value::Table(model));
+    }
+
+    let mut memory = toml::Table::new();
+    memory.insert(
+        "inference_memory_fraction".into(),
+        toml::Value::Float(settings.inference_fraction.into()),
     );
-    std::fs::write(path, body).map_err(|e| format!("write runtime config: {}", e))
+    memory.insert(
+        "kv_cache_fp8".into(),
+        toml::Value::Boolean(settings.fp8_kv_cache),
+    );
+    memory.insert(
+        "cuda_graphs".into(),
+        toml::Value::Boolean(settings.cuda_graphs),
+    );
+    root.insert("memory".into(), toml::Value::Table(memory));
+
+    let mut prefix_cache = toml::Table::new();
+    prefix_cache.insert(
+        "enabled".into(),
+        toml::Value::Boolean(settings.prefix_cache),
+    );
+    root.insert("prefix_cache".into(), toml::Value::Table(prefix_cache));
+
+    let mut speculative = toml::Table::new();
+    speculative.insert("method".into(), toml::Value::String("off".into()));
+    root.insert("speculative".into(), toml::Value::Table(speculative));
+
+    let rendered = toml::to_string_pretty(&root)
+        .map_err(|error| format!("serialize desktop runtime config: {error}"))?;
+    Ok(format!("# Managed by Kiln Desktop.\n{rendered}"))
 }
 
 fn upsert_env(envs: &mut Vec<(String, String)>, key: &str, value: String) {
@@ -831,68 +942,11 @@ fn upsert_env(envs: &mut Vec<(String, String)>, key: &str, value: String) {
     }
 }
 
-/// Translate desktop Settings into the env-var overrides the kiln server
-/// recognizes (see `crates/kiln-server/src/config.rs::apply_env_overrides`).
-/// kiln's CLI surface is `--config <toml>` plus subcommands; per-setting
-/// overrides go through `KILN_*` env vars, not flags. Pre-0.1.5 the desktop
-/// passed CLI flags that the server didn't accept, which made the supervisor
-/// crashloop with "unexpected argument '--host'".
+/// Apply process-supervision settings. Server settings are written to the
+/// managed TOML file by `apply_desktop_launch_contract`.
 pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
-    let fp8_kv_cache = if cfg!(target_os = "macos") {
-        false
-    } else {
-        s.fp8_kv_cache
-    };
-    let cuda_graphs = if cfg!(target_os = "macos") {
-        false
-    } else {
-        s.cuda_graphs
-    };
-
-    let mut envs: Vec<(String, String)> = Vec::new();
-    envs.push(("KILN_HOST".to_string(), s.host.clone()));
-    envs.push(("KILN_PORT".to_string(), s.port.to_string()));
-    envs.push((
-        "KILN_INFERENCE_MEMORY_FRACTION".to_string(),
-        format!("{}", s.inference_fraction),
-    ));
-    // Booleans: always emit so the env value is the source of truth (a
-    // setting toggled off must be able to override a true default).
-    envs.push(("KILN_KV_CACHE_FP8".to_string(), bool_env(fp8_kv_cache)));
-    envs.push(("KILN_CUDA_GRAPHS".to_string(), bool_env(cuda_graphs)));
-    envs.push((
-        "KILN_PREFIX_CACHE_ENABLED".to_string(),
-        bool_env(s.prefix_cache),
-    ));
-    envs.push(("KILN_SPECULATIVE_ENABLED".to_string(), "0".to_string()));
-    envs.push(("KILN_SPECULATIVE_METHOD".to_string(), "off".to_string()));
-    if let Some(dir) = &s.adapter_dir {
-        envs.push(("KILN_ADAPTER_DIR".to_string(), dir.display().to_string()));
-    }
-    if let Some(model) = &s.model_path {
-        envs.push(("KILN_MODEL_PATH".to_string(), model.display().to_string()));
-    }
-    if let Some(id) = &s.served_model_id {
-        let trimmed = id.trim();
-        if !trimmed.is_empty() {
-            envs.push(("KILN_SERVED_MODEL_ID".to_string(), trimmed.to_string()));
-        }
-    }
-    // Always emit both dimensions. The child inherits the desktop process's
-    // environment, so omission would let an ambient KILN_* value override the
-    // Unlimited mode selected in the UI. The server accepts `unlimited` as the
-    // explicit representation of `None`.
-    envs.push((
-        "KILN_DEFAULT_THINKING_BUDGET_TOKENS".to_string(),
-        optional_limit_env(s.default_thinking_budget_tokens),
-    ));
-    envs.push((
-        "KILN_DEFAULT_THINKING_BUDGET_MS".to_string(),
-        optional_limit_env(s.default_thinking_budget_ms),
-    ));
-
     cfg.args = Vec::new();
-    cfg.envs = envs;
+    cfg.envs = Vec::new();
     cfg.auto_restart = s.auto_restart;
     cfg.host = s.host.clone();
     cfg.port = s.port;
@@ -900,20 +954,6 @@ pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
         .kiln_binary
         .clone()
         .unwrap_or_else(|| PathBuf::from("kiln"));
-}
-
-fn bool_env(b: bool) -> String {
-    if b {
-        "1".into()
-    } else {
-        "0".into()
-    }
-}
-
-fn optional_limit_env<T: ToString>(value: Option<T>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unlimited".to_string())
 }
 
 #[cfg(test)]
@@ -989,7 +1029,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_populates_env_vars_for_kiln_server() {
+    fn desktop_runtime_config_contains_every_exposed_server_setting() {
         let mut s = Settings::default();
         s.port = 9000;
         s.host = "0.0.0.0".to_string();
@@ -1005,36 +1045,41 @@ mod tests {
         let mut cfg = SupervisorConfig::default();
         apply_to_supervisor_config(&s, &mut cfg);
 
-        // No CLI flags — kiln's CLI doesn't accept per-setting overrides.
         assert!(cfg.args.is_empty(), "args should be empty: {:?}", cfg.args);
+        assert!(cfg.envs.is_empty());
 
-        // Settings flow through KILN_* env vars (see kiln-server config.rs).
-        let env_get = |k: &str| -> Option<&str> {
-            cfg.envs
-                .iter()
-                .find(|(name, _)| name == k)
-                .map(|(_, v)| v.as_str())
-        };
-        assert_eq!(env_get("KILN_HOST"), Some("0.0.0.0"));
-        assert_eq!(env_get("KILN_PORT"), Some("9000"));
+        let rendered = render_desktop_runtime_config(&s).unwrap();
+        let config: toml::Value = toml::from_str(&rendered).unwrap();
+        assert_eq!(config["server"]["host"].as_str(), Some("0.0.0.0"));
+        assert_eq!(config["server"]["port"].as_integer(), Some(9000));
         assert_eq!(
-            env_get("KILN_KV_CACHE_FP8"),
-            Some(if cfg!(target_os = "macos") { "0" } else { "1" })
+            config["server"]["default_thinking_budget_tokens"].as_integer(),
+            Some(0)
         );
         assert_eq!(
-            env_get("KILN_CUDA_GRAPHS"),
-            Some(if cfg!(target_os = "macos") { "0" } else { "1" })
+            config["server"]["default_thinking_budget_ms"].as_integer(),
+            Some(1500)
         );
-        assert_eq!(env_get("KILN_PREFIX_CACHE_ENABLED"), Some("1")); // default true
-        assert_eq!(env_get("KILN_SPECULATIVE_ENABLED"), Some("0"));
-        assert_eq!(env_get("KILN_SPECULATIVE_METHOD"), Some("off"));
-        assert_eq!(env_get("KILN_SPEC_ENABLED"), None);
-        assert_eq!(env_get("KILN_SPEC_METHOD"), None);
-        assert_eq!(env_get("KILN_MODEL_PATH"), Some("/models/foo"));
-        assert_eq!(env_get("KILN_ADAPTER_DIR"), Some("/adapters"));
-        assert_eq!(env_get("KILN_SERVED_MODEL_ID"), Some("custom-id"));
-        assert_eq!(env_get("KILN_DEFAULT_THINKING_BUDGET_TOKENS"), Some("0"));
-        assert_eq!(env_get("KILN_DEFAULT_THINKING_BUDGET_MS"), Some("1500"));
+        assert_eq!(config["model"]["path"].as_str(), Some("/models/foo"));
+        assert_eq!(config["model"]["adapter_dir"].as_str(), Some("/adapters"));
+        assert_eq!(
+            config["model"]["served_model_id"].as_str(),
+            Some("custom-id")
+        );
+        assert_eq!(
+            config["memory"]["kv_cache_fp8"].as_bool(),
+            Some(if cfg!(target_os = "macos") {
+                false
+            } else {
+                true
+            })
+        );
+        assert_eq!(
+            config["memory"]["cuda_graphs"].as_bool(),
+            Some(!cfg!(target_os = "macos"))
+        );
+        assert_eq!(config["prefix_cache"]["enabled"].as_bool(), Some(true));
+        assert_eq!(config["speculative"]["method"].as_str(), Some("off"));
 
         // Host/port also propagated as structured fields for the poller.
         assert_eq!(cfg.host, "0.0.0.0");
@@ -1046,19 +1091,9 @@ mod tests {
     fn apply_ignores_persisted_speculative_enablement() {
         let mut settings = Settings::default();
         settings.speculative_decoding = true;
-        let mut cfg = SupervisorConfig::default();
-        apply_to_supervisor_config(&settings, &mut cfg);
-
-        let env_get = |key: &str| -> Option<&str> {
-            cfg.envs
-                .iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value.as_str())
-        };
-        assert_eq!(env_get("KILN_SPECULATIVE_ENABLED"), Some("0"));
-        assert_eq!(env_get("KILN_SPECULATIVE_METHOD"), Some("off"));
-        assert_eq!(env_get("KILN_SPEC_ENABLED"), None);
-        assert_eq!(env_get("KILN_SPEC_METHOD"), None);
+        let rendered = render_desktop_runtime_config(&settings).unwrap();
+        let config: toml::Value = toml::from_str(&rendered).unwrap();
+        assert_eq!(config["speculative"]["method"].as_str(), Some("off"));
     }
 
     #[test]
@@ -1106,25 +1141,28 @@ mod tests {
     }
 
     #[test]
-    fn unlimited_thinking_budgets_override_ambient_env() {
+    fn unlimited_thinking_budgets_are_omitted_from_the_managed_config() {
         let s = Settings::default();
-        let mut cfg = SupervisorConfig::default();
-        apply_to_supervisor_config(&s, &mut cfg);
+        let rendered = render_desktop_runtime_config(&s).unwrap();
+        let config: toml::Value = toml::from_str(&rendered).unwrap();
+        let server = config["server"].as_table().unwrap();
+        assert!(!server.contains_key("default_thinking_budget_tokens"));
+        assert!(!server.contains_key("default_thinking_budget_ms"));
+    }
 
-        let env_get = |key: &str| {
-            cfg.envs
-                .iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value.as_str())
-        };
-        assert_eq!(
-            env_get("KILN_DEFAULT_THINKING_BUDGET_TOKENS"),
-            Some("unlimited")
-        );
-        assert_eq!(
-            env_get("KILN_DEFAULT_THINKING_BUDGET_MS"),
-            Some("unlimited")
-        );
+    #[test]
+    fn runtime_config_publication_replaces_prior_contents_without_residue() {
+        let directory = TestDirectory::new("runtime-config");
+        let path = directory.0.join(DESKTOP_RUNTIME_CONFIG_NAME);
+        let mut settings = Settings::default();
+        settings.port = 9000;
+        write_desktop_runtime_config(&path, &settings).unwrap();
+        settings.port = 9001;
+        write_desktop_runtime_config(&path, &settings).unwrap();
+
+        let config: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(config["server"]["port"].as_integer(), Some(9001));
+        assert!(!sibling_path(&path, ".previous").exists());
     }
 
     #[test]

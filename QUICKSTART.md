@@ -116,7 +116,7 @@ The first build takes 15-30 minutes (CUDA kernel compilation). Subsequent builds
 cargo build --release --features vulkan
 ```
 
-Kiln auto-detects Vulkan at startup and logs `Vulkan available — using Vulkan GPU (AMD/Intel)`. Until backend selection and the memory governor share a PCI-address or UUID identity, accelerator startup is deliberately restricted to logical device `0` with exactly one matching physical DRM device. `KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` are rejected as ambiguous remapping controls rather than silently binding the governor to a different GPU.
+Kiln auto-detects Vulkan at startup and logs `Vulkan available — using Vulkan GPU (AMD/Intel)`. Until backend selection and the memory governor share a PCI-address or UUID identity, accelerator startup is deliberately restricted to logical device `0` with exactly one matching physical DRM device. Select it through `accelerator.vulkan_device_index` or `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX`; retired `KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` inputs are ignored.
 
 **Linux + AMD ROCm/HIP:**
 

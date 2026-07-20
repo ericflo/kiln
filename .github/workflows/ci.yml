@@ -153,11 +153,11 @@ jobs:
         run: cargo test --locked -p kiln-optim -p kiln-param -p kiln-autograd
 
       - name: Validate anomaly trap + deterministic envelope (#1082)
-        # Anomaly policy is explicit tape state; determinism remains a legacy
-        # process-global selector until its typed migration lands.
+        # Anomaly policy is explicit tape state. Tensor-library determinism
+        # tests configure isolated typed caches directly.
         run: |
           cargo test --locked -p kiln-autograd backward_detects_non_finite_grad_when_anomaly_enabled
-          KILN_DETERMINISTIC=1 cargo test --locked -p kiln-tensor determinism -- --test-threads=1
+          cargo test --locked -p kiln-tensor determinism -- --test-threads=1
 
       - name: Assert no candle in the --features cuda runtime dep tree
         # #1082 DoD line 100: `cargo build --release --features cuda` must have

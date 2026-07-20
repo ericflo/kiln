@@ -86,7 +86,7 @@ class EnvironmentTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {
-                "KILN_MAX_DECODE_BATCH": "8",
+                "KILN_SERVER_MAX_DECODE_BATCH": "8",
                 "KILN_OAUTH_JSON": '{"refresh_token":"must-not-appear"}',
                 "KILN_TRAINING_WEBHOOK_URL": "https://secret.example/token",
                 "UNRELATED": "ignored",
@@ -94,7 +94,7 @@ class EnvironmentTests(unittest.TestCase):
             clear=True,
         ):
             captured = environment.captured_environment()
-        self.assertEqual(captured["KILN_MAX_DECODE_BATCH"], {"value": "8", "redacted": False})
+        self.assertEqual(captured["KILN_SERVER_MAX_DECODE_BATCH"], {"value": "8", "redacted": False})
         self.assertTrue(captured["KILN_OAUTH_JSON"]["redacted"])
         self.assertNotIn("must-not-appear", captured["KILN_OAUTH_JSON"]["value"])
         self.assertTrue(captured["KILN_TRAINING_WEBHOOK_URL"]["redacted"])

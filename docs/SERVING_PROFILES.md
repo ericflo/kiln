@@ -18,8 +18,8 @@ serving_profile = "stable"
 whitespace ignored). An empty or unknown value is a fatal startup error that
 names the invalid field or environment variable and value.
 
-The older `KILN_SERVING_PROFILE` spelling remains a deprecated compatibility
-alias and emits a startup warning. Do not use it in new deployments.
+The retired `KILN_SERVING_PROFILE` spelling is ignored. Use the canonical name
+or TOML and verify the resolved source with `kiln config --json`.
 
 ## Policy matrix
 

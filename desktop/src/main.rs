@@ -65,7 +65,7 @@ fn build_supervisor_config(
 ) -> Result<SupervisorConfig, String> {
     let mut cfg = SupervisorConfig::default();
     apply_to_supervisor_config(settings, &mut cfg);
-    apply_desktop_launch_contract(app, &mut cfg)?;
+    apply_desktop_launch_contract(app, settings, &mut cfg)?;
     Ok(cfg)
 }
 

@@ -36,7 +36,7 @@ Same baseline as the canonical 60-second cast:
   release artifact or a source-built `target/release/kiln-bench`.
 - Model weights at `./Qwen3.5-4B/` (override with `KILN_MODEL_PATH`).
 - The SFT, GRPO, and live-adapter scripts explicitly start the server with
-  `KILN_SERVING_PROFILE=experimental`; inference-only casts retain the default
+  `KILN_SERVER_SERVING_PROFILE=experimental`; inference-only casts retain the default
   `stable` profile.
 - `kiln.example.toml` at the repo root, with `inference_memory_fraction`
   ≈ 0.4 so the trainer can grab scratch space alongside the inference

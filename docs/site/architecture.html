@@ -428,8 +428,8 @@ training request
           <code>accelerator.vulkan_device_index</code> is either automatic or a strict zero-based physical-device
           index. Automatic selection preserves discrete-GPU preference and otherwise uses the first enumerated
           device; an unavailable explicit index aborts startup rather than falling back. The canonical environment
-          name is mechanically derived as <code>KILN_ACCELERATOR_VULKAN_DEVICE_INDEX</code>, with
-          <code>KILN_VULKAN_DEVICE</code> retained only as a warning compatibility alias.
+          name is mechanically derived as <code>KILN_ACCELERATOR_VULKAN_DEVICE_INDEX</code>; retired
+          <code>KILN_VULKAN_DEVICE</code> is ignored.
           <code>accelerator.vulkan_validation</code> defaults false; true requires the experimental serving profile
           and an installed Khronos validation layer or startup fails. Both values are installed under
           <code>kiln.vulkan-device-policy.v1</code>, accept only an idempotent reinstall, and are reported in every
@@ -634,9 +634,9 @@ training request
           </table>
         </div>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          <code>server.deterministic</code> remains typed configuration. Its canonical environment target is
-          <code>KILN_SERVER_DETERMINISTIC</code>, and <code>KILN_DETERMINISTIC</code> remains only a deprecated
-          server compatibility alias. Standalone tensor-library use defaults to nondeterministic execution
+          <code>server.deterministic</code> remains typed configuration. Its sole environment target is
+          <code>KILN_SERVER_DETERMINISTIC</code>; retired <code>KILN_DETERMINISTIC</code> is ignored.
+          Standalone tensor-library use defaults to nondeterministic execution
           unless its owning application installs the process-lifetime policy.
         </p>
 

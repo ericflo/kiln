@@ -874,12 +874,12 @@ Currently dequantized to BF16 on CPU during loading. Auto-detected via `quantize
 
 ### Marlin W4A16 GEMM
 
-The `kiln-marlin-gemm` crate (PR #146, vendored from the IST-DASLab Marlin kernel) provides a hand-tuned W4A16 GEMM that runs the GPTQ-packed weights directly on tensor cores without dequantizing to BF16. It is opt-in via `KILN_W4A16=1` and, when enabled, dispatches the four highest-volume projections through Marlin: `q_proj` plus the MLP `gate_proj`, `up_proj`, and `down_proj`. `k_proj`, `v_proj`, and `o_proj` stay on the BF16 matmul path.
+The `kiln-marlin-gemm` crate (PR #146, vendored from the IST-DASLab Marlin kernel) provides a hand-tuned W4A16 GEMM that runs the GPTQ-packed weights directly on tensor cores without dequantizing to BF16. Select `[accelerator].cuda_marlin_profile = "attention_mlp"` (or `KILN_ACCELERATOR_CUDA_MARLIN_PROFILE=attention_mlp`) with the experimental serving profile to dispatch the four highest-volume projections through Marlin: `q_proj` plus the MLP `gate_proj`, `up_proj`, and `down_proj`. `k_proj`, `v_proj`, and `o_proj` stay on the BF16 matmul path. The `attention_mlp_gdn` profile additionally packs the GDN output projection.
 
 Two follow-on cleanups landed alongside the kernel:
 
 - **PR #210 — Marlin pack determinism + speed**. The 96 MLP projections used to pack serially in ~42.8 s at model load; PR #210 made the pack deterministic and parallelized it down to ~16.9 s. (See [`docs/archive/benchmarks/MARLIN_MLP_BENCH.md`](docs/archive/benchmarks/MARLIN_MLP_BENCH.md) for the per-projection numbers.)
-- **PR #206 — BF16 weight VRAM cleanup**. Previously the BF16 MLP weights stayed resident alongside the packed Marlin weights even when `KILN_W4A16=1` (~4.4 GB unused). PR #206 drops the BF16 tensors after packing.
+- **PR #206 — BF16 weight VRAM cleanup**. Previously the BF16 MLP weights stayed resident alongside the packed Marlin weights when Marlin W4A16 was selected (~4.4 GB unused). PR #206 drops the BF16 tensors after packing.
 
 See `crates/kiln-marlin-gemm/` for the kernel and `crates/kiln-model/src/marlin_proj.rs` for the BF16-Linear-compatible wrapper used by the forward path.
 
@@ -1038,9 +1038,8 @@ tool-call rendering.
 | `KILN_LOGGING_FORMAT` | Override log format (`json` or `pretty`) |
 
 The canonical startup override rule is mechanical:
-`KILN_<SECTION>_<FIELD>`. The eight older batching spellings are deprecated
-compatibility aliases, warn at startup, and cannot disagree with their
-canonical counterpart. Startup resolves one immutable
+`KILN_<SECTION>_<FIELD>`. The eight older batching spellings are retired and
+ignored. Startup resolves one immutable
 `BatchingRuntimeConfig`. The state boundary uses its mode to construct the
 actor, the decode-forward boundary applies its rowwise selector, and the actor
 receives only the projected admission policy it owns. None of those production
@@ -1155,8 +1154,8 @@ The canonical overrides derive mechanically as `KILN_TRAINING_<FIELD>`. The
 four old unsectioned names (`KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES`,
 `KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS`,
 `KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE`, and
-`KILN_CHECKPOINT_BOUNDARY_CACHE_GB`) remain strict warning aliases. Invalid,
-non-Unicode, or conflicting inputs fail startup. After resolution, neither
+`KILN_CHECKPOINT_BOUNDARY_CACHE_GB`) are retired and ignored. Invalid or
+non-Unicode canonical inputs fail startup. After resolution, neither
 training admission nor the trainer reads those variables: SFT memory preflight
 and boundary execution call the same policy methods, preventing estimate/runtime
 drift. GRPO and OPD do not execute the SFT boundary-spooling path.

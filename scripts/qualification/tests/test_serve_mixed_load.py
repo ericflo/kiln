@@ -2375,16 +2375,16 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
     def test_environment_sanitizer_rejects_ambient_kiln_controls(self) -> None:
         with self.assertRaisesRegex(
             serve.QualificationError,
-            "KILN_CARGO_CPU_QUOTA_PERCENT, KILN_MAX_DECODE_BATCH, "
-            "KILN_MODEL_PATH, KILN_ROCM_GRAPHS",
+            "KILN_ACCELERATOR_ROCM_GRAPH_MODE, KILN_CARGO_CPU_QUOTA_PERCENT, "
+            "KILN_MODEL_PATH, KILN_SERVER_MAX_DECODE_BATCH",
         ):
             serve.sanitized_environment(
                 {
                     "PATH": "/bin",
                     "KILN_CARGO_CPU_QUOTA_PERCENT": "9999",
                     "KILN_MODEL_PATH": "wrong",
-                    "KILN_ROCM_GRAPHS": "0",
-                    "KILN_MAX_DECODE_BATCH": "12",
+                    "KILN_ACCELERATOR_ROCM_GRAPH_MODE": "0",
+                    "KILN_SERVER_MAX_DECODE_BATCH": "12",
                 }
             )
 

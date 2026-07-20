@@ -286,7 +286,7 @@ function schemaFieldTable(schema) {
       return `| \`${markdownTableCell(path)}\` | ${required.has(name) ? 'yes' : 'no'} | ${markdownTableCell(typeAndDefault)} | \`${markdownTableCell(canonicalEnvironment)}\` | ${markdownTableCell(environment)} | ${markdownTableCell(validation)} |`;
     });
     return [
-      '| Field | Required | Type and default | Canonical environment target | Compatibility input | Validation and semantics |',
+      '| Field | Required | Type and default | Canonical environment target | Alternate environment spelling | Validation and semantics |',
       '| --- | --- | --- | --- | --- | --- |',
       ...rows,
       '',

@@ -1,7 +1,7 @@
 # Kiln configuration — all values shown are defaults.
 # See docs/CONFIGURATION.md for the complete field, validation, precedence,
-# source-attribution, and environment-override reference. Only aliases listed
-# there are public startup overrides; arbitrary KILN_* names are not config.
+# source-attribution, and environment-override reference. Only mechanically
+# derived canonical names listed there are public field overrides.
 #
 # Config file resolution order:
 #   1. --config <path> CLI argument
@@ -135,12 +135,10 @@ full_attention_score_budget_mib = 2048 # Exact-attention score/scratch ceiling (
                                       # KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB.
 vulkan_device_index = "auto"          # auto or a strict zero-based Vulkan physical-device index.
                                       # Auto prefers a discrete GPU, then the first enumerated device.
-                                      # Override with KILN_ACCELERATOR_VULKAN_DEVICE_INDEX;
-                                      # KILN_VULKAN_DEVICE is a deprecated startup alias.
+                                      # Override with KILN_ACCELERATOR_VULKAN_DEVICE_INDEX.
 vulkan_validation = false             # Enable VK_LAYER_KHRONOS_validation at instance creation.
                                       # True requires server.serving_profile="experimental".
-                                      # Override with KILN_ACCELERATOR_VULKAN_VALIDATION;
-                                      # KILN_VULKAN_VALIDATION is a deprecated startup alias.
+                                      # Override with KILN_ACCELERATOR_VULKAN_VALIDATION.
 cuda_kernel_profile = "native_default" # native_default | portable_fallback. One immutable
                                       # twenty-five-route CUDA model/backend policy replaces retired
                                       # per-kernel environment switches. Native default preserves
@@ -184,12 +182,9 @@ rocm_graph_mode = "profile"           # profile | disabled | warmup_then_eager |
                                       # stable/maintenance and lazy capture/replay under
                                       # experimental. Explicit non-disabled modes require the
                                       # experimental profile. Override with
-                                      # KILN_ACCELERATOR_ROCM_GRAPH_MODE. Historical
-                                      # KILN_ROCM_GRAPHS/KILN_ROCM_GRAPH_CAPTURE are deprecated
-                                      # startup aliases and cannot both be set.
+                                      # KILN_ACCELERATOR_ROCM_GRAPH_MODE.
 rocm_graph_cache_entries = 8          # Bounded retained native graph entries, 1..=64. Override
-                                      # with KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES; historical
-                                      # KILN_ROCM_GRAPH_CACHE_MAX is a deprecated startup alias.
+                                      # with KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES.
 rocm_graph_cache_max_bytes = 1073741824 # Independent 1 GiB retained-device-byte budget; valid
                                       # range is 64 MiB..=16 GiB. Counts graph-stable tensors,
                                       # capture arenas, private-stream hipBLASLt workspaces, and
@@ -200,8 +195,7 @@ rocm_graph_cache_max_bytes = 1073741824 # Independent 1 GiB retained-device-byte
 mode = "auto"                         # auto | enabled | disabled. Auto preserves the active
                                       # backend's immutable actor-selection policy: enabled on
                                       # CUDA, ROCm, Vulkan, and CPU; disabled on Metal. Override
-                                      # strictly with KILN_BATCHING_MODE. The deprecated
-                                      # KILN_BATCHING_ENGINE alias warns at startup.
+                                      # strictly with KILN_BATCHING_MODE.
 rowwise_decode = false                # False issues one true batched forward per ready cohort.
                                       # True is an emergency correctness comparison that normally
                                       # reduces throughput. Override with the mechanically derived
@@ -271,7 +265,6 @@ vulkan_decode_weight_prewarm_mib_per_second = 256 # Sustained materialization ra
                                       # "Qwen3.5-4B"). Override precedence:
                                       #   --served-model-id flag >
                                       #   KILN_MODEL_SERVED_MODEL_ID env >
-                                      #   legacy KILN_SERVED_MODEL_ID env >
                                       #   this TOML value > derived default.
                                       #
                                       # GPTQ INT4 quantization: point `path` at a GPTQ model directory
@@ -361,7 +354,6 @@ checkpoint_boundary_cache_gb = 6.0   # GiB target for automatic sparse anchors. 
                                      # KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS,
                                      # KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE, and
                                      # KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB.
-                                     # The four unsectioned spellings are deprecated strict aliases.
                                      # Values resolve once at startup; admission, execution,
                                      # checkpoint identity, APIs, and the dashboard share the
                                      # immutable result. Changing one requires a server restart.
@@ -408,11 +400,8 @@ enabled = true                        # Reuse KV cache blocks for shared prompt 
                                       # on Qwen3.5-4B, separate from KV blocks.
 
 [speculative]
-enabled = false                       # Serving is fail-closed to speculative decoding.
-                                      # Every effective non-off setting fails `kiln config`
-                                      # and server startup before model weights are loaded.
-method = "off"                        # Keep `off`. `enabled=true` with `off` resolves to the
-                                      # legacy skip_layer method and is therefore rejected too.
+method = "off"                        # Sole authority. Keep `off`: every non-off method fails
+                                      # `kiln config` and startup before model weights are loaded.
 num_speculative_tokens = 4            # Draft-window default and hard ceiling. Planned local
                                       # accelerator qualification covers K=1, K=2, and K=4.
 draft_layers = 8                      # Retained qualification geometry; it has no serving route.
@@ -519,8 +508,7 @@ composed_cache_max_entries = 64       # Entry-count cap on the same composed-ada
 # Configure a downward-only capacity cap through `memory.gpu_memory_gb` and an explicit
 # training budget through `memory.training_memory_gb` above. Their canonical
 # startup overrides are `KILN_MEMORY_GPU_MEMORY_GB` and
-# `KILN_MEMORY_TRAINING_MEMORY_GB`; deprecated shorter aliases are documented
-# only in docs/CONFIGURATION.md.
+# `KILN_MEMORY_TRAINING_MEMORY_GB`.
 #
 # Unified-memory detection (Linux):
 #   DRM VRAM/GTT counters can describe an address space much larger than the RAM

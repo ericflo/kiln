@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-MODEL_ID="${KILN_MODEL_ID:-Qwen/Qwen3.5-4B}"
+MODEL_ID="${KILN_MODEL_MODEL_ID:-Qwen/Qwen3.5-4B}"
 MODEL_PATH="${KILN_MODEL_PATH:-/workspace/Qwen3.5-4B}"
 BENCH_BIN="${KILN_BENCH_BIN:-target/release/kiln-bench}"
 CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}"

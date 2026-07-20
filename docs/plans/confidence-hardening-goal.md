@@ -1342,16 +1342,17 @@ without waiting for the remaining repository-wide cleanup phases.
 
 ### 8.1 Typed configuration
 
-Current audit findings and migration order (2026-07-12):
+Current audit findings and migration order (initial audit 2026-07-12, updated
+2026-07-20):
 
-- The environment is not a startup boundary today. Production-reachable code
-  contains more than 250 model/tensor/memory/kernel tuning knobs, at least 32
-  training knobs, and additional server/request-handler reads. Many are read
-  per request, per decode step, per SDPA/GEMM, or per optimizer parameter.
-- Several strict TOML fields remain mirrors rather than authorities.
-  GPU-memory sizing and gradient-checkpoint policy are accepted and validated
-  at startup, then ignored by paths that reread permissive environment parsers.
-  Streaming prefill has crossed the startup boundary: its backend dispatch,
+- The initial tree did not treat environment as a startup boundary: more than
+  250 model/tensor/memory/kernel knobs and at least 32 training knobs were read
+  below startup. Production migration is now complete. The generated inventory
+  reports 431 direct reads, 29 process mutations, and zero runtime-migration
+  reads; the remaining reads are typed-loader/logging, startup safety,
+  credential-provider, build/provenance, or test-only boundaries.
+- Strict TOML fields are now authorities rather than mirrors. GPU-memory sizing,
+  gradient-checkpoint policy, streaming-prefill backend dispatch,
   threshold, inference/training tiles, and last-token selector resolve once and
   are injected into model and trainer execution. Speculative decoding also has
   one startup authority:
@@ -1367,32 +1368,31 @@ Current audit findings and migration order (2026-07-12):
   cancel-aware external-yield settlement. Server-owned SFT must also keep its
   deferred MTP alignment phase disabled until that phase participates in GPU
   coordination, memory admission, progress cancellation, and settlement.
-  ROCm matmul route selection has now crossed the boundary as described below;
-  its qualified large-GEMM barriers remain part of the already-typed context
-  synchronization policy. Remaining leading candidates are per-attention
-  live-memory/tile decisions and lazy memory-governor parsing that can still
-  panic when first touched instead of failing startup.
+  ROCm matmul route selection has crossed the boundary as described below; its
+  qualified large-GEMM barriers remain part of the typed context
+  synchronization policy. The open Phase 8 configuration work is explicit
+  experimental/debug profile consolidation, broader dead-control deletion,
+  and the remaining test-only process mutations.
 - The target boundary is strict: only startup configuration, a narrow
   credential-provider adapter, and immutable build/source provenance may read
   process environment. Model, tensor, kernel, scheduler, training, eval, UI,
   and request code receive immutable typed policy. Qualification-only controls
   use one explicit internal namespace/profile and are included in provenance.
-- The startup loader now owns one declarative registry for all 78 fixed typed
-  leaves with public environment overrides, alongside eight explicitly
-  config-file-only leaves. Canonical names derive mechanically from section and field,
-  compatibility aliases parse strictly and warn without values, every present
-  alias must agree with a canonical value, and typed CLI overrides no longer
-  mutate process environment. Eight structured eval/agent leaves remain
-  explicitly config-file-only. Lower runtime rereads remain migration work,
-  not alternate public configuration.
+- The startup loader owns one declarative registry for all 112 fixed typed
+  leaves with public environment overrides, alongside five explicitly
+  config-file-only leaves and two dynamic teacher-credential templates.
+  Canonical names derive mechanically from section and field. There are no
+  environment aliases; all 77 former public spellings are ignored and indexed
+  in the schema with replacements. Typed CLI overrides do not mutate process
+  environment, and lower runtime rereads are prohibited by repository policy.
 - The production batching actor is the first high-risk scheduler subsystem to
   cross that boundary completely. `[batching]` owns actor selection, true
   batched versus rowwise decode, strict-prefix-aware admission, and prompt
   admission quantum. The values resolve once against backend policy and the
   effective decode width, retain configured/backend/effective provenance, are
   reported identically by config/health/debug, and require restart. Four old
-  actor spellings remain strict warning aliases; production actor construction
-  no longer reads them directly.
+  actor spellings are ignored; production actor construction reads no process
+  configuration.
 - The process-wide memory policy now has an explicit device/probe identity,
   detected-and-capped capacity, cached observations, and atomic reservations.
   Direct inference and training library consumers have typed initialization
@@ -1414,8 +1414,7 @@ Current audit findings and migration order (2026-07-12):
   readback capability and does not change eval or request semantics.
   `memory.kv_autoscale` and maintenance-only
   `memory.kv_force_blocks` replace both direct autoscaler environment reads;
-  the old spellings are warning compatibility aliases resolved only by the
-  central registry.
+  the old spellings are ignored.
 
 - [x] Inventory every direct `KILN_*` read and classify it as public stable,
   startup safety, credential provider, experimental/debug, build-time, or
@@ -1430,7 +1429,7 @@ Current audit findings and migration order (2026-07-12):
   mutation wherever possible; use one global serialization helper where env is
   unavoidable.
 
-Effective-configuration completion checkpoint (2026-07-20): the authoritative
+Effective-configuration completion checkpoint at `b3dd016c4` (2026-07-20): the authoritative
 loader now parses the selected TOML document once, validates the complete typed
 object, records explicit file leaves, applies the mechanically generated
 environment registry, and then applies typed command-line overrides. The
@@ -1444,9 +1443,22 @@ hardware-free document; `GET /v1/config` retains the exact startup snapshot
 under `effective_configuration`, beside authoritative backend-derived and live
 runtime fields.
 The generated schema, complete configuration reference, CLI/API website, and
-permanent smoke ratchet publish the same contract. Experimental/debug profile
-consolidation, alias deletion, and remaining test mutation cleanup stay open as
-separate Phase 8.1 items.
+permanent smoke ratchet published that contract. The canonical-only checkpoint
+below supersedes its 118-field/76-alias counts.
+
+Canonical-only configuration checkpoint (2026-07-20): the typed object now has
+117 fixed leaves, 112 mechanically derived canonical environment overrides,
+five config-file-only leaves, and two dynamic teacher-credential templates.
+The duplicate `speculative.enabled` and `streaming_prefill.enabled` TOML fields
+are rejected; `speculative.method` and `streaming_prefill.mode` are their sole
+authorities. All 77 former public environment spellings are inert and share one
+schema/reference migration index. The server regression proves the entire set
+is unique, disjoint, inert, source-neutral, hash-neutral, and exactly equal to
+the schema index. Desktop writes and atomically promotes a typed TOML document,
+launches the managed child with only `KILN_CONFIG`, and scrubs ambient
+configuration. The runtime inventory falls from 150 to 29 direct process
+mutations, 21 of them test-only. Experimental/debug profile consolidation,
+broader dead-control deletion, and remaining test mutation cleanup stay open.
 
 Environment-inventory checkpoint (2026-07-13): the lexical ratchet now resolves
 simple named environment constants, recognizes colocated `#[cfg(test)]` modules
@@ -3307,6 +3319,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-20 | Closed production runtime-environment boundaries | this source | this portable configuration checkpoint | immutable external-driver remap safety snapshot, exact-origin remote-teacher credential provider, hard zero-migration-read repository policy, generated inventory, configuration/teacher references, and permanent website; no accelerator execution or performance claim | 66 active memory tests; 43 remote-teacher tests; two focused server credential tests; seven remote-teacher identity integrations; 1,097/1,097 server library tests; 663/663 qualification tests; runtime inventory at 431 reads/150 mutations/zero migration reads; current 118-field config and 102-path/114-operation HTTP contracts; 10/10 docs-builder tests; 55-document/5-asset assembled static site; desktop UI smoke; default, ROCm `gfx1151`, Vulkan, and `CUDARC_CUDA_VERSION=12080` toolkit-free CUDA all-target checks; formatting, runtime-default, release, source-parsing, thinking-budget, repository-artifact, and diff gates | portable source/configuration checkpoint passed; Phase 8.1 direct-runtime-read prohibition closed; whole-object config, experimental-profile/dead-control audit, and test mutation remain open | The first accelerator identity validation snapshots one closed 13-name NVIDIA/ROCm/Intel/Vulkan visibility set before model upload and fails relevant presence closed without interpreting values. Rust and website ratchets prove that the family lists, unique union, operator reference, and generated page stay complete. Startup secret validation, credential-handle resolution, and outbound bearer injection now use one non-serializing provider selected only by trusted TOML and exact origin. The repository policy rejects every future unclassified production read even after contract regeneration, fixes each privileged boundary to one exact call shape, and continues rejecting production process mutation. Two duplicate server secret reads are removed; the generated migration queue is empty. Complete operator and vLLM identity references plus the generated website document lifecycle, redaction, failure, restart, and unsupported multi-device semantics. No GPU workload ran, and rendered server UI smoke remains unavailable locally without Chromium. |
 
 | 2026-07-20 | Complete source-aware effective configuration | this source | this portable configuration checkpoint | authoritative loader, machine-readable CLI, config API, generated schema, complete operator reference, and permanent website; no accelerator execution or performance claim | 1,098/1,098 server library tests; default, ROCm `gfx1151`, and Vulkan all-target checks; real CLI JSON parse with 118 fixed fields; exact 118-fixed/2-dynamic/113-environment/76-alias configuration contract; 176-definition observability and 102-path/114-operation/133-complete-payload HTTP contracts; every compact qualification receipt, detailed benchmark receipt, and pinned oracle result; 663/663 qualification-tooling tests; 10/10 documentation-builder tests; 55-document/5-asset assembled static site; desktop UI smoke; release, thinking-budget, runtime-environment, source-parsing, repository-artifact, formatting, and diff gates | portable source/configuration checkpoint passed; Phase 8.1 typed parser, provenance, and whole-object dump item closed; experimental-profile/dead-control audit, alias deletion, and test mutation remain open | The loader parses TOML once, materializes optional-section defaults, records file/environment/serve-CLI precedence, and exposes one deterministic `kiln.effective-configuration.v1` map through `kiln config --json` and `GET /v1/config` under `effective_configuration`. Every fixed typed leaf and dynamic teacher-credential leaf carries its post-precedence value, authority, supported environment spellings, redaction state, and restart requirement. Sensitive structured requests, webhook URLs, and credential-provider names remain source-visible but value-redacted; the bearer secret never enters the object. The typed config hash excludes provenance metadata and remains the identity of the effective value. Backend-derived and live capacity fields stay separate and authoritative. The public schema and website ratchet the exact field count and dynamic templates. Local static rendering passed; browser rendering remains unavailable on this Chromium-free machine. |
+
+| 2026-07-20 | Canonical-only configuration and Desktop typed launch | this source | this portable configuration checkpoint | server loader and bootstrap logging, effective-config API, JSON Schema, complete reference and migration index, CLI/API/architecture/troubleshooting/demo website surfaces, Desktop managed-child launch, operational scripts, and runtime-environment ratchet; no accelerator execution or performance claim | 1,087/1,087 server library tests including 115 focused configuration/API tests; 24/24 Desktop settings tests; exact 117-fixed/2-dynamic/112-environment/5-config-only/0-alias contract; all 77 retired public environment spellings unique, disjoint, schema-matched, and inert across both authoritative loading and early logging bootstrap; two removed TOML toggles rejected; runtime inventory 431 reads/29 mutations/zero migration reads with 21 test-only mutations; focused qualification environment/sanitizer tests; 10/10 documentation-builder tests; 55-document/5-asset assembled site and static smoke; Python/JSON/shell syntax; root and Desktop formatting; diff hygiene | portable canonical-only checkpoint passed; broader experimental/debug consolidation, dead-control deletion, and remaining test mutation cleanup stay open; hosted follow-up pending | Every supported field environment override is exactly `KILN_<SECTION>_<FIELD>`. Non-canonical public spellings no longer warn, conflict, or change values: they are ignored and published with exact replacements plus value-migration rules in the schema and website. `speculative.method` is the single speculative authority and `streaming_prefill.mode` the single streaming-prefill authority. Desktop serializes its exposed settings as private typed TOML, atomically stages/syncs/promotes with rollback and prior-version recovery, scrubs ambient `KILN_*`, and passes only `KILN_CONFIG` to the managed server. Current demos, workflows, issue templates, and current-tree server launch scripts use canonical names; exact-revision historical harnesses retain their original commands and are not valid against current main. Static website rendering passed; rendered browser smoke remains unavailable on this Chromium-free machine. |
 
 ## Known Starting Defects
 

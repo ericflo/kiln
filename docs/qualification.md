@@ -3010,8 +3010,8 @@ New qualification drivers use the mechanically derived
 `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE`,
 `KILN_ACCELERATOR_ROCM_GRAPH_MODE`, and
 `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES`, and
-`KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` names. The shorter graph variables
-remain deployment compatibility aliases and are not new evidence vocabulary.
+`KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` names. Retired shorter graph
+variables are ignored and are not evidence vocabulary.
 
 ### ROCm Development Soak
 

@@ -325,7 +325,7 @@ kiln serve --served-model-id Qwen3.5-4B-local</code></pre>
       <div class="card p-6 lg:col-span-2">
         <p class="label mb-2">Effective configuration</p>
         <h2 class="text-2xl font-semibold tracking-tight mb-4">Inspect every startup value and authority</h2>
-        <p class="mb-4" style="color: var(--fg-dim);">The JSON check contains <code>kiln.effective-configuration.v1</code>: all 118 fixed typed leaves plus two dynamic leaves for each configured teacher credential. The flat, sorted field map records the post-precedence typed value, <code>default</code>/<code>config_file</code>/<code>environment</code>/<code>command_line</code> source, canonical and deprecated environment spellings, redaction state, and restart requirement.</p>
+        <p class="mb-4" style="color: var(--fg-dim);">The JSON check contains <code>kiln.effective-configuration.v1</code>: all 117 fixed typed leaves plus two dynamic leaves for each configured teacher credential. The flat, sorted field map records the post-precedence typed value, <code>default</code>/<code>config_file</code>/<code>environment</code>/<code>command_line</code> source, the canonical environment spelling, an explicitly empty compatibility-name list, redaction state, and restart requirement.</p>
 <pre class="text-sm"><code>kiln config --file kiln.toml --json | jq '.effective_configuration'
 kiln config --file kiln.toml --backend vulkan --json | jq '.backend_preview'
 curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["server.max_decode_batch"]'</code></pre>

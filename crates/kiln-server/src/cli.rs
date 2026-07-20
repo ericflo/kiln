@@ -528,8 +528,8 @@ pub enum Commands {
     #[command(long_about = SERVE_OVERVIEW, after_help = SERVE_EXAMPLES)]
     Serve {
         /// Override the served model identifier exposed at /v1/models.
-        /// Wins over `KILN_MODEL_SERVED_MODEL_ID`, its legacy
-        /// `KILN_SERVED_MODEL_ID` alias, and TOML `model.served_model_id`.
+        /// Wins over `KILN_MODEL_SERVED_MODEL_ID` and TOML
+        /// `model.served_model_id`.
         #[arg(long, value_name = "ID")]
         served_model_id: Option<String>,
         /// Enable deterministic eval-serving defaults, adapter headers, and

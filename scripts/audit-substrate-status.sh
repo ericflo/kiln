@@ -84,7 +84,7 @@ ROWS = [
     ("1.9",  "safetensors loader", ["crates/kiln-tensor/src/safetensors.rs"]),
     ("1.10", "copy-counter instrumentation",
                                     ["crates/kiln-tensor/src/profile.rs"]),
-    ("1.11", "Determinism + KILN_DETERMINISTIC envelope",
+    ("1.11", "Determinism + KILN_SERVER_DETERMINISTIC envelope",
                                     ["crates/kiln-tensor/src/determinism.rs"]),
     ("1.12", "DeviceOp trait + BackwardOp scaffold",
                                     ["crates/kiln-tensor/src/device_op.rs"]),

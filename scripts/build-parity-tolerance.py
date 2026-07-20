@@ -192,7 +192,7 @@ NOTES = {
     "reduction":         "fixed-tree reduction; deterministic.",
     "matmul":            "deterministic under CUBLAS_WORKSPACE_CONFIG=:4096:8; the workspace pin is mandatory.",
     "matmul-bwd-atomic": "dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.",
-    "atomic-bwd":        "atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.",
+    "atomic-bwd":        "atomic-add bwd; deterministic variant available under KILN_SERVER_DETERMINISTIC=1.",
     "rope":              "rotate; no reduction.",
     "attention":         "flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.",
     "conv1d":            "fixed-window stride; deterministic.",
@@ -379,7 +379,7 @@ def main():
             "- Phase 9's bench-gate re-runs the audit + parity-tolerance "
             "consistency check; a row added without a justifying op or a "
             "row removed without an op deletion fails the gate.\n"
-            "- `KILN_DETERMINISTIC=1` envelope (PROFILING.md §Determinism "
+            "- `KILN_SERVER_DETERMINISTIC=1` envelope (PROFILING.md §Determinism "
             "stance) selects the deterministic variant of every "
             "`bwd_determinism = tolerance-bounded` op; under the envelope, "
             "those cells must hit `bwd_atol = 0` in the parity test.\n"

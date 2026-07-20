@@ -757,7 +757,7 @@ fn build_speculative_config(state: &AppState) -> SpeculativeConfig {
     let runtime = state.speculative_runtime_policy;
     let native_mtp = runtime.mtp_support.is_native();
     SpeculativeConfig {
-        enabled: configured.enabled,
+        enabled: configured.method != SpecMethod::Off,
         configured_method: configured.method,
         configured_effective_method,
         serving_effective_method: SpecMethod::Off,
@@ -1131,11 +1131,11 @@ mod tests {
         let effective = &json["effective_configuration"];
         assert_eq!(effective["schema_id"], "kiln.effective-configuration.v1");
         assert_eq!(effective["schema_version"], 1);
-        assert_eq!(effective["fixed_field_count"], 118);
+        assert_eq!(effective["fixed_field_count"], 117);
         assert_eq!(effective["dynamic_field_count"], 0);
         assert_eq!(
             effective["fields"].as_object().unwrap().len(),
-            118,
+            117,
             "the API snapshot must include every fixed typed leaf"
         );
         assert_eq!(effective["fields"]["server.port"]["source"], "default");
@@ -1764,7 +1764,6 @@ mod tests {
     fn speculative_snapshot_distinguishes_configured_policy_from_serving_policy() {
         let mut state = make_test_state();
         state.speculative_config = crate::config::SpeculativeDecodingConfig {
-            enabled: true,
             method: SpecMethod::Mtp,
             num_speculative_tokens: 4,
             draft_layers: 6,
@@ -1793,18 +1792,17 @@ mod tests {
     }
 
     #[test]
-    fn speculative_snapshot_preserves_configured_and_effective_method() {
+    fn speculative_snapshot_derives_enabled_from_the_configured_method() {
         let mut state = make_test_state();
         state.speculative_config = crate::config::SpeculativeDecodingConfig {
-            enabled: true,
-            method: SpecMethod::Off,
+            method: SpecMethod::SkipLayer,
             num_speculative_tokens: 4,
             draft_layers: 4,
         };
 
         let json = serde_json::to_value(build_speculative_config(&state)).unwrap();
         assert_eq!(json["enabled"], true);
-        assert_eq!(json["configured_method"], "off");
+        assert_eq!(json["configured_method"], "skip_layer");
         assert_eq!(json["configured_effective_method"], "skip_layer");
         assert_eq!(json["serving_effective_method"], "off");
         assert_eq!(json["serving_routable"], false);

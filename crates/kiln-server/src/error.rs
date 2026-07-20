@@ -98,7 +98,7 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             code: "serving_profile_conflict",
             message: format!("Serving profile `{profile}` prohibits {operation}"),
-            hint: "Restart with KILN_SERVING_PROFILE=experimental for controlled concurrent mutation, or KILN_SERVING_PROFILE=maintenance for drained exclusive work.",
+            hint: "Restart with KILN_SERVER_SERVING_PROFILE=experimental for controlled concurrent mutation, or KILN_SERVER_SERVING_PROFILE=maintenance for drained exclusive work.",
             retry_after_seconds: None,
         }
     }
@@ -108,7 +108,7 @@ impl ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "inference_disabled_by_profile",
             message: format!("Serving profile `{profile}` disables inference admission"),
-            hint: "Finish exclusive maintenance work, then restart with KILN_SERVING_PROFILE=stable (recommended) or experimental to admit inference.",
+            hint: "Finish exclusive maintenance work, then restart with KILN_SERVER_SERVING_PROFILE=stable (recommended) or experimental to admit inference.",
             retry_after_seconds: None,
         }
     }

@@ -3,7 +3,7 @@
 This document is the canonical operator reference for Kiln's typed server
 configuration. It describes the configuration accepted by the current
 `KilnConfig` and `RequestLogConfig` implementations, including current defaults,
-validation, working environment-variable aliases, and runtime provenance.
+validation, mechanically derived environment overrides, and runtime provenance.
 
 The machine-readable contract is
 [`contracts/kiln-config-v1.schema.json`](../contracts/kiln-config-v1.schema.json).
@@ -29,25 +29,22 @@ Both the section and field are converted to uppercase snake case. For example,
 `KILN_REQUEST_LOG_MAX_FILE_BYTES`.
 
 Every fixed field with an environment override implements its canonical name.
-The "Working spelling(s) today" column records either that same canonical name
-or a temporary compatibility spelling:
+The "Alternate env spelling(s)" column is deliberately `none` for every field:
 
 - **implemented** means the mechanically derived canonical name works;
-- **deprecated compatibility** means a non-canonical alias still works but
-  emits a structured startup warning naming the field, alias, and replacement;
 - **none** means there is no supported environment override for that field;
 - **target only; not implemented** means setting the mechanically derived name
   currently has no effect because the field is intentionally config-file-only.
 
-When a canonical name and deprecated compatibility alias are both present,
-Kiln parses both strictly. They are accepted only when they resolve to the same
-typed value; a conflict stops startup and names both variables. Values are
-never included in compatibility warnings.
+There are no environment aliases. Retired non-canonical names are ignored, so
+they cannot silently override the typed configuration. The complete
+[migration index](#configuration-migration) maps every retired public spelling
+to its canonical replacement.
 
 Do not assume that an arbitrary `KILN_*` name is public configuration. The
 repository contains internal diagnostics, qualification switches, kernel
-experiments, and temporary compatibility flags. Only the canonical names and
-deprecated compatibility spellings listed here are supported inputs.
+experiments, and build/toolchain inputs. Only the canonical names listed here
+are supported public field overrides.
 
 The generated [Runtime Environment Inventory](RUNTIME_ENVIRONMENT_INVENTORY.md)
 catalogs every direct environment read and mutation in crate-owned source,
@@ -72,12 +69,11 @@ not included in the field counts below.
 
 ### Value precedence
 
-For fields with a working environment alias, effective startup values resolve
-in this order, highest priority first:
+Effective startup values resolve in this order, highest priority first:
 
 1. Typed CLI overrides applied after environment resolution
    (`serve --served-model-id` and `serve --eval-mode`).
-2. A canonical environment name or deprecated compatibility alias listed here.
+2. The mechanically derived canonical environment name listed here.
 3. The selected TOML file.
 4. The built-in default.
 
@@ -102,7 +98,7 @@ TOML type errors, invalid enum values, malformed URLs, out-of-range values, and
 semantically invalid combinations stop startup. Present centralized environment
 overrides must be valid UTF-8 and must parse successfully; malformed values stop
 startup and the diagnostic names the variable and raw value. The centralized
-loader's boolean aliases accept, case-insensitively and with surrounding
+loader's boolean overrides accept, case-insensitively and with surrounding
 whitespace ignored:
 
 ```text
@@ -129,47 +125,45 @@ open an accelerator, or load model weights.
 
 ## Coverage summary
 
-The accepted TOML surface contains 16 top-level sections and 118 fixed leaf
+The accepted TOML surface contains 16 top-level sections and 117 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 118 fixed fields:
+credential. Of the 117 fixed fields:
 
-- 113 implement the canonical mechanical environment name;
-- 71 also retain one or more deprecated compatibility spellings (76 aliases
-  total);
+- 112 implement the canonical mechanical environment name;
 - 5 are config-file-only and have no environment override;
-- the 76 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
-  compatibility spelling for `server.default_thinking_enabled`.
+- no field has an alternate environment spelling.
 
-The tables below cover all 118 fixed fields and both dynamic credential fields.
-The schema additionally records the accepted deprecated TOML-only
-`streaming_prefill.enabled` compatibility field so validators match the loader.
+The tables below cover all 117 fixed fields and both dynamic credential fields.
+Unknown TOML fields are rejected, including the removed
+`speculative.enabled` and `streaming_prefill.enabled` toggles. Their canonical
+replacement fields are documented below.
 
 ## `[server]`
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `server.serving_profile` | string enum; `"stable"` | `KILN_SERVER_SERVING_PROFILE` (implemented) | `KILN_SERVING_PROFILE` (deprecated compatibility) | `stable`, `experimental`, or `maintenance`, case-insensitive. Process-lifetime policy; restart required. |
-| `server.deterministic` | boolean; `false` | `KILN_SERVER_DETERMINISTIC` (implemented) | `KILN_DETERMINISTIC` (deprecated compatibility) | Enables deterministic tensor behavior and forces the effective concurrent decode width to one. |
-| `server.host` | string; `"127.0.0.1"` | `KILN_SERVER_HOST` (implemented) | `KILN_HOST` (deprecated compatibility) | Must be non-empty. Binding beyond loopback exposes an unauthenticated inference and training API; use a trusted network or authenticated reverse proxy. |
-| `server.port` | unsigned 16-bit integer; `8420` | `KILN_SERVER_PORT` (implemented) | `KILN_PORT` (deprecated compatibility) | `1..=65535`. |
-| `server.request_timeout_secs` | unsigned integer; `600` | `KILN_SERVER_REQUEST_TIMEOUT_SECS` (implemented) | `KILN_REQUEST_TIMEOUT_SECS` (deprecated compatibility) | Must be greater than zero. Bounds a request, including model work and cleanup settlement. |
-| `server.terminal_access` | string enum; `"loopback_only"` | `KILN_SERVER_TERMINAL_ACCESS` (implemented) | `KILN_TERMINAL` (deprecated compatibility; boolean spellings map to enabled/disabled) | `loopback_only`, `enabled`, or `disabled`. Compatibility boolean spellings are accepted from the environment. This capability can execute arbitrary code; changing it requires restart. |
-| `server.http_send_buffer_bytes` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_HTTP_SEND_BUFFER_BYTES` (implemented) | `KILN_HTTP_SEND_BUFFER_BYTES` (deprecated compatibility) | When set, `1024..=16777216`. Applied to accepted sockets. Startup preflights the listener and rejects an OS read-back smaller than requested. |
-| `server.stream_stall_grace_ms` | unsigned integer; `2000` | `KILN_SERVER_STREAM_STALL_GRACE_MS` (implemented) | `KILN_STREAM_STALL_GRACE_MS` (deprecated compatibility) | `10..=2000`. A request retaining KV state with no streaming delivery progress is selected for cancellation after this grace. |
-| `server.max_batch_tokens` | unsigned integer; `512` | `KILN_SERVER_MAX_BATCH_TOKENS` (implemented) | `KILN_MAX_BATCH_TOKENS` (deprecated compatibility) | `2..=65536`. Combined decode-plus-prefill token budget for one batching-actor cycle. |
-| `server.max_prefill_tokens_per_cycle` | unsigned integer; `256` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` (implemented) | `KILN_MAX_PREFILL_TOKENS_PER_CYCLE` (deprecated compatibility) | `1..=65536`. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, direct streaming dispatch no later than that boundary, and `server.max_batch_tokens >= tile + effective max_decode_batch`; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins `128`; concurrent Vulkan serving at `256` is not qualified. |
-| `server.max_prefill_layers_per_cycle` | unsigned integer; `4` | `KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE` (implemented) | `KILN_MAX_PREFILL_LAYERS_PER_CYCLE` (deprecated compatibility) | `1..=1024`. Number of transformer layers an in-flight prefill chunk may execute before yielding to decode. |
-| `server.max_decode_batch` | `"auto"` or unsigned integer; `"auto"` | `KILN_SERVER_MAX_DECODE_BATCH` (implemented) | `KILN_MAX_DECODE_BATCH` (deprecated compatibility) | `auto`, `backend`, and `backend_policy` all delegate to backend policy; an integer must be `1..=65536`. Deterministic mode and `max_batch_tokens` may lower the final width. Do not raise this from a single throughput sample: the machine-local ROCm selector documented in the Qualification guide requires exact-width deterministic and fused-sampled execution, graph correctness, bounded tail/memory regression, restart/cooldown between arms, and follow-up soak/benchmark evidence. It emits a selection receipt but never mutates this field. The Strix Halo Vulkan development-soak candidate sets `2`; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together. |
-| `server.eval_mode` | boolean; `false` | `KILN_SERVER_EVAL_MODE` (implemented) | `KILN_EVAL_MODE` (deprecated compatibility) | Enables deterministic eval-serving defaults, headers, adapter warnings, and transient-cache cleanup behavior. `serve --eval-mode` applies a typed override after environment resolution and wins without mutating process environment. |
-| `server.debug_model_state` | boolean; `false` | `KILN_SERVER_DEBUG_MODEL_STATE` (implemented) | None | Enables trusted `GET /v1/debug/model-state` diagnostics without changing inference, cache, or eval semantics. `server.eval_mode=true` also enables the endpoint. The response contains model/configuration/runtime state but no prompt or user-message contents. |
-| `server.default_thinking_enabled` | optional boolean; omitted (`None`) | `KILN_SERVER_DEFAULT_THINKING_ENABLED` (implemented) | `KILN_DEFAULT_THINKING_ENABLED` (deprecated compatibility); `KILN_DEFAULT_NO_THINK` is a deprecated presence-only alias | `None` preserves the model template default. Requests may override with `chat_template_kwargs.enable_thinking`. Without the canonical spelling, any presence of `KILN_DEFAULT_NO_THINK`, even a value such as `0`, first selects `false`; the explicit `KILN_DEFAULT_THINKING_ENABLED` value is applied afterward and wins. When the canonical spelling is present, every present compatibility alias must resolve to the same boolean. There is no environment spelling that restores `None`. |
-| `server.default_thinking_budget_tokens` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` (implemented) | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` (deprecated compatibility) | Integer values include `0`, which closes thinking immediately. Case-insensitive `unlimited` clears a TOML limit back to `None`. Requests may inherit, replace, or explicitly disable the limit. |
-| `server.default_thinking_budget_ms` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` (implemented) | `KILN_DEFAULT_THINKING_BUDGET_MS` (deprecated compatibility) | Integer values include `0`. `unlimited` clears a TOML limit. The clock starts at the first decode candidate, after queueing and prefill. The first token or time limit reached forces the model's closing `</think>` sequence. |
-| `server.fold_reasoning_into_content` | boolean; `false` | `KILN_SERVER_FOLD_REASONING_INTO_CONTENT` (implemented) | `KILN_FOLD_REASONING_INTO_CONTENT` (deprecated compatibility) | Copies separated reasoning into `content` for compatibility clients. A request can override it. |
-| `server.chat_performance_metadata` | boolean; `false` | `KILN_SERVER_CHAT_PERFORMANCE_METADATA` (implemented) | `KILN_CHAT_PERFORMANCE_METADATA` (deprecated compatibility) | Default for chat response performance metadata; requests can override with `include_performance`. |
-| `server.chat_config_hash_metadata` | boolean; `false` | `KILN_SERVER_CHAT_CONFIG_HASH_METADATA` (implemented) | `KILN_CHAT_CONFIG_HASH_METADATA` (deprecated compatibility) | Default for chat response config hashes; requests can override with `include_config_hashes`. |
-| `server.slow_request_warn_secs` | unsigned integer; `30` | `KILN_SERVER_SLOW_REQUEST_WARN_SECS` (implemented) | `KILN_SLOW_REQUEST_WARN_SECS` (deprecated compatibility) | `0` disables slow-request warnings; otherwise a request at least this old emits a structured warning. |
-| `server.shutdown_timeout_secs` | unsigned integer; `5` | `KILN_SERVER_SHUTDOWN_TIMEOUT_SECS` (implemented) | `KILN_SHUTDOWN_TIMEOUT_SECS` (deprecated compatibility) | Must be greater than zero. Hard ceiling for graceful drain before forced exit. |
+| `server.serving_profile` | string enum; `"stable"` | `KILN_SERVER_SERVING_PROFILE` (implemented) | none | `stable`, `experimental`, or `maintenance`, case-insensitive. Process-lifetime policy; restart required. |
+| `server.deterministic` | boolean; `false` | `KILN_SERVER_DETERMINISTIC` (implemented) | none | Enables deterministic tensor behavior and forces the effective concurrent decode width to one. |
+| `server.host` | string; `"127.0.0.1"` | `KILN_SERVER_HOST` (implemented) | none | Must be non-empty. Binding beyond loopback exposes an unauthenticated inference and training API; use a trusted network or authenticated reverse proxy. |
+| `server.port` | unsigned 16-bit integer; `8420` | `KILN_SERVER_PORT` (implemented) | none | `1..=65535`. |
+| `server.request_timeout_secs` | unsigned integer; `600` | `KILN_SERVER_REQUEST_TIMEOUT_SECS` (implemented) | none | Must be greater than zero. Bounds a request, including model work and cleanup settlement. |
+| `server.terminal_access` | string enum; `"loopback_only"` | `KILN_SERVER_TERMINAL_ACCESS` (implemented) | none | `loopback_only`, `enabled`, or `disabled`. This capability can execute arbitrary code; changing it requires restart. |
+| `server.http_send_buffer_bytes` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_HTTP_SEND_BUFFER_BYTES` (implemented) | none | When set, `1024..=16777216`. Applied to accepted sockets. Startup preflights the listener and rejects an OS read-back smaller than requested. |
+| `server.stream_stall_grace_ms` | unsigned integer; `2000` | `KILN_SERVER_STREAM_STALL_GRACE_MS` (implemented) | none | `10..=2000`. A request retaining KV state with no streaming delivery progress is selected for cancellation after this grace. |
+| `server.max_batch_tokens` | unsigned integer; `512` | `KILN_SERVER_MAX_BATCH_TOKENS` (implemented) | none | `2..=65536`. Combined decode-plus-prefill token budget for one batching-actor cycle. |
+| `server.max_prefill_tokens_per_cycle` | unsigned integer; `256` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` (implemented) | none | `1..=65536`. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, direct streaming dispatch no later than that boundary, and `server.max_batch_tokens >= tile + effective max_decode_batch`; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins `128`; concurrent Vulkan serving at `256` is not qualified. |
+| `server.max_prefill_layers_per_cycle` | unsigned integer; `4` | `KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE` (implemented) | none | `1..=1024`. Number of transformer layers an in-flight prefill chunk may execute before yielding to decode. |
+| `server.max_decode_batch` | `"auto"` or unsigned integer; `"auto"` | `KILN_SERVER_MAX_DECODE_BATCH` (implemented) | none | `auto`, `backend`, and `backend_policy` all delegate to backend policy; an integer must be `1..=65536`. Deterministic mode and `max_batch_tokens` may lower the final width. Do not raise this from a single throughput sample: the machine-local ROCm selector documented in the Qualification guide requires exact-width deterministic and fused-sampled execution, graph correctness, bounded tail/memory regression, restart/cooldown between arms, and follow-up soak/benchmark evidence. It emits a selection receipt but never mutates this field. The Strix Halo Vulkan development-soak candidate sets `2`; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together. |
+| `server.eval_mode` | boolean; `false` | `KILN_SERVER_EVAL_MODE` (implemented) | none | Enables deterministic eval-serving defaults, headers, adapter warnings, and transient-cache cleanup behavior. `serve --eval-mode` applies a typed override after environment resolution and wins without mutating process environment. |
+| `server.debug_model_state` | boolean; `false` | `KILN_SERVER_DEBUG_MODEL_STATE` (implemented) | none | Enables trusted `GET /v1/debug/model-state` diagnostics without changing inference, cache, or eval semantics. `server.eval_mode=true` also enables the endpoint. The response contains model/configuration/runtime state but no prompt or user-message contents. |
+| `server.default_thinking_enabled` | optional boolean; omitted (`None`) | `KILN_SERVER_DEFAULT_THINKING_ENABLED` (implemented) | none | `None` preserves the model template default. Requests may override with `chat_template_kwargs.enable_thinking`. The canonical environment override accepts strict booleans; there is no environment value that restores `None`. |
+| `server.default_thinking_budget_tokens` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` (implemented) | none | Integer values include `0`, which closes thinking immediately. Case-insensitive `unlimited` clears a TOML limit back to `None`. Requests may inherit, replace, or explicitly disable the limit. |
+| `server.default_thinking_budget_ms` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` (implemented) | none | Integer values include `0`. `unlimited` clears a TOML limit. The clock starts at the first decode candidate, after queueing and prefill. The first token or time limit reached forces the model's closing `</think>` sequence. |
+| `server.fold_reasoning_into_content` | boolean; `false` | `KILN_SERVER_FOLD_REASONING_INTO_CONTENT` (implemented) | none | Copies separated reasoning into `content` for compatibility clients. A request can override it. |
+| `server.chat_performance_metadata` | boolean; `false` | `KILN_SERVER_CHAT_PERFORMANCE_METADATA` (implemented) | none | Default for chat response performance metadata; requests can override with `include_performance`. |
+| `server.chat_config_hash_metadata` | boolean; `false` | `KILN_SERVER_CHAT_CONFIG_HASH_METADATA` (implemented) | none | Default for chat response config hashes; requests can override with `include_config_hashes`. |
+| `server.slow_request_warn_secs` | unsigned integer; `30` | `KILN_SERVER_SLOW_REQUEST_WARN_SECS` (implemented) | none | `0` disables slow-request warnings; otherwise a request at least this old emits a structured warning. |
+| `server.shutdown_timeout_secs` | unsigned integer; `5` | `KILN_SERVER_SHUTDOWN_TIMEOUT_SECS` (implemented) | none | Must be greater than zero. Hard ceiling for graceful drain before forced exit. |
 
 ### Serving profiles
 
@@ -196,22 +190,22 @@ dashboard all report the same configured/effective/source values, plus the
 compiled Vulkan kernel-policy schema ID; lower model, tensor, and kernel paths
 do not re-read these public environment names.
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
 | `accelerator.kt_api_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_KT_API_MODE` (implemented) | none | `auto`, `all`, or `disabled`, case-insensitive. `auto` enables the qualified kiln-tensor adapter routes while leaving the experimental generic matmul and paged-KV routes inactive. `all` enables every adapter route; `disabled` forces legacy fallbacks. The two explicit modes require `server.serving_profile = "experimental"`. The mode is resolved before accelerator execution, remains immutable for the process lifetime, and is reported with source attribution. Restart required. |
 | `accelerator.full_attention_score_budget_mib` | unsigned integer MiB; `2048` | `KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB` (implemented) | none | `64..=2048`. Immutable ceiling for exact full-attention materialized score and scratch geometry across CPU, CUDA, ROCm, Metal, and Vulkan model routes. ROCm online attention derives `min(value, 1024)` MiB while retaining fixed qualified 2048-query/4096-key tiles. Runtime memory observations remain fail-closed admission and reservation checks; they never resize the geometry or switch to smaller tiles during a request. Restart required. |
-| `accelerator.vulkan_device_index` | `"auto"` or unsigned integer; `"auto"` | `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX` (implemented) | `KILN_VULKAN_DEVICE` (deprecated compatibility) | `auto` preserves automatic discrete-GPU preference and otherwise chooses the first enumerated Vulkan physical device. An integer strictly selects that zero-based Vulkan enumeration index. An unavailable index fails logical-device startup; it is never ignored or replaced with another device. The immutable selection is installed before Vulkan device creation and reported with source attribution. Restart required. |
-| `accelerator.vulkan_validation` | boolean; `false` | `KILN_ACCELERATOR_VULKAN_VALIDATION` (implemented) | `KILN_VULKAN_VALIDATION` (deprecated compatibility) | `true` requires `server.serving_profile = "experimental"` and enables `VK_LAYER_KHRONOS_validation` when the Vulkan instance is created. Startup fails if the layer is not installed. This is not mutable per request or dispatch. Restart required. |
+| `accelerator.vulkan_device_index` | `"auto"` or unsigned integer; `"auto"` | `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX` (implemented) | none | `auto` preserves automatic discrete-GPU preference and otherwise chooses the first enumerated Vulkan physical device. An integer strictly selects that zero-based Vulkan enumeration index. An unavailable index fails logical-device startup; it is never ignored or replaced with another device. The immutable selection is installed before Vulkan device creation and reported with source attribution. Restart required. |
+| `accelerator.vulkan_validation` | boolean; `false` | `KILN_ACCELERATOR_VULKAN_VALIDATION` (implemented) | none | `true` requires `server.serving_profile = "experimental"` and enables `VK_LAYER_KHRONOS_validation` when the Vulkan instance is created. Startup fails if the layer is not installed. This is not mutable per request or dispatch. Restart required. |
 | `accelerator.cuda_kernel_profile` | string enum; `"native_default"` | `KILN_ACCELERATOR_CUDA_KERNEL_PROFILE` (implemented) | none | `native_default` or `portable_fallback`, case-insensitive. `native_default` preserves the twenty-five CUDA model/backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. `portable_fallback` declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required. |
 | `accelerator.cuda_marlin_profile` | string enum; `"disabled"` | `KILN_ACCELERATOR_CUDA_MARLIN_PROFILE` (implemented) | none | `disabled`, `attention_mlp`, or `attention_mlp_gdn`, case-insensitive. `disabled` preserves BF16 projections. `attention_mlp` packs full-attention Q and every MLP projection as Marlin W4A16. `attention_mlp_gdn` also packs the quality-sensitive GDN output projection. Both non-default profiles require `server.serving_profile = "experimental"`. The selected weight layout is immutable after upload. Packing always uses the established parallel implementation. Restart required. |
 | `accelerator.cuda_flash_backward_mode` | string enum; `"fast"` | `KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE` (implemented) | none | `fast` or `deterministic`, case-insensitive. `fast` preserves the established CUDA FlashAttention backward accumulation. `deterministic` selects split accumulation for exact replay and diagnosis. The mode is installed before model construction and cannot change between training jobs. Restart required. |
 | `accelerator.metal_kernel_profile` | string enum; `"native_default"` | `KILN_ACCELERATOR_METAL_KERNEL_PROFILE` (implemented) | none | `native_default` or `portable_fallback`, case-insensitive. `native_default` preserves forty-five of the forty-six Metal backend routes active before consolidation; custom LM-head argmax remains disabled by default. `portable_fallback` declines every owned route. The complete route set is installed before Metal backend construction, immutable for the process lifetime, and reported with source attribution. Restart required. |
 | `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
-| `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | `KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL` and `KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
-| `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | `KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT` and `KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT` (deprecated compatibility) | `auto`, `native_bf16`, or `f32_then_cast`, case-insensitive. `auto` applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
+| `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | none | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Malformed values fail startup. Restart required. |
+| `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | none | `auto`, `native_bf16`, or `f32_then_cast`, case-insensitive. `auto` applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Malformed values fail startup. Restart required. |
 | `accelerator.rocm_kernel_profile` | string enum; `"qualified"` | `KILN_ACCELERATOR_ROCM_KERNEL_PROFILE` (implemented) | none | `qualified`, `portable_fallback`, or `experimental_multiblock`, case-insensitive. `qualified` installs forty-three of forty-five accelerated model/tensor routes, leaving multi-block GDN prefill and the correctness-disabled fused RMSNorm route off, and retains thirty fixed correctness/bounded-work leaves. `portable_fallback` declines all forty-five accelerated routes while retaining the same safety behavior. `experimental_multiblock` enables the multi-block GDN prefill experiment but retains fused RMSNorm off, installing forty-four of forty-five accelerated routes, and requires `server.serving_profile = "experimental"`. The complete 75-leaf policy is immutable after startup and governs backend/model dispatch, loading, forward/tape execution, W8 decode, training geometry, paged-attention specialization and splitting, concat assembly, finite checks, RMSNorm row tiling, and flash-attention forward/backward route selection and fixed tiling through Rust and C++ kernel boundaries. Retired per-kernel variables are not aliases. Restart required. |
-| `accelerator.rocm_graph_mode` | string enum; `"profile"` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` (implemented) | `KILN_ROCM_GRAPHS` and `KILN_ROCM_GRAPH_CAPTURE` (deprecated compatibility) | `profile`, `disabled`, `warmup_then_eager`, or `lazy_capture_replay`, case-insensitive. `profile` resolves to `disabled` under stable/maintenance and `lazy_capture_replay` under experimental. The two explicit non-disabled modes require the experimental profile. Restart required. |
-| `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | `KILN_ROCM_GRAPH_CACHE_MAX` (deprecated compatibility) | `1..=64`. Bounds retained native graph entries in every product and embedding constructor. At saturation, admission reclaims idle owners first and then the minimum fair-LRU active entries while preserving one graph per active owner after the incoming candidate. Zero or unbounded capacities are rejected. Restart required. |
+| `accelerator.rocm_graph_mode` | string enum; `"profile"` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` (implemented) | none | `profile`, `disabled`, `warmup_then_eager`, or `lazy_capture_replay`, case-insensitive. `profile` resolves to `disabled` under stable/maintenance and `lazy_capture_replay` under experimental. The two explicit non-disabled modes require the experimental profile. Restart required. |
+| `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | none | `1..=64`. Bounds retained native graph entries in every product and embedding constructor. At saturation, admission reclaims idle owners first and then the minimum fair-LRU active entries while preserving one graph per active owner after the incoming candidate. Zero or unbounded capacities are rejected. Restart required. |
 | `accelerator.rocm_graph_cache_max_bytes` | unsigned integer bytes; `1073741824` (1 GiB) | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` (implemented) | none | `67108864..=17179869184` (64 MiB through 16 GiB). Independently bounds requested physical bytes retained by graph-owned stable tensors, capture arenas, private-stream hipBLASLt workspaces, and owner slot state. Opaque HIP graph/exec/stream/event overhead is counted as objects and remains subject to live driver-pressure policy. Restart required. |
 
 `accelerator.kt_api_mode` replaces the former `KILN_USE_KT_API_*`,
@@ -417,10 +411,9 @@ is fixed or owned by the typed backend profile shown above.
 
 `server.deterministic` remains the public deterministic control, with
 `KILN_SERVER_DETERMINISTIC` as its mechanically derived environment target and
-`KILN_DETERMINISTIC` as a deprecated server compatibility alias. Standalone
-`kiln-tensor` consumers no longer read `KILN_DETERMINISTIC`; without an owning
-application calling the typed configuration hook, deterministic execution
-defaults to `false`.
+no alternate spelling. Standalone `kiln-tensor` consumers do not read process
+environment for this policy; without an owning application calling the typed
+configuration hook, deterministic execution defaults to `false`.
 
 `accelerator.rocm_kernel_profile` replaces the model-layer ROCm controls
 `KILN_DISABLE_ROCM_ATTN_DECODE_QKV_PREP`,
@@ -689,9 +682,9 @@ live memory and cannot change after the primary ROCm context is created.
 The explicit routes exist for controlled A/B qualification, require
 `server.serving_profile = "experimental"`, and are reported with source
 attribution by `kiln config`, `/v1/config`, health, and trusted debug state. The
-former force/disable variables are warning compatibility aliases resolved once
-by the typed startup registry. The two ad hoc trace variables were deleted;
-they are not configuration and no matmul path reads the process environment.
+former force/disable variables are retired and ignored; use the two canonical
+enum-valued overrides above. The two ad hoc trace variables were deleted; they
+are not configuration and no matmul path reads the process environment.
 
 ### ROCm token-only LM-head contract
 
@@ -1006,17 +999,17 @@ These values are resolved once, after backend selection and after
 `server.max_batch_tokens` determine the effective decode width. Every change
 requires a process restart; none is a live tuning control.
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `batching.mode` | string enum; `"auto"` | `KILN_BATCHING_MODE` (implemented) | `KILN_BATCHING_ENGINE` (deprecated compatibility) | TOML accepts `auto`, `enabled`, or `disabled`, case-insensitively. Environment input also accepts the strict boolean spellings, mapping true to `enabled` and false to `disabled`. `auto` delegates actor selection to the immutable backend policy; an explicit value wins. Restart required. |
-| `batching.rowwise_decode` | boolean; `false` | `KILN_BATCHING_ROWWISE_DECODE` (implemented) | `KILN_BATCH_DECODE_ROWWISE` (deprecated compatibility) | `false` sends each ready cohort through one true batched forward. `true` issues one forward per row while retaining actor ownership; it is an emergency correctness comparison, normally reduces throughput, and does not increase the effective decode width. Restart required. |
-| `batching.prefix_aware_admission` | boolean; `true` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` (implemented) | `KILN_BATCH_PREFIX_AWARE_ADMISSION` (deprecated compatibility) | When true, a queued same-adapter strict descendant waits while its active shorter prefix can become reusable; independent rows may still be admitted. Disable only for a controlled admission A/B. Restart required. |
-| `batching.prefill_admission_quantum` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` (implemented) | `KILN_BATCH_PREFILL_ADMISSION_QUANTUM` (deprecated compatibility) | An integer must be `1..=65536` and caps how many queued prompts the actor admits in one cycle before returning to decode. `auto` is case-insensitive and uses the backend policy below. The selected value is then clamped to `1..=effective max_decode_batch`; the diagnostics name `effective_decode_width` as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. The Strix Halo Vulkan development-soak candidate sets `2`, admitting an equal pair while retaining a four-request active ceiling. Restart required. |
+| `batching.mode` | string enum; `"auto"` | `KILN_BATCHING_MODE` (implemented) | none | TOML accepts `auto`, `enabled`, or `disabled`, case-insensitively. Environment input also accepts the strict boolean spellings, mapping true to `enabled` and false to `disabled`. `auto` delegates actor selection to the immutable backend policy; an explicit value wins. Restart required. |
+| `batching.rowwise_decode` | boolean; `false` | `KILN_BATCHING_ROWWISE_DECODE` (implemented) | none | `false` sends each ready cohort through one true batched forward. `true` issues one forward per row while retaining actor ownership; it is an emergency correctness comparison, normally reduces throughput, and does not increase the effective decode width. Restart required. |
+| `batching.prefix_aware_admission` | boolean; `true` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` (implemented) | none | When true, a queued same-adapter strict descendant waits while its active shorter prefix can become reusable; independent rows may still be admitted. Disable only for a controlled admission A/B. Restart required. |
+| `batching.prefill_admission_quantum` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` (implemented) | none | An integer must be `1..=65536` and caps how many queued prompts the actor admits in one cycle before returning to decode. `auto` is case-insensitive and uses the backend policy below. The selected value is then clamped to `1..=effective max_decode_batch`; the diagnostics name `effective_decode_width` as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. The Strix Halo Vulkan development-soak candidate sets `2`, admitting an equal pair while retaining a four-request active ceiling. Restart required. |
 | `batching.actor_cycle_idle_ms` | unsigned integer milliseconds; `0` | `KILN_BATCHING_ACTOR_CYCLE_IDLE_MS` (implemented) | none | `0..=60000`. Zero preserves the unpaced actor. A nonzero value inserts one intentional cooperative wait after an actor cycle that advanced prefill or decode, only after synchronous accelerator work has returned. The actor polls control commands at intervals no longer than 5 ms, so shutdown remains responsive, and the independent response-delivery worker and HTTP process remain live. This deliberately trades request throughput and inter-token latency for a lower sustained accelerator duty cycle; it is not a temperature controller and never changes itself from a live sensor. Config, health, debug, Prometheus, and serving-benchmark receipts expose the policy and observed waits. Restart required. |
-| `batching.direct_decode_rendezvous_mode` | string enum; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` (implemented) | `KILN_DECODE_BATCHER` (deprecated compatibility) | Selects only the fallback worker used by actor-absent direct streaming effectively-greedy requests. TOML accepts `auto`, `enabled`, or `disabled`, case-insensitively; environment input also accepts the strict boolean spellings. `auto` enables the worker on every real backend. Sampled requests, non-streaming requests, and every route using the batching actor bypass this worker. Restart required. |
-| `batching.direct_decode_rendezvous_max_batch` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` (implemented) | `KILN_DECODE_BATCH_MAX` (deprecated compatibility) | An explicit integer must be `1..=65536`. `auto` uses the backend policy below. Either selection is clamped to the already-resolved effective decode width; diagnostics use `effective_decode_width` when that ceiling wins. Restart required. |
-| `batching.direct_decode_rendezvous_wait_us` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` (implemented) | `KILN_DECODE_BATCH_WAIT_US` (deprecated compatibility) | An explicit value is any non-negative `u64` number of microseconds, including `0`; `auto` uses backend policy. A negative, overflowing, malformed, or non-UTF-8 environment value stops startup. In particular, malformed legacy `KILN_DECODE_BATCH_WAIT_US` now fails startup instead of silently becoming zero. Restart required. |
-| `batching.direct_decode_rendezvous_mixed_seq_lens` | `"auto"` or boolean; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` (implemented) | `KILN_DECODE_BATCH_MIXED_SEQ` (deprecated compatibility) | TOML accepts only the string `auto` or a native boolean; quoted boolean strings are rejected. Environment input accepts `auto` or the strict boolean spellings. The value controls whether one compatible fallback cohort may contain different decode positions. Restart required. |
+| `batching.direct_decode_rendezvous_mode` | string enum; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` (implemented) | none | Selects only the fallback worker used by actor-absent direct streaming effectively-greedy requests. TOML accepts `auto`, `enabled`, or `disabled`, case-insensitively; environment input also accepts the strict boolean spellings. `auto` enables the worker on every real backend. Sampled requests, non-streaming requests, and every route using the batching actor bypass this worker. Restart required. |
+| `batching.direct_decode_rendezvous_max_batch` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` (implemented) | none | An explicit integer must be `1..=65536`. `auto` uses the backend policy below. Either selection is clamped to the already-resolved effective decode width; diagnostics use `effective_decode_width` when that ceiling wins. Restart required. |
+| `batching.direct_decode_rendezvous_wait_us` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` (implemented) | none | An explicit value is any non-negative `u64` number of microseconds, including `0`; `auto` uses backend policy. A negative, overflowing, malformed, or non-UTF-8 environment value stops startup. In particular, malformed legacy `KILN_DECODE_BATCH_WAIT_US` now fails startup instead of silently becoming zero. Restart required. |
+| `batching.direct_decode_rendezvous_mixed_seq_lens` | `"auto"` or boolean; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` (implemented) | none | TOML accepts only the string `auto` or a native boolean; quoted boolean strings are rejected. Environment input accepts `auto` or the strict boolean spellings. The value controls whether one compatible fallback cohort may contain different decode positions. Restart required. |
 
 ### Backend-owned `auto` policy
 
@@ -1205,18 +1198,18 @@ those values as a serve-startup contract instead of guessing a target. Inspect
 
 ## `[model]`
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `model.path` | optional string; omitted (`None`) | `KILN_MODEL_PATH` (implemented) | `KILN_MODEL_PATH` | Must be non-empty when set. Omitted starts the server in mock mode; a real model path enables real inference. |
-| `model.model_id` | string; `"Qwen/Qwen3.5-4B"` | `KILN_MODEL_MODEL_ID` (implemented) | `KILN_MODEL_ID` (deprecated compatibility) | Must be non-empty. Used for model/tokenizer identity and as the source of the default served id. Kiln still applies its built-in Qwen3.5-4B runtime profile. |
-| `model.tokenizer_path` | optional string; omitted (`None`) | `KILN_MODEL_TOKENIZER_PATH` (implemented) | `KILN_TOKENIZER_PATH` (deprecated compatibility) | Must be non-empty when set. |
-| `model.adapter_dir` | optional string; omitted (`None`) | `KILN_MODEL_ADAPTER_DIR` (implemented) | `KILN_ADAPTER_DIR` (deprecated compatibility) | Must be non-empty when set. For the Qwen3.5-4B profile, omission resolves to `<model.path>/adapters`. |
-| `model.snapshot_dir` | optional string; omitted (`None`) | `KILN_MODEL_SNAPSHOT_DIR` (implemented) | `KILN_MODEL_SNAPSHOT_DIR` | Must be non-empty when set. The environment alias uniquely treats an empty or whitespace-only value as a request to clear the TOML value. Without a value, Kiln tries a location beside the model and then the system temporary directory. |
-| `model.checkpoint_read_mib_per_second` | optional unsigned integer MiB/s; omitted (`None`) | `KILN_MODEL_CHECKPOINT_READ_MIB_PER_SECOND` (implemented) | `KILN_MODEL_CHECKPOINT_READ_MIB_PER_SECOND` | `1..=16384` when set. Independently bounds the private snapshot copy, initial full content verification, and post-upload full verification. Reflinked bytes are not charged as reads. Shutdown is checked between bounded chunks and at most every 25 ms during waits. Omission removes rate limiting but preserves cancellation. Applies to real-model startup on every backend, requires restart, and is never active during inference. `GET /v1/config.model_startup.checkpoint_read` reports all three phase observations. |
-| `model.accelerator_weight_upload_mib_per_second` | optional unsigned integer MiB/s; omitted (`None`) | `KILN_MODEL_ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND` (implemented) | `KILN_MODEL_ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND` | `1..=16384` when set. Reserves the cumulative eager base-model source-byte schedule before the base group and each layer, then checks it again after the unit. The base group adds shutdown boundaries after embedding upload, transpose, pack, final norm, and rotary initialization. Transforms can add device work, so this is not a bus-throughput cap. The current backend operation is not interruptible; reservation waits poll cancellation every 25 ms. Omission removes rate limiting but preserves boundary cancellation. Inapplicable to mock and CPU-only execution. Startup-only, restart required, and never active during inference. `GET /v1/config.model_startup.accelerator_weight_upload` reports reserved/completed bytes and layers. |
-| `model.vulkan_decode_weight_prewarm` | boolean; `true` | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM` (implemented) | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM` | Populates backend-private Vulkan decode-weight caches during startup. Disable only to trade first-request latency for lower startup work. Restart required. |
-| `model.vulkan_decode_weight_prewarm_mib_per_second` | unsigned integer MiB/s; `256` | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND` (implemented) | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND` | `1..=16384`. Bounds the average Vulkan decode-weight cache materialization rate. Pacing checks shutdown at least every 25 ms between uploads. Restart required. |
-| `model.served_model_id` | optional string; omitted (`None`) | `KILN_MODEL_SERVED_MODEL_ID` (implemented) | `KILN_SERVED_MODEL_ID` (deprecated compatibility) | Must be non-empty when set. Otherwise the effective id is the final slash-separated component of `model.model_id` (`Qwen3.5-4B` by default). `serve --served-model-id` applies a typed, validated override after environment resolution. |
+| `model.path` | optional string; omitted (`None`) | `KILN_MODEL_PATH` (implemented) | none | Must be non-empty when set. Omitted starts the server in mock mode; a real model path enables real inference. |
+| `model.model_id` | string; `"Qwen/Qwen3.5-4B"` | `KILN_MODEL_MODEL_ID` (implemented) | none | Must be non-empty. Used for model/tokenizer identity and as the source of the default served id. Kiln still applies its built-in Qwen3.5-4B runtime profile. |
+| `model.tokenizer_path` | optional string; omitted (`None`) | `KILN_MODEL_TOKENIZER_PATH` (implemented) | none | Must be non-empty when set. |
+| `model.adapter_dir` | optional string; omitted (`None`) | `KILN_MODEL_ADAPTER_DIR` (implemented) | none | Must be non-empty when set. For the Qwen3.5-4B profile, omission resolves to `<model.path>/adapters`. |
+| `model.snapshot_dir` | optional string; omitted (`None`) | `KILN_MODEL_SNAPSHOT_DIR` (implemented) | none | Must be non-empty when set. An empty or whitespace-only canonical environment value clears a TOML value. Without a value, Kiln tries a location beside the model and then the system temporary directory. |
+| `model.checkpoint_read_mib_per_second` | optional unsigned integer MiB/s; omitted (`None`) | `KILN_MODEL_CHECKPOINT_READ_MIB_PER_SECOND` (implemented) | none | `1..=16384` when set. Independently bounds the private snapshot copy, initial full content verification, and post-upload full verification. Reflinked bytes are not charged as reads. Shutdown is checked between bounded chunks and at most every 25 ms during waits. Omission removes rate limiting but preserves cancellation. Applies to real-model startup on every backend, requires restart, and is never active during inference. `GET /v1/config.model_startup.checkpoint_read` reports all three phase observations. |
+| `model.accelerator_weight_upload_mib_per_second` | optional unsigned integer MiB/s; omitted (`None`) | `KILN_MODEL_ACCELERATOR_WEIGHT_UPLOAD_MIB_PER_SECOND` (implemented) | none | `1..=16384` when set. Reserves the cumulative eager base-model source-byte schedule before the base group and each layer, then checks it again after the unit. The base group adds shutdown boundaries after embedding upload, transpose, pack, final norm, and rotary initialization. Transforms can add device work, so this is not a bus-throughput cap. The current backend operation is not interruptible; reservation waits poll cancellation every 25 ms. Omission removes rate limiting but preserves boundary cancellation. Inapplicable to mock and CPU-only execution. Startup-only, restart required, and never active during inference. `GET /v1/config.model_startup.accelerator_weight_upload` reports reserved/completed bytes and layers. |
+| `model.vulkan_decode_weight_prewarm` | boolean; `true` | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM` (implemented) | none | Populates backend-private Vulkan decode-weight caches during startup. Disable only to trade first-request latency for lower startup work. Restart required. |
+| `model.vulkan_decode_weight_prewarm_mib_per_second` | unsigned integer MiB/s; `256` | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND` (implemented) | none | `1..=16384`. Bounds the average Vulkan decode-weight cache materialization rate. Pacing checks shutdown at least every 25 ms between uploads. Restart required. |
+| `model.served_model_id` | optional string; omitted (`None`) | `KILN_MODEL_SERVED_MODEL_ID` (implemented) | none | Must be non-empty when set. Otherwise the effective id is the final slash-separated component of `model.model_id` (`Qwen3.5-4B` by default). `serve --served-model-id` applies a typed, validated override after environment resolution. |
 
 ## `[paths]`
 
@@ -1224,9 +1217,9 @@ This section owns process-lifetime filesystem locations shared across backend
 crates. Resolution happens before model loading or accelerator construction, so
 inference never changes cache location in response to process environment.
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `paths.cache_root` | optional path string; omitted (platform account cache directory) | `KILN_PATHS_CACHE_ROOT` (implemented) | `KILN_PATHS_CACHE_ROOT` | Must be a non-empty path when set. Relative paths are made absolute against the startup working directory. The resolved root is installed before cache consumers and cannot change during the process lifetime. `GET /v1/config.paths` reports the absolute effective path and source. |
+| `paths.cache_root` | optional path string; omitted (platform account cache directory) | `KILN_PATHS_CACHE_ROOT` (implemented) | none | Must be a non-empty path when set. Relative paths are made absolute against the startup working directory. The resolved root is installed before cache consumers and cannot change during the process lifetime. `GET /v1/config.paths` reports the absolute effective path and source. |
 
 When omitted, `paths.cache_root` resolves from the operating-system account
 database to `~/.cache/kiln` on Linux and other Unix hosts or
@@ -1238,21 +1231,21 @@ and transposed model weights. `kiln config` prints the same resolved path.
 
 ## `[memory]`
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `memory.num_blocks` | optional unsigned integer; omitted (`None`) | `KILN_MEMORY_NUM_BLOCKS` (implemented) | `KILN_NUM_BLOCKS` (deprecated compatibility) | Must be greater than zero when set. Omission invokes backend-aware automatic KV-block sizing. |
-| `memory.gpu_memory_gb` | optional finite number; omitted (`None`) | `KILN_MEMORY_GPU_MEMORY_GB` (implemented) | `KILN_GPU_MEMORY_GB` (deprecated compatibility) | Must be finite, greater than zero, and representable as bytes. Units are GiB. This is a capacity cap, not a hardware override: it may reduce the detected safe capacity but never expands physical VRAM, host-backed unified memory, or a cgroup-bounded capacity. A request above the safe detected capacity is clamped down. |
-| `memory.inference_memory_fraction` | finite number; `0.7` | `KILN_MEMORY_INFERENCE_MEMORY_FRACTION` (implemented) | `KILN_INFERENCE_MEMORY_FRACTION` (deprecated compatibility) | Loader validation accepts `0.0..=1.0`; real-state construction clamps the configured value to `0.1..=1.0` before KV sizing. The remainder is available to the training budget. |
-| `memory.training_memory_gb` | optional finite number; omitted (`None`) | `KILN_MEMORY_TRAINING_MEMORY_GB` (implemented) | `KILN_TRAINING_MEMORY_GB` (deprecated compatibility) | Must be finite, greater than zero, and representable as bytes when set. Optional training-budget cap in GiB; it can reduce but never expand the capacity remaining after resident model and KV allocations. |
-| `memory.vulkan_buffer_pool_gb` | finite number; `3.0` | `KILN_MEMORY_VULKAN_BUFFER_POOL_GB` (implemented) | `KILN_VULKAN_BUFFER_POOL_GB` (deprecated compatibility) | Vulkan-only process-wide cap, in GiB, on idle scratch buffers retained for reuse. Must be finite, non-negative, and representable as bytes; `0` disables retention. Active operations may allocate beyond the cap, but overflow buffers are freed when their final caller drops. A new cache entry evicts the oldest idle buffers before admission, and pressure reclaim releases idle entries under exclusive GPU coordination. `/v1/config`, `/health`, and Prometheus expose the cap, retained/free/borrowed bytes, hits/misses by allocation route, evictions, and uncached overflow. Health also exposes one bounded last-miss record with requested and bucket bytes plus the source callsite. The default remains `3.0`; the Strix Halo Vulkan development-soak candidate explicitly sets `3.5` after the smaller cap showed deterministic eviction churn. |
-| `memory.floor_gb` | finite number; `1.0` | `KILN_MEMORY_FLOOR_GB` (implemented) | `KILN_MEMORY_FLOOR_GB` | Must be finite, non-negative, representable as bytes, and strictly smaller than the selected accelerator's effective capacity after `memory.gpu_memory_gb` is applied. Units are GiB. Accelerator startup rejects an equal or larger floor before model upload and reports both configured and effective byte values. The process-wide governor subtracts this additional floor, then outstanding soft reservations, from live free memory when computing allocation headroom. On unified-memory devices it is separate from the physical-memory reserve applied during safe-capacity detection. |
-| `memory.probe_ms` | unsigned integer; `500` | `KILN_MEMORY_PROBE_MS` (implemented) | `KILN_MEMORY_PROBE_MS` | Must be greater than zero. Sets the background memory-sampler cadence. Request, inference, health, and metrics paths read only the published sample and never run a driver/OS probe synchronously. Cached admission fails closed when the sample is older than `max(5000 ms, 4 * probe_ms)`, the latest probe failed, or a required sampler is not running. An explicit refresh after a material allocation or release bypasses the cadence. |
-| `memory.reclaim_mode` | string enum; `"off"` | `KILN_MEMORY_RECLAIM_MODE` (implemented) | `KILN_MEMORY_RECLAIM_MODE` | Exactly `off`, `on-demand`, or `automatic`, case-insensitive with surrounding whitespace ignored. `off` prevents execution of registered allocator reclaim hooks; `on-demand` permits explicit pressure and allocation-retry reclaim calls; `automatic` also permits the background pressure monitor. The immutable serving profile remains authoritative: a profile with allocator reclaim disabled keeps the effective mode off and does not start the monitor. |
-| `memory.kv_autoscale` | boolean; `true` | `KILN_MEMORY_KV_AUTOSCALE` (implemented) | `KILN_KV_AUTOSCALE` (deprecated compatibility) | Requests the pressure-driven physical KV-cache control loop. The serving profile and backend remain authoritative: stable mode and backends without device-resident KV pressure report the request as unavailable rather than silently enabling mutation. `/health`, `/v1/config`, and the trusted debug state expose the request, effective state, bounded reason, and source. |
-| `memory.kv_force_blocks` | unsigned integer; `0` (disabled) | `KILN_MEMORY_KV_FORCE_BLOCKS` (implemented) | `KILN_KV_FORCE_BLOCKS` (deprecated compatibility) | A positive value requests one exact startup resize before the normal autoscaler loop. It requires `memory.kv_autoscale=true` and `server.serving_profile="maintenance"`; every other combination fails configuration validation. Zero disables the one-shot operation. The resize still uses full replacement-pool reservation, exclusive GPU ownership, graph invalidation, transactional publication, and typed `forced_configuration` attribution. This is an offline maintenance/qualification control, not a per-request tuning knob. |
-| `memory.kv_cache_fp8` | boolean; `false` | `KILN_MEMORY_KV_CACHE_FP8` (implemented) | `KILN_KV_CACHE_FP8` (deprecated compatibility) | Requests E4M3FN KV storage. Backend storage policy may reject or disable the request when unsupported. |
-| `memory.cuda_graphs` | boolean; `true` | `KILN_MEMORY_CUDA_GRAPHS` (implemented) | `KILN_CUDA_GRAPHS` (deprecated compatibility) | CUDA-only request. Non-CUDA backends ignore it, and a serving profile with live graph capture disabled selects eager-only execution regardless of this value. |
-| `memory.cuda_graph_cache_entries` | unsigned integer; `8` | `KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES` (implemented) | None | `1..=64`. Bounds retained single-row CUDA decode graphs and their graph-stable device buffers. Resolved once before device selection; decode never re-reads process environment. The unqualified batched CUDA graph route remains unavailable. |
+| `memory.num_blocks` | optional unsigned integer; omitted (`None`) | `KILN_MEMORY_NUM_BLOCKS` (implemented) | none | Must be greater than zero when set. Omission invokes backend-aware automatic KV-block sizing. |
+| `memory.gpu_memory_gb` | optional finite number; omitted (`None`) | `KILN_MEMORY_GPU_MEMORY_GB` (implemented) | none | Must be finite, greater than zero, and representable as bytes. Units are GiB. This is a capacity cap, not a hardware override: it may reduce the detected safe capacity but never expands physical VRAM, host-backed unified memory, or a cgroup-bounded capacity. A request above the safe detected capacity is clamped down. |
+| `memory.inference_memory_fraction` | finite number; `0.7` | `KILN_MEMORY_INFERENCE_MEMORY_FRACTION` (implemented) | none | Loader validation accepts `0.0..=1.0`; real-state construction clamps the configured value to `0.1..=1.0` before KV sizing. The remainder is available to the training budget. |
+| `memory.training_memory_gb` | optional finite number; omitted (`None`) | `KILN_MEMORY_TRAINING_MEMORY_GB` (implemented) | none | Must be finite, greater than zero, and representable as bytes when set. Optional training-budget cap in GiB; it can reduce but never expand the capacity remaining after resident model and KV allocations. |
+| `memory.vulkan_buffer_pool_gb` | finite number; `3.0` | `KILN_MEMORY_VULKAN_BUFFER_POOL_GB` (implemented) | none | Vulkan-only process-wide cap, in GiB, on idle scratch buffers retained for reuse. Must be finite, non-negative, and representable as bytes; `0` disables retention. Active operations may allocate beyond the cap, but overflow buffers are freed when their final caller drops. A new cache entry evicts the oldest idle buffers before admission, and pressure reclaim releases idle entries under exclusive GPU coordination. `/v1/config`, `/health`, and Prometheus expose the cap, retained/free/borrowed bytes, hits/misses by allocation route, evictions, and uncached overflow. Health also exposes one bounded last-miss record with requested and bucket bytes plus the source callsite. The default remains `3.0`; the Strix Halo Vulkan development-soak candidate explicitly sets `3.5` after the smaller cap showed deterministic eviction churn. |
+| `memory.floor_gb` | finite number; `1.0` | `KILN_MEMORY_FLOOR_GB` (implemented) | none | Must be finite, non-negative, representable as bytes, and strictly smaller than the selected accelerator's effective capacity after `memory.gpu_memory_gb` is applied. Units are GiB. Accelerator startup rejects an equal or larger floor before model upload and reports both configured and effective byte values. The process-wide governor subtracts this additional floor, then outstanding soft reservations, from live free memory when computing allocation headroom. On unified-memory devices it is separate from the physical-memory reserve applied during safe-capacity detection. |
+| `memory.probe_ms` | unsigned integer; `500` | `KILN_MEMORY_PROBE_MS` (implemented) | none | Must be greater than zero. Sets the background memory-sampler cadence. Request, inference, health, and metrics paths read only the published sample and never run a driver/OS probe synchronously. Cached admission fails closed when the sample is older than `max(5000 ms, 4 * probe_ms)`, the latest probe failed, or a required sampler is not running. An explicit refresh after a material allocation or release bypasses the cadence. |
+| `memory.reclaim_mode` | string enum; `"off"` | `KILN_MEMORY_RECLAIM_MODE` (implemented) | none | Exactly `off`, `on-demand`, or `automatic`, case-insensitive with surrounding whitespace ignored. `off` prevents execution of registered allocator reclaim hooks; `on-demand` permits explicit pressure and allocation-retry reclaim calls; `automatic` also permits the background pressure monitor. The immutable serving profile remains authoritative: a profile with allocator reclaim disabled keeps the effective mode off and does not start the monitor. |
+| `memory.kv_autoscale` | boolean; `true` | `KILN_MEMORY_KV_AUTOSCALE` (implemented) | none | Requests the pressure-driven physical KV-cache control loop. The serving profile and backend remain authoritative: stable mode and backends without device-resident KV pressure report the request as unavailable rather than silently enabling mutation. `/health`, `/v1/config`, and the trusted debug state expose the request, effective state, bounded reason, and source. |
+| `memory.kv_force_blocks` | unsigned integer; `0` (disabled) | `KILN_MEMORY_KV_FORCE_BLOCKS` (implemented) | none | A positive value requests one exact startup resize before the normal autoscaler loop. It requires `memory.kv_autoscale=true` and `server.serving_profile="maintenance"`; every other combination fails configuration validation. Zero disables the one-shot operation. The resize still uses full replacement-pool reservation, exclusive GPU ownership, graph invalidation, transactional publication, and typed `forced_configuration` attribution. This is an offline maintenance/qualification control, not a per-request tuning knob. |
+| `memory.kv_cache_fp8` | boolean; `false` | `KILN_MEMORY_KV_CACHE_FP8` (implemented) | none | Requests E4M3FN KV storage. Backend storage policy may reject or disable the request when unsupported. |
+| `memory.cuda_graphs` | boolean; `true` | `KILN_MEMORY_CUDA_GRAPHS` (implemented) | none | CUDA-only request. Non-CUDA backends ignore it, and a serving profile with live graph capture disabled selects eager-only execution regardless of this value. |
+| `memory.cuda_graph_cache_entries` | unsigned integer; `8` | `KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES` (implemented) | none | `1..=64`. Bounds retained single-row CUDA decode graphs and their graph-stable device buffers. Resolved once before device selection; decode never re-reads process environment. The unqualified batched CUDA graph route remains unavailable. |
 
 Capacity detection is device-scoped. Discrete accelerators use the selected
 device's driver-reported VRAM and never count GTT as device-local capacity.
@@ -1322,9 +1315,10 @@ CUDA and ROCm have the same single-candidate/ordinal-zero restriction.
 Multi-device hosts, failed candidate enumeration, and driver-level visibility
 or remapping controls such as `CUDA_VISIBLE_DEVICES`,
 `ROCR_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `MESA_VK_DEVICE_SELECT`, or
-`DRI_PRIME` are rejected. The deprecated `KILN_VULKAN_DEVICE` alias is typed
-application configuration, not a driver remap; `GGML_VK_VISIBLE_DEVICES` is
-ignored and no longer supported. `Auto` memory probing remains diagnostic-only;
+`DRI_PRIME` are rejected. The canonical `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX`
+override is typed application configuration, not a driver remap; the retired
+`KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` names are ignored. `Auto`
+memory probing remains diagnostic-only;
 CPU performs no accelerator probe, and Apple Silicon uses its single unified
 physical memory pool. Multi-device startup remains unavailable until backend
 selection and probing share a typed PCI address or UUID.
@@ -1353,20 +1347,20 @@ cannot be enabled by adding another environment spelling.
 
 ## `[training]`
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `training.grad_checkpoint_segments` | optional unsigned integer; omitted (`None`) | `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` (implemented) | `KILN_GRAD_CHECKPOINT_SEGMENTS` (deprecated compatibility) | Must be greater than zero when set. When present, selects an explicit process-lifetime gradient-checkpoint segment count for native training; omission leaves workload- and capacity-aware automatic planning enabled. |
-| `training.no_grad_checkpoint` | boolean; `false` | `KILN_TRAINING_NO_GRAD_CHECKPOINT` (implemented) | `KILN_NO_GRAD_CHECKPOINT` (deprecated compatibility) | Disables gradient checkpoint execution for native training. The disabled state and any explicit segment count are retained together in the immutable training policy and exact-resume identity. Disabling checkpointing can materially increase training memory. |
-| `training.recompute_checkpoint_boundaries` | string enum; `"auto"` | `KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES` (implemented) | `KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive with surrounding whitespace ignored. `auto` replays sparse SFT boundaries when sequence length is at least `recompute_boundary_threshold_tokens`; `enabled` always replays them and `disabled` always retains them. The canonical environment name accepts only those three words. The deprecated alias additionally accepts historical `1`/`true`/`yes` and `0`/`false`/`no`; `on` and `off` are not accepted for this alias. |
-| `training.recompute_boundary_threshold_tokens` | positive unsigned integer; `8192` | `KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` (implemented) | `KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` (deprecated compatibility) | Inclusive sequence-length threshold used only by automatic SFT boundary replay. Zero, negative, overflowing, malformed, and non-UTF-8 environment values stop startup. |
-| `training.checkpoint_boundary_anchor_stride` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` (implemented) | `KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` (deprecated compatibility) | When sparse SFT replay is active, a concrete value retains every Nth segment boundary as an anchor. `auto` derives a shape-specific positive stride from sequence length, segment count, hidden width, boundary dtype, and the cache target. Zero and strings other than `auto` fail startup. |
-| `training.checkpoint_boundary_cache_gb` | positive floating-point GiB value; `6.0` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB` (implemented) | `KILN_CHECKPOINT_BOUNDARY_CACHE_GB` (deprecated compatibility) | Automatic anchor-stride memory target. Despite the historical `_gb` spelling, the unit is GiB (`2^30` bytes). The value must be finite, positive, convert to at least one byte, and remain below the `u64` byte limit. Startup converts it once to integral bytes using the historical truncating conversion. |
-| `training.checkpoint_interval` | optional unsigned integer; omitted (`None`) | `KILN_TRAINING_CHECKPOINT_INTERVAL` (implemented) | `KILN_CHECKPOINT_INTERVAL` (deprecated compatibility) | Must be greater than zero when set. Number of committed optimizer steps between checkpoints; per-job configuration overrides it. Omission disables periodic checkpoints. |
-| `training.webhook_url` | optional string; omitted (`None`) | `KILN_TRAINING_WEBHOOK_URL` (implemented) | `KILN_TRAINING_WEBHOOK_URL` | Must be a non-empty valid HTTP(S) URL. An exactly empty environment value clears a TOML URL; whitespace is not a clearing value and fails validation. Delivery is fire-and-forget with a five-second timeout after terminal state is recorded. |
-| `training.logit_cache_dir` | optional path string; omitted (beside the effective adapter directory) | `KILN_TRAINING_LOGIT_CACHE_DIR` (implemented) | `KILN_LOGIT_CACHE_DIR` (deprecated compatibility) | Must be a non-empty path when set. Resolved once at startup; request handlers never reread the environment. |
-| `training.max_queued_jobs` | unsigned integer; `32` | `KILN_TRAINING_MAX_QUEUED_JOBS` (implemented) | `KILN_TRAINING_MAX_QUEUED_JOBS` | Must be greater than zero. At capacity, submissions return HTTP 503 with `Retry-After: 30`. |
-| `training.max_tracked_jobs` | unsigned integer; `1024` | `KILN_TRAINING_MAX_TRACKED_JOBS` (implemented) | `KILN_TRAINING_MAX_TRACKED_JOBS` | Must be greater than zero and at least `max_queued_jobs`. Counts queued, running, completed, and failed entries. |
-| `training.tracked_job_ttl_secs` | unsigned integer; `604800` | `KILN_TRAINING_TRACKED_JOB_TTL_SECS` (implemented) | `KILN_TRAINING_TRACKED_JOB_TTL_SECS` | Must be greater than zero. Terminal entries older than the TTL are removed; active jobs are never age-evicted. |
+| `training.grad_checkpoint_segments` | optional unsigned integer; omitted (`None`) | `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` (implemented) | none | Must be greater than zero when set. When present, selects an explicit process-lifetime gradient-checkpoint segment count for native training; omission leaves workload- and capacity-aware automatic planning enabled. |
+| `training.no_grad_checkpoint` | boolean; `false` | `KILN_TRAINING_NO_GRAD_CHECKPOINT` (implemented) | none | Disables gradient checkpoint execution for native training. The disabled state and any explicit segment count are retained together in the immutable training policy and exact-resume identity. Disabling checkpointing can materially increase training memory. |
+| `training.recompute_checkpoint_boundaries` | string enum; `"auto"` | `KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES` (implemented) | none | `auto`, `enabled`, or `disabled`, case-insensitive with surrounding whitespace ignored. `auto` replays sparse SFT boundaries when sequence length is at least `recompute_boundary_threshold_tokens`; `enabled` always replays them and `disabled` always retains them. Every other TOML type, TOML value, or environment value fails startup. |
+| `training.recompute_boundary_threshold_tokens` | positive unsigned integer; `8192` | `KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` (implemented) | none | Inclusive sequence-length threshold used only by automatic SFT boundary replay. Zero, negative, overflowing, malformed, and non-UTF-8 environment values stop startup. |
+| `training.checkpoint_boundary_anchor_stride` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` (implemented) | none | When sparse SFT replay is active, a concrete value retains every Nth segment boundary as an anchor. `auto` derives a shape-specific positive stride from sequence length, segment count, hidden width, boundary dtype, and the cache target. Zero and strings other than `auto` fail startup. |
+| `training.checkpoint_boundary_cache_gb` | positive floating-point GiB value; `6.0` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB` (implemented) | none | Automatic anchor-stride memory target. Despite the historical `_gb` spelling, the unit is GiB (`2^30` bytes). The value must be finite, positive, convert to at least one byte, and remain below the `u64` byte limit. Startup converts it once to integral bytes using the historical truncating conversion. |
+| `training.checkpoint_interval` | optional unsigned integer; omitted (`None`) | `KILN_TRAINING_CHECKPOINT_INTERVAL` (implemented) | none | Must be greater than zero when set. Number of committed optimizer steps between checkpoints; per-job configuration overrides it. Omission disables periodic checkpoints. |
+| `training.webhook_url` | optional string; omitted (`None`) | `KILN_TRAINING_WEBHOOK_URL` (implemented) | none | Must be a non-empty valid HTTP(S) URL. An exactly empty environment value clears a TOML URL; whitespace is not a clearing value and fails validation. Delivery is fire-and-forget with a five-second timeout after terminal state is recorded. |
+| `training.logit_cache_dir` | optional path string; omitted (beside the effective adapter directory) | `KILN_TRAINING_LOGIT_CACHE_DIR` (implemented) | none | Must be a non-empty path when set. Resolved once at startup; request handlers never reread the environment. |
+| `training.max_queued_jobs` | unsigned integer; `32` | `KILN_TRAINING_MAX_QUEUED_JOBS` (implemented) | none | Must be greater than zero. At capacity, submissions return HTTP 503 with `Retry-After: 30`. |
+| `training.max_tracked_jobs` | unsigned integer; `1024` | `KILN_TRAINING_MAX_TRACKED_JOBS` (implemented) | none | Must be greater than zero and at least `max_queued_jobs`. Counts queued, running, completed, and failed entries. |
+| `training.tracked_job_ttl_secs` | unsigned integer; `604800` | `KILN_TRAINING_TRACKED_JOB_TTL_SECS` (implemented) | none | Must be greater than zero. Terminal entries older than the TTL are removed; active jobs are never age-evicted. |
 
 Training GPU work is also governed by `server.serving_profile`; the default
 `stable` profile does not grant training GPU ownership.
@@ -1809,10 +1803,10 @@ not live controls or fresh environment reads.
 
 ## `[logging]`
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `logging.level` | string; `"info"` | `KILN_LOGGING_LEVEL` (implemented) | `KILN_LOG_LEVEL` (deprecated compatibility) | One of `trace`, `debug`, `info`, `warn`, `error`, or a valid `tracing_subscriber::EnvFilter` directive such as `kiln=debug,tower_http=warn`. `RUST_LOG` overrides the effective filter but does not make an invalid typed value valid. |
-| `logging.format` | string; `"auto"` | `KILN_LOGGING_FORMAT` (implemented) | `KILN_LOG_FORMAT` (deprecated compatibility) | Exactly `auto`, `json`, `pretty`, `text`, or `human`. `auto` is pretty on a stderr TTY and JSON otherwise; `text` and `human` select pretty output. |
+| `logging.level` | string; `"info"` | `KILN_LOGGING_LEVEL` (implemented) | none | One of `trace`, `debug`, `info`, `warn`, `error`, or a valid `tracing_subscriber::EnvFilter` directive such as `kiln=debug,tower_http=warn`. `RUST_LOG` overrides the effective filter but does not make an invalid typed value valid. |
+| `logging.format` | string; `"auto"` | `KILN_LOGGING_FORMAT` (implemented) | none | Exactly `auto`, `json`, `pretty`, `text`, or `human`. `auto` is pretty on a stderr TTY and JSON otherwise; `text` and `human` select pretty output. |
 
 Logging is bootstrapped before the full file is validated so parse failures can
 be reported through the requested renderer. The authoritative loader then
@@ -1821,11 +1815,11 @@ Malformed or non-UTF-8 `RUST_LOG` is fatal.
 
 ## `[prefix_cache]`
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `prefix_cache.enabled` | boolean; `true` | `KILN_PREFIX_CACHE_ENABLED` (implemented) | `KILN_PREFIX_CACHE_ENABLED` | Requests reuse of KV blocks and recurrent-state snapshots for shared prompt prefixes. CPU, CUDA, ROCm, and Metal honor the request. Vulkan currently forces the effective capability off because repeated production-model runs proved semantic corruption after cross-request restoration. This is a source-level correctness quarantine, not a second setting. |
-| `prefix_cache.max_blocks` | optional unsigned integer; omitted (`None`) | `KILN_PREFIX_CACHE_MAX_BLOCKS` (implemented) | `KILN_PREFIX_CACHE_MAX_BLOCKS` | Must be greater than zero when set. On an admitted backend, `None` resolves to half of the allocated KV block pool. It has no runtime allocation effect while the effective capability is off. |
-| `prefix_cache.max_entries` | optional unsigned integer; omitted (`None`) | `KILN_PREFIX_CACHE_MAX_ENTRIES` (implemented) | `KILN_PREFIX_CACHE_MAX_ENTRIES` | Must be greater than zero when set. On an admitted backend, `None` resolves from the relevant safe allocation tier and per-entry recurrent-state bytes, with at least one entry. It has no runtime allocation effect while the effective capability is off; quarantined Vulkan reserves no host-backed prefix state. |
+| `prefix_cache.enabled` | boolean; `true` | `KILN_PREFIX_CACHE_ENABLED` (implemented) | none | Requests reuse of KV blocks and recurrent-state snapshots for shared prompt prefixes. CPU, CUDA, ROCm, and Metal honor the request. Vulkan currently forces the effective capability off because repeated production-model runs proved semantic corruption after cross-request restoration. This is a source-level correctness quarantine, not a second setting. |
+| `prefix_cache.max_blocks` | optional unsigned integer; omitted (`None`) | `KILN_PREFIX_CACHE_MAX_BLOCKS` (implemented) | none | Must be greater than zero when set. On an admitted backend, `None` resolves to half of the allocated KV block pool. It has no runtime allocation effect while the effective capability is off. |
+| `prefix_cache.max_entries` | optional unsigned integer; omitted (`None`) | `KILN_PREFIX_CACHE_MAX_ENTRIES` (implemented) | none | Must be greater than zero when set. On an admitted backend, `None` resolves from the relevant safe allocation tier and per-entry recurrent-state bytes, with at least one entry. It has no runtime allocation effect while the effective capability is off; quarantined Vulkan reserves no host-backed prefix state. |
 
 The TOML object records operator intent. `GET /v1/config` reports that object at
 `prefix_cache.configuration` and reports the backend-qualified result beside it:
@@ -1861,18 +1855,17 @@ sufficient.
 
 ## `[speculative]`
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `speculative.enabled` | boolean; `false` | `KILN_SPECULATIVE_ENABLED` (implemented) | `KILN_SPEC_ENABLED` (deprecated compatibility) | `false` forces the effective method to `off`. For compatibility, `true` with `method = "off"` selects `skip_layer`; that effective method is then subject to the fail-closed startup gate below. |
-| `speculative.method` | string enum; `"off"` | `KILN_SPECULATIVE_METHOD` (implemented) | `KILN_SPEC_METHOD` (deprecated compatibility) | TOML accepts `off`, `skip_layer`, or `mtp`. The environment parser also accepts `none`, `0`, `false`; `skiplayer`, `skip-layer`, `self`; and `native_mtp`, `native-mtp`. The deprecated method alias also controls `enabled` when neither enabled spelling is present: non-off enables and off disables. The canonical method name has literal field semantics and does not implicitly enable. |
-| `speculative.num_speculative_tokens` | unsigned integer; `4` | `KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS` (implemented) | `KILN_SPEC_NUM_TOKENS` (deprecated compatibility) | Draft proposal bound K. Must be in `1..=4`; out-of-range values stop startup before accelerator allocation. This conservative ceiling matches the planned local K=1/2/4 qualification matrix and cannot be raised without new accelerator evidence. |
-| `speculative.draft_layers` | unsigned integer; `8` | `KILN_SPECULATIVE_DRAFT_LAYERS` (implemented) | `KILN_SPEC_DRAFT_LAYERS` (deprecated compatibility) | Must be greater than zero. When speculative decoding is enabled, model-dependent startup validation also requires this value to be less than the selected model's transformer-layer count. Invalid geometry stops startup; it does not fall back at request time. |
+| `speculative.method` | string enum; `"off"` | `KILN_SPECULATIVE_METHOD` (implemented) | none | `off`, `skip_layer`, or `mtp`, case-insensitive with surrounding whitespace ignored. `method` is the single authority: `off` disables speculative decoding and either non-off value requests that qualification method. Non-off serving remains fail-closed until its accelerator lifecycle contract is qualified. |
+| `speculative.num_speculative_tokens` | unsigned integer; `4` | `KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS` (implemented) | none | Draft proposal bound K. Must be in `1..=4`; out-of-range values stop startup before accelerator allocation. This conservative ceiling matches the planned local K=1/2/4 qualification matrix and cannot be raised without new accelerator evidence. |
+| `speculative.draft_layers` | unsigned integer; `8` | `KILN_SPECULATIVE_DRAFT_LAYERS` (implemented) | none | Must be greater than zero. When `method` is not `off`, model-dependent startup validation also requires this value to be less than the selected model transformer-layer count. Invalid geometry stops startup; it does not fall back at request time. |
 
-The loaded `SpeculativeDecodingConfig` is the sole serving authority. TOML,
-canonical environment overrides, and deprecated aliases are resolved and
-validated once during typed startup, then the immutable result is passed to
-serving state. Request dispatch does not re-read speculative environment
-variables. Restart the server to apply a change.
+The loaded `SpeculativeDecodingConfig` is the sole serving authority. TOML and
+the canonical environment overrides are resolved and validated once during
+typed startup, then the immutable result is passed to serving state. Request
+dispatch does not re-read speculative environment variables. Restart the
+server to apply a change.
 
 **Current fail-closed status:** `off` is the only serving method available.
 Every enabled method, including `skip_layer` and `mtp`, stops startup until its
@@ -1895,23 +1888,19 @@ and conclusions remain labeled as such in `PROFILING.md`.
 
 ## `[streaming_prefill]`
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `streaming_prefill.mode` | string enum; `"auto"` | `KILN_STREAMING_PREFILL_MODE` (implemented) | `KILN_STREAMING_PREFILL` and `KILN_STREAMING_PREFILL_ENABLED` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive with surrounding whitespace ignored. `auto` delegates dispatch to backend policy, `enabled` selects every non-empty prompt, and `disabled` selects none. When the ROCm batching actor is effective, dispatch must cover its first effective tile; disabling streaming therefore also requires disabling the actor. The canonical environment name accepts only those three words. Deprecated aliases also accept the strict boolean forms listed above, mapping true to `enabled` and false to `disabled`. Legacy TOML `enabled = true` or `enabled = false` remains accepted; if `mode` is also present, both must express the same non-auto intent or startup fails. |
-| `streaming_prefill.threshold_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` (implemented) | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` | In `auto` mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. With the ROCm batching actor effective, the crossover cannot be later than the effective tile. `0`, negative values, and strings other than `auto` fail startup. `enabled` and `disabled` modes ignore this crossover for dispatch while retaining it in diagnostics. |
-| `streaming_prefill.tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_TILE_TOKENS` (implemented) | `KILN_STREAMING_TILE_TOKENS` (deprecated compatibility) | Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. With the ROCm batching actor effective, this tile must equal `server.max_prefill_tokens_per_cycle` and fit beside effective decode width in `server.max_batch_tokens`. When this field is concrete and either specialized tile below is `auto`, that specialized route inherits this base value rather than its backend default. |
-| `streaming_prefill.tape_tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` (implemented) | `KILN_TAPE_STREAMING_TILE_TOKENS` (deprecated compatibility) | Tile used by tape-authoritative training forward paths. Concrete values must be positive multiples of 64. `auto` inherits an explicit `tile_tokens`; when both are `auto`, backend policy owns the value. |
-| `streaming_prefill.detached_full_attn_tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS` (implemented) | `KILN_DETACHED_FULL_ATTN_TILE_TOKENS` (deprecated compatibility) | Tile for detached materialized full-attention training work. A concrete value also controls its derived boundary-forward and tape-replay variants. `auto` inherits an explicit `tile_tokens`; when both are `auto`, each variant keeps its backend default. Every concrete value must be a positive multiple of 64. |
-| `streaming_prefill.last_token_lm_head` | boolean; `true` | `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` (implemented) | `KILN_STREAMING_LAST_TOKEN_LM_HEAD` (deprecated compatibility) | When true, the final inference streaming tile computes the LM head only for its last row. All centralized strict boolean spellings, including `on` and `off`, work identically. |
+| `streaming_prefill.mode` | string enum; `"auto"` | `KILN_STREAMING_PREFILL_MODE` (implemented) | none | `auto`, `enabled`, or `disabled`, case-insensitive with surrounding whitespace ignored. `auto` delegates dispatch to backend policy, `enabled` selects every non-empty prompt, and `disabled` selects none. When the ROCm batching actor is effective, dispatch must cover the first effective tile; disabling streaming therefore also requires disabling the actor. Every other TOML type, TOML value, or environment value fails startup. |
+| `streaming_prefill.threshold_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` (implemented) | none | In `auto` mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. With the ROCm batching actor effective, the crossover cannot be later than the effective tile. `0`, negative values, and strings other than `auto` fail startup. `enabled` and `disabled` modes ignore this crossover for dispatch while retaining it in diagnostics. |
+| `streaming_prefill.tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_TILE_TOKENS` (implemented) | none | Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. With the ROCm batching actor effective, this tile must equal `server.max_prefill_tokens_per_cycle` and fit beside effective decode width in `server.max_batch_tokens`. When this field is concrete and either specialized tile below is `auto`, that specialized route inherits this base value rather than its backend default. |
+| `streaming_prefill.tape_tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` (implemented) | none | Tile used by tape-authoritative training forward paths. Concrete values must be positive multiples of 64. `auto` inherits an explicit `tile_tokens`; when both are `auto`, backend policy owns the value. |
+| `streaming_prefill.detached_full_attn_tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS` (implemented) | none | Tile for detached materialized full-attention training work. A concrete value also controls its derived boundary-forward and tape-replay variants. `auto` inherits an explicit `tile_tokens`; when both are `auto`, each variant keeps its backend default. Every concrete value must be a positive multiple of 64. |
+| `streaming_prefill.last_token_lm_head` | boolean; `true` | `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` (implemented) | none | When true, the final inference streaming tile computes the LM head only for its last row. All centralized strict boolean spellings, including `on` and `off`, work identically. |
 
-Every deprecated alias is parsed strictly and emits a value-free startup
-warning naming its canonical replacement. When a canonical name is present,
-each present alias must normalize to the same typed value or startup fails and
-names both variables. For `mode`, if both deprecated aliases are present
-without `KILN_STREAMING_PREFILL_MODE`, both are validated and the historical
-higher-precedence `KILN_STREAMING_PREFILL_ENABLED` value wins over
-`KILN_STREAMING_PREFILL`. A malformed lower-precedence alias still fails; it is
-never ignored because another spelling is present.
+`streaming_prefill.mode` is the single mode authority. The removed TOML
+`enabled` toggle and non-canonical environment spellings are not alternate
+paths into this policy: the TOML field is rejected and the environment names
+are ignored.
 
 The selected backend supplies the following `auto` policy. Dispatch thresholds
 are inclusive. Tile counts are tokens:
@@ -1944,7 +1933,7 @@ observe a mid-process change.
 
 Vulkan resumable-prompt GDN state residency is intentionally absent from this
 configuration section because the production route is correctness-quarantined.
-There is no TOML field, canonical environment override, compatibility alias, or
+There is no TOML field, canonical environment override, alternate spelling, or
 internal enable variable that can activate it. The typed Vulkan runtime policy
 sets prompt residency to false. Ordinary actor chunking therefore materializes
 each layer's recurrent state at the completed token-chunk boundary, including
@@ -2080,16 +2069,16 @@ detached_full_attn_tile_tokens = "auto"
 
 ## `[adapters]`
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `adapters.library_url` | string URL; `"https://library.kiln.run"` | `KILN_ADAPTERS_LIBRARY_URL` (implemented) | `KILN_ADAPTER_LIBRARY_URL` (deprecated compatibility) | Must be a non-empty valid HTTP(S) URL. Resolved once at startup. |
-| `adapters.max_disk_bytes` | optional unsigned integer; `107374182400` (100 GiB) | `KILN_ADAPTERS_MAX_DISK_BYTES` (implemented) | `KILN_ADAPTERS_MAX_DISK_BYTES` | Caps finalized adapter bytes under `adapter_dir`, excluding upload staging and the composed cache. For the environment alias only, empty or `0` means `None` and disables the cap. TOML `0` is accepted as a literal zero cap, not as `None`. |
-| `adapters.composed_cache_max_bytes` | optional unsigned integer; `10737418240` (10 GiB) | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES` (implemented) | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES` | LRU byte cap for `.composed`. Environment empty or `0` disables this dimension; TOML `0` remains a zero cap. |
-| `adapters.composed_cache_max_entries` | optional unsigned integer; `64` | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES` (implemented) | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES` | LRU entry-count cap for `.composed`. Environment empty or `0` disables this dimension; TOML `0` remains a zero cap. |
+| `adapters.library_url` | string URL; `"https://library.kiln.run"` | `KILN_ADAPTERS_LIBRARY_URL` (implemented) | none | Must be a non-empty valid HTTP(S) URL. Resolved once at startup. |
+| `adapters.max_disk_bytes` | optional unsigned integer; `107374182400` (100 GiB) | `KILN_ADAPTERS_MAX_DISK_BYTES` (implemented) | none | Caps finalized adapter bytes under `adapter_dir`, excluding upload staging and the composed cache. For the canonical environment override, empty or `0` means `None` and disables the cap. TOML `0` is accepted as a literal zero cap, not as `None`. |
+| `adapters.composed_cache_max_bytes` | optional unsigned integer; `10737418240` (10 GiB) | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES` (implemented) | none | LRU byte cap for `.composed`. Environment empty or `0` disables this dimension; TOML `0` remains a zero cap. |
+| `adapters.composed_cache_max_entries` | optional unsigned integer; `64` | `KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES` (implemented) | none | LRU entry-count cap for `.composed`. Environment empty or `0` disables this dimension; TOML `0` remains a zero cap. |
 
 Because all three typed defaults are `Some(...)` and TOML has no null value,
-the supported way to opt out is the working environment alias with `0` or an
-empty value.
+the supported way to opt out is the canonical environment override with `0`
+or an empty value.
 
 ## `[teachers]`
 
@@ -2107,10 +2096,10 @@ origin = "https://vllm.example.com:8443"
 api_key_env = "VLLM_TEACHER_API_KEY"
 ```
 
-| TOML field template | Type and default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field template | Type and default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
 | `teachers.credentials.<id>.origin` | required string for each entry; no entries by default | none; structured trust policy is TOML-only | none | Must be the exact canonical `scheme://host[:port]` origin, with no path, query, fragment, or embedded credentials. HTTPS is required unless the host is loopback. |
-| `teachers.credentials.<id>.api_key_env` | required string for each entry | none; this value names the secret variable | the named secret variable itself | Must match `[A-Za-z_][A-Za-z0-9_]*`, length `1..=128`. The named variable must exist and contain a non-whitespace value at startup. |
+| `teachers.credentials.<id>.api_key_env` | required string for each entry | none; this value names the secret variable | none | Must match `[A-Za-z_][A-Za-z0-9_]*`, length `1..=128`. The named variable must exist and contain a non-whitespace value at startup. |
 
 Credential ids must be `1..=64` ASCII letters, digits, `_`, or `-`. A handle is
 accepted only for its exact configured origin. Non-loopback teachers require a
@@ -2129,7 +2118,7 @@ The section is optional. When absent, the runtime uses the same queue defaults
 shown below and roots eval data at `<adapter_dir>/.eval`. It creates `suites`,
 `datasets`, and `judgments` below that root.
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
 | `eval.eval_dir` | optional path string; omitted (`None`) | `KILN_EVAL_EVAL_DIR` (target only; not implemented) | none | Must be non-empty when set. Despite the historical field name, runtime treats it as the shared eval root and creates the three registry subdirectories below it. |
 | `eval.max_queued_jobs` | unsigned integer; `32` | `KILN_EVAL_MAX_QUEUED_JOBS` (target only; not implemented) | none | Must be greater than zero. |
@@ -2145,14 +2134,14 @@ Request logging is enabled by default. It records inference request and response
 JSON on a dedicated bounded writer thread; overload drops log rows instead of
 blocking inference. Rotation and retention bound disk use.
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `request_log.enabled` | boolean; `true` | `KILN_REQUEST_LOG_ENABLED` (implemented) | `KILN_REQUEST_LOG_ENABLED` | Master switch. Initialization failure logs a warning and disables logging rather than aborting an otherwise valid server startup. |
-| `request_log.dir` | optional path string; omitted (`None`) | `KILN_REQUEST_LOG_DIR` (implemented) | `KILN_REQUEST_LOG_DIR` | Must be non-empty when set. `None` resolves to `<adapter_dir>/.requests`. The environment alias cannot clear a TOML directory; an empty value is fatal. |
-| `request_log.max_file_bytes` | unsigned integer; `67108864` (64 MiB) | `KILN_REQUEST_LOG_MAX_FILE_BYTES` (implemented) | `KILN_REQUEST_LOG_MAX_FILE_BYTES` | Must be at least `4096`. The active JSONL file rotates after reaching the threshold. |
-| `request_log.max_total_bytes` | unsigned integer; `2147483648` (2 GiB) | `KILN_REQUEST_LOG_MAX_TOTAL_BYTES` (implemented) | `KILN_REQUEST_LOG_MAX_TOTAL_BYTES` | Must be greater than zero. Oldest rotated files are removed until retained bytes fit. There is no validation requiring this value to exceed `max_file_bytes`. |
-| `request_log.compress` | boolean; `true` | `KILN_REQUEST_LOG_COMPRESS` (implemented) | `KILN_REQUEST_LOG_COMPRESS` | Gzip rotated files when true. |
-| `request_log.max_capture_bytes` | unsigned integer; `4194304` (4 MiB) | `KILN_REQUEST_LOG_MAX_CAPTURE_BYTES` (implemented) | `KILN_REQUEST_LOG_MAX_CAPTURE_BYTES` | Must be greater than zero. Per-request and per-response storage cap; truncation affects the log only, never the wire response. |
+| `request_log.enabled` | boolean; `true` | `KILN_REQUEST_LOG_ENABLED` (implemented) | none | Master switch. Initialization failure logs a warning and disables logging rather than aborting an otherwise valid server startup. |
+| `request_log.dir` | optional path string; omitted (`None`) | `KILN_REQUEST_LOG_DIR` (implemented) | none | Must be non-empty when set. `None` resolves to `<adapter_dir>/.requests`. The canonical environment override cannot clear a TOML directory; an empty value is fatal. |
+| `request_log.max_file_bytes` | unsigned integer; `67108864` (64 MiB) | `KILN_REQUEST_LOG_MAX_FILE_BYTES` (implemented) | none | Must be at least `4096`. The active JSONL file rotates after reaching the threshold. |
+| `request_log.max_total_bytes` | unsigned integer; `2147483648` (2 GiB) | `KILN_REQUEST_LOG_MAX_TOTAL_BYTES` (implemented) | none | Must be greater than zero. Oldest rotated files are removed until retained bytes fit. There is no validation requiring this value to exceed `max_file_bytes`. |
+| `request_log.compress` | boolean; `true` | `KILN_REQUEST_LOG_COMPRESS` (implemented) | none | Gzip rotated files when true. |
+| `request_log.max_capture_bytes` | unsigned integer; `4194304` (4 MiB) | `KILN_REQUEST_LOG_MAX_CAPTURE_BYTES` (implemented) | none | Must be greater than zero. Per-request and per-response storage cap; truncation affects the log only, never the wire response. |
 
 The default is intentionally data-bearing. Review log-directory permissions,
 retention, and the captured request content before exposing the service to
@@ -2164,21 +2153,21 @@ The section is optional. Its absence disables the scheduled self-improvement
 loop, while the embedded run engine still receives the default concurrency and
 timeout.
 
-| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `agent.self_improve_interval_hours` | optional unsigned integer; omitted (`None`) | `KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS` (implemented) | `KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS` | Omission disables scheduling. `0` is accepted and also results in no scheduler. The first run occurs one full interval after startup; cadence is persisted under the adapter directory. |
+| `agent.self_improve_interval_hours` | optional unsigned integer; omitted (`None`) | `KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS` (implemented) | none | Omission disables scheduling. `0` is accepted and also results in no scheduler. The first run occurs one full interval after startup; cadence is persisted under the adapter directory. |
 | `agent.self_improve` | optional structured value; omitted (`None`) | `KILN_AGENT_SELF_IMPROVE` (target only; not implemented) | none | Request template submitted to the same self-improvement path as the API. This value is intentionally open structured data; its inner request contract is validated by that subsystem rather than by `KilnConfig`. |
-| `agent.max_concurrent_runs` | unsigned integer; `2` | `KILN_AGENT_MAX_CONCURRENT_RUNS` (implemented) | `KILN_AGENT_MAX_CONCURRENT_RUNS` | Must be greater than zero. Embedded pi runs above the limit queue FIFO. |
-| `agent.run_timeout_secs` | unsigned integer; `900` | `KILN_AGENT_RUN_TIMEOUT_SECS` (implemented) | `KILN_AGENT_RUN_TIMEOUT_SECS` | Must be at least `10`. A per-run timeout can override the server default. |
-| `agent.runs_access` | string enum; `"loopback_only"` | `KILN_AGENT_RUNS_ACCESS` (implemented) | `KILN_AGENT_RUNS` (deprecated compatibility; boolean spellings map to enabled/disabled) | `loopback_only`, `enabled`, or `disabled`. Compatibility boolean spellings are accepted from the environment. Embedded runs can execute arbitrary code; changing this requires restart. |
-| `agent.pi_bin` | optional path string; omitted (search startup PATH) | `KILN_AGENT_PI_BIN` (implemented) | `KILN_PI_BIN` (deprecated compatibility) | Must name a non-empty existing file when explicitly configured. The resolved executable is immutable for the process lifetime. |
-| `agent.pi_sessions_dir` | optional path string; omitted (OS account `.pi/agent/sessions`) | `KILN_AGENT_PI_SESSIONS_DIR` (implemented) | `KILN_PI_SESSIONS_DIR` (deprecated compatibility) | Must be a non-empty path when set. Relative paths and the operating-system account fallback are resolved once at startup without consulting `HOME`. |
+| `agent.max_concurrent_runs` | unsigned integer; `2` | `KILN_AGENT_MAX_CONCURRENT_RUNS` (implemented) | none | Must be greater than zero. Embedded pi runs above the limit queue FIFO. |
+| `agent.run_timeout_secs` | unsigned integer; `900` | `KILN_AGENT_RUN_TIMEOUT_SECS` (implemented) | none | Must be at least `10`. A per-run timeout can override the server default. |
+| `agent.runs_access` | string enum; `"loopback_only"` | `KILN_AGENT_RUNS_ACCESS` (implemented) | none | `loopback_only`, `enabled`, or `disabled`. Embedded runs can execute arbitrary code; changing this requires restart. |
+| `agent.pi_bin` | optional path string; omitted (search startup PATH) | `KILN_AGENT_PI_BIN` (implemented) | none | Must name a non-empty existing file when explicitly configured. The resolved executable is immutable for the process lifetime. |
+| `agent.pi_sessions_dir` | optional path string; omitted (OS account `.pi/agent/sessions`) | `KILN_AGENT_PI_SESSIONS_DIR` (implemented) | none | Must be a non-empty path when set. Relative paths and the operating-system account fallback are resolved once at startup without consulting `HOME`. |
 
 Terminal and embedded-run access default to `loopback_only`. The host decision,
 the pi executable, session root, adapter-library URL, and teacher-logit cache
 root are resolved once during startup and published under `operational` in
 `GET /v1/config`. Request handlers use that immutable snapshot; changing TOML,
-`PATH` or a compatibility environment alias requires a restart.
+`PATH` or a canonical configuration input requires a restart.
 
 ## Effective values and provenance
 
@@ -2276,7 +2265,7 @@ Kiln exposes complementary startup-input and runtime-derived views:
   decode-width sources.
 
 The versioned `kiln.effective-configuration.v1` object is a deterministic flat
-map keyed by canonical TOML paths. It always contains all 118 fixed typed
+map keyed by canonical TOML paths. It always contains all 117 fixed typed
 leaves, including materialized defaults for optional `[eval]` and `[agent]`
 sections, plus two dynamic leaves for every configured teacher credential:
 `teachers.credentials.<id>.origin` and
@@ -2286,9 +2275,10 @@ sections, plus two dynamic leaves for every configured teacher credential:
   redacted;
 - `source`: exactly `default`, `config_file`, `environment`, or
   `command_line`;
-- `canonical_environment` and `compatibility_environment`: the mechanically
-  derived supported environment name and any deprecated aliases, or no names
-  for config-file-only/dynamic fields;
+- `canonical_environment`: the mechanically derived supported environment name,
+  or no name for config-file-only/dynamic fields;
+- `compatibility_environment`: retained in schema v1 and always empty, making
+  the absence of alternate spellings machine-readable;
 - `redacted`: whether the value is deliberately withheld; and
 - `restart_required_to_change`: always `true` for this startup snapshot.
 
@@ -2316,20 +2306,127 @@ startup map: use `--backend` for a hardware-free scheduling preview and the
 sibling `/v1/config` objects for the actual selected backend, capacity,
 availability, and live state.
 
-## Known configuration migration limitations
+## Configuration migration
 
-These are current implementation facts, not recommended architecture:
+The canonical-only environment contract is a breaking cleanup. The 77 former
+public spellings below are ignored rather than accepted as aliases. Replace
+them before upgrading; `kiln config --json` exposes the final source of every
+effective field so deployment checks can prove the replacement took effect.
 
-1. **Deprecated aliases:** 76 non-canonical spellings across 71 fields remain
-   temporarily for compatibility, including `KILN_DEFAULT_NO_THINK`. Each use
-   warns at startup; canonical and compatibility names cannot silently
-   disagree.
+| Retired environment name | Canonical replacement |
+|---|---|
+| `KILN_ADAPTER_DIR` | `KILN_MODEL_ADAPTER_DIR` |
+| `KILN_ADAPTER_LIBRARY_URL` | `KILN_ADAPTERS_LIBRARY_URL` |
+| `KILN_AGENT_RUNS` | `KILN_AGENT_RUNS_ACCESS` |
+| `KILN_BATCHING_ENGINE` | `KILN_BATCHING_MODE` |
+| `KILN_BATCH_DECODE_ROWWISE` | `KILN_BATCHING_ROWWISE_DECODE` |
+| `KILN_BATCH_PREFILL_ADMISSION_QUANTUM` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` |
+| `KILN_BATCH_PREFIX_AWARE_ADMISSION` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` |
+| `KILN_CHAT_CONFIG_HASH_METADATA` | `KILN_SERVER_CHAT_CONFIG_HASH_METADATA` |
+| `KILN_CHAT_PERFORMANCE_METADATA` | `KILN_SERVER_CHAT_PERFORMANCE_METADATA` |
+| `KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` |
+| `KILN_CHECKPOINT_BOUNDARY_CACHE_GB` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB` |
+| `KILN_CHECKPOINT_INTERVAL` | `KILN_TRAINING_CHECKPOINT_INTERVAL` |
+| `KILN_CUDA_GRAPHS` | `KILN_MEMORY_CUDA_GRAPHS` |
+| `KILN_DECODE_BATCHER` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` |
+| `KILN_DECODE_BATCH_MAX` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` |
+| `KILN_DECODE_BATCH_MIXED_SEQ` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` |
+| `KILN_DECODE_BATCH_WAIT_US` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` |
+| `KILN_DEFAULT_NO_THINK` | `KILN_SERVER_DEFAULT_THINKING_ENABLED` |
+| `KILN_DEFAULT_THINKING_BUDGET_MS` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` |
+| `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` |
+| `KILN_DEFAULT_THINKING_ENABLED` | `KILN_SERVER_DEFAULT_THINKING_ENABLED` |
+| `KILN_DETACHED_FULL_ATTN_TILE_TOKENS` | `KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS` |
+| `KILN_DETERMINISTIC` | `KILN_SERVER_DETERMINISTIC` |
+| `KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` |
+| `KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` |
+| `KILN_EVAL_MODE` | `KILN_SERVER_EVAL_MODE` |
+| `KILN_FOLD_REASONING_INTO_CONTENT` | `KILN_SERVER_FOLD_REASONING_INTO_CONTENT` |
+| `KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` |
+| `KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` |
+| `KILN_GPU_MEMORY_GB` | `KILN_MEMORY_GPU_MEMORY_GB` |
+| `KILN_GRAD_CHECKPOINT_SEGMENTS` | `KILN_TRAINING_GRAD_CHECKPOINT_SEGMENTS` |
+| `KILN_HOST` | `KILN_SERVER_HOST` |
+| `KILN_HTTP_SEND_BUFFER_BYTES` | `KILN_SERVER_HTTP_SEND_BUFFER_BYTES` |
+| `KILN_INFERENCE_MEMORY_FRACTION` | `KILN_MEMORY_INFERENCE_MEMORY_FRACTION` |
+| `KILN_KV_AUTOSCALE` | `KILN_MEMORY_KV_AUTOSCALE` |
+| `KILN_KV_CACHE_FP8` | `KILN_MEMORY_KV_CACHE_FP8` |
+| `KILN_KV_FORCE_BLOCKS` | `KILN_MEMORY_KV_FORCE_BLOCKS` |
+| `KILN_LOGIT_CACHE_DIR` | `KILN_TRAINING_LOGIT_CACHE_DIR` |
+| `KILN_LOG_FORMAT` | `KILN_LOGGING_FORMAT` |
+| `KILN_LOG_LEVEL` | `KILN_LOGGING_LEVEL` |
+| `KILN_MAX_BATCH_TOKENS` | `KILN_SERVER_MAX_BATCH_TOKENS` |
+| `KILN_MAX_DECODE_BATCH` | `KILN_SERVER_MAX_DECODE_BATCH` |
+| `KILN_MAX_PREFILL_LAYERS_PER_CYCLE` | `KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE` |
+| `KILN_MAX_PREFILL_TOKENS_PER_CYCLE` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` |
+| `KILN_MODEL_ID` | `KILN_MODEL_MODEL_ID` |
+| `KILN_NO_GRAD_CHECKPOINT` | `KILN_TRAINING_NO_GRAD_CHECKPOINT` |
+| `KILN_NUM_BLOCKS` | `KILN_MEMORY_NUM_BLOCKS` |
+| `KILN_PI_BIN` | `KILN_AGENT_PI_BIN` |
+| `KILN_PI_SESSIONS_DIR` | `KILN_AGENT_PI_SESSIONS_DIR` |
+| `KILN_PORT` | `KILN_SERVER_PORT` |
+| `KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` | `KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS` |
+| `KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES` | `KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES` |
+| `KILN_REQUEST_TIMEOUT_SECS` | `KILN_SERVER_REQUEST_TIMEOUT_SECS` |
+| `KILN_ROCM_GRAPHS` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` |
+| `KILN_ROCM_GRAPH_CACHE_MAX` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` |
+| `KILN_ROCM_GRAPH_CAPTURE` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` |
+| `KILN_SERVED_MODEL_ID` | `KILN_MODEL_SERVED_MODEL_ID` |
+| `KILN_SERVING_PROFILE` | `KILN_SERVER_SERVING_PROFILE` |
+| `KILN_SHUTDOWN_TIMEOUT_SECS` | `KILN_SERVER_SHUTDOWN_TIMEOUT_SECS` |
+| `KILN_SLOW_REQUEST_WARN_SECS` | `KILN_SERVER_SLOW_REQUEST_WARN_SECS` |
+| `KILN_SPECULATIVE_ENABLED` | `KILN_SPECULATIVE_METHOD` |
+| `KILN_SPEC_DRAFT_LAYERS` | `KILN_SPECULATIVE_DRAFT_LAYERS` |
+| `KILN_SPEC_ENABLED` | `KILN_SPECULATIVE_METHOD` |
+| `KILN_SPEC_METHOD` | `KILN_SPECULATIVE_METHOD` |
+| `KILN_SPEC_NUM_TOKENS` | `KILN_SPECULATIVE_NUM_SPECULATIVE_TOKENS` |
+| `KILN_STREAMING_LAST_TOKEN_LM_HEAD` | `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` |
+| `KILN_STREAMING_PREFILL` | `KILN_STREAMING_PREFILL_MODE` |
+| `KILN_STREAMING_PREFILL_ENABLED` | `KILN_STREAMING_PREFILL_MODE` |
+| `KILN_STREAMING_TILE_TOKENS` | `KILN_STREAMING_PREFILL_TILE_TOKENS` |
+| `KILN_STREAM_STALL_GRACE_MS` | `KILN_SERVER_STREAM_STALL_GRACE_MS` |
+| `KILN_TAPE_STREAMING_TILE_TOKENS` | `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` |
+| `KILN_TERMINAL` | `KILN_SERVER_TERMINAL_ACCESS` |
+| `KILN_TOKENIZER_PATH` | `KILN_MODEL_TOKENIZER_PATH` |
+| `KILN_TRAINING_MEMORY_GB` | `KILN_MEMORY_TRAINING_MEMORY_GB` |
+| `KILN_VULKAN_BUFFER_POOL_GB` | `KILN_MEMORY_VULKAN_BUFFER_POOL_GB` |
+| `KILN_VULKAN_DEVICE` | `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX` |
+| `KILN_VULKAN_VALIDATION` | `KILN_ACCELERATOR_VULKAN_VALIDATION` |
+
+For ordinary aliases, preserve the old value under the replacement name. The
+former boolean-to-mode and force/disable controls require an explicit value:
+
+- `KILN_DEFAULT_NO_THINK` becomes
+  `KILN_SERVER_DEFAULT_THINKING_ENABLED=false`.
+- `KILN_TERMINAL` and `KILN_AGENT_RUNS` map false to `disabled` and true to
+  `enabled` on their replacement access fields.
+- `KILN_BATCHING_ENGINE`, `KILN_DECODE_BATCHER`,
+  `KILN_STREAMING_PREFILL`, `KILN_STREAMING_PREFILL_ENABLED`, and
+  `KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES` map false to `disabled` and true to
+  `enabled` on their replacement mode fields.
+- `KILN_ROCM_GRAPHS` maps false to `disabled` and true to `profile`.
+  `KILN_ROCM_GRAPH_CAPTURE` maps false to `warmup_then_eager` and true to
+  `profile`.
+- For the two ROCm matmul force/disable pairs, a false value maps to `auto`.
+  True force-strided maps to `enabled`, true disable-strided maps to
+  `disabled`, true force-F32-output maps to `f32_then_cast`, and true
+  disable-F32-output maps to `native_bf16`.
+- `KILN_SPECULATIVE_ENABLED` and `KILN_SPEC_ENABLED` map false to `off` and
+  true to `skip_layer` on `KILN_SPECULATIVE_METHOD`. Non-off serving remains
+  fail-closed. The method override now accepts only `off`, `skip_layer`, and
+  `mtp`; historical synonyms must be replaced with those exact enum values.
+
+TOML also has two removed fields: replace `speculative.enabled` with
+`speculative.method`, using the boolean mapping above, and replace
+`streaming_prefill.enabled` with `streaming_prefill.mode`, mapping false to
+`disabled` and true to `enabled`. Unknown fields are fatal, so stale files fail
+at startup instead of becoming inert.
 
 Every public runtime field now resolves exactly once and is passed as immutable
 typed configuration to its owner; the environment contract is generated
 mechanically, and repository policy rejects direct production environment
 reads outside the closed driver-remap and credential-provider adapters.
 Internal experiment and qualification flags remain separate from this public
-API rather than being promoted by documentation. The remaining migration work
-is removal of deprecated aliases and further consolidation of explicit
-experimental/debug profiles.
+API rather than being promoted by documentation. Remaining Phase 8 work is
+consolidation of explicit experimental/debug profiles and test-only process
+environment mutation, not another public configuration path.

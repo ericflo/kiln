@@ -32,10 +32,9 @@ pub enum ServerState {
 pub struct SupervisorConfig {
     pub binary_path: PathBuf,
     pub args: Vec<String>,
-    /// Environment variables passed to the spawned kiln server. The desktop
-    /// uses these (rather than CLI flags) because kiln's CLI is structured
-    /// around `--config <toml>` and exposes overrides via `KILN_*` env vars,
-    /// not per-setting flags. See `settings::apply_to_supervisor_config`.
+    /// Explicit environment variables passed to the spawned kiln server.
+    /// Desktop server settings live in its managed TOML file; this carries
+    /// only the `KILN_CONFIG` pointer after ambient Kiln variables are scrubbed.
     pub envs: Vec<(String, String)>,
     pub auto_restart: bool,
     pub max_restarts: u32,

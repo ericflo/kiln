@@ -30,7 +30,7 @@ What's broken?
 
 ## Logs
 
-Relevant output. Run with `KILN_LOG_FORMAT=auto` if applicable.
+Relevant output. Run with `KILN_LOGGING_FORMAT=auto` if applicable.
 
 ```
 <paste here>

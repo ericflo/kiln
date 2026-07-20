@@ -251,14 +251,14 @@ class _Server:
         environment.update(
             {
                 "KILN_MODEL_PATH": str(model),
-                "KILN_ADAPTER_DIR": str(adapter_dir),
-                "KILN_HOST": "127.0.0.1",
-                "KILN_PORT": str(PORT),
-                "KILN_NUM_BLOCKS": "256",
-                "KILN_SERVING_PROFILE": "experimental",
-                "KILN_CUDA_GRAPHS": "0",
+                "KILN_MODEL_ADAPTER_DIR": str(adapter_dir),
+                "KILN_SERVER_HOST": "127.0.0.1",
+                "KILN_SERVER_PORT": str(PORT),
+                "KILN_MEMORY_NUM_BLOCKS": "256",
+                "KILN_SERVER_SERVING_PROFILE": "experimental",
+                "KILN_MEMORY_CUDA_GRAPHS": "0",
                 "KILN_ACCELERATOR_ROCM_GRAPH_MODE": "disabled",
-                "KILN_LOG_LEVEL": "info",
+                "KILN_LOGGING_LEVEL": "info",
             }
         )
         try:

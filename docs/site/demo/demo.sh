@@ -36,7 +36,7 @@ set -e
 
 # Default to ./Qwen3.5-4B but allow override.
 export KILN_MODEL_PATH="${KILN_MODEL_PATH:-./Qwen3.5-4B}"
-export KILN_SERVING_PROFILE=experimental
+export KILN_SERVER_SERVING_PROFILE=experimental
 KILN_BIN="${KILN_BIN:-./target/release/kiln}"
 
 # Resolve the directory this script lives in so we can find demo-sft.json next to it.
@@ -62,7 +62,7 @@ beat() { sleep "$1"; }
 # ------------------------------------------------------------------
 # Scene 1 — Cold start
 # ------------------------------------------------------------------
-typecmd "KILN_SERVING_PROFILE=experimental KILN_MODEL_PATH=${KILN_MODEL_PATH} ${KILN_BIN} serve --config kiln.example.toml &"
+typecmd "KILN_SERVER_SERVING_PROFILE=experimental KILN_MODEL_PATH=${KILN_MODEL_PATH} ${KILN_BIN} serve --config kiln.example.toml &"
 
 # Server logs redirected to a file so they don't bleed into the asciinema TTY.
 "${KILN_BIN}" serve --config kiln.example.toml >/tmp/kiln-demo.log 2>&1 &

@@ -136,7 +136,8 @@ impl DeterministicCache {
         }
     }
 
-    /// Read the cached value, populating from env on the first call.
+    /// Read the cached value, selecting the standalone false default on the
+    /// first call when no owning application configured it.
     pub fn is_on(&self) -> bool {
         use core::sync::atomic::Ordering;
         let v = self.state.load(Ordering::Relaxed);

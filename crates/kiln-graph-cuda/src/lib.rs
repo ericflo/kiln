@@ -4,7 +4,7 @@
 //! runner is still `crates/kiln-model/src/cuda_graph.rs`; this crate
 //! is not yet the authoritative replay layer.
 //!
-//! Phase 5.x should move or wrap the existing `KILN_CUDA_GRAPHS=true`
+//! Phase 5.x should move or wrap the existing `memory.cuda_graphs=true`
 //! path (which wires `cudarc::driver::CudaGraph` + `CudaGraphExec`
 //! against the production decode loop) behind this crate's
 //! [`CudaCapturedGraph`] or its successor.

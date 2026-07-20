@@ -70,6 +70,20 @@ def reference_rows() -> dict[str, list[str]]:
     return rows
 
 
+def retired_environment_replacements() -> dict[str, str]:
+    replacements: dict[str, str] = {}
+    pattern = re.compile(r"^\| `(KILN_[A-Z0-9_]+)` \| `(KILN_[A-Z0-9_]+)` \|$")
+    for line in REFERENCE_PATH.read_text().splitlines():
+        match = pattern.match(line)
+        if not match:
+            continue
+        retired, canonical = match.groups()
+        if retired in replacements:
+            raise ContractError(f"duplicate retired environment name {retired}")
+        replacements[retired] = canonical
+    return replacements
+
+
 def schema_fields(schema: dict[str, Any]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for definition in schema.get("$defs", {}).values():
@@ -89,12 +103,6 @@ def schema_fields(schema: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def strip_markup(value: str) -> str:
     return value.replace("`", "")
-
-
-def compatibility_aliases(cell: str) -> list[str]:
-    if "deprecated" not in cell:
-        return []
-    return re.findall(r"`(KILN_[A-Z0-9_]+)`", cell)
 
 
 def validate_contract_metadata(schema: dict[str, Any]) -> list[str]:
@@ -149,22 +157,63 @@ def validate_contract_metadata(schema: dict[str, Any]) -> list[str]:
     implemented = {
         path: cells for path, cells in fixed_rows.items() if "(implemented)" in cells[2]
     }
-    compatibility = {
-        path: compatibility_aliases(cells[3]) for path, cells in fixed_rows.items()
+    alternate_environment = {
+        path: cells[3] for path, cells in fixed_rows.items() if cells[3].lower() != "none"
     }
-    compatibility = {path: aliases for path, aliases in compatibility.items() if aliases}
+    if alternate_environment:
+        errors.append(
+            "configuration fields must not document alternate environment spellings: "
+            + ", ".join(sorted(alternate_environment))
+        )
     counts = {
         "x-kiln-field-count": len(fixed_rows),
         "x-kiln-dynamic-field-template-count": len(dynamic_rows),
         "x-kiln-canonical-environment-count": len(implemented),
         "x-kiln-config-file-only-count": len(fixed_rows) - len(implemented),
-        "x-kiln-compatibility-field-count": len(compatibility),
-        "x-kiln-compatibility-alias-count": sum(map(len, compatibility.values())),
-        "x-kiln-toml-compatibility-field-count": 1,
+        "x-kiln-compatibility-field-count": 0,
+        "x-kiln-compatibility-alias-count": 0,
+        "x-kiln-toml-compatibility-field-count": 0,
     }
     for key, expected in counts.items():
         if schema.get(key) != expected:
             errors.append(f"schema {key} must be {expected}, got {schema.get(key)!r}")
+
+    retired = schema.get("x-kiln-retired-environment-replacements")
+    if not isinstance(retired, dict) or not all(
+        isinstance(name, str) and isinstance(replacement, str)
+        for name, replacement in retired.items()
+    ):
+        errors.append("schema retired environment replacements must be a string map")
+        retired = {}
+    documented_retired = retired_environment_replacements()
+    if documented_retired != retired:
+        errors.append("retired environment replacement index drifted from the schema")
+    if schema.get("x-kiln-retired-environment-count") != len(retired):
+        errors.append(
+            "schema retired environment count must match its replacement index"
+        )
+    canonical_names = {
+        re.search(r"KILN_[A-Z0-9_]+", cells[2]).group(0)
+        for cells in implemented.values()
+    }
+    if set(retired) & canonical_names:
+        errors.append("retired environment names must be disjoint from canonical names")
+    unknown_replacements = sorted(set(retired.values()) - canonical_names)
+    if unknown_replacements:
+        errors.append(
+            "retired environment replacements must name canonical overrides: "
+            + ", ".join(unknown_replacements)
+        )
+
+    removed_toml = schema.get("x-kiln-removed-toml-field-replacements")
+    expected_removed_toml = {
+        "speculative.enabled": "speculative.method",
+        "streaming_prefill.enabled": "streaming_prefill.mode",
+    }
+    if removed_toml != expected_removed_toml:
+        errors.append("schema removed TOML field replacement index is incomplete")
+    if schema.get("x-kiln-removed-toml-field-count") != len(expected_removed_toml):
+        errors.append("schema removed TOML field count must match its replacement index")
 
     metadata_keys = (
         "x-kiln-type-and-default",
@@ -188,9 +237,9 @@ def validate_contract_metadata(schema: dict[str, Any]) -> list[str]:
                     f"{path} canonical environment name must be mechanically derived as {expected_name}"
                 )
 
-    legacy = fields.get("streaming_prefill.enabled", {})
-    if legacy.get("deprecated") is not True or legacy.get("type") != "boolean":
-        errors.append("schema must expose deprecated TOML streaming_prefill.enabled as a boolean")
+    for removed_path in expected_removed_toml:
+        if removed_path in fields:
+            errors.append(f"schema must reject removed TOML field {removed_path}")
 
     credential = definitions.get("teacher_credential", {})
     if credential.get("required") != ["origin", "api_key_env"]:
@@ -376,11 +425,8 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
             False,
             "dependent queue ordering",
         ),
-        (
-            {"streaming_prefill": {"mode": "enabled", "enabled": False}},
-            False,
-            "legacy TOML conflict",
-        ),
+        ({"streaming_prefill": {"enabled": False}}, False, "removed streaming toggle"),
+        ({"speculative": {"enabled": False}}, False, "removed speculative toggle"),
     ]
     errors = []
     for value, expected_valid, label in cases:

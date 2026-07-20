@@ -754,7 +754,7 @@ def render_report(contract: dict[str, object]) -> str:
         "",
         "The supported operator surface is narrower. Use the",
         "[Configuration Reference](CONFIGURATION.md) for typed TOML fields, mechanically",
-        "derived canonical names, deprecated compatibility aliases, defaults, validation,",
+        "derived canonical names, retired-name migrations, defaults, validation,",
         "and provenance. A name appearing in this inventory is not evidence that it is a",
         "supported public setting.",
         "",

@@ -68,7 +68,7 @@
       "slug": "configuration-schema",
       "title": "Configuration Schema",
       "section": "start",
-      "description": "Generated machine-readable reference for all typed TOML sections, fields, defaults, validation bounds, environment names, compatibility inputs, and cross-field safety conditions."
+      "description": "Generated machine-readable reference for all typed TOML sections, fields, defaults, validation bounds, canonical environment names, retired-name migrations, and cross-field safety conditions."
     },
     {
       "source": "contracts/kiln-http-api-v1.openapi.json",

@@ -10,14 +10,14 @@ or generated-report drift on the inexpensive qualification path.
 
 The supported operator surface is narrower. Use the
 [Configuration Reference](CONFIGURATION.md) for typed TOML fields, mechanically
-derived canonical names, deprecated compatibility aliases, defaults, validation,
+derived canonical names, retired-name migrations, defaults, validation,
 and provenance. A name appearing in this inventory is not evidence that it is a
 supported public setting.
 
 ## Current baseline
 
 The scanner records **431 direct read call sites** and
-**150 process-mutation call sites**. It can
+**29 process-mutation call sites**. It can
 statically name **32 distinct literal `KILN_*`
 read names** across **113 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
@@ -30,7 +30,7 @@ boundary.
 | Credential provider | 1 | 0 | 0 |
 | Experimental/debug migration | 0 | 0 | 0 |
 | Build time/provenance | 326 | 6 | 8 |
-| Test only | 97 | 25 | 142 |
+| Test only | 97 | 25 | 21 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -75,11 +75,11 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_CONFIG` | Public stable | 2 | `crates/kiln-server/src/config.rs`, `crates/kiln-server/src/logging.rs` |
 | `KILN_CUDA_ARCHS` | Build time/provenance | 8 | `crates/kiln-blas/build.rs`, `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-marlin-gemm/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-tensor/build.rs` |
 | `KILN_DISABLE_FUSED_PAGED_DECODE` | Test only | 6 | `crates/kiln-model/src/forward.rs` |
-| `KILN_EVAL_MODE` | Test only | 1 | `crates/kiln-server/src/config.rs` |
 | `KILN_METAL_LORA_LINEAR_BENCH_ITERS` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_LINEAR_BENCH_WARMUP` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_QKV_LINEAR_BENCH_ITERS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_QKV_LINEAR_BENCH_WARMUP` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
+| `KILN_MODEL_SERVED_MODEL_ID` | Test only | 1 | `crates/kiln-server/src/config.rs` |
 | `KILN_MTP_BYTE_EQ_MODEL` | Test only | 1 | `crates/kiln-model/tests/mtp_byte_eq.rs` |
 | `KILN_QUALIFICATION` | Test only | 26 | `crates/kiln-model/src/rocm_graph.rs`, `crates/kiln-model/tests/adamw_pytorch_oracle.rs`, `crates/kiln-model/tests/rocm_kv_physical_resize.rs`, `crates/kiln-model/tests/vk_resident_decode_parity.rs`, `crates/kiln-server/tests/real_model_integration.rs`, `crates/kiln-tensor/src/ops/log_softmax.rs`, `crates/kiln-tensor/tests/log_softmax_backend_stability.rs`, `crates/kiln-tensor/tests/metal_ops_parity.rs`, `crates/kiln-tensor/tests/rocm_matmul_parity.rs`, `crates/kiln-tensor/tests/rocm_prompt_logprobs.rs`, `crates/kiln-tensor/tests/rocm_storage_smoke.rs`, `crates/kiln-train/src/grpo_tape_shim.rs`, `crates/kiln-train/src/opd.rs`, `crates/kiln-train/src/trainer.rs`, `crates/kiln-vulkan-kernel/tests/support/mod.rs`, `crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` |
 | `KILN_QUALIFICATION_HF_LOGITS_PATH` | Test only | 1 | `crates/kiln-model/tests/vk_resident_decode_parity.rs` |
@@ -95,7 +95,7 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_ROCM_FLASH_BENCH_SEQ` | Test only | 1 | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` |
 | `KILN_ROCM_WAVE64` | Build time/provenance | 6 | `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-tensor/build.rs` |
 | `KILN_RUN_LONG_ROCM_RMSNORM` | Test only | 1 | `crates/kiln-rmsnorm-kernel/tests/rocm_rmsnorm_parity.rs` |
-| `KILN_SERVED_MODEL_ID` | Test only | 1 | `crates/kiln-server/src/config.rs` |
+| `KILN_SERVER_EVAL_MODE` | Test only | 1 | `crates/kiln-server/src/config.rs` |
 | `KILN_SOURCE_TREE_HASH` | Build time/provenance | 1 | `crates/kiln-server/src/execution_provenance.rs` |
 | `KILN_TENSOR_CUDA_TEST` | Test only | 2 | `crates/kiln-tensor/src/cuda_allocator.rs`, `crates/kiln-tensor/src/cuda_storage.rs` |
 | `KILN_TENSOR_METAL_TEST` | Test only | 2 | `crates/kiln-tensor/src/metal_allocator.rs`, `crates/kiln-tensor/src/metal_storage.rs` |

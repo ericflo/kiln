@@ -82,7 +82,7 @@ const AUTO_SIZER_FALLBACK_FRACTIONS: &[f64] = &[0.75, 0.65, 0.55, 0.45];
 ///
 /// On startup, we compute how much VRAM is available and partition it:
 /// - Model weights (fixed)
-/// - KV cache for inference (controlled by KILN_INFERENCE_MEMORY_FRACTION)
+/// - KV cache for inference (controlled by KILN_MEMORY_INFERENCE_MEMORY_FRACTION)
 /// - Remaining budget available for training
 #[derive(Debug, Serialize)]
 pub struct GpuMemoryBudget {
@@ -181,7 +181,7 @@ impl GpuMemoryBudget {
             return Err(format!(
                 "insufficient GPU memory for training: need ~{:.1}GB but only {:.1}GB available \
                  (total {:.1}GB - model {:.1}GB - KV cache {:.1}GB). \
-                 Try reducing KILN_NUM_BLOCKS or setting KILN_INFERENCE_MEMORY_FRACTION lower",
+                 Try reducing KILN_MEMORY_NUM_BLOCKS or setting KILN_MEMORY_INFERENCE_MEMORY_FRACTION lower",
                 estimated_training_bytes as f64 / 1e9,
                 self.training_budget_bytes as f64 / 1e9,
                 self.total_vram_bytes as f64 / 1e9,
@@ -2588,7 +2588,7 @@ pub struct AppState {
     pub model_weight_device: kiln_tensor::Device,
     /// Shutdown flag — set to true when the server is shutting down.
     pub shutdown: ShutdownFlag,
-    /// Per-request timeout duration. Configurable via KILN_REQUEST_TIMEOUT_SECS (default 600).
+    /// Per-request timeout duration. Configurable via KILN_SERVER_REQUEST_TIMEOUT_SECS (default 600).
     pub request_timeout: std::time::Duration,
     /// Requested `SO_SNDBUF` for every accepted HTTP connection. `None` leaves
     /// the platform default untouched.
@@ -4049,7 +4049,7 @@ impl AppState {
                             attempts = success.attempted_failures.len() + 1,
                             "KV cache auto-sizer fell back to a smaller inference_memory_fraction \
                              because the configured value OOM'd; set memory.inference_memory_fraction \
-                             (or KILN_INFERENCE_MEMORY_FRACTION) to this value to silence the warning"
+                             (or KILN_MEMORY_INFERENCE_MEMORY_FRACTION) to this value to silence the warning"
                         );
                     } else {
                         tracing::info!(
@@ -4884,7 +4884,7 @@ fn cap_auto_num_blocks(
     // generation already exhaust 6.5K blocks each, leaving the auto cap
     // routinely OOM-borderline under realistic load even on a 48 GiB A40.
     // Trust the memory-aware ceiling here; users who want a stricter cap can
-    // still set `KILN_NUM_BLOCKS` or `memory.num_blocks` explicitly.
+    // still set `KILN_MEMORY_NUM_BLOCKS` or `memory.num_blocks` explicitly.
     let runtime_cap_blocks = kv_auto_block_policy.runtime_cap_blocks(
         max_position_embeddings,
         block_size,
@@ -5455,7 +5455,7 @@ where
     Err(AutoSizeFailure { attempts })
 }
 
-/// Compute a conservative `KILN_NUM_BLOCKS=N` suggestion the user can paste
+/// Compute a conservative `KILN_MEMORY_NUM_BLOCKS=N` suggestion the user can paste
 /// directly. We aim for ~30% of remaining VRAM after model weights — well
 /// below the smallest fallback fraction we just tried — so the suggestion has
 /// enough headroom to start cleanly even on the GPU/driver combo that just
@@ -5491,7 +5491,7 @@ fn suggested_emergency_num_blocks(
 /// to set, instead of dumping the raw CUDA OOM. We include:
 ///   - what we tried (fractions + blocks counts)
 ///   - the underlying error from the deepest attempt
-///   - a concrete `KILN_NUM_BLOCKS=N` value
+///   - a concrete `KILN_MEMORY_NUM_BLOCKS=N` value
 ///   - a concrete `inference_memory_fraction=X` value (the lowest we tried,
 ///     halved further to stay safely below the OOM floor)
 ///   - the effective GPU memory total + source so users can sanity-check
@@ -5536,8 +5536,8 @@ fn format_oom_remediation_message(
         .max(0.10);
     buf.push_str(&format!(
         "\nRecommended remediation — set ONE of the following and restart:\n  \
-         (a) KILN_NUM_BLOCKS={}        # ~{:.1} GiB KV cache, conservative; or in kiln.toml: [memory] num_blocks = {}\n  \
-         (b) KILN_INFERENCE_MEMORY_FRACTION={:.2}   # equivalent fraction-based knob; or in kiln.toml: [memory] inference_memory_fraction = {:.2}\n",
+         (a) KILN_MEMORY_NUM_BLOCKS={}        # ~{:.1} GiB KV cache, conservative; or in kiln.toml: [memory] num_blocks = {}\n  \
+         (b) KILN_MEMORY_INFERENCE_MEMORY_FRACTION={:.2}   # equivalent fraction-based knob; or in kiln.toml: [memory] inference_memory_fraction = {:.2}\n",
         suggested_blocks, kv_gb, suggested_blocks,
         suggested_fraction, suggested_fraction,
     ));
@@ -8155,7 +8155,7 @@ mod tests {
     fn test_auto_num_blocks_caps_metal_desktop_defaults_by_memory_tier() {
         // On unified-memory Macs, pure memory-aware sizing can request a large
         // eagerly-zeroed KV cache. Default Metal auto-sizing is tier-capped by
-        // detected memory; explicit KILN_NUM_BLOCKS still bypasses this helper
+        // detected memory; explicit KILN_MEMORY_NUM_BLOCKS still bypasses this helper
         // entirely in AppState::new_real.
         assert_eq!(
             cap_auto_num_blocks(
@@ -8423,7 +8423,7 @@ mod tests {
     #[test]
     fn oom_message_names_concrete_remediation_flags() {
         // The whole point of the new error message: it must give the user a
-        // concrete `KILN_NUM_BLOCKS=N` and `KILN_INFERENCE_MEMORY_FRACTION=X`
+        // concrete `KILN_MEMORY_NUM_BLOCKS=N` and `KILN_MEMORY_INFERENCE_MEMORY_FRACTION=X`
         // value to set. Verify both appear in the rendered text.
         let failure = AutoSizeFailure {
             attempts: vec![
@@ -8448,11 +8448,11 @@ mod tests {
             kiln_memory::vram::VramSource::NvidiaSmi,
         );
         assert!(
-            msg.contains("KILN_NUM_BLOCKS=8192"),
+            msg.contains("KILN_MEMORY_NUM_BLOCKS=8192"),
             "message must include the concrete num_blocks suggestion: {msg}"
         );
         assert!(
-            msg.contains("KILN_INFERENCE_MEMORY_FRACTION="),
+            msg.contains("KILN_MEMORY_INFERENCE_MEMORY_FRACTION="),
             "message must include the concrete fraction suggestion: {msg}"
         );
         // Suggested fraction = last attempt (0.45) / 2 = 0.225, max(0.10) = 0.225
@@ -8499,7 +8499,7 @@ mod tests {
             0.85,
             kiln_memory::vram::VramSource::None,
         );
-        assert!(msg.contains("KILN_NUM_BLOCKS=64"), "message: {msg}");
+        assert!(msg.contains("KILN_MEMORY_NUM_BLOCKS=64"), "message: {msg}");
         assert!(
             msg.contains("0.0 GiB"),
             "should print 0.0 GiB when unknown: {msg}"

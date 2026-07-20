@@ -2,12 +2,21 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
+- Canonical-only configuration: every public field environment override now
+  derives mechanically as `KILN_<SECTION>_<FIELD>`. All 77 former public
+  spellings are ignored and indexed with exact replacements in the schema and
+  configuration website. Removed duplicate TOML toggles
+  `speculative.enabled` and `streaming_prefill.enabled` are rejected;
+  `speculative.method` and `streaming_prefill.mode` are their sole authorities.
+  Desktop launches from an atomic typed TOML file selected by `KILN_CONFIG`
+  instead of injecting individual settings into process environment.
 - Complete effective configuration: `kiln config --json` and
-  `GET /v1/config` under `effective_configuration` now expose all 118 fixed typed
+  `GET /v1/config` under `effective_configuration` now expose all 117 fixed typed
   startup leaves plus dynamic teacher-credential leaves in one deterministic
   source-aware map. Entries report typed post-precedence values, default/file/
-  environment/command-line authority, canonical and compatibility environment
-  names, redaction, and restart requirements; sensitive request, webhook, and
+  environment/command-line authority, the canonical environment name, an
+  explicitly empty v1 compatibility-name list, redaction, and restart
+  requirements; sensitive request, webhook, and
   credential-provider values remain present only as redacted nulls. The
   generated observability schema and permanent website publish the same v1
   contract, while backend-derived and live values remain authoritative sibling
@@ -264,8 +273,8 @@
 - typed batching configuration: `[batching]` now owns actor selection, true
   batched versus rowwise decode, strict-prefix-aware admission, and the prompt
   admission quantum. Canonical overrides derive mechanically as
-  `KILN_BATCHING_<FIELD>`; the four older primary-actor spellings remain strict,
-  warning compatibility aliases. Values resolve once after backend and
+  `KILN_BATCHING_<FIELD>`; the four older primary-actor spellings are retired
+  and ignored. Values resolve once after backend and
   effective decode-width selection, require restart, and are injected into the
   actor without production runtime environment rereads.
 - direct decode rendezvous configuration: the actor-absent direct streaming
@@ -273,9 +282,8 @@
   `[batching]` startup fields for mode, maximum batch, wait microseconds, and
   mixed sequence lengths. Canonical names derive as
   `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_<FIELD>`; the four old
-  `KILN_DECODE_BATCH*` names are strict warning aliases. Conflicts and malformed
-  values fail startup, including malformed legacy wait values that previously
-  became zero. Backend defaults remain CPU `(8,0,false)`, CUDA `(1,0,false)`,
+  `KILN_DECODE_BATCH*` names are retired and ignored. Malformed canonical values
+  fail startup. Backend defaults remain CPU `(8,0,false)`, CUDA `(1,0,false)`,
   ROCm `(8,0,false)`, Metal `(8,100,true)`, and Vulkan `(64,5000,true)`, with
   every auto mode enabled and maximum batch clamped to effective decode width.
 - batching diagnostics: `/v1/config.batching` separates immutable configured

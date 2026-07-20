@@ -345,7 +345,7 @@ Start the source-built server (using the weights downloaded above):
 KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
 ```
 
-Vulkan builds auto-select a Vulkan physical device at startup. Until backend selection and memory probes share a PCI-address or UUID identity, startup is deliberately restricted to logical device `0` with exactly one matching physical DRM device; `KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` are rejected because they make ordinal-to-probe identity ambiguous. ROCm builds use the HIP backend compiled into the binary; set `KILN_ROCM_ARCHS` at build time to control emitted gfx targets.
+Vulkan builds auto-select a Vulkan physical device at startup. Until backend selection and memory probes share a PCI-address or UUID identity, startup is deliberately restricted to logical device `0` with exactly one matching physical DRM device. Select it through `accelerator.vulkan_device_index` or `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX`; retired `KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` inputs are ignored. ROCm builds use the HIP backend compiled into the binary; set `KILN_ROCM_ARCHS` at build time to control emitted gfx targets.
 
 ```
   ┌─────────────────────────────────────┐
@@ -1081,7 +1081,7 @@ Kiln uses a typed TOML config file. Environment overrides are resolved during st
 | `batching.actor_cycle_idle_ms` | `KILN_BATCHING_ACTOR_CYCLE_IDLE_MS` | 0 | Intentional 0–60000 ms cooperative wait after actor cycles that advanced model work. Zero is unpaced. Nonzero lowers sustained accelerator duty cycle at an explicit throughput/ITL cost; it runs only after synchronous accelerator return, polls control commands within 5 ms, and requires restart |
 | `batching.direct_decode_rendezvous_mode` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` | `auto` (enabled on real backends) | Fallback worker for actor-absent direct streaming effectively-greedy requests only. Sampled, non-streaming, and actor-routed requests bypass it. Restart required |
 | `batching.direct_decode_rendezvous_max_batch` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | `auto` (backend policy) | Fallback cohort width (`auto` or 1–65536), always clamped to effective decode width. Auto is CUDA 1, CPU/ROCm/Metal 8, Vulkan 64. Restart required |
-| `batching.direct_decode_rendezvous_wait_us` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | `auto` (backend policy) | Non-negative collection delay in microseconds. Auto is Metal 100, Vulkan 5000, and 0 elsewhere. Malformed canonical or legacy input fails startup. Restart required |
+| `batching.direct_decode_rendezvous_wait_us` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | `auto` (backend policy) | Non-negative collection delay in microseconds. Auto is Metal 100, Vulkan 5000, and 0 elsewhere. Malformed canonical input fails startup. Restart required |
 | `batching.direct_decode_rendezvous_mixed_seq_lens` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | `auto` (backend policy) | Allow different decode positions in one fallback cohort. Auto is true on Metal/Vulkan and false elsewhere. Restart required |
 | `streaming_prefill.mode` | `KILN_STREAMING_PREFILL_MODE` | `auto` (backend policy) | `auto`, `enabled`, or `disabled`. Auto dispatches at 256 prompt tokens on ROCm, 2048 on CUDA/Metal, and never on CPU/Vulkan. Enabled applies to every non-empty prompt; disabled is the monolithic isolation control. ROCm actor serving rejects a mode/threshold that would delay direct splitting beyond its 256-token actor tile. Restart required |
 | `streaming_prefill.threshold_tokens` | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` | `auto` (backend policy) | `auto` or a positive integer. Overrides an existing CUDA/ROCm/Metal crossover but cannot enable CPU/Vulkan automatic dispatch. Restart required |
@@ -1120,9 +1120,8 @@ error therefore emits `configuration_load_failed` with the selected config path
 and complete error chain in the configured pretty/JSON format before exiting.
 
 The four checkpoint-boundary overrides follow the mechanical
-`KILN_<SECTION>_<FIELD>` rule. Their historical unsectioned spellings remain
-strict, warning compatibility aliases; malformed or conflicting canonical and
-legacy values stop startup. Kiln converts the configured values into one
+`KILN_<SECTION>_<FIELD>` rule. Historical unsectioned spellings are ignored;
+malformed canonical values stop startup. Kiln converts the configured values into one
 immutable policy and gives that same value to SFT memory admission and runtime
 execution. Inspect `training.checkpoint_boundary_policy` in `GET /v1/config`,
 `GET /health`, and trusted `GET /v1/debug/model-state`, or in the dashboard's
@@ -1292,8 +1291,8 @@ is passed. In eval mode, the same profile injects
 overrides it, so tool-agent evals and Pi-style loops get final `content`
 instead of long `reasoning_content`. Operators can also set
 `server.default_thinking_enabled = false` or
-`KILN_SERVER_DEFAULT_THINKING_ENABLED=false` for non-eval serving. The legacy
-`KILN_DEFAULT_NO_THINK` env var is still accepted as a compatibility alias.
+`KILN_SERVER_DEFAULT_THINKING_ENABLED=false` for non-eval serving. Retired
+`KILN_DEFAULT_NO_THINK` is ignored.
 
 The normative wire schema and executable cross-runtime vectors are in the
 [Thinking Budget Contract](docs/THINKING_BUDGET_CONTRACT.md).
