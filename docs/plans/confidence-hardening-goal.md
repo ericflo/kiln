@@ -1423,7 +1423,7 @@ Current audit findings and migration order (initial audit 2026-07-12, updated
   parser, validation, defaults, source attribution, and effective-config dump.
 - [x] Prohibit direct runtime environment reads in model kernels, forwarding,
   scheduling, training, eval, UI, and request handlers via a repository check.
-- [ ] Put experimental/debug knobs behind one explicit namespace and profile.
+- [x] Put experimental/debug knobs behind one explicit namespace and profile.
 - [ ] Delete dead, duplicate, contradictory, and undocumented knobs.
 - [x] Ensure tests use scoped configuration rather than process-global env
   mutation wherever possible; use one global serialization helper where env is
@@ -1479,6 +1479,23 @@ closes the scoped-test checklist item; the repository-wide experimental profile
 and dead-control audits remain open. The legacy preserve-list and Candle API
 surface inventories are regenerated against the current tree; their CSV
 generator now emits canonical LF output so regeneration passes diff hygiene.
+
+Profile-gate completion checkpoint (2026-07-20):
+`server.serving_profile` is the one process-lifetime opt-in authority for every
+experimental or maintenance-only execution value. The complete set is eight
+experimental accelerator gates plus the maintenance-only forced-KV gate. Each
+field carries a machine-readable `x-kiln-profile-gate` condition in the public
+JSON Schema; the schema checker requires exact equality between that audited
+set and every executable `allOf` condition. The generated website renders a
+dedicated Profile gate column, while the complete configuration reference lists
+all nine conditions and explains why trusted debug output and debug logging are
+observability rather than execution selectors. This audit found and fixed a
+real contract mismatch: runtime rejected non-disabled CUDA Marlin outside the
+experimental profile, but the JSON Schema had accepted it and its self-test had
+encoded the wrong behavior. Stable and maintenance schema validation now reject
+both Marlin layouts exactly like server startup. The profile-gate checklist item
+is closed; the final repository-wide dead/duplicate/contradictory-control audit
+remains open.
 
 Environment-inventory checkpoint (2026-07-13): the lexical ratchet now resolves
 simple named environment constants, recognizes colocated `#[cfg(test)]` modules
@@ -3343,6 +3360,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-20 | Canonical-only configuration and Desktop typed launch | this source | this portable configuration checkpoint | server loader and bootstrap logging, effective-config API, JSON Schema, complete reference and migration index, CLI/API/architecture/troubleshooting/demo website surfaces, Desktop managed-child launch, operational scripts, and runtime-environment ratchet; no accelerator execution or performance claim | 1,087/1,087 server library tests including 115 focused configuration/API tests; 24/24 Desktop settings tests; exact 117-fixed/2-dynamic/112-environment/5-config-only/0-alias contract; all 77 retired public environment spellings unique, disjoint, schema-matched, and inert across both authoritative loading and early logging bootstrap; two removed TOML toggles rejected; runtime inventory 431 reads/29 mutations/zero migration reads with 21 test-only mutations; focused qualification environment/sanitizer tests; 10/10 documentation-builder tests; 55-document/5-asset assembled site and static smoke; Python/JSON/shell syntax; root and Desktop formatting; diff hygiene | portable canonical-only checkpoint passed; broader experimental/debug consolidation, dead-control deletion, and remaining test mutation cleanup stay open; hosted follow-up pending | Every supported field environment override is exactly `KILN_<SECTION>_<FIELD>`. Non-canonical public spellings no longer warn, conflict, or change values: they are ignored and published with exact replacements plus value-migration rules in the schema and website. `speculative.method` is the single speculative authority and `streaming_prefill.mode` the single streaming-prefill authority. Desktop serializes its exposed settings as private typed TOML, atomically stages/syncs/promotes with rollback and prior-version recovery, scrubs ambient `KILN_*`, and passes only `KILN_CONFIG` to the managed server. Current demos, workflows, issue templates, and current-tree server launch scripts use canonical names; exact-revision historical harnesses retain their original commands and are not valid against current main. Static website rendering passed; rendered browser smoke remains unavailable on this Chromium-free machine. |
 
 | 2026-07-20 | Scoped test configuration and obsolete environment harness removal | this source | this portable Phase 8.1 checkpoint | logging and remote-teacher test isolation, generated runtime-environment inventory, decode fallback capability report, obsolete current-build RMSNorm/MLP A/B harnesses, legacy preserve/Candle audit inventories, and generated website; no accelerator execution or performance claim | 11/11 logging tests; 43/43 remote-teacher tests; focused remote-teacher registration integration; focused backend capability contract; runtime inventory at 433 reads/19 mutations/zero migration reads with 11 test-surface and eight build-time mutations; backend report self-test and drift check; deterministic audit regeneration at 236 environment names/689 call sites and 59 Candle APIs/131 call sites; 55-document/5-asset assembled static site and smoke; repository/release/runtime-default/thinking-budget/source-parsing checks; formatting and diff hygiene | portable scoped-test checkpoint passed; Phase 8.1 scoped-test item closed; experimental-profile and repository-wide dead-control audits remain open | Logging tests inject `RUST_LOG` values without process mutation. Credential tests serialize their unavoidable environment boundary and restore the prior value on every exit. One scanner-classified test-surface mutation is a CUDA GRPO example's child-process provenance handoff, not test-global configuration. The deleted RMSNorm backward and fused MLP gate/up A/B harnesses toggled controls already absent from current runtime, so their purported comparisons were inert. The generated decode report no longer advertises deleted debug fallback variables, and a Rust contract rejects their return. Legacy current-tree audits are refreshed and the Candle CSV generator now emits canonical LF. No GPU workload ran. |
+
+| 2026-07-20 | Executable configuration profile-gate contract | this source | this portable Phase 8.1 checkpoint | runtime validation parity, canonical JSON Schema, complete configuration reference, generated schema website, and static smoke; no accelerator execution or performance claim | exact nine-field profile-gate metadata/conditional-rule equality; configuration-schema mutation self-tests; 10/10 documentation-builder tests; 55-document/5-asset assembled static site and smoke; JSON/Python/JavaScript syntax; formatting and diff hygiene | portable profile-gate checkpoint passed; Phase 8.1 experimental/debug item closed; repository-wide dead-control audit remains open | Eight accelerator value sets require the single `experimental` serving profile and positive forced-KV sizing requires `maintenance` plus autoscaling. The audit caught and fixed the public schema's missing CUDA Marlin condition: non-disabled layouts now fail schema validation without the same experimental profile runtime already required. Generated schema tables show a dedicated Profile gate column. Trusted debug state and debug logging remain non-semantic observability controls rather than execution experiments. No GPU workload ran. |
 
 ## Known Starting Defects
 

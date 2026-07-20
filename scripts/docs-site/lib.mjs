@@ -282,12 +282,16 @@ function schemaFieldTable(schema) {
       const typeAndDefault = field?.['x-kiln-type-and-default'] ?? schemaType(field);
       const canonicalEnvironment = field?.['x-kiln-canonical-env'] ?? '';
       const environment = field?.['x-kiln-environment'] ?? '';
+      const profileGate = field?.['x-kiln-profile-gate'];
+      const profileGateText = nonEmptyString(profileGate?.profile)
+        ? `${profileGate.profile} when ${schemaConstraints(profileGate.when).join('; ')}`
+        : 'none';
       const validation = field?.['x-kiln-validation'] ?? field?.description ?? '';
-      return `| \`${markdownTableCell(path)}\` | ${required.has(name) ? 'yes' : 'no'} | ${markdownTableCell(typeAndDefault)} | \`${markdownTableCell(canonicalEnvironment)}\` | ${markdownTableCell(environment)} | ${markdownTableCell(validation)} |`;
+      return `| \`${markdownTableCell(path)}\` | ${required.has(name) ? 'yes' : 'no'} | ${markdownTableCell(typeAndDefault)} | \`${markdownTableCell(canonicalEnvironment)}\` | ${markdownTableCell(environment)} | ${markdownTableCell(profileGateText)} | ${markdownTableCell(validation)} |`;
     });
     return [
-      '| Field | Required | Type and default | Canonical environment target | Alternate environment spelling | Validation and semantics |',
-      '| --- | --- | --- | --- | --- | --- |',
+      '| Field | Required | Type and default | Canonical environment target | Alternate environment spelling | Profile gate | Validation and semantics |',
+      '| --- | --- | --- | --- | --- | --- | --- |',
       ...rows,
       '',
     ].join('\n');

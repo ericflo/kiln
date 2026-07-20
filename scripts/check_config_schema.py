@@ -37,6 +37,45 @@ SECTIONS = (
     "agent",
 )
 
+PROFILE_GATES = {
+    "accelerator.kt_api_mode": {
+        "profile": "experimental",
+        "when": {"enum": ["all", "disabled"]},
+    },
+    "accelerator.vulkan_validation": {
+        "profile": "experimental",
+        "when": {"const": True},
+    },
+    "accelerator.cuda_marlin_profile": {
+        "profile": "experimental",
+        "when": {"enum": ["attention_mlp", "attention_mlp_gdn"]},
+    },
+    "accelerator.rocm_synchronization_mode": {
+        "profile": "experimental",
+        "when": {"const": "stream_ordered"},
+    },
+    "accelerator.rocm_strided_batched_matmul_mode": {
+        "profile": "experimental",
+        "when": {"enum": ["enabled", "disabled"]},
+    },
+    "accelerator.rocm_bf16_matmul_output_mode": {
+        "profile": "experimental",
+        "when": {"enum": ["native_bf16", "f32_then_cast"]},
+    },
+    "accelerator.rocm_kernel_profile": {
+        "profile": "experimental",
+        "when": {"const": "experimental_multiblock"},
+    },
+    "accelerator.rocm_graph_mode": {
+        "profile": "experimental",
+        "when": {"enum": ["warmup_then_eager", "lazy_capture_replay"]},
+    },
+    "memory.kv_force_blocks": {
+        "profile": "maintenance",
+        "when": {"minimum": 1},
+    },
+}
+
 
 class ContractError(Exception):
     pass
@@ -103,6 +142,88 @@ def schema_fields(schema: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def strip_markup(value: str) -> str:
     return value.replace("`", "")
+
+
+def validate_profile_gates(schema: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    fields = schema_fields(schema)
+    declared = {
+        path: field["x-kiln-profile-gate"]
+        for path, field in fields.items()
+        if "x-kiln-profile-gate" in field
+    }
+    if declared != PROFILE_GATES:
+        missing = sorted(set(PROFILE_GATES) - set(declared))
+        extra = sorted(set(declared) - set(PROFILE_GATES))
+        changed = sorted(
+            path
+            for path in set(PROFILE_GATES) & set(declared)
+            if PROFILE_GATES[path] != declared[path]
+        )
+        errors.append(
+            "profile-gated field metadata drifted"
+            f" (missing={missing}, extra={extra}, changed={changed})"
+        )
+
+    conditional_gates: dict[str, dict[str, Any]] = {}
+    all_of = schema.get("allOf")
+    if not isinstance(all_of, list):
+        return errors + ["schema allOf must enumerate every profile gate"]
+    for index, rule in enumerate(all_of):
+        if not isinstance(rule, dict):
+            errors.append(f"schema allOf[{index}] must be an object")
+            continue
+        if_clause = rule.get("if")
+        then_clause = rule.get("then")
+        if not isinstance(if_clause, dict) or not isinstance(then_clause, dict):
+            errors.append(f"schema allOf[{index}] must contain object if/then clauses")
+            continue
+        root_properties = if_clause.get("properties")
+        if not isinstance(root_properties, dict) or len(root_properties) != 1:
+            errors.append(f"schema allOf[{index}] must gate exactly one section")
+            continue
+        section, section_clause = next(iter(root_properties.items()))
+        if not isinstance(section_clause, dict):
+            errors.append(f"schema allOf[{index}] section clause must be an object")
+            continue
+        field_properties = section_clause.get("properties")
+        if not isinstance(field_properties, dict) or len(field_properties) != 1:
+            errors.append(f"schema allOf[{index}] must gate exactly one field")
+            continue
+        field, condition = next(iter(field_properties.items()))
+        path = f"{section}.{field}"
+        expected_if = {
+            "properties": {
+                section: {
+                    "properties": {field: condition},
+                    "required": [field],
+                }
+            },
+            "required": [section],
+        }
+        if if_clause != expected_if:
+            errors.append(f"schema profile condition for {path} is not fail-closed")
+
+        server_clause = then_clause.get("properties", {}).get("server")
+        if not isinstance(server_clause, dict):
+            errors.append(f"schema profile condition for {path} has no server gate")
+            continue
+        profile = server_clause.get("properties", {}).get("serving_profile", {}).get("const")
+        expected_server = {
+            "properties": {"serving_profile": {"const": profile}},
+            "required": ["serving_profile"],
+        }
+        if server_clause != expected_server or "server" not in then_clause.get("required", []):
+            errors.append(f"schema profile condition for {path} does not require the profile")
+            continue
+        if path in conditional_gates:
+            errors.append(f"duplicate schema profile condition for {path}")
+            continue
+        conditional_gates[path] = {"profile": profile, "when": condition}
+
+    if conditional_gates != PROFILE_GATES:
+        errors.append("schema allOf profile conditions drifted from field metadata")
+    return errors
 
 
 def validate_contract_metadata(schema: dict[str, Any]) -> list[str]:
@@ -241,6 +362,8 @@ def validate_contract_metadata(schema: dict[str, Any]) -> list[str]:
         if removed_path in fields:
             errors.append(f"schema must reject removed TOML field {removed_path}")
 
+    errors.extend(validate_profile_gates(schema))
+
     credential = definitions.get("teacher_credential", {})
     if credential.get("required") != ["origin", "api_key_env"]:
         errors.append("teacher_credential must require origin and api_key_env")
@@ -373,8 +496,16 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
         ),
         (
             {"accelerator": {"cuda_marlin_profile": "attention_mlp_gdn"}},
+            False,
+            "CUDA Marlin default profile rejection",
+        ),
+        (
+            {
+                "server": {"serving_profile": "experimental"},
+                "accelerator": {"cuda_marlin_profile": "attention_mlp_gdn"},
+            },
             True,
-            "expanded CUDA Marlin layout",
+            "expanded CUDA Marlin experimental layout",
         ),
         (
             {"accelerator": {"cuda_marlin_profile": "everything"}},
@@ -455,7 +586,8 @@ def check(*, self_test: bool) -> None:
         f"{schema['x-kiln-field-count']} canonical fields, "
         f"{schema['x-kiln-dynamic-field-template-count']} dynamic templates, "
         f"{schema['x-kiln-canonical-environment-count']} canonical environment overrides, "
-        f"{schema['x-kiln-compatibility-alias-count']} compatibility aliases"
+        f"{schema['x-kiln-compatibility-alias-count']} compatibility aliases, "
+        f"{len(PROFILE_GATES)} profile gates"
     )
 
 

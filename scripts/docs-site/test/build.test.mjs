@@ -299,6 +299,10 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
               'x-kiln-type-and-default': 'boolean; false',
               'x-kiln-canonical-env': 'KILN_SERVER_CONFIGURED (implemented)',
               'x-kiln-environment': 'none',
+              'x-kiln-profile-gate': {
+                profile: 'experimental',
+                when: { const: true },
+              },
               'x-kiln-validation': 'Controls the fixture behavior.',
             },
           },
@@ -332,6 +336,8 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
   assert.match(html, /server\.configured/);
   assert.match(html, /KILN_SERVER_CONFIGURED/);
   assert.match(html, /Alternate environment spelling/);
+  assert.match(html, /Profile gate/);
+  assert.match(html, /experimental when const true/);
   assert.match(html, /Composition and conditional rules/);
   assert.match(html, /&quot;then&quot;: \{/);
   assert.match(html, /Kiln contract annotations/);

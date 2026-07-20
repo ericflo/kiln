@@ -180,6 +180,33 @@ override it.
 profile selects eager-only model-runner options because live graph capture is
 disabled.
 
+Every value that activates experimental or maintenance-only execution is
+listed below. This is the complete profile-gated set, not a selection of
+examples. The JSON Schema attaches the same machine-readable
+`x-kiln-profile-gate` object to each field and expresses every gate as an
+executable `if`/`then` rule. `kiln config`, `kiln serve`, and the generated
+website therefore reject the same combinations. Domain settings stay in their
+owned sections; `server.serving_profile` is the single opt-in authority, so
+there is no parallel `[experimental]` namespace with duplicate controls.
+
+| Field | Values requiring the profile | Required profile |
+|---|---|---|
+| **`accelerator.kt_api_mode`** | `all`, `disabled` | `experimental` |
+| **`accelerator.vulkan_validation`** | `true` | `experimental` |
+| **`accelerator.cuda_marlin_profile`** | `attention_mlp`, `attention_mlp_gdn` | `experimental` |
+| **`accelerator.rocm_synchronization_mode`** | `stream_ordered` | `experimental` |
+| **`accelerator.rocm_strided_batched_matmul_mode`** | `enabled`, `disabled` | `experimental` |
+| **`accelerator.rocm_bf16_matmul_output_mode`** | `native_bf16`, `f32_then_cast` | `experimental` |
+| **`accelerator.rocm_kernel_profile`** | `experimental_multiblock` | `experimental` |
+| **`accelerator.rocm_graph_mode`** | `warmup_then_eager`, `lazy_capture_replay` | `experimental` |
+| **`memory.kv_force_blocks`** | every positive integer | `maintenance` plus `memory.kv_autoscale = true` |
+
+`server.debug_model_state` is not an execution experiment: it only exposes the
+trusted diagnostics route and does not alter inference, cache, training, or
+evaluation semantics. It is therefore source-tracked and restart-bound but not
+profile-gated. Logging level `debug` is likewise observability, not an
+execution selector.
+
 ## `[accelerator]`
 
 This section owns process-lifetime accelerator execution behavior that must be
