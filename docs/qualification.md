@@ -1769,6 +1769,20 @@ Their parsed TOML documents differ only at typed
 `accelerator.rocm_graph_mode`, from `profile` to `disabled`. Run the eager arm
 first, then bind the graph arm's exact-output comparison to that new receipt.
 
+The fixed-source eager oracle is
+`benchmarks/receipts/rocm/strix-halo/20260719t235800-rocm-strix-halo-fixed-source-state-copy-eager-v16-c8.kiln.json`.
+It passed strict validation on clean pushed source `94ab3e0d6`: 8/8 requests
+completed exactly 32 tokens, all 62 decode forwards had width four, and graph
+capture, replay, fallback, and failure counts were all zero under the typed
+disabled mode. Decode service wall was 7.556 seconds, aggregate output was
+15.674 tokens/second, and thermally sustainable output was 9.964
+tokens/second. P50/p99 ITL was 443.893/938.433 ms and p99 TTFT was 2.778
+seconds. The measured row peaked at 77.125 C, the owned lifecycle peaked at
+89.875 C without a guard trip, memory peaked at 35,233,689,600 bytes, shutdown
+was unforced, and no process or listener residue remained. This receipt is the
+bitwise output oracle for the fixed-source graph arm; it is not a throughput or
+latency promotion by itself.
+
 Serving benchmark driver v15 closes the next attribution gap before another
 ROCm arm. Each successful Kiln stream now retains its exact terminal
 `metadata.performance` object, including the request-local latency phases and
