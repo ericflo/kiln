@@ -122,7 +122,7 @@ impl AgentTraceIndex {
 #[derive(Debug, Deserialize)]
 struct DiscoverRequest {
     /// Path to the directory holding pi session JSONL files.
-    /// Defaults to `$HOME/.pi/agent/sessions/`.
+    /// Defaults to the operating-system account's `.pi/agent/sessions/`.
     #[serde(default)]
     path: Option<String>,
 }

@@ -2111,6 +2111,44 @@ to 150 process mutations, and from 14 to 9 migration reads; literal `KILN_*`
 read names fall from 36 to 32. The broad Phase 8.1 checkboxes remain open for
 the nine remaining path, device-remap, Pi, and credential boundaries.
 
+Application-path authority checkpoint (completed 2026-07-20):
+`paths.cache_root` is now the one process-lifetime filesystem authority for
+BLAS and rocBLAS autotune data, Vulkan pipeline caches, and transposed model
+weights. Its canonical `KILN_PATHS_CACHE_ROOT` override derives mechanically
+from the typed field. A configured relative path is anchored once to the
+startup working directory; omission uses the operating-system account home
+instead of mutable `HOME` or `XDG_CACHE_HOME`, with a system-temporary fallback
+only when the account has no home. Startup installs the absolute result before
+signal ownership, device construction, or model loading. Reinstalling the same
+path is idempotent and a conflicting late installation fails closed.
+
+Pi setup and trace discovery use the same environment-independent OS account
+lookup for their existing defaults. The resolved cache root, source, and
+restart requirement are published through `kiln config`, `GET /v1/config`,
+the dashboard's Runtime Config view, strict TOML/schema validation, the example
+configuration, complete operator reference, and generated website. The
+assembled-site ratchet covers the field, mechanical environment name, default,
+owned cache families, API path, and immutability; the dashboard browser fixture
+covers the summary and raw JSON shapes.
+
+Verification passes 6 resource tests, focused BLAS/rocBLAS/Vulkan path tests,
+all 11 transposed-weight-cache tests, 1,097 server library tests, and all 661
+qualification tests. The 118-field/113-canonical-environment configuration,
+174-definition observability, 55-definition inference, 80-definition artifact,
+82-definition eval, 118-definition control-plane, and 102-path/114-operation
+HTTP contracts are current. Ten documentation-builder tests, the
+55-document/5-asset assembled-site static smoke, desktop UI smoke, formatting,
+release, source-parsing, thinking-budget, repository, and diff gates pass.
+All-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks pass
+under bounded one-job thermal containment; no accelerator workload ran. Local
+rendered browser smoke remains unavailable without Chromium and is left to the
+inexpensive UI/Pages workflows. The runtime ratchet falls from 441 to 433 reads
+and from 9 to 2 migration reads, with 150 process mutations unchanged. The two
+remaining migration boundaries are the startup/device-remap safety probe and
+the explicitly named credential-provider adapter. The broad Phase 8.1
+checkboxes remain open for those owners, test-only process mutation, and the
+incomplete whole-object effective configuration view.
+
 ### 8.2 One scheduling model
 
 - [ ] Map ownership and production/test use of batching engine, legacy decode
@@ -3208,6 +3246,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-20 | Immutable CUDA Marlin and FlashAttention backward policy v15 | this source | this configuration checkpoint | CUDA projection representation, pack implementation, training-backward accumulation, typed config/API/CLI/UI/qualification/schema/documentation integration, portable backend compile matrix, and real ROCm regression parity; no NVIDIA device execution, Marlin quality/performance, deterministic CUDA replay, or promotion claim | 358/358 model and 1,096/1,096 server library tests; 17/17 real-device Strix Halo ROCm FlashAttention parity tests; 661/661 qualification tests; 117-field/112-canonical-environment/76-alias config schema; 174-definition observability and complete HTTP/artifact/eval/control-plane schemas; current runtime-environment and backend-capability reports; 10/10 docs-builder tests; 55-document/5-asset assembled static site; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting and diff hygiene | portable source/configuration checkpoint passed; direct reads 461 -> 455, process mutations remain 161, migration reads 20 -> 14; NVIDIA execution remains required | `accelerator.cuda_marlin_profile` is the sole process-lifetime projection-layout authority: BF16 remains the default, and experimental-only W4A16 profiles add full-attention Q/MLP then quality-sensitive GDN output packing. The packer always uses its established parallel implementation. `accelerator.cuda_flash_backward_mode` selects fast or deterministic split accumulation once; the public FlashAttention crate preserves old fast-default signatures and exposes typed explicit-mode variants. The dead OPD kernel-disable probe is removed and FLCE row tiling is fixed at 4,096. Six former environment spellings are retired without aliases. Config, diagnostics, qualification, example, complete website reference, and generated ratchets agree on policy v15. The ROCm backward regression run passes because ROCm ignores the CUDA accumulation selector and retains its native exact/composite implementation; CUDA route execution, quality, reproducibility, and performance remain NVIDIA handoff work. |
 
 | 2026-07-20 | Residual process-state helper and config-identity cleanup | this source | this portable configuration checkpoint | generic environment helper deletion, Python doctest executable authority, trusted debug response, config/provenance identity, API/schema/qualification/docs integration, and cross-feature compilation; no accelerator execution or performance claim | 103/103 active core, 233/233 active eval, 1,096/1,096 server library, focused training-receipt, and 661/661 qualification tests; current 117-field configuration, 173-definition observability, 55-definition inference, 80-definition artifact, 82-definition eval, 118-definition control-plane, and 102-path/114-operation HTTP contracts; refreshed 909-call-site preserve-list audit with zero generic-helper users; 10/10 docs-builder tests; 55-document/5-asset assembled static site; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting, release, source-parsing, thinking-budget, and diff hygiene | portable source/configuration checkpoint passed; direct reads 455 -> 441, process mutations 161 -> 150, migration reads 14 -> 9, literal `KILN_*` read names 36 -> 32; local rendered browser smoke unavailable without Chromium | The unused generic environment parser and its global-mutation tests are gone. Python doctest execution is controlled only by its typed scorer field or stable default. Trusted debug publishes resolved typed runtime policy rather than rereading and echoing raw process values. `effective_config_hash` now means exactly the serialized effective object; the old field is read-only migration input, while the distinct immutable execution-provenance environment digest remains secret-redacted. Remaining migration owners are cache/home paths, device-remap safety, Pi home discovery, and the named credential adapter; the broad Phase 8.1 gates remain open. |
+
+| 2026-07-20 | Immutable application cache-root and account-path authority | this source | this portable configuration checkpoint | typed application paths, BLAS/rocBLAS autotune cache, Vulkan pipeline cache, transposed-weight cache, Pi account-home defaults, CLI/API/dashboard/schema/site integration, and cross-feature compilation; no accelerator execution or performance claim | 6/6 resource, focused BLAS/rocBLAS/Vulkan cache-path, 11/11 transposed-weight-cache, 1,097/1,097 server library, and 661/661 qualification tests; current 118-field/113-canonical-environment/76-alias configuration, 174-definition observability, 55-definition inference, 80-definition artifact, 82-definition eval, 118-definition control-plane, and 102-path/114-operation HTTP contracts; 10/10 docs-builder tests; 55-document/5-asset assembled static site; desktop UI smoke; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting, release, runtime-default, repository, source-parsing, thinking-budget, and diff hygiene | portable source/configuration checkpoint passed; direct reads 441 -> 433, process mutations remain 150, migration reads 9 -> 2; local rendered browser smoke unavailable without Chromium | `paths.cache_root` and its mechanically derived `KILN_PATHS_CACHE_ROOT` override resolve one absolute immutable root before device or model construction. BLAS/rocBLAS autotune files, Vulkan pipelines, and transposed weights consume that root without reading `HOME` or `XDG_CACHE_HOME`. Default cache and Pi paths use the OS account database with a portable temporary fallback. CLI, config API, dashboard, generated contracts, example, complete reference, website, and smoke ratchets agree on the path, source, owned caches, and restart requirement. The two remaining migration reads are the device-remap safety probe and the named credential-provider adapter; broad Phase 8.1 remains open. |
 
 ## Known Starting Defects
 

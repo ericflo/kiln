@@ -1,12 +1,11 @@
-use std::env;
 use std::fs;
 #[cfg(test)]
 use std::io::Read;
 use std::io::Write;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
@@ -496,29 +495,8 @@ fn try_write_cached(cache_key: &CacheKey, data: &[u8]) -> Result<()> {
     }
 }
 
-fn cache_root_dir() -> &'static PathBuf {
-    static CACHE_ROOT: OnceLock<PathBuf> = OnceLock::new();
-    CACHE_ROOT.get_or_init(|| {
-        if let Some(dir) = env::var_os("XDG_CACHE_HOME") {
-            return PathBuf::from(dir).join("kiln");
-        }
-
-        if let Some(home) = env::var_os("HOME") {
-            #[cfg(target_os = "macos")]
-            {
-                return PathBuf::from(home)
-                    .join("Library")
-                    .join("Caches")
-                    .join("kiln");
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                return PathBuf::from(home).join(".cache").join("kiln");
-            }
-        }
-
-        env::temp_dir().join("kiln")
-    })
+fn cache_root_dir() -> &'static std::path::Path {
+    kiln_resource::application_cache_root()
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {

@@ -18,6 +18,9 @@
     "model": {
       "$ref": "#/$defs/model"
     },
+    "paths": {
+      "$ref": "#/$defs/paths"
+    },
     "memory": {
       "$ref": "#/$defs/memory"
     },
@@ -785,6 +788,24 @@
           "x-kiln-canonical-env": "KILN_MODEL_SERVED_MODEL_ID (implemented)",
           "x-kiln-environment": "KILN_SERVED_MODEL_ID (deprecated compatibility)",
           "x-kiln-validation": "Must be non-empty when set. Otherwise the effective id is the final slash-separated component of model.model_id (Qwen3.5-4B by default). serve --served-model-id applies a typed, validated override after environment resolution."
+        }
+      },
+      "default": {}
+    },
+    "paths": {
+      "type": "object",
+      "description": "Process-lifetime filesystem locations shared by model and accelerator caches.",
+      "additionalProperties": false,
+      "properties": {
+        "cache_root": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Root for autotune, Vulkan pipeline, and transposed-weight caches. Relative values are anchored once to the startup working directory. Omission uses the operating-system account home without consulting HOME or XDG_CACHE_HOME, with a system-temporary fallback only when no account home is available. Restart required.",
+          "x-kiln-path": "paths.cache_root",
+          "x-kiln-type-and-default": "optional path string; omitted (platform account cache directory)",
+          "x-kiln-canonical-env": "KILN_PATHS_CACHE_ROOT (implemented)",
+          "x-kiln-environment": "KILN_PATHS_CACHE_ROOT",
+          "x-kiln-validation": "Must be a non-empty path when set. Relative paths are made absolute against the startup working directory. The resolved root is installed before cache consumers and cannot change during the process lifetime. GET /v1/config.paths reports the absolute effective path and source."
         }
       },
       "default": {}
@@ -1605,12 +1626,12 @@
         "pi_sessions_dir": {
           "type": "string",
           "minLength": 1,
-          "description": "Optional external pi session root used for trace discovery. Omission resolves $HOME/.pi/agent/sessions once at startup, with /tmp/pi/agent/sessions as the no-HOME fallback.",
+          "description": "Optional external pi session root used for trace discovery. Omission resolves the operating-system account's .pi/agent/sessions directory once at startup, with a system-temporary fallback when no account home is available.",
           "x-kiln-path": "agent.pi_sessions_dir",
-          "x-kiln-type-and-default": "optional path string; omitted ($HOME/.pi/agent/sessions)",
+          "x-kiln-type-and-default": "optional path string; omitted (OS account .pi/agent/sessions)",
           "x-kiln-canonical-env": "KILN_AGENT_PI_SESSIONS_DIR (implemented)",
           "x-kiln-environment": "KILN_PI_SESSIONS_DIR (deprecated compatibility)",
-          "x-kiln-validation": "Must be a non-empty path when set. Relative paths and the HOME fallback are resolved once at startup."
+          "x-kiln-validation": "Must be a non-empty path when set. Relative paths and the operating-system account fallback are resolved once at startup without consulting HOME."
         }
       },
       "default": {}
@@ -1979,9 +2000,9 @@
       }
     }
   ],
-  "x-kiln-field-count": 117,
+  "x-kiln-field-count": 118,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 112,
+  "x-kiln-canonical-environment-count": 113,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 71,
   "x-kiln-compatibility-alias-count": 76,

@@ -20,7 +20,7 @@
 //! - [`VkWorkgroupConfig`] — workgroup-size + subgroup-config cache
 //!   entry. Recorded in `kiln_blas::AlgoCacheValue::algo_blob` as a
 //!   stable byte format.
-//! - [`VkPipelineCacheKey`] — hash key for the `~/.cache/kiln/vulkan/
+//! - [`VkPipelineCacheKey`] — hash key for the `<paths.cache_root>/vulkan/
 //!   pipeline-cache-{device_uuid}.bin` blob per the Phase 2 issue's
 //!   "Vulkan: disk-persistent pipeline cache" bullet.
 //! - [`VkCooperativeMatrixSupport`] — feature-detection enum for

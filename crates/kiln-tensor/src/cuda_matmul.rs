@@ -137,7 +137,7 @@ pub fn restore_into_shared_cache(loaded: AlgoCache) {
 }
 
 /// Standard on-disk path for the cublasLt autotune cache on `device_index`:
-/// `~/.cache/kiln/autotune/cublaslt-sm{major}{minor}-dev{index}.json`. Returns
+/// `<paths.cache_root>/autotune/cublaslt-sm{major}{minor}-dev{index}.json`. Returns
 /// `None` if the device's compute capability can't be queried. The
 /// `sm{major}{minor}` fingerprint is portable across identical GPUs (cublasLt
 /// algo ids are per-SM-arch), unlike a per-physical-card UUID. Honors the

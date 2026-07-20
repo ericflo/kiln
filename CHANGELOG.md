@@ -2,6 +2,13 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
+- Application path authority: added typed `paths.cache_root` with a
+  mechanically derived `KILN_PATHS_CACHE_ROOT` startup override, immutable
+  absolute resolution, and source reporting in the CLI, config API, and
+  dashboard. BLAS/rocBLAS autotune data, Vulkan pipelines, and transposed
+  weights now share that one root. Runtime cache and Pi discovery no longer
+  consult `HOME` or `XDG_CACHE_HOME`; account-home defaults come from the OS
+  account database, with a portable temporary fallback.
 - Process-state cleanup: removed the unused generic environment-flag helper,
   retired the undocumented `KILN_DOCTEST_PYTHON` fallback in favor of the
   existing typed scorer `python_bin`, and stopped trusted debug responses from

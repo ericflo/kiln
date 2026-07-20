@@ -278,6 +278,14 @@ vulkan_decode_weight_prewarm_mib_per_second = 256 # Sustained materialization ra
                                       # containing quantize_config.json. Kiln auto-detects GPTQ and
                                       # dequantizes INT4 weights to BF16 during loading.
 
+[paths]
+# cache_root = "/var/cache/kiln"      # Shared root for autotune, Vulkan pipeline,
+                                      # and transposed-weight caches. Relative paths
+                                      # are anchored to the startup working directory.
+                                      # Omission uses the OS account cache directory,
+                                      # not HOME/XDG_CACHE_HOME. Override mechanically
+                                      # with KILN_PATHS_CACHE_ROOT; restart is required.
+
 [memory]
 # num_blocks = 256                   # KV cache blocks (auto-sized from VRAM if omitted).
                                       # Each block holds 16 tokens of K+V across all
@@ -440,7 +448,8 @@ max_tracked_jobs = 1024               # In-memory bound including terminal eval 
 # # network-bound serving must opt in because runs can execute arbitrary code.
 # runs_access = "loopback_only"
 # # Omit pi_bin to resolve `pi` from PATH once at startup. Omit pi_sessions_dir
-# # to resolve $HOME/.pi/agent/sessions once, with a /tmp fallback if HOME is absent.
+# # to use the OS account's .pi/agent/sessions directory, with a system-temporary
+# # fallback when the account has no home. HOME is not consulted.
 # pi_bin = "/usr/local/bin/pi"
 # pi_sessions_dir = "/var/lib/pi/agent/sessions"
 # max_concurrent_runs = 2       # runs executing at once (FIFO queue)

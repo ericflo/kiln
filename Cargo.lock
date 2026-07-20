@@ -1506,6 +1506,7 @@ dependencies = [
  "kiln-marlin-gemm",
  "kiln-memory",
  "kiln-nvtx",
+ "kiln-resource",
  "kiln-rmsnorm-kernel",
  "kiln-tensor",
  "kiln-tensor-id",
@@ -1736,6 +1737,7 @@ version = "0.4.1"
 dependencies = [
  "half",
  "kiln-blas",
+ "kiln-resource",
  "kiln-tensor",
  "kiln-vulkan-kernel",
  "serde",

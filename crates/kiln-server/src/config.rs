@@ -150,6 +150,66 @@ pub enum ConfigValueSource {
     Environment,
 }
 
+/// Source-tracked override for Kiln's shared persistent cache root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheRootSetting {
+    configured: Option<PathBuf>,
+    source: ConfigValueSource,
+}
+
+impl CacheRootSetting {
+    fn from_path(path: PathBuf, source: ConfigValueSource, name: &str) -> Result<Self> {
+        if path.as_os_str().is_empty() {
+            anyhow::bail!("{name} must be a non-empty path");
+        }
+        Ok(Self {
+            configured: Some(path),
+            source,
+        })
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        Self::from_path(PathBuf::from(raw), ConfigValueSource::Environment, name)
+    }
+
+    pub fn configured(&self) -> Option<&Path> {
+        self.configured.as_deref()
+    }
+
+    pub const fn source(&self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for CacheRootSetting {
+    fn default() -> Self {
+        Self {
+            configured: None,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for CacheRootSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.configured.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CacheRootSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let path = PathBuf::deserialize(deserializer)?;
+        Self::from_path(path, ConfigValueSource::ConfigFile, "paths.cache_root")
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 impl fmt::Display for ConfigValueSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -3380,6 +3440,9 @@ pub struct KilnConfig {
     pub accelerator: AcceleratorRuntimeConfig,
     pub batching: BatchingConfig,
     pub model: ModelConfig,
+    /// Shared persistent filesystem locations resolved once before any model
+    /// or accelerator cache is opened.
+    pub paths: PathsConfig,
     pub memory: MemoryConfig,
     pub training: TrainingConfig,
     pub logging: LoggingConfig,
@@ -3405,6 +3468,36 @@ pub struct KilnConfig {
     /// the weekly loop stays manual (`kiln self-improve`).
     #[serde(default)]
     pub agent: Option<AgentConfig>,
+}
+
+/// `[paths]` process-lifetime application filesystem policy.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PathsConfig {
+    /// Root for autotune, Vulkan pipeline, and transposed-weight caches.
+    /// Relative paths are anchored to the startup working directory.
+    pub cache_root: CacheRootSetting,
+}
+
+/// Effective application paths installed before cache consumers start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedApplicationPaths {
+    pub cache_root: PathBuf,
+    pub cache_root_source: ConfigValueSource,
+    pub restart_required_to_change: bool,
+}
+
+impl PathsConfig {
+    pub fn resolve(&self) -> Result<ResolvedApplicationPaths> {
+        let cache_root =
+            kiln_resource::resolve_application_cache_root(self.cache_root.configured())
+                .context("failed to resolve paths.cache_root")?;
+        Ok(ResolvedApplicationPaths {
+            cache_root,
+            cache_root_source: self.cache_root.source(),
+            restart_required_to_change: true,
+        })
+    }
 }
 
 /// `[teachers]` remote-teacher trust configuration.
@@ -3597,8 +3690,8 @@ pub struct AgentConfig {
     /// Explicit `pi` executable. Omit to resolve `pi` from the startup PATH.
     #[serde(default)]
     pub pi_bin: Option<PathBuf>,
-    /// External pi session directory used for trace discovery. Omit to use
-    /// `$HOME/.pi/agent/sessions`, resolved once during startup.
+    /// External pi session directory used for trace discovery. Omit to use the
+    /// operating-system account's `.pi/agent/sessions` directory.
     #[serde(default)]
     pub pi_sessions_dir: Option<PathBuf>,
 }
@@ -5525,6 +5618,15 @@ impl NormalizedEnvValue for PathBuf {
     }
 }
 
+impl NormalizedEnvValue for CacheRootSetting {
+    fn normalized_env_value(&self) -> String {
+        self.configured
+            .as_ref()
+            .expect("environment cache-root settings are always configured")
+            .normalized_env_value()
+    }
+}
+
 impl NormalizedEnvValue for LocalCapabilityAccess {
     fn normalized_env_value(&self) -> String {
         match self {
@@ -6000,6 +6102,9 @@ macro_rules! public_env_parser {
     };
     (optional_path) => {
         parse_public_optional_path
+    };
+    (cache_root) => {
+        CacheRootSetting::from_named_environment_value
     };
     (local_capability_access) => {
         parse_public_local_capability_access
@@ -6478,6 +6583,7 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     public_env_field!(bool, model.vulkan_decode_weight_prewarm),
     public_env_field!(u64, model.vulkan_decode_weight_prewarm_mib_per_second),
     public_env_field!(some_text, model.served_model_id, "KILN_SERVED_MODEL_ID"),
+    public_env_field!(cache_root, paths.cache_root),
     public_env_field!(some_usize, memory.num_blocks, "KILN_NUM_BLOCKS"),
     public_env_field!(some_f64, memory.gpu_memory_gb, "KILN_GPU_MEMORY_GB"),
     public_env_field!(
@@ -6677,6 +6783,7 @@ impl Default for KilnConfig {
             accelerator: AcceleratorRuntimeConfig::default(),
             batching: BatchingConfig::default(),
             model: ModelConfig::default(),
+            paths: PathsConfig::default(),
             memory: MemoryConfig::default(),
             training: TrainingConfig::default(),
             logging: LoggingConfig::default(),
@@ -7125,7 +7232,7 @@ impl KilnConfig {
 
     /// Resolve request-handler operational policy once, after the effective
     /// adapter directory is known. This is the only post-load startup boundary
-    /// that consults PATH/HOME; handlers retain the immutable result.
+    /// that consults PATH; handlers retain the immutable result.
     pub fn resolve_operational_runtime(
         &self,
         adapter_dir: &Path,
@@ -7140,16 +7247,15 @@ impl KilnConfig {
             .pi_sessions_dir
             .map(absolute)
             .or_else(|| {
-                std::env::var_os("HOME").map(|home| {
-                    absolute(
-                        PathBuf::from(home)
-                            .join(".pi")
-                            .join("agent")
-                            .join("sessions"),
-                    )
-                })
+                kiln_resource::user_home_dir()
+                    .map(|home| absolute(home.join(".pi").join("agent").join("sessions")))
             })
-            .unwrap_or_else(|| PathBuf::from("/tmp/pi/agent/sessions"));
+            .unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("pi")
+                    .join("agent")
+                    .join("sessions")
+            });
         let logit_cache_dir = self
             .training
             .logit_cache_dir
@@ -7800,6 +7906,7 @@ mod tests {
         "KILN_MODEL_TOKENIZER_PATH",
         "KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM",
         "KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND",
+        "KILN_PATHS_CACHE_ROOT",
         "KILN_PREFIX_CACHE_ENABLED",
         "KILN_PREFIX_CACHE_MAX_BLOCKS",
         "KILN_PREFIX_CACHE_MAX_ENTRIES",
@@ -9274,7 +9381,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 112);
+        assert_eq!(original_len, 113);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -9343,9 +9450,9 @@ rocm_graph_cache_max_bytes = 17179869184
                 .as_object()
                 .unwrap()
                 .len(),
-            15
+            16
         );
-        assert_eq!(serialized_leaves.len(), 117);
+        assert_eq!(serialized_leaves.len(), 118);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -9445,6 +9552,7 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_MODEL_ADAPTER_DIR", "/tmp/canonical-adapters"),
             ("KILN_MODEL_SNAPSHOT_DIR", "/tmp/canonical-snapshot"),
             ("KILN_MODEL_SERVED_MODEL_ID", "canonical-served"),
+            ("KILN_PATHS_CACHE_ROOT", "/tmp/canonical-kiln-cache"),
             ("KILN_MEMORY_NUM_BLOCKS", "123"),
             ("KILN_MEMORY_GPU_MEMORY_GB", "64"),
             ("KILN_MEMORY_INFERENCE_MEMORY_FRACTION", "0.6"),
@@ -9621,6 +9729,14 @@ rocm_graph_cache_max_bytes = 17179869184
         assert_eq!(
             config.model.served_model_id.as_deref(),
             Some("canonical-served")
+        );
+        assert_eq!(
+            config.paths.cache_root.configured(),
+            Some(Path::new("/tmp/canonical-kiln-cache"))
+        );
+        assert_eq!(
+            config.paths.cache_root.source(),
+            ConfigValueSource::Environment
         );
         assert_eq!(config.memory.num_blocks, Some(123));
         assert_eq!(config.memory.gpu_memory_gb, Some(64.0));
@@ -10042,6 +10158,7 @@ rocm_graph_cache_max_bytes = 17179869184
             ("KILN_MEMORY_RECLAIM_MODE", "whenever"),
             ("KILN_MEMORY_KV_AUTOSCALE", "sometimes"),
             ("KILN_MEMORY_KV_FORCE_BLOCKS", "-1"),
+            ("KILN_PATHS_CACHE_ROOT", ""),
             ("KILN_SPECULATIVE_METHOD", "guessing"),
             ("KILN_REQUEST_LOG_COMPRESS", "occasionally"),
             ("KILN_AGENT_RUNS_ACCESS", "trusted-ish"),
@@ -10055,6 +10172,29 @@ rocm_graph_cache_max_bytes = 17179869184
             assert!(detail.contains(name), "{name}: {detail}");
             assert!(detail.contains(invalid), "{name}: {detail}");
         }
+    }
+
+    #[test]
+    fn cache_root_toml_is_source_tracked_and_resolves_absolutely() {
+        let config: KilnConfig = toml::from_str("[paths]\ncache_root = 'relative-cache'\n")
+            .expect("relative cache root parses");
+        assert_eq!(
+            config.paths.cache_root.configured(),
+            Some(Path::new("relative-cache"))
+        );
+        assert_eq!(
+            config.paths.cache_root.source(),
+            ConfigValueSource::ConfigFile
+        );
+        let resolved = config.paths.resolve().expect("cache root resolves");
+        assert_eq!(
+            resolved.cache_root,
+            std::env::current_dir().unwrap().join("relative-cache")
+        );
+        assert_eq!(resolved.cache_root_source, ConfigValueSource::ConfigFile);
+        assert!(resolved.restart_required_to_change);
+
+        assert!(toml::from_str::<KilnConfig>("[paths]\ncache_root = ''\n").is_err());
     }
 
     #[test]

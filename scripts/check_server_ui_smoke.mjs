@@ -1584,6 +1584,11 @@ async function startServer({
     // expander share this immutable snapshot instead of polling it.
     if (url.pathname === '/v1/config') {
       json(res, {
+        paths: {
+          cache_root: '/var/cache/kiln',
+          cache_root_source: 'config_file',
+          restart_required_to_change: true,
+        },
         vram: {
           probe_selector: 'linux-drm:amd:0',
           unified: true,
@@ -4327,9 +4332,11 @@ async function runSmoke(baseUrl, {
     // ---- Hidden diagnostics: the runtime-config expander on the Server
     // status card fetches GET /v1/config on first open and renders the real
     // ConfigResponse fields (capacity resolution, live memory, governor,
-    // batching, streaming-prefill and checkpoint policy, KV geometry, and
-    // exact budget partitions).
+    // application paths, batching, streaming-prefill and checkpoint policy,
+    // KV geometry, and exact budget partitions).
     await clickAndWait(page, '#runtime-config > summary', 'Could not open the runtime config expander');
+    await waitForPanelText(page, '#runtime-config-body', /Application paths[\s\S]*Cache root[\s\S]*\/var\/cache\/kiln[\s\S]*config_file/, 'Runtime config should render the absolute application cache root and source');
+    await waitForPanelText(page, '#runtime-config-body', /Change requires restart[\s\S]*required/, 'Runtime config should render cache-root immutability');
     await waitForPanelText(page, '#runtime-config-body', /linux-drm-sysfs-unified/, 'Runtime config should render the device-scoped memory source');
     await waitForPanelText(page, '#runtime-config-body', /Physical[\s\S]*25\.75 GiB/, 'Runtime config should render physical capacity');
     await waitForPanelText(page, '#runtime-config-body', /Effective cap[\s\S]*24\.00 GiB/, 'Runtime config should render the effective capacity cap');
@@ -4636,10 +4643,11 @@ async function runSmoke(baseUrl, {
       '#runtime-config [data-rc-raw-pre]',
       (el) => !el.hidden
         && /"memory_budget"/.test(el.textContent || '')
+        && /"cache_root": "\/var\/cache\/kiln"/.test(el.textContent || '')
         && /"direct_decode_rendezvous"/.test(el.textContent || '')
         && /"streaming_prefill"/.test(el.textContent || ''),
     );
-    if (!configRawShown) fail('Runtime config raw JSON toggle should reveal the pretty-printed /v1/config payload including resolved batching and streaming-prefill state');
+    if (!configRawShown) fail('Runtime config raw JSON toggle should reveal the pretty-printed /v1/config payload including resolved paths, batching, and streaming-prefill state');
 
     // Regression (the "pie chart disappears" bug): the VRAM donut and header
     // stats must survive subsequent 2s health polls. The donut used to render

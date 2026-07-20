@@ -1966,6 +1966,7 @@ function updateRuntimeGraphLive(health) {
 // ConfigResponse) plus a raw pretty-printed JSON toggle so diagnostics that
 // do not belong in the compact summary remain available.
 function renderRuntimeConfigBody(cfg) {
+  const applicationPaths = cfg.paths || {};
   const vram = cfg.vram || {};
   const live = vram.live || {};
   const governor = vram.governor || {};
@@ -2232,6 +2233,11 @@ function renderRuntimeConfigBody(cfg) {
     : String(directRendezvousMode.configured);
   return `
     <div class="rc-groups">
+      <div class="rc-group">
+        <div class="rc-group-title">Application paths</div>
+        ${runtimeConfigRow('Cache root', `<strong>${escapeHtml(applicationPaths.cache_root == null ? '—' : String(applicationPaths.cache_root))}</strong>${srcChip(applicationPaths.cache_root_source)}`, 'Absolute process-lifetime root shared by autotune, Vulkan pipeline, and transposed-weight caches.')}
+        ${runtimeConfigRow('Change requires restart', `<strong>${applicationPaths.restart_required_to_change === true ? 'required' : '—'}</strong>`, 'The cache root is installed before model and accelerator cache construction.')}
+      </div>
       <div class="rc-group">
         <div class="rc-group-title">Capacity</div>
         ${runtimeConfigRow('Device', `<strong>${escapeHtml(vram.probe_selector == null ? '—' : String(vram.probe_selector))}</strong>${vram.unified ? flagChip('unified', 'The accelerator and host share one physical memory pool.') : ''}`, 'The device-scoped probe selected for the running backend.')}

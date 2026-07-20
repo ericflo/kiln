@@ -2,7 +2,7 @@
 //!
 //! Per the Phase 2 issue bullet:
 //!
-//! > **Disk-persistent autotune cache**: `~/.cache/kiln/autotune/
+//! > **Disk-persistent autotune cache**: `<paths.cache_root>/autotune/
 //! > {backend}-{device_uuid}.json`, keyed on `{shape, dtype, layout,
 //! > concurrent_streams, kiln_version}`. Applies to cublasLt
 //! > heuristics, MPS tile selection, and Vulkan workgroup-size search
@@ -190,12 +190,10 @@ impl AlgoCache {
     }
 
     /// Compute the standard cache file path for a backend + device
-    /// fingerprint. Mirrors the Phase 2 issue path:
-    /// `~/.cache/kiln/autotune/{backend}-{device_uuid}.json`.
+    /// fingerprint under the process-wide typed application cache root.
     pub fn standard_path(backend: &str, device_fingerprint: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
-            .join(".cache/kiln/autotune")
+        kiln_resource::application_cache_root()
+            .join("autotune")
             .join(format!("{backend}-{device_fingerprint}.json"))
     }
 }
@@ -510,9 +508,12 @@ mod tests {
     #[test]
     fn standard_path_format() {
         let p = AlgoCache::standard_path("cublaslt", "a6000-86");
-        let s = p.to_string_lossy();
-        assert!(s.contains(".cache/kiln/autotune/"));
-        assert!(s.ends_with("cublaslt-a6000-86.json"));
+        assert_eq!(
+            p,
+            kiln_resource::application_cache_root()
+                .join("autotune")
+                .join("cublaslt-a6000-86.json")
+        );
     }
 
     #[test]

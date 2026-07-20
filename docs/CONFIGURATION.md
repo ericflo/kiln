@@ -123,18 +123,18 @@ open an accelerator, or load model weights.
 
 ## Coverage summary
 
-The accepted TOML surface contains 15 top-level sections and 114 fixed leaf
+The accepted TOML surface contains 16 top-level sections and 118 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 114 fixed fields:
+credential. Of the 118 fixed fields:
 
-- 109 implement the canonical mechanical environment name;
+- 113 implement the canonical mechanical environment name;
 - 71 also retain one or more deprecated compatibility spellings (76 aliases
   total);
 - 5 are config-file-only and have no environment override;
 - the 76 aliases include `KILN_DEFAULT_NO_THINK`, the second deprecated
   compatibility spelling for `server.default_thinking_enabled`.
 
-The tables below cover all 114 fixed fields and both dynamic credential fields.
+The tables below cover all 118 fixed fields and both dynamic credential fields.
 The schema additionally records the accepted deprecated TOML-only
 `streaming_prefill.enabled` compatibility field so validators match the loader.
 
@@ -1212,6 +1212,24 @@ those values as a serve-startup contract instead of guessing a target. Inspect
 | `model.vulkan_decode_weight_prewarm_mib_per_second` | unsigned integer MiB/s; `256` | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND` (implemented) | `KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND` | `1..=16384`. Bounds the average Vulkan decode-weight cache materialization rate. Pacing checks shutdown at least every 25 ms between uploads. Restart required. |
 | `model.served_model_id` | optional string; omitted (`None`) | `KILN_MODEL_SERVED_MODEL_ID` (implemented) | `KILN_SERVED_MODEL_ID` (deprecated compatibility) | Must be non-empty when set. Otherwise the effective id is the final slash-separated component of `model.model_id` (`Qwen3.5-4B` by default). `serve --served-model-id` applies a typed, validated override after environment resolution. |
 
+## `[paths]`
+
+This section owns process-lifetime filesystem locations shared across backend
+crates. Resolution happens before model loading or accelerator construction, so
+inference never changes cache location in response to process environment.
+
+| TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
+|---|---|---|---|---|
+| `paths.cache_root` | optional path string; omitted (platform account cache directory) | `KILN_PATHS_CACHE_ROOT` (implemented) | `KILN_PATHS_CACHE_ROOT` | Must be a non-empty path when set. Relative paths are made absolute against the startup working directory. The resolved root is installed before cache consumers and cannot change during the process lifetime. `GET /v1/config.paths` reports the absolute effective path and source. |
+
+When omitted, `paths.cache_root` resolves from the operating-system account
+database to `~/.cache/kiln` on Linux and other Unix hosts or
+`~/Library/Caches/kiln` on macOS. Kiln does not consult `HOME` or
+`XDG_CACHE_HOME`; use the typed field or its mechanical environment spelling
+instead. If the account database has no home, Kiln uses the system temporary
+directory. The root owns BLAS/rocBLAS autotune data, Vulkan pipeline caches,
+and transposed model weights. `kiln config` prints the same resolved path.
+
 ## `[memory]`
 
 | TOML field | Type and exact default | Canonical env target | Working spelling(s) today | Validation and effective semantics |
@@ -2118,13 +2136,13 @@ timeout.
 | `agent.run_timeout_secs` | unsigned integer; `900` | `KILN_AGENT_RUN_TIMEOUT_SECS` (implemented) | `KILN_AGENT_RUN_TIMEOUT_SECS` | Must be at least `10`. A per-run timeout can override the server default. |
 | `agent.runs_access` | string enum; `"loopback_only"` | `KILN_AGENT_RUNS_ACCESS` (implemented) | `KILN_AGENT_RUNS` (deprecated compatibility; boolean spellings map to enabled/disabled) | `loopback_only`, `enabled`, or `disabled`. Compatibility boolean spellings are accepted from the environment. Embedded runs can execute arbitrary code; changing this requires restart. |
 | `agent.pi_bin` | optional path string; omitted (search startup PATH) | `KILN_AGENT_PI_BIN` (implemented) | `KILN_PI_BIN` (deprecated compatibility) | Must name a non-empty existing file when explicitly configured. The resolved executable is immutable for the process lifetime. |
-| `agent.pi_sessions_dir` | optional path string; omitted (`$HOME/.pi/agent/sessions`) | `KILN_AGENT_PI_SESSIONS_DIR` (implemented) | `KILN_PI_SESSIONS_DIR` (deprecated compatibility) | Must be a non-empty path when set. Relative paths and the HOME fallback are resolved once at startup. |
+| `agent.pi_sessions_dir` | optional path string; omitted (OS account `.pi/agent/sessions`) | `KILN_AGENT_PI_SESSIONS_DIR` (implemented) | `KILN_PI_SESSIONS_DIR` (deprecated compatibility) | Must be a non-empty path when set. Relative paths and the operating-system account fallback are resolved once at startup without consulting `HOME`. |
 
 Terminal and embedded-run access default to `loopback_only`. The host decision,
 the pi executable, session root, adapter-library URL, and teacher-logit cache
 root are resolved once during startup and published under `operational` in
 `GET /v1/config`. Request handlers use that immutable snapshot; changing TOML,
-`PATH`, `HOME`, or a compatibility environment alias requires a restart.
+`PATH` or a compatibility environment alias requires a restart.
 
 ## Effective values and provenance
 
@@ -2170,7 +2188,8 @@ Kiln currently exposes several complementary, partial views:
   native-training runtime/weight devices and
   support reason, the versioned implementation/resident-tuple/per-workload
   optimizer contract, gradient-checkpoint segmentation, the immutable SFT
-  checkpoint-boundary policy, memory budgets, and generation defaults. Its
+  checkpoint-boundary policy, the absolute shared cache root and source,
+  memory budgets, and generation defaults. Its
   `training.checkpoint_boundary_policy` object reports resolved recompute mode,
   inclusive automatic threshold, optional explicit stride, and integral cache
   target bytes. Its `speculative` object distinguishes `configured_method` and
@@ -2219,8 +2238,8 @@ Explicit source tracking (`default`, `config_file`, or `environment`) currently
 exists for `server.serving_profile`, `server.deterministic`,
 `server.stream_stall_grace_ms`, the three server batching/prefill budgets,
 `server.max_decode_batch`, all nine `[batching]` fields, all six
-`[streaming_prefill]` fields, all six `[accelerator]` fields, and
-`memory.reclaim_mode`. Other fields have
+`[streaming_prefill]` fields, the source-tracked `[accelerator]` fields,
+`paths.cache_root`, and `memory.reclaim_mode`. Other fields have
 resolved values but do not yet carry per-field source metadata.
 
 The `effective_config_hash` binds only the serialized effective typed
@@ -2240,7 +2259,7 @@ These are current implementation facts, not recommended architecture:
 1. **Effective dump:** neither `kiln config` nor `/v1/config` covers the whole
    typed object with provenance and backend-derived values. The CLI's optional
    backend preview is intentionally limited to static scheduling policy.
-2. **Deprecated aliases:** 61 non-canonical spellings across 58 fields remain
+2. **Deprecated aliases:** 76 non-canonical spellings across 71 fields remain
    temporarily for compatibility, including `KILN_DEFAULT_NO_THINK`. Each use
    warns at startup; canonical and compatibility names cannot silently
    disagree.

@@ -523,6 +523,11 @@
             }
           }
         },
+        "paths": {
+          "cache_root": "value",
+          "cache_root_source": "default",
+          "restart_required_to_change": true
+        },
         "vram": {
           "probe_selector": "value",
           "unified": false,
@@ -3716,6 +3721,7 @@
         "streaming_prefill",
         "speculative",
         "model_startup",
+        "paths",
         "vram",
         "kv_cache",
         "training",
@@ -3790,6 +3796,9 @@
         },
         "model_startup": {
           "$ref": "#/$defs/ModelStartupConfigResponse"
+        },
+        "paths": {
+          "$ref": "#/$defs/ResolvedApplicationPaths"
         },
         "vram": {
           "$ref": "#/$defs/VramConfig"
@@ -7649,6 +7658,29 @@
       },
       "description": "Versioned process-lifetime accelerator policy.",
       "x-kiln-rust-type": "ResolvedAcceleratorRuntimePolicy",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ResolvedApplicationPaths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cache_root",
+        "cache_root_source",
+        "restart_required_to_change"
+      ],
+      "properties": {
+        "cache_root": {
+          "$ref": "#/$defs/String"
+        },
+        "cache_root_source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        },
+        "restart_required_to_change": {
+          "const": true
+        }
+      },
+      "description": "Absolute process-lifetime cache root and the startup authority that selected it.",
+      "x-kiln-rust-type": "config::ResolvedApplicationPaths",
       "x-kiln-field-schema-status": "complete"
     },
     "ResolvedCudaFlashBackwardMode": {

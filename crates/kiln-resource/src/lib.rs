@@ -8,10 +8,143 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+static APPLICATION_CACHE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Resolve the operating-system account's home directory without consulting
+/// mutable process environment.
+///
+/// Unix account databases are the authority on Kiln's supported accelerator
+/// hosts. Unsupported targets return `None`, allowing callers to choose an
+/// explicit typed path or a temporary-directory fallback.
+#[cfg(unix)]
+pub fn user_home_dir() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    const FALLBACK_BUFFER_BYTES: usize = 16 * 1024;
+    const MAX_BUFFER_BYTES: usize = 1024 * 1024;
+
+    let uid = unsafe { libc::geteuid() };
+    let suggested = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let mut buffer_bytes = if suggested > 0 {
+        suggested as usize
+    } else {
+        FALLBACK_BUFFER_BYTES
+    }
+    .clamp(FALLBACK_BUFFER_BYTES, MAX_BUFFER_BYTES);
+
+    loop {
+        let mut passwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0u8; buffer_bytes];
+        let status = unsafe {
+            libc::getpwuid_r(
+                uid,
+                passwd.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE && buffer_bytes < MAX_BUFFER_BYTES {
+            buffer_bytes = (buffer_bytes * 2).min(MAX_BUFFER_BYTES);
+            continue;
+        }
+        if status != 0 || result.is_null() {
+            return None;
+        }
+
+        let passwd = unsafe { passwd.assume_init() };
+        if passwd.pw_dir.is_null() {
+            return None;
+        }
+        let bytes = unsafe { CStr::from_ptr(passwd.pw_dir) }.to_bytes();
+        return (!bytes.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(bytes)));
+    }
+}
+
+#[cfg(not(unix))]
+pub fn user_home_dir() -> Option<PathBuf> {
+    None
+}
+
+/// Platform-default root for persistent Kiln caches.
+///
+/// This deliberately does not read `HOME` or `XDG_CACHE_HOME`; `kiln serve`
+/// owns overrides through the typed `[paths].cache_root` setting. Standalone
+/// library consumers use the operating-system account database and fall back
+/// to the system temporary directory only when no account home is available.
+pub fn default_application_cache_root() -> PathBuf {
+    if let Some(home) = user_home_dir() {
+        #[cfg(target_os = "macos")]
+        {
+            return home.join("Library").join("Caches").join("kiln");
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return home.join(".cache").join("kiln");
+        }
+    }
+    std::env::temp_dir().join("kiln")
+}
+
+/// Resolve a configured cache root to an absolute path, or select the
+/// platform default when the typed setting is absent.
+pub fn resolve_application_cache_root(configured: Option<&Path>) -> std::io::Result<PathBuf> {
+    let Some(configured) = configured else {
+        return Ok(default_application_cache_root());
+    };
+    if configured.as_os_str().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "application cache root must not be empty",
+        ));
+    }
+    if configured.is_absolute() {
+        Ok(configured.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(configured))
+    }
+}
+
+/// Install the process-lifetime application cache root before cache users are
+/// constructed. Reinstalling the same value is idempotent; changing it after
+/// first use fails closed.
+pub fn install_application_cache_root(path: PathBuf) -> std::io::Result<()> {
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "application cache root must be an absolute, non-empty path",
+        ));
+    }
+    match APPLICATION_CACHE_ROOT.set(path) {
+        Ok(()) => Ok(()),
+        Err(requested) if APPLICATION_CACHE_ROOT.get() == Some(&requested) => Ok(()),
+        Err(requested) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "application cache root is already fixed at {}; cannot change it to {}",
+                APPLICATION_CACHE_ROOT
+                    .get()
+                    .expect("cache root was initialized")
+                    .display(),
+                requested.display()
+            ),
+        )),
+    }
+}
+
+/// Return the immutable process-lifetime application cache root.
+pub fn application_cache_root() -> &'static Path {
+    APPLICATION_CACHE_ROOT
+        .get_or_init(default_application_cache_root)
+        .as_path()
+}
 
 /// Write bytes to `path` under the resource lock for that path.
 ///
@@ -200,6 +333,29 @@ fn temp_path_for(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_cache_root_is_resolved_once_against_the_working_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            resolve_application_cache_root(Some(Path::new("relative-cache"))).unwrap(),
+            cwd.join("relative-cache")
+        );
+        let absolute = cwd.join("absolute-cache");
+        assert_eq!(
+            resolve_application_cache_root(Some(&absolute)).unwrap(),
+            absolute
+        );
+        assert!(resolve_application_cache_root(Some(Path::new(""))).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn account_home_lookup_is_absolute_when_available() {
+        if let Some(home) = user_home_dir() {
+            assert!(home.is_absolute());
+        }
+    }
 
     #[test]
     fn locked_update_merges_concurrent_writers_without_partial_files() {

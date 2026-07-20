@@ -696,8 +696,8 @@ pub enum Commands {
         /// Override the kiln server URL. `/v1` is appended when omitted.
         #[arg(long, alias = "kiln-url", default_value_t = default_server_url())]
         url: String,
-        /// Output path for the models.json file. Default
-        /// `$HOME/.pi/agent/models.json`.
+        /// Output path for the models.json file. Defaults to the operating-system
+        /// account's `.pi/agent/models.json` path.
         #[arg(long)]
         out: Option<String>,
     },
@@ -1916,6 +1916,7 @@ pub fn run_config_check(
             let accelerator_runtime = config
                 .accelerator
                 .resolved_policy(config.server.serving_profile);
+            let application_paths = config.paths.resolve()?;
             println!("{} Configuration is valid", style("✓").green().bold());
             println!();
             println!(
@@ -1933,6 +1934,12 @@ pub fn run_config_check(
             if let Some(ref p) = config.model.path {
                 println!("  {} {}", style("Model path:").dim(), p);
             }
+            println!(
+                "  {} {} (source: {})",
+                style("Cache root:").dim(),
+                application_paths.cache_root.display(),
+                application_paths.cache_root_source
+            );
             println!("  {} {}", style("Log level:").dim(), config.logging.level);
             println!("  {} {}", style("Log format:").dim(), config.logging.format);
             println!(
@@ -3738,12 +3745,9 @@ static PI_SETUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn apply_pi_setup_quiet(url: &str, model_id: Option<&str>) -> anyhow::Result<PathBuf> {
     let _guard = PI_SETUP_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let model_id = model_id.unwrap_or(PI_MODEL_ID);
-    let path: PathBuf = match std::env::var("HOME") {
-        Ok(h) => PathBuf::from(h)
-            .join(".pi")
-            .join("agent")
-            .join("models.json"),
-        Err(_) => PathBuf::from("/tmp/pi-agent-models.json"),
+    let path: PathBuf = match kiln_resource::user_home_dir() {
+        Some(home) => home.join(".pi").join("agent").join("models.json"),
+        None => std::env::temp_dir().join("pi-agent-models.json"),
     };
     let settings_path = pi_settings_path_for_models_path(&path);
     if let Some(parent) = path.parent() {
@@ -3774,12 +3778,9 @@ pub fn apply_pi_setup_quiet(url: &str, model_id: Option<&str>) -> anyhow::Result
 
 /// §10.14 `kiln pi-setup` — merge kiln into pi's models/settings config.
 pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
-    let default_out: PathBuf = match std::env::var("HOME") {
-        Ok(h) => PathBuf::from(h)
-            .join(".pi")
-            .join("agent")
-            .join("models.json"),
-        Err(_) => PathBuf::from("/tmp/pi-agent-models.json"),
+    let default_out: PathBuf = match kiln_resource::user_home_dir() {
+        Some(home) => home.join(".pi").join("agent").join("models.json"),
+        None => std::env::temp_dir().join("pi-agent-models.json"),
     };
     let path = match out {
         Some(p) => PathBuf::from(p),

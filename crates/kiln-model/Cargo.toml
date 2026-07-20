@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 kiln-core = { workspace = true }
 kiln-memory = { workspace = true }
+kiln-resource = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

@@ -23,6 +23,7 @@ SECTIONS = (
     "accelerator",
     "batching",
     "model",
+    "paths",
     "memory",
     "training",
     "logging",

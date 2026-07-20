@@ -4,7 +4,7 @@
 //! Per the Phase 2 issue bullet:
 //!
 //! > **Vulkan: disk-persistent pipeline cache.**
-//! > `~/.cache/kiln/vulkan/pipeline-cache-{device_uuid}.bin`. Eliminates
+//! > `<paths.cache_root>/vulkan/pipeline-cache-{device_uuid}.bin`. Eliminates
 //! > SPIR-V re-compile on every cold start (0.5–5 s currently); reuses
 //! > the disk-persistent autotune cache pattern above.
 //!
@@ -36,12 +36,13 @@ pub struct VkPipelineCacheKey {
 impl VkPipelineCacheKey {
     /// Format the standard cache file path.
     pub fn cache_path(&self) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         let uuid_hex = hex_lower(&self.device_uuid);
-        PathBuf::from(home).join(".cache/kiln/vulkan").join(format!(
-            "pipeline-cache-{uuid_hex}-{:016x}-v{}.bin",
-            self.shader_hash, self.kiln_version_major
-        ))
+        kiln_resource::application_cache_root()
+            .join("vulkan")
+            .join(format!(
+                "pipeline-cache-{uuid_hex}-{:016x}-v{}.bin",
+                self.shader_hash, self.kiln_version_major
+            ))
     }
 
     /// True iff this key's `kiln_version_major` matches `current`.
@@ -86,7 +87,7 @@ mod tests {
             kiln_version_major: 7,
         };
         let s = k.cache_path().to_string_lossy().to_string();
-        assert!(s.contains(".cache/kiln/vulkan/"));
+        assert!(s.contains("kiln/vulkan/"));
         assert!(s.contains("deadbeeffeedface"));
         assert!(s.contains("abcdef0123456789"));
         assert!(s.ends_with("-v7.bin"));

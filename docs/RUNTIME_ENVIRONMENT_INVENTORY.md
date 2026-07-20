@@ -16,7 +16,7 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **441 direct read call sites** and
+The scanner records **433 direct read call sites** and
 **150 process-mutation call sites**. It can
 statically name **32 distinct literal `KILN_*`
 read names** across **113 call sites**.
@@ -25,8 +25,8 @@ boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
-| Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 9 | 0 | 0 |
+| Public stable | 8 | 1 | 0 |
+| Experimental/debug migration | 2 | 0 | 0 |
 | Build time/provenance | 326 | 6 | 8 |
 | Test only | 97 | 25 | 142 |
 
@@ -56,13 +56,8 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/transposed_weight_cache.rs` | 2 | 0 |
-| `crates/kiln-server/src/cli.rs` | 2 | 0 |
-| `crates/kiln-blas/src/algo_cache.rs` | 1 | 0 |
 | `crates/kiln-memory/src/vram.rs` | 1 | 0 |
-| `crates/kiln-rocblas/src/algo_cache.rs` | 1 | 0 |
 | `crates/kiln-train/src/remote_teacher.rs` | 1 | 0 |
-| `crates/kiln-vulkan-blas/src/pipeline_cache.rs` | 1 | 0 |
 
 ## Literal `KILN_*` catalog
 
@@ -119,7 +114,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-blas/build.rs` | `var_os` | `CARGO_FEATURE_PROBE` | Build time/provenance | 1 |
 | `crates/kiln-blas/build.rs` | `var_os` | `CARGO_PRIMARY_PACKAGE` | Build time/provenance | 1 |
 | `crates/kiln-blas/build.rs` | `var_os` | `NVCC` | Build time/provenance | 1 |
-| `crates/kiln-blas/src/algo_cache.rs` | `var` | `HOME` | Experimental/debug migration | 1 |
 | `crates/kiln-blas/src/backend_matmul.rs` | `env!` | `CARGO_PKG_VERSION_MAJOR` | Build time/provenance | 1 |
 | `crates/kiln-conv1d-kernel/build.rs` | `var` | `var` | Build time/provenance | 2 |
 | `crates/kiln-conv1d-kernel/build.rs` | `var` | `CARGO_FEATURE_CUDA` | Build time/provenance | 1 |
@@ -152,8 +146,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-marlin-gemm/build.rs` | `var` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
 | `crates/kiln-marlin-gemm/build.rs` | `var_os` | `NVCC` | Build time/provenance | 1 |
 | `crates/kiln-memory/src/vram.rs` | `var_os` | `name` | Experimental/debug migration | 1 |
-| `crates/kiln-model/src/transposed_weight_cache.rs` | `var_os` | `HOME` | Experimental/debug migration | 1 |
-| `crates/kiln-model/src/transposed_weight_cache.rs` | `var_os` | `XDG_CACHE_HOME` | Experimental/debug migration | 1 |
 | `crates/kiln-model/tests/backend_capability_contract.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 1 |
 | `crates/kiln-mps/build.rs` | `var` | `CARGO_CFG_TARGET_OS` | Build time/provenance | 1 |
 | `crates/kiln-mps/build.rs` | `var` | `CARGO_CFG_TARGET_VENDOR` | Build time/provenance | 1 |
@@ -182,15 +174,12 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-rocblas/build.rs` | `var_os` | `CARGO_FEATURE_HIPBLASLT` | Build time/provenance | 1 |
 | `crates/kiln-rocblas/build.rs` | `var_os` | `CARGO_FEATURE_PROBE` | Build time/provenance | 1 |
 | `crates/kiln-rocblas/build.rs` | `var_os` | `CARGO_PRIMARY_PACKAGE` | Build time/provenance | 1 |
-| `crates/kiln-rocblas/src/algo_cache.rs` | `var` | `HOME` | Experimental/debug migration | 1 |
 | `crates/kiln-rocblas/src/backend_matmul.rs` | `env!` | `CARGO_PKG_VERSION_MAJOR` | Build time/provenance | 1 |
 | `crates/kiln-server/src/api/health.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/bench.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-server/src/cli.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
-| `crates/kiln-server/src/cli.rs` | `var` | `HOME` | Experimental/debug migration | 2 |
 | `crates/kiln-server/src/config.rs` | `var` | `& credential . api_key_env` | Public stable | 2 |
 | `crates/kiln-server/src/config.rs` | `var` | `name` | Public stable | 1 |
-| `crates/kiln-server/src/config.rs` | `var_os` | `HOME` | Public stable | 1 |
 | `crates/kiln-server/src/config.rs` | `var_os` | `PATH` | Public stable | 1 |
 | `crates/kiln-server/src/config.rs` | `var_os` | `& name` | Test only | 1 |
 | `crates/kiln-server/src/execution_provenance.rs` | `env!` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
@@ -221,7 +210,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-train/src/train_receipt.rs` | `env!` | `CARGO_PKG_VERSION` | Test only | 2 |
 | `crates/kiln-train/src/trainer.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 2 |
 | `crates/kiln-train/tests/qwen35_sft_oracle.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 1 |
-| `crates/kiln-vulkan-blas/src/pipeline_cache.rs` | `var` | `HOME` | Experimental/debug migration | 1 |
 | `crates/kiln-vulkan-kernel/build.rs` | `var` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
 | `crates/kiln-vulkan-kernel/build.rs` | `var` | `OUT_DIR` | Build time/provenance | 1 |
 | `crates/kiln-vulkan-kernel/examples/dispatch_test.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 1 |

@@ -1444,6 +1444,11 @@ def build_definitions() -> None:
         "adapter_library_url": ref("String"),
         "logit_cache_dir": ref("String"),
     }, "Startup-resolved operational paths and local-capability access policy retained by request handlers.")
+    add_object("ResolvedApplicationPaths", "config::ResolvedApplicationPaths", {
+        "cache_root": ref("String"),
+        "cache_root_source": ref("ConfigValueSource"),
+        "restart_required_to_change": {"const": True},
+    }, "Absolute process-lifetime cache root and the startup authority that selected it.")
     add_object("CudaGraphConfigResponse", "CudaGraphConfigResponse", {
         "requested": ref("Boolean"),
         "capture_allowed_by_serving_profile": ref("Boolean"),
@@ -1465,6 +1470,7 @@ def build_definitions() -> None:
         "prefix_cache": ref("PrefixCacheConfigResponse"),
         "streaming_prefill": ref("StreamingPrefillRuntimeConfig"), "speculative": ref("SpeculativeConfig"),
         "model_startup": ref("ModelStartupConfigResponse"),
+        "paths": ref("ResolvedApplicationPaths"),
         "vram": ref("VramConfig"), "kv_cache": ref("KvCacheConfig"),
         "training": ref("TrainingConfigResponse"), "memory_budget": ref("MemoryBudgetConfig"),
         "generation": ref("GenerationConfig"), "operational": ref("OperationalRuntimeConfig"),

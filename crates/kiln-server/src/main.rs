@@ -579,6 +579,18 @@ async fn main() -> Result<()> {
     // --- Server startup ---
     let mut config = KilnConfig::load(args.config.as_deref())?;
     config.apply_serve_cli_overrides(serve_cli_overrides.0.as_deref(), serve_cli_overrides.1)?;
+    let application_paths = config
+        .paths
+        .resolve()
+        .context("failed to resolve immutable application paths")?;
+    kiln_resource::install_application_cache_root(application_paths.cache_root.clone())
+        .context("failed to install immutable application cache root")?;
+    tracing::info!(
+        cache_root = %application_paths.cache_root.display(),
+        source = %application_paths.cache_root_source,
+        immutable_after_startup = true,
+        "application paths resolved"
+    );
     // Install signal ownership before tokenizer/model loading. A termination
     // request during a long synchronous startup phase is retained and handled
     // at the next ownership boundary instead of invoking the OS default action
@@ -1158,6 +1170,7 @@ async fn main() -> Result<()> {
             .resolve_operational_runtime(&state.adapter_dir)
             .context("failed to resolve immutable operational runtime configuration")?,
     );
+    state.application_paths = application_paths;
     state.checkpoint_read_mib_per_second = config.model.checkpoint_read_mib_per_second;
     state.checkpoint_read_applicable = model_path.is_some();
     state.checkpoint_read_not_applicable_reason = model_path.is_none().then_some("mock_mode");

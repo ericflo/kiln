@@ -2470,6 +2470,9 @@ pub struct AppState {
     /// Immutable operational policy consumed by request handlers without
     /// rereading process environment.
     pub operational_runtime: Arc<crate::config::OperationalRuntimeConfig>,
+    /// Process-lifetime filesystem locations resolved and installed before
+    /// model or accelerator cache construction.
+    pub application_paths: crate::config::ResolvedApplicationPaths,
     /// Typed startup-only checkpoint read setting retained for resolved
     /// configuration diagnostics.
     pub checkpoint_read_mib_per_second: Option<u64>,
@@ -3329,6 +3332,9 @@ impl AppState {
             speculative_config,
             speculative_runtime_policy: SpeculativeRuntimePolicy::default(),
             operational_runtime: Arc::new(crate::config::OperationalRuntimeConfig::default()),
+            application_paths: crate::config::PathsConfig::default()
+                .resolve()
+                .expect("default application paths resolve"),
             checkpoint_read_mib_per_second: None,
             checkpoint_read_applicable: false,
             checkpoint_read_not_applicable_reason: Some("mock_mode"),
@@ -4496,6 +4502,9 @@ impl AppState {
             speculative_config,
             speculative_runtime_policy,
             operational_runtime: Arc::new(crate::config::OperationalRuntimeConfig::default()),
+            application_paths: crate::config::PathsConfig::default()
+                .resolve()
+                .expect("default application paths resolve"),
             checkpoint_read_mib_per_second: None,
             checkpoint_read_applicable: true,
             checkpoint_read_not_applicable_reason: None,

@@ -679,7 +679,7 @@ open inputs and include validated examples for every public entrypoint.
 | POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
 | POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
 | GET | `/v1/models` | List available models |
-| GET | `/v1/config` | Current server configuration, including serving-profile source, typed model-startup upload policy and completed observation, batching/streaming-prefill policy, SFT checkpoint boundaries, and the versioned optimizer implementation/native-device-hook versus server-execution contract |
+| GET | `/v1/config` | Current server configuration, including serving-profile source, typed model-startup policy and observations, the absolute shared cache root and source, batching/streaming-prefill policy, SFT checkpoint boundaries, and the versioned optimizer implementation/native-device-hook versus server-execution contract |
 | GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of the complete base-weight shard manifest and execution-provenance record, active model/adapters, typed config hashes and runtime policies, batching, thinking defaults, SFT checkpoint-boundary policy, cache counts, and batched recurrent-state ownership/lifecycle counters; enabled only with typed `server.debug_model_state=true` or `server.eval_mode=true` |
 | GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
@@ -1065,6 +1065,7 @@ Kiln uses a typed TOML config file. Environment overrides are resolved during st
 | Setting | Env Var | Default | Description |
 |---|---|---|---|
 | `model.path` | `KILN_MODEL_PATH` | — | Path to model weights (required) |
+| `paths.cache_root` | `KILN_PATHS_CACHE_ROOT` | OS account cache directory | Immutable root shared by autotune, Vulkan pipeline, and transposed-weight caches. Relative values are anchored to the startup working directory; unset `HOME`/`XDG_CACHE_HOME` cannot redirect it. `kiln config` and `GET /v1/config.paths` report the absolute path and source |
 | `server.port` | `KILN_SERVER_PORT` | 8420 | Server listen port |
 | `server.serving_profile` | `KILN_SERVER_SERVING_PROFILE` | `stable` | Immutable process-lifetime GPU ownership policy: `stable`, `experimental`, or `maintenance`; malformed values stop startup, and health/config report the source and every effective policy field |
 | `server.http_send_buffer_bytes` | `KILN_SERVER_HTTP_SEND_BUFFER_BYTES` | OS default | Optional accepted-socket `SO_SNDBUF` request (1024–16777216 bytes); Kiln preflights it before readiness and reports requested, kernel-readback, and platform-normalized effective bytes in health/debug |

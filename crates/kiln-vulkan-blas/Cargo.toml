@@ -23,6 +23,7 @@ vulkan = ["dep:kiln-vulkan-kernel"]
 [dependencies]
 # Backend-agnostic types from kiln-blas.
 kiln-blas = { workspace = true }
+kiln-resource = { workspace = true }
 kiln-tensor = { workspace = true }
 
 # Optional under the `vulkan` feature.

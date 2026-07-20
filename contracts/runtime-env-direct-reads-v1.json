@@ -1368,19 +1368,6 @@
       "surface": "build-script"
     },
     {
-      "api": "var",
-      "argument": "HOME",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-blas/src/algo_cache.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "CARGO_PKG_VERSION_MAJOR",
       "argument_kind": "literal",
@@ -2135,32 +2122,6 @@
       "surface": "unit-test"
     },
     {
-      "api": "var_os",
-      "argument": "HOME",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/transposed_weight_cache.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var_os",
-      "argument": "XDG_CACHE_HOME",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/transposed_weight_cache.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "var",
       "argument": "KILN_TENSOR_VULKAN_TEST",
       "argument_kind": "literal",
@@ -2759,19 +2720,6 @@
       "surface": "build-script"
     },
     {
-      "api": "var",
-      "argument": "HOME",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-rocblas/src/algo_cache.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
       "api": "env!",
       "argument": "CARGO_PKG_VERSION_MAJOR",
       "argument_kind": "literal",
@@ -2825,19 +2773,6 @@
     },
     {
       "api": "var",
-      "argument": "HOME",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/cli.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "& credential . api_key_env",
       "argument_kind": "expression",
       "classification": "public_stable",
@@ -2865,19 +2800,6 @@
     {
       "api": "var",
       "argument": "KILN_CONFIG",
-      "argument_kind": "literal",
-      "classification": "public_stable",
-      "classification_basis": "central typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-server/src/config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var_os",
-      "argument": "HOME",
       "argument_kind": "literal",
       "classification": "public_stable",
       "classification_basis": "central typed startup configuration boundary",
@@ -3800,19 +3722,6 @@
     },
     {
       "api": "var",
-      "argument": "HOME",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-vulkan-blas/src/pipeline_cache.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "CARGO_MANIFEST_DIR",
       "argument_kind": "literal",
       "classification": "build_time",
@@ -4033,13 +3942,13 @@
       "test_only": 142
     },
     "process_mutation_entries": 98,
-    "read_call_sites": 441,
+    "read_call_sites": 433,
     "read_call_sites_by_classification": {
       "build_time": 326,
-      "experimental_debug": 9,
-      "public_stable": 9,
+      "experimental_debug": 2,
+      "public_stable": 8,
       "test_only": 97
     },
-    "read_entries": 210
+    "read_entries": 203
   }
 }

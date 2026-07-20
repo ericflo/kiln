@@ -53,6 +53,7 @@ struct ConfigResponse {
     streaming_prefill: StreamingPrefillRuntimeConfig,
     speculative: SpeculativeConfig,
     model_startup: ModelStartupConfigResponse,
+    paths: crate::config::ResolvedApplicationPaths,
     operational: OperationalRuntimeConfig,
     vram: VramConfig,
     kv_cache: KvCacheConfig,
@@ -526,6 +527,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
                 observed: state.accelerator_weight_upload_report.clone(),
             },
         },
+        paths: state.application_paths.clone(),
         operational: state.operational_runtime.as_ref().clone(),
         vram: build_vram_config(&state, memory_observation),
         kv_cache: KvCacheConfig {
@@ -1038,6 +1040,13 @@ mod tests {
             ])
         );
         assert!(checkpoint["observed"].is_null());
+        assert!(
+            json["paths"]["cache_root"]
+                .as_str()
+                .is_some_and(|path| std::path::Path::new(path).is_absolute())
+        );
+        assert_eq!(json["paths"]["cache_root_source"], "default");
+        assert_eq!(json["paths"]["restart_required_to_change"], true);
     }
 
     #[tokio::test]
